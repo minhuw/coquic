@@ -3,8 +3,8 @@ import './globals.css';
 import type { Metadata } from 'next';
 
 export const metadata: Metadata = {
-  title: 'CoQUIC demo',
-  description: 'CoQUIC HTTP/3, QUIC interop, coverage, and performance dashboard.',
+  title: 'CoQUIC: AI-Generated QUIC, From Prompt to Packet',
+  description: 'CoQUIC is an AI-generated QUIC implementation with HTTP/3, protocol QA, interop, coverage, and benchmark dashboards.',
   icons: {
     icon: '/coquic-logo.svg',
   },

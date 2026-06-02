@@ -209,6 +209,7 @@ ScopedProtectedCodecFaultInjector::~ScopedProtectedCodecFaultInjector() {
 
 COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
     bool ok = true;
+    // Local predicates keep repeated CodecResult assertions readable across helper groups.
     const auto codec_failure_impl = [](const CodecError *error, CodecErrorCode code) {
         return error != nullptr && error->code == code;
     };
@@ -231,6 +232,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
         return codec_failure_offset_impl(&*error, code, offset);
     };
 
+    // Error helper checks cover successes, wrong codes, wrong offsets, and matching failures.
     {
         volatile bool keep_missing_error_empty = true;
         std::optional<CodecError> missing_error;
@@ -276,6 +278,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                 optional_failure(matching_error, CodecErrorCode::invalid_varint, 0));
     }
 
+    // BufferWriter varint helpers are checked before vector overloads so both append paths run.
     {
         BufferWriter writer;
         coverage_check(ok, "protected_codec_internal_coverage_for_tests",
@@ -293,6 +296,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                                          });
     }
 
+    // Raw byte and vector varint appenders cover empty inputs, rollback, and encoded output.
     {
         std::vector<std::byte> bytes{std::byte{0xaa}};
         append_bytes(bytes, {});
@@ -329,6 +333,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                    make_short_header_first_byte(/*spin_bit=*/true, /*key_phase=*/true,
                                                 /*packet_number_length=*/2) == std::byte{0x65});
 
+    // Packet number writers exercise BufferWriter, vector, truncated span, and full span outputs.
     {
         constexpr TruncatedPacketNumberEncoding encoding{
             .packet_number_length = 2,
@@ -368,6 +373,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                            packet_number_bytes == std::array{std::byte{0x12}, std::byte{0x34}});
     }
 
+    // Big-endian u32 writes cover every truncated-output boundary before the success case.
     {
         std::array<std::byte, 0> no_u32_bytes{};
         SpanBufferWriter no_u32_writer(no_u32_bytes);
@@ -410,9 +416,11 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                    "minimum_payload_bytes_for_header_sample reports remaining sample padding",
                    minimum_payload_bytes_for_header_sample(2) == 2 &&
                        minimum_payload_bytes_for_header_sample(4) == 0);
+    // Fixed-size helper coverage includes empty integer reads after padding math.
     coverage_check(ok, "protected_codec_internal_coverage_for_tests",
                    "read_u32_be returns zero for empty spans", read_u32_be({}) == 0u);
 
+    // Frame payload sizing covers empty packet rejection, valid summing, and frame failures.
     {
         const std::array<Frame, 0> empty_frames{};
         coverage_check(ok, "protected_codec_internal_coverage_for_tests",
@@ -438,6 +446,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                                      CodecErrorCode::invalid_varint));
     }
 
+    // Connection-id decoding covers missing lengths, QUIC v1 size limits, truncation, and success.
     {
         BufferReader missing_length_reader({});
         coverage_check(ok, "protected_codec_internal_coverage_for_tests",
@@ -488,6 +497,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                                                             });
     }
 
+    // Long-header frame validation covers packet-type allow-lists and terminal lengthless frames.
     {
         const Frame ping = PingFrame{};
         const Frame ack = AckFrame{
@@ -598,6 +608,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                 .has_value());
     }
 
+    // Protected payload frame validation covers one-RTT rules and received frame decode errors.
     {
         const ReceivedFrame ack = ReceivedAckFrame{
             .largest_acknowledged = 0,
@@ -667,6 +678,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                                std::holds_alternative<PingFrame>(decoded.value().front()));
         }
 
+        // Fast stream decoding rejects malformed frame encodings before accepting a valid frame.
         coverage_check(
             ok, "protected_codec_internal_coverage_for_tests",
             "fast stream frame decoder rejects empty payloads",
@@ -733,6 +745,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                 std::holds_alternative<ReceivedStreamFrame>(fast_stream.value().front()));
     }
 
+    // Short-header fast-path decoders cover ack-only and stream payload guard branches.
     {
         const auto empty_ack_payload = SharedBytes{};
         const auto non_ack_payload = SharedBytes{std::byte{0x01}};
@@ -853,6 +866,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                 .has_value());
     }
 
+    // Simple outbound ACK serialization covers invalid ranges, truncation, ECN, and sizing.
     {
         const OutboundAckFrame valid_ack{
             .header =
@@ -946,6 +960,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
         "encoded_stream_frame_payload_size includes type, varints, and payload bytes",
         encoded_stream_frame_payload_size(/*stream_id=*/3, /*offset=*/1, /*payload_size=*/2) == 6);
 
+    // Vector stream header serialization covers rollback on failures and success sizing.
     {
         std::vector<std::byte> overflow_header_prefix{std::byte{0xfe}};
         const auto overflow_header =
@@ -987,6 +1002,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                            !encoded_header.empty() && encoded_header.front() == std::byte{0x0f});
     }
 
+    // Span stream header serialization covers each fixed-capacity boundary.
     {
         std::array<std::byte, 0> no_header_space{};
         SpanBufferWriter no_header_writer(no_header_space);
@@ -1041,6 +1057,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                            header_space.front() == std::byte{0x0f});
     }
 
+    // Stream payload append helpers cover header failures and successful header+payload writes.
     {
         const std::array payload = {
             std::byte{0x44},
@@ -1076,6 +1093,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                            stream_frame_bytes.size() == appended_payload.value());
     }
 
+    // Span stream frame serialization covers header failures, payload truncation, and success.
     {
         const std::array payload = {
             std::byte{0x66},
@@ -1124,6 +1142,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
         }
     }
 
+    // StreamFrameView helpers validate range and storage invariants before writing backed views.
     {
         const auto storage = std::make_shared<std::vector<std::byte>>(std::vector<std::byte>{
             std::byte{0x10},
@@ -1316,6 +1335,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
                            .has_value());
     }
 
+    // StreamFrameSendFragment helpers cover datagram append, span serialization, and truncation.
     {
         const StreamFrameSendFragment valid_fragment{
             .stream_id = 11,
@@ -1389,6 +1409,7 @@ COQUIC_NO_PROFILE bool protected_codec_internal_coverage_for_tests() {
 
 COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
     bool ok = true;
+    // Packet-path checks reuse compact CodecResult predicates for each packet family below.
     const auto codec_failure_impl = [](const CodecError *error, CodecErrorCode code) {
         return error != nullptr && error->code == code;
     };
@@ -1403,6 +1424,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                                           std::size_t offset) {
         return codec_failure_offset_impl(std::get_if<CodecError>(&result.storage), code, offset);
     };
+    // Helper predicate coverage starts with success and mismatch rejection cases.
     {
         coverage_check(
             ok, "protected_codec_packet_path_coverage_for_tests",
@@ -1433,6 +1455,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
         }
         return secret;
     };
+    // Invalid cipher suites and synthetic long headers are fixtures for negative packet paths.
     const auto invalid_cipher_suite = []() {
         const auto raw = static_cast<std::underlying_type_t<CipherSuite>>(0xff);
         CipherSuite cipher_suite{};
@@ -1493,6 +1516,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
     });
     coverage_check(ok, "protected_codec_packet_path_coverage_for_tests",
                    "serialize_frame builds a stream payload fixture", stream_payload.has_value());
+    // Generic failure predicates also cover the concrete packet-result wrapper types.
     coverage_check(ok, "protected_codec_packet_path_coverage_for_tests",
                    "codec_failure_offset rejects successful results",
                    !codec_failure_offset(CodecResult<std::size_t>::success(7),
@@ -1532,6 +1556,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                                   CodecErrorCode::invalid_varint));
 
     if (crypto_payload.has_value() && ping_payload.has_value() && ack_payload.has_value()) {
+        // Long-header layout coverage starts from a valid Initial packet fixture.
         const auto long_header_header = build_long_header(
             std::byte{0xc0}, kQuicVersion1, std::array{std::byte{0xaa}},
             std::array{std::byte{0xbb}}, std::array{std::byte{0xcc}},
@@ -1598,6 +1623,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
             "build_long_header_plaintext_header propagates oversized patched length failures",
             codec_failure_offset(oversized_rebuilt_header, CodecErrorCode::invalid_varint, 0));
 
+        // Long-header append coverage exercises unsupported versions and length overflow guards.
         auto invalid_length_packet = long_header_packet;
         const auto oversized_length =
             patch_long_header_length_field(invalid_length_packet, layout, kMaxVarInt + 1u);
@@ -1691,6 +1717,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                     CodecErrorCode::invalid_varint));
         }
 
+        // One-RTT plaintext conversion validates packet number length handling before decoding.
         const auto one_rtt_plaintext = to_plaintext_one_rtt(ProtectedOneRttPacket{
             .spin_bit = true,
             .key_phase = false,
@@ -1715,6 +1742,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
             "to_plaintext_one_rtt rejects invalid packet number lengths",
             codec_failure_offset(invalid_one_rtt_plaintext, CodecErrorCode::invalid_varint, 0));
 
+        // Received long-header plaintext decoding covers fixed, reserved, and length-field guards.
         coverage_check(ok, "protected_codec_packet_path_coverage_for_tests",
                        "decode_received_long_header_packet_fields rejects empty headers",
                        codec_failure_offset(decode_received_long_header_packet_fields(
@@ -1904,6 +1932,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
             "decode_received_long_header_packet_fields accepts valid initial plaintext headers",
             decoded_long_header_ok);
 
+        // Short-header plaintext decoding covers helper predicates and header guard failures.
         coverage_check(ok, "protected_codec_packet_path_coverage_for_tests",
                        "codec_failure_offset rejects successful short-header decode results",
                        !codec_failure_offset(CodecResult<ReceivedShortHeaderPacketFields>::success(
@@ -2003,6 +2032,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                 std::holds_alternative<PingFrame>(decoded_short_header.value().frames.front()));
     }
 
+    // Header-protection padding preserves large plaintexts and extends short plaintexts.
     {
         std::vector<std::byte> padded_plaintext{std::byte{0xaa}};
         pad_short_header_plaintext_for_header_protection(padded_plaintext, 2);
@@ -2020,6 +2050,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
             unchanged_plaintext == std::vector<std::byte>(6, std::byte{0xbb}));
     }
 
+    // Stream payload wire-size helpers cover view and fragment sizing, including invalid ranges.
     {
         const auto shared_storage = std::make_shared<std::vector<std::byte>>(std::vector<std::byte>{
             std::byte{0x10},
@@ -2150,6 +2181,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                                  CodecErrorCode::invalid_varint, 9));
     }
 
+    // Initial packet round-trip coverage checks missing context, protection failures, and success.
     {
         const auto initial_packet = ProtectedInitialPacket{
             .version = kQuicVersion1,
@@ -2260,6 +2292,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
         }
     }
 
+    // Handshake packet round-trip coverage mirrors Initial checks with handshake traffic secrets.
     {
         const auto handshake_secret = TrafficSecret{
             .cipher_suite = CipherSuite::tls_aes_128_gcm_sha256,
@@ -2384,6 +2417,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
         }
     }
 
+    // Zero-RTT packet coverage verifies secret handling and payload frame allow-list enforcement.
     {
         const auto zero_rtt_secret = TrafficSecret{
             .cipher_suite = CipherSuite::tls_aes_128_gcm_sha256,
@@ -2500,6 +2534,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
         }
     }
 
+    // One-RTT coverage includes fast ACK serialization, shared decode, and fragment paths.
     {
         const auto one_rtt_secret = TrafficSecret{
             .cipher_suite = CipherSuite::tls_aes_128_gcm_sha256,
@@ -2551,6 +2586,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
         }}};
         const std::array<StreamFrameView, 0> empty_stream_views{};
         const std::array<StreamFrameSendFragment, 0> empty_stream_fragments{};
+        // Simple ACK fast-path detection rejects mixed or malformed frame sets before sealing.
         coverage_check(ok, "protected_codec_packet_path_coverage_for_tests",
                        "simple outbound ack fast path rejects non-ack and malformed ack candidates",
                        simple_outbound_ack_frame_or_null(ProtectedOneRttPacket{
@@ -2606,6 +2642,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                     .stream_fragments = empty_stream_fragments,
                 }) == nullptr);
         {
+            // Simple ACK append coverage validates the normal one-RTT fast path.
             DatagramBuffer simple_ack_datagram;
             const auto appended = append_protected_one_rtt_packet_to_datagram_impl(
                 simple_ack_datagram, make_simple_ack_packet(22), one_rtt_context);
@@ -2616,6 +2653,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                     !simple_ack_datagram.empty());
         }
         {
+            // Primed key-cache coverage ensures borrowed secrets avoid recomputation paths.
             const auto &cached_secret = one_rtt_secret;
             const auto cached_keys = expand_traffic_secret_cached(cached_secret);
             auto cached_context = one_rtt_context;
@@ -2634,6 +2672,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                     !cached_simple_ack_datagram.empty());
         }
         {
+            // Invalid ACK ranges must roll back before the datagram buffer is committed.
             const auto invalid_range_ack_packet = ProtectedOneRttPacket{
                 .destination_connection_id = destination_connection_id,
                 .packet_number_length = 2,
@@ -2660,6 +2699,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                                          CodecErrorCode::invalid_varint));
         }
         {
+            // Injected simple-ACK writer failures cover rollback after payload sizing succeeds.
             const ScopedProtectedCodecFaultInjector injector{
                 ProtectedCodecFaultPoint::simple_ack_payload_write_failure};
             DatagramBuffer write_failure_datagram;
@@ -2672,6 +2712,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                                write_failure_datagram.empty());
         }
         {
+            // Payload size mismatch injection covers the simple-ACK post-write consistency check.
             const ScopedProtectedCodecFaultInjector injector{
                 ProtectedCodecFaultPoint::simple_ack_payload_size_mismatch};
             DatagramBuffer size_mismatch_datagram;
@@ -2684,6 +2725,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                                size_mismatch_datagram.empty());
         }
         {
+            // Padding and crypto fault injection cover late simple-ACK sealing branches.
             const ScopedProtectedCodecFaultInjector injector{
                 ProtectedCodecFaultPoint::simple_ack_force_padding_fill};
             DatagramBuffer forced_padding_datagram;
@@ -2719,6 +2761,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                                          CodecErrorCode::header_protection_failed) &&
                                protect_failure_datagram.empty());
         }
+        // A regular protected datagram fixture drives the shared-storage receive decoder.
         const auto one_rtt_packet_bytes = serialize_protected_datagram(
             std::array<ProtectedPacket, 1>{ProtectedPacket{ProtectedOneRttPacket{
                 .spin_bit = false,
@@ -2733,6 +2776,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                        "serialize_protected_datagram builds a received one-rtt fixture",
                        one_rtt_packet_bytes.has_value());
         if (one_rtt_packet_bytes.has_value()) {
+            // Shared-storage decoding covers malformed ranges, contexts, key phases, and secrets.
             const auto make_one_rtt_storage = [&]() {
                 return std::make_shared<std::vector<std::byte>>(one_rtt_packet_bytes.value());
             };
@@ -2930,6 +2974,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                                   CodecErrorCode::packet_length_mismatch));
             }
 
+            // Span-based one-RTT decoding covers mismatched secrets outside the shared path.
             {
                 auto wrong_one_rtt_secret_for_span = one_rtt_secret;
                 wrong_one_rtt_secret_for_span.secret.back() ^= std::byte{0xff};
@@ -2954,6 +2999,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                        "expand_traffic_secret_cached builds a malformed one-rtt payload fixture",
                        one_rtt_keys.has_value());
         if (one_rtt_keys.has_value()) {
+            // Malformed decrypted one-RTT payloads exercise span and shared payload decoders.
             const std::array malformed_one_rtt_payload = {
                 std::byte{0x02},
                 std::byte{0x00},
@@ -2986,6 +3032,8 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
             }
         }
 
+        // Fragment-view sealing covers chunked payloads, prefix frames, padding, and fallback
+        // paths.
         std::vector<StreamFrameSendFragment> chunk_fragments{
             StreamFrameSendFragment{
                 .stream_id = 1,
@@ -3122,6 +3170,7 @@ COQUIC_NO_PROFILE bool protected_codec_packet_path_coverage_for_tests() {
                                      one_rtt_context),
                                  CodecErrorCode::invalid_varint, 0));
 
+        // Datagram metadata serialization reports failures from prefix and appended packet phases.
         const auto base_failure = serialize_protected_datagram_with_metadata(
             std::array<ProtectedPacket, 1>{ProtectedInitialPacket{
                 .version = kQuicVersion1,

@@ -706,10 +706,12 @@ bool io_uring_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
     reset_for_case();
 
     // Peer-port extraction covers null, missing, IPv6, and unsupported-family addresses.
-    record(peer_port_from_msghdr(nullptr) == 0, "peer_port null");
+    msghdr null_name_message{};
+    record(peer_port_from_msghdr(&null_name_message) == 0, "peer_port missing_name");
 
     msghdr message{};
-    record(peer_port_from_msghdr(&message) == 0, "peer_port missing_name");
+    message.msg_name = nullptr;
+    record(peer_port_from_msghdr(&message) == 0, "peer_port explicit_null_name");
 
     auto ipv6_peer = make_ipv6_loopback_peer(6443);
     message.msg_name = &ipv6_peer;

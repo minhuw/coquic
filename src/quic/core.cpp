@@ -2218,7 +2218,7 @@ COQUIC_NO_PROFILE DatagramBuffer make_v2_initial_datagram_for_core_coverage(
     }
     auto bytes = encoded.value();
     bytes.resize(kMinimumClientInitialDatagramBytes, std::byte{0x00});
-    return bytes;
+    return DatagramBuffer(std::move(bytes));
 }
 
 // NOLINTBEGIN(clang-analyzer-cplusplus.NewDeleteLeaks)
@@ -3626,7 +3626,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                     result.effects.emplace_back(QuicCoreSendDatagram{
                         .connection = 0,
                         .route_handle = inbound->route_handle,
-                        .bytes = std::move(bytes),
+                        .bytes = DatagramBuffer(std::move(bytes)),
                     });
                 }
             }
@@ -3683,7 +3683,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
                     result.effects.emplace_back(QuicCoreSendDatagram{
                         .connection = 0,
                         .route_handle = inbound->route_handle,
-                        .bytes = std::move(bytes),
+                        .bytes = DatagramBuffer(std::move(bytes)),
                     });
                 }
                 return finalize_endpoint_result(std::move(result), now);

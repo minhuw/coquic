@@ -367,21 +367,24 @@ struct DeferredProtectedDatagram {
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
 
     DeferredProtectedDatagram() = default;
-    DeferredProtectedDatagram(DatagramBuffer datagram_bytes, QuicPathId id = 0,
-                              std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
-                              QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
+    explicit DeferredProtectedDatagram(
+        DatagramBuffer datagram_bytes, QuicPathId id = 0,
+        std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
+        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
         : bytes(std::move(datagram_bytes)), path_id(id), datagram_id(qlog_datagram_id),
           ecn(datagram_ecn) {
     }
-    DeferredProtectedDatagram(const std::vector<std::byte> &datagram_bytes, QuicPathId id = 0,
-                              std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
-                              QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
+    explicit DeferredProtectedDatagram(
+        const std::vector<std::byte> &datagram_bytes, QuicPathId id = 0,
+        std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
+        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
         : DeferredProtectedDatagram(DatagramBuffer(datagram_bytes), id, qlog_datagram_id,
                                     datagram_ecn) {
     }
-    DeferredProtectedDatagram(std::vector<std::byte> &&datagram_bytes, QuicPathId id = 0,
-                              std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
-                              QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
+    explicit DeferredProtectedDatagram(
+        std::vector<std::byte> &&datagram_bytes, QuicPathId id = 0,
+        std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
+        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
         : DeferredProtectedDatagram(DatagramBuffer(std::move(datagram_bytes)), id, qlog_datagram_id,
                                     datagram_ecn) {
     }
@@ -402,13 +405,14 @@ struct DeferredProtectedPacket {
     std::uint32_t datagram_id = 0;
 
     DeferredProtectedPacket() = default;
-    DeferredProtectedPacket(DatagramBuffer packet_bytes, std::uint32_t id = 0)
+    explicit DeferredProtectedPacket(DatagramBuffer packet_bytes, std::uint32_t id = 0)
         : bytes(std::move(packet_bytes)), datagram_id(id) {
     }
-    DeferredProtectedPacket(const std::vector<std::byte> &packet_bytes, std::uint32_t id = 0)
+    explicit DeferredProtectedPacket(const std::vector<std::byte> &packet_bytes,
+                                     std::uint32_t id = 0)
         : DeferredProtectedPacket(DatagramBuffer(packet_bytes), id) {
     }
-    DeferredProtectedPacket(std::vector<std::byte> &&packet_bytes, std::uint32_t id = 0)
+    explicit DeferredProtectedPacket(std::vector<std::byte> &&packet_bytes, std::uint32_t id = 0)
         : DeferredProtectedPacket(DatagramBuffer(std::move(packet_bytes)), id) {
     }
 

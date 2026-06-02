@@ -51,10 +51,10 @@ struct Error {
 
 template <typename T> class Result {
   public:
-    Result(T value) : storage_(std::move(value)) {
+    explicit Result(T value) : storage_(std::move(value)) {
     }
 
-    Result(Error error) : storage_(std::move(error)) {
+    explicit Result(Error error) : storage_(std::move(error)) {
     }
 
     bool has_value() const {

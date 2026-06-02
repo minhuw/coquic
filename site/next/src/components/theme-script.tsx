@@ -13,5 +13,5 @@ const themeScript = `
 `;
 
 export function ThemeScript() {
-  return <script dangerouslySetInnerHTML={{ __html: themeScript }} />;
+  return <script>{themeScript}</script>;
 }

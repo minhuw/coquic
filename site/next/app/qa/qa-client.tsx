@@ -86,7 +86,9 @@ const fallbackModelOptions: ModelOption[] = [
 ];
 
 const apiBase = '/rag-api';
-const sessionKey = 'coquic-qa-session';
+const storageNames = {
+  qaSession: 'coquic-qa-session',
+} as const;
 
 export function QaClient() {
   const [question, setQuestion] = useState('');
@@ -289,7 +291,7 @@ export function QaClient() {
     <section className="mt-5 grid gap-3" aria-label="Ask QUIC specification questions">
       <Card>
         <CardContent>
-          <form className="grid gap-3" onSubmit={submit}>
+          <form className="grid gap-3" onSubmit={(event) => void submit(event)}>
             <label className="sr-only" htmlFor="qa-question">
               Question
             </label>
@@ -621,7 +623,7 @@ function UsageBadge({ usage }: { usage: Usage | null }) {
     return null;
   }
 
-  const tokens = usage?.total_tokens;
+  const tokens = usage.total_tokens;
   if (typeof tokens !== 'number') {
     return null;
   }
@@ -673,7 +675,7 @@ function CopyAnswerButton({ answer, disabled, label }: { answer: string; disable
       aria-label={copied ? `Copied ${label}` : `Copy ${label}`}
       className="inline-flex size-[22px] shrink-0 items-center justify-center rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] p-0 text-[var(--muted)] transition-colors duration-200 hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-[var(--primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgba(15,98,254,0.48)] disabled:pointer-events-none disabled:opacity-55"
       disabled={copyDisabled}
-      onClick={copyAnswer}
+      onClick={() => void copyAnswer()}
       title={copied ? 'Copied' : 'Copy answer'}
       type="button"
     >
@@ -747,12 +749,12 @@ function getSessionId() {
   if (typeof window === 'undefined') {
     return 'server';
   }
-  const existing = window.localStorage.getItem(sessionKey);
+  const existing = window.localStorage.getItem(storageNames.qaSession);
   if (existing) {
     return existing;
   }
-  const id = window.crypto.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
-  window.localStorage.setItem(sessionKey, id);
+  const id = window.crypto.randomUUID();
+  window.localStorage.setItem(storageNames.qaSession, id);
   return id;
 }
 
@@ -763,7 +765,7 @@ async function loadHealth(): Promise<HealthPayload | null> {
       return null;
     }
     return response.json();
-  } catch (_error) {
+  } catch {
     // The visible UI reports request failures on submit; health stays silent.
     return null;
   }
@@ -792,23 +794,27 @@ async function askStream(question: string, sessionId: string, model: string, han
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (value) {
-      buffer += decoder.decode(value, { stream: !done });
-      const events = buffer.split(/\n\n/);
-      buffer = events.pop() || '';
-      for (const eventText of events) {
-        handleStreamEvent(parseSseEvent(eventText), handlers);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (value) {
+        buffer += decoder.decode(value, { stream: !done });
+        const events = buffer.split(/\n\n/);
+        buffer = events.pop() || '';
+        for (const eventText of events) {
+          handleStreamEvent(parseSseEvent(eventText), handlers);
+        }
+      }
+      if (done) {
+        buffer += decoder.decode();
+        if (buffer.trim()) {
+          handleStreamEvent(parseSseEvent(buffer), handlers);
+        }
+        return;
       }
     }
-    if (done) {
-      buffer += decoder.decode();
-      if (buffer.trim()) {
-        handleStreamEvent(parseSseEvent(buffer), handlers);
-      }
-      return;
-    }
+  } finally {
+    reader.releaseLock();
   }
 }
 

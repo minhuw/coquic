@@ -1410,16 +1410,16 @@ class Http3ServerRuntime {
                                                    : [streaming_proxy](std::uint64_t stream_id) {
                                                          return streaming_proxy->take_part(stream_id);
                                                      },
+                                           .fallback_request_handler =
+                                               [config = config_](const Http3Request &request) {
+                                                   return runtime_server_response(config, request);
+                                               },
                                            .deferred_request_cancel_handler =
                                                streaming_proxy == nullptr
                                                    ? std::function<void(std::uint64_t)>()
                                                    : [streaming_proxy](std::uint64_t stream_id) {
                                                          streaming_proxy->cancel(stream_id);
                                                      },
-                                           .fallback_request_handler =
-                                               [config = config_](const Http3Request &request) {
-                                                   return runtime_server_response(config, request);
-                                               },
                                        }));
             }
             if (lifecycle->event == quic::QuicCoreConnectionLifecycle::closed) {
@@ -2164,7 +2164,7 @@ bool runtime_misc_internal_coverage_for_test() {
         result.effects.push_back(quic::QuicCoreEffect{
             quic::QuicCoreSendDatagram{
                 .connection = 1,
-                .bytes = bytes_from_string("x"),
+                .bytes = quic::DatagramBuffer(bytes_from_string("x")),
             },
         });
         runtime_misc_internal_coverage_check(ok, !flush_send_effects(backend, result),
@@ -2179,7 +2179,7 @@ bool runtime_misc_internal_coverage_for_test() {
             quic::QuicCoreSendDatagram{
                 .connection = 1,
                 .route_handle = 7,
-                .bytes = bytes_from_string("x"),
+                .bytes = quic::DatagramBuffer(bytes_from_string("x")),
             },
         });
         runtime_misc_internal_coverage_check(ok, !flush_send_effects(backend, result),
@@ -2199,7 +2199,7 @@ bool runtime_misc_internal_coverage_for_test() {
             quic::QuicCoreSendDatagram{
                 .connection = 4,
                 .route_handle = 9,
-                .bytes = bytes_from_string("ok"),
+                .bytes = quic::DatagramBuffer(bytes_from_string("ok")),
                 .ecn = quic::QuicEcnCodepoint::ect0,
             },
         });
@@ -2694,7 +2694,7 @@ bool runtime_loop_internal_coverage_for_test() {
             quic::QuicCoreSendDatagram{
                 .connection = 11,
                 .route_handle = 7,
-                .bytes = bytes_from_string("server"),
+                .bytes = quic::DatagramBuffer(bytes_from_string("server")),
             },
         });
         runtime_loop_internal_coverage_check(ok, runtime.handle_result(accepted_result, now),
@@ -2978,7 +2978,7 @@ bool runtime_additional_internal_coverage_for_test() {
         missing_route_send_result.effects.push_back(quic::QuicCoreEffect{
             quic::QuicCoreSendDatagram{
                 .connection = 1,
-                .bytes = bytes_from_string("x"),
+                .bytes = quic::DatagramBuffer(bytes_from_string("x")),
             },
         });
         runtime_additional_internal_coverage_check(
@@ -3043,7 +3043,7 @@ bool runtime_additional_internal_coverage_for_test() {
             quic::QuicCoreSendDatagram{
                 .connection = 9,
                 .route_handle = 7,
-                .bytes = bytes_from_string("server-send"),
+                .bytes = quic::DatagramBuffer(bytes_from_string("server-send")),
             },
         });
         runtime_additional_internal_coverage_check(
@@ -3327,7 +3327,7 @@ bool runtime_additional_internal_coverage_for_test() {
             quic::QuicCoreSendDatagram{
                 .connection = 7,
                 .route_handle = 3,
-                .bytes = bytes_from_string("client-send"),
+                .bytes = quic::DatagramBuffer(bytes_from_string("client-send")),
             },
         });
         runtime_additional_internal_coverage_check(

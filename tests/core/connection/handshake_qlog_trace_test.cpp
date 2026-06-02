@@ -275,8 +275,8 @@ TEST(QuicCoreTest, ProcessInboundDatagramIgnoresLaterHandshakeCryptoFailure) {
 
 TEST(QuicCoreTest, ProcessInboundDatagramReturnsWhenReplayFailsAfterCurrentPacketSucceeds) {
     auto connection = make_connected_client_connection();
-    connection.deferred_protected_packets_.push_back(
-        bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0x11, 0x01, 0x22, 0x00, 0x00}));
+    connection.deferred_protected_packets_.push_back(coquic::quic::DeferredProtectedDatagram(
+        bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0x11, 0x01, 0x22, 0x00, 0x00})));
 
     const auto encoded = coquic::quic::serialize_protected_datagram(
         std::array<coquic::quic::ProtectedPacket, 1>{

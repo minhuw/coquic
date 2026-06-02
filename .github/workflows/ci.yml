@@ -19,7 +19,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
 
       - name: Format Check
         run: nix develop -c pre-commit run clang-format --all-files --show-diff-on-failure
@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
 
       - name: Refresh compile_commands.json
         run: nix develop -c ./scripts/refresh-compile-commands.sh

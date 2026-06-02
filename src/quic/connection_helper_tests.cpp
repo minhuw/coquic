@@ -476,7 +476,8 @@ bool random_one_in_sixteen_fallback_returns_bool_for_tests() {
     const ScopedConnectionDrainTestHook hook(
         &ConnectionDrainTestHooks::force_random_one_in_sixteen_rand_failure);
     const bool fallback = random_one_in_sixteen();
-    return fallback || !fallback;
+    static_cast<void>(fallback);
+    return true;
 }
 
 bool forced_random_one_in_sixteen_false_for_tests() {
@@ -1316,8 +1317,15 @@ bool connection_helper_edge_cases_for_tests() {
     connection_coverage_check(ok, "empty_issued_connection_id_remains_empty",
                               make_issued_connection_id({}, /*sequence_number=*/7).empty());
     connection_coverage_check(ok, "random_one_in_sixteen_openssl_returns_bool", [] {
-        const bool value = random_one_in_sixteen();
-        return value || !value;
+        bool false_result = true;
+        {
+            const ScopedConnectionDrainOptionalBoolTestHook force_false(
+                &ConnectionDrainTestHooks::force_random_one_in_sixteen_result, false);
+            false_result = random_one_in_sixteen();
+        }
+        ScopedConnectionDrainOptionalBoolTestHook force_true(
+            &ConnectionDrainTestHooks::force_random_one_in_sixteen_result, true);
+        return !false_result && random_one_in_sixteen();
     }());
     connection_coverage_check(
         ok, "stream_state_error_helpers_cover_all_codes",

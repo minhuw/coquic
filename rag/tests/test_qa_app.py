@@ -5,7 +5,6 @@ from fastapi.testclient import TestClient
 from coquic_rag.qa.app import create_app
 from coquic_rag.qa.filters import RelevanceDecision
 from coquic_rag.qa.filters import QUESTION_GENERATOR_MODEL
-from coquic_rag.qa.openrouter_chat import FREE_ANSWER_MODELS
 from coquic_rag.qa.openrouter_chat import ChatUsage
 from coquic_rag.qa.service import QaResponse, QaStreamEvent
 

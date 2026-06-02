@@ -14,6 +14,7 @@ engines:
       - "bench/**"
       - "demo/**"
       - "docs/**"
+      - "rag/tests/**"
       - "tests/**"
       - "tools/rag/tests/**"
 
@@ -23,3 +24,4 @@ exclude_paths:
   - "docs/references/**"
   - "docs/rfc/**"
   - "docs/superpowers/**"
+  - "rag/tests/**"

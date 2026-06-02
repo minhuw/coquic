@@ -117,7 +117,9 @@ QuicConnection::queue_outbound_packet_inspections(const SerializedProtectedDatag
         if (!decoded.has_value()) {
             continue;
         }
-        if (force_packet_inspection_missing_plaintext_storage_for_tests()) {
+        const bool reset_plaintext_storage =
+            force_packet_inspection_missing_plaintext_storage_for_tests();
+        if (reset_plaintext_storage) {
             std::visit(PacketInspectionPlaintextStorageResetVisitor{}, decoded.value());
         }
 

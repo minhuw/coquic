@@ -21,7 +21,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
 
       - name: Build
         run: nix develop -c zig build
@@ -39,7 +39,7 @@ jobs:
             --json-out coverage/coverage-results.json >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload Coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe
         with:
           files: coverage/lcov.info
           disable_search: true

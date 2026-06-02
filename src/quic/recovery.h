@@ -351,10 +351,18 @@ class PacketSpaceRecovery {
     };
 
     static constexpr std::size_t kInvalidLedgerSlotIndex = std::numeric_limits<std::size_t>::max();
+    static constexpr std::size_t kMaxSentPacketRecordPoolSize = 8192;
 
     struct SentPacketLedgerSlot {
+        SentPacketLedgerSlot() = default;
+        SentPacketLedgerSlot(const SentPacketLedgerSlot &other);
+        SentPacketLedgerSlot(SentPacketLedgerSlot &&other) noexcept = default;
+        SentPacketLedgerSlot &operator=(const SentPacketLedgerSlot &other);
+        SentPacketLedgerSlot &operator=(SentPacketLedgerSlot &&other) noexcept = default;
+
         LedgerSlotState state = LedgerSlotState::empty;
-        SentPacketRecord packet;
+        std::uint64_t packet_number = 0;
+        std::unique_ptr<SentPacketRecord> packet;
         bool acknowledged = false;
     };
 
@@ -364,9 +372,15 @@ class PacketSpaceRecovery {
     };
 
     static DeadlineTrackedPacket tracked_packet(const SentPacketRecord &packet);
+    static SentPacketRecord *slot_packet_or_null(SentPacketLedgerSlot &slot);
+    static const SentPacketRecord *slot_packet_or_null(const SentPacketLedgerSlot &slot);
+    static SentPacketRecord &slot_packet(SentPacketLedgerSlot &slot);
+    static const SentPacketRecord &slot_packet(const SentPacketLedgerSlot &slot);
     static RecoveryPacketHandle packet_handle(const SentPacketLedgerSlot &slot,
                                               std::size_t slot_index);
     static void reclaim_retired_packet_storage(SentPacketRecord &packet);
+    std::unique_ptr<SentPacketRecord> acquire_packet_record(SentPacketRecord &&packet);
+    void recycle_packet_record(std::unique_ptr<SentPacketRecord> packet);
     void link_live_slot(std::size_t slot_index);
     void ensure_live_link_slot(std::size_t slot_index);
     void set_live_link(std::size_t slot_index, LiveSlotLink link);
@@ -408,6 +422,7 @@ class PacketSpaceRecovery {
     AckProcessingResult ack_processing_result_from_apply(const AckApplyResult &apply_result) const;
 
     std::deque<SentPacketLedgerSlot> slots_;
+    std::vector<std::unique_ptr<SentPacketRecord>> packet_record_pool_;
     std::vector<LiveSlotLink> live_links_;
     std::vector<std::uint64_t> live_slot_words_;
     mutable std::optional<DeadlineTrackedPacket> latest_in_flight_ack_eliciting_packet_;

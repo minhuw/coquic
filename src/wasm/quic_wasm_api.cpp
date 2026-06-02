@@ -16,6 +16,14 @@
 #include <variant>
 #include <vector>
 
+#include <openssl/asn1.h>
+#include <openssl/bio.h>
+#include <openssl/bn.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
+#include <openssl/x509.h>
+
 #include "src/quic/core.h"
 #include "src/quic/protected_codec.h"
 #include "src/quic/version.h"
@@ -39,6 +47,13 @@ constexpr std::size_t kDemoMaxUdpPayloadSize =
     kDemoEthernetMtuBytes - kDemoIpv6HeaderBytes - kDemoUdpHeaderBytes;
 constexpr std::uint64_t kDemoInitialMaxData = 512;
 constexpr std::uint64_t kDemoInitialMaxStreamData = 512;
+constexpr std::uint32_t kWasmOptionRetryEnabled = 1u << 0u;
+constexpr std::uint32_t kWasmOptionOnlyVersion2 = 1u << 1u;
+constexpr std::uint32_t kWasmOptionPreferVersion2 = 1u << 2u;
+constexpr std::uint32_t kWasmOptionChacha20Only = 1u << 3u;
+constexpr std::uint32_t kWasmOptionDisableActiveMigration = 1u << 4u;
+constexpr std::uint32_t kWasmOptionAllowPeerAddressChange = 1u << 5u;
+constexpr std::uint32_t kWasmOptionZeroRtt = 1u << 6u;
 
 enum class WasmEventType : std::uint32_t {
     state = 1,
@@ -94,6 +109,23 @@ struct WasmEndpoint {
         : role(config.role), core(std::move(config)) {
     }
 };
+
+struct WasmEndpointOptions {
+    bool retry_enabled = false;
+    bool only_version_2 = false;
+    bool prefer_version_2 = false;
+    bool chacha20_only = false;
+    bool disable_active_migration = false;
+    bool allow_peer_address_change = true;
+    bool zero_rtt = false;
+};
+
+using Asn1IntegerPtr = std::unique_ptr<ASN1_INTEGER, decltype(&ASN1_INTEGER_free)>;
+using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free)>;
+using BnPtr = std::unique_ptr<BIGNUM, decltype(&BN_free)>;
+using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
+using RsaPtr = std::unique_ptr<RSA, decltype(&RSA_free)>;
+using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
 
 bool valid_const(const std::uint8_t *ptr, std::size_t len) {
     return ptr != nullptr || len == 0;
@@ -160,6 +192,73 @@ std::optional<std::string> input_string(const std::uint8_t *input, std::size_t i
     return std::string(reinterpret_cast<const char *>(input), input_len);
 }
 
+std::optional<std::string> memory_bio_string(BIO *bio) {
+    char *data = nullptr;
+    const long length = BIO_get_mem_data(bio, &data);
+    if (data == nullptr || length <= 0) {
+        return std::nullopt;
+    }
+    return std::string(data, static_cast<std::size_t>(length));
+}
+
+std::optional<TlsIdentity> generate_demo_server_identity() {
+    EvpPkeyPtr key(EVP_PKEY_new(), &EVP_PKEY_free);
+    RsaPtr rsa(RSA_new(), &RSA_free);
+    BnPtr exponent(BN_new(), &BN_free);
+    if (key == nullptr || rsa == nullptr || exponent == nullptr) {
+        return std::nullopt;
+    }
+    if (BN_set_word(exponent.get(), RSA_F4) != 1 ||
+        RSA_generate_key_ex(rsa.get(), 2048, exponent.get(), nullptr) != 1 ||
+        EVP_PKEY_assign_RSA(key.get(), rsa.get()) != 1) {
+        return std::nullopt;
+    }
+    static_cast<void>(rsa.release());
+
+    X509Ptr certificate(X509_new(), &X509_free);
+    if (certificate == nullptr || X509_set_version(certificate.get(), 2) != 1 ||
+        ASN1_INTEGER_set(X509_get_serialNumber(certificate.get()), 1) != 1 ||
+        X509_gmtime_adj(X509_get_notBefore(certificate.get()), 0) == nullptr ||
+        X509_gmtime_adj(X509_get_notAfter(certificate.get()), 60 * 60 * 24) == nullptr ||
+        X509_set_pubkey(certificate.get(), key.get()) != 1) {
+        return std::nullopt;
+    }
+
+    auto *name = X509_get_subject_name(certificate.get());
+    if (name == nullptr ||
+        X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                                   reinterpret_cast<const unsigned char *>("localhost"), -1, -1,
+                                   0) != 1 ||
+        X509_set_issuer_name(certificate.get(), name) != 1 ||
+        X509_sign(certificate.get(), key.get(), EVP_sha256()) <= 0) {
+        return std::nullopt;
+    }
+
+    BioPtr certificate_bio(BIO_new(BIO_s_mem()), &BIO_free);
+    BioPtr key_bio(BIO_new(BIO_s_mem()), &BIO_free);
+    if (certificate_bio == nullptr || key_bio == nullptr ||
+        PEM_write_bio_X509(certificate_bio.get(), certificate.get()) != 1 ||
+        PEM_write_bio_PrivateKey(key_bio.get(), key.get(), nullptr, nullptr, 0, nullptr, nullptr) !=
+            1) {
+        return std::nullopt;
+    }
+
+    auto certificate_pem = memory_bio_string(certificate_bio.get());
+    auto private_key_pem = memory_bio_string(key_bio.get());
+    if (!certificate_pem.has_value() || !private_key_pem.has_value()) {
+        return std::nullopt;
+    }
+    return TlsIdentity{
+        .certificate_pem = std::move(*certificate_pem),
+        .private_key_pem = std::move(*private_key_pem),
+    };
+}
+
+std::optional<TlsIdentity> demo_server_identity() {
+    static const auto *identity = new std::optional<TlsIdentity>(generate_demo_server_identity());
+    return *identity;
+}
+
 std::vector<std::byte> route_address_validation_identity(QuicRouteHandle route_handle) {
     std::vector<std::byte> identity;
     identity.reserve(1 + sizeof(route_handle));
@@ -169,6 +268,35 @@ std::vector<std::byte> route_address_validation_identity(QuicRouteHandle route_h
             static_cast<std::byte>((route_handle >> static_cast<unsigned>(shift)) & 0xffu));
     }
     return identity;
+}
+
+WasmEndpointOptions wasm_options_from_flags(std::uint32_t flags) {
+    return WasmEndpointOptions{
+        .retry_enabled = (flags & kWasmOptionRetryEnabled) != 0,
+        .only_version_2 = (flags & kWasmOptionOnlyVersion2) != 0,
+        .prefer_version_2 = (flags & kWasmOptionPreferVersion2) != 0,
+        .chacha20_only = (flags & kWasmOptionChacha20Only) != 0,
+        .disable_active_migration = (flags & kWasmOptionDisableActiveMigration) != 0,
+        .allow_peer_address_change = (flags & kWasmOptionAllowPeerAddressChange) != 0,
+        .zero_rtt = (flags & kWasmOptionZeroRtt) != 0,
+    };
+}
+
+std::vector<std::uint32_t> wasm_supported_versions(const WasmEndpointOptions &options) {
+    if (options.only_version_2) {
+        return {kQuicVersion2};
+    }
+    if (options.prefer_version_2) {
+        return {kQuicVersion2, kQuicVersion1};
+    }
+    return {kQuicVersion1};
+}
+
+std::vector<CipherSuite> wasm_allowed_cipher_suites(const WasmEndpointOptions &options) {
+    if (options.chacha20_only) {
+        return {CipherSuite::tls_chacha20_poly1305_sha256};
+    }
+    return {};
 }
 
 ConnectionId connection_id_from_input(const std::uint8_t *input, std::size_t input_len,
@@ -183,20 +311,30 @@ ConnectionId connection_id_from_input(const std::uint8_t *input, std::size_t inp
     return ConnectionId(bytes->begin(), bytes->end());
 }
 
-QuicCoreEndpointConfig endpoint_config(EndpointRole role, std::optional<TlsIdentity> identity) {
+QuicCoreEndpointConfig endpoint_config(EndpointRole role, std::optional<TlsIdentity> identity,
+                                       WasmEndpointOptions options = {}) {
     QuicCoreEndpointConfig config{
         .role = role,
+        .supported_versions = wasm_supported_versions(options),
         .verify_peer = false,
+        .retry_enabled = options.retry_enabled,
         .application_protocol = "coquic-wasm",
         .identity = std::move(identity),
         .max_outbound_datagram_size = kDemoMaxUdpPayloadSize,
+        .allowed_tls_cipher_suites = wasm_allowed_cipher_suites(options),
+        .allow_peer_address_change = options.allow_peer_address_change,
     };
     config.transport.pmtud_enabled = false;
     config.transport.max_udp_payload_size = kDemoMaxUdpPayloadSize;
+    config.transport.disable_active_migration = options.disable_active_migration;
     config.transport.initial_max_data = kDemoInitialMaxData;
     config.transport.initial_max_stream_data_bidi_local = kDemoInitialMaxStreamData;
     config.transport.initial_max_stream_data_bidi_remote = kDemoInitialMaxStreamData;
     config.transport.initial_max_stream_data_uni = kDemoInitialMaxStreamData;
+    if (options.zero_rtt) {
+        config.zero_rtt.allow = role == EndpointRole::server;
+        config.zero_rtt.application_context = {std::byte{0x10}};
+    }
     config.enable_packet_inspection = true;
     return config;
 }
@@ -872,10 +1010,14 @@ void queue_result(WasmEndpoint &endpoint, QuicCoreResult result) {
         }
 
         if (const auto *resumption = std::get_if<QuicCoreResumptionStateAvailable>(&effect)) {
-            endpoint.events.push_back(PendingEvent{
+            PendingEvent pending{
                 .type = WasmEventType::resumption_state_available,
                 .connection = resumption->connection,
-            });
+            };
+            append_payload(pending.payload,
+                           std::span<const std::byte>(resumption->state.serialized.data(),
+                                                      resumption->state.serialized.size()));
+            endpoint.events.push_back(std::move(pending));
             continue;
         }
 
@@ -988,27 +1130,11 @@ std::int32_t write_packet_inspection_header(const PendingPacketInspection &inspe
     return 1;
 }
 
-} // namespace
-
-extern "C" {
-
-__attribute__((export_name("coquic_wasm_version"))) std::uint32_t coquic_wasm_version() {
-    return coquic::quic::kQuicVersion1;
-}
-
-__attribute__((export_name("coquic_wasm_alloc"))) std::uint8_t *
-coquic_wasm_alloc(std::size_t size) {
-    return static_cast<std::uint8_t *>(std::malloc(size));
-}
-
-__attribute__((export_name("coquic_wasm_free"))) void coquic_wasm_free(std::uint8_t *pointer) {
-    std::free(pointer);
-}
-
-__attribute__((export_name("coquic_wasm_endpoint_create"))) std::uint32_t
-coquic_wasm_endpoint_create(std::int32_t role_id, const std::uint8_t *certificate_pem,
-                            std::size_t certificate_pem_len, const std::uint8_t *private_key_pem,
-                            std::size_t private_key_pem_len) {
+std::uint32_t create_endpoint_with_options(std::int32_t role_id,
+                                           const std::uint8_t *certificate_pem,
+                                           std::size_t certificate_pem_len,
+                                           const std::uint8_t *private_key_pem,
+                                           std::size_t private_key_pem_len, std::uint32_t flags) {
     std::optional<TlsIdentity> identity;
     EndpointRole role = EndpointRole::client;
     if (role_id == 0) {
@@ -1017,40 +1143,44 @@ coquic_wasm_endpoint_create(std::int32_t role_id, const std::uint8_t *certificat
         role = EndpointRole::server;
         auto cert = input_string(certificate_pem, certificate_pem_len);
         auto key = input_string(private_key_pem, private_key_pem_len);
-        if (!cert.has_value() || !key.has_value() || cert->empty() || key->empty()) {
+        if (!cert.has_value() || !key.has_value()) {
             return 0;
         }
-        identity = TlsIdentity{
-            .certificate_pem = std::move(*cert),
-            .private_key_pem = std::move(*key),
-        };
+        if (cert->empty() && key->empty()) {
+            identity = demo_server_identity();
+            if (!identity.has_value()) {
+                return 0;
+            }
+        } else {
+            if (cert->empty() || key->empty()) {
+                return 0;
+            }
+            identity = TlsIdentity{
+                .certificate_pem = std::move(*cert),
+                .private_key_pem = std::move(*key),
+            };
+        }
     } else {
         return 0;
     }
 
-    return register_endpoint(
-        std::make_unique<WasmEndpoint>(endpoint_config(role, std::move(identity))));
+    return register_endpoint(std::make_unique<WasmEndpoint>(
+        endpoint_config(role, std::move(identity), wasm_options_from_flags(flags))));
 }
 
-__attribute__((export_name("coquic_wasm_endpoint_destroy"))) void
-coquic_wasm_endpoint_destroy(std::uint32_t endpoint_id) {
-    auto &registry = endpoint_registry();
-    if (endpoint_id == 0 || endpoint_id > registry.size()) {
-        return;
-    }
-    registry[endpoint_id - 1].reset();
-}
-
-__attribute__((export_name("coquic_wasm_endpoint_open_connection"))) std::int32_t
-coquic_wasm_endpoint_open_connection(std::uint32_t endpoint_id, std::uint64_t now_ms,
-                                     const std::uint8_t *initial_dcid, std::size_t initial_dcid_len,
-                                     const std::uint8_t *source_cid, std::size_t source_cid_len,
-                                     std::uint64_t route_handle) {
+std::int32_t
+open_connection_with_options(std::uint32_t endpoint_id, std::uint64_t now_ms,
+                             const std::uint8_t *initial_dcid, std::size_t initial_dcid_len,
+                             const std::uint8_t *source_cid, std::size_t source_cid_len,
+                             std::uint64_t route_handle, std::uint32_t flags,
+                             std::optional<QuicResumptionState> resumption_state = std::nullopt) {
     auto *endpoint = endpoint_from_id(endpoint_id);
     if (endpoint == nullptr || endpoint->role != EndpointRole::client ||
         !valid_const(initial_dcid, initial_dcid_len) || !valid_const(source_cid, source_cid_len)) {
         return kErrorInvalidArgument;
     }
+    const auto options = wasm_options_from_flags(flags);
+    const auto supported_versions = wasm_supported_versions(options);
 
     QuicCoreClientConnectionConfig connection{
         .source_connection_id = connection_id_from_input(
@@ -1061,8 +1191,18 @@ coquic_wasm_endpoint_open_connection(std::uint32_t endpoint_id, std::uint64_t no
             initial_dcid, initial_dcid_len,
             {std::byte{0x83}, std::byte{0x94}, std::byte{0xc8}, std::byte{0xf0}, std::byte{0x3e},
              std::byte{0x51}, std::byte{0x57}, std::byte{0x08}}),
+        .original_version = options.only_version_2 ? kQuicVersion2 : kQuicVersion1,
+        .initial_version = options.only_version_2 ? kQuicVersion2 : kQuicVersion1,
         .server_name = "localhost",
+        .resumption_state = std::move(resumption_state),
     };
+    if (options.zero_rtt) {
+        connection.zero_rtt = QuicZeroRttConfig{
+            .attempt = connection.resumption_state.has_value(),
+            .allow = false,
+            .application_context = {std::byte{0x10}},
+        };
+    }
     if (connection.source_connection_id.empty() ||
         connection.initial_destination_connection_id.empty()) {
         return kErrorInvalidArgument;
@@ -1089,6 +1229,88 @@ coquic_wasm_endpoint_open_connection(std::uint32_t endpoint_id, std::uint64_t no
         return kErrorUnsupported;
     }
     return static_cast<std::int32_t>(created_connection);
+}
+
+} // namespace
+
+extern "C" {
+
+__attribute__((export_name("coquic_wasm_version"))) std::uint32_t coquic_wasm_version() {
+    return coquic::quic::kQuicVersion1;
+}
+
+__attribute__((export_name("coquic_wasm_alloc"))) std::uint8_t *
+coquic_wasm_alloc(std::size_t size) {
+    return static_cast<std::uint8_t *>(std::malloc(size));
+}
+
+__attribute__((export_name("coquic_wasm_free"))) void coquic_wasm_free(std::uint8_t *pointer) {
+    std::free(pointer);
+}
+
+__attribute__((export_name("coquic_wasm_endpoint_create"))) std::uint32_t
+coquic_wasm_endpoint_create(std::int32_t role_id, const std::uint8_t *certificate_pem,
+                            std::size_t certificate_pem_len, const std::uint8_t *private_key_pem,
+                            std::size_t private_key_pem_len) {
+    return create_endpoint_with_options(role_id, certificate_pem, certificate_pem_len,
+                                        private_key_pem, private_key_pem_len, 0);
+}
+
+__attribute__((export_name("coquic_wasm_endpoint_create_with_options"))) std::uint32_t
+coquic_wasm_endpoint_create_with_options(std::int32_t role_id, const std::uint8_t *certificate_pem,
+                                         std::size_t certificate_pem_len,
+                                         const std::uint8_t *private_key_pem,
+                                         std::size_t private_key_pem_len, std::uint32_t flags) {
+    return create_endpoint_with_options(role_id, certificate_pem, certificate_pem_len,
+                                        private_key_pem, private_key_pem_len, flags);
+}
+
+__attribute__((export_name("coquic_wasm_endpoint_destroy"))) void
+coquic_wasm_endpoint_destroy(std::uint32_t endpoint_id) {
+    auto &registry = endpoint_registry();
+    if (endpoint_id == 0 || endpoint_id > registry.size()) {
+        return;
+    }
+    registry[endpoint_id - 1].reset();
+}
+
+__attribute__((export_name("coquic_wasm_endpoint_open_connection"))) std::int32_t
+coquic_wasm_endpoint_open_connection(std::uint32_t endpoint_id, std::uint64_t now_ms,
+                                     const std::uint8_t *initial_dcid, std::size_t initial_dcid_len,
+                                     const std::uint8_t *source_cid, std::size_t source_cid_len,
+                                     std::uint64_t route_handle) {
+    return open_connection_with_options(endpoint_id, now_ms, initial_dcid, initial_dcid_len,
+                                        source_cid, source_cid_len, route_handle, 0);
+}
+
+__attribute__((export_name("coquic_wasm_endpoint_open_connection_with_options"))) std::int32_t
+coquic_wasm_endpoint_open_connection_with_options(std::uint32_t endpoint_id, std::uint64_t now_ms,
+                                                  const std::uint8_t *initial_dcid,
+                                                  std::size_t initial_dcid_len,
+                                                  const std::uint8_t *source_cid,
+                                                  std::size_t source_cid_len,
+                                                  std::uint64_t route_handle, std::uint32_t flags) {
+    return open_connection_with_options(endpoint_id, now_ms, initial_dcid, initial_dcid_len,
+                                        source_cid, source_cid_len, route_handle, flags);
+}
+
+__attribute__((export_name("coquic_wasm_endpoint_open_connection_with_resumption"))) std::int32_t
+coquic_wasm_endpoint_open_connection_with_resumption(
+    std::uint32_t endpoint_id, std::uint64_t now_ms, const std::uint8_t *initial_dcid,
+    std::size_t initial_dcid_len, const std::uint8_t *source_cid, std::size_t source_cid_len,
+    std::uint64_t route_handle, std::uint32_t flags, const std::uint8_t *resumption,
+    std::size_t resumption_len) {
+    auto state_bytes = input_vector(resumption, resumption_len);
+    if (!state_bytes.has_value()) {
+        return kErrorInvalidArgument;
+    }
+    std::optional<QuicResumptionState> state;
+    if (!state_bytes->empty()) {
+        state = QuicResumptionState{.serialized = std::move(*state_bytes)};
+    }
+    return open_connection_with_options(endpoint_id, now_ms, initial_dcid, initial_dcid_len,
+                                        source_cid, source_cid_len, route_handle, flags,
+                                        std::move(state));
 }
 
 __attribute__((export_name("coquic_wasm_endpoint_input_datagram"))) std::int32_t
@@ -1156,6 +1378,49 @@ coquic_wasm_endpoint_send_datagram(std::uint32_t endpoint_id, std::uint64_t now_
         QuicCoreConnectionCommand{
             .connection = connection_handle,
             .input = QuicCoreSendDatagramData{.bytes = std::move(*bytes)},
+        },
+        time_from_ms(now_ms));
+    queue_result(*endpoint, std::move(result));
+    return 0;
+}
+
+__attribute__((export_name("coquic_wasm_endpoint_request_key_update"))) std::int32_t
+coquic_wasm_endpoint_request_key_update(std::uint32_t endpoint_id, std::uint64_t now_ms,
+                                        std::uint64_t connection_handle) {
+    auto *endpoint = endpoint_from_id(endpoint_id);
+    if (endpoint == nullptr || connection_handle == 0) {
+        return kErrorInvalidArgument;
+    }
+
+    auto result = endpoint->core.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = connection_handle,
+            .input = QuicCoreRequestKeyUpdate{},
+        },
+        time_from_ms(now_ms));
+    queue_result(*endpoint, std::move(result));
+    return 0;
+}
+
+__attribute__((export_name("coquic_wasm_endpoint_request_migration"))) std::int32_t
+coquic_wasm_endpoint_request_migration(std::uint32_t endpoint_id, std::uint64_t now_ms,
+                                       std::uint64_t connection_handle, std::uint64_t route_handle,
+                                       std::uint32_t reason_id) {
+    auto *endpoint = endpoint_from_id(endpoint_id);
+    if (endpoint == nullptr || connection_handle == 0 || route_handle == 0 || reason_id > 1) {
+        return kErrorInvalidArgument;
+    }
+
+    auto result = endpoint->core.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = connection_handle,
+            .input =
+                QuicCoreRequestConnectionMigration{
+                    .route_handle = route_handle,
+                    .reason = reason_id == 1 ? QuicMigrationRequestReason::preferred_address
+                                             : QuicMigrationRequestReason::active,
+                    .address_validation_identity = route_address_validation_identity(route_handle),
+                },
         },
         time_from_ms(now_ms));
     queue_result(*endpoint, std::move(result));

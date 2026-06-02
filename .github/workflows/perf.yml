@@ -153,7 +153,7 @@ jobs:
           df -h
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v22
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
 
       - name: Configure Nix Build Parallelism
         run: |
@@ -164,7 +164,7 @@ jobs:
           } >> "${HOME}/.config/nix/nix.conf"
 
       # Remove this when GitHub runner gets docker engine >= v28.1.0.
-      - uses: docker/setup-docker-action@v5
+      - uses: docker/setup-docker-action@0234bb73ccb40f0c430b795634f9247e2b5c2d23
         with:
           version: version=v28.3.0
 

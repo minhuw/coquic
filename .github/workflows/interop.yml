@@ -63,10 +63,10 @@ jobs:
           fetch-depth: 0
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
 
       # Remove this when GitHub runner gets docker engine >= v28.1.0.
-      - uses: docker/setup-docker-action@v5
+      - uses: docker/setup-docker-action@0234bb73ccb40f0c430b795634f9247e2b5c2d23
         with:
           version: version=v28.3.0
 
@@ -146,10 +146,10 @@ jobs:
           fetch-depth: 0
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
 
       # Remove this when GitHub runner gets docker engine >= v28.1.0.
-      - uses: docker/setup-docker-action@v5
+      - uses: docker/setup-docker-action@0234bb73ccb40f0c430b795634f9247e2b5c2d23
         with:
           version: version=v28.3.0
 

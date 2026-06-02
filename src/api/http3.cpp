@@ -334,9 +334,9 @@ Client &Client::operator=(Client &&) noexcept = default;
 Result<StreamId> Client::submit_request(const Request &request) {
     auto submitted = impl_->client.submit_request(to_internal(request));
     if (!submitted.has_value()) {
-        return from_internal(submitted.error());
+        return Result<StreamId>(from_internal(submitted.error()));
     }
-    return submitted.value();
+    return Result<StreamId>(submitted.value());
 }
 
 ClientUpdate Client::on_quic_result(const core::Result &result, TimePoint now) {

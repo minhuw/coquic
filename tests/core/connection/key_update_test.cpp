@@ -1562,7 +1562,8 @@ TEST(QuicCoreTest, ProcessInboundDatagramFailsWhenDeferredReplayKeyUpdateFailsAf
             .one_rtt_key_phase = true,
         });
     ASSERT_TRUE(deferred_packet.has_value());
-    connection.deferred_protected_packets_.push_back(deferred_packet.value());
+    connection.deferred_protected_packets_.push_back(
+        coquic::quic::DeferredProtectedDatagram(deferred_packet.value()));
 
     connection.application_space_.write_secret = coquic::quic::TrafficSecret{
         .cipher_suite = invalid_cipher_suite(),

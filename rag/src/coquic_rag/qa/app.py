@@ -360,9 +360,10 @@ def _client_key(request: Request, session_id: str | None) -> str:
         return f"session:{session_id[:80]}"
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return f"ip:{forwarded.split(',', 1)[0].strip()}"
+        forwarded_host = forwarded.split(",", 1)[0].strip()
+        return "ip:" + forwarded_host
     if request.client is not None:
-        return f"ip:{request.client.host}"
+        return "ip:" + request.client.host
     return "ip:unknown"
 
 

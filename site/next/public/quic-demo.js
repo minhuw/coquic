@@ -1,65 +1,286 @@
 const wasmPath = "./coquic-wasm-quic.wasm";
 const packetDelayMs = 1000;
-const defaultLossRatePercent = 15;
+const defaultNetworkEnvironment = {
+  delayMs: packetDelayMs,
+  bandwidthMbps: 20,
+  lossRatePercent: 0,
+};
 const initialDestinationConnectionId = Uint8Array.from([0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08]);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const pingPongPayloadBytes = 360;
 const maxPendingPingPong = 2;
+const wasmOptionFlags = {
+  retryEnabled: 1 << 0,
+  onlyVersion2: 1 << 1,
+  preferVersion2: 1 << 2,
+  chacha20Only: 1 << 3,
+  disableActiveMigration: 1 << 4,
+  allowPeerAddressChange: 1 << 5,
+  zeroRtt: 1 << 6,
+};
+const ecnCodepoints = {
+  unavailable: 0,
+  notEct: 1,
+  ect0: 2,
+  ect1: 3,
+  ce: 4,
+};
 
-const certPem = `-----BEGIN CERTIFICATE-----
-MIIDCTCCAfGgAwIBAgIUfGLiwBSFPX9DqQSNXv+f3CUruwswDQYJKoZIhvcNAQEL
-BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDMxODEzMjIxNVoXDTI3MDMx
-ODEzMjIxNVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF
-AAOCAQ8AMIIBCgKCAQEA/ilQZWcEKdgT7VAyku7JOVvmtJSk0/u2IJvEmfb7Cdbl
-zt039tBRsiFrdFikSTGm7rBqCzzT7wAHv4J0+nP/tQs53uslpViTi7rVAvml/jHX
-ng3JevgJzz3AdEpTTPL3NKjQESuNiXsuoutTzNJ1ltDywQz4+vGe9ctQye51TsBD
-mr/fJAzult7m1PTroiTp7ZJkq6ybUhmT943fT40WGy1uk5LwVYmbh4sbzweVbIQp
-RLT3YZeYG0Klocez2o3v5PMXE94eOBZGLVhYA1iwmubZpqtPfnMYFPApwoYdJfZ4
-xOBT4eYqgzZu/Be9VR7KKX82eFViGhLg69lMSjR4KwIDAQABo1MwUTAdBgNVHQ4E
-FgQUShGJTwym+VNTqADxkzCXDDXOTN8wHwYDVR0jBBgwFoAUShGJTwym+VNTqADx
-kzCXDDXOTN8wDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAVOf+
-NQ52+nRbePlhxeLVaIiQBKZcUCVkWcZfG6xpkrgF7OQXsPq7RzFzd/OFLuUXkEPR
-G/jE+thaj+jytTXvTKmXPhQNoihem9r0HzaYJP7gL0tBc5hZjJDbwN7xNy77nTDD
-EENFyvRWDs1Dn7lXJFoYSpYhbfqBw12uPfM1wyqNDnALcVpMZCkOWu9Xgeg2Qqr1
-I4OQhcypFBscgLaILsmon74WpYGR1DygjufmAwVbRHw9B2Ep9XP/zVQNJ9bOnljw
-c0PxBwkqi65cndFE++WVC2flc1hRRARfZejA/Xrg54vujrQ7xzUXCNGV+B1B4Svl
-p+Y0wRfxl6nd2jrw7g==
------END CERTIFICATE-----
-`;
+const scenarioPresets = {
+  handshake: {
+    label: "Handshake",
+    summary: "Handshake only, then hold the confirmed connection.",
+    workload: "handshake",
+    maxReplies: 0,
+  },
+  handshakeloss: {
+    label: "Handshake Loss",
+    summary: "Loss applies during Initial and Handshake packet exchange.",
+    workload: "handshake",
+    lossEnabled: true,
+    lossRate: 20,
+    dropBeforeHandshake: true,
+    dropKinds: ["Initial", "Handshake"],
+    maxDrops: 1,
+    maxReplies: 0,
+  },
+  transfer: {
+    label: "Transfer",
+    summary: "Stream transfer with packet inspection.",
+    workload: "transfer",
+    initialMessages: 1,
+    payloadBytes: pingPongPayloadBytes,
+    maxReplies: maxPendingPingPong,
+  },
+  keyupdate: {
+    label: "Key Update",
+    summary: "Transfer followed by a native 1-RTT key update request.",
+    workload: "transfer",
+    initialMessages: 2,
+    payloadBytes: 420,
+    maxReplies: 2,
+    keyUpdateAfterHandshake: true,
+  },
+  transferloss: {
+    label: "Transfer Loss",
+    summary: "1-RTT stream transfer with deterministic packet loss.",
+    workload: "transfer",
+    initialMessages: 1,
+    lossEnabled: true,
+    lossRate: 20,
+    dropKinds: ["1-RTT"],
+    maxReplies: 3,
+  },
+  handshakecorruption: {
+    label: "Handshake Corruption",
+    summary: "Handshake corruption showcase with one mutated Initial or Handshake datagram.",
+    workload: "handshake",
+    corruptBeforeHandshake: true,
+    corruptKinds: ["Initial", "Handshake"],
+    maxCorruptions: 1,
+    maxReplies: 0,
+  },
+  transfercorruption: {
+    label: "Transfer Corruption",
+    summary: "1-RTT corruption showcase with one mutated protected datagram.",
+    workload: "transfer",
+    initialMessages: 1,
+    corruptKinds: ["1-RTT"],
+    maxCorruptions: 1,
+    maxReplies: 2,
+  },
+  blackhole: {
+    label: "Blackhole",
+    summary: "Post-handshake packets are blackholed to expose PTO behavior.",
+    workload: "transfer",
+    initialMessages: 1,
+    lossEnabled: true,
+    lossRate: 40,
+    dropKinds: ["1-RTT"],
+    maxDrops: 8,
+    maxReplies: 1,
+  },
+  chacha20: {
+    label: "ChaCha20",
+    summary: "Handshake and transfer with ChaCha20-Poly1305 forced in TLS.",
+    workload: "transfer",
+    initialMessages: 1,
+    payloadBytes: 320,
+    maxReplies: 1,
+    wasmFlags: wasmOptionFlags.chacha20Only,
+  },
+  longrtt: {
+    label: "Long RTT",
+    summary: "Long relay delay stretches ACK, recovery, and packet timing.",
+    workload: "transfer",
+    initialMessages: 1,
+    payloadBytes: pingPongPayloadBytes,
+    packetDelayMs: 2200,
+    maxReplies: 2,
+  },
+  ipv6: {
+    label: "IPv6",
+    summary: "IPv6 interop showcase with IPv6 Ethernet frames in PCAP export.",
+    workload: "transfer",
+    initialMessages: 1,
+    payloadBytes: 320,
+    maxReplies: 1,
+    pcapIpVersion: 6,
+  },
+  multiplexing: {
+    label: "Multiplexing",
+    summary: "Several bidirectional streams are queued after handshake.",
+    workload: "multiplexing",
+    initialMessages: 3,
+    payloadBytes: 300,
+    maxReplies: 1,
+    streamIds: [0n, 4n, 8n],
+  },
+  retry: {
+    label: "Retry",
+    summary: "Server sends a real Retry before the validated handshake completes.",
+    workload: "handshake",
+    wasmFlags: wasmOptionFlags.retryEnabled,
+    maxReplies: 0,
+  },
+  resumption: {
+    label: "Resumption",
+    summary: "Warm up a session ticket, then open a resumed QUIC connection.",
+    workload: "handshake",
+    maxReplies: 0,
+    needsResumption: true,
+  },
+  zerortt: {
+    label: "0-RTT",
+    summary: "Warm up resumption, then queue stream data before handshake confirmation.",
+    workload: "transfer",
+    initialMessages: 1,
+    payloadBytes: 280,
+    maxReplies: 1,
+    wasmFlags: wasmOptionFlags.zeroRtt,
+    needsResumption: true,
+    queueEarlyData: true,
+  },
+  v2: {
+    label: "Version 2",
+    summary: "Connection opens with QUIC v2 packet encoding and secrets.",
+    workload: "handshake",
+    wasmFlags: wasmOptionFlags.onlyVersion2,
+    maxReplies: 0,
+  },
+  amplificationlimit: {
+    label: "Amplification Limit",
+    summary: "Handshake-only run to inspect address validation and server flight size.",
+    workload: "handshake",
+    maxReplies: 0,
+    annotation: "Watch Path And Recovery for address validation state and server bytes sent.",
+  },
+  "rebind-port": {
+    label: "Rebind Port",
+    summary: "Client packets switch to a new route handle after handshake.",
+    workload: "transfer",
+    initialMessages: 1,
+    payloadBytes: 320,
+    maxReplies: 1,
+    rebindAfterHandshake: { clientRoute: 11, serverRoute: 1, label: "client UDP port rebound" },
+  },
+  "rebind-addr": {
+    label: "Rebind Addr",
+    summary: "Client packets switch to a distinct address-validation route.",
+    workload: "transfer",
+    initialMessages: 1,
+    payloadBytes: 320,
+    maxReplies: 1,
+    rebindAfterHandshake: { clientRoute: 17, serverRoute: 1, label: "client address rebound" },
+  },
+  connectionmigration: {
+    label: "Connection Migration",
+    summary: "Native migration request switches the client send path.",
+    workload: "transfer",
+    initialMessages: 1,
+    payloadBytes: 320,
+    maxReplies: 1,
+    wasmFlags: wasmOptionFlags.allowPeerAddressChange,
+    migrationAfterHandshake: { route: 23, reason: 0 },
+  },
+  ecn: {
+    label: "ECN",
+    summary: "Delivered datagrams are marked ECT(0) so ACK ECN counts can appear.",
+    workload: "transfer",
+    initialMessages: 1,
+    payloadBytes: 300,
+    maxReplies: 1,
+    inboundEcn: ecnCodepoints.ect0,
+  },
+  goodput: {
+    label: "Goodput",
+    summary: "High-volume stream transfer to stress flow control and packetization.",
+    workload: "transfer",
+    initialMessages: 6,
+    payloadBytes: 1200,
+    maxReplies: 0,
+  },
+  crosstraffic: {
+    label: "Cross Traffic",
+    summary: "Mixed stream burst with loss to create queue pressure.",
+    workload: "multiplexing",
+    initialMessages: 6,
+    payloadBytes: 520,
+    lossEnabled: true,
+    lossRate: 15,
+    dropKinds: ["1-RTT"],
+    maxDrops: 2,
+    maxReplies: 1,
+    streamIds: [0n, 4n, 8n, 12n],
+  },
+};
 
-const keyPem = `-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQD+KVBlZwQp2BPt
-UDKS7sk5W+a0lKTT+7Ygm8SZ9vsJ1uXO3Tf20FGyIWt0WKRJMabusGoLPNPvAAe/
-gnT6c/+1Czne6yWlWJOLutUC+aX+MdeeDcl6+AnPPcB0SlNM8vc0qNARK42Jey6i
-61PM0nWW0PLBDPj68Z71y1DJ7nVOwEOav98kDO6W3ubU9OuiJOntkmSrrJtSGZP3
-jd9PjRYbLW6TkvBViZuHixvPB5VshClEtPdhl5gbQqWhx7Paje/k8xcT3h44FkYt
-WFgDWLCa5tmmq09+cxgU8CnChh0l9njE4FPh5iqDNm78F71VHsopfzZ4VWIaEuDr
-2UxKNHgrAgMBAAECggEBAIxMoA2pxTmYBr/8gj5rw/Z+zaanWymNjGcJtYhMNx2i
-W+9KXIdJTZ+oJRnviJjC6ORfy9nyNQd8m8pSqGJMwD3fOY3dfkV81M3QT5+50bC1
-MNIVyD+yRi/5ZZCMKtmSUXXnLhwcT6AxuHfEsdih4LllFGwOzi4wTNBf8HPXxze1
-fr4WCJ9J4PunT/WKjgHSqN30JsPupc0J2+MfbxKkmrUT+xsSCG51JTYM3xws+1pY
-KEVtX2Rj74bWCf66lvSR2tBjhVpjvql1CR0n3uQ6ukPIPpD936t92gAAh1ah5LuM
-q3jn8feFYdbjH7u1SPuxzPcHhS6nHs8cnTV9fOpUI0ECgYEA/9xSF18qCES0VLau
-GHPBOIIgkqu3xXmIf4vBgIywWf1a+Tr6ABk2Kpe15CnLms9ozFjq5qlt9vFBGXL6
-7JJcaHiVS+fRKhMyXPODEm8OR4UoX+sJE58LBj9lpfHTy7phzi+fUcS4jWBIMAGV
-fqyK02E75bGQyS0rcwCW0vvc4csCgYEA/kzBpNS9peT2YrqsgCxeMmqqhIyGSKz1
-MGE3iiVCwGvP+vmVK5adnhNHD1+wBRAoOv439Gpw6r7J6i3gOCXuaEr4ili3M9Ys
-6dN3mFt6Q56KM0W5mF8qcEL3LSvv3YOaG5222eG94E2PA/3VomDN7bReNDyF2S8O
-up5T/CCSdyECgYAjLfTvl7scxe2RlEidvhS8I1A9OnUbJtm4x8uEVFPPG8HNcOl8
-5/qForR0ubZwA8KiDjvGGVewU32i9SdBLeKczq+gbzBYO6l6FFVaTIDHHqzte1CV
-LRID+uWMCpMXePoHso6SXJ0Pe0SRrTYT4792zvDAZUjGEHrf5h3WxqCZPwKBgQC9
-4kKV+eTCgv0XK5yy+G495zf8UZHTopJS1cTK+pelZtud489nBMgcyPg+moysuyvP
-IRRXBUPbhSrwGeFbC7fBWHnNlAD4S+ytjKG4ulXJOBCpyF6VUDo4KUi4Ch7JoQLp
-rBJlDxLg8gjgSiHDZdVesVfGWYr4aRLudlrv4MJ9AQKBgC6ru7V4pXSXhu0d1zdJ
-I6+gmCCVlulCj89YpX9DN11IrLHD7p3g+vLfLFJEzSLjVJi/vF+avjnePOY58xg9
-1vvDklAgaW7GxDoi8OgNVOj1mStu3sphJtTlzI8q2DqB0ICbJlwTKcjWcms2wVnd
-rmZ1jkyEbwNB4p2YPXDQJ3hW
------END PRIVATE KEY-----
-`;
+const defaultScenarioPresetId = "transfer";
 
 const stateCodes = ["handshake_ready", "handshake_confirmed", "failed"];
+const zeroRttStatusCodes = ["unavailable", "not_attempted", "attempted", "accepted", "rejected"];
 const packetQueueGap = 10;
+
+class NetworkEnvironment {
+  constructor(settings = defaultNetworkEnvironment) {
+    this.configure(settings);
+    this.resetQueues();
+  }
+
+  configure(settings = {}) {
+    this.delayMs = clampNetworkDelay(settings.delayMs ?? this.delayMs ?? defaultNetworkEnvironment.delayMs);
+    this.bandwidthMbps = clampNetworkBandwidth(
+      settings.bandwidthMbps ?? this.bandwidthMbps ?? defaultNetworkEnvironment.bandwidthMbps,
+    );
+    this.lossRatePercent = clampNetworkLoss(
+      settings.lossRatePercent ?? this.lossRatePercent ?? defaultNetworkEnvironment.lossRatePercent,
+    );
+  }
+
+  resetQueues(timelineMs = 0) {
+    this.nextAvailableAtMs = {
+      client: timelineMs,
+      server: timelineMs,
+    };
+  }
+
+  scheduleDatagram(direction, byteLength, sentAtMs) {
+    const queueKey = direction === "server" ? "server" : "client";
+    const bytes = Math.max(0, Number(byteLength) || 0);
+    const serializationMs = Math.max(1, Math.ceil((bytes * 8) / (this.bandwidthMbps * 1000)));
+    const startAtMs = Math.max(sentAtMs, this.nextAvailableAtMs[queueKey] ?? sentAtMs);
+    const finishAtMs = startAtMs + serializationMs;
+    this.nextAvailableAtMs[queueKey] = finishAtMs;
+    const arrivalAtMs = finishAtMs + this.delayMs;
+    return {
+      arrivalAtMs,
+      serializationMs,
+      transitMs: Math.max(1, arrivalAtMs - sentAtMs),
+    };
+  }
+}
+
 let wasm;
 let packetSerial = 0;
 let packetRecords = [];
@@ -73,16 +294,189 @@ let modalLastFocus = null;
 let stepBudget = 0;
 let schedulerWaiters = [];
 let currentRunPromise = null;
+let currentRunState = null;
 let protocolStepInProgress = false;
 let activeWorkbenchRoot = null;
-let packetLossEnabled = false;
-let packetLossRatePercent = defaultLossRatePercent;
+let networkEnvironment = new NetworkEnvironment();
+let activeScenarioPresetId = defaultScenarioPresetId;
 const activePackets = new Map();
 const activeDatagrams = new Map();
 const boundControlNodes = new WeakSet();
 
 function el(id) {
   return document.getElementById(id);
+}
+
+function clampNetworkLoss(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(40, parsed)) : defaultNetworkEnvironment.lossRatePercent;
+}
+
+function clampNetworkDelay(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? Math.max(50, Math.min(2500, parsed)) : defaultNetworkEnvironment.delayMs;
+}
+
+function clampNetworkBandwidth(value) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? Math.max(0.5, Math.min(100, parsed)) : defaultNetworkEnvironment.bandwidthMbps;
+}
+
+function formatBandwidth(value) {
+  const bandwidth = clampNetworkBandwidth(value);
+  return Number.isInteger(bandwidth) ? `${bandwidth}Mbps` : `${bandwidth.toFixed(1)}Mbps`;
+}
+
+function scenarioPreset(id = activeScenarioPresetId) {
+  return scenarioPresets[id] ?? scenarioPresets[defaultScenarioPresetId];
+}
+
+function scenarioNetworkSettings(preset = scenarioPreset()) {
+  return {
+    delayMs: preset.packetDelayMs ?? defaultNetworkEnvironment.delayMs,
+    bandwidthMbps: preset.bandwidthMbps ?? defaultNetworkEnvironment.bandwidthMbps,
+    lossRatePercent: preset.lossEnabled ? (preset.lossRate ?? defaultNetworkEnvironment.lossRatePercent) : 0,
+  };
+}
+
+function currentPacketDelayMs() {
+  return networkEnvironment.delayMs;
+}
+
+function scenarioWasmFlags(scenario) {
+  return scenario.wasmFlags ?? 0;
+}
+
+function createEndpoint(role, certPointer = 0, certLength = 0, keyPointer = 0, keyLength = 0, flags = 0) {
+  if (typeof wasm.coquic_wasm_endpoint_create_with_options === "function") {
+    return wasm.coquic_wasm_endpoint_create_with_options(role, certPointer, certLength, keyPointer, keyLength, flags);
+  }
+  return wasm.coquic_wasm_endpoint_create(role, certPointer, certLength, keyPointer, keyLength);
+}
+
+function createEndpointPair(flags) {
+  const client = createEndpoint(0, 0, 0, 0, 0, flags);
+  const server = createEndpoint(1, 0, 0, 0, 0, flags);
+  return { client, server };
+}
+
+function openConnection(endpoint, protocolNow, routeHandle, flags = 0) {
+  if (typeof wasm.coquic_wasm_endpoint_open_connection_with_options === "function") {
+    return wasm.coquic_wasm_endpoint_open_connection_with_options(
+      endpoint,
+      BigInt(protocolNow),
+      0,
+      0,
+      0,
+      0,
+      BigInt(routeHandle),
+      flags,
+    );
+  }
+  return wasm.coquic_wasm_endpoint_open_connection(endpoint, BigInt(protocolNow), 0, 0, 0, 0, BigInt(routeHandle));
+}
+
+function openConnectionWithResumption(endpoint, protocolNow, routeHandle, flags = 0, resumptionState = null) {
+  const state = resumptionState ?? new Uint8Array();
+  if (typeof wasm.coquic_wasm_endpoint_open_connection_with_resumption === "function") {
+    return withBytes(state, (pointer, length) =>
+      wasm.coquic_wasm_endpoint_open_connection_with_resumption(
+        endpoint,
+        BigInt(protocolNow),
+        0,
+        0,
+        0,
+        0,
+        BigInt(routeHandle),
+        flags,
+        pointer,
+        length,
+      ),
+    );
+  }
+  if (state.length > 0) {
+    throw new Error("resumption is unavailable in this WASM build");
+  }
+  return openConnection(endpoint, protocolNow, routeHandle, flags);
+}
+
+function requestKeyUpdate(runState, protocolNow, sender = "client") {
+  if (typeof wasm.coquic_wasm_endpoint_request_key_update !== "function") {
+    log(runState.timelineMs, "key update request unavailable in this WASM build", "error");
+    return false;
+  }
+  const endpoint = sender === "client" ? runState.clientEndpoint : runState.serverEndpoint;
+  const connection = sender === "client" ? runState.clientConnection : runState.serverConnection;
+  if (connection === 0n) return false;
+  const rc = wasm.coquic_wasm_endpoint_request_key_update(endpoint, BigInt(protocolNow), connection);
+  if (rc < 0) throw new Error(`${sender} key update failed ${rc}`);
+  runState.keyUpdateRequested = true;
+  log(runState.timelineMs, `${sender} requested native key update`);
+  return true;
+}
+
+function requestMigration(runState, protocolNow) {
+  if (typeof wasm.coquic_wasm_endpoint_request_migration !== "function") {
+    log(runState.timelineMs, "migration request unavailable in this WASM build", "error");
+    return false;
+  }
+  const migration = runState.scenario.migrationAfterHandshake;
+  if (!migration || runState.clientConnection === 0n) return false;
+  const rc = wasm.coquic_wasm_endpoint_request_migration(
+    runState.clientEndpoint,
+    BigInt(protocolNow),
+    runState.clientConnection,
+    BigInt(migration.route),
+    migration.reason ?? 0,
+  );
+  if (rc < 0) throw new Error(`client migration failed ${rc}`);
+  runState.clientToServerRoute = migration.route;
+  runState.serverToClientRoute = 1;
+  runState.migrationRequested = true;
+  log(runState.timelineMs, `client requested native migration to route ${migration.route}`);
+  return true;
+}
+
+function maybeApplyHandshakeScenarioActions(runState, protocolNow) {
+  if (runState.handshakeActionsApplied) return false;
+  const scenario = runState.scenario;
+  let progressed = false;
+  if (scenario.rebindAfterHandshake) {
+    runState.clientToServerRoute = scenario.rebindAfterHandshake.clientRoute;
+    runState.serverToClientRoute = scenario.rebindAfterHandshake.serverRoute;
+    log(runState.timelineMs, `${scenario.rebindAfterHandshake.label}: C->S route ${runState.clientToServerRoute}`);
+    progressed = true;
+  }
+  if (scenario.migrationAfterHandshake) {
+    progressed = requestMigration(runState, protocolNow) || progressed;
+  }
+  if (scenario.keyUpdateAfterHandshake) {
+    progressed = requestKeyUpdate(runState, protocolNow, "client") || progressed;
+  }
+  runState.handshakeActionsApplied = true;
+  return progressed;
+}
+
+function updateRelayTimerLabel(delayMs = currentPacketDelayMs()) {
+  const label = el("relay-timer-label");
+  if (label) label.textContent = `relay delay: ${delayMs}ms`;
+}
+
+function updateScenarioControls() {
+  const preset = scenarioPreset();
+  const select = el("scenario-preset");
+  const summary = el("scenario-summary");
+  if (select && select.value !== activeScenarioPresetId) select.value = activeScenarioPresetId;
+  if (summary) summary.textContent = preset.summary;
+  updateRelayTimerLabel(networkEnvironment.delayMs);
+}
+
+function applyScenarioPreset(id) {
+  activeScenarioPresetId = scenarioPresets[id] ? id : defaultScenarioPresetId;
+  const preset = scenarioPreset();
+  networkEnvironment.configure(scenarioNetworkSettings(preset));
+  updateScenarioControls();
+  updateNetworkControls();
 }
 
 function isWorkbenchMounted() {
@@ -96,6 +490,7 @@ function stopDemoForUnmount() {
   paused = false;
   stepBudget = 0;
   protocolStepInProgress = false;
+  currentRunState = null;
   releasePauseWaiters();
   wakeScheduler();
 }
@@ -181,46 +576,96 @@ function setGlobalTimer(timeMs) {
   if (node) node.textContent = `${timeMs}ms`;
 }
 
-function updateLossControls() {
-  const toggle = el("loss-toggle");
-  const rate = el("loss-rate");
-  const label = el("loss-rate-label");
-  if (toggle) {
-    toggle.setAttribute("aria-pressed", packetLossEnabled ? "true" : "false");
-    toggle.dataset.state = packetLossEnabled ? "on" : "off";
+function updateNetworkControls() {
+  const loss = el("network-loss");
+  const bandwidth = el("network-bandwidth");
+  const delay = el("network-delay");
+  const lossLabel = el("network-loss-label");
+  const bandwidthLabel = el("network-bandwidth-label");
+  const delayLabel = el("network-delay-label");
+  const summary = el("network-summary");
+  if (loss) loss.value = `${networkEnvironment.lossRatePercent}`;
+  if (bandwidth) bandwidth.value = `${networkEnvironment.bandwidthMbps}`;
+  if (delay) delay.value = `${networkEnvironment.delayMs}`;
+  if (lossLabel) lossLabel.textContent = `${networkEnvironment.lossRatePercent}%`;
+  if (bandwidthLabel) bandwidthLabel.textContent = formatBandwidth(networkEnvironment.bandwidthMbps);
+  if (delayLabel) delayLabel.textContent = `${networkEnvironment.delayMs}ms`;
+  if (summary) {
+    summary.textContent = `${networkEnvironment.delayMs}ms / ${formatBandwidth(
+      networkEnvironment.bandwidthMbps,
+    )} / ${networkEnvironment.lossRatePercent}% loss`;
   }
-  if (rate) {
-    rate.value = `${packetLossRatePercent}`;
-    rate.disabled = !packetLossEnabled;
-  }
-  if (label) label.textContent = packetLossEnabled ? `${packetLossRatePercent}%` : "0%";
+  updateRelayTimerLabel(networkEnvironment.delayMs);
 }
 
-function setPacketLossEnabled(enabled) {
-  packetLossEnabled = enabled;
-  updateLossControls();
+function applyNetworkChange(settings) {
+  networkEnvironment.configure(settings);
+  if (currentRunState && isRunActive(currentRunState.runToken)) {
+    currentRunState.network.configure(settings);
+  }
+  updateNetworkControls();
 }
 
-function setPacketLossRate(value) {
-  const parsed = Number.parseInt(value, 10);
-  packetLossRatePercent = Number.isFinite(parsed)
-    ? Math.max(0, Math.min(40, parsed))
-    : defaultLossRatePercent;
-  if (packetLossRatePercent === 0) packetLossEnabled = false;
-  updateLossControls();
+function setNetworkLossRate(value) {
+  applyNetworkChange({ lossRatePercent: value });
+}
+
+function setNetworkBandwidth(value) {
+  applyNetworkChange({ bandwidthMbps: value });
+}
+
+function setNetworkDelay(value) {
+  applyNetworkChange({ delayMs: value });
 }
 
 function shouldDropDatagram(runState, direction, datagram, records) {
-  if (!packetLossEnabled || packetLossRatePercent <= 0) return false;
-  if (runState.clientState !== "handshake_confirmed" || runState.serverState !== "handshake_confirmed") {
+  if (runState.quiet) return false;
+  const lossRatePercent = runState.network.lossRatePercent;
+  if (lossRatePercent <= 0) return false;
+  if (runState.droppedDatagrams >= (runState.scenario.maxDrops ?? Number.POSITIVE_INFINITY)) {
     return false;
   }
-  if (records.some((record) => record.kind !== "1-RTT")) return false;
+  const handshakeConfirmed =
+    runState.clientState === "handshake_confirmed" &&
+    runState.serverState === "handshake_confirmed";
+  if (!handshakeConfirmed && !runState.scenario.dropBeforeHandshake) {
+    return false;
+  }
+  const dropKinds = runState.scenario.dropKinds ?? ["1-RTT"];
+  if (!records.some((record) => dropKinds.includes(record.kind))) return false;
   const attempt = runState.lossAttempt;
   runState.lossAttempt += 1;
-  const period = Math.max(2, Math.round(100 / packetLossRatePercent));
+  const period = Math.max(2, Math.round(100 / lossRatePercent));
   const phase = direction === "client" ? 3 : 5;
   return (attempt + phase) % period === 0;
+}
+
+function shouldCorruptDatagram(runState, records) {
+  if (runState.quiet) return false;
+  if (runState.corruptedDatagrams >= (runState.scenario.maxCorruptions ?? Number.POSITIVE_INFINITY)) {
+    return false;
+  }
+  const handshakeConfirmed =
+    runState.clientState === "handshake_confirmed" &&
+    runState.serverState === "handshake_confirmed";
+  if (!handshakeConfirmed && !runState.scenario.corruptBeforeHandshake) {
+    return false;
+  }
+  const corruptKinds = runState.scenario.corruptKinds ?? [];
+  return records.some((record) => corruptKinds.includes(record.kind));
+}
+
+function corruptDatagramBytes(datagram, records) {
+  const bytes = datagram.bytes.slice();
+  const target =
+    [...records].reverse().find((record) => record.end - record.start > 16) ??
+    records.find((record) => record.end - record.start > 0);
+  const fallbackOffset = Math.max(0, bytes.length - 1);
+  const offset = target
+    ? Math.min(bytes.length - 1, Math.max(target.start, target.end - 3))
+    : fallbackOffset;
+  bytes[offset] ^= 0x55;
+  return { ...datagram, bytes, corruptedOffset: offset };
 }
 
 function wasmI64ToNumber(value, label) {
@@ -231,14 +676,14 @@ function wasmI64ToNumber(value, label) {
   return number;
 }
 
-function pingPongPayload(sender, sequence) {
+function pingPongPayload(sender, sequence, payloadBytes = pingPongPayloadBytes) {
   const prefix = `${sender} ping-pong ${sequence} `;
   const fill = "flow-control-window ";
   let text = prefix;
-  while (encoder.encode(text).length < pingPongPayloadBytes) {
+  while (encoder.encode(text).length < payloadBytes) {
     text += fill;
   }
-  return encoder.encode(text).slice(0, pingPongPayloadBytes);
+  return encoder.encode(text).slice(0, payloadBytes);
 }
 
 function pauseDemo() {
@@ -290,11 +735,11 @@ async function waitForProtocolStep(runState, description) {
 }
 
 async function runProtocolStep(runState, description, action) {
-  if (!(await waitForProtocolStep(runState, description))) return false;
+  if (!runState.quiet && !(await waitForProtocolStep(runState, description))) return false;
   if (!isRunActive(runState.runToken)) return false;
   protocolStepInProgress = true;
   try {
-    await action(runState.stepMode);
+    await action(runState.quiet ? "running" : runState.stepMode);
     if (!isRunActive(runState.runToken)) return false;
     drainInternalEvents(runState);
     updateEndpointDiagnostics(runState.clientEndpoint, runState.serverEndpoint, runState);
@@ -617,7 +1062,7 @@ function packetTravelBounds(item) {
 
 function packetRawX(item) {
   const { leftEdge, rightEdge } = packetTravelBounds(item);
-  const progress = Math.max(0, Math.min(1, item.elapsedMs / packetDelayMs));
+  const progress = Math.max(0, Math.min(1, item.elapsedMs / (item.delayMs ?? currentPacketDelayMs())));
   const eased = progress < 0.5 ? 2 * progress * progress : 1 - ((-2 * progress + 2) ** 2) / 2;
   return item.direction === "client" ? leftEdge + (rightEdge - leftEdge) * eased : rightEdge - (rightEdge - leftEdge) * eased;
 }
@@ -723,7 +1168,7 @@ function setPacketPhase(item, phase) {
   item.node.dataset.phase = phase;
   const status = item.node.querySelector("span");
   if (status) {
-    status.textContent = phase === "received" || phase === "accepted" || phase === "lost"
+    status.textContent = phase === "received" || phase === "accepted" || phase === "lost" || phase === "corrupted"
       ? phase
       : item.sizeLabel;
   }
@@ -735,6 +1180,7 @@ function setPacketPhase(item, phase) {
 }
 
 function setDatagramPhase(datagram, phase) {
+  if (datagram.quiet || !datagram.node) return;
   datagram.phase = phase;
   datagram.node.dataset.phase = phase;
   renderDatagramEnvelope(datagram);
@@ -748,6 +1194,7 @@ function retirePacket(item) {
 }
 
 function retireDatagram(datagram, phase = "accepted") {
+  if (datagram.quiet || !datagram.node) return;
   if (!activeDatagrams.has(datagram.id)) return;
   setDatagramPhase(datagram, phase);
   setTimeout(() => {
@@ -762,7 +1209,7 @@ function markSelectedPacket() {
   }
 }
 
-function visualizePacket(direction, record) {
+function visualizePacket(direction, record, delayMs = currentPacketDelayMs()) {
   const packet = document.createElement("button");
   const fromClient = direction === "client";
   packetSerial += 1;
@@ -781,6 +1228,7 @@ function visualizePacket(direction, record) {
     serial: packetSerial,
     phase: "generated",
     elapsedMs: 0,
+    delayMs,
   };
   activePackets.set(record.id, item);
   setPacketPhase(item, "generated");
@@ -791,38 +1239,53 @@ function visualizePacket(direction, record) {
     async wait({ instant = false } = {}) {
       setPacketPhase(item, "in-flight");
       if (instant) {
-        item.elapsedMs = packetDelayMs;
+        item.elapsedMs = item.delayMs;
         setPacketPhase(item, "arrived");
         return;
       }
-      while (item.elapsedMs < packetDelayMs) {
+      while (item.elapsedMs < item.delayMs) {
         await waitUntilRunning();
         const previous = performance.now();
         await waitForAnimationFrame();
         if (paused) continue;
         advancePacketClock(item, previous);
       }
-      item.elapsedMs = packetDelayMs;
+      item.elapsedMs = item.delayMs;
       setPacketPhase(item, "arrived");
     },
     receive() {
-      item.elapsedMs = packetDelayMs;
+      item.elapsedMs = item.delayMs;
       setPacketPhase(item, "received");
     },
     accept() {
-      item.elapsedMs = packetDelayMs;
+      item.elapsedMs = item.delayMs;
       setPacketPhase(item, "accepted");
       setTimeout(() => retirePacket(item), 180);
     },
     lose() {
-      item.elapsedMs = packetDelayMs;
+      item.elapsedMs = item.delayMs;
       setPacketPhase(item, "lost");
       setTimeout(() => retirePacket(item), 560);
+    },
+    corrupt() {
+      item.elapsedMs = item.delayMs;
+      setPacketPhase(item, "corrupted");
     },
   };
 }
 
 function visualizeDatagram(direction, datagram, records, packetItems) {
+  if (datagram.quiet) {
+    return {
+      id: 0,
+      node: null,
+      direction,
+      records,
+      items: packetItems,
+      phase: "generated",
+      quiet: true,
+    };
+  }
   const node = document.createElement("div");
   const fromClient = direction === "client";
   node.className = `datagram ${fromClient ? "from-client" : "from-server"}`;
@@ -1093,16 +1556,19 @@ function selectPacket(id, options = {}) {
 }
 
 function capturePcapDatagram(direction, datagram, now) {
+  if (datagram.quiet) return;
   datagramRecords.push({
     id: datagramRecords.length + 1,
     now,
     direction,
+    ipVersion: datagram.pcapIpVersion ?? scenarioPreset().pcapIpVersion ?? 4,
     bytes: datagram.bytes.slice(),
   });
 }
 
 function captureDatagram(direction, datagram, now, inspections = []) {
   const directionLabel = direction === "client" ? "C -> S" : "S -> C";
+  if (datagram.quiet) return [];
   capturePcapDatagram(direction, datagram, now);
   const parsedPackets = splitDatagram(datagram.bytes, direction);
   const coreInspection = inspectionByOffset(inspections);
@@ -1171,6 +1637,17 @@ function ipv4Address(a, b, c, d) {
   return Uint8Array.from([a, b, c, d]);
 }
 
+function ipv6Address(lastWord) {
+  const bytes = new Uint8Array(16);
+  bytes[0] = 0xfd;
+  bytes[1] = 0x63;
+  bytes[2] = 0x6f;
+  bytes[3] = 0x71;
+  bytes[14] = (lastWord >> 8) & 0xff;
+  bytes[15] = lastWord & 0xff;
+  return bytes;
+}
+
 function buildUdpIpv4Frame(record) {
   const payload = record.bytes;
   const frame = new Uint8Array(14 + 20 + 8 + payload.length);
@@ -1209,8 +1686,45 @@ function buildUdpIpv4Frame(record) {
   return frame;
 }
 
+function buildUdpIpv6Frame(record) {
+  const payload = record.bytes;
+  const frame = new Uint8Array(14 + 40 + 8 + payload.length);
+  const view = new DataView(frame.buffer);
+  const fromClient = record.direction === "client";
+  const dstMac = fromClient ? [0x02, 0x00, 0x00, 0x00, 0x00, 0x02] : [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+  const srcMac = fromClient ? [0x02, 0x00, 0x00, 0x00, 0x00, 0x01] : [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
+  frame.set(dstMac, 0);
+  frame.set(srcMac, 6);
+  writeU16(view, 12, 0x86dd);
+
+  const ipOffset = 14;
+  const udpOffset = ipOffset + 40;
+  const payloadOffset = udpOffset + 8;
+  const srcIp = fromClient ? ipv6Address(1) : ipv6Address(2);
+  const dstIp = fromClient ? ipv6Address(2) : ipv6Address(1);
+  const srcPort = fromClient ? 44330 : 4433;
+  const dstPort = fromClient ? 4433 : 44330;
+
+  frame[ipOffset] = 0x60;
+  writeU16(view, ipOffset + 4, 8 + payload.length);
+  frame[ipOffset + 6] = 17;
+  frame[ipOffset + 7] = 64;
+  frame.set(srcIp, ipOffset + 8);
+  frame.set(dstIp, ipOffset + 24);
+
+  writeU16(view, udpOffset, srcPort);
+  writeU16(view, udpOffset + 2, dstPort);
+  writeU16(view, udpOffset + 4, 8 + payload.length);
+  writeU16(view, udpOffset + 6, 0);
+  frame.set(payload, payloadOffset);
+  return frame;
+}
+
 function buildPcap() {
-  const frames = datagramRecords.map((record) => ({ record, frame: buildUdpIpv4Frame(record) }));
+  const frames = datagramRecords.map((record) => ({
+    record,
+    frame: record.ipVersion === 6 ? buildUdpIpv6Frame(record) : buildUdpIpv4Frame(record),
+  }));
   const totalLength = 24 + frames.reduce((sum, item) => sum + 16 + item.frame.length, 0);
   const bytes = new Uint8Array(totalLength);
   const view = new DataView(bytes.buffer);
@@ -1725,11 +2239,14 @@ function drainEndpointPacketInspections(endpoint, runState) {
 function noteReceivedPingPongChunk(label, event, runState) {
   const key = `${label}:${event.streamId.toString()}`;
   const total = (runState.streamReceiveBytes.get(key) ?? 0) + event.payload.length;
-  const completeMessages = Math.floor(total / pingPongPayloadBytes);
-  const remainingBytes = total % pingPongPayloadBytes;
+  const payloadBytes = runState.scenario.payloadBytes ?? pingPongPayloadBytes;
+  const completeMessages = Math.floor(total / payloadBytes);
+  const remainingBytes = total % payloadBytes;
   runState.streamReceiveBytes.set(key, remainingBytes);
   for (let index = 0; index < completeMessages; index += 1) {
-    if (runState.pendingPingPong.length >= maxPendingPingPong) break;
+    if (runState.pendingPingPong.length >= runState.maxReplies) break;
+    if (runState.replyCount >= runState.maxReplies) break;
+    runState.replyCount += 1;
     runState.pendingPingPong.push({
       sender: label,
       streamId: event.streamId,
@@ -1758,6 +2275,15 @@ function handleOneEvent(endpoint, label, runState) {
   } else if (event.type === 4) {
     log(runState.timelineMs, `${label} local error ${event.code}`, "error");
     throw new Error(`${label} local error ${event.code}`);
+  } else if (event.type === 7) {
+    const status = zeroRttStatusCodes[event.code] ?? `status_${event.code}`;
+    runState.zeroRttStatus = status;
+    if (!runState.quiet) log(runState.timelineMs, `${label} 0-RTT ${status}`);
+  } else if (event.type === 8) {
+    runState.resumptionState = event.payload;
+    if (!runState.quiet) {
+      log(runState.timelineMs, `${label} resumption state ${event.payload.length} bytes`);
+    }
   }
   return true;
 }
@@ -1792,27 +2318,45 @@ function queueDatagramIfAvailable(from, to, toRoute, runState, label, direction)
   const key = packetInspectionKey(from, datagram.inspectionDatagramId);
   const inspections = runState.packetInspections.get(key) ?? [];
   runState.packetInspections.delete(key);
+  datagram.pcapIpVersion = runState.scenario.pcapIpVersion ?? 4;
+  datagram.quiet = runState.quiet;
   const records = captureDatagram(direction, datagram, runState.timelineMs, inspections);
-  const animations = records.map((record) => visualizePacket(direction, record));
+  const sentAtMs = runState.timelineMs;
+  const networkSchedule = runState.network.scheduleDatagram(direction, datagram.bytes.length, sentAtMs);
+  const animations = runState.quiet
+    ? []
+    : records.map((record) => visualizePacket(direction, record, networkSchedule.transitMs));
   const visual = visualizeDatagram(direction, datagram, records, animations.map((animation) => animation.item));
   setDatagramPhase(visual, "in-flight");
   runState.endpointStats[direction].sentDatagrams += 1;
   runState.endpointStats[direction].sentBytes += datagram.bytes.length;
-  const sentAtMs = runState.timelineMs;
   if (shouldDropDatagram(runState, direction, datagram, records)) {
     runState.droppedDatagrams += 1;
     setDatagramPhase(visual, "lost");
     for (const animation of animations) animation.lose();
     log(
       runState.timelineMs,
-      `${label} ${datagram.bytes.length} bytes dropped by simulated loss (${packetLossRatePercent}%)`,
+      `${label} ${datagram.bytes.length} bytes dropped by simulated loss (${runState.network.lossRatePercent}%)`,
       "loss",
     );
     retireDatagram(visual, "lost");
     return true;
   }
+  let deliverDatagram = datagram;
+  if (shouldCorruptDatagram(runState, records)) {
+    deliverDatagram = corruptDatagramBytes(datagram, records);
+    runState.corruptedDatagrams += 1;
+    setDatagramPhase(visual, "corrupted");
+    for (const animation of animations) animation.corrupt();
+    log(
+      runState.timelineMs,
+      `${label} ${datagram.bytes.length} bytes mutated at byte ${deliverDatagram.corruptedOffset}`,
+      "loss",
+    );
+  }
   runState.inFlight.push({
-    datagram,
+    datagram: deliverDatagram,
+    originalDatagram: datagram,
     records,
     animations,
     visual,
@@ -1821,9 +2365,16 @@ function queueDatagramIfAvailable(from, to, toRoute, runState, label, direction)
     label,
     direction,
     sentAtMs,
-    arrivalAtMs: sentAtMs + packetDelayMs,
+    arrivalAtMs: networkSchedule.arrivalAtMs,
+    serializationMs: networkSchedule.serializationMs,
+    forceInboundEcn: runState.scenario.inboundEcn,
   });
-  log(runState.timelineMs, `${label} ${datagram.bytes.length} bytes in flight`);
+  log(
+    runState.timelineMs,
+    `${label} ${datagram.bytes.length} bytes in flight (${runState.network.delayMs}ms, ${formatBandwidth(
+      runState.network.bandwidthMbps,
+    )})`,
+  );
   return true;
 }
 
@@ -1850,6 +2401,7 @@ async function receiveNextArrivedDatagram(runState, protocolNow) {
   const item = runState.arrived.shift();
   if (!item) return false;
   const receiver = item.direction === "client" ? "server" : "client";
+  const inboundEcn = item.forceInboundEcn ?? item.datagram.ecn;
   withBytes(item.datagram.bytes, (pointer, length) => {
     const rc = wasm.coquic_wasm_endpoint_input_datagram(
       item.to,
@@ -1857,7 +2409,7 @@ async function receiveNextArrivedDatagram(runState, protocolNow) {
       pointer,
       length,
       BigInt(item.toRoute),
-      item.datagram.ecn,
+      inboundEcn,
     );
     if (rc < 0) throw new Error(`input datagram failed ${rc}`);
   });
@@ -1865,6 +2417,13 @@ async function receiveNextArrivedDatagram(runState, protocolNow) {
   runState.endpointStats[receiver].receivedBytes += item.datagram.bytes.length;
   drainEndpointPacketInspections(item.to, runState);
   runState.datagrams += 1;
+  if (item.datagram.corruptedOffset !== undefined) {
+    setDatagramPhase(item.visual, "corrupted");
+    for (const animation of item.animations) animation.corrupt();
+    log(runState.timelineMs, `${item.label} corrupted datagram delivered to ${receiver}`, "loss");
+    retireDatagram(item.visual, "corrupted");
+    return true;
+  }
   setDatagramPhase(item.visual, "received");
   if (item.animations.length > 0) {
     for (const animation of item.animations) animation.receive();
@@ -1917,7 +2476,7 @@ function queuePingPongMessage(runState, protocolNow, sender, streamId) {
     throw new Error(`${sender} connection is not ready for stream send`);
   }
   runState.pingPongSequence += 1;
-  const payload = pingPongPayload(sender, runState.pingPongSequence);
+  const payload = pingPongPayload(sender, runState.pingPongSequence, runState.scenario.payloadBytes ?? pingPongPayloadBytes);
   withBytes(payload, (pointer, length) => {
     const rc = wasm.coquic_wasm_endpoint_send_stream(
       endpoint,
@@ -1936,8 +2495,326 @@ function queuePingPongMessage(runState, protocolNow, sender, streamId) {
   );
 }
 
+function queueScenarioWorkload(runState, protocolNow) {
+  const scenario = runState.scenario;
+  if (scenario.queueEarlyData && !runState.earlyDataQueued) {
+    const streamIds = scenario.streamIds?.length ? scenario.streamIds : [0n];
+    queuePingPongMessage(runState, protocolNow, "client", streamIds[0]);
+    runState.earlyDataQueued = true;
+    runState.workloadQueued = true;
+    return;
+  }
+  const messageCount = Math.max(0, scenario.initialMessages ?? (scenario.workload === "handshake" ? 0 : 1));
+  if (messageCount === 0) {
+    runState.workloadQueued = true;
+    log(runState.timelineMs, `${scenario.label} showcase: handshake complete`);
+    return;
+  }
+  const streamIds = scenario.streamIds?.length ? scenario.streamIds : [0n];
+  for (let index = 0; index < messageCount; index += 1) {
+    queuePingPongMessage(runState, protocolNow, "client", streamIds[index % streamIds.length]);
+  }
+  runState.workloadQueued = true;
+}
+
+function makeRunState({ scenario, flags, client, server, runToken, quiet = false }) {
+  const network = quiet ? new NetworkEnvironment(scenarioNetworkSettings(scenario)) : new NetworkEnvironment(networkEnvironment);
+  network.resetQueues(0);
+  return {
+    clientState: "idle",
+    serverState: "idle",
+    datagrams: 0,
+    clientConnection: 0n,
+    serverConnection: 0n,
+    packetInspections: new Map(),
+    timelineMs: 0,
+    receivedStreamText: "",
+    inFlight: [],
+    arrived: [],
+    accepting: [],
+    droppedDatagrams: 0,
+    corruptedDatagrams: 0,
+    lossAttempt: 0,
+    pendingPingPong: [],
+    streamReceiveBytes: new Map(),
+    pingPongSequence: 0,
+    replyCount: 0,
+    maxReplies: scenario.maxReplies ?? maxPendingPingPong,
+    workloadQueued: false,
+    earlyDataQueued: false,
+    handshakeActionsApplied: false,
+    migrationRequested: false,
+    keyUpdateRequested: false,
+    resumptionState: null,
+    zeroRttStatus: "",
+    scenario,
+    network,
+    clientToServerRoute: 7,
+    serverToClientRoute: 1,
+    wasmFlags: flags,
+    runToken,
+    stepIndex: 0,
+    endpointStats: makeEndpointStats(),
+    clientEndpoint: client,
+    serverEndpoint: server,
+    quiet,
+  };
+}
+
+function runStateComplete(runState, idleRounds) {
+  const handshakeReady =
+    runState.clientState === "handshake_confirmed" &&
+    runState.serverState === "handshake_confirmed";
+  if (runState.quiet) return handshakeReady && runState.resumptionState?.length > 0;
+  return (
+    handshakeReady &&
+    runState.workloadQueued &&
+    runState.pendingPingPong.length === 0 &&
+    runState.inFlight.length === 0 &&
+    runState.arrived.length === 0 &&
+    runState.accepting.length === 0 &&
+    idleRounds >= 2
+  );
+}
+
+function openScenarioConnection(runState, protocolNow, resumptionState = null) {
+  const opened = resumptionState
+    ? openConnectionWithResumption(
+      runState.clientEndpoint,
+      protocolNow,
+      runState.serverToClientRoute,
+      runState.wasmFlags,
+      resumptionState,
+    )
+    : openConnection(runState.clientEndpoint, protocolNow, runState.serverToClientRoute, runState.wasmFlags);
+  if (opened <= 0) throw new Error(`open failed ${opened}`);
+  runState.clientConnection = BigInt(opened);
+  el("client-connection").textContent = `${runState.clientConnection}`;
+  if (!runState.quiet) log(runState.timelineMs, `client open connection ${runState.clientConnection}`);
+}
+
+async function driveRunState(runState, { resumptionState = null } = {}) {
+  let protocolNow = 0;
+  updateEndpointDiagnostics(runState.clientEndpoint, runState.serverEndpoint, runState);
+
+  await runAutomaticStep(runState, () => {
+    openScenarioConnection(runState, protocolNow, resumptionState);
+  });
+
+  let idleRounds = 0;
+  while (isRunActive(runState.runToken)) {
+    protocolNow += 1;
+    let progressed = false;
+    const wakeups = readWakeups(runState);
+
+    if (runState.accepting.length > 0) {
+      const item = runState.accepting[0];
+      const record = item.records[item.acceptIndex];
+      if (!record) {
+        runState.accepting.shift();
+        continue;
+      }
+      if (!(await runProtocolStep(runState, `packet #${record.id} accepted`, () =>
+        acceptNextPacket(runState)
+      ))) {
+        break;
+      }
+      progressed = true;
+      continue;
+    }
+
+    if (runState.arrived.length > 0) {
+      if (!(await runProtocolStep(runState, `${runState.arrived[0].label} received`, () =>
+        receiveNextArrivedDatagram(runState, protocolNow)
+      ))) {
+        break;
+      }
+      progressed = true;
+      continue;
+    }
+
+    if (hasEvent(runState.clientEndpoint) || hasEvent(runState.serverEndpoint)) {
+      drainInternalEvents(runState);
+      updateEndpointDiagnostics(runState.clientEndpoint, runState.serverEndpoint, runState);
+      progressed = true;
+      continue;
+    }
+
+    const handshakeReady =
+      runState.clientState === "handshake_confirmed" &&
+      runState.serverState === "handshake_confirmed";
+    if (!runState.quiet && handshakeReady && !runState.handshakeActionsApplied) {
+      if (!(await runAutomaticStep(runState, () => {
+        maybeApplyHandshakeScenarioActions(runState, protocolNow);
+      }))) {
+        break;
+      }
+      progressed = true;
+      continue;
+    }
+
+    if (!runState.quiet && runState.scenario.queueEarlyData && !runState.earlyDataQueued) {
+      if (!(await runAutomaticStep(runState, () => {
+        queueScenarioWorkload(runState, protocolNow);
+      }))) {
+        break;
+      }
+      progressed = true;
+      continue;
+    }
+
+    if (!runState.quiet && handshakeReady && !runState.workloadQueued) {
+      if (!(await runAutomaticStep(runState, () => {
+        queueScenarioWorkload(runState, protocolNow);
+      }))) {
+        break;
+      }
+      progressed = true;
+      continue;
+    }
+
+    if (!runState.quiet && runState.pendingPingPong.length > 0) {
+      const next = runState.pendingPingPong.shift();
+      if (!(await runAutomaticStep(runState, () => {
+        queuePingPongMessage(runState, protocolNow, next.sender, next.streamId);
+      }))) {
+        break;
+      }
+      progressed = true;
+      continue;
+    }
+
+    if (hasDatagram(runState.clientEndpoint)) {
+      if (!(await runProtocolStep(runState, "client emits datagram", () => {
+        if (!queueDatagramIfAvailable(
+          runState.clientEndpoint,
+          runState.serverEndpoint,
+          runState.clientToServerRoute,
+          runState,
+          "client -> server",
+          "client",
+        )) {
+          throw new Error("client datagram disappeared before emit step");
+        }
+      }))) {
+        break;
+      }
+      progressed = true;
+      continue;
+    }
+
+    if (hasDatagram(runState.serverEndpoint)) {
+      if (!(await runProtocolStep(runState, "server emits datagram", () => {
+        if (!queueDatagramIfAvailable(
+          runState.serverEndpoint,
+          runState.clientEndpoint,
+          runState.serverToClientRoute,
+          runState,
+          "server -> client",
+          "server",
+        )) {
+          throw new Error("server datagram disappeared before emit step");
+        }
+      }))) {
+        break;
+      }
+      progressed = true;
+      continue;
+    }
+
+    if (runState.inFlight.length > 0) {
+      const arrivalAtMs = Math.min(...runState.inFlight.map((item) => item.arrivalAtMs));
+      const dueCount = runState.inFlight.filter((item) => item.arrivalAtMs === arrivalAtMs).length;
+      if (!(await runProtocolStep(runState, `${dueCount} datagram${dueCount === 1 ? "" : "s"} arrive`, (stepMode) =>
+        arriveDueDatagrams(runState, { instant: stepMode === "single" })
+      ))) {
+        break;
+      }
+      progressed = true;
+      continue;
+    }
+
+    const clientTimerDue = wakeups.client >= 0 && wakeups.client <= protocolNow;
+    const serverTimerDue = wakeups.server >= 0 && wakeups.server <= protocolNow;
+    if (clientTimerDue) {
+      if (!(await runAutomaticStep(runState, () => {
+        const rc = wasm.coquic_wasm_endpoint_timer_expired(runState.clientEndpoint, BigInt(protocolNow));
+        if (rc < 0) throw new Error(`client timer failed ${rc}`);
+        if (!runState.quiet) log(runState.timelineMs, `client timer fired at ${protocolNow}ms`);
+      }))) {
+        break;
+      }
+      progressed = true;
+      continue;
+    }
+
+    if (serverTimerDue) {
+      if (!(await runAutomaticStep(runState, () => {
+        const rc = wasm.coquic_wasm_endpoint_timer_expired(runState.serverEndpoint, BigInt(protocolNow));
+        if (rc < 0) throw new Error(`server timer failed ${rc}`);
+        if (!runState.quiet) log(runState.timelineMs, `server timer fired at ${protocolNow}ms`);
+      }))) {
+        break;
+      }
+      progressed = true;
+      continue;
+    }
+
+    idleRounds = progressed ? 0 : idleRounds + 1;
+    if (runStateComplete(runState, idleRounds)) break;
+    if (!progressed) {
+      const futureWakeups = [wakeups.client, wakeups.server]
+        .filter((value) => value >= 0 && value > protocolNow);
+      if (futureWakeups.length > 0) {
+        const nextWakeup = Math.min(...futureWakeups);
+        if (!(await runAutomaticStep(runState, () => {
+          protocolNow = nextWakeup;
+          if (!runState.quiet) log(runState.timelineMs, `scheduler advanced to ${protocolNow}ms`);
+        }))) {
+          break;
+        }
+        continue;
+      }
+      if (demoState === "running" || runState.quiet) {
+        await pauseAwareSleep(runState.quiet ? 0 : 15);
+      } else {
+        await new Promise((resolve) => schedulerWaiters.push(resolve));
+      }
+    }
+  }
+}
+
+async function collectResumptionState(runToken, flags) {
+  const warmupScenario = {
+    ...scenarioPresets.handshake,
+    label: "Resumption Warmup",
+    wasmFlags: flags | wasmOptionFlags.zeroRtt,
+    needsResumption: false,
+  };
+  const { client, server } = createEndpointPair(flags | wasmOptionFlags.zeroRtt);
+  const runState = makeRunState({
+    scenario: warmupScenario,
+    flags: flags | wasmOptionFlags.zeroRtt,
+    client,
+    server,
+    runToken,
+    quiet: true,
+  });
+  try {
+    await driveRunState(runState);
+    if (!runState.resumptionState || runState.resumptionState.length === 0) {
+      throw new Error("resumption warmup did not produce a session ticket");
+    }
+    return runState.resumptionState;
+  } finally {
+    wasm.coquic_wasm_endpoint_destroy(client);
+    wasm.coquic_wasm_endpoint_destroy(server);
+  }
+}
+
 async function runDemo({ startPaused = false } = {}) {
   const runToken = activeRunToken;
+  const scenario = { ...scenarioPreset() };
   demoState = startPaused ? "paused" : "running";
   paused = startPaused;
   if (!startPaused) stepBudget = 0;
@@ -1954,206 +2831,48 @@ async function runDemo({ startPaused = false } = {}) {
   el("client-wakeup").textContent = "none";
   el("server-wakeup").textContent = "none";
   resetEndpointDiagnostics();
-  const cert = encoder.encode(certPem);
-  const key = encoder.encode(keyPem);
-  const client = wasm.coquic_wasm_endpoint_create(0, 0, 0, 0, 0);
-  const server = withBytes(cert, (cp, cn) =>
-    withBytes(key, (kp, kn) => wasm.coquic_wasm_endpoint_create(1, cp, cn, kp, kn)),
-  );
-  const runState = {
-    clientState: "idle",
-    serverState: "idle",
-    datagrams: 0,
-    clientConnection: 0n,
-    serverConnection: 0n,
-    packetInspections: new Map(),
-    timelineMs: 0,
-    receivedStreamText: "",
-    inFlight: [],
-    arrived: [],
-    accepting: [],
-    droppedDatagrams: 0,
-    lossAttempt: 0,
-    pendingPingPong: [],
-    streamReceiveBytes: new Map(),
-    pingPongSequence: 0,
-    runToken,
-    stepIndex: 0,
-    endpointStats: makeEndpointStats(),
-    clientEndpoint: client,
-    serverEndpoint: server,
-  };
-  let protocolNow = 0;
+  const flags = scenarioWasmFlags(scenario);
+  let resumptionState = null;
 
   try {
-    updateEndpointDiagnostics(client, server, runState);
+    log(0, `interop preset: ${scenario.label}`);
+    if (scenario.needsResumption) {
+      log(0, "warming up native session resumption state");
+      resumptionState = await collectResumptionState(runToken, flags);
+      if (!isRunActive(runToken)) return;
+      log(0, `resumption state ready (${resumptionState.length} bytes)`);
+    }
 
-    await runAutomaticStep(runState, () => {
-      const opened = wasm.coquic_wasm_endpoint_open_connection(
-        client,
-        BigInt(protocolNow),
-        0,
-        0,
-        0,
-        0,
-        1n,
-      );
-      if (opened <= 0) throw new Error(`open failed ${opened}`);
-      runState.clientConnection = BigInt(opened);
-      el("client-connection").textContent = `${runState.clientConnection}`;
-      log(runState.timelineMs, `client open connection ${runState.clientConnection}`);
-    });
-
-    let idleRounds = 0;
-    while (isRunActive(runToken)) {
-      protocolNow += 1;
-      let progressed = false;
-      const wakeups = readWakeups(runState);
-
-      if (runState.accepting.length > 0) {
-        const item = runState.accepting[0];
-        const record = item.records[item.acceptIndex];
-        if (!record) {
-          runState.accepting.shift();
-          continue;
-        }
-        if (!(await runProtocolStep(runState, `packet #${record.id} accepted`, () =>
-          acceptNextPacket(runState)
-        ))) {
-          break;
-        }
-        progressed = true;
-        continue;
-      }
-      if (runState.arrived.length > 0) {
-        if (!(await runProtocolStep(runState, `${runState.arrived[0].label} received`, () =>
-          receiveNextArrivedDatagram(runState, protocolNow)
-        ))) {
-          break;
-        }
-        progressed = true;
-        continue;
-      }
-      if (hasEvent(client) || hasEvent(server)) {
-        drainInternalEvents(runState);
-        updateEndpointDiagnostics(client, server, runState);
-        progressed = true;
-        continue;
-      }
-
-      const handshakeReady =
-        runState.clientState === "handshake_confirmed" &&
-        runState.serverState === "handshake_confirmed";
-      if (handshakeReady && runState.pingPongSequence === 0) {
-        if (!(await runAutomaticStep(runState, () => {
-          queuePingPongMessage(runState, protocolNow, "client", 0n);
-        }))) {
-          break;
-        }
-        progressed = true;
-        continue;
-      }
-      if (runState.pendingPingPong.length > 0) {
-        const next = runState.pendingPingPong.shift();
-        if (!(await runAutomaticStep(runState, () => {
-          queuePingPongMessage(runState, protocolNow, next.sender, next.streamId);
-        }))) {
-          break;
-        }
-        progressed = true;
-        continue;
-      }
-
-      if (hasDatagram(client)) {
-        if (!(await runProtocolStep(runState, "client emits datagram", () => {
-          if (!queueDatagramIfAvailable(client, server, 7, runState, "client -> server", "client")) {
-            throw new Error("client datagram disappeared before emit step");
-          }
-        }))) {
-          break;
-        }
-        progressed = true;
-        continue;
-      }
-      if (hasDatagram(server)) {
-        if (!(await runProtocolStep(runState, "server emits datagram", () => {
-          if (!queueDatagramIfAvailable(server, client, 1, runState, "server -> client", "server")) {
-            throw new Error("server datagram disappeared before emit step");
-          }
-        }))) {
-          break;
-        }
-        progressed = true;
-        continue;
-      }
-
-      if (runState.inFlight.length > 0) {
-        const arrivalAtMs = Math.min(...runState.inFlight.map((item) => item.arrivalAtMs));
-        const dueCount = runState.inFlight.filter((item) => item.arrivalAtMs === arrivalAtMs).length;
-        if (!(await runProtocolStep(runState, `${dueCount} datagram${dueCount === 1 ? "" : "s"} arrive`, (stepMode) =>
-          arriveDueDatagrams(runState, { instant: stepMode === "single" })
-        ))) {
-          break;
-        }
-        progressed = true;
-        continue;
-      }
-
-      const clientTimerDue = wakeups.client >= 0 && wakeups.client <= protocolNow;
-      const serverTimerDue = wakeups.server >= 0 && wakeups.server <= protocolNow;
-      if (clientTimerDue) {
-        if (!(await runAutomaticStep(runState, () => {
-          const rc = wasm.coquic_wasm_endpoint_timer_expired(client, BigInt(protocolNow));
-          if (rc < 0) throw new Error(`client timer failed ${rc}`);
-          log(runState.timelineMs, `client timer fired at ${protocolNow}ms`);
-        }))) {
-          break;
-        }
-        progressed = true;
-        continue;
-      }
-      if (serverTimerDue) {
-        if (!(await runAutomaticStep(runState, () => {
-          const rc = wasm.coquic_wasm_endpoint_timer_expired(server, BigInt(protocolNow));
-          if (rc < 0) throw new Error(`server timer failed ${rc}`);
-          log(runState.timelineMs, `server timer fired at ${protocolNow}ms`);
-        }))) {
-          break;
-        }
-        progressed = true;
-        continue;
-      }
-
-      idleRounds += progressed ? 0 : 1;
-      if (!progressed) {
-        const futureWakeups = [wakeups.client, wakeups.server]
-          .filter((value) => value >= 0 && value > protocolNow);
-        if (futureWakeups.length > 0) {
-          const nextWakeup = Math.min(...futureWakeups);
-          if (!(await runAutomaticStep(runState, () => {
-            protocolNow = nextWakeup;
-            log(runState.timelineMs, `scheduler advanced to ${protocolNow}ms`);
-          }))) {
-            break;
-          }
-          continue;
-        }
-        if (demoState === "running") {
-          await pauseAwareSleep(15);
-        } else {
-          await new Promise((resolve) => schedulerWaiters.push(resolve));
-        }
-      }
+    const { client, server } = createEndpointPair(flags);
+    const runState = makeRunState({ scenario, flags, client, server, runToken });
+    currentRunState = runState;
+    updateRelayTimerLabel(runState.network.delayMs);
+    log(
+      runState.timelineMs,
+      `network environment: ${runState.network.delayMs}ms / ${formatBandwidth(
+        runState.network.bandwidthMbps,
+      )} / ${runState.network.lossRatePercent}% loss`,
+    );
+    if (flags !== 0) {
+      log(runState.timelineMs, `native wasm options enabled: 0x${flags.toString(16)}`);
+    }
+    if (scenario.annotation) {
+      log(runState.timelineMs, scenario.annotation);
+    }
+    try {
+      await driveRunState(runState, { resumptionState });
+    } finally {
+      wasm.coquic_wasm_endpoint_destroy(client);
+      wasm.coquic_wasm_endpoint_destroy(server);
+      if (runToken === activeRunToken) setGlobalTimer(runState.timelineMs);
+      if (currentRunState === runState) currentRunState = null;
     }
   } finally {
-    wasm.coquic_wasm_endpoint_destroy(client);
-    wasm.coquic_wasm_endpoint_destroy(server);
     if (runToken === activeRunToken) {
       demoState = "idle";
       paused = false;
       stepBudget = 0;
       protocolStepInProgress = false;
-      setGlobalTimer(runState.timelineMs);
       updateRunButton();
     }
   }
@@ -2171,12 +2890,14 @@ function bindWorkbenchControls() {
   bindControl("start", "click", handleStartClick);
   bindControl("stop", "click", pauseDemo);
   bindControl("step", "click", requestNextStep);
-  bindControl("loss-toggle", "click", () => setPacketLossEnabled(!packetLossEnabled));
-  bindControl("loss-rate", "input", (event) => {
-    setPacketLossRate(event.target.value);
-    if (packetLossRatePercent > 0) packetLossEnabled = true;
-    updateLossControls();
+  bindControl("scenario-preset", "change", (event) => {
+    stopDemoForUnmount();
+    applyScenarioPreset(event.target.value);
+    updateRunButton();
   });
+  bindControl("network-loss", "input", (event) => setNetworkLossRate(event.target.value));
+  bindControl("network-bandwidth", "input", (event) => setNetworkBandwidth(event.target.value));
+  bindControl("network-delay", "input", (event) => setNetworkDelay(event.target.value));
   bindControl("download-pcap", "click", downloadPcap);
   bindControl("packet-modal-close", "click", closePacketModal);
   bindControl("packet-modal", "click", (event) => {
@@ -2192,7 +2913,8 @@ function initializeWorkbenchPage() {
   bindWorkbenchControls();
   resetPacketInspector();
   resetEndpointDiagnostics();
-  updateLossControls();
+  updateScenarioControls();
+  updateNetworkControls();
   setModuleState(wasm ? "wasm ready" : "loading wasm", wasm ? "ready" : "");
   updateRunButton();
 }

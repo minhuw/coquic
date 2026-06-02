@@ -625,12 +625,18 @@ int socket_io_backend_open_udp_socket_for_runtime_tests(int family) {
 
 bool socket_io_backend_configure_linux_ecn_socket_options_for_runtime_tests(int socket_fd,
                                                                             int family) {
+    if (socket_fd < 0) {
+        return false;
+    }
     return internal::configure_linux_ecn_socket_options(
         internal::LinuxSocketDescriptor{.fd = socket_fd}, family);
 }
 
 bool socket_io_backend_configure_linux_pmtud_socket_options_for_runtime_tests(int socket_fd,
                                                                               int family) {
+    if (socket_fd < 0) {
+        return false;
+    }
     return internal::configure_linux_pmtud_socket_options(
         internal::LinuxSocketDescriptor{.fd = socket_fd}, family);
 }

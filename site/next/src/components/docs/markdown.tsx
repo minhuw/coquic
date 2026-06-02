@@ -94,8 +94,10 @@ function parseMarkdown(markdown: string) {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n');
   let index = 0;
 
+  const currentLine = () => lines.at(index) ?? '';
+
   while (index < lines.length) {
-    const line = lines[index];
+    const line = currentLine();
     const trimmed = line.trim();
 
     if (!trimmed) {
@@ -103,16 +105,16 @@ function parseMarkdown(markdown: string) {
       continue;
     }
 
-    const fence = trimmed.match(/^```(\w+)?$/);
+    const fence = trimmed.match(/^```([A-Za-z0-9_+-]+)?$/);
     if (fence) {
       const codeLines: string[] = [];
       index += 1;
-      while (index < lines.length && !lines[index].trim().startsWith('```')) {
-        codeLines.push(lines[index]);
+      while (index < lines.length && !currentLine().trim().startsWith('```')) {
+        codeLines.push(currentLine());
         index += 1;
       }
       index += 1;
-      blocks.push({ type: 'code', language: fence[1] ?? '', code: codeLines.join('\n') });
+      blocks.push({ type: 'code', language: fence[1] || '', code: codeLines.join('\n') });
       continue;
     }
 
@@ -126,12 +128,12 @@ function parseMarkdown(markdown: string) {
     if (/^-\s+/.test(trimmed)) {
       const items: string[] = [];
       while (index < lines.length) {
-        const item = lines[index].trim().match(/^-\s+(.+)$/);
+        const item = currentLine().trim().match(/^-\s+(.+)$/);
         if (!item) break;
         const parts = [item[1].trim()];
         index += 1;
-        while (index < lines.length && /^\s{2,}\S/.test(lines[index]) && !/^-\s+/.test(lines[index].trim())) {
-          parts.push(lines[index].trim());
+        while (index < lines.length && isIndentedContinuation(currentLine()) && !/^-\s+/.test(currentLine().trim())) {
+          parts.push(currentLine().trim());
           index += 1;
         }
         items.push(parts.join(' '));
@@ -143,12 +145,12 @@ function parseMarkdown(markdown: string) {
     if (/^\d+\.\s+/.test(trimmed)) {
       const items: string[] = [];
       while (index < lines.length) {
-        const item = lines[index].trim().match(/^\d+\.\s+(.+)$/);
+        const item = currentLine().trim().match(/^\d+\.\s+(.+)$/);
         if (!item) break;
         const parts = [item[1].trim()];
         index += 1;
-        while (index < lines.length && /^\s{2,}\S/.test(lines[index]) && !/^\d+\.\s+/.test(lines[index].trim())) {
-          parts.push(lines[index].trim());
+        while (index < lines.length && isIndentedContinuation(currentLine()) && !/^\d+\.\s+/.test(currentLine().trim())) {
+          parts.push(currentLine().trim());
           index += 1;
         }
         items.push(parts.join(' '));
@@ -158,8 +160,8 @@ function parseMarkdown(markdown: string) {
     }
 
     const paragraph: string[] = [];
-    while (index < lines.length && !isBlockStart(lines[index])) {
-      paragraph.push(lines[index].trim());
+    while (index < lines.length && !isBlockStart(currentLine())) {
+      paragraph.push(currentLine().trim());
       index += 1;
     }
     blocks.push({ type: 'paragraph', text: paragraph.join(' ') });
@@ -171,6 +173,10 @@ function parseMarkdown(markdown: string) {
 function isBlockStart(line: string) {
   const trimmed = line.trim();
   return !trimmed || /^```/.test(trimmed) || /^#{1,3}\s+/.test(trimmed) || /^-\s+/.test(trimmed) || /^\d+\.\s+/.test(trimmed);
+}
+
+function isIndentedContinuation(line: string) {
+  return /^\s{2,}\S/.test(line);
 }
 
 function renderInline(text: string, currentSlug: readonly string[]) {

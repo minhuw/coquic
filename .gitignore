@@ -20,9 +20,11 @@ compile_commands.json
 .bench-results/
 bench/*/target/
 coverage-html.tar.gz
+perf.data
 site/next/.next/
 site/next/out/
 site/next/node_modules/
+site/next/tsconfig.tsbuildinfo
 site/next/public/perf-results.json
 site/next/public/perf-history.json
 site/next/public/coverage-results.json

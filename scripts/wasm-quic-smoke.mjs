@@ -55,8 +55,11 @@ const {
   coquic_wasm_alloc,
   coquic_wasm_free,
   coquic_wasm_endpoint_create,
+  coquic_wasm_endpoint_create_with_options,
   coquic_wasm_endpoint_destroy,
   coquic_wasm_endpoint_open_connection,
+  coquic_wasm_endpoint_open_connection_with_options,
+  coquic_wasm_endpoint_open_connection_with_resumption,
   coquic_wasm_endpoint_input_datagram,
   coquic_wasm_endpoint_send_stream,
   coquic_wasm_endpoint_timer_expired,
@@ -75,17 +78,38 @@ _initialize();
 if (typeof coquic_wasm_endpoint_diagnostics !== "function") {
   throw new Error("missing coquic_wasm_endpoint_diagnostics export");
 }
+for (const [name, fn] of Object.entries({
+  coquic_wasm_endpoint_create_with_options,
+  coquic_wasm_endpoint_open_connection_with_options,
+  coquic_wasm_endpoint_open_connection_with_resumption,
+})) {
+  if (typeof fn !== "function") {
+    throw new Error(`missing ${name} export`);
+  }
+}
 
 const eventTypes = {
   state: 1,
   lifecycle: 2,
   receiveStream: 3,
   localError: 4,
+  zeroRttStatus: 7,
+  resumptionStateAvailable: 8,
+};
+const zeroRttStatusCodes = {
+  unavailable: 0,
+  notAttempted: 1,
+  attempted: 2,
+  accepted: 3,
+  rejected: 4,
 };
 const stateCodes = {
   handshakeReady: 0,
   handshakeConfirmed: 1,
   failed: 2,
+};
+const wasmOptionFlags = {
+  zeroRtt: 1 << 6,
 };
 const flowControlFrameTypes = new Set([
   "MAX_DATA",
@@ -94,57 +118,6 @@ const flowControlFrameTypes = new Set([
   "STREAM_DATA_BLOCKED",
 ]);
 const pingPongPayloadBytes = 360;
-
-const certPem = `-----BEGIN CERTIFICATE-----
-MIIDCTCCAfGgAwIBAgIUfGLiwBSFPX9DqQSNXv+f3CUruwswDQYJKoZIhvcNAQEL
-BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDMxODEzMjIxNVoXDTI3MDMx
-ODEzMjIxNVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF
-AAOCAQ8AMIIBCgKCAQEA/ilQZWcEKdgT7VAyku7JOVvmtJSk0/u2IJvEmfb7Cdbl
-zt039tBRsiFrdFikSTGm7rBqCzzT7wAHv4J0+nP/tQs53uslpViTi7rVAvml/jHX
-ng3JevgJzz3AdEpTTPL3NKjQESuNiXsuoutTzNJ1ltDywQz4+vGe9ctQye51TsBD
-mr/fJAzult7m1PTroiTp7ZJkq6ybUhmT943fT40WGy1uk5LwVYmbh4sbzweVbIQp
-RLT3YZeYG0Klocez2o3v5PMXE94eOBZGLVhYA1iwmubZpqtPfnMYFPApwoYdJfZ4
-xOBT4eYqgzZu/Be9VR7KKX82eFViGhLg69lMSjR4KwIDAQABo1MwUTAdBgNVHQ4E
-FgQUShGJTwym+VNTqADxkzCXDDXOTN8wHwYDVR0jBBgwFoAUShGJTwym+VNTqADx
-kzCXDDXOTN8wDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAVOf+
-NQ52+nRbePlhxeLVaIiQBKZcUCVkWcZfG6xpkrgF7OQXsPq7RzFzd/OFLuUXkEPR
-G/jE+thaj+jytTXvTKmXPhQNoihem9r0HzaYJP7gL0tBc5hZjJDbwN7xNy77nTDD
-EENFyvRWDs1Dn7lXJFoYSpYhbfqBw12uPfM1wyqNDnALcVpMZCkOWu9Xgeg2Qqr1
-I4OQhcypFBscgLaILsmon74WpYGR1DygjufmAwVbRHw9B2Ep9XP/zVQNJ9bOnljw
-c0PxBwkqi65cndFE++WVC2flc1hRRARfZejA/Xrg54vujrQ7xzUXCNGV+B1B4Svl
-p+Y0wRfxl6nd2jrw7g==
------END CERTIFICATE-----
-`;
-
-const keyPem = `-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQD+KVBlZwQp2BPt
-UDKS7sk5W+a0lKTT+7Ygm8SZ9vsJ1uXO3Tf20FGyIWt0WKRJMabusGoLPNPvAAe/
-gnT6c/+1Czne6yWlWJOLutUC+aX+MdeeDcl6+AnPPcB0SlNM8vc0qNARK42Jey6i
-61PM0nWW0PLBDPj68Z71y1DJ7nVOwEOav98kDO6W3ubU9OuiJOntkmSrrJtSGZP3
-jd9PjRYbLW6TkvBViZuHixvPB5VshClEtPdhl5gbQqWhx7Paje/k8xcT3h44FkYt
-WFgDWLCa5tmmq09+cxgU8CnChh0l9njE4FPh5iqDNm78F71VHsopfzZ4VWIaEuDr
-2UxKNHgrAgMBAAECggEBAIxMoA2pxTmYBr/8gj5rw/Z+zaanWymNjGcJtYhMNx2i
-W+9KXIdJTZ+oJRnviJjC6ORfy9nyNQd8m8pSqGJMwD3fOY3dfkV81M3QT5+50bC1
-MNIVyD+yRi/5ZZCMKtmSUXXnLhwcT6AxuHfEsdih4LllFGwOzi4wTNBf8HPXxze1
-fr4WCJ9J4PunT/WKjgHSqN30JsPupc0J2+MfbxKkmrUT+xsSCG51JTYM3xws+1pY
-KEVtX2Rj74bWCf66lvSR2tBjhVpjvql1CR0n3uQ6ukPIPpD936t92gAAh1ah5LuM
-q3jn8feFYdbjH7u1SPuxzPcHhS6nHs8cnTV9fOpUI0ECgYEA/9xSF18qCES0VLau
-GHPBOIIgkqu3xXmIf4vBgIywWf1a+Tr6ABk2Kpe15CnLms9ozFjq5qlt9vFBGXL6
-7JJcaHiVS+fRKhMyXPODEm8OR4UoX+sJE58LBj9lpfHTy7phzi+fUcS4jWBIMAGV
-fqyK02E75bGQyS0rcwCW0vvc4csCgYEA/kzBpNS9peT2YrqsgCxeMmqqhIyGSKz1
-MGE3iiVCwGvP+vmVK5adnhNHD1+wBRAoOv439Gpw6r7J6i3gOCXuaEr4ili3M9Ys
-6dN3mFt6Q56KM0W5mF8qcEL3LSvv3YOaG5222eG94E2PA/3VomDN7bReNDyF2S8O
-up5T/CCSdyECgYAjLfTvl7scxe2RlEidvhS8I1A9OnUbJtm4x8uEVFPPG8HNcOl8
-5/qForR0ubZwA8KiDjvGGVewU32i9SdBLeKczq+gbzBYO6l6FFVaTIDHHqzte1CV
-LRID+uWMCpMXePoHso6SXJ0Pe0SRrTYT4792zvDAZUjGEHrf5h3WxqCZPwKBgQC9
-4kKV+eTCgv0XK5yy+G495zf8UZHTopJS1cTK+pelZtud489nBMgcyPg+moysuyvP
-IRRXBUPbhSrwGeFbC7fBWHnNlAD4S+ytjKG4ulXJOBCpyF6VUDo4KUi4Ch7JoQLp
-rBJlDxLg8gjgSiHDZdVesVfGWYr4aRLudlrv4MJ9AQKBgC6ru7V4pXSXhu0d1zdJ
-I6+gmCCVlulCj89YpX9DN11IrLHD7p3g+vLfLFJEzSLjVJi/vF+avjnePOY58xg9
-1vvDklAgaW7GxDoi8OgNVOj1mStu3sphJtTlzI8q2DqB0ICbJlwTKcjWcms2wVnd
-rmZ1jkyEbwNB4p2YPXDQJ3hW
------END PRIVATE KEY-----
-`;
 
 function view() {
   return new Uint8Array(memory.buffer);
@@ -334,6 +307,25 @@ function packetInspectionKey(endpoint, datagramId) {
   return `${endpoint}:${datagramId.toString()}`;
 }
 
+function makeState() {
+  return {
+    clientReady: false,
+    clientConfirmed: false,
+    serverReady: false,
+    serverConfirmed: false,
+    clientConnection: 0n,
+    serverConnection: 0n,
+    packetInspections: 0,
+    inspectedFrames: 0,
+    pendingPacketInspections: new Map(),
+    received: [],
+    flowControlFrames: new Set(),
+    resumptionState: null,
+    zeroRttStatuses: [],
+    serverStreamBeforeConfirmed: false,
+  };
+}
+
 function rememberPacketInspections(endpoint, state) {
   for (const inspection of drainPacketInspections(endpoint)) {
     const key = packetInspectionKey(endpoint, BigInt(inspection.datagram_id));
@@ -370,6 +362,9 @@ function drainEvents(endpoint, label, state) {
       state[`${label}Connection`] = event.connection;
     }
     if (event.type === eventTypes.receiveStream) {
+      if (label === "server" && !state.serverConfirmed) {
+        state.serverStreamBeforeConfirmed = true;
+      }
       state.received.push({
         endpoint: label,
         streamId: event.streamId,
@@ -378,10 +373,20 @@ function drainEvents(endpoint, label, state) {
         text: new TextDecoder().decode(event.payload),
       });
     }
+    if (event.type === eventTypes.zeroRttStatus) {
+      state.zeroRttStatuses.push({
+        endpoint: label,
+        code: event.code,
+        connection: event.connection,
+      });
+    }
+    if (event.type === eventTypes.resumptionStateAvailable) {
+      state.resumptionState = event.payload;
+    }
   }
 }
 
-function relay(from, to, routeHandle, now) {
+function relay(from, to, routeHandle, now, state) {
   let moved = 0;
   for (;;) {
     const datagram = popDatagram(from);
@@ -429,8 +434,8 @@ function relay(from, to, routeHandle, now) {
 
 function pump(client, server, state, now) {
   let moved = 0;
-  moved += relay(client, server, 7n, now);
-  moved += relay(server, client, 1n, now);
+  moved += relay(client, server, 7n, now, state);
+  moved += relay(server, client, 1n, now, state);
   drainEvents(client, "client", state);
   drainEvents(server, "server", state);
   return moved;
@@ -438,8 +443,6 @@ function pump(client, server, state, now) {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const certBytes = encoder.encode(certPem);
-const keyBytes = encoder.encode(keyPem);
 
 function pingPongPayload(sender, sequence) {
   const prefix = `${sender} ping-pong ${sequence} `;
@@ -458,6 +461,44 @@ function sendStream(endpoint, now, connection, streamId, payload, label) {
       coquic_wasm_endpoint_send_stream(endpoint, now, connection, streamId, pointer, length, 0),
     );
   });
+}
+
+function createEndpoint(role, flags = 0) {
+  return flags === 0
+    ? coquic_wasm_endpoint_create(role, 0, 0, 0, 0)
+    : coquic_wasm_endpoint_create_with_options(role, 0, 0, 0, 0, flags);
+}
+
+function createEndpointPair(flags = 0) {
+  const client = createEndpoint(0, flags);
+  const server = createEndpoint(1, flags);
+  debugLog(`endpoints client=${client} server=${server} flags=${flags}`);
+  if (client === 0 || server === 0) {
+    throw new Error(`endpoint creation failed client=${client} server=${server}`);
+  }
+  return { client, server };
+}
+
+function openConnection(endpoint, now, flags = 0, resumptionState = null) {
+  if (resumptionState) {
+    return withBytes(resumptionState, (pointer, length) =>
+      coquic_wasm_endpoint_open_connection_with_resumption(
+        endpoint,
+        now,
+        0,
+        0,
+        0,
+        0,
+        1n,
+        flags,
+        pointer,
+        length,
+      ),
+    );
+  }
+  return flags === 0
+    ? coquic_wasm_endpoint_open_connection(endpoint, now, 0, 0, 0, 0, 1n)
+    : coquic_wasm_endpoint_open_connection_with_options(endpoint, now, 0, 0, 0, 0, 1n, flags);
 }
 
 function receivedBytes(state, endpoint) {
@@ -499,39 +540,19 @@ function pumpUntil(client, server, state, now, predicate, label, maxSteps = 128)
   return now;
 }
 
-const client = coquic_wasm_endpoint_create(0, 0, 0, 0, 0);
-const server = withBytes(certBytes, (certPointer, certLength) =>
-  withBytes(keyBytes, (keyPointer, keyLength) =>
-    coquic_wasm_endpoint_create(1, certPointer, certLength, keyPointer, keyLength),
-  ),
-);
-debugLog(`endpoints client=${client} server=${server}`);
-if (client === 0 || server === 0) {
-  throw new Error(`endpoint creation failed client=${client} server=${server}`);
-}
-
-const state = {
-  clientReady: false,
-  clientConfirmed: false,
-  serverReady: false,
-  serverConfirmed: false,
-  clientConnection: 0n,
-  serverConnection: 0n,
-  packetInspections: 0,
-  inspectedFrames: 0,
-  pendingPacketInspections: new Map(),
-  received: [],
-  flowControlFrames: new Set(),
-};
-
-try {
+function driveHandshake(
+  client,
+  server,
+  state,
+  now,
+  { flags = 0, resumptionState = null, afterOpen = null } = {},
+) {
   const emptyClientDiagnostics = endpointDiagnostics(client);
   if (emptyClientDiagnostics.role !== "client" || emptyClientDiagnostics.connection_count !== 0) {
     throw new Error(`unexpected empty client diagnostics ${jsonState(emptyClientDiagnostics)}`);
   }
 
-  let now = 0n;
-  const connection = coquic_wasm_endpoint_open_connection(client, now, 0, 0, 0, 0, 1n);
+  const connection = openConnection(client, now, flags, resumptionState);
   debugLog(`open connection=${connection}`);
   if (connection <= 0) {
     throw new Error(`open connection failed with ${connection}`);
@@ -540,6 +561,9 @@ try {
   const openedClientDiagnostics = endpointDiagnostics(client);
   if (openedClientDiagnostics.connection_count !== 1) {
     throw new Error(`client diagnostics did not expose opened connection ${jsonState(openedClientDiagnostics)}`);
+  }
+  if (afterOpen) {
+    afterOpen(now, state);
   }
 
   for (let step = 0; step < 96 && !(state.clientConfirmed && state.serverConfirmed); step += 1) {
@@ -566,6 +590,14 @@ try {
   if (state.serverConnection === 0n) {
     throw new Error("server did not emit an accepted connection handle");
   }
+  return now;
+}
+
+function runTransferSmoke() {
+  const { client, server } = createEndpointPair();
+  const state = makeState();
+  try {
+    let now = driveHandshake(client, server, state, 0n);
 
   const expectedByEndpoint = {
     client: "",
@@ -614,9 +646,66 @@ try {
   if (serverDiagnostics.connection_count !== 1 || serverDiagnostics.connections[0]?.active_streams === undefined) {
     throw new Error(`server diagnostics missing connection internals ${jsonState(serverDiagnostics)}`);
   }
-
-  console.log("wasm-quic smoke ok");
-} finally {
-  coquic_wasm_endpoint_destroy(client);
-  coquic_wasm_endpoint_destroy(server);
+  } finally {
+    coquic_wasm_endpoint_destroy(client);
+    coquic_wasm_endpoint_destroy(server);
+  }
 }
+
+function collectResumptionState() {
+  const { client, server } = createEndpointPair(wasmOptionFlags.zeroRtt);
+  const state = makeState();
+  try {
+    driveHandshake(client, server, state, 0n, { flags: wasmOptionFlags.zeroRtt });
+    if (!state.resumptionState || state.resumptionState.length === 0) {
+      throw new Error(`resumption state was not emitted: ${jsonState(state)}`);
+    }
+    return state.resumptionState;
+  } finally {
+    coquic_wasm_endpoint_destroy(client);
+    coquic_wasm_endpoint_destroy(server);
+  }
+}
+
+function runResumptionZeroRttSmoke() {
+  const resumptionState = collectResumptionState();
+  const { client, server } = createEndpointPair(wasmOptionFlags.zeroRtt);
+  const state = makeState();
+  const earlyPayload = encoder.encode("client zero-rtt smoke early data");
+  const expectedEarlyText = decoder.decode(earlyPayload);
+  try {
+    let now = driveHandshake(client, server, state, 100n, {
+      flags: wasmOptionFlags.zeroRtt,
+      resumptionState,
+      afterOpen: (currentNow) => {
+        sendStream(client, currentNow, state.clientConnection, 0n, earlyPayload, "client zero-rtt send");
+      },
+    });
+    now = pumpUntil(
+      client,
+      server,
+      state,
+      now,
+      () => receivedText(state, "server").includes(expectedEarlyText),
+      "zero-rtt early data receive",
+    );
+    if (!receivedText(state, "server").includes(expectedEarlyText)) {
+      throw new Error(`server did not receive zero-rtt stream data: ${jsonState(state.received)}`);
+    }
+    if (!state.serverStreamBeforeConfirmed) {
+      throw new Error(`server stream data did not arrive before handshake confirmation: ${jsonState(state)}`);
+    }
+    if (state.zeroRttStatuses.some((event) =>
+      event.code === zeroRttStatusCodes.unavailable || event.code === zeroRttStatusCodes.rejected
+    )) {
+      throw new Error(`zero-rtt was reported unavailable or rejected: ${jsonState(state.zeroRttStatuses)}`);
+    }
+  } finally {
+    coquic_wasm_endpoint_destroy(client);
+    coquic_wasm_endpoint_destroy(server);
+  }
+}
+
+runTransferSmoke();
+runResumptionZeroRttSmoke();
+console.log("wasm-quic smoke ok");

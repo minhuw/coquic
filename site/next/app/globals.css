@@ -566,19 +566,15 @@
 
 @layer components {
   .packet-stage {
-    @apply my-[18px] grid min-h-[258px] grid-cols-[minmax(116px,0.16fr)_minmax(0,1fr)_minmax(116px,0.16fr)_max-content] items-stretch gap-3.5;
+    @apply my-0 grid min-h-[258px] grid-cols-[minmax(104px,0.14fr)_minmax(0,1fr)_minmax(104px,0.14fr)] items-stretch gap-5 border-t border-[var(--line)] py-5;
   }
 
-  .stage-node,
-  .packet-rail,
-  .endpoint,
-  .timeline,
-  .capture-panel {
+  .packet-rail {
     @apply rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] shadow-none;
   }
 
   .stage-node {
-    @apply grid min-w-0 content-center justify-items-center gap-2.5 p-[18px_12px] text-center text-xs text-[var(--muted)];
+    @apply grid min-w-0 content-center justify-items-center gap-2.5 border-y border-[var(--line)] py-[18px] text-center text-xs text-[var(--muted)];
   }
 
   .stage-node span,
@@ -623,9 +619,8 @@
     @apply absolute inset-[44px_28px] rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)];
   }
 
-  .packet-rail::after {
-    content: "global relay timer: 1000ms";
-    @apply absolute left-1/2 top-3 -translate-x-1/2 whitespace-nowrap rounded-full border border-[var(--line)] bg-[var(--surface)] px-[9px] py-[5px] font-mono text-[11px] text-[var(--muted)];
+  .relay-timer-label {
+    @apply absolute left-1/2 top-3 z-[8] -translate-x-1/2 whitespace-nowrap rounded-full border border-[var(--line)] bg-[var(--surface)] px-[9px] py-[5px] font-mono text-[11px] text-[var(--muted)];
   }
 
   .packet-lane {
@@ -695,17 +690,21 @@
     @apply right-3 text-[var(--server-ink)];
   }
 
+  .scenario-toolbar {
+    @apply mt-5 grid items-start gap-y-4 border-y border-[var(--line)] py-3 lg:grid-cols-[minmax(220px,0.65fr)_minmax(420px,1.25fr)_minmax(156px,0.48fr)] lg:gap-x-6 lg:gap-y-0;
+  }
+
   .stage-controls {
-    @apply grid w-max min-w-44 content-center gap-2 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] p-[14px_10px];
+    @apply grid min-w-0 content-start gap-0 bg-transparent lg:border-l lg:border-[var(--line)] lg:pl-6;
   }
 
   .control-timer,
   .module-state {
-    @apply rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] font-mono text-xs text-[var(--muted)];
+    @apply border-b border-[var(--line)] bg-transparent font-mono text-xs text-[var(--muted)];
   }
 
   .control-timer {
-    @apply grid min-h-[46px] gap-1 px-[9px] py-2 text-[var(--ink)];
+    @apply grid min-h-[46px] gap-1 px-1 py-2 text-[var(--ink)];
   }
 
   .control-timer span {
@@ -717,39 +716,83 @@
   }
 
   .module-state {
-    @apply grid min-h-[34px] place-items-center px-2 py-[5px] text-center text-[0.72rem] font-bold leading-tight;
+    @apply grid min-h-[34px] place-items-center px-1 py-[5px] text-center text-[0.72rem] font-bold leading-tight;
   }
 
   .module-state.ready {
-    @apply border-[rgba(15,98,254,0.28)] bg-[var(--primary-soft)] text-[var(--primary)];
+    @apply border-[rgba(15,98,254,0.28)] bg-transparent text-[var(--primary)];
   }
 
   .module-state.failed {
-    @apply border-[rgba(207,45,86,0.28)] bg-[var(--danger-soft)] text-[var(--danger)];
+    @apply border-[rgba(207,45,86,0.28)] bg-transparent text-[var(--danger)];
   }
 
   .control-button {
-    @apply grid min-h-[50px] w-full min-w-[156px] grid-cols-[32px_max-content] items-center gap-[9px] rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-[9px] py-2 text-left text-sm font-semibold text-[var(--ink)] transition-[background,border-color,box-shadow] duration-200 hover:bg-[var(--surface-3)] disabled:opacity-55;
+    @apply grid min-h-[44px] w-full min-w-0 grid-cols-[28px_max-content] items-center gap-[9px] border-b border-[var(--line)] bg-transparent px-1 py-2 text-left text-sm font-semibold text-[var(--ink)] transition-colors duration-200 hover:bg-[var(--surface-2)] disabled:opacity-55;
   }
 
-  .loss-control {
-    @apply grid min-h-[82px] min-w-[156px] gap-2 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] p-2;
+  .scenario-control {
+    @apply grid min-h-[126px] min-w-0 content-start gap-2 border-b border-[var(--line)] pb-4 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-6;
   }
 
-  .loss-toggle {
-    @apply grid min-h-10 w-full cursor-pointer grid-cols-[32px_minmax(0,1fr)] items-center gap-[9px] rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] px-[7px] py-1.5 text-left text-sm font-semibold text-[var(--ink)] transition-colors duration-200 hover:bg-[var(--surface-3)] aria-pressed:border-[rgba(207,45,86,0.46)] aria-pressed:bg-[var(--danger-soft)] aria-pressed:text-[var(--danger)];
+  .scenario-label {
+    @apply grid min-h-9 grid-cols-[28px_minmax(0,1fr)] items-center gap-[9px] text-sm font-semibold text-[var(--ink)];
   }
 
-  .loss-rate {
-    @apply grid grid-cols-[32px_minmax(0,1fr)] items-center gap-[9px] px-[7px];
+  .scenario-select {
+    @apply min-h-9 w-full cursor-pointer rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] px-2 font-mono text-[11px] font-semibold text-[var(--ink)] outline-none transition-colors duration-200 hover:bg-[var(--surface-3)] focus-visible:border-[var(--primary)] focus-visible:ring-2 focus-visible:ring-[rgba(15,98,254,0.18)];
   }
 
-  .loss-rate span {
-    @apply font-mono text-[11px] font-bold text-[var(--muted)];
+  .scenario-summary {
+    @apply block min-h-[30px] border-t border-[var(--line)] px-1 pt-2 font-mono text-[10px] leading-snug text-[var(--muted)];
   }
 
-  .loss-rate input {
-    @apply h-5 min-w-0 cursor-pointer accent-[var(--danger)] disabled:cursor-default disabled:opacity-45;
+  .network-control {
+    @apply grid min-w-0 gap-x-4 gap-y-0 lg:pl-1 md:grid-cols-3;
+  }
+
+  .workbench-results {
+    @apply border-t border-[var(--line)];
+  }
+
+  .network-control-head {
+    @apply grid min-h-9 grid-cols-[28px_minmax(0,1fr)] items-center gap-[9px] border-b border-[var(--line)] pb-2 text-sm font-semibold text-[var(--ink)] md:col-span-full;
+  }
+
+  .network-control-head > span:last-child {
+    @apply grid min-w-0 gap-0.5;
+  }
+
+  .network-control-head strong {
+    @apply truncate text-sm leading-tight text-[var(--ink)];
+  }
+
+  .network-control-head small {
+    @apply truncate font-mono text-[10px] leading-tight text-[var(--muted)];
+  }
+
+  .network-range {
+    @apply grid min-w-0 grid-cols-[minmax(88px,0.34fr)_minmax(0,1fr)] items-center gap-2 border-b border-[var(--line)] py-2 md:grid-cols-1 md:items-stretch;
+  }
+
+  .network-range > span {
+    @apply grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-baseline gap-2;
+  }
+
+  .network-range span span {
+    @apply truncate text-xs font-semibold text-[var(--muted)];
+  }
+
+  .network-range strong {
+    @apply font-mono text-[11px] font-bold text-[var(--ink)];
+  }
+
+  .network-range input {
+    @apply h-5 min-w-0 cursor-pointer accent-[var(--primary)];
+  }
+
+  #network-loss {
+    @apply accent-[var(--danger)];
   }
 
   #start {
@@ -765,7 +808,7 @@
   }
 
   .control-icon {
-    @apply grid size-8 place-items-center rounded-[var(--radius)] border border-[var(--line)] bg-white/5;
+    @apply grid size-7 place-items-center text-[var(--muted)];
   }
 
   .control-icon svg {
@@ -822,6 +865,10 @@
     @apply border-[rgba(207,45,86,0.72)] bg-[var(--danger-soft)] text-[var(--danger)] shadow-[inset_4px_0_0_var(--danger)];
   }
 
+  .packet[data-phase="corrupted"] {
+    @apply border-[rgba(207,45,86,0.72)] bg-[var(--danger-soft)] text-[var(--danger)] shadow-[inset_4px_0_0_var(--danger)];
+  }
+
   .datagram[data-phase="in-flight"] {
     @apply border-[rgba(15,98,254,0.58)];
   }
@@ -843,6 +890,10 @@
     @apply border-[rgba(207,45,86,0.7)] bg-[var(--danger-soft)] opacity-80;
   }
 
+  .datagram[data-phase="corrupted"] {
+    @apply border-[rgba(207,45,86,0.7)] bg-[var(--danger-soft)] opacity-80;
+  }
+
   .packet strong,
   .packet span {
     @apply overflow-hidden truncate whitespace-nowrap;
@@ -853,19 +904,19 @@
   }
 
   .workbench {
-    @apply mt-5 grid gap-4;
+    @apply grid gap-5 pt-5;
   }
 
   .endpoint-grid {
-    @apply grid gap-4 xl:grid-cols-2;
+    @apply grid gap-5 xl:grid-cols-2;
   }
 
   .endpoint {
-    @apply overflow-hidden;
+    @apply min-w-0 overflow-hidden border-t border-[var(--line)];
   }
 
   .endpoint-head {
-    @apply grid grid-cols-[40px_minmax(0,1fr)_auto] items-center gap-3 border-b border-[var(--line)] bg-[var(--surface)] p-4;
+    @apply grid grid-cols-[32px_minmax(0,1fr)_auto] items-center gap-3 bg-transparent px-3 py-3;
   }
 
   .endpoint-title h2 {
@@ -874,19 +925,19 @@
 
   .endpoint-chip,
   .diag-pill {
-    @apply inline-flex min-h-6 items-center rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-2 font-mono text-[11px] font-semibold text-[var(--muted)];
+    @apply inline-flex min-h-6 items-center border-l border-[var(--line)] pl-3 font-mono text-[11px] font-semibold text-[var(--muted)];
   }
 
   .client .endpoint-chip,
   .client .diag-flag.on dd,
   .diag-pill.on {
-    @apply border-[rgba(15,98,254,0.28)] bg-[var(--primary-soft)] text-[var(--primary)];
+    @apply border-[rgba(15,98,254,0.28)] bg-transparent text-[var(--primary)];
   }
 
   .server .endpoint-chip,
   .server .diag-flag.on dd,
   .server .diag-pill.on {
-    @apply border-[rgba(0,67,206,0.22)] bg-[var(--surface-2)] text-[var(--server-ink)];
+    @apply border-[rgba(0,67,206,0.22)] bg-transparent text-[var(--server-ink)];
   }
 
   .state-machine,
@@ -895,23 +946,38 @@
   .flag-grid,
   .flow-grid,
   .stream-limit-grid {
-    @apply grid gap-2 p-4;
+    @apply grid gap-x-4 gap-y-0 px-3;
   }
 
   .state-machine {
-    @apply grid-cols-2 border-b border-[var(--line)] sm:grid-cols-4;
+    @apply grid-cols-2 border-t border-[var(--line)] sm:grid-cols-4;
   }
 
   .state-step,
   .diag-stat,
-  .diag-flag,
+  .diag-flag {
+    @apply min-w-0 border-t border-[var(--line)] px-0 py-2;
+  }
+
+  .state-step {
+    @apply first:border-t-0 sm:[&:nth-child(-n+4)]:border-t-0;
+  }
+
+  .diag-stat {
+    @apply first:border-t-0 sm:[&:nth-child(-n+4)]:border-t-0;
+  }
+
+  .diag-flag {
+    @apply first:border-t-0 sm:[&:nth-child(-n+3)]:border-t-0;
+  }
+
   .summary-item,
   .packet-tree details {
     @apply rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] p-3;
   }
 
   .state-step {
-    @apply relative pl-7;
+    @apply relative pl-7 pr-2;
   }
 
   .state-step::before {
@@ -920,7 +986,7 @@
   }
 
   .state-step.current {
-    @apply border-[#78a9ff] bg-[var(--primary-soft)];
+    @apply bg-transparent text-[var(--primary)];
   }
 
   .state-step.current::before {
@@ -928,7 +994,7 @@
   }
 
   .state-step.done {
-    @apply border-[#a6c8ff];
+    @apply text-[var(--ink)];
   }
 
   .state-step strong {
@@ -961,7 +1027,7 @@
   }
 
   .diag-section {
-    @apply border-t border-[var(--line)] p-4;
+    @apply border-t border-[var(--line)] px-3 py-5;
   }
 
   .diag-section-head {
@@ -973,7 +1039,7 @@
   }
 
   .diag-table-wrap {
-    @apply overflow-auto rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)];
+    @apply overflow-auto border-y border-[var(--line)] bg-transparent;
   }
 
   .diag-table {
@@ -994,17 +1060,17 @@
   }
 
   .timeline {
-    @apply overflow-hidden;
+    @apply overflow-hidden border-t border-[var(--line)] pt-4;
   }
 
   .timeline h2 {
-    @apply border-b border-[var(--line)] bg-[var(--surface)] p-4 text-base font-semibold;
+    @apply border-b border-[var(--line)] px-3 pb-3 text-base font-semibold;
   }
 
   .log,
   .packet-list,
   .modal-detail {
-    @apply max-h-[360px] overflow-auto bg-[var(--surface-2)];
+    @apply max-h-[360px] overflow-auto bg-transparent;
   }
 
   .entry {
@@ -1030,7 +1096,11 @@
   }
 
   .packet-inspector {
-    @apply mt-5;
+    @apply mt-0 border-t border-[var(--line)] py-4;
+  }
+
+  .capture-panel .panel-head {
+    @apply px-3;
   }
 
   .capture-panel {
@@ -1763,15 +1833,23 @@
 @media (max-width: 1080px) {
   @layer components {
     .packet-stage {
-      @apply grid-cols-1;
+      @apply grid-cols-1 gap-4;
     }
 
     .stage-node {
       @apply min-h-[104px];
     }
 
+    .scenario-toolbar {
+      @apply gap-y-4;
+    }
+
+    .endpoint-grid {
+      @apply gap-5;
+    }
+
     .stage-controls {
-      @apply w-full grid-cols-[repeat(2,minmax(130px,1fr))];
+      @apply grid-cols-[repeat(2,minmax(130px,1fr))] gap-x-4;
     }
 
     .control-timer {
@@ -1820,11 +1898,27 @@
     }
 
     .stage-controls {
-      @apply grid-cols-1 p-2.5;
+      @apply grid-cols-1 gap-x-0;
     }
 
     .control-button {
       @apply min-h-[50px] min-w-0;
+    }
+
+    .scenario-toolbar {
+      @apply py-4;
+    }
+
+    .scenario-control {
+      @apply pr-0;
+    }
+
+    .network-control {
+      @apply gap-y-1;
+    }
+
+    .endpoint-grid {
+      @apply gap-4;
     }
 
     .packet-rail {

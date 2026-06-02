@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Script from 'next/script';
-import { Play, Shuffle, Square, StepForward, X } from 'lucide-react';
+import { Gauge, ListChecks, Play, Square, StepForward, X } from 'lucide-react';
 
 import { DemoNav } from '@/components/demo-nav';
 import { PageHeader } from '@/components/page-header';
@@ -25,18 +25,51 @@ const endpoints: Endpoint[] = [
 
 const miniStats = ['state', 'connection', 'wakeup', 'version', 'sent', 'received', 'events', 'stream-count'] as const;
 
+const interopPresets = [
+  ['handshake', 'Handshake'],
+  ['handshakeloss', 'Handshake Loss'],
+  ['transfer', 'Transfer'],
+  ['keyupdate', 'Key Update'],
+  ['transferloss', 'Transfer Loss'],
+  ['handshakecorruption', 'Handshake Corruption'],
+  ['transfercorruption', 'Transfer Corruption'],
+  ['blackhole', 'Blackhole'],
+  ['chacha20', 'ChaCha20'],
+  ['longrtt', 'Long RTT'],
+  ['ipv6', 'IPv6'],
+  ['multiplexing', 'Multiplexing'],
+  ['retry', 'Retry'],
+  ['resumption', 'Resumption'],
+  ['zerortt', '0-RTT'],
+  ['v2', 'Version 2'],
+  ['amplificationlimit', 'Amplification Limit'],
+  ['rebind-port', 'Rebind Port'],
+  ['rebind-addr', 'Rebind Addr'],
+  ['connectionmigration', 'Connection Migration'],
+  ['ecn', 'ECN'],
+  ['goodput', 'Goodput'],
+  ['crosstraffic', 'Cross Traffic'],
+] as const;
+
 function statLabel(key: (typeof miniStats)[number]) {
-  const labels: Record<(typeof miniStats)[number], string> = {
-    state: 'State',
-    connection: 'Connection',
-    wakeup: 'Wakeup',
-    version: 'Version',
-    sent: 'Sent',
-    received: 'Received',
-    events: 'Events',
-    'stream-count': 'Streams',
-  };
-  return labels[key];
+  switch (key) {
+    case 'state':
+      return 'State';
+    case 'connection':
+      return 'Connection';
+    case 'wakeup':
+      return 'Wakeup';
+    case 'version':
+      return 'Version';
+    case 'sent':
+      return 'Sent';
+    case 'received':
+      return 'Received';
+    case 'events':
+      return 'Events';
+    case 'stream-count':
+      return 'Streams';
+  }
 }
 
 function initialStatValue(key: (typeof miniStats)[number]) {
@@ -124,34 +157,57 @@ export default function WorkbenchPage() {
         <DemoNav active="workbench" />
         <PageHeader eyebrow="wasm QUIC laboratory" title="CoQUIC Protocol Workbench" />
 
-        <section className="packet-stage" aria-label="QUIC packet exchange">
-          <div className="stage-node stage-client">
-            <span>C</span>
-            <strong>Client</strong>
-            <small>browser endpoint</small>
+        <div className="scenario-toolbar" aria-label="Interop case controls">
+          <label className="scenario-control" htmlFor="scenario-preset">
+            <span className="scenario-label">
+              <span className="control-icon" aria-hidden="true">
+                <ListChecks />
+              </span>
+              <span>Interop Case</span>
+            </span>
+            <select id="scenario-preset" className="scenario-select" defaultValue="transfer">
+              {interopPresets.map(([value, label]) => (
+                <option value={value} key={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <span id="scenario-summary" className="scenario-summary">
+              Stream transfer with packet inspection.
+            </span>
+          </label>
+          <div className="network-control" aria-label="Network environment">
+            <span className="network-control-head">
+              <span className="control-icon" aria-hidden="true">
+                <Gauge />
+              </span>
+              <span>
+                <strong>Network Environment</strong>
+                <small id="network-summary">1000ms / 20Mbps / 0% loss</small>
+              </span>
+            </span>
+            <label className="network-range" htmlFor="network-loss">
+              <span>
+                <span>Loss</span>
+                <strong id="network-loss-label">0%</strong>
+              </span>
+              <input id="network-loss" type="range" min="0" max="40" step="5" defaultValue="0" />
+            </label>
+            <label className="network-range" htmlFor="network-bandwidth">
+              <span>
+                <span>Bandwidth</span>
+                <strong id="network-bandwidth-label">20Mbps</strong>
+              </span>
+              <input id="network-bandwidth" type="range" min="0.5" max="100" step="0.5" defaultValue="20" />
+            </label>
+            <label className="network-range" htmlFor="network-delay">
+              <span>
+                <span>Delay</span>
+                <strong id="network-delay-label">1000ms</strong>
+              </span>
+              <input id="network-delay" type="range" min="50" max="2500" step="50" defaultValue="1000" />
+            </label>
           </div>
-
-          <div id="packet-rail" className="packet-rail">
-            <div className="packet-lane c2s">
-              <span className="pipe-back" aria-hidden="true" />
-              <span className="pipe-front" aria-hidden="true" />
-              <span className="lane-end lane-left">C</span>
-              <span className="lane-end lane-right">S</span>
-            </div>
-            <div className="packet-lane s2c">
-              <span className="pipe-back" aria-hidden="true" />
-              <span className="pipe-front" aria-hidden="true" />
-              <span className="lane-end lane-left">C</span>
-              <span className="lane-end lane-right">S</span>
-            </div>
-          </div>
-
-          <div className="stage-node stage-server">
-            <span>S</span>
-            <strong>Server</strong>
-            <small>browser endpoint</small>
-          </div>
-
           <div className="stage-controls" aria-label="Debugger controls">
             <div className="control-timer" aria-live="polite">
               <span>Global Timer</span>
@@ -159,24 +215,6 @@ export default function WorkbenchPage() {
             </div>
             <div id="module-state" className="module-state" aria-live="polite">
               loading wasm
-            </div>
-            <div className="loss-control" aria-label="Packet loss simulation">
-              <button
-                id="loss-toggle"
-                className="loss-toggle"
-                type="button"
-                aria-pressed="false"
-                aria-label="Toggle packet loss simulation"
-              >
-                <span className="control-icon" aria-hidden="true">
-                  <Shuffle />
-                </span>
-                <span className="control-label">Loss</span>
-              </button>
-              <label className="loss-rate" htmlFor="loss-rate">
-                <span id="loss-rate-label">0%</span>
-                <input id="loss-rate" type="range" min="0" max="40" step="5" defaultValue="15" />
-              </label>
             </div>
             <button id="start" className="control-button" type="button" aria-label="Start protocol exchange">
               <span className="control-icon" aria-hidden="true">
@@ -201,39 +239,73 @@ export default function WorkbenchPage() {
               </span>
             </button>
           </div>
-        </section>
+        </div>
 
-        <section className="workbench" aria-label="Endpoint diagnostics">
-          <div className="endpoint-grid">
-            {endpoints.map((endpoint) => (
-              <EndpointPanel endpoint={endpoint} key={endpoint.key} />
-            ))}
+        <section className="packet-stage" aria-label="QUIC packet exchange">
+          <div className="stage-node stage-client">
+            <span>C</span>
+            <strong>Client</strong>
+            <small>browser endpoint</small>
           </div>
 
-          <div className="timeline">
-            <h2>Datagram And Event Trace</h2>
-            <div id="log" className="log" />
-          </div>
-        </section>
-
-        <section className="packet-inspector" aria-label="Packet capture inspector">
-          <div className="capture-panel">
-            <div className="panel-head">
-              <h2>Packet Log</h2>
-              <div className="panel-actions">
-                <button id="download-pcap" className="panel-button" type="button" disabled>
-                  Download PCAP
-                </button>
-                <span id="packet-count">0 captured</span>
-              </div>
+          <div id="packet-rail" className="packet-rail">
+            <span id="relay-timer-label" className="relay-timer-label">
+              relay delay: 1000ms
+            </span>
+            <div className="packet-lane c2s">
+              <span className="pipe-back" aria-hidden="true" />
+              <span className="pipe-front" aria-hidden="true" />
+              <span className="lane-end lane-left">C</span>
+              <span className="lane-end lane-right">S</span>
             </div>
-            <div id="packet-list" className="packet-list" />
+            <div className="packet-lane s2c">
+              <span className="pipe-back" aria-hidden="true" />
+              <span className="pipe-front" aria-hidden="true" />
+              <span className="lane-end lane-left">C</span>
+              <span className="lane-end lane-right">S</span>
+            </div>
           </div>
 
-          <span id="packet-selected" hidden>
-            none selected
-          </span>
-          <div id="packet-detail" hidden />
+          <div className="stage-node stage-server">
+            <span>S</span>
+            <strong>Server</strong>
+            <small>browser endpoint</small>
+          </div>
+        </section>
+
+        <section className="workbench-results" aria-label="Result Section">
+          <section className="workbench" aria-label="Endpoint diagnostics">
+            <div className="endpoint-grid">
+              {endpoints.map((endpoint) => (
+                <EndpointPanel endpoint={endpoint} key={endpoint.key} />
+              ))}
+            </div>
+
+            <div className="timeline">
+              <h2>Datagram And Event Trace</h2>
+              <div id="log" className="log" />
+            </div>
+          </section>
+
+          <section className="packet-inspector" aria-label="Packet capture inspector">
+            <div className="capture-panel">
+              <div className="panel-head">
+                <h2>Packet Log</h2>
+                <div className="panel-actions">
+                  <button id="download-pcap" className="panel-button" type="button" disabled>
+                    Download PCAP
+                  </button>
+                  <span id="packet-count">0 captured</span>
+                </div>
+              </div>
+              <div id="packet-list" className="packet-list" />
+            </div>
+
+            <span id="packet-selected" hidden>
+              none selected
+            </span>
+            <div id="packet-detail" hidden />
+          </section>
         </section>
 
         <Script src="/quic-demo.js" strategy="afterInteractive" type="module" />

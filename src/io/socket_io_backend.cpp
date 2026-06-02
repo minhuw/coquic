@@ -605,8 +605,10 @@ bool socket_io_backend_internal_coverage_hook_exercises_remaining_branches_for_t
            "sendto truncated ipv6 destination");
 
     reset_for_case();
+    const auto recorded_length =
+        record_sendto_socket_fd_for_backend_tests(33, nullptr, 6, 0, nullptr, 0);
     record(all_true({
-               record_sendto_socket_fd_for_backend_tests(33, nullptr, 6, 0, nullptr, 0) == 6,
+               recorded_length == 6,
                g_multi_socket_backend_test_trace.last_send_socket_fd == 33,
            }),
            "record sendto socket fd");

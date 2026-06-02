@@ -231,7 +231,7 @@ class ReceivedFrameList {
         *this = frames;
     }
 
-    ReceivedFrameList(std::vector<ReceivedFrame> frames) {
+    explicit ReceivedFrameList(std::vector<ReceivedFrame> frames) {
         *this = std::move(frames);
     }
 

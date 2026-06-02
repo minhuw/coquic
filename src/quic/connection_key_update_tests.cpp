@@ -2689,10 +2689,13 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.initial_space_.recovery.slots_.resize(1);
         auto &slot = connection.initial_space_.recovery.slots_.front();
         slot.state = PacketSpaceRecovery::LedgerSlotState::retired;
-        slot.packet.packet_number = 99;
-        slot.packet.ack_eliciting = true;
-        slot.packet.in_flight = true;
-        slot.packet.bytes_in_flight = 1200;
+        slot.packet_number = 99;
+        slot.packet = std::make_unique<SentPacketRecord>(SentPacketRecord{
+            .packet_number = 99,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .bytes_in_flight = 1200,
+        });
         connection.initial_space_.recovery.live_links_.resize(1);
         connection.initial_space_.recovery.first_live_slot_ = 0;
         connection.initial_space_.recovery.last_live_slot_ = 0;

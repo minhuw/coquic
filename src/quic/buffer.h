@@ -29,7 +29,7 @@ template <typename T> class UninitializedAllocator {
     UninitializedAllocator() = default;
 
     template <typename U>
-    constexpr UninitializedAllocator(const UninitializedAllocator<U> &) noexcept {
+    explicit constexpr UninitializedAllocator(const UninitializedAllocator<U> &) noexcept {
     }
 
     [[nodiscard]] T *allocate(std::size_t count) {
@@ -71,9 +71,9 @@ class DatagramBuffer {
   public:
     DatagramBuffer() = default;
     DatagramBuffer(std::initializer_list<std::byte> bytes);
-    DatagramBuffer(std::span<const std::byte> bytes);
-    DatagramBuffer(const std::vector<std::byte> &bytes);
-    DatagramBuffer(std::vector<std::byte> &&bytes);
+    explicit DatagramBuffer(std::span<const std::byte> bytes);
+    explicit DatagramBuffer(const std::vector<std::byte> &bytes);
+    explicit DatagramBuffer(std::vector<std::byte> &&bytes);
 
     bool empty() const;
     std::size_t size() const;

@@ -3235,7 +3235,8 @@ TEST(QuicCoreTest, ProcessInboundDatagramKeepsDeferredShortHeaderPacketsBuffered
     connection.started_ = true;
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     const auto deferred_packet = bytes_from_ints({0x40, 0x01, 0x02, 0x03, 0x04});
-    connection.deferred_protected_packets_.push_back(deferred_packet);
+    connection.deferred_protected_packets_.push_back(
+        coquic::quic::DeferredProtectedDatagram(deferred_packet));
 
     connection.process_inbound_datagram(deferred_packet, coquic::quic::test::test_time(1));
 
@@ -3431,7 +3432,8 @@ TEST(QuicCoreTest, ProcessInboundDatagramDeduplicatesAndEvictsDeferredProtectedP
             coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x31});
 
         const auto deferred_packet = make_deferred_packet(connection, 1);
-        connection.deferred_protected_packets_.push_back(deferred_packet);
+        connection.deferred_protected_packets_.push_back(
+            coquic::quic::DeferredProtectedDatagram(deferred_packet));
 
         connection.process_inbound_datagram(deferred_packet, coquic::quic::test::test_time(1));
 
@@ -3452,7 +3454,7 @@ TEST(QuicCoreTest, ProcessInboundDatagramDeduplicatesAndEvictsDeferredProtectedP
 
         for (std::uint8_t index = 0; index < 32; ++index) {
             connection.deferred_protected_packets_.push_back(
-                make_deferred_packet(connection, index));
+                coquic::quic::DeferredProtectedDatagram(make_deferred_packet(connection, index)));
         }
 
         const auto evicted_packet = connection.deferred_protected_packets_.front();
@@ -3470,8 +3472,8 @@ TEST(QuicCoreTest, ProcessInboundDatagramDeduplicatesAndEvictsDeferredProtectedP
 
 TEST(QuicCoreTest, ProcessInboundDatagramFailsWhenDeferredReplayPacketFailsProcessing) {
     auto connection = make_connected_client_connection();
-    connection.deferred_protected_packets_.push_back(
-        bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0x11, 0x01, 0x22, 0x00, 0x00}));
+    connection.deferred_protected_packets_.push_back(coquic::quic::DeferredProtectedDatagram(
+        bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0x11, 0x01, 0x22, 0x00, 0x00})));
 
     connection.process_inbound_datagram(bytes_from_ints({0x01}), coquic::quic::test::test_time(1));
 
@@ -3500,7 +3502,8 @@ TEST(QuicCoreTest, DrainOutboundDatagramReplaysDeferredProtectedPacketsBeforeFlu
     if (!deferred_packet.has_value()) {
         return;
     }
-    connection.deferred_protected_packets_.push_back(deferred_packet.value());
+    connection.deferred_protected_packets_.push_back(
+        coquic::quic::DeferredProtectedDatagram(deferred_packet.value()));
 
     auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
@@ -3529,8 +3532,8 @@ TEST(QuicCoreTest, DrainOutboundDatagramReplaysDeferredProtectedPacketsBeforeFlu
 
 TEST(QuicCoreTest, DrainOutboundDatagramFailsWhenDeferredReplayFails) {
     auto connection = make_connected_client_connection();
-    connection.deferred_protected_packets_.push_back(
-        bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0x11, 0x01, 0x22, 0x00, 0x00}));
+    connection.deferred_protected_packets_.push_back(coquic::quic::DeferredProtectedDatagram(
+        bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0x11, 0x01, 0x22, 0x00, 0x00})));
 
     EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
     EXPECT_TRUE(connection.has_failed());

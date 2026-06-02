@@ -19,6 +19,8 @@ class SharedBytes {
         : SharedBytes(std::vector<std::byte>(bytes)) {
     }
 
+    // cppcheck-suppress noExplicitConstructor ; stream-frame plumbing intentionally accepts byte
+    // vectors.
     SharedBytes(std::vector<std::byte> bytes)
         : storage_(std::make_shared<std::vector<std::byte>>(std::move(bytes))), begin_(0),
           end_(storage_->size()) {

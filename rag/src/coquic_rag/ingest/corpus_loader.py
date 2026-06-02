@@ -390,7 +390,7 @@ def _document_node(
 
 def _path_doc_id(path: str | Path) -> str:
     normalized = str(path).replace("\\", "/").strip("/")
-    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
     stem = Path(normalized).stem or "document"
     slug = "".join(char.lower() if char.isalnum() else "-" for char in stem).strip("-")
     return f"{slug}-{digest}"

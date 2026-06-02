@@ -38,7 +38,7 @@ struct PacketSpaceRecoveryTestPeer {
         recovery.live_links_.assign(1, PacketSpaceRecovery::LiveSlotLink{});
         auto &slot = recovery.slots_.front();
         slot.state = PacketSpaceRecovery::LedgerSlotState::retired;
-        slot.packet.packet_number = packet_number;
+        slot.packet_number = packet_number;
         recovery.first_live_slot_ = 0;
         recovery.last_live_slot_ = 0;
     }

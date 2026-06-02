@@ -405,7 +405,7 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
         };
         runtime_io_restart_coverage_check(
             ok, "unsupported family skips linux ecn socket options",
-            configure_linux_ecn_socket_options(LinuxSocketDescriptor{.fd = -1}, AF_UNSPEC));
+            configure_linux_ecn_socket_options(LinuxSocketDescriptor{.fd = 0}, AF_UNSPEC));
         runtime_io_restart_coverage_check(ok, "unsupported family leaves setsockopt untouched",
                                           g_recorded_setsockopt_for_tests.calls.empty());
     }

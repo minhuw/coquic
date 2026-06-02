@@ -76,9 +76,14 @@ struct PacketSpaceRecoveryTestPeer {
         return recovery.slots_.size();
     }
 
+    static bool slot_has_packet_storage(const PacketSpaceRecovery &recovery,
+                                        std::size_t slot_index) {
+        return recovery.slots_.at(slot_index).packet != nullptr;
+    }
+
     static const SentPacketRecord &slot_packet_at(const PacketSpaceRecovery &recovery,
                                                   std::size_t slot_index) {
-        return recovery.slots_.at(slot_index).packet;
+        return recovery.slot_packet(recovery.slots_.at(slot_index));
     }
 
     static std::size_t next_packet_threshold_loss_slot(const PacketSpaceRecovery &recovery) {
@@ -140,24 +145,24 @@ struct PacketSpaceRecoveryTestPeer {
              slot_index < loss_scan_end;) {
             auto &slot = recovery.slots_[slot_index];
             const auto next_live_slot = recovery.next_live_slot(slot_index);
-            const auto packet_number = slot.packet.packet_number;
-            if (slot.state != PacketSpaceRecovery::LedgerSlotState::sent ||
-                !slot.packet.in_flight) {
+            auto &packet = recovery.slot_packet(slot);
+            const auto packet_number = packet.packet_number;
+            if (slot.state != PacketSpaceRecovery::LedgerSlotState::sent || !packet.in_flight) {
                 slot_index = next_live_slot;
                 continue;
             }
 
             if (!recovery.is_packet_threshold_lost(packet_number, state.effective_largest_acked) &&
-                !recovery.is_time_threshold_lost(slot.packet.sent_time, now)) {
+                !recovery.is_time_threshold_lost(packet.sent_time, now)) {
                 slot_index = next_live_slot;
                 continue;
             }
 
-            recovery.erase_from_tracked_sets(slot.packet);
+            recovery.erase_from_tracked_sets(packet);
             if (recovery.is_packet_threshold_lost(packet_number, state.effective_largest_acked)) {
-                recovery.note_packet_threshold_loss(slot.packet, state.effective_largest_acked);
+                recovery.note_packet_threshold_loss(packet, state.effective_largest_acked);
             } else {
-                recovery.note_time_threshold_loss(slot.packet, now);
+                recovery.note_time_threshold_loss(packet, now);
             }
             slot.state = PacketSpaceRecovery::LedgerSlotState::declared_lost;
             state.result.lost_packets.push_back(recovery.packet_handle(slot, slot_index));
@@ -202,12 +207,21 @@ struct PacketSpaceRecoveryTestPeer {
     }
 
     static SentPacketRecord &slot_packet_at(PacketSpaceRecovery &recovery, std::size_t slot_index) {
-        return recovery.slots_.at(slot_index).packet;
+        return recovery.slot_packet(recovery.slots_.at(slot_index));
     }
 
-    static void set_slot_packet_number(PacketSpaceRecovery &recovery, std::size_t slot_index,
-                                       std::uint64_t packet_number) {
-        recovery.slots_.at(slot_index).packet.packet_number = packet_number;
+    struct SlotPacketNumberOverride {
+        std::size_t slot_index = 0;
+        std::uint64_t packet_number = 0;
+    };
+
+    static void set_slot_packet_number(PacketSpaceRecovery &recovery,
+                                       SlotPacketNumberOverride override) {
+        auto &slot = recovery.slots_.at(override.slot_index);
+        slot.packet_number = override.packet_number;
+        if (slot.packet != nullptr) {
+            slot.packet->packet_number = override.packet_number;
+        }
     }
 
     static void set_slot_acknowledged(PacketSpaceRecovery &recovery, std::size_t slot_index,
@@ -1102,7 +1116,8 @@ TEST(QuicRecoveryTest, PacketThresholdScanSkipsPacketsBelowReorderingGap) {
                                              coquic::quic::test::test_time(2)));
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(3)));
-    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(recovery, 0, 2);
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(
+        recovery, {.slot_index = 0, .packet_number = 2});
 
     auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/3), coquic::quic::test::test_time(4));
@@ -1765,7 +1780,7 @@ TEST(QuicRecoveryTest, RetiringEarlierPacketsDoesNotRenumberLaterHandles) {
     }
 }
 
-TEST(QuicRecoveryTest, RetiringPacketClearsPayloadStateButKeepsStableSlotAllocation) {
+TEST(QuicRecoveryTest, RetiringPacketReleasesPayloadStateButKeepsStableSlotAllocation) {
     PacketSpaceRecovery recovery;
     SentPacketRecord packet = make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
                                                coquic::quic::test::test_time(0));
@@ -1788,13 +1803,8 @@ TEST(QuicRecoveryTest, RetiringPacketClearsPayloadStateButKeepsStableSlotAllocat
     recovery.retire_packet(0);
 
     EXPECT_EQ(coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_count(recovery), 1u);
-
-    const auto &retired_packet =
-        coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_packet_at(recovery, 0);
-    EXPECT_EQ(retired_packet.packet_number, 0u);
-    EXPECT_TRUE(retired_packet.crypto_ranges.empty());
-    EXPECT_TRUE(retired_packet.stream_fragments.empty());
-    EXPECT_FALSE(retired_packet.max_data_frame.has_value());
+    EXPECT_FALSE(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_has_packet_storage(recovery, 0));
 }
 
 TEST(QuicRecoveryTest, PacketHandlesRemainReadableAfterEarlierRetirementCompactsPrefix) {
@@ -2636,7 +2646,8 @@ TEST(QuicRecoveryTest, PacketLookupHelpersHandleUnknownAndMismatchedSlots) {
                   RecoveryPacketHandle{.packet_number = 99, .slot_index = 0}),
               nullptr);
 
-    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(recovery, 1, 9);
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(
+        recovery, {.slot_index = 1, .packet_number = 9});
     EXPECT_FALSE(coquic::quic::test::PacketSpaceRecoveryTestPeer::slot_exists(recovery, 1));
     EXPECT_FALSE(recovery.handle_for_packet_number(1).has_value());
     EXPECT_EQ(recovery.find_packet(1), nullptr);
@@ -2646,8 +2657,8 @@ TEST(QuicRecoveryTest, PacketLookupHelpersHandleUnknownAndMismatchedSlots) {
                                                       coquic::quic::test::test_time(2)));
     auto mismatched = mismatched_handle.handle_for_packet_number(2);
     ASSERT_TRUE(mismatched.has_value());
-    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(mismatched_handle, 2,
-                                                                            9);
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(
+        mismatched_handle, {.slot_index = 2, .packet_number = 9});
     EXPECT_FALSE(
         mismatched_handle.retire_packet_if_present(optional_value_or_terminate(mismatched)));
 
@@ -2664,7 +2675,8 @@ TEST(QuicRecoveryTest, PacketLookupHelpersHandleUnknownAndMismatchedSlots) {
                                                     coquic::quic::test::test_time(2)));
     auto mismatched_take_handle = mismatched_take.handle_for_packet_number(2);
     ASSERT_TRUE(mismatched_take_handle.has_value());
-    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(mismatched_take, 2, 9);
+    coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(
+        mismatched_take, {.slot_index = 2, .packet_number = 9});
     EXPECT_FALSE(
         mismatched_take
             .take_retired_packet_if_present(optional_value_or_terminate(mismatched_take_handle))
@@ -2874,7 +2886,7 @@ TEST(QuicRecoveryTest, DirectRecoveryColdBranchEdgesUsePeerHooks) {
     packet_number_above_range.on_packet_sent(make_sent_packet(/*packet_number=*/0,
                                                               /*ack_eliciting=*/true,
                                                               coquic::quic::test::test_time(0)));
-    Peer::set_slot_packet_number(packet_number_above_range, 0, 2);
+    Peer::set_slot_packet_number(packet_number_above_range, {.slot_index = 0, .packet_number = 2});
     const auto low_ack = make_ack_frame(/*largest=*/0);
     auto low_cursor = coquic::quic::make_ack_range_cursor(low_ack);
     ASSERT_TRUE(low_cursor.has_value());

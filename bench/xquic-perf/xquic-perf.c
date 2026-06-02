@@ -169,7 +169,7 @@ struct perf_ctx_s {
     completed_stream_t *completed;
     size_t completed_len;
     size_t completed_cap;
-    counters_t *live_counters;
+    uint64_t live_bytes_received;
     uint64_t measure_start_us;
     int count_stream_bytes;
 };
@@ -641,9 +641,8 @@ static xqc_int_t stream_read_notify(xqc_stream_t *stream, void *strm_user_data) 
         } else {
             uint64_t received = (uint64_t)ret;
             s->received += received;
-            if (ctx->count_stream_bytes && s->counts && ctx->live_counters != NULL &&
-                now_us() >= ctx->measure_start_us) {
-                ctx->live_counters->bytes_received += received;
+            if (ctx->count_stream_bytes && s->counts && now_us() >= ctx->measure_start_us) {
+                ctx->live_bytes_received += received;
             }
             if (fin) {
                 completed_stream_t done;
@@ -1149,7 +1148,6 @@ static void run_timed_bulk_download(config_t *cfg, counters_t *c) {
     }
     uint64_t measure_start = now_us() + cfg->warmup_us;
     uint64_t deadline = measure_start + cfg->duration_us;
-    ctx->live_counters = c;
     ctx->measure_start_us = measure_start;
     ctx->count_stream_bytes = 1;
     for (uint64_t i = 0; !ctx->error && i < cfg->connections; ++i) {
@@ -1167,6 +1165,7 @@ static void run_timed_bulk_download(config_t *cfg, counters_t *c) {
         free_ctx(ctx);
         exit(1);
     }
+    c->bytes_received += ctx->live_bytes_received;
     free_ctx(ctx);
 }
 

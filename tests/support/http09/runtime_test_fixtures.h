@@ -388,27 +388,19 @@ class ScopedServerSocketPollTraceReset {
 };
 
 inline sockaddr *copy_addrinfo_address(const sockaddr_in &address) {
-    return reinterpret_cast<sockaddr *>(new sockaddr_in(address));
+    auto *storage = new sockaddr_storage{};
+    std::memcpy(storage, &address, sizeof(address));
+    return reinterpret_cast<sockaddr *>(storage);
 }
 
 inline sockaddr *copy_addrinfo_address(const sockaddr_in6 &address) {
-    return reinterpret_cast<sockaddr *>(new sockaddr_in6(address));
+    auto *storage = new sockaddr_storage{};
+    std::memcpy(storage, &address, sizeof(address));
+    return reinterpret_cast<sockaddr *>(storage);
 }
 
 inline void delete_addrinfo_address(sockaddr *address) {
-    if (address == nullptr) {
-        return;
-    }
-
-    if (address->sa_family == AF_INET) {
-        delete reinterpret_cast<sockaddr_in *>(address);
-        return;
-    }
-    if (address->sa_family == AF_INET6) {
-        delete reinterpret_cast<sockaddr_in6 *>(address);
-        return;
-    }
-    delete address;
+    delete reinterpret_cast<sockaddr_storage *>(address);
 }
 
 inline int fail_getaddrinfo_with_results(const char *, const char *, const addrinfo *,

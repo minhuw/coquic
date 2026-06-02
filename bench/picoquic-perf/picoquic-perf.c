@@ -845,22 +845,21 @@ static int loop_callback(picoquic_quic_t *quic, picoquic_packet_loop_cb_enum mod
     if (stop_requested) {
         return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
     }
-    switch (mode) {
-    case picoquic_packet_loop_ready: {
+    if (mode == picoquic_packet_loop_ready) {
         picoquic_packet_loop_options_t *options = (picoquic_packet_loop_options_t *)callback_arg;
         options->do_time_check = 1;
-        break;
+        return 0;
     }
-    case picoquic_packet_loop_after_receive:
-    case picoquic_packet_loop_after_send:
+    if (mode == picoquic_packet_loop_after_receive || mode == picoquic_packet_loop_after_send) {
         if (app->is_client) {
             maybe_finish_client(app);
             if (app->finished) {
                 return PICOQUIC_NO_ERROR_TERMINATE_PACKET_LOOP;
             }
         }
-        break;
-    case picoquic_packet_loop_time_check: {
+        return 0;
+    }
+    if (mode == picoquic_packet_loop_time_check) {
         packet_loop_time_check_arg_t *time_check = (packet_loop_time_check_arg_t *)callback_arg;
         if (app->is_client) {
             maybe_finish_client(app);
@@ -879,17 +878,14 @@ static int loop_callback(picoquic_quic_t *quic, picoquic_packet_loop_cb_enum mod
                 time_check->delta_t = 1000000;
             }
         }
-        break;
+        return 0;
     }
-    case picoquic_packet_loop_port_update:
-    case picoquic_packet_loop_wake_up:
-    case picoquic_packet_loop_alt_port:
-    case picoquic_packet_loop_system_call_duration:
-        break;
-    default:
-        return PICOQUIC_ERROR_UNEXPECTED_ERROR;
+    if (mode == picoquic_packet_loop_port_update || mode == picoquic_packet_loop_wake_up ||
+        mode == picoquic_packet_loop_alt_port ||
+        mode == picoquic_packet_loop_system_call_duration) {
+        return 0;
     }
-    return 0;
+    return PICOQUIC_ERROR_UNEXPECTED_ERROR;
 }
 
 static int run_server(const config_t *cfg) {

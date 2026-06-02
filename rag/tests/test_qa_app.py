@@ -44,7 +44,7 @@ class FakeQaService:
             direct_model="openai/gpt-oss-120b:free",
             rag_answer=f"answer for {question}",
             rag_usage=ChatUsage(prompt_tokens=6, completion_tokens=3, total_tokens=9),
-            rag_model="z-ai/glm-4.5-air:free",
+            rag_model="nvidia/nemotron-3-super-120b-a12b:free",
         )
 
     def answer_stream(
@@ -124,7 +124,7 @@ def test_qa_endpoint_returns_answer_payload(monkeypatch) -> None:
     assert payload["direct_model"] == "openai/gpt-oss-120b:free"
     assert payload["rag_answer"] == "answer for How does QUIC ACK delay work?"
     assert payload["rag_usage"]["total_tokens"] == 9
-    assert payload["rag_model"] == "z-ai/glm-4.5-air:free"
+    assert payload["rag_model"] == "nvidia/nemotron-3-super-120b-a12b:free"
     assert fake_service.calls[0]["model"] == "openai/gpt-oss-120b:free"
 
 

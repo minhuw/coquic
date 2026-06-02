@@ -16,7 +16,6 @@ OPENROUTER_CHAT_TIMEOUT_SECONDS = 20
 FREE_ANSWER_MODELS = (
     ("openai/gpt-oss-120b:free", "OpenAI: gpt-oss-120b (free)"),
     ("nvidia/nemotron-3-super-120b-a12b:free", "NVIDIA: Nemotron 3 Super (free)"),
-    ("z-ai/glm-4.5-air:free", "Z.AI: GLM 4.5 Air (free)"),
     ("google/gemma-4-31b-it:free", "Google: Gemma 4 31B IT (free)"),
 )
 FREE_ANSWER_MODEL_IDS = frozenset(model_id for model_id, _label in FREE_ANSWER_MODELS)

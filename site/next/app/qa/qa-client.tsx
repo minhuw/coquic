@@ -81,7 +81,6 @@ type HealthPayload = {
 const fallbackModelOptions: ModelOption[] = [
   { id: 'openai/gpt-oss-120b:free', label: 'OpenAI: gpt-oss-120b (free)' },
   { id: 'nvidia/nemotron-3-super-120b-a12b:free', label: 'NVIDIA: Nemotron 3 Super (free)' },
-  { id: 'z-ai/glm-4.5-air:free', label: 'Z.AI: GLM 4.5 Air (free)' },
   { id: 'google/gemma-4-31b-it:free', label: 'Google: Gemma 4 31B IT (free)' },
 ];
 
@@ -1086,16 +1085,6 @@ function modelMeta(model: string): ModelMeta {
       swatch: '#1f8a65',
       label: 'Google: Gemma 4 31B IT (free)',
       iconSrc: '/google-favicon.ico',
-    };
-  }
-  if (model.startsWith('z-ai/glm-4.5-air')) {
-    return {
-      provider: 'Z.AI',
-      size: 'Air',
-      avatar: 'Z',
-      swatch: '#b83280',
-      label: 'Z.AI: GLM 4.5 Air (free)',
-      iconSrc: '/z-ai-logo.svg',
     };
   }
   if (model.startsWith('google/gemma-4-26b')) {

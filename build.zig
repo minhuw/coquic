@@ -2,6 +2,11 @@ const std = @import("std");
 
 const StringList = std.array_list.Managed([]const u8);
 
+const CoreFfiPackageLibraries = struct {
+    static_lib: std.Build.LazyPath,
+    shared_lib: std.Build.LazyPath,
+};
+
 fn requireEnv(b: *std.Build, name: []const u8) []const u8 {
     return b.graph.environ_map.get(name) orelse std.debug.panic(
         "missing required environment variable {s}; run inside `nix develop`",
@@ -17,6 +22,18 @@ fn rootModule(
     return b.createModule(.{
         .target = target,
         .optimize = optimize,
+    });
+}
+
+fn picRootModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Module {
+    return b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .pic = true,
     });
 }
 
@@ -155,6 +172,52 @@ fn appendSourceFiles(files: *StringList, source_files: []const []const u8) void 
     files.appendSlice(source_files) catch @panic("oom");
 }
 
+fn quicProductionSourceFiles() []const []const u8 {
+    return &.{
+        "src/quic/buffer.cpp",
+        "src/quic/cca/bbr.cpp",
+        "src/quic/cca/common.cpp",
+        "src/quic/cca/copa.cpp",
+        "src/quic/cca/cubic.cpp",
+        "src/quic/cca/newreno.cpp",
+        "src/quic/congestion.cpp",
+        "src/quic/connection.cpp",
+        "src/quic/connection_diagnostics.cpp",
+        "src/quic/connection_effects.cpp",
+        "src/quic/connection_flow_control.cpp",
+        "src/quic/connection_inbound_recovery.cpp",
+        "src/quic/connection_packet_inspection.cpp",
+        "src/quic/connection_paths_streams.cpp",
+        "src/quic/connection_qlog.cpp",
+        "src/quic/connection_send.cpp",
+        "src/quic/connection_timers.cpp",
+        "src/quic/core.cpp",
+        "src/quic/crypto_stream.cpp",
+        "src/quic/frame.cpp",
+        "src/quic/packet.cpp",
+        "src/quic/packet_number.cpp",
+        "src/quic/plaintext_codec.cpp",
+        "src/quic/protected_codec.cpp",
+        "src/quic/qlog/json.cpp",
+        "src/quic/qlog/session.cpp",
+        "src/quic/qlog/sink.cpp",
+        "src/quic/recovery.cpp",
+        "src/quic/streams.cpp",
+        "src/quic/transport_parameters.cpp",
+        "src/quic/varint.cpp",
+    };
+}
+
+fn quicTestHookSourceFiles() []const []const u8 {
+    return &.{
+        "src/quic/connection_helper_tests.cpp",
+        "src/quic/connection_internal_helper_tests.cpp",
+        "src/quic/connection_key_update_tests.cpp",
+        "src/quic/connection_pmtud_tests.cpp",
+        "src/quic/protected_codec_test_hooks.cpp",
+    };
+}
+
 fn quicSourceFiles() []const []const u8 {
     return &.{
         "src/quic/buffer.cpp",
@@ -254,10 +317,52 @@ fn apiSourceFiles() []const []const u8 {
     };
 }
 
+fn coreApiSourceFiles() []const []const u8 {
+    return &.{
+        "src/api/core.cpp",
+    };
+}
+
 fn ffiSourceFiles() []const []const u8 {
     return &.{
         "src/ffi/core.cpp",
     };
+}
+
+fn appendCoreFfiSourceFiles(files: *StringList, tls_backend: []const u8) void {
+    appendSourceFiles(files, quicProductionSourceFiles());
+    appendPacketCryptoSource(files, tls_backend);
+    appendTlsAdapterSource(files, tls_backend);
+    appendSourceFiles(files, coreApiSourceFiles());
+    appendSourceFiles(files, ffiSourceFiles());
+}
+
+fn packageName(b: *std.Build, tls_backend: []const u8) []const u8 {
+    return b.fmt("coquic-{s}", .{tls_backend});
+}
+
+fn packageLibraryName(b: *std.Build, tls_backend: []const u8) []const u8 {
+    return packageName(b, tls_backend);
+}
+
+fn packageSharedSoname(b: *std.Build, library_name: []const u8) []const u8 {
+    return b.fmt("lib{s}.so.0", .{library_name});
+}
+
+fn packageSharedVersionedName(b: *std.Build, library_name: []const u8) []const u8 {
+    return b.fmt("{s}.1.0", .{packageSharedSoname(b, library_name)});
+}
+
+fn packageCmakeTargetName(tls_backend: []const u8) []const u8 {
+    if (std.mem.eql(u8, tls_backend, "quictls")) {
+        return "coquic_quictls";
+    }
+
+    if (std.mem.eql(u8, tls_backend, "boringssl")) {
+        return "coquic_boringssl";
+    }
+
+    std.debug.panic("unsupported tls_backend {s}", .{tls_backend});
 }
 
 fn addProjectLibrary(
@@ -300,6 +405,171 @@ fn addProjectLibrary(
     });
     linkLibCpp(lib);
     return lib;
+}
+
+fn addCoreFfiLibrary(
+    b: *std.Build,
+    name: []const u8,
+    linkage: std.builtin.LinkMode,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    cpp_flags: []const []const u8,
+    tls_backend: []const u8,
+    tls_include_dir: []const u8,
+    tls_lib_dir: []const u8,
+    tls_linkage: []const u8,
+) *std.Build.Step.Compile {
+    const lib = b.addLibrary(.{
+        .name = name,
+        .linkage = linkage,
+        .version = .{ .major = 0, .minor = 1, .patch = 0 },
+        .root_module = picRootModule(b, target, optimize),
+    });
+    addIncludePath(lib, b.path("."));
+    addIncludePath(lib, b.path("include"));
+    addIncludePath(lib, .{ .cwd_relative = tls_include_dir });
+
+    var files = StringList.init(b.allocator);
+    appendCoreFfiSourceFiles(&files, tls_backend);
+    const ffi_cpp_flags = withExtraFlags(b, cpp_flags, &.{
+        "-DCOQUIC_FFI_BUILD=1",
+        if (linkage == .dynamic)
+            "-fvisibility=hidden"
+        else
+            "-fvisibility=default",
+    });
+    addCSourceFiles(lib, .{
+        .root = b.path("."),
+        .files = files.toOwnedSlice() catch @panic("oom"),
+        .flags = ffi_cpp_flags,
+    });
+    if (linkage == .dynamic) {
+        linkTlsBackend(b, lib, tls_backend, tls_lib_dir, tls_linkage);
+    }
+    linkLibCpp(lib);
+    lib.installHeader(b.path("include/coquic/ffi/core.h"), "coquic/ffi/core.h");
+    return lib;
+}
+
+fn packageCxxOptimizeFlag(optimize: std.builtin.OptimizeMode) []const u8 {
+    return switch (optimize) {
+        .Debug => "-O0",
+        .ReleaseSafe => "-O2",
+        .ReleaseFast => "-O3",
+        .ReleaseSmall => "-Os",
+    };
+}
+
+fn packageCxxDebugFlag(optimize: std.builtin.OptimizeMode) []const u8 {
+    return switch (optimize) {
+        .Debug => "-g",
+        else => "",
+    };
+}
+
+fn packageCxxNdebugFlag(optimize: std.builtin.OptimizeMode) []const u8 {
+    return switch (optimize) {
+        .Debug => "",
+        else => "-DNDEBUG",
+    };
+}
+
+fn addCoreFfiPackageLibraries(
+    b: *std.Build,
+    library_name: []const u8,
+    optimize: std.builtin.OptimizeMode,
+    profile_hooks: bool,
+    tls_backend: []const u8,
+    tls_include_dir: []const u8,
+    tls_lib_dir: []const u8,
+    export_script: std.Build.LazyPath,
+) CoreFfiPackageLibraries {
+    const script =
+        \\static_lib="$1"
+        \\shared_lib="$2"
+        \\exports="$3"
+        \\project_include="$4"
+        \\public_include="$5"
+        \\tls_include="$6"
+        \\tls_lib_dir="$7"
+        \\soname="$8"
+        \\opt_flag="$9"
+        \\debug_flag="${10}"
+        \\ndebug_flag="${11}"
+        \\profile_hooks="${12}"
+        \\shift 12
+        \\
+        \\cxx="${CXX:-c++}"
+        \\ar="${AR:-ar}"
+        \\work="$(mktemp -d)"
+        \\trap 'rm -rf "$work"' EXIT
+        \\
+        \\common_flags=(
+        \\  -std=c++20
+        \\  -fPIC
+        \\  -fvisibility=hidden
+        \\  "$opt_flag"
+        \\  -DCOQUIC_FFI_BUILD=1
+        \\  "-DCOQUIC_PROFILE_HOOKS=$profile_hooks"
+        \\  "-I$project_include"
+        \\  "-I$public_include"
+        \\  "-I$tls_include"
+        \\)
+        \\if [ -n "$debug_flag" ]; then
+        \\  common_flags+=("$debug_flag")
+        \\fi
+        \\if [ -n "$ndebug_flag" ]; then
+        \\  common_flags+=("$ndebug_flag")
+        \\fi
+        \\
+        \\objects=()
+        \\index=0
+        \\for source in "$@"; do
+        \\  object="$work/object-$index.o"
+        \\  "$cxx" "${common_flags[@]}" -c "$source" -o "$object"
+        \\  objects+=("$object")
+        \\  index=$((index + 1))
+        \\done
+        \\
+        \\"$ar" rcs "$static_lib" "${objects[@]}"
+        \\"$cxx" -shared \
+        \\  "-Wl,-soname,$soname" \
+        \\  "-Wl,--version-script=$exports" \
+        \\  -Wl,--exclude-libs,ALL \
+        \\  -o "$shared_lib" \
+        \\  "${objects[@]}" \
+        \\  "$tls_lib_dir/libssl.a" \
+        \\  "$tls_lib_dir/libcrypto.a" \
+        \\  -lm -pthread -ldl
+        \\
+    ;
+
+    const run = b.addSystemCommand(&.{ "bash", "-eu", "-c", script, "coquic-package-cxx" });
+    const static_lib = run.addOutputFileArg(b.fmt("lib{s}.a", .{library_name}));
+    const shared_lib = run.addOutputFileArg(packageSharedVersionedName(b, library_name));
+    run.addFileArg(export_script);
+    run.addArgs(&.{
+        b.pathFromRoot("."),
+        b.pathFromRoot("include"),
+        tls_include_dir,
+        tls_lib_dir,
+        packageSharedSoname(b, library_name),
+        packageCxxOptimizeFlag(optimize),
+        packageCxxDebugFlag(optimize),
+        packageCxxNdebugFlag(optimize),
+        if (profile_hooks) "1" else "0",
+    });
+
+    var files = StringList.init(b.allocator);
+    appendCoreFfiSourceFiles(&files, tls_backend);
+    for (files.items) |file| {
+        run.addFileArg(b.path(file));
+    }
+
+    return .{
+        .static_lib = static_lib,
+        .shared_lib = shared_lib,
+    };
 }
 
 fn wasmQuicSourceFiles() []const []const u8 {
@@ -451,6 +721,241 @@ fn linkLiburing(compile: *std.Build.Step.Compile) void {
     linkSystemLibrary(compile, "liburing", .{
         .use_pkg_config = .force,
     });
+}
+
+fn tlsStaticPrivateLibs(b: *std.Build, package_name: []const u8) []const u8 {
+    return b.fmt(
+        "${{libdir}}/{s}/private/libssl.a ${{libdir}}/{s}/private/libcrypto.a",
+        .{ package_name, package_name },
+    );
+}
+
+fn packageCmakeConfig(b: *std.Build, package_name: []const u8, library_name: []const u8) []const u8 {
+    return b.fmt(
+        \\include("${{CMAKE_CURRENT_LIST_DIR}}/{0s}Targets.cmake")
+        \\
+        \\if(NOT TARGET CoQUIC::{1s})
+        \\  message(FATAL_ERROR "CoQUIC target CoQUIC::{1s} was not defined")
+        \\endif()
+        \\
+    , .{ package_name, library_name });
+}
+
+fn packageCmakeVersionConfig() []const u8 {
+    return
+    \\set(PACKAGE_VERSION "0.1.0")
+    \\
+    \\if(PACKAGE_FIND_VERSION VERSION_GREATER PACKAGE_VERSION)
+    \\  set(PACKAGE_VERSION_COMPATIBLE FALSE)
+    \\else()
+    \\  set(PACKAGE_VERSION_COMPATIBLE TRUE)
+    \\  if(PACKAGE_FIND_VERSION VERSION_EQUAL PACKAGE_VERSION)
+    \\    set(PACKAGE_VERSION_EXACT TRUE)
+    \\  endif()
+    \\endif()
+    \\
+    ;
+}
+
+fn packageCmakeTargets(b: *std.Build, package_name: []const u8, library_name: []const u8) []const u8 {
+    return b.fmt(
+        \\include("${{CMAKE_CURRENT_LIST_DIR}}/{0s}Targets-shared.cmake" OPTIONAL)
+        \\include("${{CMAKE_CURRENT_LIST_DIR}}/{0s}Targets-static.cmake" OPTIONAL)
+        \\
+        \\if(NOT TARGET CoQUIC::{1s} AND TARGET CoQUIC::{1s}_shared)
+        \\  add_library(CoQUIC::{1s} ALIAS CoQUIC::{1s}_shared)
+        \\elseif(NOT TARGET CoQUIC::{1s} AND TARGET CoQUIC::{1s}_static)
+        \\  add_library(CoQUIC::{1s} ALIAS CoQUIC::{1s}_static)
+        \\endif()
+        \\
+    , .{ package_name, library_name });
+}
+
+fn packageCmakeSharedTargets(b: *std.Build, package_name: []const u8, library_name: []const u8) []const u8 {
+    return b.fmt(
+        \\add_library(CoQUIC::{1s}_shared SHARED IMPORTED)
+        \\set_target_properties(CoQUIC::{1s}_shared PROPERTIES
+        \\  IMPORTED_LOCATION "${{CMAKE_CURRENT_LIST_DIR}}/../../lib{0s}.so"
+        \\  INTERFACE_INCLUDE_DIRECTORIES "${{CMAKE_CURRENT_LIST_DIR}}/../../../include"
+        \\)
+        \\
+    , .{ package_name, library_name });
+}
+
+fn packageCmakeStaticTargets(b: *std.Build, package_name: []const u8, library_name: []const u8) []const u8 {
+    return b.fmt(
+        \\add_library(CoQUIC::{1s}_static STATIC IMPORTED)
+        \\set_target_properties(CoQUIC::{1s}_static PROPERTIES
+        \\  IMPORTED_LOCATION "${{CMAKE_CURRENT_LIST_DIR}}/../../lib{0s}.a"
+        \\  INTERFACE_INCLUDE_DIRECTORIES "${{CMAKE_CURRENT_LIST_DIR}}/../../../include"
+        \\  INTERFACE_LINK_LIBRARIES "${{CMAKE_CURRENT_LIST_DIR}}/../../{0s}/private/libssl.a;${{CMAKE_CURRENT_LIST_DIR}}/../../{0s}/private/libcrypto.a;stdc++;m;pthread;dl"
+        \\)
+        \\
+    , .{ package_name, library_name });
+}
+
+fn packagePkgConfig(b: *std.Build, package_name: []const u8, tls_backend: []const u8) []const u8 {
+    return b.fmt(
+        \\prefix=${{pcfiledir}}/../..
+        \\includedir=${{prefix}}/include
+        \\libdir=${{prefix}}/lib
+        \\
+        \\Name: {0s}
+        \\Description: CoQUIC C FFI package built with {1s}
+        \\Version: 0.1.0
+        \\Cflags: -I${{includedir}}
+        \\Libs: -L${{libdir}} -l{0s}
+        \\Libs.private: {2s} -lstdc++ -lm -lpthread -ldl
+        \\
+    , .{ package_name, tls_backend, tlsStaticPrivateLibs(b, package_name) });
+}
+
+fn packageStaticPkgConfig(b: *std.Build, package_name: []const u8, tls_backend: []const u8) []const u8 {
+    return b.fmt(
+        \\prefix=${{pcfiledir}}/../..
+        \\includedir=${{prefix}}/include
+        \\libdir=${{prefix}}/lib
+        \\
+        \\Name: {0s}-static
+        \\Description: Static CoQUIC C FFI package built with {1s}
+        \\Version: 0.1.0
+        \\Cflags: -I${{includedir}}
+        \\Libs: ${{libdir}}/lib{0s}.a {2s} -lstdc++ -lm -lpthread -ldl
+        \\
+    , .{ package_name, tls_backend, tlsStaticPrivateLibs(b, package_name) });
+}
+
+fn ffiExportVersionScript() []const u8 {
+    return
+    \\{
+    \\  global:
+    \\    coquic_*;
+    \\  local:
+    \\    *;
+    \\};
+    \\
+    ;
+}
+
+fn packageNotice() []const u8 {
+    return
+    \\CoQUIC packages include CoQUIC under the terms in LICENSE.coquic.
+    \\
+    \\The backend-specific packages also redistribute the selected TLS backend:
+    \\
+    \\- coquic-boringssl bundles BoringSSL libssl and libcrypto archives.
+    \\- coquic-quictls bundles QuicTLS/OpenSSL libssl and libcrypto archives.
+    \\
+    \\Redistributors must include the applicable upstream TLS license and notice
+    \\materials from the pinned dependency source when producing release packages.
+    \\
+    ;
+}
+
+fn installCoreFfiPackage(
+    b: *std.Build,
+    static_lib: std.Build.LazyPath,
+    shared_lib: std.Build.LazyPath,
+    tls_backend: []const u8,
+    tls_lib_dir: []const u8,
+) *std.Build.Step {
+    const package_name_value = packageName(b, tls_backend);
+    const library_name = packageCmakeTargetName(tls_backend);
+    const package_library_name = packageLibraryName(b, tls_backend);
+    const cmake_dir = b.fmt("lib/cmake/{s}", .{package_name_value});
+
+    const generated = b.addWriteFiles();
+    const cmake_config =
+        generated.add(b.fmt("{s}Config.cmake", .{package_name_value}), packageCmakeConfig(b, package_name_value, library_name));
+    const cmake_version_config =
+        generated.add(b.fmt("{s}ConfigVersion.cmake", .{package_name_value}), packageCmakeVersionConfig());
+    const cmake_targets =
+        generated.add(b.fmt("{s}Targets.cmake", .{package_name_value}), packageCmakeTargets(b, package_name_value, library_name));
+    const cmake_shared_targets =
+        generated.add(b.fmt("{s}Targets-shared.cmake", .{package_name_value}), packageCmakeSharedTargets(b, package_name_value, library_name));
+    const cmake_static_targets =
+        generated.add(b.fmt("{s}Targets-static.cmake", .{package_name_value}), packageCmakeStaticTargets(b, package_name_value, library_name));
+    const pkg_config =
+        generated.add(b.fmt("{s}.pc", .{package_name_value}), packagePkgConfig(b, package_name_value, tls_backend));
+    const static_pkg_config =
+        generated.add(b.fmt("{s}-static.pc", .{package_name_value}), packageStaticPkgConfig(b, package_name_value, tls_backend));
+    const notice = generated.add("NOTICE", packageNotice());
+
+    const install_package = b.step(
+        "package",
+        "Install backend-specific CoQUIC C FFI libraries and package metadata",
+    );
+    install_package.dependOn(&b.addInstallFile(static_lib, b.fmt("lib/lib{s}.a", .{
+        package_library_name,
+    })).step);
+    install_package.dependOn(&b.addInstallFile(shared_lib, b.fmt("lib/{s}", .{
+        packageSharedVersionedName(b, package_library_name),
+    })).step);
+    install_package.dependOn(&b.addInstallFile(shared_lib, b.fmt("lib/{s}", .{
+        packageSharedSoname(b, package_library_name),
+    })).step);
+    install_package.dependOn(&b.addInstallFile(shared_lib, b.fmt("lib/lib{s}.so", .{
+        package_library_name,
+    })).step);
+    install_package.dependOn(&b.addInstallFile(
+        b.path("include/coquic/ffi/core.h"),
+        "include/coquic/ffi/core.h",
+    ).step);
+    install_package.dependOn(&b.addInstallFile(cmake_config, b.fmt("{s}/{s}Config.cmake", .{
+        cmake_dir,
+        package_name_value,
+    })).step);
+    install_package.dependOn(&b.addInstallFile(cmake_version_config, b.fmt("{s}/{s}ConfigVersion.cmake", .{
+        cmake_dir,
+        package_name_value,
+    })).step);
+    install_package.dependOn(&b.addInstallFile(cmake_targets, b.fmt("{s}/{s}Targets.cmake", .{
+        cmake_dir,
+        package_name_value,
+    })).step);
+    install_package.dependOn(&b.addInstallFile(cmake_shared_targets, b.fmt("{s}/{s}Targets-shared.cmake", .{
+        cmake_dir,
+        package_name_value,
+    })).step);
+    install_package.dependOn(&b.addInstallFile(cmake_static_targets, b.fmt("{s}/{s}Targets-static.cmake", .{
+        cmake_dir,
+        package_name_value,
+    })).step);
+    install_package.dependOn(&b.addInstallFile(pkg_config, b.fmt("lib/pkgconfig/{s}.pc", .{
+        package_name_value,
+    })).step);
+    install_package.dependOn(&b.addInstallFile(static_pkg_config, b.fmt("lib/pkgconfig/{s}-static.pc", .{
+        package_name_value,
+    })).step);
+    install_package.dependOn(&b.addInstallFile(
+        b.path("LICENSE"),
+        b.fmt("share/doc/{s}/LICENSE.coquic", .{package_name_value}),
+    ).step);
+    install_package.dependOn(&b.addInstallFile(
+        notice,
+        b.fmt("share/doc/{s}/NOTICE", .{package_name_value}),
+    ).step);
+    if (b.graph.environ_map.get("COQUIC_TLS_LICENSE_FILE")) |license_file| {
+        install_package.dependOn(&b.addInstallFile(
+            .{ .cwd_relative = license_file },
+            b.fmt("share/doc/{s}/LICENSE.tls", .{package_name_value}),
+        ).step);
+    }
+    if (b.graph.environ_map.get("COQUIC_TLS_NOTICE_FILE")) |notice_file| {
+        install_package.dependOn(&b.addInstallFile(
+            .{ .cwd_relative = notice_file },
+            b.fmt("share/doc/{s}/NOTICE.tls", .{package_name_value}),
+        ).step);
+    }
+    install_package.dependOn(&b.addInstallFile(
+        .{ .cwd_relative = b.pathJoin(&.{ tls_lib_dir, "libssl.a" }) },
+        b.fmt("lib/{s}/private/libssl.a", .{package_name_value}),
+    ).step);
+    install_package.dependOn(&b.addInstallFile(
+        .{ .cwd_relative = b.pathJoin(&.{ tls_lib_dir, "libcrypto.a" }) },
+        b.fmt("lib/{s}/private/libcrypto.a", .{package_name_value}),
+    ).step);
+    return install_package;
 }
 
 fn addTestBinary(
@@ -648,6 +1153,24 @@ pub fn build(b: *std.Build) void {
         spdlog_include_dir,
         fmt_include_dir,
         liburing_include_dir,
+    );
+    const ffi_export_script = b.addWriteFiles().add("coquic-ffi.exports", ffiExportVersionScript());
+    const ffi_package_libs = addCoreFfiPackageLibraries(
+        b,
+        packageLibraryName(b, tls_backend),
+        optimize,
+        profile_hooks,
+        tls_backend,
+        tls_include_dir,
+        tls_lib_dir,
+        ffi_export_script,
+    );
+    _ = installCoreFfiPackage(
+        b,
+        ffi_package_libs.static_lib,
+        ffi_package_libs.shared_lib,
+        tls_backend,
+        tls_lib_dir,
     );
     addCSourceFiles(exe, .{
         .root = b.path("."),

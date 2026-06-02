@@ -25,6 +25,7 @@ site/next/.next/
 site/next/out/
 site/next/node_modules/
 site/next/tsconfig.tsbuildinfo
+demo/next/.next/
 site/next/public/perf-results.json
 site/next/public/perf-history.json
 site/next/public/coverage-results.json

@@ -7,6 +7,22 @@
 extern "C" {
 #endif
 
+#ifndef COQUIC_FFI_API
+#if defined(_WIN32)
+#if defined(COQUIC_FFI_BUILD)
+#define COQUIC_FFI_API __declspec(dllexport)
+#elif defined(COQUIC_FFI_USE_SHARED)
+#define COQUIC_FFI_API __declspec(dllimport)
+#else
+#define COQUIC_FFI_API
+#endif
+#elif defined(COQUIC_FFI_BUILD)
+#define COQUIC_FFI_API __attribute__((visibility("default")))
+#else
+#define COQUIC_FFI_API
+#endif
+#endif
+
 #define COQUIC_FFI_ABI_VERSION 1u
 
 typedef struct coquic_endpoint coquic_endpoint_t;
@@ -380,70 +396,74 @@ typedef struct coquic_effect {
     } as;
 } coquic_effect_t;
 
-uint32_t coquic_ffi_abi_version(void);
-void coquic_transport_config_init(coquic_transport_config_t *config);
-void coquic_endpoint_config_init(coquic_endpoint_config_t *config);
-void coquic_client_connection_config_init(coquic_client_connection_config_t *config);
+COQUIC_FFI_API uint32_t coquic_ffi_abi_version(void);
+COQUIC_FFI_API void coquic_transport_config_init(coquic_transport_config_t *config);
+COQUIC_FFI_API void coquic_endpoint_config_init(coquic_endpoint_config_t *config);
+COQUIC_FFI_API void coquic_client_connection_config_init(coquic_client_connection_config_t *config);
 
-coquic_status_t coquic_endpoint_create(const coquic_endpoint_config_t *config,
-                                       coquic_endpoint_t **out_endpoint);
-void coquic_endpoint_destroy(coquic_endpoint_t *endpoint);
+COQUIC_FFI_API coquic_status_t coquic_endpoint_create(const coquic_endpoint_config_t *config,
+                                                      coquic_endpoint_t **out_endpoint);
+COQUIC_FFI_API void coquic_endpoint_destroy(coquic_endpoint_t *endpoint);
 
-coquic_status_t coquic_endpoint_open_connection(coquic_endpoint_t *endpoint,
-                                                const coquic_open_connection_t *input,
-                                                coquic_time_us_t now, coquic_result_t **out_result);
-coquic_status_t coquic_endpoint_input_datagram(coquic_endpoint_t *endpoint,
-                                               const coquic_inbound_datagram_t *input,
-                                               coquic_time_us_t now, coquic_result_t **out_result);
-coquic_status_t coquic_endpoint_update_path_mtu(coquic_endpoint_t *endpoint,
-                                                const coquic_path_mtu_update_t *input,
-                                                coquic_time_us_t now, coquic_result_t **out_result);
-coquic_status_t coquic_endpoint_timer_expired(coquic_endpoint_t *endpoint, coquic_time_us_t now,
-                                              coquic_result_t **out_result);
+COQUIC_FFI_API coquic_status_t
+coquic_endpoint_open_connection(coquic_endpoint_t *endpoint, const coquic_open_connection_t *input,
+                                coquic_time_us_t now, coquic_result_t **out_result);
+COQUIC_FFI_API coquic_status_t
+coquic_endpoint_input_datagram(coquic_endpoint_t *endpoint, const coquic_inbound_datagram_t *input,
+                               coquic_time_us_t now, coquic_result_t **out_result);
+COQUIC_FFI_API coquic_status_t
+coquic_endpoint_update_path_mtu(coquic_endpoint_t *endpoint, const coquic_path_mtu_update_t *input,
+                                coquic_time_us_t now, coquic_result_t **out_result);
+COQUIC_FFI_API coquic_status_t coquic_endpoint_timer_expired(coquic_endpoint_t *endpoint,
+                                                             coquic_time_us_t now,
+                                                             coquic_result_t **out_result);
 
-coquic_status_t coquic_connection_send_stream(coquic_endpoint_t *endpoint,
-                                              coquic_connection_handle_t connection,
-                                              const coquic_send_stream_data_t *input,
-                                              coquic_time_us_t now, coquic_result_t **out_result);
-coquic_status_t coquic_connection_send_datagram(coquic_endpoint_t *endpoint,
-                                                coquic_connection_handle_t connection,
-                                                const coquic_send_datagram_data_t *input,
-                                                coquic_time_us_t now, coquic_result_t **out_result);
-coquic_status_t coquic_connection_reset_stream(coquic_endpoint_t *endpoint,
-                                               coquic_connection_handle_t connection,
-                                               const coquic_reset_stream_t *input,
-                                               coquic_time_us_t now, coquic_result_t **out_result);
-coquic_status_t coquic_connection_stop_sending(coquic_endpoint_t *endpoint,
-                                               coquic_connection_handle_t connection,
-                                               const coquic_stop_sending_t *input,
-                                               coquic_time_us_t now, coquic_result_t **out_result);
-coquic_status_t coquic_connection_close(coquic_endpoint_t *endpoint,
-                                        coquic_connection_handle_t connection,
-                                        const coquic_close_connection_t *input,
-                                        coquic_time_us_t now, coquic_result_t **out_result);
-coquic_status_t coquic_connection_request_key_update(coquic_endpoint_t *endpoint,
-                                                     coquic_connection_handle_t connection,
-                                                     coquic_time_us_t now,
-                                                     coquic_result_t **out_result);
-coquic_status_t
-coquic_connection_request_migration(coquic_endpoint_t *endpoint,
-                                    coquic_connection_handle_t connection,
-                                    const coquic_request_connection_migration_t *input,
-                                    coquic_time_us_t now, coquic_result_t **out_result);
+COQUIC_FFI_API coquic_status_t coquic_connection_send_stream(coquic_endpoint_t *endpoint,
+                                                             coquic_connection_handle_t connection,
+                                                             const coquic_send_stream_data_t *input,
+                                                             coquic_time_us_t now,
+                                                             coquic_result_t **out_result);
+COQUIC_FFI_API coquic_status_t coquic_connection_send_datagram(
+    coquic_endpoint_t *endpoint, coquic_connection_handle_t connection,
+    const coquic_send_datagram_data_t *input, coquic_time_us_t now, coquic_result_t **out_result);
+COQUIC_FFI_API coquic_status_t coquic_connection_reset_stream(coquic_endpoint_t *endpoint,
+                                                              coquic_connection_handle_t connection,
+                                                              const coquic_reset_stream_t *input,
+                                                              coquic_time_us_t now,
+                                                              coquic_result_t **out_result);
+COQUIC_FFI_API coquic_status_t coquic_connection_stop_sending(coquic_endpoint_t *endpoint,
+                                                              coquic_connection_handle_t connection,
+                                                              const coquic_stop_sending_t *input,
+                                                              coquic_time_us_t now,
+                                                              coquic_result_t **out_result);
+COQUIC_FFI_API coquic_status_t coquic_connection_close(coquic_endpoint_t *endpoint,
+                                                       coquic_connection_handle_t connection,
+                                                       const coquic_close_connection_t *input,
+                                                       coquic_time_us_t now,
+                                                       coquic_result_t **out_result);
+COQUIC_FFI_API coquic_status_t coquic_connection_request_key_update(
+    coquic_endpoint_t *endpoint, coquic_connection_handle_t connection, coquic_time_us_t now,
+    coquic_result_t **out_result);
+COQUIC_FFI_API coquic_status_t coquic_connection_request_migration(
+    coquic_endpoint_t *endpoint, coquic_connection_handle_t connection,
+    const coquic_request_connection_migration_t *input, coquic_time_us_t now,
+    coquic_result_t **out_result);
 
-size_t coquic_endpoint_connection_count(const coquic_endpoint_t *endpoint);
-uint8_t coquic_endpoint_has_send_continuation_pending(const coquic_endpoint_t *endpoint);
-coquic_optional_time_us_t coquic_endpoint_next_wakeup(const coquic_endpoint_t *endpoint);
+COQUIC_FFI_API size_t coquic_endpoint_connection_count(const coquic_endpoint_t *endpoint);
+COQUIC_FFI_API uint8_t
+coquic_endpoint_has_send_continuation_pending(const coquic_endpoint_t *endpoint);
+COQUIC_FFI_API coquic_optional_time_us_t
+coquic_endpoint_next_wakeup(const coquic_endpoint_t *endpoint);
 
-void coquic_result_destroy(coquic_result_t *result);
-size_t coquic_result_effect_count(const coquic_result_t *result);
-coquic_status_t coquic_result_effect_at(const coquic_result_t *result, size_t index,
-                                        coquic_effect_t *out_effect);
-coquic_optional_time_us_t coquic_result_next_wakeup(const coquic_result_t *result);
-uint8_t coquic_result_has_local_error(const coquic_result_t *result);
-coquic_status_t coquic_result_local_error(const coquic_result_t *result,
-                                          coquic_local_error_t *out_error);
-uint8_t coquic_result_send_continuation_pending(const coquic_result_t *result);
+COQUIC_FFI_API void coquic_result_destroy(coquic_result_t *result);
+COQUIC_FFI_API size_t coquic_result_effect_count(const coquic_result_t *result);
+COQUIC_FFI_API coquic_status_t coquic_result_effect_at(const coquic_result_t *result, size_t index,
+                                                       coquic_effect_t *out_effect);
+COQUIC_FFI_API coquic_optional_time_us_t coquic_result_next_wakeup(const coquic_result_t *result);
+COQUIC_FFI_API uint8_t coquic_result_has_local_error(const coquic_result_t *result);
+COQUIC_FFI_API coquic_status_t coquic_result_local_error(const coquic_result_t *result,
+                                                         coquic_local_error_t *out_error);
+COQUIC_FFI_API uint8_t coquic_result_send_continuation_pending(const coquic_result_t *result);
 
 #ifdef __cplusplus
 }

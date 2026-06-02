@@ -59,11 +59,6 @@ function upstreamHeaders(request: NextRequest) {
   copyHeader(request, headers, 'content-type');
   copyHeader(request, headers, 'user-agent');
   copyHeader(request, headers, 'x-session-id');
-
-  const forwardedFor = request.headers.get('x-forwarded-for');
-  if (forwardedFor) {
-    headers.set('x-forwarded-for', forwardedFor);
-  }
   return headers;
 }
 

@@ -336,7 +336,11 @@
             "-Dtarget=${profile.zigTarget}"
           ]
         );
-      mkCoquicPackage = profile:
+      mkCoquicPackage =
+        {
+          profile,
+          includeFfiSdk ? false,
+        }:
         pkgs.stdenv.mkDerivation {
           pname = "coquic-${profile.name}";
           version = "dev";
@@ -363,15 +367,26 @@
             export HOME="$TMPDIR"
             ${mkCoquicEnv profile}
             zig build ${mkZigBuildArgs profile}
+            ${lib.optionalString includeFfiSdk "zig build package ${mkZigBuildArgs profile}"}
             runHook postBuild
           '';
 
           installPhase = ''
             runHook preInstall
-            mkdir -p $out/bin
-            cp zig-out/bin/coquic $out/bin/coquic
-            cp zig-out/bin/h3-server $out/bin/h3-server
-            cp zig-out/bin/coquic-perf $out/bin/coquic-perf
+            ${
+              if includeFfiSdk then
+                ''
+                  mkdir -p $out
+                  cp -R zig-out/. $out/
+                ''
+              else
+                ''
+                  mkdir -p $out/bin
+                  cp zig-out/bin/coquic $out/bin/coquic
+                  cp zig-out/bin/h3-server $out/bin/h3-server
+                  cp zig-out/bin/coquic-perf $out/bin/coquic-perf
+                ''
+            }
             runHook postInstall
           '';
         };
@@ -523,13 +538,29 @@
               echo "${banner}"
             '';
       };
-      quictlsPackage = mkCoquicPackage quictlsProfile;
-      quictlsMuslPackage = mkCoquicPackage quictlsMuslProfile;
-      quictlsMuslPerfPackage = mkCoquicPackage quictlsMuslPerfProfile;
-      boringsslPackage = mkCoquicPackage boringsslProfile;
-      boringsslMuslPackage = mkCoquicPackage boringsslMuslProfile;
-      boringsslMuslPerfPackage = mkCoquicPackage boringsslMuslPerfProfile;
-      boringsslMuslProfileHooksPackage = mkCoquicPackage boringsslMuslProfileHooksProfile;
+      quictlsPackage = mkCoquicPackage {
+        profile = quictlsProfile;
+        includeFfiSdk = true;
+      };
+      quictlsMuslPackage = mkCoquicPackage {
+        profile = quictlsMuslProfile;
+      };
+      quictlsMuslPerfPackage = mkCoquicPackage {
+        profile = quictlsMuslPerfProfile;
+      };
+      boringsslPackage = mkCoquicPackage {
+        profile = boringsslProfile;
+        includeFfiSdk = true;
+      };
+      boringsslMuslPackage = mkCoquicPackage {
+        profile = boringsslMuslProfile;
+      };
+      boringsslMuslPerfPackage = mkCoquicPackage {
+        profile = boringsslMuslPerfProfile;
+      };
+      boringsslMuslProfileHooksPackage = mkCoquicPackage {
+        profile = boringsslMuslProfileHooksProfile;
+      };
       quicgoPerfClient = pkgs.buildGoModule {
         pname = "quicgo-perf-client";
         version = "dev";

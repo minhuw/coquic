@@ -258,6 +258,27 @@ void ReceivedPacketHistory::on_ack_sent() {
     ack_eliciting_packets_since_last_ack_ = 0;
 }
 
+void ReceivedPacketHistory::retire_acknowledged_ranges_up_to(std::uint64_t largest_acknowledged) {
+    const auto retired_floor = largest_acknowledged == std::numeric_limits<std::uint64_t>::max()
+                                   ? std::numeric_limits<std::uint64_t>::max()
+                                   : largest_acknowledged + 1;
+    least_untracked_packet_number_ = std::max(least_untracked_packet_number_, retired_floor);
+
+    for (auto it = ranges_.begin(); it != ranges_.end();) {
+        if (it->second.largest_packet_number <= largest_acknowledged) {
+            it = ranges_.erase(it);
+            continue;
+        }
+        if (it->first <= largest_acknowledged) {
+            auto range = it->second;
+            ranges_.erase(it);
+            ranges_.emplace(retired_floor, range);
+            break;
+        }
+        break;
+    }
+}
+
 PacketSpaceRecovery::PacketSpaceRecovery() : sent_packets_{this} {
 }
 
@@ -605,6 +626,7 @@ void PacketSpaceRecovery::reclaim_retired_packet_storage(SentPacketRecord &packe
     std::vector<StreamFrameSendMetadata>().swap(packet.stream_frame_metadata);
     std::vector<StreamFrameSendFragment>().swap(packet.stream_fragments);
     packet.qlog_packet_snapshot.reset();
+    packet.largest_received_packet_number_acked.reset();
 }
 
 std::unique_ptr<SentPacketRecord>

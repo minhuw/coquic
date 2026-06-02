@@ -8,7 +8,7 @@ Current scope:
 - store generated local state under `.rag`
 - expose query tooling through a repo-local Codex skill and CLI
 - share one localhost-only Qdrant dev backend across multiple Codex sessions
-- expose a public-demo QA API that uses hosted embeddings, Qdrant, and OpenRouter free chat models
+- expose a public-demo QA API that uses hosted embeddings, Qdrant, and DeepSeek V4 Pro
 
 Setup:
 
@@ -37,6 +37,7 @@ embeddings and Qdrant Cloud:
 
 ```bash
 export OPENROUTER_API_KEY=...
+export DEEPSEEK_API_KEY=...
 export COQUIC_QDRANT_URL=https://<cluster>.<region>.cloud.qdrant.io
 export COQUIC_QDRANT_API_KEY=...
 
@@ -137,6 +138,7 @@ Public QA API:
 
 ```bash
 export OPENROUTER_API_KEY=...
+export DEEPSEEK_API_KEY=...
 export COQUIC_QDRANT_URL=https://<cluster>.<region>.cloud.qdrant.io
 export COQUIC_QDRANT_API_KEY=...
 
@@ -146,18 +148,24 @@ rag/scripts/run-qa-api
 The API listens on `127.0.0.1:8787` by default and exposes:
 
 - `GET /api/health`
-- `POST /api/qa` with `{ "question": "...", "model": "openai/gpt-oss-120b:free" }`
+- `POST /api/qa` with `{ "question": "...", "model": "deepseek-v4-pro" }`
 
 Cost controls are applied before generation: request size validation,
-per-session/IP rate limiting, OpenRouter relevance classification, retrieval
-confidence gating, a free-model allowlist, capped context, and capped output tokens.
+per-session rate limiting, per-IP rate limiting, a shared DeepSeek request
+budget, DeepSeek random-question generation, DeepSeek relevance classification,
+retrieval confidence gating, a DeepSeek V4 Pro answer-model allowlist, capped
+context, and capped output tokens.
+
+The public-demo rate limits are fixed in code: 12 QA requests per session per
+minute, 24 QA requests per IP per minute, 10 random-question requests per
+session per minute, 20 random-question requests per IP per minute, and a shared
+90-call DeepSeek budget per minute. A QA request reserves 3 DeepSeek budget
+units; a random-question request reserves 1.
 
 Useful environment variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `COQUIC_QA_RATE_LIMIT` | `12` | Requests per window |
-| `COQUIC_QA_RATE_WINDOW_SECONDS` | `60` | Rate-limit window |
 | `COQUIC_QA_TOP_K` | `10` | Retrieved sections sent to the LLM |
 | `COQUIC_QA_MAX_CONTEXT_CHARS` | `6500` | Context cap before generation |
 | `COQUIC_QA_MAX_OUTPUT_TOKENS` | `650` | Generation cap |

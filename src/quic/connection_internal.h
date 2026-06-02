@@ -3713,6 +3713,7 @@ inline bool packet_has_only_stream_frame_metadata(const SentPacketRecord &packet
            packet.stream_data_blocked_frames.empty() && packet.max_data_frame == std::nullopt &&
            packet.data_blocked_frame == std::nullopt && !packet.has_handshake_done &&
            !packet.is_pmtu_probe && !packet.has_ping && !packet.force_ack &&
+           !packet.largest_received_packet_number_acked.has_value() &&
            packet.qlog_packet_snapshot == nullptr && !packet.qlog_pto_probe &&
            packet.stream_fragments.empty() && sent_packet_has_stream_frames(packet);
 }

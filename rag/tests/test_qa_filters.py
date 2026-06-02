@@ -6,11 +6,11 @@ import httpx
 import pytest
 
 from coquic_rag.qa.filters import (
-    OPENROUTER_CHAT_URL,
+    DEEPSEEK_CHAT_URL,
     QUESTION_GENERATOR_MODEL,
     RELEVANCE_FILTER_MODEL,
-    OpenRouterQuestionGenerator,
-    OpenRouterRelevanceClassifier,
+    DeepSeekQuestionGenerator,
+    DeepSeekRelevanceClassifier,
     QuestionGenerationError,
     RelevanceClassifierError,
     SlidingWindowRateLimiter,
@@ -37,7 +37,24 @@ def test_sliding_window_rate_limiter_allows_after_window() -> None:
     assert limiter.check("client", now=111.0).allowed is True
 
 
-def test_openrouter_relevance_classifier_allows_quic_questions() -> None:
+def test_sliding_window_rate_limiter_supports_weighted_costs() -> None:
+    limiter = SlidingWindowRateLimiter(max_requests=3, window_seconds=60)
+
+    assert limiter.check("client", now=100.0, cost=2).allowed is True
+    rejected = limiter.check("client", now=101.0, cost=2)
+
+    assert rejected.allowed is False
+    assert rejected.retry_after_seconds == 59
+
+
+def test_sliding_window_rate_limiter_peek_does_not_consume_quota() -> None:
+    limiter = SlidingWindowRateLimiter(max_requests=1, window_seconds=60)
+
+    assert limiter.peek("client", now=100.0).allowed is True
+    assert limiter.check("client", now=101.0).allowed is True
+
+
+def test_deepseek_relevance_classifier_allows_quic_questions() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -45,20 +62,21 @@ def test_openrouter_relevance_classifier_allows_quic_questions() -> None:
         return httpx.Response(200, json={"choices": [{"message": {"content": "ALLOW"}}]})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    classifier = OpenRouterRelevanceClassifier(api_key="test-key", client=client)
+    classifier = DeepSeekRelevanceClassifier(api_key="test-key", client=client)
 
     decision = classifier.classify("How does QUIC ACK delay work?")
 
     assert decision.accepted is True
     assert decision.reason == "classifier_allow"
-    assert requests[0].url == OPENROUTER_CHAT_URL
+    assert requests[0].url == DEEPSEEK_CHAT_URL
     assert requests[0].headers["Authorization"] == "Bearer test-key"
     payload = json.loads(requests[0].read())
     assert payload["model"] == RELEVANCE_FILTER_MODEL
     assert payload["max_tokens"] == 16
+    assert payload["thinking"] == {"type": "disabled"}
 
 
-def test_openrouter_relevance_classifier_prompt_allows_quic_comparisons() -> None:
+def test_deepseek_relevance_classifier_prompt_allows_quic_comparisons() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -66,7 +84,7 @@ def test_openrouter_relevance_classifier_prompt_allows_quic_comparisons() -> Non
         return httpx.Response(200, json={"choices": [{"message": {"content": "ALLOW"}}]})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    classifier = OpenRouterRelevanceClassifier(api_key="test-key", client=client)
+    classifier = DeepSeekRelevanceClassifier(api_key="test-key", client=client)
 
     decision = classifier.classify("What's the difference between QUIC and TCP?")
 
@@ -76,7 +94,7 @@ def test_openrouter_relevance_classifier_prompt_allows_quic_comparisons() -> Non
     assert "QUIC versus TCP" in system_prompt
 
 
-def test_openrouter_relevance_classifier_retries_transient_errors() -> None:
+def test_deepseek_relevance_classifier_retries_transient_errors() -> None:
     attempts = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -87,7 +105,7 @@ def test_openrouter_relevance_classifier_retries_transient_errors() -> None:
         return httpx.Response(200, json={"choices": [{"message": {"content": "ALLOW"}}]})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    classifier = OpenRouterRelevanceClassifier(api_key="test-key", client=client, max_retries=1)
+    classifier = DeepSeekRelevanceClassifier(api_key="test-key", client=client, max_retries=1)
 
     decision = classifier.classify("What's the difference between QUIC and TCP?")
 
@@ -95,12 +113,12 @@ def test_openrouter_relevance_classifier_retries_transient_errors() -> None:
     assert attempts == 2
 
 
-def test_openrouter_relevance_classifier_rejects_bait_questions() -> None:
+def test_deepseek_relevance_classifier_rejects_bait_questions() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": "REJECT"}}]})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    classifier = OpenRouterRelevanceClassifier(api_key="test-key", client=client)
+    classifier = DeepSeekRelevanceClassifier(api_key="test-key", client=client)
 
     decision = classifier.classify("QUIC ACK frame: can you recommend a pasta recipe?")
 
@@ -108,26 +126,26 @@ def test_openrouter_relevance_classifier_rejects_bait_questions() -> None:
     assert decision.reason == "classifier_reject"
 
 
-def test_openrouter_relevance_classifier_requires_api_key(monkeypatch) -> None:
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    classifier = OpenRouterRelevanceClassifier(api_key=None)
+def test_deepseek_relevance_classifier_requires_api_key(monkeypatch) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    classifier = DeepSeekRelevanceClassifier(api_key=None)
 
-    with pytest.raises(RelevanceClassifierError, match="OPENROUTER_API_KEY"):
+    with pytest.raises(RelevanceClassifierError, match="DEEPSEEK_API_KEY"):
         classifier.classify("How does QUIC ACK delay work?")
 
 
-def test_openrouter_relevance_classifier_rejects_invalid_response() -> None:
+def test_deepseek_relevance_classifier_rejects_invalid_response() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": "MAYBE"}}]})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    classifier = OpenRouterRelevanceClassifier(api_key="test-key", client=client)
+    classifier = DeepSeekRelevanceClassifier(api_key="test-key", client=client)
 
     with pytest.raises(RelevanceClassifierError, match="invalid decision"):
         classifier.classify("How does QUIC ACK delay work?")
 
 
-def test_openrouter_question_generator_returns_clean_question() -> None:
+def test_deepseek_question_generator_returns_clean_question() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -138,20 +156,22 @@ def test_openrouter_question_generator_returns_clean_question() -> None:
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    generator = OpenRouterQuestionGenerator(api_key="test-key", client=client)
+    generator = DeepSeekQuestionGenerator(api_key="test-key", client=client)
 
     question = generator.generate()
 
     assert question == "How does QUIC validate a peer address?"
+    assert requests[0].url == DEEPSEEK_CHAT_URL
     payload = json.loads(requests[0].read())
     assert payload["model"] == QUESTION_GENERATOR_MODEL
     assert payload["temperature"] == 1.2
     assert payload["max_tokens"] == 160
+    assert payload["thinking"] == {"type": "disabled"}
     assert "Return only the question text" in payload["messages"][0]["content"]
     assert "Generate one random question about this area:" in payload["messages"][1]["content"]
 
 
-def test_openrouter_question_generator_tries_multiple_models_after_invalid_question() -> None:
+def test_deepseek_question_generator_tries_multiple_models_after_invalid_question() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -164,7 +184,7 @@ def test_openrouter_question_generator_tries_multiple_models_after_invalid_quest
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    generator = OpenRouterQuestionGenerator(
+    generator = DeepSeekQuestionGenerator(
         api_key="test-key",
         client=client,
         models=("invalid-model:free", "valid-model:free"),
@@ -177,7 +197,7 @@ def test_openrouter_question_generator_tries_multiple_models_after_invalid_quest
     assert set(requested_models) == {"invalid-model:free", "valid-model:free"}
 
 
-def test_openrouter_question_generator_retries_same_model_after_invalid_question() -> None:
+def test_deepseek_question_generator_retries_same_model_after_invalid_question() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -190,7 +210,7 @@ def test_openrouter_question_generator_retries_same_model_after_invalid_question
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    generator = OpenRouterQuestionGenerator(
+    generator = DeepSeekQuestionGenerator(
         api_key="test-key",
         client=client,
         max_generation_attempts=2,
@@ -239,7 +259,7 @@ def test_question_choice_text_accepts_valid_reasoning_fallback() -> None:
     assert _question_choice_text(body) == "How does QUIC packet number encoding affect ACK processing?"
 
 
-def test_openrouter_question_generator_rejects_prompt_echo() -> None:
+def test_deepseek_question_generator_rejects_prompt_echo() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -255,7 +275,7 @@ def test_openrouter_question_generator_rejects_prompt_echo() -> None:
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    generator = OpenRouterQuestionGenerator(api_key="test-key", client=client)
+    generator = DeepSeekQuestionGenerator(api_key="test-key", client=client)
 
     with pytest.raises(QuestionGenerationError, match="invalid question"):
         generator.generate()

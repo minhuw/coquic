@@ -18,8 +18,10 @@ include/coquic/ public API
 |   Lowest layer: sans-I/O endpoint, typed inputs, typed effects.
 +-- coquic::quic
 |   Transport facade: endpoint, connection, and stream handles over core.
-`-- coquic::http3
-   Application protocol layer: HTTP/3 state that emits QUIC connection inputs.
++-- coquic::http3
+|   Application protocol layer: HTTP/3 state that emits QUIC connection inputs.
+`-- C FFI
+    C ABI wrapper over the sans-I/O endpoint for native bindings.
 ```
 
 `coquic::quic` wraps `coquic::core`. `coquic::http3` composes with either
@@ -29,6 +31,7 @@ to the matching QUIC connection.
 ## Contents
 
 - [Public API](api/public-api.md): API overview and compatibility boundary.
+- [C FFI API](api/c-ffi.md): C ABI, ownership, package names, and event loop.
 - [Core API](api/core.md): sans-I/O endpoint, inputs, effects, and timers.
 - [QUIC Facade API](api/quic.md): transport facade over the core endpoint.
 - [HTTP/3 API](api/http3.md): request/response layer and QUIC input handoff.

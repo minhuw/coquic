@@ -60,6 +60,7 @@ struct SentPacketRecord { // NOLINT(clang-analyzer-optin.performance.Padding)
     bool has_ping = false;
     std::size_t bytes_in_flight = 0;
     bool force_ack = false;
+    std::optional<std::uint64_t> largest_received_packet_number_acked;
     QuicPathId path_id = 0;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
     std::uint64_t delivered = 0;
@@ -138,6 +139,7 @@ class ReceivedPacketHistory {
     std::optional<AckFrame> build_ack_frame(std::uint64_t ack_delay_exponent, QuicCoreTimePoint now,
                                             bool allow_non_pending = false) const;
     void on_ack_sent();
+    void retire_acknowledged_ranges_up_to(std::uint64_t largest_acknowledged);
 
   private:
     struct ReceivedPacketRange {

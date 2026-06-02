@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <memory>
@@ -56,7 +57,11 @@ template <typename T> class CoreEffectAllocator {
 
     [[nodiscard]] T *allocate(std::size_t count) {
         if (count > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+#if defined(__cpp_exceptions)
             throw std::bad_array_new_length();
+#else
+            std::abort();
+#endif
         }
         return static_cast<T *>(
             detail::allocate_core_effect_storage(detail::CoreEffectStorageBytes{count * sizeof(T)},

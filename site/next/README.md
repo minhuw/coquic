@@ -40,8 +40,10 @@ Open `http://127.0.0.1:3001/qa`.
 For deployment, `h3-server` reverse-proxies all public traffic to the local
 Next.js server, and Next proxies `/rag-api/*` to FastAPI. Keep both Node/Next
 and FastAPI bound to loopback on the server. The deploy runner starts FastAPI
-when `OPENROUTER_API_KEY`, `COQUIC_QDRANT_URL`, and `COQUIC_QDRANT_API_KEY`
-are available in `/etc/coquic-demo/rag.env`.
+when `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `COQUIC_QDRANT_URL`, and
+`COQUIC_QDRANT_API_KEY` are available in `/etc/coquic-demo/rag.env`.
+The `/rag-api/*` proxy does not forward `X-Forwarded-For`, because the public
+request header is spoofable in this deployment path.
 
 Run a full Next.js development server behind `h3-server`:
 

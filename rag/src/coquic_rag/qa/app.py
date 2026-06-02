@@ -4,6 +4,8 @@ import hashlib
 import json
 import logging
 import os
+import threading
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -21,21 +23,21 @@ from coquic_rag.embed.provider import (
 )
 from coquic_rag.query.service import get_index_status
 from coquic_rag.qa.filters import (
+    DeepSeekRelevanceClassifier,
+    DeepSeekQuestionGenerator,
     MAX_QUESTION_CHARS,
     RELEVANCE_FILTER_MODEL,
-    OpenRouterRelevanceClassifier,
-    OpenRouterQuestionGenerator,
     QuestionGenerationError,
     QUESTION_GENERATOR_MODEL,
     SlidingWindowRateLimiter,
     is_valid_generated_question,
     normalize_question,
 )
-from coquic_rag.qa.openrouter_chat import (
+from coquic_rag.qa.deepseek_chat import (
+    ANSWER_MODELS,
     DEFAULT_ANSWER_MODEL,
-    FREE_ANSWER_MODELS,
     ChatUsage,
-    OpenRouterChatClient,
+    DeepSeekChatClient,
     normalize_answer_model,
 )
 from coquic_rag.qa.service import QaConfig, QaResponse, QaService
@@ -50,6 +52,27 @@ DEFAULT_ALLOWED_ORIGINS = (
 )
 QA_COLLECTION_NAME = "quic_sections"
 LOGGER = logging.getLogger(__name__)
+GLOBAL_DEEPSEEK_RATE_KEY = "deepseek:global"
+QA_RATE_LIMIT_REQUESTS = 12
+QA_RATE_WINDOW_SECONDS = 60
+QA_IP_RATE_LIMIT_REQUESTS = 24
+QA_IP_RATE_WINDOW_SECONDS = 60
+RANDOM_QUESTION_RATE_LIMIT_REQUESTS = 10
+RANDOM_QUESTION_RATE_WINDOW_SECONDS = 60
+RANDOM_QUESTION_IP_RATE_LIMIT_REQUESTS = 20
+RANDOM_QUESTION_IP_RATE_WINDOW_SECONDS = 60
+DEEPSEEK_RATE_LIMIT_REQUESTS = 90
+DEEPSEEK_RATE_WINDOW_SECONDS = 60
+QA_DEEPSEEK_COST = 3
+RANDOM_QUESTION_DEEPSEEK_COST = 1
+RATE_LIMIT_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class ClientIdentity:
+    ip_key: str
+    session_key: str | None
+    user_key: str
 
 
 class QaRequest(BaseModel):
@@ -128,8 +151,8 @@ def qa_service() -> QaService:
         collection_name=QA_COLLECTION_NAME,
         require_artifacts_for_search=False,
     )
-    llm_client = OpenRouterChatClient(model=DEFAULT_ANSWER_MODEL)
-    relevance_classifier = OpenRouterRelevanceClassifier(model=RELEVANCE_FILTER_MODEL)
+    llm_client = DeepSeekChatClient(model=DEFAULT_ANSWER_MODEL)
+    relevance_classifier = DeepSeekRelevanceClassifier(model=RELEVANCE_FILTER_MODEL)
     return QaService(
         query_service=query_service,
         llm_client=llm_client,
@@ -141,27 +164,51 @@ def qa_service() -> QaService:
 @lru_cache
 def rate_limiter() -> SlidingWindowRateLimiter:
     return SlidingWindowRateLimiter(
-        max_requests=_env_int("COQUIC_QA_RATE_LIMIT", 12),
-        window_seconds=_env_int("COQUIC_QA_RATE_WINDOW_SECONDS", 60),
+        max_requests=QA_RATE_LIMIT_REQUESTS,
+        window_seconds=QA_RATE_WINDOW_SECONDS,
+    )
+
+
+@lru_cache
+def qa_ip_rate_limiter() -> SlidingWindowRateLimiter:
+    return SlidingWindowRateLimiter(
+        max_requests=QA_IP_RATE_LIMIT_REQUESTS,
+        window_seconds=QA_IP_RATE_WINDOW_SECONDS,
     )
 
 
 @lru_cache
 def question_rate_limiter() -> SlidingWindowRateLimiter:
     return SlidingWindowRateLimiter(
-        max_requests=_env_int("COQUIC_RANDOM_QUESTION_RATE_LIMIT", 10),
-        window_seconds=_env_int("COQUIC_RANDOM_QUESTION_RATE_WINDOW_SECONDS", 60),
+        max_requests=RANDOM_QUESTION_RATE_LIMIT_REQUESTS,
+        window_seconds=RANDOM_QUESTION_RATE_WINDOW_SECONDS,
     )
 
 
 @lru_cache
-def relevance_classifier() -> OpenRouterRelevanceClassifier:
-    return OpenRouterRelevanceClassifier(model=RELEVANCE_FILTER_MODEL)
+def question_ip_rate_limiter() -> SlidingWindowRateLimiter:
+    return SlidingWindowRateLimiter(
+        max_requests=RANDOM_QUESTION_IP_RATE_LIMIT_REQUESTS,
+        window_seconds=RANDOM_QUESTION_IP_RATE_WINDOW_SECONDS,
+    )
 
 
 @lru_cache
-def question_generator() -> OpenRouterQuestionGenerator:
-    return OpenRouterQuestionGenerator(
+def deepseek_rate_limiter() -> SlidingWindowRateLimiter:
+    return SlidingWindowRateLimiter(
+        max_requests=DEEPSEEK_RATE_LIMIT_REQUESTS,
+        window_seconds=DEEPSEEK_RATE_WINDOW_SECONDS,
+    )
+
+
+@lru_cache
+def relevance_classifier() -> DeepSeekRelevanceClassifier:
+    return DeepSeekRelevanceClassifier(model=RELEVANCE_FILTER_MODEL)
+
+
+@lru_cache
+def question_generator() -> DeepSeekQuestionGenerator:
+    return DeepSeekQuestionGenerator(
         model=QUESTION_GENERATOR_MODEL,
         timeout=12,
         max_generation_attempts=5,
@@ -207,14 +254,11 @@ def create_app() -> FastAPI:
         service: QaService = Depends(qa_service),
     ) -> QaResponsePayload:
         normalized_question = normalize_question(payload.question)
-        client_key = _client_key(request, x_session_id)
-        limit = rate_limiter().check(client_key)
-        if not limit.allowed:
-            raise HTTPException(
-                status_code=429,
-                detail="rate limit exceeded",
-                headers={"Retry-After": str(limit.retry_after_seconds)},
-            )
+        client_identity = _client_identity(request, x_session_id)
+        _enforce_rate_limits(
+            _qa_rate_limit_checks(client_identity),
+            deepseek_cost=QA_DEEPSEEK_COST,
+        )
         try:
             answer_model = normalize_answer_model(payload.model)
         except ValueError as error:
@@ -223,7 +267,7 @@ def create_app() -> FastAPI:
         result = await run_in_threadpool(
             service.answer,
             normalized_question,
-            user_id=_hashed_user_id(client_key),
+            user_id=_hashed_user_id(client_identity.user_key),
             model=answer_model,
         )
         return _to_payload(result)
@@ -236,14 +280,11 @@ def create_app() -> FastAPI:
         service: QaService = Depends(qa_service),
     ) -> StreamingResponse:
         normalized_question = normalize_question(payload.question)
-        client_key = _client_key(request, x_session_id)
-        limit = rate_limiter().check(client_key)
-        if not limit.allowed:
-            raise HTTPException(
-                status_code=429,
-                detail="rate limit exceeded",
-                headers={"Retry-After": str(limit.retry_after_seconds)},
-            )
+        client_identity = _client_identity(request, x_session_id)
+        _enforce_rate_limits(
+            _qa_rate_limit_checks(client_identity),
+            deepseek_cost=QA_DEEPSEEK_COST,
+        )
         try:
             answer_model = normalize_answer_model(payload.model)
         except ValueError as error:
@@ -253,7 +294,7 @@ def create_app() -> FastAPI:
             try:
                 for event in service.answer_stream(
                     normalized_question,
-                    user_id=_hashed_user_id(client_key),
+                    user_id=_hashed_user_id(client_identity.user_key),
                     model=answer_model,
                 ):
                     yield _sse(event.event, event.payload)
@@ -277,16 +318,13 @@ def create_app() -> FastAPI:
     def random_question(
         request: Request,
         x_session_id: Annotated[str | None, Header()] = None,
-        generator: OpenRouterQuestionGenerator = Depends(question_generator),
+        generator: DeepSeekQuestionGenerator = Depends(question_generator),
     ) -> RandomQuestionPayload:
-        client_key = _client_key(request, x_session_id)
-        limit = question_rate_limiter().check(client_key)
-        if not limit.allowed:
-            raise HTTPException(
-                status_code=429,
-                detail="rate limit exceeded",
-                headers={"Retry-After": str(limit.retry_after_seconds)},
-            )
+        client_identity = _client_identity(request, x_session_id)
+        _enforce_rate_limits(
+            _random_question_rate_limit_checks(client_identity),
+            deepseek_cost=RANDOM_QUESTION_DEEPSEEK_COST,
+        )
 
         try:
             question = normalize_question(generator.generate())
@@ -326,7 +364,7 @@ def _to_payload(response: QaResponse) -> QaResponsePayload:
 
 
 def _answer_models_payload() -> list[dict[str, str]]:
-    return [{"id": model_id, "label": label} for model_id, label in FREE_ANSWER_MODELS]
+    return [{"id": model_id, "label": label} for model_id, label in ANSWER_MODELS]
 
 
 def _semantic_search_ready(status: object) -> bool:
@@ -355,16 +393,82 @@ def _allowed_origins() -> list[str]:
     return list(DEFAULT_ALLOWED_ORIGINS)
 
 
+def _qa_rate_limit_checks(
+    client_identity: ClientIdentity,
+) -> tuple[tuple[SlidingWindowRateLimiter, str, int], ...]:
+    return (
+        (rate_limiter(), client_identity.session_key or client_identity.ip_key, 1),
+        (qa_ip_rate_limiter(), client_identity.ip_key, 1),
+    )
+
+
+def _random_question_rate_limit_checks(
+    client_identity: ClientIdentity,
+) -> tuple[tuple[SlidingWindowRateLimiter, str, int], ...]:
+    return (
+        (question_rate_limiter(), client_identity.session_key or client_identity.ip_key, 1),
+        (question_ip_rate_limiter(), client_identity.ip_key, 1),
+    )
+
+
+def _enforce_rate_limits(
+    checks: tuple[tuple[SlidingWindowRateLimiter, str, int], ...],
+    *,
+    deepseek_cost: int,
+) -> None:
+    with RATE_LIMIT_LOCK:
+        all_checks = (
+            *checks,
+            (deepseek_rate_limiter(), GLOBAL_DEEPSEEK_RATE_KEY, deepseek_cost),
+        )
+        retry_after_seconds = 0
+        for limiter, key, cost in all_checks:
+            limit = limiter.peek(key, cost=cost)
+            if not limit.allowed:
+                retry_after_seconds = max(retry_after_seconds, limit.retry_after_seconds)
+
+        if retry_after_seconds > 0:
+            _raise_rate_limit(retry_after_seconds)
+
+        for limiter, key, cost in all_checks:
+            limit = limiter.check(key, cost=cost)
+            if not limit.allowed:
+                _raise_rate_limit(limit.retry_after_seconds)
+
+
+def _raise_rate_limit(retry_after_seconds: int) -> None:
+    raise HTTPException(
+        status_code=429,
+        detail="rate limit exceeded",
+        headers={"Retry-After": str(retry_after_seconds)},
+    )
+
+
+def _client_identity(request: Request, session_id: str | None) -> ClientIdentity:
+    ip_key = _client_ip_key(request)
+    session_key = _client_session_key(session_id)
+    user_key = "|".join(key for key in (ip_key, session_key) if key)
+    return ClientIdentity(ip_key=ip_key, session_key=session_key, user_key=user_key)
+
+
 def _client_key(request: Request, session_id: str | None) -> str:
-    if session_id:
-        return f"session:{session_id[:80]}"
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        forwarded_host = forwarded.split(",", 1)[0].strip()
-        return "ip:" + forwarded_host
+    return _client_identity(request, session_id).user_key
+
+
+def _client_session_key(session_id: str | None) -> str | None:
+    if session_id and session_id.strip():
+        return "session:" + _bounded_header_value(session_id)
+    return None
+
+
+def _client_ip_key(request: Request) -> str:
     if request.client is not None:
-        return "ip:" + request.client.host
+        return "ip:" + _bounded_header_value(request.client.host)
     return "ip:unknown"
+
+
+def _bounded_header_value(value: str) -> str:
+    return " ".join(value.strip().split())[:80] or "unknown"
 
 
 def _hashed_user_id(value: str) -> str:

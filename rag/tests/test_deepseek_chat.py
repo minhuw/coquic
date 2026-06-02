@@ -4,16 +4,16 @@ import json
 
 import httpx
 
-from coquic_rag.qa.openrouter_chat import (
+from coquic_rag.qa.deepseek_chat import (
     ChatStreamChunk,
-    OpenRouterChatClient,
+    DeepSeekChatClient,
     normalize_answer_model,
     _direct_system_prompt,
     _system_prompt,
 )
 
 
-def test_openrouter_chat_client_uses_free_model_and_tracks_response_model() -> None:
+def test_deepseek_chat_client_uses_v4_model_and_tracks_response_model() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -29,29 +29,31 @@ def test_openrouter_chat_client_uses_free_model_and_tracks_response_model() -> N
                         }
                     }
                 ],
-                "model": "openai/gpt-oss-120b:free",
+                "model": "deepseek-v4-pro",
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
             },
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    chat = OpenRouterChatClient(api_key="test-key", client=client)
+    chat = DeepSeekChatClient(api_key="test-key", client=client)
 
     result = chat.answer(
         question="What's the difference between QUIC and TCP?",
         sections=[],
         max_tokens=650,
+        user_id="session-hash",
     )
 
     payload = json.loads(requests[0].read())
-    assert payload["model"] == "openai/gpt-oss-120b:free"
-    assert "thinking" not in payload
+    assert payload["model"] == "deepseek-v4-pro"
+    assert payload["user_id"] == "session-hash"
+    assert payload["thinking"] == {"type": "disabled"}
     assert result.answer.startswith("QUIC differs")
-    assert result.model == "openai/gpt-oss-120b:free"
+    assert result.model == "deepseek-v4-pro"
     assert result.usage.total_tokens == 15
 
 
-def test_openrouter_chat_client_direct_answer_omits_retrieved_context() -> None:
+def test_deepseek_chat_client_direct_answer_omits_retrieved_context() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -71,22 +73,22 @@ def test_openrouter_chat_client_direct_answer_omits_retrieved_context() -> None:
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    chat = OpenRouterChatClient(api_key="test-key", client=client)
+    chat = DeepSeekChatClient(api_key="test-key", client=client)
 
     result = chat.answer_direct(
         question="What's the difference between QUIC and TCP?",
         max_tokens=650,
-        model="google/gemma-4-31b-it:free",
+        model="deepseek-v4-pro",
     )
 
     payload = json.loads(requests[0].read())
-    assert payload["model"] == "google/gemma-4-31b-it:free"
+    assert payload["model"] == "deepseek-v4-pro"
     assert "retrieved context" not in payload["messages"][1]["content"].lower()
     assert "Do not use or refer to retrieved context" in payload["messages"][0]["content"]
     assert result.answer.startswith("QUIC runs")
 
 
-def test_openrouter_chat_client_streams_answer_chunks() -> None:
+def test_deepseek_chat_client_streams_answer_chunks() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -94,7 +96,7 @@ def test_openrouter_chat_client_streams_answer_chunks() -> None:
         return httpx.Response(
             200,
             content=(
-                'data: {"model":"openai/gpt-oss-120b:free","choices":[{"delta":{"content":"QUIC "}}]}\n\n'
+                'data: {"model":"deepseek-v4-pro","choices":[{"delta":{"content":"QUIC "}}]}\n\n'
                 'data: {"choices":[{"delta":{"content":"streams."}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}\n\n'
                 "data: [DONE]\n\n"
             ),
@@ -102,7 +104,7 @@ def test_openrouter_chat_client_streams_answer_chunks() -> None:
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    chat = OpenRouterChatClient(api_key="test-key", client=client)
+    chat = DeepSeekChatClient(api_key="test-key", client=client)
 
     chunks = list(
         chat.stream_answer(
@@ -117,7 +119,7 @@ def test_openrouter_chat_client_streams_answer_chunks() -> None:
     assert "".join(chunk.delta for chunk in chunks) == "QUIC streams."
     assert chunks[-1] == ChatStreamChunk(
         usage=chunks[-1].usage,
-        model="openai/gpt-oss-120b:free",
+        model="deepseek-v4-pro",
         done=True,
     )
     assert chunks[-1].usage is not None
@@ -139,12 +141,13 @@ def test_direct_prompt_matches_user_question_language() -> None:
 
 
 def test_normalize_answer_model_rejects_non_allowlisted_models() -> None:
-    assert normalize_answer_model(None) == "openai/gpt-oss-120b:free"
-    assert normalize_answer_model(" google/gemma-4-31b-it:free ") == "google/gemma-4-31b-it:free"
+    assert normalize_answer_model(None) == "deepseek-v4-pro"
+    assert normalize_answer_model(" deepseek-v4-pro ") == "deepseek-v4-pro"
 
-    try:
-        normalize_answer_model("openrouter/free")
-    except ValueError as error:
-        assert "unsupported free answer model" in str(error)
-    else:
-        raise AssertionError("expected unsupported model to be rejected")
+    for model in ("openrouter/free", "deepseek-v4-flash"):
+        try:
+            normalize_answer_model(model)
+        except ValueError as error:
+            assert "unsupported DeepSeek answer model" in str(error)
+        else:
+            raise AssertionError("expected unsupported model to be rejected")

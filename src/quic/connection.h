@@ -1052,6 +1052,7 @@ class QuicConnection {
     std::vector<std::map<std::uint64_t, StreamState>::iterator> active_stream_iterator_scratch_;
     std::vector<Frame> application_crypto_frame_scratch_;
     std::vector<Frame> application_candidate_frame_scratch_;
+    std::vector<Frame> alternate_application_candidate_frame_scratch_;
     std::vector<SentPacketRecord> acked_packet_scratch_;
     std::vector<SentPacketRecord> late_acked_packet_scratch_;
     std::vector<SentPacketRecord> newly_lost_packet_scratch_;

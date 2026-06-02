@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
-import { Check, ChevronDown, Copy, TriangleAlert } from 'lucide-react';
+import { Check, Copy, TriangleAlert } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -60,11 +60,6 @@ type StreamMetrics = {
   completionTokens: number | null;
 };
 
-type ModelOption = {
-  id: string;
-  label: string;
-};
-
 type ModelMeta = {
   provider: string;
   size: string;
@@ -74,17 +69,8 @@ type ModelMeta = {
   iconSrc?: string;
 };
 
-type HealthPayload = {
-  answer_models?: ModelOption[];
-};
-
-const fallbackModelOptions: ModelOption[] = [
-  { id: 'openai/gpt-oss-120b:free', label: 'OpenAI: gpt-oss-120b (free)' },
-  { id: 'nvidia/nemotron-3-super-120b-a12b:free', label: 'NVIDIA: Nemotron 3 Super (free)' },
-  { id: 'google/gemma-4-31b-it:free', label: 'Google: Gemma 4 31B IT (free)' },
-];
-
 const apiBase = '/rag-api';
+const qaModel = 'deepseek-v4-pro';
 const storageNames = {
   qaSession: 'coquic-qa-session',
 } as const;
@@ -107,9 +93,6 @@ export function QaClient() {
   const [ragConfidence, setRagConfidence] = useState<number | null>(null);
   const [citations, setCitations] = useState<Citation[]>([]);
   const [questionError, setQuestionError] = useState('');
-  const [selectedModel, setSelectedModel] = useState(fallbackModelOptions[0].id);
-  const [modelOptions, setModelOptions] = useState<ModelOption[]>(fallbackModelOptions);
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const suggestRequestId = useRef(0);
   const directMetricsRef = useRef<StreamMetrics>(emptyStreamMetrics());
   const ragMetricsRef = useRef<StreamMetrics>(emptyStreamMetrics());
@@ -117,18 +100,6 @@ export function QaClient() {
   const hasResults = directAnswer.length > 0 || ragAnswer.length > 0;
   const hasCitations = citations.length > 0;
   const sessionId = useMemo(() => getSessionId(), []);
-
-  useEffect(() => {
-    void loadHealth().then((payload) => {
-      if (payload?.answer_models?.length) {
-        setModelOptions(payload.answer_models);
-        setSelectedModel((current) => {
-          const options = payload.answer_models ?? [];
-          return options.some((option) => option.id === current) ? current : options[0].id;
-        });
-      }
-    });
-  }, []);
 
   useEffect(() => {
     if (!busy || queryStartedAt === null) {
@@ -140,32 +111,6 @@ export function QaClient() {
     const intervalId = window.setInterval(updateElapsed, 250);
     return () => window.clearInterval(intervalId);
   }, [busy, queryStartedAt]);
-
-  useEffect(() => {
-    if (!modelMenuOpen) {
-      return;
-    }
-
-    function closeOnOutside(event: PointerEvent) {
-      const target = event.target;
-      if (target instanceof Element && !target.closest('[data-model-picker]')) {
-        setModelMenuOpen(false);
-      }
-    }
-
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        setModelMenuOpen(false);
-      }
-    }
-
-    document.addEventListener('pointerdown', closeOnOutside);
-    document.addEventListener('keydown', closeOnEscape);
-    return () => {
-      document.removeEventListener('pointerdown', closeOnOutside);
-      document.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [modelMenuOpen]);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -179,7 +124,7 @@ export function QaClient() {
     setStatus('asking');
     setQueryStartedAt(startedAt);
     setQueryElapsedMs(0);
-    setDirectAnswer('Asking the selected free model directly...');
+    setDirectAnswer('Asking DeepSeek V4 Pro directly...');
     setRagAnswer('Retrieving QUIC context...');
     setDirectUsage(null);
     setRagUsage(null);
@@ -187,13 +132,13 @@ export function QaClient() {
     ragMetricsRef.current = emptyStreamMetrics();
     setDirectMetrics(directMetricsRef.current);
     setRagMetrics(ragMetricsRef.current);
-    setDirectModel(selectedModel);
-    setRagModel(selectedModel);
+    setDirectModel(qaModel);
+    setRagModel(qaModel);
     setRagConfidence(null);
     setCitations([]);
 
     try {
-      await askStream(trimmed, sessionId, selectedModel, {
+      await askStream(trimmed, sessionId, {
         onMetadata: (payload) => {
           setCitations(payload.citations || []);
           setRagConfidence(typeof payload.rag_confidence === 'number' ? payload.rag_confidence : null);
@@ -225,8 +170,8 @@ export function QaClient() {
           setRagAnswer(payload.rag_answer || payload.answer || 'No RAG answer returned.');
           setDirectUsage(payload.direct_usage || null);
           setRagUsage(payload.rag_usage || payload.usage || null);
-          setDirectModel(payload.direct_model || selectedModel);
-          setRagModel(payload.rag_model || selectedModel);
+          setDirectModel(payload.direct_model || qaModel);
+          setRagModel(payload.rag_model || qaModel);
           setRagConfidence(typeof payload.rag_confidence === 'number' ? payload.rag_confidence : null);
           setCitations(payload.citations || []);
           setStatus(publicStatus(payload));
@@ -242,8 +187,8 @@ export function QaClient() {
       ragMetricsRef.current = emptyStreamMetrics();
       setDirectMetrics(directMetricsRef.current);
       setRagMetrics(ragMetricsRef.current);
-      setDirectModel(selectedModel);
-      setRagModel(selectedModel);
+      setDirectModel(qaModel);
+      setRagModel(qaModel);
       setRagConfidence(null);
       setCitations([]);
       setStatus('error');
@@ -313,18 +258,10 @@ export function QaClient() {
             />
             <div className="flex items-center justify-between gap-3">
               <span className="flex min-w-0 flex-wrap items-center gap-2">
-                <ModelPicker
-                  disabled={busy || suggesting}
-                  onChange={setSelectedModel}
-                  onOpenChange={setModelMenuOpen}
-                  open={modelMenuOpen}
-                  options={modelOptions}
-                  value={selectedModel}
-                />
-                <span className="inline-flex h-9 shrink-0 items-center gap-1.5 text-xs font-medium text-[var(--muted)]">
+                <span className="inline-flex h-9 shrink-0 items-center gap-2 text-xs font-medium text-[var(--muted)]">
+                  <span>Powered by DeepSeek V4 Pro</span>
+                  <img className="size-9" src="/deepseek-logo-icon.svg" alt="" aria-hidden="true" />
                   <PrivacyNotice />
-                  <span>Powered by OpenRouter</span>
-                  <img className="size-[18px]" src="/openrouter-favicon.ico" alt="" aria-hidden="true" />
                 </span>
               </span>
               <span className="inline-flex shrink-0 items-center gap-2">
@@ -357,7 +294,7 @@ export function QaClient() {
               copyLabel="direct answer"
               elapsedMs={queryElapsedMs}
               metrics={directMetrics}
-              model={directModel || selectedModel}
+              model={directModel || qaModel}
               title="Direct"
               usage={directUsage}
             />
@@ -374,7 +311,7 @@ export function QaClient() {
               copyLabel="RAG answer"
               elapsedMs={queryElapsedMs}
               metrics={ragMetrics}
-              model={ragModel || selectedModel}
+              model={ragModel || qaModel}
               title="With RAG"
               usage={ragUsage}
             />
@@ -435,86 +372,6 @@ function AnswerHeader({
   );
 }
 
-function ModelPicker({
-  disabled,
-  onChange,
-  onOpenChange,
-  open,
-  options,
-  value,
-}: {
-  disabled: boolean;
-  onChange: (value: string) => void;
-  onOpenChange: (open: boolean) => void;
-  open: boolean;
-  options: ModelOption[];
-  value: string;
-}) {
-  const selected = options.find((option) => option.id === value) ?? fallbackModelOptions[0];
-  const selectedMeta = modelMeta(selected.id);
-
-  return (
-    <div className="relative min-w-0" data-model-picker>
-      <button
-        aria-expanded={open}
-        aria-haspopup="listbox"
-        className="inline-flex h-11 max-w-[min(72vw,360px)] items-center gap-2 rounded-[var(--radius)] border border-[var(--line-strong)] bg-[var(--surface)] px-2.5 text-left text-[var(--ink)] transition-colors duration-200 hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] focus-visible:border-[var(--primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgba(15,98,254,0.48)] disabled:pointer-events-none disabled:opacity-55"
-        disabled={disabled}
-        onClick={() => onOpenChange(!open)}
-        type="button"
-      >
-        <ModelAvatar meta={selectedMeta} />
-        <span className="grid min-w-0 gap-0.5">
-          <span className="truncate text-sm font-semibold leading-none">{selectedMeta.label || selected.label}</span>
-          <span className="truncate font-mono text-[11px] leading-none text-[var(--muted)]">
-            {selectedMeta.provider} · {selectedMeta.size}
-          </span>
-        </span>
-        <ChevronDown
-          aria-hidden="true"
-          className={`size-4 shrink-0 text-[var(--muted)] transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
-        />
-      </button>
-
-      {open ? (
-        <div
-          className="theme-popover absolute bottom-[calc(100%+8px)] left-0 z-30 w-[min(88vw,390px)] rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] p-1.5"
-          role="listbox"
-        >
-          {options.map((option) => {
-            const meta = modelMeta(option.id);
-            const selectedOption = option.id === value;
-            return (
-              <button
-                aria-selected={selectedOption}
-                className="grid w-full cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-[var(--radius)] px-2.5 py-2 text-left transition-colors duration-200 hover:bg-[var(--surface-2)] focus-visible:bg-[var(--surface-2)] focus-visible:outline-none aria-selected:bg-[var(--primary-soft)]"
-                key={option.id}
-                onClick={() => {
-                  onChange(option.id);
-                  onOpenChange(false);
-                }}
-                role="option"
-                type="button"
-              >
-                <ModelAvatar meta={meta} />
-                <span className="grid min-w-0 gap-1">
-                  <span className="truncate text-sm font-semibold leading-tight text-[var(--ink)]">
-                    {meta.label || option.label}
-                  </span>
-                  <span className="truncate font-mono text-[11px] leading-none text-[var(--muted)]">
-                    {meta.provider} · {meta.size}
-                  </span>
-                </span>
-                {selectedOption ? <Check aria-hidden="true" className="size-4 text-[var(--primary)]" /> : null}
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function PrivacyNotice() {
   return (
     <span className="group relative inline-flex items-center">
@@ -529,9 +386,8 @@ function PrivacyNotice() {
         className="theme-popover pointer-events-none absolute bottom-[calc(100%+10px)] right-0 z-40 w-[min(82vw,340px)] rounded-[var(--radius)] border border-[rgba(141,109,0,0.22)] bg-[var(--warning-tooltip)] p-3 text-left text-xs font-normal leading-relaxed text-[var(--ink)] opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100"
         role="tooltip"
       >
-        CoQUIC does not store your questions or generated answers. Requests are sent through OpenRouter, and free-model
-        providers may retain or process them under their own policies. Avoid entering secrets, private code, or sensitive
-        operational data.
+        CoQUIC does not store your questions or generated answers. DeepSeek V4 Pro processes QA requests; refer to
+        DeepSeek's privacy policy for how DeepSeek handles submitted data.
       </span>
     </span>
   );
@@ -757,20 +613,7 @@ function getSessionId() {
   return id;
 }
 
-async function loadHealth(): Promise<HealthPayload | null> {
-  try {
-    const response = await fetch(`${apiBase}/api/health`);
-    if (!response.ok) {
-      return null;
-    }
-    return response.json();
-  } catch {
-    // The visible UI reports request failures on submit; health stays silent.
-    return null;
-  }
-}
-
-async function askStream(question: string, sessionId: string, model: string, handlers: StreamHandlers): Promise<void> {
+async function askStream(question: string, sessionId: string, handlers: StreamHandlers): Promise<void> {
   const response = await fetch(`${apiBase}/api/qa/stream`, {
     method: 'POST',
     headers: {
@@ -778,7 +621,7 @@ async function askStream(question: string, sessionId: string, model: string, han
       Accept: 'text/event-stream',
       'X-Session-Id': sessionId,
     },
-    body: JSON.stringify({ question, model }),
+    body: JSON.stringify({ question }),
   });
   if (response.status === 429) {
     throw new Error('rate limit exceeded');
@@ -885,7 +728,7 @@ function appendStreamText(current: string, delta: string) {
   if (!delta) {
     return current;
   }
-  if (current === 'Asking the selected free model directly...' || current === 'Retrieving QUIC context...') {
+  if (current === 'Asking DeepSeek V4 Pro directly...' || current === 'Retrieving QUIC context...') {
     return delta;
   }
   return `${current}${delta}`;
@@ -1067,74 +910,14 @@ function confidenceClassName(confidence: number) {
 }
 
 function modelMeta(model: string): ModelMeta {
-  if (model === 'openrouter/free') {
+  if (model === 'deepseek-v4-pro') {
     return {
-      provider: 'OpenRouter',
-      size: 'router',
-      avatar: 'OR',
-      swatch: '#0f62fe',
-      label: 'Free Models Router',
-      iconSrc: '/openrouter-favicon.ico',
-    };
-  }
-  if (model.startsWith('google/gemma-4-31b')) {
-    return {
-      provider: 'Google',
-      size: '31B',
-      avatar: 'G',
-      swatch: '#1f8a65',
-      label: 'Google: Gemma 4 31B IT (free)',
-      iconSrc: '/google-favicon.ico',
-    };
-  }
-  if (model.startsWith('google/gemma-4-26b')) {
-    return {
-      provider: 'Google',
-      size: '26B',
-      avatar: 'G',
-      swatch: '#1f8a65',
-      label: 'Google: Gemma 4 26B A4B (free)',
-      iconSrc: '/google-favicon.ico',
-    };
-  }
-  if (model.startsWith('openai/gpt-oss-120b')) {
-    return {
-      provider: 'OpenAI',
-      size: '120B',
-      avatar: 'AI',
-      swatch: '#393939',
-      label: 'OpenAI: gpt-oss-120b (free)',
-      iconSrc: '/openai-favicon.ico',
-    };
-  }
-  if (model.startsWith('openai/gpt-oss-20b')) {
-    return {
-      provider: 'OpenAI',
-      size: '20B',
-      avatar: 'AI',
-      swatch: '#393939',
-      label: 'OpenAI: gpt-oss-20b (free)',
-      iconSrc: '/openai-favicon.ico',
-    };
-  }
-  if (model.startsWith('nvidia/nemotron-3-nano-30b-a3b')) {
-    return {
-      provider: 'NVIDIA',
-      size: '30B A3B',
-      avatar: 'NV',
-      swatch: '#76b900',
-      label: 'NVIDIA: Nemotron 3 Nano 30B A3B (free)',
-      iconSrc: '/nvidia-favicon.ico',
-    };
-  }
-  if (model.startsWith('nvidia/nemotron-3-super-120b-a12b')) {
-    return {
-      provider: 'NVIDIA',
-      size: '120B A12B',
-      avatar: 'NV',
-      swatch: '#76b900',
-      label: 'NVIDIA: Nemotron 3 Super (free)',
-      iconSrc: '/nvidia-favicon.ico',
+      provider: 'DeepSeek',
+      size: 'V4 Pro',
+      avatar: 'DS',
+      swatch: '#4f46e5',
+      label: 'DeepSeek: V4 Pro',
+      iconSrc: '/deepseek-logo-icon.svg',
     };
   }
   return {

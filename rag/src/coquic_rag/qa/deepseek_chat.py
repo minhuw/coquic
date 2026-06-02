@@ -10,18 +10,16 @@ from typing import Any
 import httpx
 
 
-OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_ANSWER_MODEL = "openai/gpt-oss-120b:free"
-OPENROUTER_CHAT_TIMEOUT_SECONDS = 20
-FREE_ANSWER_MODELS = (
-    ("openai/gpt-oss-120b:free", "OpenAI: gpt-oss-120b (free)"),
-    ("nvidia/nemotron-3-super-120b-a12b:free", "NVIDIA: Nemotron 3 Super (free)"),
-    ("google/gemma-4-31b-it:free", "Google: Gemma 4 31B IT (free)"),
+DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions"
+DEFAULT_ANSWER_MODEL = "deepseek-v4-pro"
+DEEPSEEK_CHAT_TIMEOUT_SECONDS = 20
+ANSWER_MODELS = (
+    ("deepseek-v4-pro", "DeepSeek: V4 Pro"),
 )
-FREE_ANSWER_MODEL_IDS = frozenset(model_id for model_id, _label in FREE_ANSWER_MODELS)
+ANSWER_MODEL_IDS = frozenset(model_id for model_id, _label in ANSWER_MODELS)
 
 
-class OpenRouterChatError(RuntimeError):
+class DeepSeekChatError(RuntimeError):
     pass
 
 
@@ -47,18 +45,18 @@ class ChatStreamChunk:
     done: bool = False
 
 
-class OpenRouterChatClient:
+class DeepSeekChatClient:
     def __init__(
         self,
         *,
         api_key: str | None = None,
         model: str = DEFAULT_ANSWER_MODEL,
-        base_url: str = OPENROUTER_CHAT_URL,
-        timeout: float = OPENROUTER_CHAT_TIMEOUT_SECONDS,
+        base_url: str = DEEPSEEK_CHAT_URL,
+        timeout: float = DEEPSEEK_CHAT_TIMEOUT_SECONDS,
         max_retries: int = 0,
         client: httpx.Client | None = None,
     ) -> None:
-        self._api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+        self._api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self._model = normalize_answer_model(model)
         self._base_url = base_url
         self._timeout = timeout
@@ -87,9 +85,10 @@ class OpenRouterChatClient:
             ],
             "temperature": 0.1,
             "max_tokens": max_tokens,
+            "thinking": {"type": "disabled"},
         }
         if user_id:
-            payload["user"] = user_id
+            payload["user_id"] = user_id
 
         return self._chat(payload, requested_model=selected_model)
 
@@ -110,9 +109,10 @@ class OpenRouterChatClient:
             ],
             "temperature": 0.1,
             "max_tokens": max_tokens,
+            "thinking": {"type": "disabled"},
         }
         if user_id:
-            payload["user"] = user_id
+            payload["user_id"] = user_id
 
         return self._chat(payload, requested_model=selected_model)
 
@@ -134,11 +134,12 @@ class OpenRouterChatClient:
             ],
             "temperature": 0.1,
             "max_tokens": max_tokens,
+            "thinking": {"type": "disabled"},
             "stream": True,
             "stream_options": {"include_usage": True},
         }
         if user_id:
-            payload["user"] = user_id
+            payload["user_id"] = user_id
         yield from self._chat_stream(payload, requested_model=selected_model)
 
     def stream_answer_direct(
@@ -158,35 +159,36 @@ class OpenRouterChatClient:
             ],
             "temperature": 0.1,
             "max_tokens": max_tokens,
+            "thinking": {"type": "disabled"},
             "stream": True,
             "stream_options": {"include_usage": True},
         }
         if user_id:
-            payload["user"] = user_id
+            payload["user_id"] = user_id
         yield from self._chat_stream(payload, requested_model=selected_model)
 
     def _selected_model(self, model: str | None) -> str:
         try:
             return normalize_answer_model(model or self._model)
         except ValueError as error:
-            raise OpenRouterChatError(str(error)) from error
+            raise DeepSeekChatError(str(error)) from error
 
     def _chat(self, payload: dict[str, object], *, requested_model: str) -> ChatResult:
         if not self._api_key:
-            raise OpenRouterChatError("OPENROUTER_API_KEY is required for answer generation")
+            raise DeepSeekChatError("DEEPSEEK_API_KEY is required for answer generation")
         response = self._post_with_retries(payload)
         choices = response.get("choices")
         if not isinstance(choices, list) or not choices:
-            raise OpenRouterChatError("OpenRouter response did not include choices")
+            raise DeepSeekChatError("DeepSeek response did not include choices")
         first_choice = choices[0]
         if not isinstance(first_choice, dict):
-            raise OpenRouterChatError("OpenRouter response choice was invalid")
+            raise DeepSeekChatError("DeepSeek response choice was invalid")
         message = first_choice.get("message")
         if not isinstance(message, dict):
-            raise OpenRouterChatError("OpenRouter response did not include a message")
+            raise DeepSeekChatError("DeepSeek response did not include a message")
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
-            raise OpenRouterChatError("OpenRouter response was empty")
+            raise DeepSeekChatError("DeepSeek response was empty")
         return ChatResult(
             answer=content.strip(),
             usage=_usage_from_response(response),
@@ -209,11 +211,11 @@ class OpenRouterChatClient:
                 if attempt >= self._max_retries:
                     break
                 time.sleep(0.3 * (2**attempt))
-        raise OpenRouterChatError(f"OpenRouter request failed: {last_error}") from last_error
+        raise DeepSeekChatError(f"DeepSeek request failed: {last_error}") from last_error
 
     def _chat_stream(self, payload: dict[str, object], *, requested_model: str):
         if not self._api_key:
-            raise OpenRouterChatError("OPENROUTER_API_KEY is required for answer generation")
+            raise DeepSeekChatError("DEEPSEEK_API_KEY is required for answer generation")
         last_model = requested_model
         last_usage: ChatUsage | None = None
         try:
@@ -234,7 +236,7 @@ class OpenRouterChatClient:
                     try:
                         body = json.loads(event)
                     except ValueError as error:
-                        raise OpenRouterChatError("OpenRouter stream returned invalid JSON") from error
+                        raise DeepSeekChatError("DeepSeek stream returned invalid JSON") from error
                     model = _model_from_response(body, last_model)
                     last_model = model
                     usage = _usage_from_response(body)
@@ -245,7 +247,7 @@ class OpenRouterChatClient:
                         yield ChatStreamChunk(delta=delta, model=model)
                 yield ChatStreamChunk(usage=last_usage, model=last_model, done=True)
         except httpx.HTTPError as error:
-            raise OpenRouterChatError(f"OpenRouter stream failed: {error}") from error
+            raise DeepSeekChatError(f"DeepSeek stream failed: {error}") from error
 
     def _client_or_create(self) -> httpx.Client:
         if self._client is None:
@@ -262,8 +264,8 @@ def normalize_answer_model(model: str | None) -> str:
     if model is None or not model.strip():
         return DEFAULT_ANSWER_MODEL
     normalized = model.strip()
-    if normalized not in FREE_ANSWER_MODEL_IDS:
-        raise ValueError(f"unsupported free answer model: {normalized}")
+    if normalized not in ANSWER_MODEL_IDS:
+        raise ValueError(f"unsupported DeepSeek answer model: {normalized}")
     return normalized
 
 

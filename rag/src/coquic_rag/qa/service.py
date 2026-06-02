@@ -9,12 +9,12 @@ from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from coquic_rag.query.service import QueryService
-from coquic_rag.qa.openrouter_chat import (
+from coquic_rag.qa.deepseek_chat import (
     ChatResult,
     ChatStreamChunk,
     ChatUsage,
-    OpenRouterChatClient,
-    OpenRouterChatError,
+    DeepSeekChatClient,
+    DeepSeekChatError,
 )
 from coquic_rag.qa.filters import (
     RelevanceClassifierError,
@@ -89,7 +89,7 @@ class QaService:
         self,
         *,
         query_service: QueryService,
-        llm_client: OpenRouterChatClient,
+        llm_client: DeepSeekChatClient,
         relevance_classifier: RelevanceClassifier,
         config: QaConfig | None = None,
     ) -> None:
@@ -167,7 +167,7 @@ class QaService:
                     user_id=user_id,
                     model=model,
                 )
-            except OpenRouterChatError:
+            except DeepSeekChatError:
                 direct_result, direct_error = direct_future.result()
                 if direct_result is not None:
                     return QaResponse(
@@ -386,7 +386,7 @@ class QaService:
                 ),
                 False,
             )
-        except OpenRouterChatError:
+        except DeepSeekChatError:
             return None, True
 
 
@@ -485,7 +485,7 @@ def _start_stream_worker(
         try:
             for chunk in chunks:
                 stream_queue.put(_StreamWorkerEvent(side=side, chunk=chunk))
-        except OpenRouterChatError:
+        except DeepSeekChatError:
             stream_queue.put(_StreamWorkerEvent(side=side, error=True))
         finally:
             stream_queue.put(_StreamWorkerEvent(side=side, finished=True))

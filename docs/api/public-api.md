@@ -28,6 +28,10 @@ that boundary, CoQUIC exposes three API layers:
 The headers under `include/coquic/` are the intended compatibility surface.
 Types and helpers under `src/` remain implementation details.
 
+The C ABI wrapper is documented separately as the [C FFI API](c-ffi.md). Use it
+for C consumers and native language bindings that need opaque handles, explicit
+result ownership, and pkg-config or CMake package metadata.
+
 ## Layer Map
 
 ```text

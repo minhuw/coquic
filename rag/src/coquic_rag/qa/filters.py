@@ -3,19 +3,21 @@ from __future__ import annotations
 import os
 import random
 import re
+import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from math import ceil
 from typing import Any
 
 import httpx
 
 
 MAX_QUESTION_CHARS = 1200
-OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
-RELEVANCE_FILTER_MODEL = "openai/gpt-oss-120b:free"
-QUESTION_GENERATOR_MODEL = "openrouter/free"
+DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions"
+RELEVANCE_FILTER_MODEL = "deepseek-v4-pro"
+QUESTION_GENERATOR_MODEL = "deepseek-v4-pro"
 RELEVANCE_FILTER_TIMEOUT_SECONDS = 8
 RELEVANCE_FILTER_MAX_RETRIES = 0
 QUESTION_GENERATOR_MAX_ATTEMPTS = 1
@@ -71,18 +73,18 @@ def normalize_question(question: str) -> str:
     return " ".join(question.strip().split())
 
 
-class OpenRouterRelevanceClassifier:
+class DeepSeekRelevanceClassifier:
     def __init__(
         self,
         *,
         api_key: str | None = None,
         model: str = RELEVANCE_FILTER_MODEL,
-        base_url: str = OPENROUTER_CHAT_URL,
+        base_url: str = DEEPSEEK_CHAT_URL,
         timeout: float = RELEVANCE_FILTER_TIMEOUT_SECONDS,
         max_retries: int = RELEVANCE_FILTER_MAX_RETRIES,
         client: httpx.Client | None = None,
     ) -> None:
-        self._api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+        self._api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self._model = model
         self._base_url = base_url
         self._timeout = timeout
@@ -96,7 +98,7 @@ class OpenRouterRelevanceClassifier:
     def classify(self, question: str) -> RelevanceDecision:
         normalized = normalize_question(question)
         if not self._api_key:
-            raise RelevanceClassifierError("OPENROUTER_API_KEY is required for relevance filtering")
+            raise RelevanceClassifierError("DEEPSEEK_API_KEY is required for relevance filtering")
         payload: dict[str, object] = {
             "model": self._model,
             "messages": [
@@ -108,6 +110,7 @@ class OpenRouterRelevanceClassifier:
             ],
             "temperature": 0,
             "max_tokens": 16,
+            "thinking": {"type": "disabled"},
         }
         body = self._post_with_retries(payload)
         decision_text = _first_choice_text(body).strip().upper()
@@ -115,7 +118,7 @@ class OpenRouterRelevanceClassifier:
             return RelevanceDecision(True, "classifier_allow")
         if decision_text.startswith("REJECT"):
             return RelevanceDecision(False, "classifier_reject")
-        raise RelevanceClassifierError(f"OpenRouter relevance filter returned invalid decision: {decision_text}")
+        raise RelevanceClassifierError(f"DeepSeek relevance filter returned invalid decision: {decision_text}")
 
     def _post_with_retries(self, payload: dict[str, object]) -> dict[str, Any]:
         last_error: Exception | None = None
@@ -137,7 +140,7 @@ class OpenRouterRelevanceClassifier:
                 if attempt >= self._max_retries:
                     break
                 time.sleep(0.25 * (2**attempt))
-        raise RelevanceClassifierError(f"OpenRouter relevance filter failed: {last_error}") from last_error
+        raise RelevanceClassifierError(f"DeepSeek relevance filter failed: {last_error}") from last_error
 
     def _client_or_create(self) -> httpx.Client:
         if self._client is None:
@@ -150,20 +153,20 @@ class OpenRouterRelevanceClassifier:
         return self._client
 
 
-class OpenRouterQuestionGenerator:
+class DeepSeekQuestionGenerator:
     def __init__(
         self,
         *,
         api_key: str | None = None,
         model: str = QUESTION_GENERATOR_MODEL,
         models: Iterable[str] | None = None,
-        base_url: str = OPENROUTER_CHAT_URL,
+        base_url: str = DEEPSEEK_CHAT_URL,
         timeout: float = RELEVANCE_FILTER_TIMEOUT_SECONDS,
         max_retries: int = RELEVANCE_FILTER_MAX_RETRIES,
         max_generation_attempts: int = QUESTION_GENERATOR_MAX_ATTEMPTS,
         client: httpx.Client | None = None,
     ) -> None:
-        self._api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+        self._api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self._model = model
         self._models = tuple(models) if models is not None else (model,)
         self._base_url = base_url
@@ -182,14 +185,14 @@ class OpenRouterQuestionGenerator:
 
     def generate(self) -> str:
         if not self._api_key:
-            raise QuestionGenerationError("OPENROUTER_API_KEY is required for question generation")
+            raise QuestionGenerationError("DEEPSEEK_API_KEY is required for question generation")
         last_error: QuestionGenerationError | None = None
         for model in _generation_plan(self._models, self._max_generation_attempts):
             try:
                 return self._generate_once(model)
             except QuestionGenerationError as error:
                 last_error = error
-        raise QuestionGenerationError(f"OpenRouter question generator failed: {last_error}") from last_error
+        raise QuestionGenerationError(f"DeepSeek question generator failed: {last_error}") from last_error
 
     def _generate_once(self, model: str) -> str:
         payload: dict[str, object] = {
@@ -209,12 +212,13 @@ class OpenRouterQuestionGenerator:
             ],
             "temperature": 1.2,
             "max_tokens": 160,
+            "thinking": {"type": "disabled"},
         }
         body = self._post_with_retries(payload)
         generated_text = _question_choice_text(body)
         question = _clean_generated_question(generated_text)
         if not is_valid_generated_question(question):
-            raise QuestionGenerationError("OpenRouter question generator returned an invalid question")
+            raise QuestionGenerationError("DeepSeek question generator returned an invalid question")
         return question
 
     def _post_with_retries(self, payload: dict[str, object]) -> dict[str, Any]:
@@ -237,7 +241,7 @@ class OpenRouterQuestionGenerator:
                 if attempt >= self._max_retries:
                     break
                 time.sleep(0.25 * (2**attempt))
-        raise QuestionGenerationError(f"OpenRouter question generator failed: {last_error}") from last_error
+        raise QuestionGenerationError(f"DeepSeek question generator failed: {last_error}") from last_error
 
     def _client_or_create(self) -> httpx.Client:
         if self._client is None:
@@ -325,29 +329,29 @@ def _clean_generated_question(text: str) -> str:
 def _first_choice_text(response: dict[str, Any]) -> str:
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise RelevanceClassifierError("OpenRouter relevance filter response did not include choices")
+        raise RelevanceClassifierError("DeepSeek relevance filter response did not include choices")
     first_choice = choices[0]
     if not isinstance(first_choice, dict):
-        raise RelevanceClassifierError("OpenRouter relevance filter response choice was invalid")
+        raise RelevanceClassifierError("DeepSeek relevance filter response choice was invalid")
     message = first_choice.get("message")
     if not isinstance(message, dict):
-        raise RelevanceClassifierError("OpenRouter relevance filter response did not include a message")
+        raise RelevanceClassifierError("DeepSeek relevance filter response did not include a message")
     content = message.get("content")
     if not isinstance(content, str):
-        raise RelevanceClassifierError("OpenRouter relevance filter response was empty")
+        raise RelevanceClassifierError("DeepSeek relevance filter response was empty")
     return content
 
 
 def _question_choice_text(response: dict[str, Any]) -> str:
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise QuestionGenerationError("OpenRouter question generator response did not include choices")
+        raise QuestionGenerationError("DeepSeek question generator response did not include choices")
     first_choice = choices[0]
     if not isinstance(first_choice, dict):
-        raise QuestionGenerationError("OpenRouter question generator response choice was invalid")
+        raise QuestionGenerationError("DeepSeek question generator response choice was invalid")
     message = first_choice.get("message")
     if not isinstance(message, dict):
-        raise QuestionGenerationError("OpenRouter question generator response did not include a message")
+        raise QuestionGenerationError("DeepSeek question generator response did not include a message")
     content = message.get("content")
     if isinstance(content, str) and content.strip():
         return content
@@ -365,7 +369,7 @@ def _question_choice_text(response: dict[str, Any]) -> str:
         question = _clean_generated_question(candidate)
         if is_valid_generated_question(question):
             return question
-    raise QuestionGenerationError("OpenRouter question generator response was empty")
+    raise QuestionGenerationError("DeepSeek question generator response was empty")
 
 
 @dataclass
@@ -379,17 +383,39 @@ class SlidingWindowRateLimiter:
     max_requests: int
     window_seconds: int
     _requests: dict[str, deque[float]] = field(default_factory=lambda: defaultdict(deque))
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
-    def check(self, key: str, now: float | None = None) -> RateLimitResult:
+    def check(self, key: str, now: float | None = None, *, cost: int = 1) -> RateLimitResult:
         current = now if now is not None else time.monotonic()
+        normalized_cost = max(1, cost)
+        with self._lock:
+            result = self._peek_unlocked(key, current, normalized_cost)
+            if not result.allowed:
+                return result
+            bucket = self._requests[key]
+            bucket.extend(current for _ in range(normalized_cost))
+            return result
+
+    def peek(self, key: str, now: float | None = None, *, cost: int = 1) -> RateLimitResult:
+        current = now if now is not None else time.monotonic()
+        normalized_cost = max(1, cost)
+        with self._lock:
+            return self._peek_unlocked(key, current, normalized_cost)
+
+    def _peek_unlocked(self, key: str, current: float, cost: int) -> RateLimitResult:
+        if self.max_requests < cost or self.window_seconds <= 0:
+            return RateLimitResult(False, max(1, self.window_seconds))
+
         bucket = self._requests[key]
         cutoff = current - self.window_seconds
         while bucket and bucket[0] <= cutoff:
             bucket.popleft()
-        if len(bucket) >= self.max_requests:
-            retry_after = max(1, int(bucket[0] + self.window_seconds - current))
+
+        overflow = len(bucket) + cost - self.max_requests
+        if overflow > 0:
+            retry_index = min(len(bucket) - 1, overflow - 1)
+            retry_after = max(1, int(ceil(bucket[retry_index] + self.window_seconds - current)))
             return RateLimitResult(False, retry_after)
-        bucket.append(current)
         return RateLimitResult(True)
 
 

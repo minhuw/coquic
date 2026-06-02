@@ -1202,7 +1202,8 @@ void QuicConnection::maybe_update_rtt_before_ack_loss_detection(
     if (largest_packet == nullptr) {
         return;
     }
-    if (!packet_space.recovery.ack_ranges_include_newly_ackable_ack_eliciting_packet(cursor)) {
+    if (!largest_packet->ack_eliciting &&
+        !packet_space.recovery.ack_ranges_include_newly_ackable_ack_eliciting_packet(cursor)) {
         return;
     }
 
@@ -1615,6 +1616,10 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
     }
 
     auto &packet = *retired_packet;
+    if (packet.largest_received_packet_number_acked.has_value()) {
+        packet_space.received_packets.retire_acknowledged_ranges_up_to(
+            *packet.largest_received_packet_number_acked);
+    }
     std::optional<std::uint64_t> single_retirement_candidate;
     std::vector<std::uint64_t> additional_retirement_candidates;
     const auto note_retirement_candidate = [&](std::uint64_t stream_id) {

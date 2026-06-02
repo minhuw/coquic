@@ -5,7 +5,8 @@ from fastapi.testclient import TestClient
 from coquic_rag.qa.app import create_app
 from coquic_rag.qa.filters import RelevanceDecision
 from coquic_rag.qa.filters import QUESTION_GENERATOR_MODEL
-from coquic_rag.qa.openrouter_chat import ChatUsage
+from coquic_rag.qa.filters import SlidingWindowRateLimiter
+from coquic_rag.qa.deepseek_chat import ChatUsage
 from coquic_rag.qa.service import QaResponse, QaStreamEvent
 
 
@@ -41,10 +42,10 @@ class FakeQaService:
             usage=ChatUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
             direct_answer="direct answer",
             direct_usage=ChatUsage(prompt_tokens=4, completion_tokens=2, total_tokens=6),
-            direct_model="openai/gpt-oss-120b:free",
+            direct_model="deepseek-v4-pro",
             rag_answer=f"answer for {question}",
             rag_usage=ChatUsage(prompt_tokens=6, completion_tokens=3, total_tokens=9),
-            rag_model="nvidia/nemotron-3-super-120b-a12b:free",
+            rag_model="deepseek-v4-pro",
         )
 
     def answer_stream(
@@ -92,11 +93,19 @@ class FakeRelevanceClassifier:
         return RelevanceDecision(self.accepted, "classifier_allow" if self.accepted else "classifier_reject")
 
 
+def clear_rate_limiter_caches(qa_app) -> None:
+    qa_app.rate_limiter.cache_clear()
+    qa_app.qa_ip_rate_limiter.cache_clear()
+    qa_app.question_rate_limiter.cache_clear()
+    qa_app.question_ip_rate_limiter.cache_clear()
+    qa_app.deepseek_rate_limiter.cache_clear()
+
+
 def test_qa_endpoint_returns_answer_payload(monkeypatch) -> None:
     import coquic_rag.qa.app as qa_app
 
     qa_app.qa_service.cache_clear()
-    qa_app.rate_limiter.cache_clear()
+    clear_rate_limiter_caches(qa_app)
     fake_service = FakeQaService()
     monkeypatch.setattr(qa_app, "qa_service", lambda: fake_service)
     app = create_app()
@@ -106,7 +115,7 @@ def test_qa_endpoint_returns_answer_payload(monkeypatch) -> None:
         "/api/qa",
         json={
             "question": "How does QUIC ACK delay work?",
-            "model": "openai/gpt-oss-120b:free",
+            "model": "deepseek-v4-pro",
         },
         headers={"X-Session-Id": "test-session"},
     )
@@ -121,20 +130,24 @@ def test_qa_endpoint_returns_answer_payload(monkeypatch) -> None:
     assert payload["citations"][0]["url"] == "https://www.rfc-editor.org/rfc/rfc9000.html#section-1"
     assert payload["direct_answer"] == "direct answer"
     assert payload["direct_usage"]["total_tokens"] == 6
-    assert payload["direct_model"] == "openai/gpt-oss-120b:free"
+    assert payload["direct_model"] == "deepseek-v4-pro"
     assert payload["rag_answer"] == "answer for How does QUIC ACK delay work?"
     assert payload["rag_usage"]["total_tokens"] == 9
-    assert payload["rag_model"] == "nvidia/nemotron-3-super-120b-a12b:free"
-    assert fake_service.calls[0]["model"] == "openai/gpt-oss-120b:free"
+    assert payload["rag_model"] == "deepseek-v4-pro"
+    assert fake_service.calls[0]["model"] == "deepseek-v4-pro"
 
 
 def test_qa_endpoint_enforces_rate_limit(monkeypatch) -> None:
     import coquic_rag.qa.app as qa_app
 
     qa_app.qa_service.cache_clear()
-    qa_app.rate_limiter.cache_clear()
-    monkeypatch.setenv("COQUIC_QA_RATE_LIMIT", "1")
-    monkeypatch.setenv("COQUIC_QA_RATE_WINDOW_SECONDS", "60")
+    clear_rate_limiter_caches(qa_app)
+    limiter = SlidingWindowRateLimiter(max_requests=1, window_seconds=60)
+    monkeypatch.setattr(
+        qa_app,
+        "rate_limiter",
+        lambda: limiter,
+    )
     monkeypatch.setattr(qa_app, "qa_service", lambda: FakeQaService())
     app = create_app()
     client = TestClient(app)
@@ -155,11 +168,67 @@ def test_qa_endpoint_enforces_rate_limit(monkeypatch) -> None:
     assert "Retry-After" in second.headers
 
 
+def test_qa_endpoint_limits_same_ip_across_rotated_sessions(monkeypatch) -> None:
+    import coquic_rag.qa.app as qa_app
+
+    qa_app.qa_service.cache_clear()
+    clear_rate_limiter_caches(qa_app)
+    limiter = SlidingWindowRateLimiter(max_requests=1, window_seconds=60)
+    monkeypatch.setattr(
+        qa_app,
+        "qa_ip_rate_limiter",
+        lambda: limiter,
+    )
+    monkeypatch.setattr(qa_app, "qa_service", lambda: FakeQaService())
+    app = create_app()
+    client = TestClient(app)
+
+    first = client.post(
+        "/api/qa",
+        json={"question": "How does QUIC ACK delay work?"},
+        headers={"X-Session-Id": "session-a"},
+    )
+    second = client.post(
+        "/api/qa",
+        json={"question": "How does QUIC ACK delay work?"},
+        headers={"X-Session-Id": "session-b"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+
+
+def test_qa_endpoint_global_deepseek_limit_applies_before_service_call(monkeypatch) -> None:
+    import coquic_rag.qa.app as qa_app
+
+    qa_app.qa_service.cache_clear()
+    clear_rate_limiter_caches(qa_app)
+    limiter = SlidingWindowRateLimiter(max_requests=2, window_seconds=60)
+    monkeypatch.setattr(
+        qa_app,
+        "deepseek_rate_limiter",
+        lambda: limiter,
+    )
+    fake_service = FakeQaService()
+    monkeypatch.setattr(qa_app, "qa_service", lambda: fake_service)
+    app = create_app()
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/qa",
+        json={"question": "How does QUIC ACK delay work?"},
+        headers={"X-Session-Id": "global-limited-session"},
+    )
+
+    assert response.status_code == 429
+    assert fake_service.calls == []
+
+
 def test_qa_stream_endpoint_returns_sse(monkeypatch) -> None:
     import coquic_rag.qa.app as qa_app
 
     qa_app.qa_service.cache_clear()
-    qa_app.rate_limiter.cache_clear()
+    clear_rate_limiter_caches(qa_app)
     fake_service = FakeQaService()
     monkeypatch.setattr(qa_app, "qa_service", lambda: fake_service)
     app = create_app()
@@ -169,7 +238,7 @@ def test_qa_stream_endpoint_returns_sse(monkeypatch) -> None:
         "/api/qa/stream",
         json={
             "question": "How does QUIC ACK delay work?",
-            "model": "openai/gpt-oss-120b:free",
+            "model": "deepseek-v4-pro",
         },
         headers={"X-Session-Id": "test-stream-session"},
     )
@@ -182,11 +251,11 @@ def test_qa_stream_endpoint_returns_sse(monkeypatch) -> None:
     assert fake_service.calls[0]["stream"] is True
 
 
-def test_qa_endpoint_rejects_non_free_answer_model(monkeypatch) -> None:
+def test_qa_endpoint_rejects_non_deepseek_answer_model(monkeypatch) -> None:
     import coquic_rag.qa.app as qa_app
 
     qa_app.qa_service.cache_clear()
-    qa_app.rate_limiter.cache_clear()
+    clear_rate_limiter_caches(qa_app)
     monkeypatch.setattr(qa_app, "qa_service", lambda: FakeQaService())
     app = create_app()
     client = TestClient(app)
@@ -201,7 +270,7 @@ def test_qa_endpoint_rejects_non_free_answer_model(monkeypatch) -> None:
     )
 
     assert response.status_code == 400
-    assert "unsupported free answer model" in response.json()["detail"]
+    assert "unsupported DeepSeek answer model" in response.json()["detail"]
 
 
 def test_health_reports_hardcoded_models_when_old_override_env_is_set(monkeypatch) -> None:
@@ -237,17 +306,18 @@ def test_health_reports_hardcoded_models_when_old_override_env_is_set(monkeypatc
     payload = response.json()
     assert payload["embedding_model"] == "nvidia/llama-nemotron-embed-vl-1b-v2:free"
     assert "relevance_filter_model" not in payload
-    assert payload["llm_model"] == "openai/gpt-oss-120b:free"
+    assert payload["llm_model"] == "deepseek-v4-pro"
     assert payload["answer_models"][0] == {
-        "id": "openai/gpt-oss-120b:free",
-        "label": "OpenAI: gpt-oss-120b (free)",
+        "id": "deepseek-v4-pro",
+        "label": "DeepSeek: V4 Pro",
     }
+    assert len(payload["answer_models"]) == 1
 
 
 def test_random_question_endpoint_returns_validated_question(monkeypatch) -> None:
     import coquic_rag.qa.app as qa_app
 
-    qa_app.question_rate_limiter.cache_clear()
+    clear_rate_limiter_caches(qa_app)
     generator = FakeQuestionGenerator()
     classifier = FakeRelevanceClassifier()
     monkeypatch.setattr(qa_app, "question_generator", lambda: generator)
@@ -266,22 +336,23 @@ def test_random_question_endpoint_returns_validated_question(monkeypatch) -> Non
     assert classifier.calls == []
 
 
-def test_default_random_question_generator_uses_openrouter_free_router(monkeypatch) -> None:
+def test_default_random_question_generator_uses_deepseek_v4_pro(monkeypatch) -> None:
     import coquic_rag.qa.app as qa_app
 
     qa_app.question_generator.cache_clear()
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
 
     generator = qa_app.question_generator()
 
     assert generator.models == (QUESTION_GENERATOR_MODEL,)
+    assert generator.models == ("deepseek-v4-pro",)
     assert generator.max_generation_attempts == 5
 
 
 def test_random_question_endpoint_rejects_invalid_generated_questions(monkeypatch) -> None:
     import coquic_rag.qa.app as qa_app
 
-    qa_app.question_rate_limiter.cache_clear()
+    clear_rate_limiter_caches(qa_app)
     monkeypatch.setattr(qa_app, "question_generator", lambda: FakeQuestionGenerator("What is pasta?"))
     classifier = FakeRelevanceClassifier(False)
     monkeypatch.setattr(qa_app, "relevance_classifier", lambda: classifier)
@@ -300,9 +371,13 @@ def test_random_question_endpoint_rejects_invalid_generated_questions(monkeypatc
 def test_random_question_endpoint_enforces_rate_limit(monkeypatch) -> None:
     import coquic_rag.qa.app as qa_app
 
-    qa_app.question_rate_limiter.cache_clear()
-    monkeypatch.setenv("COQUIC_RANDOM_QUESTION_RATE_LIMIT", "1")
-    monkeypatch.setenv("COQUIC_RANDOM_QUESTION_RATE_WINDOW_SECONDS", "60")
+    clear_rate_limiter_caches(qa_app)
+    limiter = SlidingWindowRateLimiter(max_requests=1, window_seconds=60)
+    monkeypatch.setattr(
+        qa_app,
+        "question_rate_limiter",
+        lambda: limiter,
+    )
     monkeypatch.setattr(qa_app, "question_generator", lambda: FakeQuestionGenerator())
     monkeypatch.setattr(qa_app, "relevance_classifier", lambda: FakeRelevanceClassifier())
     app = create_app()
@@ -315,6 +390,34 @@ def test_random_question_endpoint_enforces_rate_limit(monkeypatch) -> None:
     second = client.post(
         "/api/questions/random",
         headers={"X-Session-Id": "same-random-session"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+
+
+def test_random_question_endpoint_limits_same_ip_across_rotated_sessions(monkeypatch) -> None:
+    import coquic_rag.qa.app as qa_app
+
+    clear_rate_limiter_caches(qa_app)
+    limiter = SlidingWindowRateLimiter(max_requests=1, window_seconds=60)
+    monkeypatch.setattr(
+        qa_app,
+        "question_ip_rate_limiter",
+        lambda: limiter,
+    )
+    monkeypatch.setattr(qa_app, "question_generator", lambda: FakeQuestionGenerator())
+    monkeypatch.setattr(qa_app, "relevance_classifier", lambda: FakeRelevanceClassifier())
+    app = create_app()
+    client = TestClient(app)
+
+    first = client.post(
+        "/api/questions/random",
+        headers={"X-Session-Id": "random-session-a"},
+    )
+    second = client.post(
+        "/api/questions/random",
+        headers={"X-Session-Id": "random-session-b"},
     )
 
     assert first.status_code == 200

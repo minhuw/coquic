@@ -118,8 +118,7 @@ typedef struct {
 } run_summary_t;
 
 typedef struct {
-    const config_t *cfg;
-    counters_t *counters;
+    counters_t counters;
     uint64_t expected_requests;
     uint64_t completed_requests;
     uint64_t request_bytes;
@@ -140,24 +139,101 @@ typedef struct {
     int counted;
 } client_stream_data_t;
 
-static quicly_context_t ctx;
 static ptls_key_exchange_algorithm_t *key_exchanges[4];
 static ptls_cipher_suite_t *cipher_suites[8];
 static int is_server_role;
-static quicly_cid_plaintext_t next_cid;
 
 static int on_client_hello_cb(ptls_on_client_hello_t *self, ptls_t *tls,
                               ptls_on_client_hello_parameters_t *params);
-static ptls_on_client_hello_t on_client_hello = {on_client_hello_cb};
-static ptls_context_t tlsctx = {
-    .random_bytes = ptls_openssl_random_bytes,
-    .get_time = &ptls_get_time,
-    .key_exchanges = key_exchanges,
-    .cipher_suites = cipher_suites,
-    .require_dhe_on_psk = 1,
-    .on_client_hello = &on_client_hello,
-};
-static ptls_iovec_t negotiated_protocols[1];
+static quicly_error_t flatten_sized_text(quicly_sendbuf_vec_t *vec, void *dst, size_t off,
+                                         size_t len);
+static void on_stop_sending(quicly_stream_t *stream, quicly_error_t err);
+static void on_receive_reset(quicly_stream_t *stream, quicly_error_t err);
+static void server_on_receive(quicly_stream_t *stream, size_t off, const void *src, size_t len);
+static void client_on_receive(quicly_stream_t *stream, size_t off, const void *src, size_t len);
+static void client_on_destroy(quicly_stream_t *stream, quicly_error_t err);
+static quicly_error_t on_stream_open(quicly_stream_open_t *self, quicly_stream_t *stream);
+
+static void *checked_calloc(size_t count, size_t size) {
+    void *ptr = calloc(count, size);
+    if (ptr == NULL) {
+        perror("calloc");
+        exit(1);
+    }
+    return ptr;
+}
+
+static quicly_context_t *quic_context(void) {
+    static quicly_context_t *context;
+    if (context == NULL) {
+        context = checked_calloc(1, sizeof(*context));
+    }
+    return context;
+}
+
+static quicly_cid_plaintext_t *next_connection_id(void) {
+    static quicly_cid_plaintext_t *cid;
+    if (cid == NULL) {
+        cid = checked_calloc(1, sizeof(*cid));
+    }
+    return cid;
+}
+
+static ptls_on_client_hello_t *client_hello_callback(void) {
+    static ptls_on_client_hello_t *on_client_hello;
+    if (on_client_hello == NULL) {
+        on_client_hello = checked_calloc(1, sizeof(*on_client_hello));
+        on_client_hello->cb = on_client_hello_cb;
+    }
+    return on_client_hello;
+}
+
+static ptls_context_t *tls_context(void) {
+    static ptls_context_t *tlsctx;
+    if (tlsctx == NULL) {
+        tlsctx = checked_calloc(1, sizeof(*tlsctx));
+        tlsctx->random_bytes = ptls_openssl_random_bytes;
+        tlsctx->get_time = &ptls_get_time;
+        tlsctx->key_exchanges = key_exchanges;
+        tlsctx->cipher_suites = cipher_suites;
+        tlsctx->require_dhe_on_psk = 1;
+    }
+    tlsctx->on_client_hello = client_hello_callback();
+    return tlsctx;
+}
+
+static ptls_openssl_sign_certificate_t *certificate_signer(void) {
+    static ptls_openssl_sign_certificate_t *signer;
+    if (signer == NULL) {
+        signer = checked_calloc(1, sizeof(*signer));
+    }
+    return signer;
+}
+
+static ptls_openssl_verify_certificate_t *certificate_verifier(void) {
+    static ptls_openssl_verify_certificate_t *verifier;
+    if (verifier == NULL) {
+        verifier = checked_calloc(1, sizeof(*verifier));
+    }
+    return verifier;
+}
+
+static ptls_iovec_t *negotiated_protocol_list(void) {
+    static ptls_iovec_t *protocols;
+    if (protocols == NULL) {
+        protocols = checked_calloc(1, sizeof(*protocols));
+    }
+    return protocols;
+}
+
+static quicly_stream_open_t *stream_open_callback(void) {
+    static quicly_stream_open_t *stream_open;
+    if (stream_open == NULL) {
+        stream_open = checked_calloc(1, sizeof(*stream_open));
+        stream_open->cb = on_stream_open;
+    }
+    return stream_open;
+}
 
 static uint64_t now_us(void) {
     struct timespec ts;
@@ -167,6 +243,17 @@ static uint64_t now_us(void) {
 
 static uint64_t duration_millis(uint64_t usec) {
     return usec / 1000ULL;
+}
+
+static long timeout_delta_ms(int64_t timeout_at, int64_t now_ms, long max_wait_ms) {
+    if (timeout_at == INT64_MAX) {
+        return max_wait_ms;
+    }
+    if (timeout_at <= now_ms) {
+        return 0;
+    }
+    const uint64_t delta = (uint64_t)(timeout_at - now_ms);
+    return delta > (uint64_t)max_wait_ms ? max_wait_ms : (long)delta;
 }
 
 static uint64_t parse_u64(const char *text, const char *name) {
@@ -374,6 +461,34 @@ static void latency_push(latency_vec_t *vec, uint64_t value) {
     vec->values[vec->len++] = value;
 }
 
+static void counters_merge(counters_t *dst, counters_t *src) {
+    dst->bytes_sent += src->bytes_sent;
+    dst->bytes_received += src->bytes_received;
+    dst->requests_completed += src->requests_completed;
+    dst->skipped_setup_errors += src->skipped_setup_errors;
+    for (size_t i = 0; i != src->latencies.len; ++i) {
+        latency_push(&dst->latencies, src->latencies.values[i]);
+    }
+    free(src->latencies.values);
+    memset(src, 0, sizeof(*src));
+}
+
+static void free_batch(client_batch_t *batch) {
+    if (batch == NULL) {
+        return;
+    }
+    free(batch->counters.latencies.values);
+    free(batch);
+}
+
+static void finish_batch(client_batch_t *batch, counters_t *counters) {
+    if (batch == NULL) {
+        return;
+    }
+    counters_merge(counters, &batch->counters);
+    free_batch(batch);
+}
+
 static int compare_u64(const void *a, const void *b) {
     uint64_t lhs = *(const uint64_t *)a;
     uint64_t rhs = *(const uint64_t *)b;
@@ -463,7 +578,7 @@ static void load_certificate_chain(ptls_context_t *tls, const char *path) {
 }
 
 static void load_private_key(ptls_context_t *tls, const char *path) {
-    static ptls_openssl_sign_certificate_t signer;
+    ptls_openssl_sign_certificate_t *signer = certificate_signer();
     FILE *fp = fopen(path, "rb");
     if (!fp) {
         fprintf(stderr, "failed to open private key:%s:%s\n", path, strerror(errno));
@@ -475,15 +590,15 @@ static void load_private_key(ptls_context_t *tls, const char *path) {
         fprintf(stderr, "failed to read private key:%s\n", path);
         exit(1);
     }
-    ptls_openssl_init_sign_certificate(&signer, pkey);
+    ptls_openssl_init_sign_certificate(signer, pkey);
     EVP_PKEY_free(pkey);
-    tls->sign_certificate = &signer.super;
+    tls->sign_certificate = &signer->super;
 }
 
 static void setup_verify_certificate(ptls_context_t *tls) {
-    static ptls_openssl_verify_certificate_t verifier;
-    ptls_openssl_init_verify_certificate(&verifier, NULL);
-    tls->verify_certificate = &verifier.super;
+    ptls_openssl_verify_certificate_t *verifier = certificate_verifier();
+    ptls_openssl_init_verify_certificate(verifier, NULL);
+    tls->verify_certificate = &verifier->super;
 }
 
 static int on_client_hello_cb(ptls_on_client_hello_t *self, ptls_t *tls,
@@ -508,6 +623,9 @@ static const char *quicly_cc_name(const char *label) {
 }
 
 static void configure_context(const config_t *cfg, int server) {
+    quicly_context_t *context = quic_context();
+    ptls_context_t *tls = tls_context();
+    ptls_iovec_t *protocols = negotiated_protocol_list();
     is_server_role = server;
     key_exchanges[0] = &ptls_openssl_secp256r1;
     key_exchanges[1] = NULL;
@@ -517,32 +635,32 @@ static void configure_context(const config_t *cfg, int server) {
         cipher_suites[i] = ptls_openssl_cipher_suites[i];
         cipher_suites[i + 1] = NULL;
     }
-    negotiated_protocols[0] = ptls_iovec_init(APPLICATION_PROTOCOL, strlen(APPLICATION_PROTOCOL));
+    protocols[0] = ptls_iovec_init(APPLICATION_PROTOCOL, strlen(APPLICATION_PROTOCOL));
 
-    ctx = quicly_spec_context;
-    ctx.tls = &tlsctx;
-    ctx.stream_open = NULL;
-    ctx.transport_params.max_data = TRANSFER_CONNECTION_WINDOW;
-    ctx.transport_params.max_stream_data.bidi_local = TRANSFER_STREAM_WINDOW;
-    ctx.transport_params.max_stream_data.bidi_remote = TRANSFER_STREAM_WINDOW;
-    ctx.transport_params.max_stream_data.uni = TRANSFER_STREAM_WINDOW;
-    ctx.transport_params.max_streams_bidi = cfg->streams > 100 ? cfg->streams : 100;
-    ctx.transport_params.max_udp_payload_size = 1500;
+    *context = quicly_spec_context;
+    context->tls = tls;
+    context->stream_open = NULL;
+    context->transport_params.max_data = TRANSFER_CONNECTION_WINDOW;
+    context->transport_params.max_stream_data.bidi_local = TRANSFER_STREAM_WINDOW;
+    context->transport_params.max_stream_data.bidi_remote = TRANSFER_STREAM_WINDOW;
+    context->transport_params.max_stream_data.uni = TRANSFER_STREAM_WINDOW;
+    context->transport_params.max_streams_bidi = cfg->streams > 100 ? cfg->streams : 100;
+    context->transport_params.max_udp_payload_size = 1500;
 
     const char *cc_name = quicly_cc_name(cfg->congestion_control);
     for (quicly_cc_type_t **cc = quicly_cc_all_types; *cc != NULL; ++cc) {
         if (strcmp((*cc)->name, cc_name) == 0) {
-            ctx.init_cc = (*cc)->cc_init;
+            context->init_cc = (*cc)->cc_init;
             break;
         }
     }
 
-    quicly_amend_ptls_context(ctx.tls);
+    quicly_amend_ptls_context(context->tls);
     if (server) {
-        load_certificate_chain(ctx.tls, cfg->certificate_chain);
-        load_private_key(ctx.tls, cfg->private_key);
+        load_certificate_chain(context->tls, cfg->certificate_chain);
+        load_private_key(context->tls, cfg->private_key);
     } else if (cfg->verify_peer) {
-        setup_verify_certificate(ctx.tls);
+        setup_verify_certificate(context->tls);
     }
 }
 
@@ -606,6 +724,15 @@ static quicly_error_t flatten_sized_text(quicly_sendbuf_vec_t *vec, void *dst, s
     return 0;
 }
 
+static const quicly_streambuf_sendvec_callbacks_t *sized_text_callbacks(void) {
+    static quicly_streambuf_sendvec_callbacks_t *callbacks;
+    if (callbacks == NULL) {
+        callbacks = checked_calloc(1, sizeof(*callbacks));
+        callbacks->flatten_vec = flatten_sized_text;
+    }
+    return callbacks;
+}
+
 static int send_sized_text(quicly_stream_t *stream, const char *path, int is_http1) {
     size_t size;
     int lastpos;
@@ -613,8 +740,8 @@ static int send_sized_text(quicly_stream_t *stream, const char *path, int is_htt
         return 0;
     }
     send_header(stream, is_http1, 200, "text/plain; charset=utf-8");
-    static const quicly_streambuf_sendvec_callbacks_t callbacks = {flatten_sized_text, NULL};
-    quicly_sendbuf_vec_t vec = {&callbacks, size, NULL};
+    const quicly_streambuf_sendvec_callbacks_t *callbacks = sized_text_callbacks();
+    quicly_sendbuf_vec_t vec = {callbacks, size, NULL};
     quicly_streambuf_egress_write_vec(stream, &vec);
     return 1;
 }
@@ -672,12 +799,12 @@ static void client_count_stream(client_stream_data_t *data) {
                  data->response_read, data->response_bytes);
         set_batch_failure(batch, message);
     }
-    batch->counters->bytes_sent += batch->request_bytes;
-    batch->counters->bytes_received += data->response_bytes;
-    ++batch->counters->requests_completed;
+    batch->counters.bytes_sent += batch->request_bytes;
+    batch->counters.bytes_received += data->response_bytes;
+    ++batch->counters.requests_completed;
     ++batch->completed_requests;
     if (data->counts_latency) {
-        latency_push(&batch->counters->latencies, now_us() - data->started_at);
+        latency_push(&batch->counters.latencies, now_us() - data->started_at);
     }
 }
 
@@ -704,23 +831,33 @@ static void client_on_destroy(quicly_stream_t *stream, quicly_error_t err) {
     quicly_streambuf_destroy(stream, err);
 }
 
-static const quicly_stream_callbacks_t server_stream_callbacks = {
-    quicly_streambuf_destroy,
-    quicly_streambuf_egress_shift,
-    quicly_streambuf_egress_emit,
-    on_stop_sending,
-    server_on_receive,
-    on_receive_reset,
-};
+static const quicly_stream_callbacks_t *server_stream_callback_table(void) {
+    static quicly_stream_callbacks_t *callbacks;
+    if (callbacks == NULL) {
+        callbacks = checked_calloc(1, sizeof(*callbacks));
+        callbacks->on_destroy = quicly_streambuf_destroy;
+        callbacks->on_send_shift = quicly_streambuf_egress_shift;
+        callbacks->on_send_emit = quicly_streambuf_egress_emit;
+        callbacks->on_send_stop = on_stop_sending;
+        callbacks->on_receive = server_on_receive;
+        callbacks->on_receive_reset = on_receive_reset;
+    }
+    return callbacks;
+}
 
-static const quicly_stream_callbacks_t client_stream_callbacks = {
-    client_on_destroy,
-    quicly_streambuf_egress_shift,
-    quicly_streambuf_egress_emit,
-    on_stop_sending,
-    client_on_receive,
-    on_receive_reset,
-};
+static const quicly_stream_callbacks_t *client_stream_callback_table(void) {
+    static quicly_stream_callbacks_t *callbacks;
+    if (callbacks == NULL) {
+        callbacks = checked_calloc(1, sizeof(*callbacks));
+        callbacks->on_destroy = client_on_destroy;
+        callbacks->on_send_shift = quicly_streambuf_egress_shift;
+        callbacks->on_send_emit = quicly_streambuf_egress_emit;
+        callbacks->on_send_stop = on_stop_sending;
+        callbacks->on_receive = client_on_receive;
+        callbacks->on_receive_reset = on_receive_reset;
+    }
+    return callbacks;
+}
 
 static quicly_error_t on_stream_open(quicly_stream_open_t *self, quicly_stream_t *stream) {
     (void)self;
@@ -730,15 +867,15 @@ static quicly_error_t on_stream_open(quicly_stream_open_t *self, quicly_stream_t
         0) {
         return ret;
     }
-    stream->callbacks = is_server_role ? &server_stream_callbacks : &client_stream_callbacks;
+    stream->callbacks =
+        is_server_role ? server_stream_callback_table() : client_stream_callback_table();
     return 0;
 }
 
-static quicly_stream_open_t stream_open = {on_stream_open};
-
 static ssize_t receive_datagram(int fd, void *buf, quicly_address_t *dest, quicly_address_t *src,
                                 uint8_t *ecn) {
-    struct iovec vec = {.iov_base = buf, .iov_len = ctx.transport_params.max_udp_payload_size};
+    const quicly_context_t *context = quic_context();
+    struct iovec vec = {.iov_base = buf, .iov_len = context->transport_params.max_udp_payload_size};
     char cmsgbuf[CMSG_SPACE(sizeof(struct in6_pktinfo)) + CMSG_SPACE(1)] = {};
     struct msghdr msg = {
         .msg_name = &src->sa,
@@ -919,6 +1056,11 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
         count = DEFAULT_MAX_RUN_REQUESTS;
     }
 
+    quicly_context_t *context = quic_context();
+    quicly_cid_plaintext_t *next_cid = next_connection_id();
+    ptls_iovec_t *protocols = negotiated_protocol_list();
+
+    /* Resolve and prepare a short-lived UDP socket for this client batch. */
     struct sockaddr_storage sa;
     socklen_t salen;
     if (resolve_address(&sa, &salen, cfg->host, cfg->port, 0) != 0) {
@@ -947,52 +1089,53 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
 
     ptls_handshake_properties_t hs_properties;
     memset(&hs_properties, 0, sizeof(hs_properties));
-    hs_properties.client.negotiated_protocols.list = negotiated_protocols;
+    hs_properties.client.negotiated_protocols.list = protocols;
     hs_properties.client.negotiated_protocols.count = 1;
 
-    client_batch_t batch;
-    memset(&batch, 0, sizeof(batch));
-    batch.cfg = cfg;
-    batch.counters = counters;
-    batch.expected_requests = count;
-    batch.request_bytes = request_bytes;
-    batch.response_bytes = response_bytes;
-    batch.counts_latency = counts_latency;
+    /* Streams keep a pointer to this heap batch until quicly destroys their callbacks. */
+    client_batch_t *batch = calloc(1, sizeof(*batch));
+    if (batch == NULL) {
+        close(fd);
+        snprintf(failure_reason, failure_reason_len, "out of memory");
+        return -1;
+    }
+    batch->expected_requests = count;
+    batch->request_bytes = request_bytes;
+    batch->response_bytes = response_bytes;
+    batch->counts_latency = counts_latency;
 
     quicly_conn_t *conn = NULL;
     quicly_error_t ret =
-        quicly_connect(&conn, &ctx, cfg->server_name, (struct sockaddr *)&sa, NULL, &next_cid,
+        quicly_connect(&conn, context, cfg->server_name, (struct sockaddr *)&sa, NULL, next_cid,
                        ptls_iovec_init(NULL, 0), &hs_properties, NULL, NULL);
     if (ret != 0 || conn == NULL) {
+        free_batch(batch);
         close(fd);
         snprintf(failure_reason, failure_reason_len, "quicly_connect failed");
         return -1;
     }
-    ++next_cid.master_id;
-    if (enqueue_requests(conn, &batch, count) != 0) {
-        snprintf(failure_reason, failure_reason_len, "%s", batch.failure_reason);
+    ++next_cid->master_id;
+    if (enqueue_requests(conn, batch, count) != 0) {
+        snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
         quicly_free(conn);
+        finish_batch(batch, counters);
         close(fd);
         return -1;
     }
     send_pending(fd, conn);
 
+    /* Stream callbacks collect byte, request, and latency counters as packets arrive. */
     int close_called = 0;
     uint64_t hard_deadline = now_us() + 120000000ULL;
     while (conn != NULL) {
+        /* Drive packet I/O and timers until all streams complete or the batch fails. */
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(fd, &readfds);
         struct timeval tv;
         int64_t timeout_at = quicly_get_first_timeout(conn);
-        int64_t now_ms = ctx.now->cb(ctx.now);
-        int64_t delta = timeout_at == INT64_MAX ? 100 : timeout_at - now_ms;
-        if (delta < 0) {
-            delta = 0;
-        }
-        if (delta > 100) {
-            delta = 100;
-        }
+        int64_t now_ms = context->now->cb(context->now);
+        long delta = timeout_delta_ms(timeout_at, now_ms, 100);
         tv.tv_sec = delta / 1000;
         tv.tv_usec = (delta % 1000) * 1000;
         int sret;
@@ -1013,7 +1156,8 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
                 size_t off = 0;
                 while (off != (size_t)rret) {
                     quicly_decoded_packet_t packet;
-                    if (quicly_decode_packet(&ctx, &packet, buf, (size_t)rret, &off) == SIZE_MAX) {
+                    if (quicly_decode_packet(context, &packet, buf, (size_t)rret, &off) ==
+                        SIZE_MAX) {
                         break;
                     }
                     packet.ecn = ecn;
@@ -1022,7 +1166,7 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
             }
         }
 
-        if (!close_called && batch.completed_requests >= batch.expected_requests &&
+        if (!close_called && batch->completed_requests >= batch->expected_requests &&
             quicly_num_streams(conn) == 0) {
             quicly_close(conn, 0, "");
             close_called = 1;
@@ -1035,15 +1179,18 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
             if (ret != QUICLY_ERROR_FREE_CONNECTION) {
                 snprintf(failure_reason, failure_reason_len, "quicly_send returned %" PRId64,
                          (int64_t)ret);
+                finish_batch(batch, counters);
                 close(fd);
                 return -1;
             }
         }
-        if (batch.failed) {
-            snprintf(failure_reason, failure_reason_len, "%s", batch.failure_reason);
+        if (batch->failed) {
+            snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
             if (conn != NULL) {
                 quicly_close(conn, QUICLY_ERROR_FROM_APPLICATION_ERROR_CODE(1), "perf failure");
+                quicly_free(conn);
             }
+            finish_batch(batch, counters);
             close(fd);
             return -1;
         }
@@ -1052,17 +1199,20 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
             if (conn != NULL) {
                 quicly_free(conn);
             }
+            finish_batch(batch, counters);
             close(fd);
             return -1;
         }
     }
     close(fd);
-    if (batch.completed_requests != batch.expected_requests) {
+    if (batch->completed_requests != batch->expected_requests) {
         snprintf(failure_reason, failure_reason_len,
                  "quicly-perf completed %" PRIu64 " of %" PRIu64 " requests",
-                 batch.completed_requests, batch.expected_requests);
+                 batch->completed_requests, batch->expected_requests);
+        finish_batch(batch, counters);
         return -1;
     }
+    finish_batch(batch, counters);
     return 0;
 }
 
@@ -1219,6 +1369,10 @@ static void remove_server_conn(size_t index) {
 }
 
 static int run_server(const config_t *cfg) {
+    quicly_context_t *context = quic_context();
+    quicly_cid_plaintext_t *next_cid = next_connection_id();
+
+    /* Bind the UDP listener and install signal handlers for benchmark shutdown. */
     struct sockaddr_storage sa;
     socklen_t salen;
     if (resolve_address(&sa, &salen, cfg->host, cfg->port, 1) != 0) {
@@ -1242,6 +1396,7 @@ static int run_server(const config_t *cfg) {
     signal(SIGINT, on_server_signal);
 
     while (!server_stop) {
+        /* Wait for either network input or the earliest quicly connection timer. */
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(fd, &readfds);
@@ -1253,13 +1408,7 @@ static int run_server(const config_t *cfg) {
             }
         }
         struct timeval tv;
-        int64_t delta = timeout_at == INT64_MAX ? 100 : timeout_at - ctx.now->cb(ctx.now);
-        if (delta < 0) {
-            delta = 0;
-        }
-        if (delta > 100) {
-            delta = 100;
-        }
+        long delta = timeout_delta_ms(timeout_at, context->now->cb(context->now), 100);
         tv.tv_sec = delta / 1000;
         tv.tv_usec = (delta % 1000) * 1000;
         int sret;
@@ -1280,7 +1429,8 @@ static int run_server(const config_t *cfg) {
                 size_t off = 0;
                 while (off != (size_t)rret) {
                     quicly_decoded_packet_t packet;
-                    if (quicly_decode_packet(&ctx, &packet, buf, (size_t)rret, &off) == SIZE_MAX) {
+                    if (quicly_decode_packet(context, &packet, buf, (size_t)rret, &off) ==
+                        SIZE_MAX) {
                         break;
                     }
                     packet.ecn = ecn;
@@ -1297,18 +1447,20 @@ static int run_server(const config_t *cfg) {
                     } else if (QUICLY_PACKET_IS_LONG_HEADER(packet.octets.base[0]) &&
                                packet.version != 0 &&
                                !quicly_is_supported_version(packet.version)) {
+                        /* Unknown-version Initials need a stateless version negotiation response.
+                         */
                         uint8_t payload[1500];
                         size_t payload_len = quicly_send_version_negotiation(
-                            &ctx, packet.cid.src, packet.cid.dest.encrypted,
+                            context, packet.cid.src, packet.cid.dest.encrypted,
                             quicly_supported_versions, payload);
                         if (payload_len != SIZE_MAX) {
                             send_one_packet(fd, &remote, &local, payload, payload_len);
                         }
                     } else if (QUICLY_PACKET_IS_INITIAL(packet.octets.base[0])) {
-                        quicly_error_t ret = quicly_accept(&conn, &ctx, &local.sa, &remote.sa,
-                                                           &packet, NULL, &next_cid, NULL, NULL);
+                        quicly_error_t ret = quicly_accept(&conn, context, &local.sa, &remote.sa,
+                                                           &packet, NULL, next_cid, NULL, NULL);
                         if (ret == 0 && conn != NULL) {
-                            ++next_cid.master_id;
+                            ++next_cid->master_id;
                             quicly_conn_t **new_conns = realloc(
                                 server_conns, (num_server_conns + 1) * sizeof(server_conns[0]));
                             if (!new_conns) {
@@ -1324,12 +1476,13 @@ static int run_server(const config_t *cfg) {
             }
         }
 
-        for (size_t i = 0; i != num_server_conns; ++i) {
+        for (size_t i = 0; i < num_server_conns;) {
             quicly_error_t ret = send_pending(fd, server_conns[i]);
             if (ret != 0) {
                 remove_server_conn(i);
-                --i;
+                continue;
             }
+            ++i;
         }
     }
 
@@ -1456,7 +1609,7 @@ static int emit_summary(const run_summary_t *summary) {
 int main(int argc, char **argv) {
     config_t cfg = parse_args(argc, argv);
     configure_context(&cfg, strcmp(cfg.role, "server") == 0);
-    ctx.stream_open = &stream_open;
+    quic_context()->stream_open = stream_open_callback();
     if (strcmp(cfg.role, "server") == 0) {
         return run_server(&cfg);
     }

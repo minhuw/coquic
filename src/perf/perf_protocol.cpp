@@ -187,74 +187,70 @@ std::optional<QuicPerfControlMessage> decode_perf_control_message(std::span<cons
     const auto message_type = static_cast<QuicPerfMessageType>(type.value());
     switch (message_type) {
     case QuicPerfMessageType::session_start: {
-        const auto protocol_version = take_u32(in);
-        const auto mode_raw = take_u8(in);
-        const auto direction_raw = take_u8(in);
-        const auto request_bytes = take_u64(in);
-        const auto response_bytes = take_u64(in);
+        auto protocol_version = take_u32(in);
+        auto mode_raw = take_u8(in);
+        auto direction_raw = take_u8(in);
+        auto request_bytes = take_u64(in);
+        auto response_bytes = take_u64(in);
         if (!protocol_version.has_value() || !mode_raw.has_value() || !direction_raw.has_value() ||
             !request_bytes.has_value() || !response_bytes.has_value()) {
             return std::nullopt;
         }
 
-        std::optional<std::uint8_t> optional_flags;
+        std::uint8_t optional_flags = 0;
         if (protocol_version.value() == kQuicPerfProtocolVersion ||
             protocol_version.value() == kQuicPerfProtocolVersionMilliseconds) {
-            optional_flags = take_u8(in);
+            const auto decoded_optional_flags = take_u8(in);
+            if (!decoded_optional_flags.has_value()) {
+                return std::nullopt;
+            }
+            optional_flags = decoded_optional_flags.value();
         } else if (protocol_version.value() != kQuicPerfProtocolVersionLegacy) {
             return std::nullopt;
         }
 
-        const auto total_bytes = take_u64(in);
-        const auto requests = take_u64(in);
-        const auto warmup = take_u64(in);
-        const auto duration = take_u64(in);
-        const auto streams = take_u64(in);
-        const auto connections = take_u64(in);
-        const auto requests_in_flight = take_u64(in);
-        if (((protocol_version.value() == kQuicPerfProtocolVersion ||
-              protocol_version.value() == kQuicPerfProtocolVersionMilliseconds) &&
-             !optional_flags.has_value()) ||
-            !total_bytes.has_value() || !requests.has_value() || !warmup.has_value() ||
+        auto total_bytes = take_u64(in);
+        auto requests = take_u64(in);
+        auto warmup = take_u64(in);
+        auto duration = take_u64(in);
+        auto streams = take_u64(in);
+        auto connections = take_u64(in);
+        auto requests_in_flight = take_u64(in);
+        if (!total_bytes.has_value() || !requests.has_value() || !warmup.has_value() ||
             !duration.has_value() || !streams.has_value() || !connections.has_value() ||
             !requests_in_flight.has_value()) {
             return std::nullopt;
         }
 
-        const auto mode = parse_mode(mode_raw.value());
-        const auto direction = parse_direction(direction_raw.value());
+        auto mode = parse_mode(mode_raw.value());
+        auto direction = parse_direction(direction_raw.value());
         if (!mode.has_value() || !direction.has_value() || !in.empty()) {
             return std::nullopt;
         }
 
-        const auto protocol_version_value = protocol_version.value();
-        const auto total_bytes_value = total_bytes.value_or(0);
-        const auto requests_value = requests.value_or(0);
-        const auto optional_flags_value = optional_flags.value_or(0);
-
         QuicPerfSessionStart start;
-        start.protocol_version = protocol_version_value;
+        start.protocol_version = protocol_version.value();
         start.mode = mode.value();
         start.direction = direction.value();
         start.request_bytes = request_bytes.value();
         start.response_bytes = response_bytes.value();
-        if (protocol_version_value == kQuicPerfProtocolVersionLegacy) {
-            if (total_bytes_value != 0) {
-                start.total_bytes = total_bytes_value;
+        if (start.protocol_version == kQuicPerfProtocolVersionLegacy) {
+            if (total_bytes.value() != 0) {
+                start.total_bytes = total_bytes;
             }
-            if (requests_value != 0) {
-                start.requests = requests_value;
+            if (requests.value() != 0) {
+                start.requests = requests;
             }
         } else {
-            if ((optional_flags_value & kSessionStartOptionalTotalBytesFlag) != 0) {
-                start.total_bytes = total_bytes_value;
+            if ((optional_flags & kSessionStartOptionalTotalBytesFlag) != 0) {
+                start.total_bytes = total_bytes;
             }
-            if ((optional_flags_value & kSessionStartOptionalRequestsFlag) != 0) {
-                start.requests = requests_value;
+            if ((optional_flags & kSessionStartOptionalRequestsFlag) != 0) {
+                start.requests = requests;
             }
         }
-        if (protocol_version_value == kQuicPerfProtocolVersionLegacy ||
-            protocol_version_value == kQuicPerfProtocolVersionMilliseconds) {
+        if (start.protocol_version == kQuicPerfProtocolVersionLegacy ||
+            start.protocol_version == kQuicPerfProtocolVersionMilliseconds) {
             start.warmup = legacy_milliseconds_from_u64(warmup.value());
             start.duration = legacy_milliseconds_from_u64(duration.value());
         } else {

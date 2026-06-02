@@ -24,6 +24,23 @@ std::string connection_id_key_for_tests(std::span<const std::byte> connection_id
     return connection_id_key(connection_id);
 }
 
+sockaddr_storage runtime_test_loopback_peer(std::uint16_t port) {
+    sockaddr_storage peer{};
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(port);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    return peer;
+}
+
+QuicRouteHandle inbound_route_handle_or_zero(const RuntimeWaitStep &step) {
+    if (!step.input.has_value()) {
+        return 0;
+    }
+    const auto *inbound = std::get_if<QuicCoreInboundDatagram>(&*step.input);
+    return inbound != nullptr ? inbound->route_handle.value_or(0) : 0;
+}
+
 int client_receive_timeout_ms_for_tests(const Http09RuntimeConfig &config) {
     return client_receive_timeout_ms(config);
 }
@@ -149,12 +166,10 @@ drive_endpoint_until_blocked_case_for_tests(DriveEndpointUntilBlockedCaseForTest
     });
     kDriveEndpointCaseSetups[static_cast<std::size_t>(case_id)](endpoint, core, initial_result);
 
-    const bool returned =
-        drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core,
-                                     /*fd=*/-1, peer_ptr,
-                                     /*peer_len=*/0, initial_result, state, "client");
     return DriveEndpointUntilBlockedResultForTests{
-        .returned = returned,
+        .returned = drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core,
+                                                 /*fd=*/-1, peer_ptr,
+                                                 /*peer_len=*/0, initial_result, state, "client"),
         .terminal_success = state.terminal_success,
         .terminal_failure = state.terminal_failure,
         .endpoint_has_pending_work = state.endpoint_has_pending_work,
@@ -501,39 +516,42 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
             },
     };
     g_recorded_sendto_for_tests = {};
-    const ScopedHttp09RuntimeOpsOverride runtime_ops{
+    return ScopedHttp09RuntimeOpsOverride{
         Http09RuntimeOpsOverride{
             .sendto_fn = &record_sendto_for_tests,
         },
-    };
-    auto io = make_scripted_client_loop_io_for_tests(io_script);
-    std::unique_ptr<FailureInjectingClientLoopIoForTests> failure_injecting_io;
-    if (case_id == ClientConnectionLoopCaseForTests::nonblocking_receive_terminal_failure_state) {
-        failure_injecting_io = std::make_unique<FailureInjectingClientLoopIoForTests>(
-            FailureInjectingClientLoopIoForTests{
-                .script = &io_script,
-                .state = &state,
-            });
-        io = ClientLoopIo{
-            .context = failure_injecting_io.get(),
-            .now_fn = &failure_injecting_client_loop_now_for_tests,
-            .receive_datagram_fn = &failure_injecting_client_loop_receive_for_tests,
-            .wait_for_socket_or_deadline_fn = &failure_injecting_client_loop_wait_for_tests,
-        };
     }
-    const int exit_code = run_http09_client_connection_loop(
-        config, make_endpoint_driver(endpoint), core, client_sockets,
-        /*idle_timeout_ms=*/kDefaultClientReceiveTimeoutMs, peer, /*peer_len=*/0, state,
-        client_policy, io, start_result);
-    return ClientConnectionLoopResultForTests{
-        .exit_code = exit_code,
-        .terminal_success = state.terminal_success,
-        .terminal_failure = state.terminal_failure,
-        .endpoint_has_pending_work = state.endpoint_has_pending_work,
-        .receive_calls = io_script.next_receive_index,
-        .wait_calls = io_script.next_wait_index,
-        .current_time_calls = io_script.next_now_index,
-    };
+        .while_active([&] {
+            auto io = make_scripted_client_loop_io_for_tests(io_script);
+            std::unique_ptr<FailureInjectingClientLoopIoForTests> failure_injecting_io;
+            if (case_id ==
+                ClientConnectionLoopCaseForTests::nonblocking_receive_terminal_failure_state) {
+                failure_injecting_io = std::make_unique<FailureInjectingClientLoopIoForTests>(
+                    FailureInjectingClientLoopIoForTests{
+                        .script = &io_script,
+                        .state = &state,
+                    });
+                io = ClientLoopIo{
+                    .context = failure_injecting_io.get(),
+                    .now_fn = &failure_injecting_client_loop_now_for_tests,
+                    .receive_datagram_fn = &failure_injecting_client_loop_receive_for_tests,
+                    .wait_for_socket_or_deadline_fn = &failure_injecting_client_loop_wait_for_tests,
+                };
+            }
+            const int exit_code = run_http09_client_connection_loop(
+                config, make_endpoint_driver(endpoint), core, client_sockets,
+                /*idle_timeout_ms=*/kDefaultClientReceiveTimeoutMs, peer, /*peer_len=*/0, state,
+                client_policy, io, start_result);
+            return ClientConnectionLoopResultForTests{
+                .exit_code = exit_code,
+                .terminal_success = state.terminal_success,
+                .terminal_failure = state.terminal_failure,
+                .endpoint_has_pending_work = state.endpoint_has_pending_work,
+                .receive_calls = io_script.next_receive_index,
+                .wait_calls = io_script.next_wait_index,
+                .current_time_calls = io_script.next_now_index,
+            };
+        });
 }
 
 ClientConnectionLoopResultForTests
@@ -940,10 +958,10 @@ bool existing_server_session_missing_input_fails_for_tests() {
         .destination_connection_id = {std::byte{0x83}},
     };
     ServerConnectionIdRouteMap connection_id_routes;
-    const bool processed = process_existing_server_session_datagram(
-        *session, step, connection_id_routes, parsed,
-        std::bind_front(&record_erased_server_session_key_for_tests, &erased_key));
-    return !processed & erased_key.empty();
+    return !process_existing_server_session_datagram(
+               *session, step, connection_id_routes, parsed,
+               std::bind_front(&record_erased_server_session_key_for_tests, &erased_key)) &
+           erased_key.empty();
 }
 
 bool preferred_address_routes_to_existing_server_session_for_tests() {
@@ -1027,11 +1045,12 @@ bool runtime_backend_connectionmigration_request_flow_case_for_tests(
     const auto route_handle = policy.preferred_address_route_handle.value_or(QuicRouteHandle{});
     const auto &request = std::get<QuicCoreRequestConnectionMigration>(core_inputs.front());
     const auto &remote = backend_ptr->ensure_route_calls.front();
-    const auto expected_route_handle = preferred_route_result.value_or(QuicRouteHandle{});
     return policy.handshake_ready_seen && policy.handshake_confirmed_seen &&
-           policy.preferred_address_request_queued && (route_handle == expected_route_handle) &&
-           (io_context.preferred_route_handle.value_or(0) == expected_route_handle) &&
-           (request.route_handle == expected_route_handle) &&
+           policy.preferred_address_request_queued &&
+           (route_handle == preferred_route_result.value_or(QuicRouteHandle{})) &&
+           (io_context.preferred_route_handle.value_or(0) ==
+            preferred_route_result.value_or(QuicRouteHandle{})) &&
+           (request.route_handle == preferred_route_result.value_or(QuicRouteHandle{})) &&
            (request.reason == QuicMigrationRequestReason::preferred_address) &&
            (remote.family == AF_INET) && (peer_port_for_remote_for_tests(remote) == 4444);
 }
@@ -1133,13 +1152,12 @@ bool runtime_backend_preferred_address_route_failure_stops_migration_request_for
     });
     result.effects.emplace_back(make_ipv4_preferred_address_effect_for_tests());
 
-    const bool observed = observe_client_runtime_policy_effects_with_backend(result, state, policy,
-                                                                             io_context, "client");
-
     std::vector<QuicCoreInput> core_inputs;
+    const bool route_observation_failed = !observe_client_runtime_policy_effects_with_backend(
+        result, state, policy, io_context, "client");
     maybe_queue_client_runtime_policy_inputs(config, policy, core_inputs);
 
-    return !observed && backend_ptr->ensure_route_calls.size() == 1 &&
+    return route_observation_failed && backend_ptr->ensure_route_calls.size() == 1 &&
            policy.handshake_ready_seen && policy.handshake_confirmed_seen &&
            !policy.preferred_address_route_handle.has_value() &&
            !io_context.preferred_route_handle.has_value() &&
@@ -1219,10 +1237,11 @@ bool expired_server_timer_failure_cleans_up_for_tests() {
     };
 
     auto failed_endpoint = make_endpoint();
-    const auto failed_update =
-        failed_endpoint.on_core_result(single_receive_result_for_runtime_tests(0, "", true), now());
+    const bool endpoint_reports_failure =
+        failed_endpoint.on_core_result(single_receive_result_for_runtime_tests(0, "", true), now())
+            .terminal_failure;
     return run_case("expired-core-failure", make_failed_server_core_for_tests(), make_endpoint()) &
-           failed_update.terminal_failure &
+           endpoint_reports_failure &
            run_case("expired-endpoint-failure", make_failing_server_core_for_tests(),
                     std::move(failed_endpoint));
 }
@@ -1258,22 +1277,21 @@ bool pending_server_work_failure_cleans_up_for_tests() {
     ScopedRuntimeTempDirForTests document_root;
     document_root.write_file("large.bin", std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
 
-    const auto make_pending_endpoint = [&](bool fail_endpoint) {
+    const auto run_case = [&](std::string_view local_connection_id_key, QuicCore core,
+                              bool fail_endpoint) {
         QuicHttp09ServerEndpoint endpoint(QuicHttp09ServerConfig{
             .document_root = document_root.path(),
         });
-        const auto update = endpoint.on_core_result(
-            single_receive_result_for_runtime_tests(0, "GET /large.bin\r\n", true), now());
-        bool failed = false;
-        if (fail_endpoint) {
-            const auto failure_update = endpoint.on_core_result(
-                single_receive_result_for_runtime_tests(4, "", true), now());
-            failed = failure_update.terminal_failure;
+        const bool pending_work_available =
+            endpoint
+                .on_core_result(
+                    single_receive_result_for_runtime_tests(0, "GET /large.bin\r\n", true), now())
+                .has_pending_work;
+        if (fail_endpoint &&
+            !endpoint.on_core_result(single_receive_result_for_runtime_tests(4, "", true), now())
+                 .terminal_failure) {
+            return false;
         }
-        return std::tuple{std::move(endpoint), update.has_pending_work, failed};
-    };
-    const auto run_case = [&](std::string_view local_connection_id_key, QuicCore core,
-                              QuicHttp09ServerEndpoint endpoint, bool has_pending_work) {
         ServerSessionMap sessions;
         sessions.emplace(std::string(local_connection_id_key),
                          std::make_unique<ServerSession>(ServerSession{
@@ -1281,7 +1299,7 @@ bool pending_server_work_failure_cleans_up_for_tests() {
                              .endpoint = std::move(endpoint),
                              .state =
                                  EndpointDriveState{
-                                     .endpoint_has_pending_work = has_pending_work,
+                                     .endpoint_has_pending_work = pending_work_available,
                                  },
                              .peer = {},
                              .peer_len = 0,
@@ -1292,18 +1310,13 @@ bool pending_server_work_failure_cleans_up_for_tests() {
         pump_server_pending_endpoint_work(
             sessions, connection_id_routes,
             [&](const std::string &erased_key) { sessions.erase(erased_key); });
-        return has_pending_work & sessions.empty();
+        return pending_work_available && sessions.empty();
     };
 
-    auto [core_failed_endpoint, has_pending_work, ignored_failed] = make_pending_endpoint(false);
-    auto [endpoint_failed_endpoint, endpoint_has_pending_work, endpoint_failed] =
-        make_pending_endpoint(true);
-    return !ignored_failed &
-           run_case("pending-core-failure", make_failed_server_core_for_tests(),
-                    std::move(core_failed_endpoint), has_pending_work) &
-           endpoint_failed &
+    return run_case("pending-core-failure", make_failed_server_core_for_tests(),
+                    /*fail_endpoint=*/false) &
            run_case("pending-endpoint-failure", make_failing_server_core_for_tests(),
-                    std::move(endpoint_failed_endpoint), endpoint_has_pending_work);
+                    /*fail_endpoint=*/true);
 }
 
 bool pending_server_work_success_preserves_session_for_tests() {
@@ -1393,22 +1406,13 @@ bool zero_rtt_request_allowance_for_tests() {
 }
 
 bool runtime_assigns_stable_path_ids_for_tests() {
-    const auto make_peer = [](std::uint16_t port) {
-        sockaddr_storage peer{};
-        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
-        ipv4.sin_family = AF_INET;
-        ipv4.sin_port = htons(port);
-        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        return peer;
-    };
-
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
     EndpointDriveState state;
     RuntimeWaitStep first{
         .input = QuicCoreInboundDatagram{.bytes = {std::byte{0x01}}},
         .input_time = now(),
         .socket_fd = 4,
-        .source = make_peer(4444),
+        .source = runtime_test_loopback_peer(4444),
         .source_len = peer_len,
         .has_source = true,
     };
@@ -1416,7 +1420,7 @@ bool runtime_assigns_stable_path_ids_for_tests() {
         .input = QuicCoreInboundDatagram{.bytes = {std::byte{0x02}}},
         .input_time = now(),
         .socket_fd = 4,
-        .source = make_peer(4444),
+        .source = runtime_test_loopback_peer(4444),
         .source_len = peer_len,
         .has_source = true,
     };
@@ -1424,41 +1428,29 @@ bool runtime_assigns_stable_path_ids_for_tests() {
         .input = QuicCoreInboundDatagram{.bytes = {std::byte{0x03}}},
         .input_time = now(),
         .socket_fd = 7,
-        .source = make_peer(4444),
+        .source = runtime_test_loopback_peer(4444),
         .source_len = peer_len,
         .has_source = true,
     };
 
-    const auto first_assigned = assign_runtime_path_for_inbound_step(state, first);
-    const auto second_assigned = assign_runtime_path_for_inbound_step(state, second);
-    const auto third_assigned = assign_runtime_path_for_inbound_step(state, third);
-    if (!first_assigned.has_value() || !second_assigned.has_value() ||
-        !third_assigned.has_value()) {
+    if (!assign_runtime_path_for_inbound_step(state, first).has_value() ||
+        !assign_runtime_path_for_inbound_step(state, second).has_value() ||
+        !assign_runtime_path_for_inbound_step(state, third).has_value()) {
         return false;
     }
-    return (first_assigned.value_or(0) != 0) & (first_assigned == second_assigned) &
-           (first_assigned != third_assigned) &
-           (state.path_routes.at(*first_assigned).socket_fd == 4) &
-           (state.path_routes.at(*third_assigned).socket_fd == 7);
+    return state.path_routes.size() == 2 && state.path_routes.contains(1) &&
+           state.path_routes.contains(2) && state.path_routes.at(1).socket_fd == 4 &&
+           state.path_routes.at(2).socket_fd == 7;
 }
 
 bool runtime_server_route_handles_are_stable_per_peer_tuple_for_tests() {
-    const auto make_peer = [](std::uint16_t port) {
-        sockaddr_storage peer{};
-        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
-        ipv4.sin_family = AF_INET;
-        ipv4.sin_port = htons(port);
-        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        return peer;
-    };
-
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
     EndpointDriveState state;
     RuntimeWaitStep first{
         .input = QuicCoreInboundDatagram{.bytes = {std::byte{0x01}}},
         .input_time = now(),
         .socket_fd = 4,
-        .source = make_peer(4444),
+        .source = runtime_test_loopback_peer(4444),
         .source_len = peer_len,
         .has_source = true,
     };
@@ -1466,7 +1458,7 @@ bool runtime_server_route_handles_are_stable_per_peer_tuple_for_tests() {
         .input = QuicCoreInboundDatagram{.bytes = {std::byte{0x02}}},
         .input_time = now(),
         .socket_fd = 4,
-        .source = make_peer(4444),
+        .source = runtime_test_loopback_peer(4444),
         .source_len = peer_len,
         .has_source = true,
     };
@@ -1474,108 +1466,107 @@ bool runtime_server_route_handles_are_stable_per_peer_tuple_for_tests() {
         .input = QuicCoreInboundDatagram{.bytes = {std::byte{0x03}}},
         .input_time = now(),
         .socket_fd = 7,
-        .source = make_peer(4444),
+        .source = runtime_test_loopback_peer(4444),
         .source_len = peer_len,
         .has_source = true,
     };
 
-    static_cast<void>(assign_runtime_path_for_inbound_step(state, first));
-    static_cast<void>(assign_runtime_path_for_inbound_step(state, second));
-    static_cast<void>(assign_runtime_path_for_inbound_step(state, third));
-
-    const auto first_route = std::get<QuicCoreInboundDatagram>(*first.input).route_handle;
-    const auto second_route = std::get<QuicCoreInboundDatagram>(*second.input).route_handle;
-    const auto third_route = std::get<QuicCoreInboundDatagram>(*third.input).route_handle;
-    if (!first_route.has_value() || !second_route.has_value() || !third_route.has_value()) {
+    if (!assign_runtime_path_for_inbound_step(state, first).has_value() ||
+        !assign_runtime_path_for_inbound_step(state, second).has_value() ||
+        !assign_runtime_path_for_inbound_step(state, third).has_value()) {
         return false;
     }
 
-    const auto first_route_value = first_route.value_or(0);
-    const auto second_route_value = second_route.value_or(0);
-    const auto third_route_value = third_route.value_or(0);
-    return first_route_value != 0 && first_route_value == second_route_value &&
-           first_route_value != third_route_value &&
-           state.route_routes.at(first_route_value).socket_fd == 4 &&
-           state.route_routes.at(third_route_value).socket_fd == 7;
+    return inbound_route_handle_or_zero(first) != 0 &&
+           inbound_route_handle_or_zero(first) == inbound_route_handle_or_zero(second) &&
+           inbound_route_handle_or_zero(first) != inbound_route_handle_or_zero(third) &&
+           state.route_routes.at(inbound_route_handle_or_zero(first)).socket_fd == 4 &&
+           state.route_routes.at(inbound_route_handle_or_zero(third)).socket_fd == 7;
 }
 
 bool runtime_configures_linux_ecn_socket_options_for_tests() {
     g_recorded_setsockopt_for_tests = {};
-    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+    return ScopedHttp09RuntimeOpsOverride{
         Http09RuntimeOpsOverride{
             .socket_fn = [](int, int, int) { return 41; },
             .setsockopt_fn = &record_setsockopt_for_tests,
         },
-    };
-
-    const int fd = open_udp_socket(AF_INET6);
-    const bool opened = fd == 41;
-    const auto has_call = [](int level, int name, int value) {
-        return std::ranges::any_of(g_recorded_setsockopt_for_tests.calls,
-                                   [&](const RecordedSetSockOptForTests::Call &call) {
-                                       return call.level == level && call.name == name &&
-                                              call.value == value;
-                                   });
-    };
-    return opened && has_call(IPPROTO_IPV6, IPV6_V6ONLY, 0) &&
-           has_call(IPPROTO_IP, IP_RECVTOS, 1) && has_call(IPPROTO_IPV6, IPV6_RECVTCLASS, 1);
+    }
+        .while_active([&] {
+            const int fd = open_udp_socket(AF_INET6);
+            const bool opened = fd == 41;
+            const auto has_call = [](int level, int name, int value) {
+                return std::ranges::any_of(g_recorded_setsockopt_for_tests.calls,
+                                           [&](const RecordedSetSockOptForTests::Call &call) {
+                                               return call.level == level && call.name == name &&
+                                                      call.value == value;
+                                           });
+            };
+            return opened && has_call(IPPROTO_IPV6, IPV6_V6ONLY, 0) &&
+                   has_call(IPPROTO_IP, IP_RECVTOS, 1) &&
+                   has_call(IPPROTO_IPV6, IPV6_RECVTCLASS, 1);
+        });
 }
 
 bool runtime_sendmsg_uses_outbound_ecn_for_tests() {
     g_recorded_sendmsg_for_tests = {};
-    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+    return ScopedHttp09RuntimeOpsOverride{
         Http09RuntimeOpsOverride{
             .sendmsg_fn = &record_sendmsg_for_tests,
         },
-    };
-    const std::array<std::byte, 1> datagram = {
-        std::byte{0x01},
-    };
+    }
+        .while_active([&] {
+            const std::array<std::byte, 1> datagram = {
+                std::byte{0x01},
+            };
 
-    sockaddr_storage peer{};
-    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
-    ipv4.sin_family = AF_INET;
-    ipv4.sin_port = htons(4433);
-    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            sockaddr_storage peer{};
+            auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
+            ipv4.sin_family = AF_INET;
+            ipv4.sin_port = htons(4433);
+            ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-    const bool sent =
-        send_datagram(/*fd=*/17, datagram, peer, static_cast<socklen_t>(sizeof(sockaddr_in)),
-                      "client", QuicEcnCodepoint::ect1);
-    return sent && (g_recorded_sendmsg_for_tests.calls == 1) &&
-           (g_recorded_sendmsg_for_tests.socket_fd == 17) &&
-           (g_recorded_sendmsg_for_tests.level == IPPROTO_IP) &&
-           (g_recorded_sendmsg_for_tests.type == IP_TOS) &&
-           (g_recorded_sendmsg_for_tests.traffic_class == 0x01);
+            return send_datagram(/*fd=*/17, datagram, peer,
+                                 static_cast<socklen_t>(sizeof(sockaddr_in)), "client",
+                                 QuicEcnCodepoint::ect1) &&
+                   (g_recorded_sendmsg_for_tests.calls == 1) &&
+                   (g_recorded_sendmsg_for_tests.socket_fd == 17) &&
+                   (g_recorded_sendmsg_for_tests.level == IPPROTO_IP) &&
+                   (g_recorded_sendmsg_for_tests.type == IP_TOS) &&
+                   (g_recorded_sendmsg_for_tests.traffic_class == 0x01);
+        });
 }
 
 bool runtime_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests() {
     g_recorded_sendmsg_for_tests = {};
-    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+    return ScopedHttp09RuntimeOpsOverride{
         Http09RuntimeOpsOverride{
             .sendmsg_fn = &record_sendmsg_for_tests,
         },
-    };
-    const std::array<std::byte, 1> datagram = {
-        std::byte{0x01},
-    };
+    }
+        .while_active([&] {
+            const std::array<std::byte, 1> datagram = {
+                std::byte{0x01},
+            };
 
-    sockaddr_storage peer{};
-    auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&peer);
-    ipv6.sin6_family = AF_INET6;
-    ipv6.sin6_port = htons(4433);
-    ipv6.sin6_addr.s6_addr[10] = 0xff;
-    ipv6.sin6_addr.s6_addr[11] = 0xff;
-    ipv6.sin6_addr.s6_addr[12] = 127;
-    ipv6.sin6_addr.s6_addr[15] = 1;
+            sockaddr_storage peer{};
+            auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&peer);
+            ipv6.sin6_family = AF_INET6;
+            ipv6.sin6_port = htons(4433);
+            ipv6.sin6_addr.s6_addr[10] = 0xff;
+            ipv6.sin6_addr.s6_addr[11] = 0xff;
+            ipv6.sin6_addr.s6_addr[12] = 127;
+            ipv6.sin6_addr.s6_addr[15] = 1;
 
-    const bool sent =
-        send_datagram(/*fd=*/23, datagram, peer, static_cast<socklen_t>(sizeof(sockaddr_in6)),
-                      "server", QuicEcnCodepoint::ect1);
-    return sent && (g_recorded_sendmsg_for_tests.calls == 1) &&
-           (g_recorded_sendmsg_for_tests.socket_fd == 23) &&
-           (g_recorded_sendmsg_for_tests.level == IPPROTO_IP) &&
-           (g_recorded_sendmsg_for_tests.type == IP_TOS) &&
-           (g_recorded_sendmsg_for_tests.traffic_class == 0x01);
+            return send_datagram(/*fd=*/23, datagram, peer,
+                                 static_cast<socklen_t>(sizeof(sockaddr_in6)), "server",
+                                 QuicEcnCodepoint::ect1) &&
+                   (g_recorded_sendmsg_for_tests.calls == 1) &&
+                   (g_recorded_sendmsg_for_tests.socket_fd == 23) &&
+                   (g_recorded_sendmsg_for_tests.level == IPPROTO_IP) &&
+                   (g_recorded_sendmsg_for_tests.type == IP_TOS) &&
+                   (g_recorded_sendmsg_for_tests.traffic_class == 0x01);
+        });
 }
 
 bool runtime_recvmsg_maps_ecn_to_core_input_for_tests() {
@@ -1588,110 +1579,93 @@ bool runtime_recvmsg_maps_ecn_to_core_input_for_tests() {
     ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in);
 
-    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+    return ScopedHttp09RuntimeOpsOverride{
         Http09RuntimeOpsOverride{
             .recvmsg_fn = &record_recvmsg_for_tests,
         },
-    };
-
-    const auto received = receive_datagram(/*socket_fd=*/29, "client", /*flags=*/0);
-    if (received.status != ReceiveDatagramStatus::ok || !received.step.input.has_value()) {
-        return false;
     }
+        .while_active([&] {
+            const auto received = receive_datagram(/*socket_fd=*/29, "client", /*flags=*/0);
+            if (received.status != ReceiveDatagramStatus::ok || !received.step.input.has_value()) {
+                return false;
+            }
 
-    const auto *inbound = std::get_if<QuicCoreInboundDatagram>(&*received.step.input);
-    return inbound != nullptr && inbound->bytes == g_recorded_recvmsg_for_tests.bytes &&
-           inbound->ecn == QuicEcnCodepoint::ce;
+            const auto *inbound = std::get_if<QuicCoreInboundDatagram>(&*received.step.input);
+            return inbound != nullptr && inbound->bytes == g_recorded_recvmsg_for_tests.bytes &&
+                   inbound->ecn == QuicEcnCodepoint::ce;
+        });
 }
 
 bool drive_endpoint_uses_transport_selected_path_for_tests() {
     g_recorded_sendto_for_tests = {};
-    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+    return ScopedHttp09RuntimeOpsOverride{
         Http09RuntimeOpsOverride{
             .sendto_fn = &record_sendto_for_tests,
         },
-    };
+    }
+        .while_active([&] {
+            const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+            const auto selected_route_handle = static_cast<QuicRouteHandle>(9);
+            const int fallback_socket_fd = 31;
+            const int selected_socket_fd = 77;
+            const auto fallback_peer = runtime_test_loopback_peer(8443);
 
-    const auto make_peer = [](std::uint16_t port) {
-        sockaddr_storage peer{};
-        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
-        ipv4.sin_family = AF_INET;
-        ipv4.sin_port = htons(port);
-        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        return peer;
-    };
+            EndpointDriveState state;
+            state.route_routes[selected_route_handle] = RuntimeSendRoute{
+                .socket_fd = selected_socket_fd,
+                .peer = runtime_test_loopback_peer(9443),
+                .peer_len = peer_len,
+            };
 
-    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
-    const auto selected_route_handle = static_cast<QuicRouteHandle>(9);
-    const int fallback_socket_fd = 31;
-    const int selected_socket_fd = 77;
-    const auto fallback_peer = make_peer(8443);
-    const auto selected_peer = make_peer(9443);
+            QuicCoreResult result;
+            result.effects.emplace_back(QuicCoreSendDatagram{
+                .route_handle = selected_route_handle,
+                .bytes = {std::byte{0xaa}},
+            });
 
-    EndpointDriveState state;
-    state.route_routes[selected_route_handle] = RuntimeSendRoute{
-        .socket_fd = selected_socket_fd,
-        .peer = selected_peer,
-        .peer_len = peer_len,
-    };
-
-    QuicCoreResult result;
-    result.effects.emplace_back(QuicCoreSendDatagram{
-        .route_handle = selected_route_handle,
-        .bytes = {std::byte{0xaa}},
-    });
-
-    ScriptedEndpointForTests endpoint;
-    QuicCore core = make_local_error_client_core_for_tests();
-    const bool drove =
-        drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core, fallback_socket_fd,
-                                     &fallback_peer, peer_len, result, state, "client");
-    return drove & (g_recorded_sendto_for_tests.calls == 1) &
-           (g_recorded_sendto_for_tests.socket_fd == selected_socket_fd) &
-           (g_recorded_sendto_for_tests.peer_port == 9443);
+            ScriptedEndpointForTests endpoint;
+            QuicCore core = make_local_error_client_core_for_tests();
+            return drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core,
+                                                fallback_socket_fd, &fallback_peer, peer_len,
+                                                result, state, "client") &&
+                   (g_recorded_sendto_for_tests.calls == 1) &&
+                   (g_recorded_sendto_for_tests.socket_fd == selected_socket_fd) &&
+                   (g_recorded_sendto_for_tests.peer_port == 9443);
+        });
 }
 
 bool runtime_server_send_effect_uses_route_handle_for_tests() {
     g_recorded_sendto_for_tests = {};
-    const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+    return ScopedHttp09RuntimeOpsOverride{
         Http09RuntimeOpsOverride{
             .sendto_fn = &record_sendto_for_tests,
         },
-    };
+    }
+        .while_active([&] {
+            const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+            const int fallback_socket_fd = 31;
+            const int route_socket_fd = 77;
+            const auto fallback_peer = runtime_test_loopback_peer(8443);
 
-    const auto make_peer = [](std::uint16_t port) {
-        sockaddr_storage peer{};
-        auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&peer);
-        ipv4.sin_family = AF_INET;
-        ipv4.sin_port = htons(port);
-        ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        return peer;
-    };
+            QuicCoreResult result;
+            result.effects.emplace_back(QuicCoreSendDatagram{
+                .route_handle = 5,
+                .bytes = {std::byte{0xaa}},
+            });
 
-    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
-    const int fallback_socket_fd = 31;
-    const int route_socket_fd = 77;
-    const auto fallback_peer = make_peer(8443);
-    const auto route_peer = make_peer(10443);
+            EndpointDriveState state;
+            state.route_routes.emplace(5, RuntimeSendRoute{
+                                              .socket_fd = route_socket_fd,
+                                              .peer = runtime_test_loopback_peer(10443),
+                                              .peer_len = peer_len,
+                                          });
 
-    QuicCoreResult result;
-    result.effects.emplace_back(QuicCoreSendDatagram{
-        .route_handle = 5,
-        .bytes = {std::byte{0xaa}},
-    });
-
-    EndpointDriveState state;
-    state.route_routes.emplace(5, RuntimeSendRoute{
-                                      .socket_fd = route_socket_fd,
-                                      .peer = route_peer,
-                                      .peer_len = peer_len,
-                                  });
-
-    const bool handled = handle_core_effects(fallback_socket_fd, result, &fallback_peer, peer_len,
-                                             state.route_routes, "server");
-    return handled & (g_recorded_sendto_for_tests.calls == 1) &
-           (g_recorded_sendto_for_tests.socket_fd == route_socket_fd) &
-           (g_recorded_sendto_for_tests.peer_port == 10443);
+            return handle_core_effects(fallback_socket_fd, result, &fallback_peer, peer_len,
+                                       state.route_routes, "server") &&
+                   (g_recorded_sendto_for_tests.calls == 1) &&
+                   (g_recorded_sendto_for_tests.socket_fd == route_socket_fd) &&
+                   (g_recorded_sendto_for_tests.peer_port == 10443);
+        });
 }
 
 bool runtime_policy_core_inputs_advance_before_terminal_success_for_tests() {
@@ -1720,10 +1694,6 @@ bool runtime_policy_core_inputs_advance_before_terminal_success_for_tests() {
             },
     });
 
-    const Http09RuntimeConfig config{
-        .mode = Http09RuntimeMode::client,
-        .testcase = QuicHttp09Testcase::connectionmigration,
-    };
     ClientSocketSet client_sockets{
         .primary =
             ClientSocketDescriptor{
@@ -1732,11 +1702,16 @@ bool runtime_policy_core_inputs_advance_before_terminal_success_for_tests() {
             },
     };
     sockaddr_storage peer{};
-    const bool drove = drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core, /*fd=*/17,
-                                                    &peer, /*peer_len=*/0, initial_result, state,
-                                                    "client", &config, &policy, &client_sockets);
-    return drove & state.terminal_success & policy.preferred_address_request_queued &
-           (endpoint.next_on_core_result_index == 2);
+    return [&] {
+        const Http09RuntimeConfig config{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::connectionmigration,
+        };
+        return drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core, /*fd=*/17, &peer,
+                                            /*peer_len=*/0, initial_result, state, "client",
+                                            &config, &policy, &client_sockets);
+    }() & state.terminal_success &
+           policy.preferred_address_request_queued & (endpoint.next_on_core_result_index == 2);
 }
 
 bool server_connectionmigration_preferred_address_config_for_tests() {
@@ -1804,18 +1779,26 @@ bool runtime_registers_all_server_core_connection_ids_case_for_tests(
 
     refresh_server_session_connection_id_routes(session, connection_id_routes);
 
-    const bool has_preferred_connection_id_key = !preferred_connection_id_key.empty();
-    const bool has_route = connection_id_routes.contains(preferred_connection_id_key);
-    const bool route_matches = has_route & (connection_id_routes.at(preferred_connection_id_key) ==
-                                            local_connection_id_key);
-    return has_preferred_connection_id_key & has_route & route_matches &
-           (session.alternate_connection_id_keys.size() == 1) &
+    if (preferred_connection_id_key.empty() ||
+        !connection_id_routes.contains(preferred_connection_id_key)) {
+        return false;
+    }
+    return (connection_id_routes.at(preferred_connection_id_key) == local_connection_id_key) &&
+           (session.alternate_connection_id_keys.size() == 1) &&
            (session.alternate_connection_id_keys.front() == preferred_connection_id_key);
 }
 
 bool runtime_registers_all_server_core_connection_ids_for_tests() {
     return runtime_registers_all_server_core_connection_ids_case_for_tests(
         /*include_preferred_address=*/true);
+}
+
+bool runtime_misc_internal_coverage_check(bool &ok, std::string_view label, bool condition) {
+    if (!condition) {
+        std::cerr << "runtime_misc_internal_coverage_for_tests failed: " << label << '\n';
+        ok = false;
+    }
+    return condition;
 }
 
 bool runtime_misc_internal_coverage_for_tests() {
@@ -1845,37 +1828,35 @@ bool runtime_misc_internal_coverage_for_tests() {
     };
 
     bool ok = true;
-    const auto check = [&](std::string_view label, bool condition) {
-        if (!condition) {
-            std::cerr << "runtime_misc_internal_coverage_for_tests failed: " << label << '\n';
-            ok = false;
-        }
-        return condition;
-    };
 
     {
         static_cast<void>(::setenv("COQUIC_RUNTIME_MISC_RESTORE", "seed", 1));
         {
             ScopedEnvVar unset_existing("COQUIC_RUNTIME_MISC_RESTORE", std::nullopt);
-            check("scoped env clears existing variable",
-                  std::getenv("COQUIC_RUNTIME_MISC_RESTORE") == nullptr);
+            runtime_misc_internal_coverage_check(ok, "scoped env clears existing variable",
+                                                 std::getenv("COQUIC_RUNTIME_MISC_RESTORE") ==
+                                                     nullptr);
         }
-        check("scoped env restores previous variable",
-              getenv_string("COQUIC_RUNTIME_MISC_RESTORE").value_or("") == "seed");
+        runtime_misc_internal_coverage_check(
+            ok, "scoped env restores previous variable",
+            getenv_string("COQUIC_RUNTIME_MISC_RESTORE").value_or("") == "seed");
         static_cast<void>(::unsetenv("COQUIC_RUNTIME_MISC_RESTORE"));
     }
 
-    static_cast<void>(check("expected diagnostic path", false));
+    static_cast<void>(runtime_misc_internal_coverage_check(ok, "expected diagnostic path", false));
     ok = true;
 
     sockaddr_storage invalid_address{};
     invalid_address.ss_family = AF_UNSPEC;
-    check("format trace empty length", format_sockaddr_for_trace(invalid_address, 0) == "-");
-    check("format trace invalid family",
-          format_sockaddr_for_trace(invalid_address, sizeof(invalid_address)) == "-");
+    runtime_misc_internal_coverage_check(ok, "format trace empty length",
+                                         format_sockaddr_for_trace(invalid_address, 0) == "-");
+    runtime_misc_internal_coverage_check(
+        ok, "format trace invalid family",
+        format_sockaddr_for_trace(invalid_address, sizeof(invalid_address)) == "-");
 
-    check("empty host unspecified", host_is_unspecified(""));
-    check("named host not unspecified", !host_is_unspecified("interop-server-host"));
+    runtime_misc_internal_coverage_check(ok, "empty host unspecified", host_is_unspecified(""));
+    runtime_misc_internal_coverage_check(ok, "named host not unspecified",
+                                         !host_is_unspecified("interop-server-host"));
 
     {
         ScopedEnvVar empty_hostname("HOSTNAME", std::string{});
@@ -1889,15 +1870,18 @@ bool runtime_misc_internal_coverage_for_tests() {
             return 0;
         };
         char dummy = '\0';
-        check("zero-length gethostname fails",
-              (gethostname_fn(&dummy, 0) == -1) & (errno == EINVAL));
-        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        runtime_misc_internal_coverage_check(ok, "zero-length gethostname fails",
+                                             (gethostname_fn(&dummy, 0) == -1) & (errno == EINVAL));
+        ScopedHttp09RuntimeOpsOverride{
             Http09RuntimeOpsOverride{
                 .gethostname_fn = gethostname_fn,
             },
-        };
-        check("hostname fallback succeeds",
-              preferred_address_host_for_server("").value_or("") == "runtime-host");
+        }
+            .while_active([&] {
+                runtime_misc_internal_coverage_check(
+                    ok, "hostname fallback succeeds",
+                    preferred_address_host_for_server("").value_or("") == "runtime-host");
+            });
     }
 
     {
@@ -1911,49 +1895,57 @@ bool runtime_misc_internal_coverage_for_tests() {
             return 0;
         };
         char dummy = '\0';
-        check("empty hostname zero-length gethostname fails",
-              (gethostname_fn(&dummy, 0) == -1) & (errno == EINVAL));
-        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        runtime_misc_internal_coverage_check(ok, "empty hostname zero-length gethostname fails",
+                                             (gethostname_fn(&dummy, 0) == -1) & (errno == EINVAL));
+        ScopedHttp09RuntimeOpsOverride{
             Http09RuntimeOpsOverride{
                 .gethostname_fn = gethostname_fn,
             },
-        };
-        check("hostname fallback empty string returns nullopt",
-              !preferred_address_host_for_server("").has_value());
+        }
+            .while_active([&] {
+                runtime_misc_internal_coverage_check(
+                    ok, "hostname fallback empty string returns nullopt",
+                    !preferred_address_host_for_server("").has_value());
+            });
     }
 
     {
         ScopedEnvVar empty_hostname("HOSTNAME", std::string{});
-        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        ScopedHttp09RuntimeOpsOverride{
             Http09RuntimeOpsOverride{
                 .gethostname_fn = [](char *, size_t) -> int {
                     errno = EIO;
                     return -1;
                 },
             },
-        };
-        check("hostname fallback failure returns nullopt",
-              !preferred_address_host_for_server("").has_value());
-        check("preferred address lookup failure returns nullopt",
-              !runtime_preferred_address_for_server(
-                   Http09RuntimeConfig{
-                       .mode = Http09RuntimeMode::server,
-                       .host = "",
-                       .port = 443,
-                       .testcase = QuicHttp09Testcase::connectionmigration,
-                   })
-                   .has_value());
+        }
+            .while_active([&] {
+                runtime_misc_internal_coverage_check(
+                    ok, "hostname fallback failure returns nullopt",
+                    !preferred_address_host_for_server("").has_value());
+                runtime_misc_internal_coverage_check(
+                    ok, "preferred address lookup failure returns nullopt",
+                    !runtime_preferred_address_for_server(
+                         Http09RuntimeConfig{
+                             .mode = Http09RuntimeMode::server,
+                             .host = "",
+                             .port = 443,
+                             .testcase = QuicHttp09Testcase::connectionmigration,
+                         })
+                         .has_value());
+            });
     }
 
-    check("invalid host preferred address fails",
-          !runtime_preferred_address_for_server(
-               Http09RuntimeConfig{
-                   .mode = Http09RuntimeMode::server,
-                   .host = "invalid host",
-                   .port = 443,
-                   .testcase = QuicHttp09Testcase::connectionmigration,
-               })
-               .has_value());
+    runtime_misc_internal_coverage_check(
+        ok, "invalid host preferred address fails",
+        !runtime_preferred_address_for_server(
+             Http09RuntimeConfig{
+                 .mode = Http09RuntimeMode::server,
+                 .host = "invalid host",
+                 .port = 443,
+                 .testcase = QuicHttp09Testcase::connectionmigration,
+             })
+             .has_value());
 
     PreferredAddress ipv6_preferred_address{
         .ipv6_address =
@@ -1978,10 +1970,12 @@ bool runtime_misc_internal_coverage_for_tests() {
         .ipv6_port = 4444,
         .connection_id = make_runtime_connection_id(std::byte{0x5a}, 7),
     };
-    const auto ipv6_sockaddr = sockaddr_from_preferred_address(ipv6_preferred_address);
-    const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(&ipv6_sockaddr);
-    check("preferred address sockaddr family", ipv6->sin6_family == AF_INET6);
-    check("preferred address sockaddr port", ntohs(ipv6->sin6_port) == 4444);
+    auto preferred_ipv6_sockaddr = sockaddr_from_preferred_address(ipv6_preferred_address);
+    const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(&preferred_ipv6_sockaddr);
+    runtime_misc_internal_coverage_check(ok, "preferred address sockaddr family",
+                                         ipv6->sin6_family == AF_INET6);
+    runtime_misc_internal_coverage_check(ok, "preferred address sockaddr port",
+                                         ntohs(ipv6->sin6_port) == 4444);
 
     ResolvedUdpAddress ipv4_resolved{};
     auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&ipv4_resolved.address);
@@ -1990,45 +1984,52 @@ bool runtime_misc_internal_coverage_for_tests() {
     ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     ipv4_resolved.address_len = sizeof(sockaddr_in);
     ipv4_resolved.family = AF_INET;
-    const auto ipv4_preferred_address =
+    auto resolved_ipv4_preferred_address =
         preferred_address_from_resolved_udp_address(ipv4_resolved, {});
-    check("preferred address ipv4 port", ipv4_preferred_address.ipv4_port == 4443);
-    check("preferred address empty cid still mints reset token",
-          std::ranges::any_of(ipv4_preferred_address.stateless_reset_token,
-                              [](std::byte value) { return value != std::byte{0x00}; }));
+    runtime_misc_internal_coverage_check(ok, "preferred address ipv4 port",
+                                         resolved_ipv4_preferred_address.ipv4_port == 4443);
+    runtime_misc_internal_coverage_check(
+        ok, "preferred address empty cid still mints reset token",
+        std::ranges::any_of(resolved_ipv4_preferred_address.stateless_reset_token,
+                            [](std::byte value) { return value != std::byte{0x00}; }));
     ResolvedUdpAddress unknown_family_resolved{};
     unknown_family_resolved.family = AF_UNSPEC;
-    const auto unknown_family_preferred_address =
+    auto resolved_unknown_family_preferred_address =
         preferred_address_from_resolved_udp_address(unknown_family_resolved, {});
-    check("preferred address unknown family leaves ports empty",
-          (unknown_family_preferred_address.ipv4_port == 0) &
-              (unknown_family_preferred_address.ipv6_port == 0));
+    runtime_misc_internal_coverage_check(
+        ok, "preferred address unknown family leaves ports empty",
+        (resolved_unknown_family_preferred_address.ipv4_port == 0) &
+            (resolved_unknown_family_preferred_address.ipv6_port == 0));
 
-    check("wait without sockets fails", !wait_for_socket_or_deadline(
-                                             RuntimeWaitConfig{
-                                                 .socket_fds = {-1, -1},
-                                                 .socket_fd_count = 0,
-                                                 .idle_timeout_ms = 1,
-                                                 .role_name = "client",
-                                             },
-                                             std::nullopt)
-                                             .has_value());
+    runtime_misc_internal_coverage_check(ok, "wait without sockets fails",
+                                         !wait_for_socket_or_deadline(
+                                              RuntimeWaitConfig{
+                                                  .socket_fds = {-1, -1},
+                                                  .socket_fd_count = 0,
+                                                  .idle_timeout_ms = 1,
+                                                  .role_name = "client",
+                                              },
+                                              std::nullopt)
+                                              .has_value());
 
     {
-        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        ScopedHttp09RuntimeOpsOverride{
             Http09RuntimeOpsOverride{
                 .poll_fn = [](pollfd *, nfds_t, int) -> int { return 1; },
             },
-        };
-        check("wait unreadable socket fails", !wait_for_socket_or_deadline(
-                                                   RuntimeWaitConfig{
-                                                       .socket_fds = {-1, -1},
-                                                       .socket_fd_count = 1,
-                                                       .idle_timeout_ms = 1,
-                                                       .role_name = "client",
-                                                   },
-                                                   std::nullopt)
-                                                   .has_value());
+        }
+            .while_active([&] {
+                runtime_misc_internal_coverage_check(ok, "wait unreadable socket fails",
+                                                     !wait_for_socket_or_deadline(
+                                                          RuntimeWaitConfig{
+                                                              .socket_fds = {-1, -1},
+                                                              .socket_fd_count = 1,
+                                                              .idle_timeout_ms = 1,
+                                                              .role_name = "client",
+                                                          },
+                                                          std::nullopt)
+                                                          .has_value());
+            });
     }
 
     {
@@ -2037,32 +2038,36 @@ bool runtime_misc_internal_coverage_for_tests() {
             .input = QuicCoreTimerExpired{},
             .input_time = now(),
             .socket_fd = 7,
-            .source = ipv6_sockaddr,
+            .source = preferred_ipv6_sockaddr,
             .source_len = sizeof(sockaddr_in6),
             .has_source = true,
         };
-        check("timer step does not assign path",
-              !assign_runtime_path_for_inbound_step(state, step).has_value());
+        runtime_misc_internal_coverage_check(
+            ok, "timer step does not assign path",
+            !assign_runtime_path_for_inbound_step(state, step).has_value());
     }
 
-    check("invalid requests env does not trigger migration",
-          !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
-              .mode = Http09RuntimeMode::client,
-              .testcase = QuicHttp09Testcase::transfer,
-              .requests_env = "not-a-valid-request",
-          }));
-    check("server transfer request never triggers migration",
-          !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
-              .mode = Http09RuntimeMode::server,
-              .testcase = QuicHttp09Testcase::transfer,
-              .requests_env = "https://server46:443/file.bin",
-          }));
-    check("non-server46 transfer request does not trigger migration",
-          !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
-              .mode = Http09RuntimeMode::client,
-              .testcase = QuicHttp09Testcase::transfer,
-              .requests_env = "https://example.com:443/file.bin",
-          }));
+    runtime_misc_internal_coverage_check(
+        ok, "invalid requests env does not trigger migration",
+        !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::transfer,
+            .requests_env = "not-a-valid-request",
+        }));
+    runtime_misc_internal_coverage_check(
+        ok, "server transfer request never triggers migration",
+        !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::server,
+            .testcase = QuicHttp09Testcase::transfer,
+            .requests_env = "https://server46:443/file.bin",
+        }));
+    runtime_misc_internal_coverage_check(
+        ok, "non-server46 transfer request does not trigger migration",
+        !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::transfer,
+            .requests_env = "https://example.com:443/file.bin",
+        }));
 
     {
         ScopedEnvVar trace("COQUIC_RUNTIME_TRACE", "1");
@@ -2110,7 +2115,7 @@ bool runtime_misc_internal_coverage_for_tests() {
         result.effects.emplace_back(QuicCorePeerPreferredAddressAvailable{
             .preferred_address = ipv6_preferred_address,
         });
-        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        ScopedHttp09RuntimeOpsOverride{
             Http09RuntimeOpsOverride{
                 .socket_fn = [](int family, int, int) -> int {
                     if (family != AF_INET6) {
@@ -2121,28 +2126,37 @@ bool runtime_misc_internal_coverage_for_tests() {
                 },
                 .setsockopt_fn = [](int, int, int, const void *, socklen_t) -> int { return 0; },
             },
-        };
-        check(
-            "policy observes cross-family preferred address",
-            observe_client_runtime_policy_effects(result, state, policy, client_sockets, "client"));
-        std::vector<QuicCoreInput> core_inputs;
-        maybe_queue_client_runtime_policy_inputs(
-            Http09RuntimeConfig{
-                .mode = Http09RuntimeMode::client,
-                .testcase = QuicHttp09Testcase::connectionmigration,
-            },
-            policy, core_inputs);
-        check("policy records preferred address route",
-              policy.preferred_address_route_handle.has_value());
-        check("policy queues one migration input", core_inputs.size() == 1);
+        }
+            .while_active([&] {
+                runtime_misc_internal_coverage_check(
+                    ok, "policy observes cross-family preferred address",
+                    observe_client_runtime_policy_effects(result, state, policy, client_sockets,
+                                                          "client"));
+                std::vector<QuicCoreInput> core_inputs;
+                maybe_queue_client_runtime_policy_inputs(
+                    Http09RuntimeConfig{
+                        .mode = Http09RuntimeMode::client,
+                        .testcase = QuicHttp09Testcase::connectionmigration,
+                    },
+                    policy, core_inputs);
+                runtime_misc_internal_coverage_check(
+                    ok, "policy records preferred address route",
+                    policy.preferred_address_route_handle.has_value());
+                runtime_misc_internal_coverage_check(ok, "policy queues one migration input",
+                                                     core_inputs.size() == 1);
 
-        const auto client_timer_trace = run_client_connection_loop_case_for_tests(
-            ClientConnectionLoopCaseForTests::outer_timer_then_wait_failure);
-        check("client timer trace samples time", client_timer_trace.current_time_calls > 0);
-        const auto client_timer_send_trace = run_client_connection_loop_case_for_tests(
-            ClientConnectionLoopCaseForTests::timer_due_emits_send_trace_with_future_wakeup);
-        check("client timer trace records send-count path",
-              client_timer_send_trace.current_time_calls > 0);
+                runtime_misc_internal_coverage_check(
+                    ok, "client timer trace samples time",
+                    run_client_connection_loop_case_for_tests(
+                        ClientConnectionLoopCaseForTests::outer_timer_then_wait_failure)
+                            .current_time_calls > 0);
+                runtime_misc_internal_coverage_check(
+                    ok, "client timer trace records send-count path",
+                    run_client_connection_loop_case_for_tests(
+                        ClientConnectionLoopCaseForTests::
+                            timer_due_emits_send_trace_with_future_wakeup)
+                            .current_time_calls > 0);
+            });
     }
 
     {
@@ -2161,8 +2175,9 @@ bool runtime_misc_internal_coverage_for_tests() {
             /*socket_fd=*/32, nullptr, /*length=*/7, /*flags=*/0,
             reinterpret_cast<const sockaddr *>(&short_ipv6),
             static_cast<socklen_t>(sizeof(sockaddr_in6) - 1)));
-        check("short sendto destinations keep peer port zero",
-              g_recorded_sendto_for_tests.peer_ports == std::vector<std::uint16_t>{0, 0});
+        runtime_misc_internal_coverage_check(ok, "short sendto destinations keep peer port zero",
+                                             g_recorded_sendto_for_tests.peer_ports ==
+                                                 std::vector<std::uint16_t>{0, 0});
     }
 
     {
@@ -2190,7 +2205,8 @@ bool runtime_misc_internal_coverage_for_tests() {
             .alternate_connection_id_keys = {"stale-route"},
         };
         refresh_server_session_connection_id_routes(session, connection_id_routes);
-        check("refresh removes stale route", !connection_id_routes.contains("stale-route"));
+        runtime_misc_internal_coverage_check(ok, "refresh removes stale route",
+                                             !connection_id_routes.contains("stale-route"));
     }
 
     {
@@ -2202,8 +2218,9 @@ bool runtime_misc_internal_coverage_for_tests() {
         });
         const auto preferred_address =
             core_config.transport.preferred_address.value_or(PreferredAddress{});
-        check("connectionmigration config provides a preferred address",
-              core_config.transport.preferred_address.has_value());
+        runtime_misc_internal_coverage_check(
+            ok, "connectionmigration config provides a preferred address",
+            core_config.transport.preferred_address.has_value());
         const auto local_connection_id_key = connection_id_key(core_config.source_connection_id);
         const auto preferred_connection_id_key = connection_id_key(preferred_address.connection_id);
         ServerConnectionIdRouteMap connection_id_routes{
@@ -2223,10 +2240,11 @@ bool runtime_misc_internal_coverage_for_tests() {
             .alternate_connection_id_keys = {preferred_connection_id_key},
         };
         refresh_server_session_connection_id_routes(session, connection_id_routes);
-        check("refresh preserves live alternate routes",
-              connection_id_routes.contains(preferred_connection_id_key) &
-                  (session.alternate_connection_id_keys.size() == 1) &
-                  (session.alternate_connection_id_keys.front() == preferred_connection_id_key));
+        runtime_misc_internal_coverage_check(
+            ok, "refresh preserves live alternate routes",
+            connection_id_routes.contains(preferred_connection_id_key) &
+                (session.alternate_connection_id_keys.size() == 1) &
+                (session.alternate_connection_id_keys.front() == preferred_connection_id_key));
     }
 
     {
@@ -2260,9 +2278,12 @@ bool runtime_misc_internal_coverage_for_tests() {
                          }));
         erase_server_session_with_routes(sessions, connection_id_routes, initial_destination_routes,
                                          local_connection_id_key);
-        check("erase removes session", !sessions.contains(local_connection_id_key));
-        check("erase removes alternate route", !connection_id_routes.contains("alternate-route"));
-        check("erase removes initial route", !initial_destination_routes.contains("initial-route"));
+        runtime_misc_internal_coverage_check(ok, "erase removes session",
+                                             !sessions.contains(local_connection_id_key));
+        runtime_misc_internal_coverage_check(ok, "erase removes alternate route",
+                                             !connection_id_routes.contains("alternate-route"));
+        runtime_misc_internal_coverage_check(ok, "erase removes initial route",
+                                             !initial_destination_routes.contains("initial-route"));
     }
 
     {
@@ -2274,11 +2295,12 @@ bool runtime_misc_internal_coverage_for_tests() {
             .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
             .private_key_path = "tests/fixtures/quic-server-key.pem",
         };
-        check("invalid host server fails", run_http09_server(server_config) == 1);
+        runtime_misc_internal_coverage_check(ok, "invalid host server fails",
+                                             run_http09_server(server_config) == 1);
     }
 
     {
-        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        ScopedHttp09RuntimeOpsOverride{
             Http09RuntimeOpsOverride{
                 .socket_fn = [](int, int, int) -> int {
                     static thread_local int next_fd = 760;
@@ -2297,21 +2319,24 @@ bool runtime_misc_internal_coverage_for_tests() {
                 },
                 .freeaddrinfo_fn = ::freeaddrinfo,
             },
-        };
-        const auto server_config = Http09RuntimeConfig{
-            .mode = Http09RuntimeMode::server,
-            .host = "127.0.0.1",
-            .port = 443,
-            .testcase = QuicHttp09Testcase::connectionmigration,
-            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
-            .private_key_path = "tests/fixtures/quic-server-key.pem",
-        };
-        check("preferred bind resolve failure aborts server",
-              run_http09_server(server_config) == 1);
+        }
+            .while_active([&] {
+                const auto server_config = Http09RuntimeConfig{
+                    .mode = Http09RuntimeMode::server,
+                    .host = "127.0.0.1",
+                    .port = 443,
+                    .testcase = QuicHttp09Testcase::connectionmigration,
+                    .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+                    .private_key_path = "tests/fixtures/quic-server-key.pem",
+                };
+                runtime_misc_internal_coverage_check(ok,
+                                                     "preferred bind resolve failure aborts server",
+                                                     run_http09_server(server_config) == 1);
+            });
     }
 
     {
-        const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
+        ScopedHttp09RuntimeOpsOverride{
             Http09RuntimeOpsOverride{
                 .socket_fn = [](int, int, int) -> int {
                     static thread_local int next_fd = 700;
@@ -2327,20 +2352,23 @@ bool runtime_misc_internal_coverage_for_tests() {
                     return 0;
                 },
             },
-        };
-        const auto server_config = Http09RuntimeConfig{
-            .mode = Http09RuntimeMode::server,
-            .host = "127.0.0.1",
-            .port = 443,
-            .testcase = QuicHttp09Testcase::connectionmigration,
-            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
-            .private_key_path = "tests/fixtures/quic-server-key.pem",
-        };
-        check("second bind failure aborts server", run_http09_server(server_config) == 1);
+        }
+            .while_active([&] {
+                const auto server_config = Http09RuntimeConfig{
+                    .mode = Http09RuntimeMode::server,
+                    .host = "127.0.0.1",
+                    .port = 443,
+                    .testcase = QuicHttp09Testcase::connectionmigration,
+                    .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+                    .private_key_path = "tests/fixtures/quic-server-key.pem",
+                };
+                runtime_misc_internal_coverage_check(ok, "second bind failure aborts server",
+                                                     run_http09_server(server_config) == 1);
+            });
     }
 
     {
-        auto duplicate_seed_peer = ipv6_sockaddr;
+        auto duplicate_seed_peer = preferred_ipv6_sockaddr;
         QuicCore core = make_failed_server_core_for_tests();
         const std::array seeded_paths{
             RuntimePathSeedForTests{
@@ -2359,7 +2387,8 @@ bool runtime_misc_internal_coverage_for_tests() {
             bytes_from_string_for_runtime_tests("odcid"),
             /*inbound_socket_fd=*/11, duplicate_seed_peer, sizeof(sockaddr_in6),
             bytes_from_string_for_runtime_tests("payload"), now());
-        check("duplicate seeded route is rejected", !duplicate_result.processed);
+        runtime_misc_internal_coverage_check(ok, "duplicate seeded route is rejected",
+                                             !duplicate_result.processed);
     }
 
     {
@@ -2367,9 +2396,11 @@ bool runtime_misc_internal_coverage_for_tests() {
         const auto unparsable_result = route_existing_server_session_datagram_for_tests(
             core, std::span<const RuntimePathSeedForTests>{},
             bytes_from_string_for_runtime_tests("local"),
-            bytes_from_string_for_runtime_tests("odcid"), /*inbound_socket_fd=*/11, ipv6_sockaddr,
-            sizeof(sockaddr_in6), std::vector<std::byte>{std::byte{0x00}}, now());
-        check("unparsable datagram is rejected", !unparsable_result.processed);
+            bytes_from_string_for_runtime_tests("odcid"), /*inbound_socket_fd=*/11,
+            preferred_ipv6_sockaddr, sizeof(sockaddr_in6), std::vector<std::byte>{std::byte{0x00}},
+            now());
+        runtime_misc_internal_coverage_check(ok, "unparsable datagram is rejected",
+                                             !unparsable_result.processed);
     }
 
     return ok;
@@ -2377,31 +2408,29 @@ bool runtime_misc_internal_coverage_for_tests() {
 
 bool runtime_additional_internal_coverage_for_tests() {
     bool ok = true;
-    const auto check = [&](std::string_view label, bool condition) {
-        static_cast<void>(label);
-        ok &= condition;
-        return condition;
-    };
 
-    check("empty transfer requests do not trigger migration",
-          !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
-              .mode = Http09RuntimeMode::client,
-              .testcase = QuicHttp09Testcase::transfer,
-              .requests_env = "",
-          }));
-    check("non-server46 transfer request still does not trigger migration",
-          !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
-              .mode = Http09RuntimeMode::client,
-              .testcase = QuicHttp09Testcase::transfer,
-              .requests_env = "https://example.com:443/file.bin",
-          }));
+    runtime_misc_internal_coverage_check(
+        ok, "empty transfer requests do not trigger migration",
+        !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::transfer,
+            .requests_env = "",
+        }));
+    runtime_misc_internal_coverage_check(
+        ok, "non-server46 transfer request still does not trigger migration",
+        !runtime_client_should_attempt_preferred_address_migration(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+            .testcase = QuicHttp09Testcase::transfer,
+            .requests_env = "https://example.com:443/file.bin",
+        }));
 
     g_recorded_sendto_for_tests = {};
     static_cast<void>(record_sendto_for_tests(
         /*socket_fd=*/33, nullptr, /*length=*/0, /*flags=*/0, /*destination=*/nullptr,
         /*destination_len=*/0));
-    check("null sendto destination keeps peer port zero",
-          g_recorded_sendto_for_tests.peer_ports == std::vector<std::uint16_t>{0});
+    runtime_misc_internal_coverage_check(ok, "null sendto destination keeps peer port zero",
+                                         g_recorded_sendto_for_tests.peer_ports ==
+                                             std::vector<std::uint16_t>{0});
 
     return ok;
 }

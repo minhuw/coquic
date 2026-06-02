@@ -363,7 +363,7 @@ TEST(QuicCoreTest, ResumedClientDefersHandshakeCryptoWhenSharedCwndIsFull) {
     ASSERT_TRUE(client.connection_->handshake_space_.write_secret.has_value());
     ASSERT_TRUE(client.connection_->handshake_space_.received_packets.has_ack_to_send());
 
-    const auto queued = client.connection_->queue_stream_send(
+    auto queued = client.connection_->queue_stream_send(
         0, std::vector<std::byte>(512, std::byte{0x62}), /*fin=*/true);
     ASSERT_TRUE(queued.has_value());
     client.connection_->congestion_controller_.bytes_in_flight_ =
@@ -371,7 +371,7 @@ TEST(QuicCoreTest, ResumedClientDefersHandshakeCryptoWhenSharedCwndIsFull) {
 
     const auto first_reply =
         client.connection_->drain_outbound_datagram(coquic::quic::test::test_time(103));
-    const auto first_packet_kinds = protected_datagram_packet_kinds(first_reply);
+    auto first_packet_kinds = protected_datagram_packet_kinds(first_reply);
     ASSERT_TRUE(first_packet_kinds.has_value());
     if (!first_packet_kinds.has_value()) {
         return;
@@ -426,10 +426,12 @@ TEST(QuicCoreTest, ResumedServerFirstApplicationAckCoversOriginalZeroRttPacketRa
     auto to_server =
         client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time(100));
     std::vector<std::uint64_t> zero_rtt_packet_numbers;
-    const auto collect_zero_rtt_packets = [&](const coquic::quic::QuicCoreResult &result) {
+    auto collect_zero_rtt_packets = [&](const coquic::quic::QuicCoreResult &result) {
         for (const auto &datagram : coquic::quic::test::send_datagrams_from(result)) {
-            for (const auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
-                const auto *zero_rtt = std::get_if<coquic::quic::ProtectedZeroRttPacket>(&packet);
+            for (const auto &decoded_packet :
+                 decode_sender_datagram(*client.connection_, datagram)) {
+                const auto *zero_rtt =
+                    std::get_if<coquic::quic::ProtectedZeroRttPacket>(&decoded_packet);
                 if (zero_rtt == nullptr) {
                     continue;
                 }
@@ -454,9 +456,9 @@ TEST(QuicCoreTest, ResumedServerFirstApplicationAckCoversOriginalZeroRttPacketRa
     }
 
     ASSERT_FALSE(zero_rtt_packet_numbers.empty());
-    const auto min_zero_rtt =
+    auto min_zero_rtt =
         *std::min_element(zero_rtt_packet_numbers.begin(), zero_rtt_packet_numbers.end());
-    const auto max_zero_rtt =
+    auto max_zero_rtt =
         *std::max_element(zero_rtt_packet_numbers.begin(), zero_rtt_packet_numbers.end());
 
     const auto to_client = coquic::quic::test::relay_send_datagrams_to_peer(
@@ -499,8 +501,8 @@ TEST(QuicCoreTest, ResumedServerFirstApplicationAckCoversOriginalZeroRttPacketRa
     bool saw_ack_frame = false;
     bool saw_ack_covering_zero_rtt_range = false;
     for (const auto &datagram : response_datagrams) {
-        for (const auto &packet : decode_server_response_datagram(datagram)) {
-            const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+        for (const auto &decoded_packet : decode_server_response_datagram(datagram)) {
+            const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded_packet);
             if (one_rtt == nullptr) {
                 continue;
             }
@@ -564,7 +566,7 @@ TEST(QuicCoreTest, ClientUsesProtectedZeroRttPacketForEarlyApplicationSend) {
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(0));
 
     ASSERT_FALSE(datagram.empty());
-    const auto packets = decode_sender_datagram(connection, datagram);
+    auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
     const auto *zero_rtt = std::get_if<coquic::quic::ProtectedZeroRttPacket>(&packets.front());
     ASSERT_NE(zero_rtt, nullptr);
@@ -626,7 +628,7 @@ TEST(QuicCoreTest, QlogCapturesZeroRttPacketTypeForOutboundEarlyData) {
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(datagram.empty());
 
-    const auto records = coquic::quic::test::qlog_seq_records_from_file(
+    auto records = coquic::quic::test::qlog_seq_records_from_file(
         coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
     EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:packet_sent"), 1u);
     EXPECT_TRUE(coquic::quic::test::qlog_any_record_contains(records, "\"packet_type\":\"0RTT\""));
@@ -667,7 +669,7 @@ TEST(QuicCoreTest, ApplicationCloseUsesOneRttProtectionWhenZeroRttIsAlsoAvailabl
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(0));
     ASSERT_FALSE(datagram.empty());
-    const auto packets = decode_sender_datagram(connection, datagram);
+    auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
     EXPECT_NE(std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front()), nullptr);
     EXPECT_EQ(std::get_if<coquic::quic::ProtectedZeroRttPacket>(&packets.front()), nullptr);
@@ -696,14 +698,14 @@ TEST(QuicCoreTest, ApplicationCloseDropsAckToFitDatagramWhenZeroRttIsAlsoAvailab
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(datagram.empty());
-    const auto packets = decode_sender_datagram(connection, datagram);
+    auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
-    const auto *packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
-    ASSERT_NE(packet, nullptr);
+    const auto *one_rtt_packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(one_rtt_packet, nullptr);
 
     bool saw_ack = false;
     bool saw_application_close = false;
-    for (const auto &frame : packet->frames) {
+    for (const auto &frame : one_rtt_packet->frames) {
         saw_ack = saw_ack || std::holds_alternative<coquic::quic::AckFrame>(frame);
         saw_application_close =
             saw_application_close ||
@@ -738,10 +740,10 @@ TEST(QuicCoreTest, AcceptedZeroRttPacketsScheduleApplicationAck) {
     EXPECT_EQ(optional_value_or_terminate(connection.application_space_.pending_ack_deadline),
               coquic::quic::test::test_time(1));
 
-    const auto ack_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    auto ack_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
 
     ASSERT_FALSE(ack_datagram.empty());
-    const auto packets = decode_sender_datagram(connection, ack_datagram);
+    auto packets = decode_sender_datagram(connection, ack_datagram);
     ASSERT_EQ(packets.size(), 1u);
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
     ASSERT_NE(application, nullptr);
@@ -821,7 +823,7 @@ TEST(QuicCoreTest, ServerProcessesZeroRttStreamBeforeHandshakeCompletes) {
         coquic::quic::test::test_time(1));
     ASSERT_TRUE(processed.has_value());
 
-    const auto received = connection.take_received_stream_data();
+    auto received = connection.take_received_stream_data();
     ASSERT_TRUE(received.has_value());
     if (!received.has_value()) {
         return;
@@ -872,7 +874,7 @@ TEST(QuicCoreTest, ProcessInboundDatagramProcessesZeroRttStreamBeforeHandshakeCo
 
     connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(1));
 
-    const auto received = connection.take_received_stream_data();
+    auto received = connection.take_received_stream_data();
     ASSERT_TRUE(received.has_value());
     if (!received.has_value()) {
         return;
@@ -901,7 +903,7 @@ TEST(QuicCoreTest, ClientStopsUsingZeroRttWhenApplicationWriteKeysExist) {
 
     EXPECT_FALSE(connection.zero_rtt_space_.write_secret.has_value());
     if (!datagram.empty()) {
-        const auto packets = decode_sender_datagram(connection, datagram);
+        auto packets = decode_sender_datagram(connection, datagram);
         ASSERT_EQ(packets.size(), 1u);
         EXPECT_EQ(std::get_if<coquic::quic::ProtectedZeroRttPacket>(&packets.front()), nullptr);
     }
@@ -944,7 +946,7 @@ TEST(QuicCoreTest, ServerRetainsZeroRttReadSecretLongEnoughForReorderedZeroRttPa
         });
     ASSERT_TRUE(early_zero_rtt.has_value());
 
-    const auto first_one_rtt = coquic::quic::serialize_protected_datagram(
+    auto first_one_rtt = coquic::quic::serialize_protected_datagram(
         std::array<coquic::quic::ProtectedPacket, 1>{
             coquic::quic::ProtectedOneRttPacket{
                 .destination_connection_id = connection.config_.source_connection_id,
@@ -963,7 +965,7 @@ TEST(QuicCoreTest, ServerRetainsZeroRttReadSecretLongEnoughForReorderedZeroRttPa
         });
     ASSERT_TRUE(first_one_rtt.has_value());
 
-    const auto late_zero_rtt = coquic::quic::serialize_protected_datagram(
+    auto late_zero_rtt = coquic::quic::serialize_protected_datagram(
         std::array<coquic::quic::ProtectedPacket, 1>{
             coquic::quic::ProtectedZeroRttPacket{
                 .version = coquic::quic::kQuicVersion1,
@@ -1002,7 +1004,7 @@ TEST(QuicCoreTest, ServerRetainsZeroRttReadSecretLongEnoughForReorderedZeroRttPa
 
     connection.process_inbound_datagram(late_zero_rtt.value(), coquic::quic::test::test_time(3));
 
-    const auto first_received = connection.take_received_stream_data();
+    auto first_received = connection.take_received_stream_data();
     ASSERT_TRUE(first_received.has_value());
     if (!first_received.has_value()) {
         return;
@@ -1011,7 +1013,7 @@ TEST(QuicCoreTest, ServerRetainsZeroRttReadSecretLongEnoughForReorderedZeroRttPa
     EXPECT_EQ(first_stream.stream_id, 0u);
     EXPECT_EQ(first_stream.bytes, coquic::quic::test::bytes_from_string("early"));
 
-    const auto second_received = connection.take_received_stream_data();
+    auto second_received = connection.take_received_stream_data();
     ASSERT_TRUE(second_received.has_value());
     if (!second_received.has_value()) {
         return;
@@ -1077,7 +1079,7 @@ TEST(QuicCoreTest, ClientStartupReportsUnavailableZeroRttForMalformedResumptionS
     EXPECT_TRUE(connection.started_);
     EXPECT_FALSE(connection.has_failed());
     ASSERT_FALSE(connection.decoded_resumption_state_.has_value());
-    const auto event = connection.take_zero_rtt_status_event();
+    auto event = connection.take_zero_rtt_status_event();
     ASSERT_TRUE(event.has_value());
     if (!event.has_value()) {
         return;
@@ -1111,7 +1113,7 @@ TEST(QuicCoreTest, ClientStartupReportsUnavailableZeroRttForApplicationContextMi
     EXPECT_FALSE(resumed.has_failed());
     ASSERT_TRUE(resumed.decoded_resumption_state_.has_value());
     EXPECT_FALSE(resumed.peer_transport_parameters_.has_value());
-    const auto event = resumed.take_zero_rtt_status_event();
+    auto event = resumed.take_zero_rtt_status_event();
     ASSERT_TRUE(event.has_value());
     if (!event.has_value()) {
         return;
@@ -1152,7 +1154,7 @@ TEST(QuicCoreTest, ClientStartupReportsUnavailableZeroRttForMalformedResumptionF
         connection.start_client_if_needed();
 
         EXPECT_FALSE(connection.has_failed());
-        const auto event = connection.take_zero_rtt_status_event();
+        auto event = connection.take_zero_rtt_status_event();
         ASSERT_TRUE(event.has_value());
         if (!event.has_value()) {
             return;
@@ -1176,7 +1178,7 @@ TEST(QuicCoreTest, ClientStartupReportsUnavailableZeroRttForMalformedResumptionF
     append_u32_be(invalid_transport_parameters, coquic::quic::kQuicVersion1);
     append_length_prefixed_bytes(invalid_transport_parameters, {});
     append_length_prefixed_text(invalid_transport_parameters, "h3");
-    const auto malformed_transport_parameters = bytes_from_ints({0x40});
+    auto malformed_transport_parameters = bytes_from_ints({0x40});
     append_length_prefixed_bytes(invalid_transport_parameters, malformed_transport_parameters);
     append_length_prefixed_bytes(invalid_transport_parameters, {});
     run_unavailable_case(std::move(invalid_transport_parameters));
@@ -1248,13 +1250,13 @@ TEST(QuicCoreTest, SyncTlsStateSkipsResumptionEmissionWithoutPeerTransportParame
     if (!connection.tls_.has_value()) {
         return;
     }
-    auto &tls = connection.tls_.value();
-    ASSERT_TRUE(tls.handshake_complete());
+    auto &tls_adapter = connection.tls_.value();
+    ASSERT_TRUE(tls_adapter.handshake_complete());
 
     connection.pending_resumption_state_effect_.reset();
     connection.resumption_state_emitted_ = false;
     connection.peer_transport_parameters_.reset();
-    coquic::quic::test::TlsAdapterTestPeer::clear_peer_transport_parameters(tls);
+    coquic::quic::test::TlsAdapterTestPeer::clear_peer_transport_parameters(tls_adapter);
 
     const auto synced = connection.sync_tls_state();
 
@@ -1284,7 +1286,7 @@ TEST(QuicCoreTest, QueueStreamSendEmitsZeroRttAttemptEventForResumedClient) {
     connection.zero_rtt_space_.write_secret = make_test_traffic_secret(
         coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x55});
 
-    const auto queued = connection.queue_stream_send(0, bytes_from_ints({0x61}), false);
+    auto queued = connection.queue_stream_send(0, bytes_from_ints({0x61}), false);
 
     ASSERT_TRUE(queued.has_value());
     ASSERT_TRUE(connection.pending_zero_rtt_status_event_.has_value());
@@ -1500,7 +1502,7 @@ TEST(QuicCoreTest, AcceptedZeroRttRejectsReducedServerTransportLimits) {
         coquic::quic::test::TlsAdapterTestPeer::apply_early_data_status(
             *connection.tls_, SSL_EARLY_DATA_ACCEPTED, true);
 
-        const auto validated = connection.validate_peer_transport_parameters_if_ready();
+        auto validated = connection.validate_peer_transport_parameters_if_ready();
 
         ASSERT_FALSE(validated.has_value());
         EXPECT_EQ(validated.error().code,
@@ -1559,12 +1561,12 @@ TEST(QuicCoreTest, AcceptedZeroRttAllowsNonRememberedAndOptionalParameterReducti
 
     const auto serialized_current = coquic::quic::serialize_transport_parameters(current);
     ASSERT_TRUE(serialized_current.has_value());
-    auto &tls = optional_ref_or_terminate(connection.tls_);
+    auto &tls_adapter = optional_ref_or_terminate(connection.tls_);
     coquic::quic::test::TlsAdapterTestPeer::set_peer_transport_parameters(
-        tls, serialized_current.value());
-    coquic::quic::test::TlsAdapterTestPeer::set_early_data_attempted(tls, true);
-    coquic::quic::test::TlsAdapterTestPeer::apply_early_data_status(tls, SSL_EARLY_DATA_ACCEPTED,
-                                                                    true);
+        tls_adapter, serialized_current.value());
+    coquic::quic::test::TlsAdapterTestPeer::set_early_data_attempted(tls_adapter, true);
+    coquic::quic::test::TlsAdapterTestPeer::apply_early_data_status(tls_adapter,
+                                                                    SSL_EARLY_DATA_ACCEPTED, true);
 
     EXPECT_TRUE(connection.validate_peer_transport_parameters_if_ready().has_value());
 }

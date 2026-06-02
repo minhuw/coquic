@@ -1,5 +1,8 @@
 #include <array>
+#include <cstdint>
 #include <filesystem>
+#include <initializer_list>
+#include <string_view>
 
 #include <gtest/gtest.h>
 
@@ -9,6 +12,71 @@
 namespace {
 using namespace coquic::perf;
 using namespace coquic::perf::test_support;
+
+bool contains_all(std::string_view text, std::initializer_list<std::string_view> needles) {
+    for (const std::string_view needle : needles) {
+        if (text.find(needle) == std::string_view::npos) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool rr_result_contains(const std::filesystem::path &json_path,
+                        std::initializer_list<std::string_view> needles) {
+    return contains_all(read_result_text(json_path), needles);
+}
+
+bool stdout_summary_contains_rr_metrics(std::string_view stdout_output) {
+    return contains_all(stdout_output, {"status=ok", "mode=rr", "requests/s="});
+}
+
+testing::AssertionResult
+timed_rr_result_uses_measurement_only(const std::filesystem::path &json_path) {
+    const auto json = read_result_text(json_path);
+    const auto warmup_ms = json_u64_field(json, "warmup_ms");
+    const auto elapsed_ms = json_u64_field(json, "elapsed_ms");
+    const auto connections = json_u64_field(json, "connections");
+    const auto requests_completed = json_u64_field(json, "requests_completed");
+    const auto server_bytes_sent = json_u64_field_in_object(json, "server_counters", "bytes_sent");
+    const auto server_bytes_received =
+        json_u64_field_in_object(json, "server_counters", "bytes_received");
+    const auto server_requests_completed =
+        json_u64_field_in_object(json, "server_counters", "requests_completed");
+
+    if (!warmup_ms.has_value() || !elapsed_ms.has_value() || !connections.has_value() ||
+        !requests_completed.has_value() || !server_bytes_sent.has_value() ||
+        !server_bytes_received.has_value() || !server_requests_completed.has_value()) {
+        return testing::AssertionFailure() << "timed rr JSON omitted required counters";
+    }
+
+    const std::uint64_t elapsed_ms_value = elapsed_ms.value_or(0);
+    const std::uint64_t requests_completed_value = requests_completed.value_or(0);
+    if (warmup_ms.value_or(0) != 100u) {
+        return testing::AssertionFailure() << "warmup_ms was " << warmup_ms.value_or(0);
+    }
+    if (connections.value_or(0) != 4u) {
+        return testing::AssertionFailure() << "connections was " << connections.value_or(0);
+    }
+    if (elapsed_ms_value < 100u || elapsed_ms_value > 350u) {
+        return testing::AssertionFailure() << "elapsed_ms was " << elapsed_ms_value;
+    }
+    if (requests_completed_value == 0u) {
+        return testing::AssertionFailure() << "requests_completed was zero";
+    }
+    if (server_bytes_sent.value_or(0) == 0u) {
+        return testing::AssertionFailure() << "server bytes_sent was zero";
+    }
+    if (server_bytes_received.value_or(0) == 0u) {
+        return testing::AssertionFailure() << "server bytes_received was zero";
+    }
+    if (server_requests_completed.value_or(0) != requests_completed_value) {
+        return testing::AssertionFailure()
+               << "server requests_completed was " << server_requests_completed.value_or(0)
+               << ", client requests_completed was " << requests_completed_value;
+    }
+    return testing::AssertionSuccess();
+}
 
 TEST(QuicPerfRrTest, EstablishedConnectionReportsLatencyAndRequestRate) {
     const auto port = allocate_udp_loopback_port();
@@ -40,10 +108,8 @@ TEST(QuicPerfRrTest, EstablishedConnectionReportsLatencyAndRequestRate) {
     };
 
     EXPECT_EQ(run_perf_runtime(client), 0);
-    const auto json = read_result_text(json_path);
-    EXPECT_NE(json.find("\"mode\":\"rr\""), std::string::npos);
-    EXPECT_NE(json.find("\"requests_completed\":32"), std::string::npos);
-    EXPECT_NE(json.find("\"latency\":{"), std::string::npos);
+    EXPECT_TRUE(rr_result_contains(
+        json_path, {"\"mode\":\"rr\"", "\"requests_completed\":32", "\"latency\":{"}));
 }
 
 TEST(QuicPerfRrTest, HonorsRequestsInFlightLimit) {
@@ -76,8 +142,7 @@ TEST(QuicPerfRrTest, HonorsRequestsInFlightLimit) {
     };
 
     EXPECT_EQ(run_perf_runtime(client), 0);
-    const auto json = read_result_text(json_path);
-    EXPECT_NE(json.find("\"requests_in_flight\":2"), std::string::npos);
+    EXPECT_TRUE(rr_result_contains(json_path, {"\"requests_in_flight\":2"}));
 }
 
 TEST(QuicPerfRrTest, HighRequestsInFlightReservesCapacityForControlStream) {
@@ -111,8 +176,7 @@ TEST(QuicPerfRrTest, HighRequestsInFlightReservesCapacityForControlStream) {
     };
 
     EXPECT_EQ(run_perf_runtime(client), 0);
-    const auto json = read_result_text(json_path);
-    EXPECT_NE(json.find("\"requests_completed\":16"), std::string::npos);
+    EXPECT_TRUE(rr_result_contains(json_path, {"\"requests_completed\":16"}));
 }
 
 TEST(QuicPerfRrTest, FixedRequestCompletesWithMultipleConfiguredConnections) {
@@ -147,8 +211,7 @@ TEST(QuicPerfRrTest, FixedRequestCompletesWithMultipleConfiguredConnections) {
     };
 
     EXPECT_EQ(run_perf_runtime(client), 0);
-    const auto json = read_result_text(json_path);
-    EXPECT_NE(json.find("\"requests_completed\":8"), std::string::npos);
+    EXPECT_TRUE(rr_result_contains(json_path, {"\"requests_completed\":8"}));
 }
 
 TEST(QuicPerfRrTest, TimedWindowUsesMeasurementOnly) {
@@ -182,41 +245,7 @@ TEST(QuicPerfRrTest, TimedWindowUsesMeasurementOnly) {
     };
 
     EXPECT_EQ(run_perf_runtime(client), 0);
-    const auto json = read_result_text(json_path);
-    const auto warmup_ms = json_u64_field(json, "warmup_ms");
-    const auto elapsed_ms = json_u64_field(json, "elapsed_ms");
-    const auto connections = json_u64_field(json, "connections");
-    const auto requests_completed = json_u64_field(json, "requests_completed");
-    const auto server_bytes_sent = json_u64_field_in_object(json, "server_counters", "bytes_sent");
-    const auto server_bytes_received =
-        json_u64_field_in_object(json, "server_counters", "bytes_received");
-    const auto server_requests_completed =
-        json_u64_field_in_object(json, "server_counters", "requests_completed");
-
-    ASSERT_TRUE(warmup_ms.has_value());
-    ASSERT_TRUE(elapsed_ms.has_value());
-    ASSERT_TRUE(connections.has_value());
-    ASSERT_TRUE(requests_completed.has_value());
-    ASSERT_TRUE(server_bytes_sent.has_value());
-    ASSERT_TRUE(server_bytes_received.has_value());
-    ASSERT_TRUE(server_requests_completed.has_value());
-
-    const std::uint64_t warmup_ms_value = warmup_ms.value_or(0);
-    const std::uint64_t elapsed_ms_value = elapsed_ms.value_or(0);
-    const std::uint64_t connections_value = connections.value_or(0);
-    const std::uint64_t requests_completed_value = requests_completed.value_or(0);
-    const std::uint64_t server_bytes_sent_value = server_bytes_sent.value_or(0);
-    const std::uint64_t server_bytes_received_value = server_bytes_received.value_or(0);
-    const std::uint64_t server_requests_completed_value = server_requests_completed.value_or(0);
-
-    EXPECT_EQ(warmup_ms_value, 100u);
-    EXPECT_EQ(connections_value, 4u);
-    EXPECT_GE(elapsed_ms_value, 100u);
-    EXPECT_LE(elapsed_ms_value, 350u);
-    EXPECT_GT(requests_completed_value, 0u);
-    EXPECT_GT(server_bytes_sent_value, 0u);
-    EXPECT_GT(server_bytes_received_value, 0u);
-    EXPECT_EQ(server_requests_completed_value, requests_completed_value);
+    EXPECT_TRUE(timed_rr_result_uses_measurement_only(json_path));
 }
 
 TEST(QuicPerfRrTest, TimedDrainCompletesAfterCloseRequestsDrainOutstandingResponses) {
@@ -281,11 +310,7 @@ TEST(QuicPerfRrTest, PrintsHumanReadableSummaryToStdout) {
 
     testing::internal::CaptureStdout();
     EXPECT_EQ(run_perf_runtime(client), 0);
-    const auto stdout_output = testing::internal::GetCapturedStdout();
-
-    EXPECT_NE(stdout_output.find("status=ok"), std::string::npos);
-    EXPECT_NE(stdout_output.find("mode=rr"), std::string::npos);
-    EXPECT_NE(stdout_output.find("requests/s="), std::string::npos);
+    EXPECT_TRUE(stdout_summary_contains_rr_metrics(testing::internal::GetCapturedStdout()));
     EXPECT_FALSE(read_result_text(json_path).empty());
 }
 

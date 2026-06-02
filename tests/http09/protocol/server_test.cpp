@@ -111,11 +111,11 @@ QuicCoreResult handshake_ready_result() {
 }
 
 std::vector<QuicCoreSendStreamData>
-send_stream_inputs_from(const QuicHttp09EndpointUpdate &update) {
+send_stream_inputs_from(const QuicHttp09EndpointUpdate &endpoint_update) {
     std::vector<QuicCoreSendStreamData> out;
-    for (const auto &input : update.core_inputs) {
-        if (const auto *send = std::get_if<QuicCoreSendStreamData>(&input)) {
-            out.push_back(*send);
+    for (const auto &input : endpoint_update.core_inputs) {
+        if (const auto *send_input = std::get_if<QuicCoreSendStreamData>(&input)) {
+            out.push_back(*send_input);
         }
     }
     return out;
@@ -145,7 +145,7 @@ TEST(QuicHttp09ServerTest, ServesFileBodyOnRequestedBidirectionalStream) {
         endpoint, server, request_on_server, coquic::quic::test::test_time(2));
     const auto response_on_client = coquic::quic::test::relay_send_datagrams_to_peer(
         response_from_server, client, coquic::quic::test::test_time(2));
-    const auto received = coquic::quic::test::received_stream_data_from(response_on_client);
+    auto received = coquic::quic::test::received_stream_data_from(response_on_client);
 
     ASSERT_FALSE(received.empty());
     std::vector<std::byte> body;
@@ -204,7 +204,7 @@ TEST(QuicHttp09ServerTest, SendsResponseWhenRequestArrivesBeforeHandshakeComplet
         return std::nullopt;
     };
 
-    const auto one_rtt_datagram_index = find_one_rtt_datagram_index(request_datagrams);
+    auto one_rtt_datagram_index = find_one_rtt_datagram_index(request_datagrams);
     ASSERT_TRUE(one_rtt_datagram_index.has_value());
     if (!one_rtt_datagram_index.has_value()) {
         return;
@@ -212,12 +212,12 @@ TEST(QuicHttp09ServerTest, SendsResponseWhenRequestArrivesBeforeHandshakeComplet
 
     const auto request_on_server = coquic::quic::test::relay_nth_send_datagram_to_peer(
         request, one_rtt_datagram_index.value(), server, coquic::quic::test::test_time(4));
-    const auto response_before_completion = drive_server_endpoint_on_result(
+    auto response_before_completion = drive_server_endpoint_on_result(
         endpoint, server, request_on_server, coquic::quic::test::test_time(5));
 
     const auto handshake_on_server = coquic::quic::test::relay_send_datagrams_to_peer(
         client_handshake, server, coquic::quic::test::test_time(6));
-    const auto response_after_completion = drive_server_endpoint_on_result(
+    auto response_after_completion = drive_server_endpoint_on_result(
         endpoint, server, handshake_on_server, coquic::quic::test::test_time(7));
 
     const auto client_before_completion = coquic::quic::test::relay_send_datagrams_to_peer(
@@ -268,7 +268,7 @@ TEST(QuicHttp09ServerTest, DefersConfiguredResponseUntilHandshakeReady) {
     EXPECT_TRUE(still_before_ready.core_inputs.empty());
     EXPECT_FALSE(still_before_ready.has_pending_work);
 
-    const auto after_ready =
+    auto after_ready =
         endpoint.on_core_result(handshake_ready_result(), coquic::quic::test::test_time(3));
     const auto sends = send_stream_inputs_from(after_ready);
     ASSERT_EQ(sends.size(), 1u);
@@ -294,18 +294,18 @@ TEST(QuicHttp09ServerTest, DeferredConfiguredLargeResponseStartsOnHandshakeReady
     ASSERT_TRUE(before_ready.core_inputs.empty());
     EXPECT_FALSE(before_ready.has_pending_work);
 
-    auto after_ready =
+    auto initial_ready_update =
         endpoint.on_core_result(handshake_ready_result(), coquic::quic::test::test_time(2));
-    auto sends = send_stream_inputs_from(after_ready);
-    ASSERT_EQ(sends.size(), 1u);
-    EXPECT_EQ(sends.front().bytes.size(), 32u * 1024u);
-    EXPECT_FALSE(sends.front().fin);
-    EXPECT_TRUE(after_ready.has_pending_work);
+    auto initial_sends = send_stream_inputs_from(initial_ready_update);
+    ASSERT_EQ(initial_sends.size(), 1u);
+    EXPECT_EQ(initial_sends.front().bytes.size(), 32u * 1024u);
+    EXPECT_FALSE(initial_sends.front().fin);
+    EXPECT_TRUE(initial_ready_update.has_pending_work);
 
-    after_ready = endpoint.poll(coquic::quic::test::test_time(3));
-    sends = send_stream_inputs_from(after_ready);
-    ASSERT_EQ(sends.size(), 1u);
-    EXPECT_TRUE(sends.front().fin);
+    auto followup_ready_update = endpoint.poll(coquic::quic::test::test_time(3));
+    auto followup_sends = send_stream_inputs_from(followup_ready_update);
+    ASSERT_EQ(followup_sends.size(), 1u);
+    EXPECT_TRUE(followup_sends.front().fin);
 }
 
 TEST(QuicHttp09ServerTest, ServesResponseAfterLostShortRequestPacketIsRetransmitted) {
@@ -334,9 +334,8 @@ TEST(QuicHttp09ServerTest, ServesResponseAfterLostShortRequestPacketIsRetransmit
 
     const auto server_after_client_handshake = coquic::quic::test::relay_send_datagrams_to_peer(
         client_handshake, server, coquic::quic::test::test_time(4));
-    const auto ignored_endpoint_result = drive_server_endpoint_on_result(
-        endpoint, server, server_after_client_handshake, coquic::quic::test::test_time(5));
-    static_cast<void>(ignored_endpoint_result);
+    static_cast<void>(drive_server_endpoint_on_result(
+        endpoint, server, server_after_client_handshake, coquic::quic::test::test_time(5)));
 
     const auto server_response_datagrams =
         coquic::quic::test::send_datagrams_from(server_after_client_handshake);
@@ -352,7 +351,7 @@ TEST(QuicHttp09ServerTest, ServesResponseAfterLostShortRequestPacketIsRetransmit
         }
     }
     ASSERT_TRUE(largest_server_datagram_index.has_value());
-    const auto largest_server_datagram = optional_value_or_terminate(largest_server_datagram_index);
+    auto largest_server_datagram = optional_value_or_terminate(largest_server_datagram_index);
     for (std::size_t index = 0; index < server_response_datagrams.size(); ++index) {
         if (server_response_datagrams.size() > 1 && index == largest_server_datagram) {
             continue;
@@ -361,7 +360,7 @@ TEST(QuicHttp09ServerTest, ServesResponseAfterLostShortRequestPacketIsRetransmit
     }
     ASSERT_FALSE(delivered_server_datagrams.empty());
 
-    const auto client_after_partial_server_response = coquic::quic::test::relay_datagrams_to_peer(
+    auto client_after_partial_server_response = coquic::quic::test::relay_datagrams_to_peer(
         server_response_datagrams, delivered_server_datagrams, client,
         coquic::quic::test::test_time(6));
 
@@ -370,9 +369,8 @@ TEST(QuicHttp09ServerTest, ServesResponseAfterLostShortRequestPacketIsRetransmit
 
     const auto server_after_client_ack = coquic::quic::test::relay_send_datagrams_to_peer(
         client_after_partial_server_response, server, coquic::quic::test::test_time(7));
-    const auto ignored_server_followup = drive_server_endpoint_on_result(
-        endpoint, server, server_after_client_ack, coquic::quic::test::test_time(8));
-    static_cast<void>(ignored_server_followup);
+    static_cast<void>(drive_server_endpoint_on_result(endpoint, server, server_after_client_ack,
+                                                      coquic::quic::test::test_time(8)));
 
     const auto retransmission = coquic::quic::test::drive_earliest_next_wakeup(
         client, {client.next_wakeup(), client_after_partial_server_response.next_wakeup});
@@ -381,7 +379,7 @@ TEST(QuicHttp09ServerTest, ServesResponseAfterLostShortRequestPacketIsRetransmit
 
     const auto server_after_retransmission = coquic::quic::test::relay_send_datagrams_to_peer(
         retransmission, server, coquic::quic::test::test_time(9));
-    const auto response_after_retransmission = drive_server_endpoint_on_result(
+    auto response_after_retransmission = drive_server_endpoint_on_result(
         endpoint, server, server_after_retransmission, coquic::quic::test::test_time(10));
     const auto client_after_retransmission = coquic::quic::test::relay_send_datagrams_to_peer(
         response_after_retransmission, client, coquic::quic::test::test_time(11));
@@ -572,7 +570,7 @@ TEST(QuicHttp09ServerTest, ErasesPendingRequestStateAfterCompletedRequest) {
         coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
         1u);
 
-    const auto second = client.advance(
+    auto second = client.advance(
         QuicCoreSendStreamData{
             .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("\r\n"),
@@ -616,7 +614,7 @@ TEST(QuicHttp09ServerTest, ErasesPendingRequestStateWhenStreamFails) {
         coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_request_count(endpoint),
         1u);
 
-    const auto second = client.advance(
+    auto second = client.advance(
         QuicCoreSendStreamData{
             .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string(""),
@@ -653,7 +651,7 @@ TEST(QuicHttp09ServerTest, MissingFileCausesStreamLocalResetWithoutEndpointFailu
         coquic::quic::test::test_time(1));
     const auto request_on_server = coquic::quic::test::relay_send_datagrams_to_peer(
         request_result, server, coquic::quic::test::test_time(1));
-    const auto endpoint_update =
+    auto endpoint_update =
         endpoint.on_core_result(request_on_server, coquic::quic::test::test_time(2));
 
     ASSERT_EQ(endpoint_update.core_inputs.size(), 2u);
@@ -749,14 +747,14 @@ TEST(QuicHttp09ServerTest, ForcedOpenFailurePathIgnoresUnrelatedRequests) {
         coquic::quic::test::test_time(1));
     const auto request_on_server = coquic::quic::test::relay_send_datagrams_to_peer(
         request_result, server, coquic::quic::test::test_time(1));
-    const auto endpoint_update =
+    auto endpoint_update =
         endpoint.on_core_result(request_on_server, coquic::quic::test::test_time(2));
 
     ASSERT_EQ(endpoint_update.core_inputs.size(), 1u);
-    const auto *send =
+    const auto *send_input =
         std::get_if<coquic::quic::QuicCoreSendStreamData>(&endpoint_update.core_inputs.front());
-    ASSERT_NE(send, nullptr);
-    EXPECT_FALSE(send->bytes.empty());
+    ASSERT_NE(send_input, nullptr);
+    EXPECT_FALSE(send_input->bytes.empty());
     EXPECT_FALSE(endpoint.has_failed());
 }
 
@@ -1014,27 +1012,27 @@ TEST(QuicHttp09ServerTest, PollProcessesBoundedBurstAcrossPendingResponses) {
     QuicHttp09ServerEndpoint endpoint(
         QuicHttp09ServerConfig{.document_root = document_root.path()});
 
-    const auto initial = endpoint.on_core_result(result, coquic::quic::test::test_time(1));
-    EXPECT_FALSE(initial.terminal_failure);
+    auto initial_update = endpoint.on_core_result(result, coquic::quic::test::test_time(1));
+    EXPECT_FALSE(initial_update.terminal_failure);
     EXPECT_EQ(
         coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint),
         2u);
 
-    const auto update = endpoint.poll(coquic::quic::test::test_time(2));
-    const auto sends = send_stream_inputs_from(update);
+    auto burst_update = endpoint.poll(coquic::quic::test::test_time(2));
+    auto sends = send_stream_inputs_from(burst_update);
     ASSERT_EQ(sends.size(), 32u);
-    EXPECT_TRUE(update.has_pending_work);
+    EXPECT_TRUE(burst_update.has_pending_work);
     EXPECT_EQ(
         coquic::http09::test::QuicHttp09ServerEndpointTestPeer::pending_response_count(endpoint),
         2u);
 
     std::size_t alpha_chunks = 0;
     std::size_t beta_chunks = 0;
-    for (const auto &send : sends) {
-        EXPECT_EQ(send.bytes.size(), 32u * 1024u);
-        EXPECT_FALSE(send.fin);
-        alpha_chunks += static_cast<std::size_t>(send.stream_id == 0);
-        beta_chunks += static_cast<std::size_t>(send.stream_id == 4);
+    for (const auto &send_input : sends) {
+        EXPECT_EQ(send_input.bytes.size(), 32u * 1024u);
+        EXPECT_FALSE(send_input.fin);
+        alpha_chunks += static_cast<std::size_t>(send_input.stream_id == 0);
+        beta_chunks += static_cast<std::size_t>(send_input.stream_id == 4);
     }
     EXPECT_GT(alpha_chunks, 0u);
     EXPECT_GT(beta_chunks, 0u);
@@ -1108,11 +1106,11 @@ TEST(QuicHttp09ServerTest, PollQueuesBoundedResponseChunkBurst) {
     EXPECT_TRUE(burst.has_pending_work);
 
     for (const auto &input : burst.core_inputs) {
-        const auto *send = std::get_if<coquic::quic::QuicCoreSendStreamData>(&input);
-        ASSERT_NE(send, nullptr);
-        EXPECT_EQ(send->stream_id, 0u);
-        EXPECT_EQ(send->bytes.size(), 32u * 1024u);
-        EXPECT_FALSE(send->fin);
+        const auto *send_input = std::get_if<coquic::quic::QuicCoreSendStreamData>(&input);
+        ASSERT_NE(send_input, nullptr);
+        EXPECT_EQ(send_input->stream_id, 0u);
+        EXPECT_EQ(send_input->bytes.size(), 32u * 1024u);
+        EXPECT_FALSE(send_input->fin);
     }
 }
 

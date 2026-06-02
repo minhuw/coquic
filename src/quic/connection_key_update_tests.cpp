@@ -20,36 +20,41 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.peer_preferred_address_emitted_ = true;
         return connection;
     };
-    const auto process_fast_path_datagram = [](QuicConnection &connection,
+    const auto process_fast_path_datagram = [](QuicConnection &fast_path_connection,
                                                std::vector<std::byte> datagram,
                                                QuicCoreTimePoint now = QuicCoreTimePoint{}) {
         auto storage = std::make_shared<std::vector<std::byte>>(std::move(datagram));
-        connection.process_inbound_datagram(
+        fast_path_connection.process_inbound_datagram(
             storage, /*begin=*/0, /*end=*/storage->size(), now, /*path_id=*/0,
             QuicEcnCodepoint::unavailable, std::nullopt, /*replay_trigger=*/false,
             /*count_inbound_bytes=*/true, /*allow_in_place_receive_decode=*/true);
     };
-    const auto make_runtime_transport_parameters = [](const QuicConnection &connection) {
+    const auto make_runtime_transport_parameters = [](const QuicConnection &parameter_connection) {
         return TransportParameters{
             .original_destination_connection_id =
-                connection.config_.initial_destination_connection_id,
-            .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
-            .active_connection_id_limit = connection.config_.transport.active_connection_id_limit,
-            .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
-            .max_ack_delay = connection.config_.transport.max_ack_delay,
-            .initial_max_data = connection.config_.transport.initial_max_data,
+                parameter_connection.config_.initial_destination_connection_id,
+            .max_udp_payload_size = parameter_connection.config_.transport.max_udp_payload_size,
+            .active_connection_id_limit =
+                parameter_connection.config_.transport.active_connection_id_limit,
+            .ack_delay_exponent = parameter_connection.config_.transport.ack_delay_exponent,
+            .max_ack_delay = parameter_connection.config_.transport.max_ack_delay,
+            .initial_max_data = parameter_connection.config_.transport.initial_max_data,
             .initial_max_stream_data_bidi_local =
-                connection.config_.transport.initial_max_stream_data_bidi_local,
+                parameter_connection.config_.transport.initial_max_stream_data_bidi_local,
             .initial_max_stream_data_bidi_remote =
-                connection.config_.transport.initial_max_stream_data_bidi_remote,
-            .initial_max_stream_data_uni = connection.config_.transport.initial_max_stream_data_uni,
-            .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
-            .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
-            .initial_source_connection_id = connection.peer_source_connection_id_,
+                parameter_connection.config_.transport.initial_max_stream_data_bidi_remote,
+            .initial_max_stream_data_uni =
+                parameter_connection.config_.transport.initial_max_stream_data_uni,
+            .initial_max_streams_bidi =
+                parameter_connection.config_.transport.initial_max_streams_bidi,
+            .initial_max_streams_uni =
+                parameter_connection.config_.transport.initial_max_streams_uni,
+            .initial_source_connection_id = parameter_connection.peer_source_connection_id_,
             .version_information = version_information_for_handshake(
-                connection.config_.supported_versions, connection.current_version_,
-                connection.config_.retry_source_connection_id, connection.original_version_,
-                connection.current_version_),
+                parameter_connection.config_.supported_versions,
+                parameter_connection.current_version_,
+                parameter_connection.config_.retry_source_connection_id,
+                parameter_connection.original_version_, parameter_connection.current_version_),
         };
     };
     const auto make_new_connection_id_frame = [](std::uint64_t sequence_number) {
@@ -76,13 +81,13 @@ bool connection_key_update_and_probe_coverage_for_tests() {
     };
 
     const auto serialize_one_rtt_ack_datagram =
-        [](const QuicConnection &connection, const TrafficSecret &secret,
+        [](const QuicConnection &ack_connection, const TrafficSecret &secret,
            std::uint64_t packet_number, bool key_phase = false) {
             const auto encoded = serialize_protected_datagram(
                 std::array<ProtectedPacket, 1>{
                     ProtectedOneRttPacket{
                         .key_phase = key_phase,
-                        .destination_connection_id = connection.config_.source_connection_id,
+                        .destination_connection_id = ack_connection.config_.source_connection_id,
                         .packet_number_length = 2,
                         .packet_number = packet_number,
                         .frames = {AckFrame{}},
@@ -91,7 +96,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                 SerializeProtectionContext{
                     .local_role = EndpointRole::server,
                     .client_initial_destination_connection_id =
-                        connection.client_initial_destination_connection_id(),
+                        ack_connection.client_initial_destination_connection_id(),
                     .one_rtt_secret = secret,
                     .one_rtt_key_phase = key_phase,
                 });
@@ -100,14 +105,14 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             }
             return encoded.value();
         };
-    const auto serialize_handshake_ping_datagram = [](const QuicConnection &connection,
+    const auto serialize_handshake_ping_datagram = [](const QuicConnection &handshake_connection,
                                                       const TrafficSecret &secret,
                                                       std::uint64_t packet_number) {
         const auto encoded = serialize_protected_datagram(
             std::array<ProtectedPacket, 1>{
                 ProtectedHandshakePacket{
                     .version = kQuicVersion1,
-                    .destination_connection_id = connection.config_.source_connection_id,
+                    .destination_connection_id = handshake_connection.config_.source_connection_id,
                     .source_connection_id = bytes_from_ints_for_tests({0x11, 0x90}),
                     .packet_number_length = 2,
                     .packet_number = packet_number,
@@ -117,7 +122,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             SerializeProtectionContext{
                 .local_role = EndpointRole::server,
                 .client_initial_destination_connection_id =
-                    connection.client_initial_destination_connection_id(),
+                    handshake_connection.client_initial_destination_connection_id(),
                 .handshake_secret = secret,
             });
         if (!encoded.has_value()) {
@@ -126,13 +131,13 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         return encoded.value();
     };
     const auto serialize_one_rtt_frames_datagram =
-        [](const QuicConnection &connection, const TrafficSecret &secret,
+        [](const QuicConnection &frames_connection, const TrafficSecret &secret,
            std::uint64_t packet_number, std::vector<Frame> frames, bool key_phase = false) {
             const auto encoded = serialize_protected_datagram(
                 std::array<ProtectedPacket, 1>{
                     ProtectedOneRttPacket{
                         .key_phase = key_phase,
-                        .destination_connection_id = connection.config_.source_connection_id,
+                        .destination_connection_id = frames_connection.config_.source_connection_id,
                         .packet_number_length = 2,
                         .packet_number = packet_number,
                         .frames = std::move(frames),
@@ -141,7 +146,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                 SerializeProtectionContext{
                     .local_role = EndpointRole::server,
                     .client_initial_destination_connection_id =
-                        connection.client_initial_destination_connection_id(),
+                        frames_connection.client_initial_destination_connection_id(),
                     .one_rtt_secret = secret,
                     .one_rtt_key_phase = key_phase,
                 });
@@ -385,7 +390,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.queue_new_token(bytes_from_ints_for_tests({0xa1, 0xa2}));
         connection.local_stream_limit_state_.queue_max_streams(StreamLimitType::bidirectional, 5);
 
-        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+        auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(connection.pending_new_token_frames_.empty());
@@ -605,11 +610,11 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             .in_flight = true,
             .bytes_in_flight = 1,
         });
-        const AckFrame tracked_ack_frame{
+        AckFrame tracked_ack_frame{
             .largest_acknowledged = 8,
             .first_ack_range = 0,
         };
-        const auto tracked_cursor = make_ack_range_cursor(tracked_ack_frame);
+        auto tracked_cursor = make_ack_range_cursor(tracked_ack_frame);
         COQUIC_CONNECTION_HOOK_RECORD(tracked_cursor.has_value());
         if (tracked_cursor.has_value()) {
             COQUIC_CONNECTION_HOOK_RECORD(!connection.ack_ranges_include_unsent_packet_number(
@@ -787,7 +792,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          }},
                                          .bytes_in_flight = 1,
                                      });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(41);
+        auto handle = connection.application_space_.recovery.handle_for_packet_number(41);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
         if (handle.has_value()) {
             const auto retired =
@@ -811,7 +816,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          .retire_connection_id_frames = {retire_connection_id},
                                          .bytes_in_flight = 1,
                                      });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(450);
+        auto handle = connection.application_space_.recovery.handle_for_packet_number(450);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
         if (handle.has_value()) {
             const auto retired =
@@ -838,7 +843,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          .retire_connection_id_frames = {retire_connection_id},
                                          .bytes_in_flight = 1,
                                      });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(451);
+        auto handle = connection.application_space_.recovery.handle_for_packet_number(451);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
         if (handle.has_value()) {
             const auto retired =
@@ -870,7 +875,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          .retire_connection_id_frames = {retire_connection_id},
                                          .bytes_in_flight = 1,
                                      });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(42);
+        auto handle = connection.application_space_.recovery.handle_for_packet_number(42);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
         if (handle.has_value()) {
             const auto lost = connection.mark_lost_packet(connection.application_space_, *handle,
@@ -897,7 +902,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          .retire_connection_id_frames = {retire_connection_id},
                                          .bytes_in_flight = 1,
                                      });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(440);
+        auto handle = connection.application_space_.recovery.handle_for_packet_number(440);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
         if (handle.has_value()) {
             const auto retired =
@@ -919,7 +924,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          .retire_connection_id_frames = {retire_connection_id},
                                          .bytes_in_flight = 1,
                                      });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(441);
+        auto handle = connection.application_space_.recovery.handle_for_packet_number(441);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
         if (handle.has_value()) {
             const auto lost = connection.mark_lost_packet(connection.application_space_, *handle,
@@ -952,11 +957,11 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          .retire_connection_id_frames = {retire_connection_id},
                                          .bytes_in_flight = 1,
                                      });
-        const auto probe = connection.select_pto_probe(connection.application_space_);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.packet_number == 43);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.new_token_frames.size() == 1);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.new_connection_id_frames.size() == 1);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.retire_connection_id_frames.size() == 1);
+        auto selected_pto_probe = connection.select_pto_probe(connection.application_space_);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.packet_number == 43);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.new_token_frames.size() == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.new_connection_id_frames.size() == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.retire_connection_id_frames.size() == 1);
     }
 
     {
@@ -1047,15 +1052,15 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                     },
                 .bytes_in_flight = 1,
             });
-        const auto probe = connection.select_pto_probe(connection.application_space_);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.packet_number == 44);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.max_data_frame.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(probe.max_streams_frames.size() == 2);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.data_blocked_frame.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(probe.stream_data_blocked_frames.size() == 1);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.first_stream_frame_metadata.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(probe.stream_frame_metadata.size() == 1);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.stream_fragments.size() == 1);
+        auto selected_pto_probe = connection.select_pto_probe(connection.application_space_);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.packet_number == 44);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.max_data_frame.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.max_streams_frames.size() == 2);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.data_blocked_frame.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.stream_data_blocked_frames.size() == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.first_stream_frame_metadata.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.stream_frame_metadata.size() == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.stream_fragments.size() == 1);
     }
 
     {
@@ -1078,11 +1083,11 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          .data_blocked_frame = DataBlockedFrame{.maximum_data = 21},
                                          .bytes_in_flight = 1,
                                      });
-        const auto probe = connection.select_pto_probe(connection.application_space_);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.packet_number == 45);
-        COQUIC_CONNECTION_HOOK_RECORD(!probe.max_data_frame.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(!probe.data_blocked_frame.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(probe.has_ping);
+        auto selected_pto_probe = connection.select_pto_probe(connection.application_space_);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.packet_number == 45);
+        COQUIC_CONNECTION_HOOK_RECORD(!selected_pto_probe.max_data_frame.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(!selected_pto_probe.data_blocked_frame.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.has_ping);
     }
 
     {
@@ -1138,7 +1143,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.next_application_read_secret_ =
             make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0xa2});
         connection.next_application_read_secret_source_generation_ = 19;
-        const auto ensured = connection.ensure_next_application_read_secret();
+        auto ensured = connection.ensure_next_application_read_secret();
         COQUIC_CONNECTION_HOOK_RECORD(ensured.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(!connection.next_application_read_secret_.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(
@@ -1151,7 +1156,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             .cipher_suite = invalid_cipher_suite_for_tests(),
             .secret = {std::byte{0x8a}},
         };
-        const auto ensured = connection.ensure_next_application_read_secret();
+        auto ensured = connection.ensure_next_application_read_secret();
         COQUIC_CONNECTION_HOOK_RECORD(!ensured.has_value());
     }
 
@@ -1374,18 +1379,17 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             .connection_id = bytes_from_ints_for_tests({0xb4}),
             .stateless_reset_token = std::array<std::byte, 16>{std::byte{0x44}},
         };
-        const auto stale_processed =
-            connection.process_new_connection_id_frame(NewConnectionIdFrame{
-                .sequence_number = 4,
-                .retire_prior_to = 3,
-                .connection_id = bytes_from_ints_for_tests({0xb4}),
-            });
+        auto stale_processed = connection.process_new_connection_id_frame(NewConnectionIdFrame{
+            .sequence_number = 4,
+            .retire_prior_to = 3,
+            .connection_id = bytes_from_ints_for_tests({0xb4}),
+        });
         COQUIC_CONNECTION_HOOK_RECORD(stale_processed.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(connection.pending_retire_connection_id_frames_.size() == 1);
 
         connection = make_connected_client_connection();
         connection.largest_peer_retire_prior_to_ = 5;
-        const auto already_retired_processed =
+        auto already_retired_processed =
             connection.process_new_connection_id_frame(NewConnectionIdFrame{
                 .sequence_number = 5,
                 .retire_prior_to = 5,
@@ -1401,7 +1405,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             .connection_id = bytes_from_ints_for_tests({0xb6}),
             .stateless_reset_token = std::array<std::byte, 16>{std::byte{0x46}},
         };
-        const auto lower_than_largest_processed =
+        auto lower_than_largest_processed =
             connection.process_new_connection_id_frame(NewConnectionIdFrame{
                 .sequence_number = 4,
                 .retire_prior_to = 4,
@@ -1415,7 +1419,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
 
         connection = make_connected_client_connection();
         connection.largest_peer_retire_prior_to_ = 5;
-        const auto stale_not_retired_processed =
+        auto stale_not_retired_processed =
             connection.process_new_connection_id_frame(NewConnectionIdFrame{
                 .sequence_number = 5,
                 .retire_prior_to = 4,
@@ -1786,7 +1790,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.active_peer_connection_id_sequence_ = 0;
         connection.initial_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
 
-        const auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
+        auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
         const auto decoded = deserialize_protected_datagram(
             datagram, DeserializeProtectionContext{
                           .peer_role = EndpointRole::client,
@@ -1833,7 +1837,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             };
         }
 
-        const auto datagram = serialize_handshake_ping_datagram(
+        auto datagram = serialize_handshake_ping_datagram(
             connection,
             make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x90}),
             40 + static_cast<std::uint64_t>(secret_level));
@@ -1850,7 +1854,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.handshake_packet_space_discarded_ = true;
         connection.handshake_space_.read_secret.reset();
 
-        const auto datagram = serialize_protected_datagram(
+        auto datagram = serialize_protected_datagram(
             std::array<ProtectedPacket, 1>{
                 ProtectedHandshakePacket{
                     .version = kQuicVersion1,
@@ -1884,7 +1888,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         COQUIC_CONNECTION_HOOK_RECORD(
             enable_qlog_for_connection_coverage(connection, "discarded-handshake"));
 
-        const auto datagram = serialize_protected_datagram(
+        auto datagram = serialize_protected_datagram(
             std::array<ProtectedPacket, 1>{
                 ProtectedHandshakePacket{
                     .version = kQuicVersion1,
@@ -1933,7 +1937,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                     connection.client_initial_destination_connection_id(),
                 .handshake_secret = connection.handshake_space_.read_secret,
             });
-        const auto second_packet = serialize_protected_datagram(
+        auto second_packet = serialize_protected_datagram(
             std::array<ProtectedPacket, 1>{
                 ProtectedHandshakePacket{
                     .version = kQuicVersion1,
@@ -2364,7 +2368,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         COQUIC_CONNECTION_HOOK_RECORD(
             connection.queue_stream_send(0, bytes_from_ints_for_tests({0x61}), false).has_value());
 
-        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+        auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
@@ -2383,7 +2387,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         COQUIC_CONNECTION_HOOK_RECORD(
             connection.queue_stream_send(0, bytes_from_ints_for_tests({0x62}), false).has_value());
 
-        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+        auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
@@ -2437,7 +2441,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.anti_amplification_sent_bytes_ = 0;
         connection.current_send_path_id_.reset();
 
-        const auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
+        auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
     }
@@ -2519,7 +2523,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         COQUIC_CONNECTION_HOOK_RECORD(!connection.pto_deadline().has_value());
         COQUIC_CONNECTION_HOOK_RECORD(!connection.ack_deadline().has_value());
 
-        const auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
+        auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
@@ -2615,7 +2619,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             .has_ping = true,
         };
 
-        const auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
+        auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
     }
@@ -2643,7 +2647,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         const AckFrame ack_frame{
             .largest_acknowledged = 1,
         };
-        const auto ack_cursor = make_ack_range_cursor(ack_frame);
+        auto ack_cursor = make_ack_range_cursor(ack_frame);
         COQUIC_CONNECTION_HOOK_RECORD(ack_cursor.has_value());
         if (ack_cursor.has_value()) {
             static_cast<void>(connection.process_inbound_ack_cursor(
@@ -2708,7 +2712,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             .connection_id = bytes_from_ints_for_tests({0xbc}),
             .stateless_reset_token = std::array<std::byte, 16>{std::byte{0x4c}},
         };
-        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+        auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
         COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(
             connection.peer_connection_ids_.at(12).retire_frame_in_flight);
@@ -2719,7 +2723,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.pending_retire_connection_id_frames_.push_back(RetireConnectionIdFrame{
             .sequence_number = 13,
         });
-        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+        auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
         COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(!connection.peer_connection_ids_.contains(13));
     }
@@ -2751,7 +2755,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.initial_space_.received_packets.record_received(
             /*packet_number=*/10, /*ack_eliciting=*/true, QuicCoreTimePoint{});
 
-        const auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
+        auto datagram = connection.flush_outbound_datagram(QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
     }
@@ -3149,10 +3153,10 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          .bytes_in_flight = 1,
                                      });
 
-        const auto probe = connection.select_pto_probe(connection.application_space_);
+        auto selected_pto_probe = connection.select_pto_probe(connection.application_space_);
 
-        COQUIC_CONNECTION_HOOK_RECORD(!probe.first_stream_frame_metadata.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(probe.stream_frame_metadata.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!selected_pto_probe.first_stream_frame_metadata.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.stream_frame_metadata.empty());
     }
 
     {
@@ -3196,8 +3200,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                 .protection_key_update_generation =
                     connection.current_application_write_key_generation_ + 1,
             });
-        const AckFrame out_of_range_ack{.largest_acknowledged = 10};
-        const auto out_of_range_cursor = make_ack_range_cursor(out_of_range_ack);
+        AckFrame out_of_range_ack{.largest_acknowledged = 10};
+        auto out_of_range_cursor = make_ack_range_cursor(out_of_range_ack);
         COQUIC_CONNECTION_HOOK_RECORD(out_of_range_cursor.has_value());
         if (out_of_range_cursor.has_value()) {
             COQUIC_CONNECTION_HOOK_RECORD(connection
@@ -3208,7 +3212,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         }
 
         const AckFrame mismatched_ack{.largest_acknowledged = 20};
-        const auto mismatched_cursor = make_ack_range_cursor(mismatched_ack);
+        auto mismatched_cursor = make_ack_range_cursor(mismatched_ack);
         COQUIC_CONNECTION_HOOK_RECORD(mismatched_cursor.has_value());
         if (mismatched_cursor.has_value()) {
             COQUIC_CONNECTION_HOOK_RECORD(connection
@@ -3228,9 +3232,10 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          .protection_key_update_generation =
                                              connection.current_application_write_key_generation_,
                                      });
-        const auto failed_ack = connection.process_inbound_ack(
+        auto failed_ack_receive_time = QuicCoreTimePoint{};
+        auto failed_ack = connection.process_inbound_ack(
             connection.application_space_, AckFrame{.largest_acknowledged = 21},
-            QuicCoreTimePoint{},
+            failed_ack_receive_time,
             /*ack_delay_exponent=*/0, /*max_ack_delay_ms=*/0,
             /*suppress_pto_reset=*/false, /*used_previous_application_read_secret=*/true);
         COQUIC_CONNECTION_HOOK_RECORD(!failed_ack.has_value());
@@ -3268,13 +3273,14 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                     StreamFrameSendMetadata{.stream_id = 0, .offset = 0, .length = 1},
                 .bytes_in_flight = 1,
             });
-        const auto copa_processed_ack = copa_connection.process_inbound_ack(
+        auto copa_ack_receive_time = QuicCoreTimePoint{} + std::chrono::milliseconds(1);
+        auto copa_processed_ack = copa_connection.process_inbound_ack(
             copa_connection.application_space_, AckFrame{.largest_acknowledged = 1},
-            QuicCoreTimePoint{} + std::chrono::milliseconds(1), /*ack_delay_exponent=*/0,
+            copa_ack_receive_time, /*ack_delay_exponent=*/0,
             /*max_ack_delay_ms=*/0, /*suppress_pto_reset=*/false,
             /*used_previous_application_read_secret=*/false);
         COQUIC_CONNECTION_HOOK_RECORD(copa_processed_ack.has_value());
-        const std::array sample{AckedStreamPacketSample{
+        std::array sample{AckedStreamPacketSample{
             .packet_number = 2,
             .sent_time = QuicCoreTimePoint{},
             .bytes_in_flight = 1,
@@ -3299,7 +3305,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         fast_path_config.role = EndpointRole::server;
         auto fast_path_connection =
             make_connected_client_connection_for_connection_coverage(fast_path_config);
-        const std::array ce_sample{AckedStreamPacketSample{
+        std::array ce_sample{AckedStreamPacketSample{
             .packet_number = 3,
             .sent_time = QuicCoreTimePoint{} + std::chrono::milliseconds(3),
             .congestion_send_sequence = 3,
@@ -3307,7 +3313,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             .path_id = 33,
             .ecn = QuicEcnCodepoint::ect1,
         }};
-        const AckApplyResult ack_result{.largest_acknowledged_was_newly_acked = true};
+        AckApplyResult ack_result{.largest_acknowledged_was_newly_acked = true};
         COQUIC_CONNECTION_HOOK_RECORD(fast_path_connection.try_ack_simple_stream_fast_path(
             fast_path_connection.application_space_, ack_result, ce_sample,
             std::span<const SentPacketRecord>{}, QuicCoreTimePoint{} + std::chrono::milliseconds(4),
@@ -3320,7 +3326,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             std::span<const SentPacketRecord>{}, QuicCoreTimePoint{}, AckEcnCounts{},
             /*suppress_pto_reset=*/false));
 
-        const std::array non_empty_acked_packet{SentPacketRecord{.packet_number = 4}};
+        std::array non_empty_acked_packet{SentPacketRecord{.packet_number = 4}};
         COQUIC_CONNECTION_HOOK_RECORD(!fast_path_connection.try_ack_simple_stream_fast_path(
             fast_path_connection.application_space_, AckApplyResult{}, ce_sample,
             non_empty_acked_packet, QuicCoreTimePoint{}, AckEcnCounts{},
@@ -3363,7 +3369,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                     StreamFrameSendMetadata{.stream_id = 7300, .offset = 0, .length = 1},
                 .bytes_in_flight = 1,
             });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(73);
+        auto handle = connection.application_space_.recovery.handle_for_packet_number(73);
         std::vector<SentPacketRecord> acked_packets;
         std::vector<AckedStreamPacketSample> simple_samples;
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
@@ -3392,7 +3398,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                     StreamFrameSendMetadata{.stream_id = 74, .offset = 0, .length = 1},
                 .bytes_in_flight = 1,
             });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(74);
+        auto handle = connection.application_space_.recovery.handle_for_packet_number(74);
         std::vector<SentPacketRecord> acked_packets;
         std::vector<AckedStreamPacketSample> simple_samples;
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
@@ -3419,7 +3425,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                     },
                 .bytes_in_flight = 1,
             });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(77);
+        auto handle = connection.application_space_.recovery.handle_for_packet_number(77);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
         if (handle.has_value()) {
             COQUIC_CONNECTION_HOOK_RECORD(
@@ -3456,7 +3462,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                     },
                 .bytes_in_flight = 1,
             });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(75);
+        auto handle = connection.application_space_.recovery.handle_for_packet_number(75);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
         if (handle.has_value()) {
             COQUIC_CONNECTION_HOOK_RECORD(
@@ -3493,7 +3499,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                     },
                 .bytes_in_flight = 1,
             });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(76);
+        auto handle = connection.application_space_.recovery.handle_for_packet_number(76);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
         if (handle.has_value()) {
             COQUIC_CONNECTION_HOOK_RECORD(
@@ -3520,7 +3526,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                     },
                 .bytes_in_flight = 1,
             });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(78);
+        auto handle = connection.application_space_.recovery.handle_for_packet_number(78);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
         if (handle.has_value()) {
             COQUIC_CONNECTION_HOOK_RECORD(

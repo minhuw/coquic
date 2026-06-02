@@ -230,7 +230,7 @@ TEST(QuicTlsAdapterContractTest, HandshakeCanBeConstrainedToAesCipherSuites) {
     ASSERT_TRUE(TlsAdapterTestPeer::cipher_suite_for_ssl(client).has_value());
     ASSERT_TRUE(TlsAdapterTestPeer::cipher_suite_for_ssl(server).has_value());
     const auto client_cipher = TlsAdapterTestPeer::cipher_suite_for_ssl(client).value();
-    const auto server_cipher = TlsAdapterTestPeer::cipher_suite_for_ssl(server).value();
+    auto server_cipher = TlsAdapterTestPeer::cipher_suite_for_ssl(server).value();
     EXPECT_TRUE(client_cipher == CipherSuite::tls_aes_128_gcm_sha256 ||
                 client_cipher == CipherSuite::tls_aes_256_gcm_sha384);
     EXPECT_TRUE(server_cipher == CipherSuite::tls_aes_128_gcm_sha256 ||
@@ -406,7 +406,7 @@ TEST(QuicTlsAdapterContractTest,
     TlsAdapter resumed_client(std::move(resumed_client_config));
     ASSERT_TRUE(resumed_client.start().has_value());
 
-    const auto secrets = resumed_client.take_available_secrets();
+    auto secrets = resumed_client.take_available_secrets();
     EXPECT_TRUE(std::any_of(secrets.begin(), secrets.end(), [](const auto &secret) {
         return secret.level == EncryptionLevel::zero_rtt && secret.sender == EndpointRole::client;
     }));
@@ -442,12 +442,12 @@ TEST(QuicTlsAdapterContractTest,
     TlsAdapter resumed_server(std::move(resumed_server_config));
 
     ASSERT_TRUE(resumed_client.start().has_value());
-    const auto resumed_client_initial = resumed_client.take_pending(EncryptionLevel::initial);
+    auto resumed_client_initial = resumed_client.take_pending(EncryptionLevel::initial);
     ASSERT_FALSE(resumed_client_initial.empty());
     ASSERT_TRUE(
         resumed_server.provide(EncryptionLevel::initial, resumed_client_initial).has_value());
 
-    const auto early_server_secrets = resumed_server.take_available_secrets();
+    auto early_server_secrets = resumed_server.take_available_secrets();
     EXPECT_TRUE(std::any_of(early_server_secrets.begin(), early_server_secrets.end(),
                             [](const auto &secret) {
                                 return secret.level == EncryptionLevel::zero_rtt &&
@@ -520,12 +520,12 @@ TEST(QuicTlsAdapterContractTest,
     TlsAdapter resumed_server(std::move(resumed_server_config));
 
     ASSERT_TRUE(resumed_client.start().has_value());
-    const auto resumed_client_initial = resumed_client.take_pending(EncryptionLevel::initial);
+    auto resumed_client_initial = resumed_client.take_pending(EncryptionLevel::initial);
     ASSERT_FALSE(resumed_client_initial.empty());
     ASSERT_TRUE(
         resumed_server.provide(EncryptionLevel::initial, resumed_client_initial).has_value());
 
-    const auto early_server_secrets = resumed_server.take_available_secrets();
+    auto early_server_secrets = resumed_server.take_available_secrets();
     EXPECT_TRUE(std::any_of(early_server_secrets.begin(), early_server_secrets.end(),
                             [](const auto &secret) {
                                 return secret.level == EncryptionLevel::zero_rtt &&
@@ -827,7 +827,7 @@ TEST(QuicTlsAdapterContractTest, ServerIdentityFailuresProduceStickyErrors) {
               CodecErrorCode::invalid_packet_protection_state);
 
     auto malformed_certificate_chain = make_server_config();
-    const auto valid_chain_identity = malformed_certificate_chain.identity.value_or(TlsIdentity{});
+    auto valid_chain_identity = malformed_certificate_chain.identity.value_or(TlsIdentity{});
     malformed_certificate_chain.identity = TlsIdentity{
         .certificate_pem = valid_chain_identity.certificate_pem +
                            "-----BEGIN CERTIFICATE-----\nnot-base64\n-----END CERTIFICATE-----\n",
@@ -847,7 +847,7 @@ TEST(QuicTlsAdapterContractTest, ServerIdentityFailuresProduceStickyErrors) {
     }
 
     auto invalid_private_key = make_server_config();
-    const auto valid_private_key_identity = invalid_private_key.identity.value_or(TlsIdentity{});
+    auto valid_private_key_identity = invalid_private_key.identity.value_or(TlsIdentity{});
     invalid_private_key.identity = TlsIdentity{
         .certificate_pem = valid_private_key_identity.certificate_pem,
         .private_key_pem = "invalid private key",
@@ -943,7 +943,7 @@ TEST(QuicTlsAdapterContractTest,
         TlsAdapter client(make_client_config());
         TlsAdapter server(make_server_config());
         drive_tls_handshake(client, server);
-        const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::provide_post_handshake);
+        ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::provide_post_handshake);
         EXPECT_FALSE(client.provide(EncryptionLevel::application, {}).has_value());
         EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(client),
                   CodecErrorCode::invalid_packet_protection_state);
@@ -977,7 +977,7 @@ TEST(QuicTlsAdapterContractTest,
         0);
 
     EXPECT_EQ(TlsAdapterTestPeer::call_static_send_alert(adapter, ssl_encryption_initial, 40), 0);
-    const auto static_alert_poll = adapter.poll();
+    auto static_alert_poll = adapter.poll();
     ASSERT_FALSE(static_alert_poll.has_value());
     EXPECT_EQ(static_alert_poll.error().code, CodecErrorCode::invalid_packet_protection_state);
     EXPECT_TRUE(static_alert_poll.error().has_transport_error_code);
@@ -1103,7 +1103,7 @@ TEST(QuicTlsAdapterContractTest, SecretCallbackHooksRemainUsableBeforeHandshakeC
     EXPECT_EQ(TlsAdapterTestPeer::call_static_set_write_secret_with_null_app_data(
                   server, ssl_encryption_handshake, write_secret.data(), write_secret.size()),
               0);
-    const auto outbound_secrets = server.take_available_secrets();
+    auto outbound_secrets = server.take_available_secrets();
     ASSERT_EQ(outbound_secrets.size(), 1u);
     EXPECT_EQ(outbound_secrets[0].sender, EndpointRole::server);
     EXPECT_EQ(outbound_secrets[0].level, EncryptionLevel::handshake);
@@ -1144,7 +1144,7 @@ TEST(QuicTlsAdapterContractTest, CallbacksCaptureSecretsAndHandshakeData) {
                                                                  read_secret.data(), nullptr,
                                                                  read_secret.size()),
               1);
-    const auto inbound_secrets = client.take_available_secrets();
+    auto inbound_secrets = client.take_available_secrets();
     ASSERT_EQ(inbound_secrets.size(), 1u);
     EXPECT_EQ(inbound_secrets[0].sender, EndpointRole::server);
     EXPECT_EQ(inbound_secrets[0].level, EncryptionLevel::application);
@@ -1153,7 +1153,7 @@ TEST(QuicTlsAdapterContractTest, CallbacksCaptureSecretsAndHandshakeData) {
                                                                  nullptr, write_secret.data(),
                                                                  write_secret.size()),
               1);
-    const auto outbound_secrets = client.take_available_secrets();
+    auto outbound_secrets = client.take_available_secrets();
     ASSERT_EQ(outbound_secrets.size(), 1u);
     EXPECT_EQ(outbound_secrets[0].sender, EndpointRole::client);
     EXPECT_EQ(outbound_secrets[0].level, EncryptionLevel::application);
@@ -1234,7 +1234,8 @@ TEST(QuicTlsAdapterContractTest, DirectOnSetSecretIgnoresNullSecretsAndMissingCi
                   1);
         auto inbound_secrets = client.take_available_secrets();
         ASSERT_EQ(inbound_secrets.size(), 1u);
-        EXPECT_EQ(inbound_secrets[0].sender, EndpointRole::server);
+        auto inbound_sender = inbound_secrets.front().sender;
+        EXPECT_EQ(inbound_sender, EndpointRole::server);
 
         EXPECT_EQ(TlsAdapterTestPeer::call_on_set_secret(client, ssl_encryption_application,
                                                          EndpointRole::client, secret.data(),
@@ -1242,7 +1243,8 @@ TEST(QuicTlsAdapterContractTest, DirectOnSetSecretIgnoresNullSecretsAndMissingCi
                   1);
         auto outbound_secrets = client.take_available_secrets();
         ASSERT_EQ(outbound_secrets.size(), 1u);
-        EXPECT_EQ(outbound_secrets[0].sender, EndpointRole::client);
+        auto outbound_sender = outbound_secrets.front().sender;
+        EXPECT_EQ(outbound_sender, EndpointRole::client);
     }
 
     {

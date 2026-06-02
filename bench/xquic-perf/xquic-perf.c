@@ -169,7 +169,7 @@ struct perf_ctx_s {
     completed_stream_t *completed;
     size_t completed_len;
     size_t completed_cap;
-    counters_t *live_counters;
+    uint64_t live_bytes_received;
     uint64_t measure_start_us;
     int count_stream_bytes;
 };
@@ -641,9 +641,8 @@ static xqc_int_t stream_read_notify(xqc_stream_t *stream, void *strm_user_data) 
         } else {
             uint64_t received = (uint64_t)ret;
             s->received += received;
-            if (ctx->count_stream_bytes && s->counts && ctx->live_counters != NULL &&
-                now_us() >= ctx->measure_start_us) {
-                ctx->live_counters->bytes_received += received;
+            if (ctx->count_stream_bytes && s->counts && now_us() >= ctx->measure_start_us) {
+                ctx->live_bytes_received += received;
             }
             if (fin) {
                 completed_stream_t done;
@@ -872,6 +871,28 @@ static int init_ctx(perf_ctx_t *ctx, const config_t *cfg, int server) {
     return 0;
 }
 
+static perf_ctx_t *alloc_ctx(const config_t *cfg, int server) {
+    perf_ctx_t *ctx = (perf_ctx_t *)calloc(1, sizeof(*ctx));
+    if (ctx == NULL) {
+        return NULL;
+    }
+    ctx->fd = -1;
+    if (init_ctx(ctx, cfg, server) != 0) {
+        cleanup_ctx(ctx);
+        free(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+static void free_ctx(perf_ctx_t *ctx) {
+    if (ctx == NULL) {
+        return;
+    }
+    cleanup_ctx(ctx);
+    free(ctx);
+}
+
 static void drive_once(perf_ctx_t *ctx, uint64_t deadline_us) {
     int timeout_ms = 10;
     uint64_t now = now_us();
@@ -926,13 +947,13 @@ static void drive_once(perf_ctx_t *ctx, uint64_t deadline_us) {
 }
 
 static void run_server(const config_t *cfg) {
-    perf_ctx_t ctx;
-    if (init_ctx(&ctx, cfg, 1) != 0) {
+    perf_ctx_t *ctx = alloc_ctx(cfg, 1);
+    if (ctx == NULL) {
         fprintf(stderr, "could not initialize xquic server\n");
         exit(1);
     }
     for (;;) {
-        drive_once(&ctx, now_us() + 1000000ULL);
+        drive_once(ctx, now_us() + 1000000ULL);
     }
 }
 
@@ -1117,34 +1138,35 @@ static void consume_completed_bulk(perf_ctx_t *ctx, counters_t *c, uint64_t meas
 }
 
 static void run_timed_bulk_download(config_t *cfg, counters_t *c) {
-    perf_ctx_t ctx;
-    if (init_ctx(&ctx, cfg, 0) != 0) {
-        set_error(&ctx, "could not initialize xquic client");
+    perf_ctx_t *ctx = alloc_ctx(cfg, 0);
+    if (ctx == NULL) {
+        fprintf(stderr, "could not initialize xquic client\n");
+        exit(1);
     }
-    if (!ctx.error && open_connections(&ctx, cfg->connections) != 0) {
-        set_error(&ctx, "could not connect xquic client");
+    if (!ctx->error && open_connections(ctx, cfg->connections) != 0) {
+        set_error(ctx, "could not connect xquic client");
     }
     uint64_t measure_start = now_us() + cfg->warmup_us;
     uint64_t deadline = measure_start + cfg->duration_us;
-    ctx.live_counters = c;
-    ctx.measure_start_us = measure_start;
-    ctx.count_stream_bytes = 1;
-    for (uint64_t i = 0; !ctx.error && i < cfg->connections; ++i) {
-        conn_ctx_t *conn = connection_at(&ctx, i);
+    ctx->measure_start_us = measure_start;
+    ctx->count_stream_bytes = 1;
+    for (uint64_t i = 0; !ctx->error && i < cfg->connections; ++i) {
+        conn_ctx_t *conn = connection_at(ctx, i);
         for (uint64_t j = 0; j < cfg->streams; ++j) {
-            open_request(&ctx, conn, 1, 0, TIMED_BULK_RESPONSE_BYTES);
+            open_request(ctx, conn, 1, 0, TIMED_BULK_RESPONSE_BYTES);
         }
     }
-    while (!ctx.error && now_us() < deadline) {
-        drive_once(&ctx, deadline);
-        ctx.completed_len = 0;
+    while (!ctx->error && now_us() < deadline) {
+        drive_once(ctx, deadline);
+        ctx->completed_len = 0;
     }
-    if (ctx.error) {
-        fprintf(stderr, "%s\n", ctx.error_message);
-        cleanup_ctx(&ctx);
+    if (ctx->error) {
+        fprintf(stderr, "%s\n", ctx->error_message);
+        free_ctx(ctx);
         exit(1);
     }
-    cleanup_ctx(&ctx);
+    c->bytes_received += ctx->live_bytes_received;
+    free_ctx(ctx);
 }
 
 static void run_fixed_bulk(config_t *cfg, counters_t *c) {
@@ -1152,84 +1174,86 @@ static void run_fixed_bulk(config_t *cfg, counters_t *c) {
         fprintf(stderr, "fixed bulk requires --total-bytes for xquic client\n");
         exit(1);
     }
-    perf_ctx_t ctx;
-    if (init_ctx(&ctx, cfg, 0) != 0) {
-        set_error(&ctx, "could not initialize xquic client");
+    perf_ctx_t *ctx = alloc_ctx(cfg, 0);
+    if (ctx == NULL) {
+        fprintf(stderr, "could not initialize xquic client\n");
+        exit(1);
     }
-    if (!ctx.error && open_connections(&ctx, cfg->connections) != 0) {
-        set_error(&ctx, "could not connect xquic client");
+    if (!ctx->error && open_connections(ctx, cfg->connections) != 0) {
+        set_error(ctx, "could not connect xquic client");
     }
     uint64_t per_stream = cfg->total_bytes.value / cfg->streams;
     uint64_t remainder = cfg->total_bytes.value % cfg->streams;
     for (uint64_t i = 0; i < cfg->streams; ++i) {
         uint64_t target = per_stream + (i < remainder ? 1 : 0);
-        conn_ctx_t *conn = connection_at(&ctx, i % cfg->connections);
+        conn_ctx_t *conn = connection_at(ctx, i % cfg->connections);
         if (strcmp(cfg->direction, "upload") == 0) {
-            open_request(&ctx, conn, 1, target, 0);
+            open_request(ctx, conn, 1, target, 0);
         } else {
-            open_request(&ctx, conn, 1, 0, target);
+            open_request(ctx, conn, 1, 0, target);
         }
     }
-    while (!ctx.error && active_streams(&ctx) > 0) {
-        drive_once(&ctx, now_us() + 10000000ULL);
-        consume_completed(&ctx, c, 0, 1);
+    while (!ctx->error && active_streams(ctx) > 0) {
+        drive_once(ctx, now_us() + 10000000ULL);
+        consume_completed(ctx, c, 0, 1);
     }
-    if (ctx.error) {
-        fprintf(stderr, "%s\n", ctx.error_message);
-        cleanup_ctx(&ctx);
+    if (ctx->error) {
+        fprintf(stderr, "%s\n", ctx->error_message);
+        free_ctx(ctx);
         exit(1);
     }
-    cleanup_ctx(&ctx);
+    free_ctx(ctx);
 }
 
 static void run_rr(config_t *cfg, counters_t *c) {
-    perf_ctx_t ctx;
-    if (init_ctx(&ctx, cfg, 0) != 0) {
-        set_error(&ctx, "could not initialize xquic client");
+    perf_ctx_t *ctx = alloc_ctx(cfg, 0);
+    if (ctx == NULL) {
+        fprintf(stderr, "could not initialize xquic client\n");
+        exit(1);
     }
-    if (!ctx.error && open_connections(&ctx, cfg->connections) != 0) {
-        set_error(&ctx, "could not connect xquic client");
+    if (!ctx->error && open_connections(ctx, cfg->connections) != 0) {
+        set_error(ctx, "could not connect xquic client");
     }
     uint64_t measure_start = now_us() + cfg->warmup_us;
     uint64_t deadline = measure_start + cfg->duration_us;
     uint64_t started = 0;
     uint64_t target_active = cfg->requests_in_flight * cfg->connections;
     uint64_t next_conn = 0;
-    while (!ctx.error && started < target_active &&
+    while (!ctx->error && started < target_active &&
            (!cfg->requests.set || started < cfg->requests.value)) {
-        conn_ctx_t *conn = connection_at(&ctx, next_conn++ % cfg->connections);
-        open_request(&ctx, conn, cfg->requests.set || now_us() >= measure_start, cfg->request_bytes,
+        conn_ctx_t *conn = connection_at(ctx, next_conn++ % cfg->connections);
+        open_request(ctx, conn, cfg->requests.set || now_us() >= measure_start, cfg->request_bytes,
                      cfg->response_bytes);
         started++;
     }
-    while (!ctx.error) {
+    while (!ctx->error) {
         if (!cfg->requests.set && now_us() >= deadline) {
             break;
         }
-        if (cfg->requests.set && started >= cfg->requests.value && active_streams(&ctx) == 0) {
+        if (cfg->requests.set && started >= cfg->requests.value && active_streams(ctx) == 0) {
             break;
         }
-        drive_once(&ctx, deadline);
-        consume_completed(&ctx, c, measure_start, 0);
-        while (active_streams(&ctx) < target_active) {
+        drive_once(ctx, deadline);
+        consume_completed(ctx, c, measure_start, 0);
+        while (active_streams(ctx) < target_active) {
             if (cfg->requests.set && started >= cfg->requests.value) {
                 break;
             }
             if (!cfg->requests.set && now_us() >= deadline) {
                 break;
             }
-            conn_ctx_t *conn = connection_at(&ctx, next_conn++ % cfg->connections);
-            open_request(&ctx, conn, cfg->requests.set || now_us() >= measure_start,
+            conn_ctx_t *conn = connection_at(ctx, next_conn++ % cfg->connections);
+            open_request(ctx, conn, cfg->requests.set || now_us() >= measure_start,
                          cfg->request_bytes, cfg->response_bytes);
             started++;
         }
     }
-    if (ctx.error) {
-        fprintf(stderr, "%s\n", ctx.error_message);
-        cleanup_ctx(&ctx);
+    if (ctx->error) {
+        fprintf(stderr, "%s\n", ctx->error_message);
+        free_ctx(ctx);
         exit(1);
     }
-    cleanup_ctx(&ctx);
+    free_ctx(ctx);
 }
 
 static int start_one_crr(config_t *cfg, counters_t *c, uint64_t measure_start, uint64_t *started,

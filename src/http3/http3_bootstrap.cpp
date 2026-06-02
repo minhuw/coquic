@@ -1312,16 +1312,21 @@ void bootstrap_clear_forced_file_size_failure_path_for_test() {
     forced_file_size_failure_path_for_test().reset();
 }
 
+bool bootstrap_internal_coverage_check(bool &ok, bool condition) {
+    ok &= condition;
+    return condition;
+}
+
 bool bootstrap_internal_coverage_for_test() {
     bool ok = true;
-    const auto check = [&](bool condition) { ok &= condition; };
 
+    // Stop-state and move-only descriptor helpers are covered before socket scripts.
     reset_bootstrap_test_hooks();
-    check(!is_stop_requested(nullptr));
+    bootstrap_internal_coverage_check(ok, !is_stop_requested(nullptr));
     std::atomic<bool> stop_requested = false;
-    check(!is_stop_requested(&stop_requested));
+    bootstrap_internal_coverage_check(ok, !is_stop_requested(&stop_requested));
     stop_requested.store(true);
-    check(is_stop_requested(&stop_requested));
+    bootstrap_internal_coverage_check(ok, is_stop_requested(&stop_requested));
 
     const auto exercise_invalid_destination_move = [&](bool fail_pipe) {
         reset_bootstrap_test_hooks();
@@ -1331,7 +1336,7 @@ bool bootstrap_internal_coverage_for_test() {
 
         int pipe_fds[2] = {-1, -1};
         if (bootstrap_pipe(pipe_fds) != 0) {
-            check(fail_pipe);
+            bootstrap_internal_coverage_check(ok, fail_pipe);
             return;
         }
 
@@ -1339,18 +1344,19 @@ bool bootstrap_internal_coverage_for_test() {
         ScopedFd peer(pipe_fds[1]);
         ScopedFd destination(-1);
         destination = std::move(source);
-        check(destination.get() >= 0);
-        check(peer.get() >= 0);
+        bootstrap_internal_coverage_check(ok, destination.get() >= 0);
+        bootstrap_internal_coverage_check(ok, peer.get() >= 0);
     };
     exercise_invalid_destination_move(false);
     exercise_invalid_destination_move(true);
 
+    // Forced poll and accept results cover bootstrap wrappers without real network events.
     {
         reset_bootstrap_test_hooks();
         bootstrap_test_hooks().forced_poll_results = {
             ForcedPollResult{.ready = 1, .revents = 0, .error_number = 0},
         };
-        check(bootstrap_poll(nullptr, 0, 0) == 1);
+        bootstrap_internal_coverage_check(ok, bootstrap_poll(nullptr, 0, 0) == 1);
     }
 
     {
@@ -1358,49 +1364,51 @@ bool bootstrap_internal_coverage_for_test() {
         bootstrap_test_hooks().forced_accept_results = {
             ForcedAcceptResult{.fd = 0, .error_number = 0},
         };
-        check(bootstrap_accept(-1, nullptr, nullptr) == 0);
+        bootstrap_internal_coverage_check(ok, bootstrap_accept(-1, nullptr, nullptr) == 0);
     }
 
     {
         reset_bootstrap_test_hooks();
         errno = 0;
-        check((bootstrap_accept(-1, nullptr, nullptr) == -1) & (errno == EBADF));
+        bootstrap_internal_coverage_check(ok, (bootstrap_accept(-1, nullptr, nullptr) == -1) &
+                                                  (errno == EBADF));
     }
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_pipe_failures = 1;
-    check(!bootstrap_scoped_fd_move_constructor_for_test());
+    bootstrap_internal_coverage_check(ok, !bootstrap_scoped_fd_move_constructor_for_test());
 
     for (int mismatch = 1; mismatch <= 2; ++mismatch) {
         reset_bootstrap_test_hooks();
         bootstrap_test_hooks().move_constructor_expectation_mismatch_stage = mismatch;
-        check(!bootstrap_scoped_fd_move_constructor_for_test());
+        bootstrap_internal_coverage_check(ok, !bootstrap_scoped_fd_move_constructor_for_test());
     }
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_pipe_failures = 1;
-    check(!bootstrap_scoped_fd_move_assignment_for_test());
+    bootstrap_internal_coverage_check(ok, !bootstrap_scoped_fd_move_assignment_for_test());
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().pipe_call_index_to_fail = 2;
-    check(!bootstrap_scoped_fd_move_assignment_for_test());
+    bootstrap_internal_coverage_check(ok, !bootstrap_scoped_fd_move_assignment_for_test());
 
     for (int mismatch = 1; mismatch <= 3; ++mismatch) {
         reset_bootstrap_test_hooks();
         bootstrap_test_hooks().move_assignment_expectation_mismatch_index = mismatch;
-        check(!bootstrap_scoped_fd_move_assignment_for_test());
+        bootstrap_internal_coverage_check(ok, !bootstrap_scoped_fd_move_assignment_for_test());
     }
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_pipe_failures = 1;
-    check(!bootstrap_scoped_fd_self_move_assignment_for_test());
+    bootstrap_internal_coverage_check(ok, !bootstrap_scoped_fd_self_move_assignment_for_test());
 
     for (int mismatch = 1; mismatch <= 2; ++mismatch) {
         reset_bootstrap_test_hooks();
         bootstrap_test_hooks().self_move_expectation_mismatch_stage = mismatch;
-        check(!bootstrap_scoped_fd_self_move_assignment_for_test());
+        bootstrap_internal_coverage_check(ok, !bootstrap_scoped_fd_self_move_assignment_for_test());
     }
 
+    // TLS context and per-connection scripts exercise SSL setup, timeouts, and read/write guards.
     const Http3BootstrapConfig config{
         .host = "127.0.0.1",
         .port = 0,
@@ -1413,86 +1421,87 @@ bool bootstrap_internal_coverage_for_test() {
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().fail_ssl_ctx_new = true;
-    check(make_ssl_context(config) == nullptr);
+    bootstrap_internal_coverage_check(ok, make_ssl_context(config) == nullptr);
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().fail_ssl_ctx_min_proto = true;
-    check(make_ssl_context(config) == nullptr);
+    bootstrap_internal_coverage_check(ok, make_ssl_context(config) == nullptr);
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().fail_ssl_ctx_check_private_key = true;
-    check(make_ssl_context(config) == nullptr);
+    bootstrap_internal_coverage_check(ok, make_ssl_context(config) == nullptr);
 
     reset_bootstrap_test_hooks();
     auto ssl_context = make_ssl_context(config);
-    check(ssl_context != nullptr);
+    bootstrap_internal_coverage_check(ok, ssl_context != nullptr);
     bootstrap_test_hooks().fail_ssl_new = true;
     ScopedFd ssl_new_failure_socket(bootstrap_socket(AF_INET, SOCK_STREAM, 0));
-    check(ssl_new_failure_socket.get() >= 0);
+    bootstrap_internal_coverage_check(ok, ssl_new_failure_socket.get() >= 0);
     serve_bootstrap_connection(config, ssl_context.get(), ssl_new_failure_socket.get());
 
     reset_bootstrap_test_hooks();
     ssl_context = make_ssl_context(config);
-    check(ssl_context != nullptr);
+    bootstrap_internal_coverage_check(ok, ssl_context != nullptr);
     bootstrap_test_hooks().remaining_socket_timeout_failures = 1;
     serve_bootstrap_connection(config, ssl_context.get(), -1);
 
     reset_bootstrap_test_hooks();
     ssl_context = make_ssl_context(config);
-    check(ssl_context != nullptr);
+    bootstrap_internal_coverage_check(ok, ssl_context != nullptr);
     ScopedFd timeout_send_failure_socket(bootstrap_socket(AF_INET, SOCK_STREAM, 0));
-    check(timeout_send_failure_socket.get() >= 0);
+    bootstrap_internal_coverage_check(ok, timeout_send_failure_socket.get() >= 0);
     bootstrap_test_hooks().remaining_socket_timeout_failures = 2;
     serve_bootstrap_connection(config, ssl_context.get(), timeout_send_failure_socket.get());
 
     reset_bootstrap_test_hooks();
     ssl_context = make_ssl_context(config);
-    check(ssl_context != nullptr);
+    bootstrap_internal_coverage_check(ok, ssl_context != nullptr);
     bootstrap_test_hooks().fail_ssl_set_fd = true;
     ScopedFd ssl_set_fd_failure_socket(bootstrap_socket(AF_INET, SOCK_STREAM, 0));
-    check(ssl_set_fd_failure_socket.get() >= 0);
+    bootstrap_internal_coverage_check(ok, ssl_set_fd_failure_socket.get() >= 0);
     serve_bootstrap_connection(config, ssl_context.get(), ssl_set_fd_failure_socket.get());
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_ssl_write_results = {2};
-    check(write_all_ssl(nullptr, "ok"));
+    bootstrap_internal_coverage_check(ok, write_all_ssl(nullptr, "ok"));
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_ssl_write_results = {0};
-    check(!write_all_ssl(nullptr, "fail"));
+    bootstrap_internal_coverage_check(ok, !write_all_ssl(nullptr, "fail"));
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_ssl_read_chunks = {"GET / HTTP/1.1\r\n\r\n"};
-    check(read_http_request(nullptr).has_value());
+    bootstrap_internal_coverage_check(ok, read_http_request(nullptr).has_value());
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_ssl_read_chunks = {std::string(kBootstrapRequestLimitBytes, 'a')};
-    check(!read_http_request(nullptr).has_value());
+    bootstrap_internal_coverage_check(ok, !read_http_request(nullptr).has_value());
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_ssl_read_chunks = {"GET / HTTP/1.1\r\nHost: example.test\r\n"};
-    check(!read_http_request(nullptr).has_value());
+    bootstrap_internal_coverage_check(ok, !read_http_request(nullptr).has_value());
 
+    // Listening and server-loop paths use forced sockets, poll results, and accept results.
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_listen_socket_failures = 1;
-    check(make_listen_socket(config) < 0);
+    bootstrap_internal_coverage_check(ok, make_listen_socket(config) < 0);
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_listen_failures = 1;
-    check(make_listen_socket(config) < 0);
+    bootstrap_internal_coverage_check(ok, make_listen_socket(config) < 0);
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_poll_results = {
         ForcedPollResult{.ready = -1, .revents = 0, .error_number = EIO},
     };
-    check(run_http3_bootstrap_server(config, nullptr) == 1);
+    bootstrap_internal_coverage_check(ok, run_http3_bootstrap_server(config, nullptr) == 1);
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_poll_results = {
         ForcedPollResult{.ready = 1, .revents = POLLHUP, .error_number = 0},
         ForcedPollResult{.ready = -1, .revents = 0, .error_number = EIO},
     };
-    check(run_http3_bootstrap_server(config, nullptr) == 1);
+    bootstrap_internal_coverage_check(ok, run_http3_bootstrap_server(config, nullptr) == 1);
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_poll_results = {
@@ -1502,7 +1511,7 @@ bool bootstrap_internal_coverage_for_test() {
     bootstrap_test_hooks().forced_accept_results = {
         ForcedAcceptResult{.fd = -1, .error_number = EINTR},
     };
-    check(run_http3_bootstrap_server(config, nullptr) == 1);
+    bootstrap_internal_coverage_check(ok, run_http3_bootstrap_server(config, nullptr) == 1);
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_poll_results = {
@@ -1512,7 +1521,7 @@ bool bootstrap_internal_coverage_for_test() {
     bootstrap_test_hooks().forced_accept_results = {
         ForcedAcceptResult{.fd = -1, .error_number = EAGAIN},
     };
-    check(run_http3_bootstrap_server(config, nullptr) == 1);
+    bootstrap_internal_coverage_check(ok, run_http3_bootstrap_server(config, nullptr) == 1);
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_poll_results = {
@@ -1522,7 +1531,7 @@ bool bootstrap_internal_coverage_for_test() {
     bootstrap_test_hooks().forced_accept_results = {
         ForcedAcceptResult{.fd = -1, .error_number = EWOULDBLOCK},
     };
-    check(run_http3_bootstrap_server(config, nullptr) == 1);
+    bootstrap_internal_coverage_check(ok, run_http3_bootstrap_server(config, nullptr) == 1);
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_poll_results = {
@@ -1531,8 +1540,9 @@ bool bootstrap_internal_coverage_for_test() {
     bootstrap_test_hooks().forced_accept_results = {
         ForcedAcceptResult{.fd = -1, .error_number = EMFILE},
     };
-    check(run_http3_bootstrap_server(config, nullptr) == 1);
+    bootstrap_internal_coverage_check(ok, run_http3_bootstrap_server(config, nullptr) == 1);
 
+    // Reset hooks after the final scripted bootstrap-server case.
     reset_bootstrap_test_hooks();
     return ok;
 }

@@ -77,9 +77,9 @@ coquic::quic::QuicCoreResult local_error_result() {
 }
 
 std::vector<coquic::quic::QuicCoreSendStreamData>
-send_stream_inputs_from(const coquic::http3::Http3ClientEndpointUpdate &update) {
+send_stream_inputs_from(const coquic::http3::Http3ClientEndpointUpdate &endpoint_update) {
     std::vector<coquic::quic::QuicCoreSendStreamData> sends;
-    for (const auto &input : update.core_inputs) {
+    for (const auto &input : endpoint_update.core_inputs) {
         if (const auto *send = std::get_if<coquic::quic::QuicCoreSendStreamData>(&input)) {
             sends.push_back(*send);
         }
@@ -150,10 +150,38 @@ std::vector<std::byte> goaway_frame_bytes(std::uint64_t id) {
 }
 
 void prime_client_transport(coquic::http3::Http3ClientEndpoint &endpoint) {
-    const auto update =
+    auto transport_update =
         endpoint.on_core_result(handshake_ready_result(), coquic::quic::QuicCoreTimePoint{});
-    EXPECT_FALSE(update.terminal_failure);
-    EXPECT_EQ(send_stream_inputs_from(update).size(), 3u);
+    EXPECT_FALSE(transport_update.terminal_failure);
+    EXPECT_EQ(send_stream_inputs_from(transport_update).size(), 3u);
+}
+
+std::vector<std::byte> completed_echo_response_payload() {
+    std::array response_headers{
+        coquic::http3::Http3Field{":status", "200"},
+        coquic::http3::Http3Field{"content-length", "4"},
+        coquic::http3::Http3Field{"content-type", "application/octet-stream"},
+    };
+    std::array response_trailers{
+        coquic::http3::Http3Field{"etag", "done"},
+    };
+    auto response_payload = headers_frame_bytes(0, response_headers);
+    const auto body_frame = data_frame_bytes("ping");
+    response_payload.insert(response_payload.end(), body_frame.begin(), body_frame.end());
+    const auto trailers_frame = headers_frame_bytes(0, response_trailers);
+    response_payload.insert(response_payload.end(), trailers_frame.begin(), trailers_frame.end());
+    return response_payload;
+}
+
+bool completed_echo_response_update_matches(
+    const coquic::http3::Http3ClientEndpointUpdate &response_update) {
+    if (response_update.events.size() != 1u) {
+        return false;
+    }
+    const auto &event = response_update.events.front();
+    return event.stream_id == 0u && event.request.head.path == "/_coquic/echo" &&
+           event.response.head.status == 200u && event.response.body == bytes_from_text("ping") &&
+           event.response.trailers == coquic::http3::Http3Headers{{"etag", "done"}};
 }
 
 } // namespace
@@ -203,30 +231,11 @@ TEST(QuicHttp3ClientTest, SubmitRequestEmitsCompletedResponseAfterFinalFin) {
     const auto request_update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
     EXPECT_FALSE(send_stream_inputs_from(request_update).empty());
 
-    const std::array response_headers{
-        coquic::http3::Http3Field{":status", "200"},
-        coquic::http3::Http3Field{"content-length", "4"},
-        coquic::http3::Http3Field{"content-type", "application/octet-stream"},
-    };
-    const std::array response_trailers{
-        coquic::http3::Http3Field{"etag", "done"},
-    };
-    auto response_bytes = headers_frame_bytes(0, response_headers);
-    const auto body_frame = data_frame_bytes("ping");
-    response_bytes.insert(response_bytes.end(), body_frame.begin(), body_frame.end());
-    const auto trailers_frame = headers_frame_bytes(0, response_trailers);
-    response_bytes.insert(response_bytes.end(), trailers_frame.begin(), trailers_frame.end());
+    const auto response_payload = completed_echo_response_payload();
+    auto response_update = endpoint.on_core_result(receive_result(0, response_payload, true),
+                                                   coquic::quic::QuicCoreTimePoint{});
 
-    const auto response_update = endpoint.on_core_result(receive_result(0, response_bytes, true),
-                                                         coquic::quic::QuicCoreTimePoint{});
-
-    ASSERT_EQ(response_update.events.size(), 1u);
-    EXPECT_EQ(response_update.events[0].stream_id, 0u);
-    EXPECT_EQ(response_update.events[0].request.head.path, "/_coquic/echo");
-    EXPECT_EQ(response_update.events[0].response.head.status, 200u);
-    EXPECT_EQ(response_update.events[0].response.body, bytes_from_text("ping"));
-    EXPECT_EQ(response_update.events[0].response.trailers,
-              (coquic::http3::Http3Headers{{"etag", "done"}}));
+    EXPECT_TRUE(completed_echo_response_update_matches(response_update));
 }
 
 TEST(QuicHttp3ClientTest, HeadRequestCollectsHeadersOnlyFinalResponse) {
@@ -253,16 +262,16 @@ TEST(QuicHttp3ClientTest, HeadRequestCollectsHeadersOnlyFinalResponse) {
         coquic::http3::Http3Field{"content-type", "text/plain"},
     };
 
-    const auto update =
+    auto head_response_update =
         endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, response_headers), true),
                                 coquic::quic::QuicCoreTimePoint{});
 
-    ASSERT_EQ(update.events.size(), 1u);
-    EXPECT_EQ(update.events[0].stream_id, 0u);
-    const auto content_length = update.events[0].response.head.content_length;
+    ASSERT_EQ(head_response_update.events.size(), 1u);
+    EXPECT_EQ(head_response_update.events[0].stream_id, 0u);
+    auto content_length = head_response_update.events[0].response.head.content_length;
     ASSERT_TRUE(content_length.has_value());
     EXPECT_EQ(content_length.value_or(0u), 4u);
-    EXPECT_TRUE(update.events[0].response.body.empty());
+    EXPECT_TRUE(head_response_update.events[0].response.body.empty());
 }
 
 TEST(QuicHttp3ClientTest, RejectsSubmissionAtOrAbovePeerGoawayBoundary) {
@@ -292,7 +301,7 @@ TEST(QuicHttp3ClientTest, RejectsSubmissionAtOrAbovePeerGoawayBoundary) {
                                      coquic::quic::QuicCoreTimePoint{})
                      .terminal_failure);
 
-    const auto rejected = endpoint.submit_request(coquic::http3::Http3Request{
+    auto rejected = endpoint.submit_request(coquic::http3::Http3Request{
         .head =
             {
                 .method = "GET",
@@ -333,7 +342,7 @@ TEST(QuicHttp3ClientTest, AllowsSubmissionBelowPeerGoawayBoundary) {
                                      coquic::quic::QuicCoreTimePoint{})
                      .terminal_failure);
 
-    const auto submitted = endpoint.submit_request(coquic::http3::Http3Request{
+    auto submitted = endpoint.submit_request(coquic::http3::Http3Request{
         .head =
             {
                 .method = "GET",
@@ -364,17 +373,17 @@ TEST(QuicHttp3ClientTest, PeerResetRejectedRequestEmitsRequestErrorEvent) {
 
     EXPECT_FALSE(send_stream_inputs_from(endpoint.poll(coquic::quic::QuicCoreTimePoint{})).empty());
 
-    const auto update = endpoint.on_core_result(
+    auto reset_response_update = endpoint.on_core_result(
         reset_result(0,
                      static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_rejected)),
         coquic::quic::QuicCoreTimePoint{});
 
-    EXPECT_FALSE(update.terminal_failure);
-    ASSERT_TRUE(update.events.empty());
-    ASSERT_EQ(update.request_error_events.size(), 1u);
-    EXPECT_EQ(update.request_error_events[0].stream_id, 0u);
-    EXPECT_EQ(update.request_error_events[0].request.head.path, "/reject");
-    EXPECT_EQ(update.request_error_events[0].application_error_code,
+    EXPECT_FALSE(reset_response_update.terminal_failure);
+    ASSERT_TRUE(reset_response_update.events.empty());
+    ASSERT_EQ(reset_response_update.request_error_events.size(), 1u);
+    EXPECT_EQ(reset_response_update.request_error_events[0].stream_id, 0u);
+    EXPECT_EQ(reset_response_update.request_error_events[0].request.head.path, "/reject");
+    EXPECT_EQ(reset_response_update.request_error_events[0].application_error_code,
               static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_rejected));
 }
 
@@ -399,13 +408,13 @@ TEST(QuicHttp3ClientTest, PeerResetAfterCompletedResponseIsIgnored) {
     const std::array response_headers{
         coquic::http3::Http3Field{":status", "200"},
     };
-    const auto response_update =
+    auto response_update =
         endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, response_headers), true),
                                 coquic::quic::QuicCoreTimePoint{});
     ASSERT_EQ(response_update.events.size(), 1u);
     ASSERT_TRUE(response_update.request_error_events.empty());
 
-    const auto reset_update = endpoint.on_core_result(
+    auto reset_update = endpoint.on_core_result(
         reset_result(0,
                      static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_cancelled)),
         coquic::quic::QuicCoreTimePoint{});
@@ -451,9 +460,9 @@ TEST(QuicHttp3ClientTest, ClosedConnectionResultFailsEndpointDuringOnCoreResult)
     auto &connection = coquic::http3::Http3ClientEndpointTestAccess::connection(endpoint);
     coquic::http3::Http3ConnectionTestAccess::set_closed(connection, true);
 
-    const auto update =
+    auto closed_result_update =
         endpoint.on_core_result(handshake_ready_result(), coquic::quic::QuicCoreTimePoint{});
-    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_TRUE(closed_result_update.terminal_failure);
     EXPECT_TRUE(endpoint.has_failed());
 }
 
@@ -463,8 +472,8 @@ TEST(QuicHttp3ClientTest, ClosedConnectionPollFailsEndpoint) {
     auto &connection = coquic::http3::Http3ClientEndpointTestAccess::connection(endpoint);
     coquic::http3::Http3ConnectionTestAccess::set_closed(connection, true);
 
-    const auto update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
-    EXPECT_TRUE(update.terminal_failure);
+    auto poll_update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
+    EXPECT_TRUE(poll_update.terminal_failure);
     EXPECT_TRUE(endpoint.has_failed());
 }
 
@@ -487,8 +496,8 @@ TEST(QuicHttp3ClientTest, PendingInvalidRequestFailsWhenPollFlushesQueue) {
     EXPECT_FALSE(ready.terminal_failure);
     EXPECT_TRUE(ready.has_pending_work);
 
-    const auto update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
-    EXPECT_TRUE(update.terminal_failure);
+    auto invalid_request_update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
+    EXPECT_TRUE(invalid_request_update.terminal_failure);
     EXPECT_TRUE(endpoint.has_failed());
 }
 
@@ -532,9 +541,9 @@ TEST(QuicHttp3ClientTest, EmptyBodyRequestWithTrailersSubmitsImmediately) {
     ASSERT_TRUE(submitted.has_value());
     EXPECT_EQ(submitted.value(), 0u);
 
-    const auto update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
-    EXPECT_FALSE(update.terminal_failure);
-    EXPECT_FALSE(send_stream_inputs_from(update).empty());
+    auto trailers_request_update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(trailers_request_update.terminal_failure);
+    EXPECT_FALSE(send_stream_inputs_from(trailers_request_update).empty());
 }
 
 TEST(QuicHttp3ClientTest, QueuedEventsCoverInformationalAndIgnoredClientIncompatibleEvents) {
@@ -597,16 +606,17 @@ TEST(QuicHttp3ClientTest, QueuedEventsCoverInformationalAndIgnoredClientIncompat
                         .stream_id = 0,
                     });
 
-    const auto update =
+    auto queued_events_update =
         endpoint.on_core_result(coquic::quic::QuicCoreResult{}, coquic::quic::QuicCoreTimePoint{});
-    EXPECT_FALSE(update.terminal_failure);
-    ASSERT_TRUE(update.request_error_events.empty());
-    ASSERT_EQ(update.events.size(), 1u);
-    EXPECT_EQ(update.events[0].response.interim_heads.size(), 1u);
-    EXPECT_EQ(update.events[0].response.interim_heads[0].status, 103u);
-    EXPECT_EQ(update.events[0].response.head.status, 200u);
-    EXPECT_EQ(update.events[0].response.body, bytes_from_text("pong"));
-    EXPECT_EQ(update.events[0].response.trailers, (coquic::http3::Http3Headers{{"etag", "done"}}));
+    EXPECT_FALSE(queued_events_update.terminal_failure);
+    ASSERT_TRUE(queued_events_update.request_error_events.empty());
+    ASSERT_EQ(queued_events_update.events.size(), 1u);
+    EXPECT_EQ(queued_events_update.events[0].response.interim_heads.size(), 1u);
+    EXPECT_EQ(queued_events_update.events[0].response.interim_heads[0].status, 103u);
+    EXPECT_EQ(queued_events_update.events[0].response.head.status, 200u);
+    EXPECT_EQ(queued_events_update.events[0].response.body, bytes_from_text("pong"));
+    EXPECT_EQ(queued_events_update.events[0].response.trailers,
+              (coquic::http3::Http3Headers{{"etag", "done"}}));
 }
 
 TEST(QuicHttp3ClientTest, QueuedCompleteWithoutActiveRequestFailsOnCoreResult) {
@@ -618,9 +628,9 @@ TEST(QuicHttp3ClientTest, QueuedCompleteWithoutActiveRequestFailsOnCoreResult) {
                         .stream_id = 0,
                     });
 
-    const auto update =
+    auto orphan_complete_update =
         endpoint.on_core_result(coquic::quic::QuicCoreResult{}, coquic::quic::QuicCoreTimePoint{});
-    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_TRUE(orphan_complete_update.terminal_failure);
     EXPECT_TRUE(endpoint.has_failed());
 }
 
@@ -648,8 +658,8 @@ TEST(QuicHttp3ClientTest, QueuedCompleteWithoutResponseFailsDuringPoll) {
                         .stream_id = 0,
                     });
 
-    const auto update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
-    EXPECT_TRUE(update.terminal_failure);
+    auto missing_response_update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
+    EXPECT_TRUE(missing_response_update.terminal_failure);
     EXPECT_TRUE(endpoint.has_failed());
 }
 
@@ -682,9 +692,9 @@ TEST(QuicHttp3ClientTest, QueuedCompleteWithoutResponseHeadFailsEndpoint) {
                         .stream_id = 0,
                     });
 
-    const auto update =
+    auto missing_head_update =
         endpoint.on_core_result(coquic::quic::QuicCoreResult{}, coquic::quic::QuicCoreTimePoint{});
-    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_TRUE(missing_head_update.terminal_failure);
     EXPECT_TRUE(endpoint.has_failed());
 }
 

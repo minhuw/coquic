@@ -387,22 +387,37 @@ class ScopedServerSocketPollTraceReset {
     ScopedServerSocketPollTraceReset &operator=(const ScopedServerSocketPollTraceReset &) = delete;
 };
 
+inline sockaddr *copy_addrinfo_address(const sockaddr_in &address) {
+    auto *storage = new sockaddr_storage{};
+    std::memcpy(storage, &address, sizeof(address));
+    return reinterpret_cast<sockaddr *>(storage);
+}
+
+inline sockaddr *copy_addrinfo_address(const sockaddr_in6 &address) {
+    auto *storage = new sockaddr_storage{};
+    std::memcpy(storage, &address, sizeof(address));
+    return reinterpret_cast<sockaddr *>(storage);
+}
+
+inline void delete_addrinfo_address(sockaddr *address) {
+    delete reinterpret_cast<sockaddr_storage *>(address);
+}
+
 inline int fail_getaddrinfo_with_results(const char *, const char *, const addrinfo *,
                                          addrinfo **results) {
     if (results == nullptr) {
         return EAI_FAIL;
     }
 
-    auto *address = new sockaddr_storage{};
-    auto *ipv4 = reinterpret_cast<sockaddr_in *>(address);
-    ipv4->sin_family = AF_INET;
+    sockaddr_in ipv4{};
+    ipv4.sin_family = AF_INET;
 
     auto *result = new addrinfo{};
     result->ai_family = AF_INET;
     result->ai_socktype = SOCK_DGRAM;
     result->ai_protocol = IPPROTO_UDP;
     result->ai_addrlen = sizeof(sockaddr_in);
-    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    result->ai_addr = copy_addrinfo_address(ipv4);
 
     *results = result;
     return EAI_FAIL;
@@ -423,12 +438,14 @@ inline int record_server_socket_then_succeed(int, int, int) {
 inline int record_server_bind_then_succeed(int, const sockaddr *address, socklen_t address_len) {
     if (address != nullptr && address->sa_family == AF_INET &&
         address_len >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
-        const auto *ipv4 = reinterpret_cast<const sockaddr_in *>(address);
-        g_server_socket_poll_trace.bound_ports.push_back(ntohs(ipv4->sin_port));
+        sockaddr_in ipv4{};
+        std::memcpy(&ipv4, address, sizeof(ipv4));
+        g_server_socket_poll_trace.bound_ports.push_back(ntohs(ipv4.sin_port));
     } else if (address != nullptr && address->sa_family == AF_INET6 &&
                address_len >= static_cast<socklen_t>(sizeof(sockaddr_in6))) {
-        const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(address);
-        g_server_socket_poll_trace.bound_ports.push_back(ntohs(ipv6->sin6_port));
+        sockaddr_in6 ipv6{};
+        std::memcpy(&ipv6, address, sizeof(ipv6));
+        g_server_socket_poll_trace.bound_ports.push_back(ntohs(ipv6.sin6_port));
     }
     return 0;
 }
@@ -455,18 +472,17 @@ inline int ipv6_only_getaddrinfo(const char *node, const char *service, const ad
         return EAI_SOCKTYPE;
     }
 
-    auto *address = new sockaddr_storage{};
-    auto *ipv6 = reinterpret_cast<sockaddr_in6 *>(address);
-    ipv6->sin6_family = AF_INET6;
-    ipv6->sin6_port = htons(9443);
-    ipv6->sin6_addr = in6addr_loopback;
+    sockaddr_in6 ipv6{};
+    ipv6.sin6_family = AF_INET6;
+    ipv6.sin6_port = htons(9443);
+    ipv6.sin6_addr = in6addr_loopback;
 
     auto *result = new addrinfo{};
     result->ai_family = AF_INET6;
     result->ai_socktype = SOCK_DGRAM;
     result->ai_protocol = IPPROTO_UDP;
     result->ai_addrlen = sizeof(sockaddr_in6);
-    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    result->ai_addr = copy_addrinfo_address(ipv6);
 
     *results = result;
     return 0;
@@ -476,21 +492,17 @@ inline void counting_freeaddrinfo(addrinfo *results) {
     ++g_freeaddrinfo_calls;
     while (results != nullptr) {
         auto *next = results->ai_next;
-        if (results->ai_addr != nullptr) {
-            delete reinterpret_cast<sockaddr_storage *>(results->ai_addr);
-        }
+        delete_addrinfo_address(results->ai_addr);
         delete results;
         results = next;
     }
 }
 
 inline addrinfo *make_ipv4_addrinfo_result(std::string_view ip, std::uint16_t port) {
-    auto *address = new sockaddr_storage{};
-    auto *ipv4 = reinterpret_cast<sockaddr_in *>(address);
-    ipv4->sin_family = AF_INET;
-    ipv4->sin_port = htons(port);
-    if (::inet_pton(AF_INET, std::string(ip).c_str(), &ipv4->sin_addr) != 1) {
-        delete address;
+    sockaddr_in ipv4{};
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(port);
+    if (::inet_pton(AF_INET, std::string(ip).c_str(), &ipv4.sin_addr) != 1) {
         return nullptr;
     }
 
@@ -499,17 +511,15 @@ inline addrinfo *make_ipv4_addrinfo_result(std::string_view ip, std::uint16_t po
     result->ai_socktype = SOCK_DGRAM;
     result->ai_protocol = IPPROTO_UDP;
     result->ai_addrlen = sizeof(sockaddr_in);
-    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    result->ai_addr = copy_addrinfo_address(ipv4);
     return result;
 }
 
 inline addrinfo *make_ipv6_addrinfo_result(std::string_view ip, std::uint16_t port) {
-    auto *address = new sockaddr_storage{};
-    auto *ipv6 = reinterpret_cast<sockaddr_in6 *>(address);
-    ipv6->sin6_family = AF_INET6;
-    ipv6->sin6_port = htons(port);
-    if (::inet_pton(AF_INET6, std::string(ip).c_str(), &ipv6->sin6_addr) != 1) {
-        delete address;
+    sockaddr_in6 ipv6{};
+    ipv6.sin6_family = AF_INET6;
+    ipv6.sin6_port = htons(port);
+    if (::inet_pton(AF_INET6, std::string(ip).c_str(), &ipv6.sin6_addr) != 1) {
         return nullptr;
     }
 
@@ -518,7 +528,7 @@ inline addrinfo *make_ipv6_addrinfo_result(std::string_view ip, std::uint16_t po
     result->ai_socktype = SOCK_DGRAM;
     result->ai_protocol = IPPROTO_UDP;
     result->ai_addrlen = sizeof(sockaddr_in6);
-    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    result->ai_addr = copy_addrinfo_address(ipv6);
     return result;
 }
 
@@ -611,18 +621,17 @@ inline int unsupported_family_getaddrinfo(const char *node, const char *service,
         return EAI_NONAME;
     }
 
-    auto *address = new sockaddr_storage{};
-    auto *ipv4 = reinterpret_cast<sockaddr_in *>(address);
-    ipv4->sin_family = AF_INET;
-    ipv4->sin_port = htons(443);
-    ipv4->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sockaddr_in ipv4{};
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(443);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     auto *result = new addrinfo{};
     result->ai_family = AF_UNIX;
     result->ai_socktype = SOCK_DGRAM;
     result->ai_protocol = IPPROTO_UDP;
     result->ai_addrlen = sizeof(sockaddr_in);
-    result->ai_addr = reinterpret_cast<sockaddr *>(address);
+    result->ai_addr = copy_addrinfo_address(ipv4);
     *results = result;
     return 0;
 }
@@ -1193,6 +1202,7 @@ inline InMemoryHttp09TransferResult
 run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_config) {
     InMemoryHttp09TransferResult observed;
 
+    // The in-memory client still uses the real request parser so bad request envs fail early.
     const auto requests =
         coquic::http09::parse_http09_requests_env(transfer_config.client_config.requests_env);
     if (!requests.has_value()) {
@@ -1238,6 +1248,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
     std::deque<std::vector<std::byte>> to_client;
     std::deque<std::vector<std::byte>> to_server;
 
+    // Transport state snapshots let tests assert congestion and queued-stream side effects.
     const auto capture_connection_state = [&]() {
         observed.client_bytes_in_flight =
             client.core.connection_->congestion_controller_.bytes_in_flight();
@@ -1253,6 +1264,8 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
         observed.server_has_next_wakeup = server.next_wakeup.has_value();
     };
 
+    // The client driver forwards send effects into the synthetic server queue and polls the
+    // endpoint.
     const auto drive_client = [&](coquic::quic::QuicCoreResult result,
                                   coquic::quic::QuicCoreTimePoint now) {
         for (;;) {
@@ -1316,6 +1329,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
         }
     };
 
+    // The server driver mirrors the client path while tracking server-send counters.
     const auto drive_server = [&](coquic::quic::QuicCoreResult result,
                                   coquic::quic::QuicCoreTimePoint now) {
         for (;;) {
@@ -1370,6 +1384,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
     };
 
     auto now = coquic::quic::test::test_time();
+    // Start the client core before entering the transfer loop so initial packets are queued.
     if (!drive_client(client.core.advance(coquic::quic::QuicCoreStart{}, now), now)) {
         capture_connection_state();
         return observed;
@@ -1380,6 +1395,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
            observed.steps < kStepLimit) {
         ++observed.steps;
 
+        // Datagrams are delivered in FIFO order, then timers advance whichever side wakes first.
         if (!to_server.empty()) {
             now += std::chrono::milliseconds(1);
             auto inbound = std::move(to_server.front());
@@ -1448,6 +1464,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     ObservingServerResult observed;
     constexpr std::size_t kTimerSpinLimit = 100000;
 
+    // The observing server binds a real UDP socket so tests can inspect runtime network behavior.
     const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (socket_fd < 0) {
         return observed;
@@ -1489,6 +1506,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     bool saw_peer_activity = false;
     std::unordered_set<std::uint64_t> response_packet_numbers;
 
+    // The next poll timeout is derived from the earliest pending QUIC timer across sessions.
     auto earliest_wakeup = [&]() -> std::optional<coquic::quic::QuicCoreTimePoint> {
         std::optional<coquic::quic::QuicCoreTimePoint> next_wakeup;
         for (const auto &[key, session] : sessions) {
@@ -1530,6 +1548,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
                                        });
         };
         const auto track_response_packet_state = [&]() {
+            // Response packets move from sent/lost tracking to acked once QUIC drops the record.
             const auto &application_space = session.core.connection_->application_space_;
             for (const auto &[packet_number, packet] : application_space.sent_packets) {
                 if (!packet_is_response(packet)) {
@@ -1561,6 +1580,8 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
             }
         };
 
+        // Driving a session records core effects, sends datagrams, and feeds endpoint outputs back
+        // in.
         for (;;) {
             session.next_wakeup = result.next_wakeup;
             capture_transport_state();
@@ -1614,6 +1635,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
         }
     };
 
+    // New sessions are keyed by local CID while retaining the initial-destination CID route.
     auto create_session = [&](const coquic::quic::ConnectionId &initial_destination_connection_id,
                               const sockaddr_storage &peer, socklen_t peer_len) -> Session & {
         auto core_config = make_session_core_config(next_connection_index++);
@@ -1639,6 +1661,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     const auto process_inbound_datagram = [&](std::vector<std::byte> inbound,
                                               const sockaddr_storage &source,
                                               socklen_t source_len) -> bool {
+        // Unsupported packets are ignored; supported Initials either find or create a session.
         saw_peer_activity = true;
         ++observed.inbound_datagrams;
 
@@ -1680,6 +1703,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     };
 
     const auto drain_ready_datagrams = [&]() -> bool {
+        // Nonblocking reads drain all queued datagrams before returning to poll.
         while (true) {
             std::vector<std::byte> inbound(65535);
             sockaddr_storage source{};
@@ -1705,6 +1729,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     };
 
     const auto pump_endpoint_work_once = [&]() -> bool {
+        // Endpoint poll work can enqueue more core inputs even without a fresh datagram.
         for (const auto &[key, session] : sessions) {
             (void)key;
             if (!session->endpoint_has_pending_work) {
@@ -1732,6 +1757,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
 
     const auto process_expired_timers = [&](coquic::quic::QuicCoreTimePoint current,
                                             bool &processed_any) -> bool {
+        // Timer processing is bounded so a broken test session cannot spin forever.
         processed_any = false;
         for (const auto &[key, session] : sessions) {
             (void)key;
@@ -1755,6 +1781,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     };
 
     for (;;) {
+        // Each loop prefers already-due timers, then ready datagrams, then endpoint poll work.
         bool processed_timers = false;
         if (!process_expired_timers(runtime_now(), processed_timers)) {
             return observed;
@@ -1794,6 +1821,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
         descriptor.fd = socket_fd;
         descriptor.events = POLLIN;
 
+        // Poll waits only until the next QUIC timer and exits idle if no peer ever spoke.
         int poll_result = 0;
         do {
             poll_result = ::poll(&descriptor, 1, timeout_ms);

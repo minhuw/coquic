@@ -104,7 +104,7 @@ class ScopedEnvVar {
 
 class ScopedFd {
   public:
-    explicit ScopedFd(int fd) : fd_(fd) {
+    explicit ScopedFd(int socket_fd) : fd_(socket_fd) {
     }
 
     ~ScopedFd() {
@@ -135,11 +135,12 @@ class ScopedTcpLoopbackListener {
             return;
         }
 
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        address.sin_port = htons(port);
-        if (::bind(fd_, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+        sockaddr_in listen_address{};
+        listen_address.sin_family = AF_INET;
+        listen_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        listen_address.sin_port = htons(port);
+        if (::bind(fd_, reinterpret_cast<const sockaddr *>(&listen_address),
+                   sizeof(listen_address)) != 0) {
             ::close(fd_);
             fd_ = -1;
             return;
@@ -193,34 +194,36 @@ class ScopedHttpProxyUpstream {
 
   private:
     void run(std::uint16_t port) {
-        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) {
+        const int listen_socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_socket_fd < 0) {
             return;
         }
-        ScopedFd listen_fd(fd);
+        ScopedFd listen_fd(listen_socket_fd);
 
         const int enable = 1;
-        if (::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) != 0) {
+        if (::setsockopt(listen_socket_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) !=
+            0) {
             return;
         }
 
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        address.sin_port = htons(port);
-        if (::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+        sockaddr_in listen_address{};
+        listen_address.sin_family = AF_INET;
+        listen_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        listen_address.sin_port = htons(port);
+        if (::bind(listen_socket_fd, reinterpret_cast<const sockaddr *>(&listen_address),
+                   sizeof(listen_address)) != 0) {
             return;
         }
-        if (::listen(fd, 1) != 0) {
+        if (::listen(listen_socket_fd, 1) != 0) {
             return;
         }
         ready_.store(true, std::memory_order_release);
 
-        const int client_fd = ::accept(fd, nullptr, nullptr);
+        const int client_fd = ::accept(listen_socket_fd, nullptr, nullptr);
         if (client_fd < 0) {
             return;
         }
-        ScopedFd client(client_fd);
+        ScopedFd client_socket_guard(client_fd);
 
         std::array<char, 4096> buffer{};
         while (request_text_.find("\r\n\r\n") == std::string::npos) {
@@ -355,23 +358,24 @@ class ScriptedIoBackend final : public coquic::io::QuicIoBackend {
 };
 
 std::uint16_t allocate_udp_loopback_port() {
-    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
+    const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (socket_fd < 0) {
         return 0;
     }
-    ScopedFd socket_guard(fd);
+    ScopedFd socket_guard(socket_fd);
 
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port = htons(0);
-    if (::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+    sockaddr_in bind_address{};
+    bind_address.sin_family = AF_INET;
+    bind_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bind_address.sin_port = htons(0);
+    if (::bind(socket_fd, reinterpret_cast<const sockaddr *>(&bind_address),
+               sizeof(bind_address)) != 0) {
         return 0;
     }
 
     sockaddr_in bound{};
     socklen_t bound_length = sizeof(bound);
-    if (::getsockname(fd, reinterpret_cast<sockaddr *>(&bound), &bound_length) != 0) {
+    if (::getsockname(socket_fd, reinterpret_cast<sockaddr *>(&bound), &bound_length) != 0) {
         return 0;
     }
 
@@ -379,23 +383,24 @@ std::uint16_t allocate_udp_loopback_port() {
 }
 
 std::uint16_t allocate_tcp_loopback_port() {
-    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
+    const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0) {
         return 0;
     }
-    ScopedFd socket_guard(fd);
+    ScopedFd socket_guard(socket_fd);
 
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port = htons(0);
-    if (::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+    sockaddr_in bind_address{};
+    bind_address.sin_family = AF_INET;
+    bind_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bind_address.sin_port = htons(0);
+    if (::bind(socket_fd, reinterpret_cast<const sockaddr *>(&bind_address),
+               sizeof(bind_address)) != 0) {
         return 0;
     }
 
     sockaddr_in bound{};
     socklen_t bound_length = sizeof(bound);
-    if (::getsockname(fd, reinterpret_cast<sockaddr *>(&bound), &bound_length) != 0) {
+    if (::getsockname(socket_fd, reinterpret_cast<sockaddr *>(&bound), &bound_length) != 0) {
         return 0;
     }
 
@@ -403,17 +408,18 @@ std::uint16_t allocate_tcp_loopback_port() {
 }
 
 bool udp_port_is_bound(std::uint16_t port) {
-    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
+    const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (socket_fd < 0) {
         return false;
     }
-    ScopedFd socket_guard(fd);
+    ScopedFd socket_guard(socket_fd);
 
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port = htons(port);
-    if (::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) == 0) {
+    sockaddr_in bind_address{};
+    bind_address.sin_family = AF_INET;
+    bind_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bind_address.sin_port = htons(port);
+    if (::bind(socket_fd, reinterpret_cast<const sockaddr *>(&bind_address),
+               sizeof(bind_address)) == 0) {
         return false;
     }
 
@@ -421,17 +427,18 @@ bool udp_port_is_bound(std::uint16_t port) {
 }
 
 bool tcp_port_is_accepting(std::uint16_t port) {
-    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
+    const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0) {
         return false;
     }
-    ScopedFd socket_guard(fd);
+    ScopedFd socket_guard(socket_fd);
 
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port = htons(port);
-    return ::connect(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) == 0;
+    sockaddr_in connect_address{};
+    connect_address.sin_family = AF_INET;
+    connect_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    connect_address.sin_port = htons(port);
+    return ::connect(socket_fd, reinterpret_cast<const sockaddr *>(&connect_address),
+                     sizeof(connect_address)) == 0;
 }
 
 std::vector<std::byte> bytes_from_text(std::string_view text) {
@@ -463,9 +470,9 @@ std::optional<std::string_view> find_header_value(const coquic::http3::Http3Head
     return std::nullopt;
 }
 
-void expect_header_value(const coquic::http3::Http3ResponseHead &head,
+void expect_header_value(const coquic::http3::Http3ResponseHead &response_head,
                          std::pair<std::string_view, std::string_view> expected_header) {
-    const auto value = find_header_value(head.headers, expected_header.first);
+    const auto value = find_header_value(response_head.headers, expected_header.first);
     ASSERT_TRUE(value.has_value());
     if (!value.has_value()) {
         return;
@@ -473,7 +480,8 @@ void expect_header_value(const coquic::http3::Http3ResponseHead &head,
     EXPECT_EQ(value.value(), expected_header.second);
 }
 
-bool wait_for_http3_server_ready(pid_t pid, const coquic::http3::Http3RuntimeConfig &config) {
+bool wait_for_http3_server_ready(pid_t pid,
+                                 const coquic::http3::Http3RuntimeConfig &runtime_config) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
     while (std::chrono::steady_clock::now() < deadline) {
         int status = 0;
@@ -482,14 +490,15 @@ bool wait_for_http3_server_ready(pid_t pid, const coquic::http3::Http3RuntimeCon
             return false;
         }
 
-        if (!udp_port_is_bound(config.port)) {
+        if (!udp_port_is_bound(runtime_config.port)) {
             std::this_thread::sleep_for(std::chrono::milliseconds{10});
             continue;
         }
 
-        const bool bootstrap_ready =
-            !config.enable_bootstrap ||
-            tcp_port_is_accepting(config.bootstrap_port == 0 ? config.port : config.bootstrap_port);
+        const bool bootstrap_ready = !runtime_config.enable_bootstrap ||
+                                     tcp_port_is_accepting(runtime_config.bootstrap_port == 0
+                                                               ? runtime_config.port
+                                                               : runtime_config.bootstrap_port);
         if (bootstrap_ready) {
             return true;
         }
@@ -501,12 +510,12 @@ bool wait_for_http3_server_ready(pid_t pid, const coquic::http3::Http3RuntimeCon
 
 class ScopedHttp3Process {
   public:
-    explicit ScopedHttp3Process(const coquic::http3::Http3RuntimeConfig &config) {
+    explicit ScopedHttp3Process(const coquic::http3::Http3RuntimeConfig &runtime_config) {
         pid_ = ::fork();
         if (pid_ == 0) {
-            _exit(coquic::http3::run_http3_runtime(config));
+            _exit(coquic::http3::run_http3_runtime(runtime_config));
         }
-        if (!wait_for_http3_server_ready(pid_, config)) {
+        if (!wait_for_http3_server_ready(pid_, runtime_config)) {
             ADD_FAILURE() << "timed out waiting for HTTP/3 runtime to bind loopback listeners";
             terminate();
         }
@@ -568,19 +577,20 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
     }
     SSL_CTX_set_verify(ctx.get(), SSL_VERIFY_NONE, nullptr);
 
-    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
+    const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0) {
         return std::nullopt;
     }
-    ScopedFd socket_guard(fd);
+    ScopedFd socket_guard(socket_fd);
 
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    if (::inet_pton(AF_INET, std::string(host).c_str(), &address.sin_addr) != 1) {
+    sockaddr_in connect_address{};
+    connect_address.sin_family = AF_INET;
+    connect_address.sin_port = htons(port);
+    if (::inet_pton(AF_INET, std::string(host).c_str(), &connect_address.sin_addr) != 1) {
         return std::nullopt;
     }
-    if (::connect(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+    if (::connect(socket_fd, reinterpret_cast<const sockaddr *>(&connect_address),
+                  sizeof(connect_address)) != 0) {
         return std::nullopt;
     }
 
@@ -588,7 +598,7 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
     if (ssl == nullptr) {
         return std::nullopt;
     }
-    SSL_set_fd(ssl.get(), fd);
+    SSL_set_fd(ssl.get(), socket_fd);
     SSL_set_tlsext_host_name(ssl.get(), std::string(host).c_str());
     if (SSL_connect(ssl.get()) != 1) {
         return std::nullopt;
@@ -1586,22 +1596,22 @@ TEST(QuicHttp3RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection)
     EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
               coquic::quic::QuicCongestionControlAlgorithm::copa);
 
-    const auto client = coquic::http3::Http3RuntimeConfig{
+    auto client_config = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
         .url = "https://localhost:9443/hello.txt",
         .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::copa,
     };
-    const auto client_core = coquic::http3::make_http3_client_endpoint_config(client);
+    const auto client_core = coquic::http3::make_http3_client_endpoint_config(client_config);
     EXPECT_EQ(client_core.transport.congestion_control,
               coquic::quic::QuicCongestionControlAlgorithm::copa);
 
-    const auto server = coquic::http3::Http3RuntimeConfig{
+    auto server_config = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::server,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
         .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::bbr,
     };
-    const auto server_core = coquic::http3::make_http3_server_endpoint_config(server);
+    const auto server_core = coquic::http3::make_http3_server_endpoint_config(server_config);
     ASSERT_TRUE(server_core.has_value());
     EXPECT_EQ(optional_ref_or_terminate(server_core).transport.congestion_control,
               coquic::quic::QuicCongestionControlAlgorithm::bbr);
@@ -1686,23 +1696,23 @@ TEST(QuicHttp3RuntimeTest, ServerEndpointConfigRejectsUnreadableIdentityFiles) {
 }
 
 TEST(QuicHttp3RuntimeTest, CoreEndpointConfigsUseH3Alpn) {
-    const auto client = coquic::http3::Http3RuntimeConfig{
+    auto client_config = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
         .url = "https://localhost:9443/hello.txt",
     };
 
-    const auto client_core = coquic::http3::make_http3_client_endpoint_config(client);
+    const auto client_core = coquic::http3::make_http3_client_endpoint_config(client_config);
     EXPECT_EQ(client_core.role, coquic::quic::EndpointRole::client);
     EXPECT_EQ(client_core.application_protocol,
               std::string(coquic::http3::kHttp3ApplicationProtocol));
 
-    const auto server = coquic::http3::Http3RuntimeConfig{
+    auto server_config = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::server,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
-    const auto server_core = coquic::http3::make_http3_server_endpoint_config(server);
+    const auto server_core = coquic::http3::make_http3_server_endpoint_config(server_config);
     ASSERT_TRUE(server_core.has_value());
     if (!server_core.has_value()) {
         return;
@@ -1893,7 +1903,7 @@ TEST(QuicHttp3RuntimeTest, ServesBootstrapAndHttp3FromOneServerProcess) {
     const auto bootstrap_port = allocate_tcp_loopback_port();
     ASSERT_NE(bootstrap_port, 0);
 
-    const auto server = coquic::http3::Http3RuntimeConfig{
+    auto server_config = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::server,
         .host = "127.0.0.1",
         .port = h3_port,
@@ -1904,9 +1914,9 @@ TEST(QuicHttp3RuntimeTest, ServesBootstrapAndHttp3FromOneServerProcess) {
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
-    ScopedHttp3Process server_process(server);
+    ScopedHttp3Process server_process(server_config);
 
-    const auto bootstrap_response = https_request("127.0.0.1", bootstrap_port, "GET", "/hello.txt");
+    auto bootstrap_response = https_request("127.0.0.1", bootstrap_port, "GET", "/hello.txt");
     ASSERT_TRUE(bootstrap_response.has_value());
     if (!bootstrap_response.has_value()) {
         return;
@@ -1918,13 +1928,13 @@ TEST(QuicHttp3RuntimeTest, ServesBootstrapAndHttp3FromOneServerProcess) {
     EXPECT_EQ(received.headers.at("Alt-Svc"),
               std::string("h3=\":") + std::to_string(h3_port) + "\"; ma=120");
 
-    const auto client = coquic::http3::Http3RuntimeConfig{
+    auto client_config = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
         .url = "https://localhost:" + std::to_string(h3_port) + "/hello.txt",
         .output_path = output_root.path() / "hello.txt",
     };
 
-    EXPECT_EQ(coquic::http3::run_http3_runtime(client), 0);
+    EXPECT_EQ(coquic::http3::run_http3_runtime(client_config), 0);
     EXPECT_EQ(coquic::quic::test::read_text_file(output_root.path() / "hello.txt"), "hello-http3");
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
 }
@@ -1986,7 +1996,7 @@ TEST(QuicHttp3RuntimeTest, RunHttp3ServerFailsWhenIdentityOrUdpBootstrapSetupIsI
         const auto h3_port = allocate_udp_loopback_port();
         ASSERT_NE(h3_port, 0);
 
-        const auto server = coquic::http3::Http3RuntimeConfig{
+        auto server_config = coquic::http3::Http3RuntimeConfig{
             .mode = coquic::http3::Http3RuntimeMode::server,
             .host = "127.0.0.1",
             .port = h3_port,
@@ -1995,7 +2005,7 @@ TEST(QuicHttp3RuntimeTest, RunHttp3ServerFailsWhenIdentityOrUdpBootstrapSetupIsI
             .private_key_path = "tests/fixtures/quic-server-key.pem",
         };
 
-        EXPECT_NE(coquic::http3::run_http3_server(server), 0);
+        EXPECT_NE(coquic::http3::run_http3_server(server_config), 0);
     }
 
     {
@@ -2003,17 +2013,19 @@ TEST(QuicHttp3RuntimeTest, RunHttp3ServerFailsWhenIdentityOrUdpBootstrapSetupIsI
         const auto h3_port = allocate_udp_loopback_port();
         ASSERT_NE(h3_port, 0);
 
-        const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-        ASSERT_GE(fd, 0);
-        ScopedFd occupied_socket(fd);
+        const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        ASSERT_GE(socket_fd, 0);
+        ScopedFd occupied_socket(socket_fd);
 
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        address.sin_port = htons(h3_port);
-        ASSERT_EQ(::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)), 0);
+        sockaddr_in bind_address{};
+        bind_address.sin_family = AF_INET;
+        bind_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        bind_address.sin_port = htons(h3_port);
+        ASSERT_EQ(::bind(socket_fd, reinterpret_cast<const sockaddr *>(&bind_address),
+                         sizeof(bind_address)),
+                  0);
 
-        const auto server = coquic::http3::Http3RuntimeConfig{
+        auto server_config = coquic::http3::Http3RuntimeConfig{
             .mode = coquic::http3::Http3RuntimeMode::server,
             .host = "127.0.0.1",
             .port = h3_port,
@@ -2022,7 +2034,7 @@ TEST(QuicHttp3RuntimeTest, RunHttp3ServerFailsWhenIdentityOrUdpBootstrapSetupIsI
             .private_key_path = "tests/fixtures/quic-server-key.pem",
         };
 
-        EXPECT_NE(coquic::http3::run_http3_server(server), 0);
+        EXPECT_NE(coquic::http3::run_http3_server(server_config), 0);
     }
 }
 
@@ -2279,12 +2291,12 @@ TEST(QuicHttp3RuntimeTest, ClientReturnsFailureWhenTemporaryOutputDisappearsBefo
         }
     });
 
-    const auto client = coquic::http3::Http3RuntimeConfig{
+    auto client_config = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
         .url = "https://localhost:" + std::to_string(h3_port) + "/large.txt",
     };
 
-    EXPECT_NE(coquic::http3::run_http3_client(client), 0);
+    EXPECT_NE(coquic::http3::run_http3_client(client_config), 0);
     stop_requested.store(true, std::memory_order_relaxed);
     remover.join();
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds{200}).has_value());
@@ -2337,30 +2349,31 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCoversPathAndMimeBranches) {
     EXPECT_TRUE(head.body.empty());
     expect_header_value(head.head, {"content-type", "application/json"});
 
-    auto css = coquic::http3::runtime_server_response_for_test(document_root.path(),
-                                                               request("GET", "/style.css"));
-    EXPECT_EQ(css.head.status, 200);
-    expect_header_value(css.head, {"content-type", "text/css; charset=utf-8"});
+    auto css_response = coquic::http3::runtime_server_response_for_test(
+        document_root.path(), request("GET", "/style.css"));
+    EXPECT_EQ(css_response.head.status, 200);
+    expect_header_value(css_response.head, {"content-type", "text/css; charset=utf-8"});
 
-    auto js = coquic::http3::runtime_server_response_for_test(document_root.path(),
-                                                              request("GET", "/app.js"));
-    EXPECT_EQ(js.head.status, 200);
-    expect_header_value(js.head, {"content-type", "text/javascript; charset=utf-8"});
+    auto js_response = coquic::http3::runtime_server_response_for_test(document_root.path(),
+                                                                       request("GET", "/app.js"));
+    EXPECT_EQ(js_response.head.status, 200);
+    expect_header_value(js_response.head, {"content-type", "text/javascript; charset=utf-8"});
 
-    auto mjs = coquic::http3::runtime_server_response_for_test(document_root.path(),
-                                                               request("GET", "/module.mjs"));
-    EXPECT_EQ(mjs.head.status, 200);
-    expect_header_value(mjs.head, {"content-type", "text/javascript; charset=utf-8"});
+    auto module_js_response = coquic::http3::runtime_server_response_for_test(
+        document_root.path(), request("GET", "/module.mjs"));
+    EXPECT_EQ(module_js_response.head.status, 200);
+    expect_header_value(module_js_response.head,
+                        {"content-type", "text/javascript; charset=utf-8"});
 
-    auto svg = coquic::http3::runtime_server_response_for_test(document_root.path(),
-                                                               request("GET", "/vector.svg"));
-    EXPECT_EQ(svg.head.status, 200);
-    expect_header_value(svg.head, {"content-type", "image/svg+xml"});
+    auto svg_response = coquic::http3::runtime_server_response_for_test(
+        document_root.path(), request("GET", "/vector.svg"));
+    EXPECT_EQ(svg_response.head.status, 200);
+    expect_header_value(svg_response.head, {"content-type", "image/svg+xml"});
 
-    auto bin = coquic::http3::runtime_server_response_for_test(document_root.path(),
-                                                               request("GET", "/blob.bin"));
-    EXPECT_EQ(bin.head.status, 200);
-    expect_header_value(bin.head, {"content-type", "application/octet-stream"});
+    auto binary_response = coquic::http3::runtime_server_response_for_test(
+        document_root.path(), request("GET", "/blob.bin"));
+    EXPECT_EQ(binary_response.head.status, 200);
+    expect_header_value(binary_response.head, {"content-type", "application/octet-stream"});
 
     auto missing = coquic::http3::runtime_server_response_for_test(document_root.path(),
                                                                    request("GET", "/missing.txt"));
@@ -2415,7 +2428,7 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCanReverseProxyToHttpUpstream) {
     EXPECT_EQ(response.head.status, 200);
     EXPECT_EQ(response.body, bytes_from_text("<div>next</div>"));
     expect_header_value(response.head, {"content-type", "text/html; charset=utf-8"});
-    const auto upstream_request = upstream.request_text();
+    auto upstream_request = upstream.request_text();
     EXPECT_NE(upstream_request.find("GET /dashboard?tab=perf HTTP/1.1\r\n"), std::string::npos);
     EXPECT_NE(upstream_request.find("Host: demo.test\r\n"), std::string::npos);
     EXPECT_NE(upstream_request.find("x-demo: 1\r\n"), std::string::npos);
@@ -2561,8 +2574,7 @@ TEST(QuicHttp3RuntimeTest, RuntimeInspectRouteSupportsPost) {
             .output_path = output_root.path() / "inspect.json",
         };
         EXPECT_EQ(coquic::http3::run_http3_runtime(inspect_client), 0);
-        const auto inspect_body =
-            coquic::quic::test::read_text_file(output_root.path() / "inspect.json");
+        auto inspect_body = coquic::quic::test::read_text_file(output_root.path() / "inspect.json");
         EXPECT_NE(inspect_body.find("\"method\":\"POST\""), std::string::npos);
         EXPECT_NE(inspect_body.find("\"body_bytes\":4"), std::string::npos);
     }
@@ -2593,12 +2605,12 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCoversSpecialRoutes) {
     EXPECT_EQ(echo_post.head.status, 200);
     EXPECT_EQ(echo_post.body, bytes_from_text("ping"));
 
-    const auto inspect_get = coquic::http3::runtime_server_response_for_test(
+    auto inspect_get = coquic::http3::runtime_server_response_for_test(
         document_root.path(), request("GET", "/_coquic/inspect"));
     EXPECT_EQ(inspect_get.head.status, 405);
     expect_header_value(inspect_get.head, {"allow", "POST"});
 
-    const auto inspect_post = coquic::http3::runtime_server_response_for_test(
+    auto inspect_post = coquic::http3::runtime_server_response_for_test(
         document_root.path(), request("POST", "/_coquic/inspect", "ping"));
     EXPECT_EQ(inspect_post.head.status, 200);
     expect_header_value(inspect_post.head, {"content-type", "application/json"});

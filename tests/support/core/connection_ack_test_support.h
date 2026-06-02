@@ -1,3 +1,6 @@
+#ifndef COQUIC_TESTS_SUPPORT_CORE_CONNECTION_ACK_TEST_SUPPORT_H
+#define COQUIC_TESTS_SUPPORT_CORE_CONNECTION_ACK_TEST_SUPPORT_H
+
 #include <algorithm>
 #include <array>
 
@@ -61,8 +64,13 @@ struct ScopedConnectionDrainTestHookReset {
             connection_set_force_application_candidate_estimate_failure_countdown_for_tests(-1);
         coquic::quic::test::
             connection_set_force_candidate_datagram_serialization_failure_countdown_for_tests(-1);
+        const coquic::quic::test::ApplicationCandidateDatagramExtraBytesTestHook extra_bytes_hook{
+            .countdown = -1,
+            .bytes = 0,
+        };
         coquic::quic::test::
-            connection_set_force_application_candidate_datagram_extra_bytes_for_tests({-1, 0});
+            connection_set_force_application_candidate_datagram_extra_bytes_for_tests(
+                extra_bytes_hook);
         coquic::quic::test::
             connection_set_force_packet_inspection_missing_plaintext_storage_for_tests(false);
     }
@@ -105,3 +113,5 @@ using coquic::quic::test_support::tracked_packet_or_terminate;
 using coquic::quic::test_support::tracked_packet_snapshot;
 
 } // namespace
+
+#endif // COQUIC_TESTS_SUPPORT_CORE_CONNECTION_ACK_TEST_SUPPORT_H

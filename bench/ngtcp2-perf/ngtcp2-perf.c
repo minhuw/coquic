@@ -1206,6 +1206,7 @@ static int open_batch_streams(perf_conn_t *pc, uint64_t count, uint64_t request_
 static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t request_bytes,
                              uint64_t response_bytes, counters_t *counters, int counts_latency,
                              char *failure_reason, size_t failure_reason_len) {
+    /* Empty or oversized batches are normalized before allocating the client connection. */
     if (count == 0) {
         return 0;
     }
@@ -1230,6 +1231,7 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t reque
         return -1;
     }
 
+    /* The batch loop opens streams after the handshake, drives I/O, and exits on timeout. */
     uint64_t started_at = now_us();
     int opened_streams = 0;
     while (!pc->failed && pc->completed_requests < count &&
@@ -1292,6 +1294,7 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t reque
         pc->failed = 1;
     }
 
+    /* Successful batches send CONNECTION_CLOSE so the peer can drain cleanly. */
     if (!pc->failed) {
         ngtcp2_path_storage ps;
         ngtcp2_path_storage_zero(&ps);
@@ -1424,8 +1427,15 @@ static run_summary_t make_summary(const config_t *cfg, const counters_t *counter
 }
 
 static run_summary_t run_client(const config_t *cfg) {
-    counters_t counters;
-    memset(&counters, 0, sizeof(counters));
+    counters_t *counters = calloc(1, sizeof(*counters));
+    if (!counters) {
+        run_summary_t summary;
+        memset(&summary, 0, sizeof(summary));
+        summary.status = "failed";
+        summary.failure_reason = "out of memory";
+        summary.cfg = cfg;
+        return summary;
+    }
     char failure_reason[256] = "";
     uint64_t start = now_us();
     if (cfg->warmup_us > 0 && !cfg->requests.set && !cfg->total_bytes.set) {
@@ -1434,18 +1444,19 @@ static run_summary_t run_client(const config_t *cfg) {
     uint64_t measure_start = now_us();
     int rc;
     if (is_mode(cfg, "bulk")) {
-        rc = run_bulk(cfg, &counters, failure_reason, sizeof(failure_reason));
+        rc = run_bulk(cfg, counters, failure_reason, sizeof(failure_reason));
     } else if (is_mode(cfg, "rr")) {
-        rc = run_rr(cfg, &counters, failure_reason, sizeof(failure_reason));
+        rc = run_rr(cfg, counters, failure_reason, sizeof(failure_reason));
     } else {
-        rc = run_crr(cfg, &counters, failure_reason, sizeof(failure_reason));
+        rc = run_crr(cfg, counters, failure_reason, sizeof(failure_reason));
     }
     uint64_t end = now_us();
     uint64_t elapsed = end - (cfg->requests.set ? start : measure_start);
     run_summary_t summary =
-        make_summary(cfg, &counters, (int64_t)duration_millis(elapsed), rc == 0 ? "ok" : "failed",
+        make_summary(cfg, counters, (int64_t)duration_millis(elapsed), rc == 0 ? "ok" : "failed",
                      rc == 0 ? NULL : failure_reason);
-    free(counters.latencies.values);
+    free(counters->latencies.values);
+    free(counters);
     return summary;
 }
 

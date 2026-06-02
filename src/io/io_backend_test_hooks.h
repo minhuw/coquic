@@ -47,6 +47,10 @@ class ScopedSocketIoBackendOpsOverride {
     ScopedSocketIoBackendOpsOverride(const ScopedSocketIoBackendOpsOverride &) = delete;
     ScopedSocketIoBackendOpsOverride &operator=(const ScopedSocketIoBackendOpsOverride &) = delete;
 
+    template <typename Callback> decltype(auto) while_active(Callback &&callback) const {
+        return callback();
+    }
+
   private:
     SocketIoBackendOpsOverride previous_;
 };
@@ -68,6 +72,10 @@ class ScopedIoUringBackendOpsOverride {
 
     ScopedIoUringBackendOpsOverride(const ScopedIoUringBackendOpsOverride &) = delete;
     ScopedIoUringBackendOpsOverride &operator=(const ScopedIoUringBackendOpsOverride &) = delete;
+
+    template <typename Callback> decltype(auto) while_active(Callback &&callback) const {
+        return callback();
+    }
 
   private:
     IoUringBackendOpsOverride previous_;

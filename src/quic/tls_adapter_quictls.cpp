@@ -716,6 +716,7 @@ class TlsAdapter::Impl {
 
     void initialize() {
         ERR_clear_error();
+        // Build the role-specific SSL context before applying QUIC and TLS policy.
         ctx_.reset(new_ssl_ctx(config_.role));
         if (ctx_ == nullptr) {
             sticky_error_ =
@@ -738,6 +739,7 @@ class TlsAdapter::Impl {
         SSL_CTX_set_verify(ctx_.get(), config_.verify_peer ? SSL_VERIFY_PEER : SSL_VERIFY_NONE,
                            nullptr);
         SSL_CTX_set_keylog_callback(ctx_.get(), &Impl::on_keylog_line);
+        // Peer verification and key logging are configured before identity and ALPN setup.
         if (verify_paths_init_failed(config_.verify_peer, ctx_.get())) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
@@ -755,11 +757,13 @@ class TlsAdapter::Impl {
             SSL_CTX_set_session_cache_mode(ctx_.get(), SSL_SESS_CACHE_CLIENT);
         }
         SSL_CTX_sess_set_new_cb(ctx_.get(), &Impl::on_new_session);
+        // Early data limits are enabled at the context level for both 0-RTT send and receive.
         if (config_.accept_zero_rtt) {
             SSL_CTX_set_max_early_data(ctx_.get(), kQuicMaxEarlyData);
             SSL_CTX_set_recv_max_early_data(ctx_.get(), kQuicMaxEarlyData);
         }
 
+        // Servers must load certificate identity before ALPN and connection objects are created.
         if (!load_identity()) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
@@ -791,6 +795,7 @@ class TlsAdapter::Impl {
         }
 
         SSL_set_app_data(ssl_.get(), this);
+        // The SSL object receives QUIC hooks, SNI, and local transport parameters in order.
         if (ssl_quic_method_failed(ssl_.get(), &kQuicMethod)) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
@@ -815,6 +820,7 @@ class TlsAdapter::Impl {
             SSL_set_accept_state(ssl_.get());
         }
 
+        // A restored client session records whether this handshake will attempt 0-RTT.
         if (config_.resumption_state.has_value()) {
             auto session = deserialize_session_bytes(*config_.resumption_state);
             const bool restored = session != nullptr && set_session(ssl_.get(), session.get()) == 1;
@@ -826,6 +832,7 @@ class TlsAdapter::Impl {
             }
         }
 
+        // QuicTLS needs the final per-connection early-data switch after state selection.
         if (config_.attempt_zero_rtt || config_.accept_zero_rtt) {
             SSL_set_quic_early_data_enabled(ssl_.get(), 1);
         }

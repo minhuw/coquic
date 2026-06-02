@@ -615,9 +615,10 @@ void BbrCongestionController::update_min_rtt(const RateSample &rs, QuicCoreTimeP
     const auto min_rtt_expired = now > min_rtt_stamp_.value_or(now) + kBbrMinRttWindow;
     const auto min_rtt = min_rtt_.value_or(QuicCoreDuration::max());
     const auto sample_min_rtt = probe_rtt_min_delay_.value_or(min_rtt);
+    const bool min_rtt_missing = !min_rtt_.has_value();
     const bool update_min_rtt_sample =
         probe_rtt_min_delay_.has_value() &&
-        ((sample_min_rtt < min_rtt) || min_rtt_expired || !min_rtt_.has_value());
+        ((sample_min_rtt < min_rtt) || min_rtt_expired || min_rtt_missing);
     if (update_min_rtt_sample) {
         min_rtt_ = sample_min_rtt;
         min_rtt_stamp_ = probe_rtt_min_stamp_;

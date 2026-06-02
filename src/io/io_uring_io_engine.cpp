@@ -346,6 +346,7 @@ std::optional<QuicIoEngineEvent>
 IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
                       std::optional<quic::QuicCoreTimePoint> next_wakeup,
                       std::string_view role_name) {
+    // Poll fallback owns receive readiness after recvmsg support has been disabled.
     if (use_poll_receive_) {
         return receive_fallback_ != nullptr
                    ? receive_fallback_->wait(socket_fds, idle_timeout_ms, next_wakeup, role_name)
@@ -361,6 +362,7 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
 
     const auto current = QuicCoreClock::now();
 
+    // Clamp the io_uring wait timeout so QUIC timers fire before the idle timeout expires.
     int wait_timeout_ms = idle_timeout_ms;
     if (next_wakeup.has_value()) {
         const auto until_wakeup =
@@ -374,6 +376,7 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
 
     Completion completion{};
     if (!pending_completions_.empty()) {
+        // Deferred completions are drained before blocking in io_uring again.
         completion = pending_completions_.front();
         pending_completions_.pop_front();
     } else {
@@ -384,6 +387,7 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
         if (wait_rc == -ETIME) {
             const auto now = QuicCoreClock::now();
             if (next_wakeup.has_value() && now >= *next_wakeup) {
+                // Timeout at or past the QUIC wakeup is surfaced as a timer event.
                 return QuicIoEngineEvent{
                     .kind = QuicIoEngineEvent::Kind::timer_expired,
                     .now = now,
@@ -412,6 +416,7 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
 
     const auto now = QuicCoreClock::now();
     if (completion.user_data == kSendCompletionUserData) {
+        // Send completions only report ring health; receive events carry application data.
         if (completion.res < 0) {
             std::cerr << "io-uring send completion failed res=" << completion.res
                       << " err=" << std::strerror(-completion.res) << "\n";
@@ -424,6 +429,7 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
         };
     }
 
+    // Receive completions are keyed by socket fd so the event can be routed to the caller.
     auto receive_it = receives_.find(static_cast<int>(completion.user_data));
     if (receive_it == receives_.end()) {
         std::cerr << "io-uring wait failed: unknown completion user_data=" << completion.user_data
@@ -433,6 +439,7 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
     }
     if (completion.res < 0) {
         if (completion.res == -EINVAL) {
+            // Some kernels reject the recvmsg shape; keep the endpoint alive with poll I/O.
             std::cerr << "io-uring recv completion failed with EINVAL; falling back to poll I/O\n";
             enable_receive_fallback();
             return receive_fallback_->wait(socket_fds, idle_timeout_ms, next_wakeup, role_name);
@@ -444,6 +451,7 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
     }
 
     auto &state = receive_it->second;
+    // Copy the datagram out before rearming because arm_receive reuses the same buffers.
     const auto bytes_to_copy =
         std::min<std::size_t>(state.data.size(), static_cast<std::size_t>(completion.res));
     std::vector<std::byte> bytes(bytes_to_copy);

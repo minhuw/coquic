@@ -14,53 +14,54 @@ bool connection_pmtud_coverage_for_tests() {
     const auto make_connected_client_connection =
         make_connected_pmtud_client_connection_for_connection_coverage;
 
-    const auto record_application_ack_ranges = [](QuicConnection &connection,
+    const auto record_application_ack_ranges = [](QuicConnection &test_connection,
                                                   std::size_t range_count) {
         for (std::size_t index = 0; index < range_count; ++index) {
-            connection.application_space_.received_packets.record_received(
+            test_connection.application_space_.received_packets.record_received(
                 static_cast<std::uint64_t>(index * 2u), /*ack_eliciting=*/true,
                 QuicCoreTimePoint{});
         }
-        connection.application_space_.pending_ack_deadline = QuicCoreTimePoint{};
+        test_connection.application_space_.pending_ack_deadline = QuicCoreTimePoint{};
     };
-    const auto queue_application_stream_byte = [](QuicConnection &connection,
+    const auto queue_application_stream_byte = [](QuicConnection &test_connection,
                                                   std::uint64_t stream_id = 0) {
         constexpr std::array payload{std::byte{0x41}};
-        const auto queued = connection.queue_stream_send(stream_id, payload, false);
+        const auto queued = test_connection.queue_stream_send(stream_id, payload, false);
         if (!queued.has_value()) {
             return false;
         }
-        connection.connection_flow_control_.peer_max_data =
-            std::max<std::uint64_t>(connection.connection_flow_control_.peer_max_data, 4096);
-        if (auto *stream = connection.find_stream_state(stream_id); stream != nullptr) {
+        test_connection.connection_flow_control_.peer_max_data =
+            std::max<std::uint64_t>(test_connection.connection_flow_control_.peer_max_data, 4096);
+        if (auto *stream = test_connection.find_stream_state(stream_id); stream != nullptr) {
             stream->flow_control.peer_max_stream_data =
                 std::max<std::uint64_t>(stream->flow_control.peer_max_stream_data, 4096);
             stream->send_flow_control_limit = stream->flow_control.peer_max_stream_data;
         }
         return queued.value();
     };
-    const auto queue_application_stream_bytes = [](QuicConnection &connection, std::size_t size,
-                                                   bool fin = false, std::uint64_t stream_id = 0) {
-        const auto queued = connection.queue_stream_send(
+    const auto queue_application_stream_bytes = [](QuicConnection &test_connection,
+                                                   std::size_t size, bool fin = false,
+                                                   std::uint64_t stream_id = 0) {
+        const auto queued = test_connection.queue_stream_send(
             stream_id, std::vector<std::byte>(size, std::byte{0x41}), fin);
         if (!queued.has_value()) {
             return false;
         }
-        connection.connection_flow_control_.peer_max_data =
-            std::max<std::uint64_t>(connection.connection_flow_control_.peer_max_data, 8192);
-        if (auto *stream = connection.find_stream_state(stream_id); stream != nullptr) {
+        test_connection.connection_flow_control_.peer_max_data =
+            std::max<std::uint64_t>(test_connection.connection_flow_control_.peer_max_data, 8192);
+        if (auto *stream = test_connection.find_stream_state(stream_id); stream != nullptr) {
             stream->flow_control.peer_max_stream_data =
                 std::max<std::uint64_t>(stream->flow_control.peer_max_stream_data, 8192);
             stream->send_flow_control_limit = stream->flow_control.peer_max_stream_data;
         }
         return queued.value();
     };
-    const auto reduce_remaining_congestion_window = [](QuicConnection &connection,
+    const auto reduce_remaining_congestion_window = [](QuicConnection &test_connection,
                                                        std::size_t remaining_bytes) {
-        const auto cwnd = connection.congestion_controller_.congestion_window();
+        const auto cwnd = test_connection.congestion_controller_.congestion_window();
         if (cwnd > remaining_bytes) {
-            connection.congestion_controller_.on_packet_sent(cwnd - remaining_bytes,
-                                                             /*ack_eliciting=*/true);
+            test_connection.congestion_controller_.on_packet_sent(cwnd - remaining_bytes,
+                                                                  /*ack_eliciting=*/true);
         }
     };
     const auto make_path_validation_data = [](std::uint8_t first) {
@@ -75,24 +76,25 @@ bool connection_pmtud_coverage_for_tests() {
             std::byte{static_cast<std::uint8_t>(first + 7u)},
         };
     };
-    const auto queue_path_validation_frames = [&](QuicConnection &connection,
+    const auto queue_path_validation_frames = [&](QuicConnection &test_connection,
                                                   std::uint8_t response_first,
                                                   std::uint8_t challenge_first) -> PathState & {
-        auto &path = connection.ensure_path_state(0);
-        path.pending_response = make_path_validation_data(response_first);
-        path.challenge_pending = true;
-        path.outstanding_challenge = make_path_validation_data(challenge_first);
-        return path;
+        auto &path_state = test_connection.ensure_path_state(0);
+        path_state.pending_response = make_path_validation_data(response_first);
+        path_state.challenge_pending = true;
+        path_state.outstanding_challenge = make_path_validation_data(challenge_first);
+        return path_state;
     };
-    const auto set_outbound_datagram_limit = [](QuicConnection &connection, std::size_t limit) {
-        connection.config_.max_outbound_datagram_size = limit;
-        if (connection.peer_transport_parameters_.has_value()) {
-            connection.peer_transport_parameters_->max_udp_payload_size = limit;
+    const auto set_outbound_datagram_limit = [](QuicConnection &test_connection,
+                                                std::size_t limit) {
+        test_connection.config_.max_outbound_datagram_size = limit;
+        if (test_connection.peer_transport_parameters_.has_value()) {
+            test_connection.peer_transport_parameters_->max_udp_payload_size = limit;
         }
     };
-    const auto set_path_challenge = [&](PathState &path, std::uint8_t first) {
-        path.challenge_pending = true;
-        path.outstanding_challenge = make_path_validation_data(first);
+    const auto set_path_challenge = [&](PathState &path_state, std::uint8_t first) {
+        path_state.challenge_pending = true;
+        path_state.outstanding_challenge = make_path_validation_data(first);
     };
 
     {
@@ -354,11 +356,12 @@ bool connection_pmtud_coverage_for_tests() {
                 .is_pmtu_probe = true,
                 .pmtu_probe_size = 1500,
             });
-        const auto handle = connection.application_space_.recovery.handle_for_packet_number(77);
-        COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
+        const auto packet_handle =
+            connection.application_space_.recovery.handle_for_packet_number(77);
+        COQUIC_CONNECTION_HOOK_RECORD(packet_handle.has_value());
+        if (packet_handle.has_value()) {
             const auto packet =
-                connection.retire_acked_packet(connection.application_space_, *handle);
+                connection.retire_acked_packet(connection.application_space_, *packet_handle);
             COQUIC_CONNECTION_HOOK_RECORD(packet.has_value());
             if (packet.has_value()) {
                 COQUIC_CONNECTION_HOOK_RECORD(!packet->in_flight);
@@ -452,7 +455,7 @@ bool connection_pmtud_coverage_for_tests() {
         path.anti_amplification_received_bytes = 0;
 
         connection.note_pmtu_probe_sent(0, 7, 2048);
-        const auto ack_time = QuicCoreTimePoint{} + std::chrono::milliseconds(15);
+        const auto probe_ack_time = QuicCoreTimePoint{} + std::chrono::milliseconds(15);
         connection.note_pmtu_probe_acked(
             SentPacketRecord{
                 .packet_number = 7,
@@ -461,13 +464,13 @@ bool connection_pmtud_coverage_for_tests() {
                 .is_pmtu_probe = true,
                 .pmtu_probe_size = 2048,
             },
-            ack_time);
+            probe_ack_time);
 
         COQUIC_CONNECTION_HOOK_RECORD(path.mtu.validated_datagram_size == 2048);
         COQUIC_CONNECTION_HOOK_RECORD(path.mtu.search_low == 2048);
         COQUIC_CONNECTION_HOOK_RECORD(!path.mtu.outstanding_probe_packet_number.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(path.mtu.next_probe_time ==
-                                      ack_time + std::chrono::seconds(1));
+                                      probe_ack_time + std::chrono::seconds(1));
         COQUIC_CONNECTION_HOOK_RECORD(connection.outbound_datagram_size_limit() == 2048);
 
         connection.note_pmtu_probe_sent(0, 8, 0);
@@ -478,7 +481,7 @@ bool connection_pmtud_coverage_for_tests() {
                 .path_id = 0,
                 .is_pmtu_probe = true,
             },
-            ack_time + std::chrono::milliseconds(5));
+            probe_ack_time + std::chrono::milliseconds(5));
         COQUIC_CONNECTION_HOOK_RECORD(!path.mtu.outstanding_probe_packet_number.has_value());
 
         connection.note_pmtu_probe_acked(
@@ -487,7 +490,7 @@ bool connection_pmtud_coverage_for_tests() {
                 .path_id = 0,
                 .is_pmtu_probe = true,
             },
-            ack_time);
+            probe_ack_time);
         COQUIC_CONNECTION_HOOK_RECORD(!path.mtu.outstanding_probe_packet_number.has_value());
 
         connection.note_pmtu_probe_acked(
@@ -495,7 +498,7 @@ bool connection_pmtud_coverage_for_tests() {
                 .packet_number = 10,
                 .path_id = 0,
             },
-            ack_time);
+            probe_ack_time);
         COQUIC_CONNECTION_HOOK_RECORD(path.mtu.validated_datagram_size == 2048);
     }
 
@@ -553,12 +556,13 @@ bool connection_pmtud_coverage_for_tests() {
         connection.handshake_space_.write_secret =
             make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x67});
         connection.initial_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
-        const ScopedConnectionDrainTestHook hook(
+        const ScopedConnectionDrainTestHook congestion_block_hook(
             &ConnectionDrainTestHooks::force_duplicate_initial_congestion_blocked);
 
-        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+        const auto duplicate_initial_datagram =
+            connection.drain_outbound_datagram(QuicCoreTimePoint{});
 
-        COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!duplicate_initial_datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(connection.initial_space_.next_send_packet_number == 1);
     }
 
@@ -595,12 +599,13 @@ bool connection_pmtud_coverage_for_tests() {
         connection.application_space_.write_secret =
             make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x78});
         connection.handshake_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
-        const ScopedConnectionDrainTestHook hook(
+        const ScopedConnectionDrainTestHook application_block_hook(
             &ConnectionDrainTestHooks::force_application_send_congestion_blocked);
 
-        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+        const auto blocked_application_datagram =
+            connection.drain_outbound_datagram(QuicCoreTimePoint{});
 
-        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(blocked_application_datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.next_send_packet_number == 0);
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
     }
@@ -646,9 +651,10 @@ bool connection_pmtud_coverage_for_tests() {
         const ScopedConnectionDrainTestHook hook(
             &ConnectionDrainTestHooks::force_application_packet_number_exhausted);
 
-        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+        const auto failed_application_datagram =
+            connection.drain_outbound_datagram(QuicCoreTimePoint{});
 
-        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(failed_application_datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(path.pending_response.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(path.challenge_pending);
     }
@@ -785,9 +791,10 @@ bool connection_pmtud_coverage_for_tests() {
         const ScopedConnectionDrainTestHook packet_number_hook(
             &ConnectionDrainTestHooks::force_application_packet_number_exhausted);
 
-        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+        const auto failed_application_datagram =
+            connection.drain_outbound_datagram(QuicCoreTimePoint{});
 
-        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(failed_application_datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(path.pending_response.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(path.challenge_pending);
         COQUIC_CONNECTION_HOOK_RECORD(
@@ -837,9 +844,10 @@ bool connection_pmtud_coverage_for_tests() {
         const ScopedConnectionDrainCountdownTestHook hook(
             &ConnectionDrainTestHooks::force_candidate_datagram_serialization_failure_countdown, 1);
 
-        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+        const auto failed_application_datagram =
+            connection.drain_outbound_datagram(QuicCoreTimePoint{});
 
-        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(failed_application_datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
     }
 
@@ -870,9 +878,9 @@ bool connection_pmtud_coverage_for_tests() {
             .path_id = 0,
         };
 
-        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+        const auto failed_probe_datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
 
-        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(failed_probe_datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
     }
 

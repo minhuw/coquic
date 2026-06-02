@@ -12,7 +12,7 @@ TEST(QuicCoreTest, ApplicationAckFramesIncludeEcnCountsWhenReceiveMetadataIsAvai
     const auto ack_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
 
     ASSERT_FALSE(ack_datagram.empty());
-    const auto packets = decode_sender_datagram(connection, ack_datagram);
+    auto packets = decode_sender_datagram(connection, ack_datagram);
     ASSERT_EQ(packets.size(), 1u);
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
     ASSERT_NE(application, nullptr);
@@ -22,9 +22,9 @@ TEST(QuicCoreTest, ApplicationAckFramesIncludeEcnCountsWhenReceiveMetadataIsAvai
             return std::holds_alternative<coquic::quic::AckFrame>(frame);
         });
     ASSERT_NE(ack_it, application->frames.end());
-    const auto &ack = std::get<coquic::quic::AckFrame>(*ack_it);
-    ASSERT_TRUE(ack.ecn_counts.has_value());
-    const auto &ecn_counts = optional_ref_or_terminate(ack.ecn_counts);
+    const auto &ack_frame = std::get<coquic::quic::AckFrame>(*ack_it);
+    ASSERT_TRUE(ack_frame.ecn_counts.has_value());
+    const auto &ecn_counts = optional_ref_or_terminate(ack_frame.ecn_counts);
     EXPECT_EQ(ecn_counts.ect0, 0u);
     EXPECT_EQ(ecn_counts.ect1, 0u);
     EXPECT_EQ(ecn_counts.ecn_ce, 1u);
@@ -41,7 +41,7 @@ TEST(QuicCoreTest, PacketInspectionQueuesDecodedOutboundOneRttPackets) {
     };
     ASSERT_TRUE(connection.queue_stream_send(0, kPayload, false).has_value());
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     ASSERT_FALSE(datagram.empty());
     EXPECT_EQ(connection.last_drained_packet_inspection_datagram_id(), 1u);
@@ -60,7 +60,7 @@ TEST(QuicCoreTest, PacketInspectionQueuesDecodedOutboundOneRttPackets) {
     EXPECT_EQ(inspection_value.destination_connection_id, peer_source_connection_id);
     EXPECT_EQ(inspection_value.encrypted_packet.size(), datagram.size());
     ASSERT_FALSE(inspection_value.frames.empty());
-    const auto stream_it = std::find_if(
+    auto stream_it = std::find_if(
         inspection_value.frames.begin(), inspection_value.frames.end(), [](const auto &frame) {
             return std::holds_alternative<coquic::quic::ReceivedStreamFrame>(frame);
         });
@@ -369,11 +369,11 @@ TEST(QuicCoreTest, ConnectionDiagnosticsExposeTransportRecoveryFlowAndStreamStat
         .packet_number = 5,
         .ack_eliciting = true,
     };
-    auto &rtt = connection.application_space_.recovery.rtt_state();
-    rtt.latest_rtt = std::chrono::milliseconds(25);
-    rtt.min_rtt = std::chrono::milliseconds(12);
-    rtt.smoothed_rtt = std::chrono::milliseconds(19);
-    rtt.rttvar = std::chrono::milliseconds(7);
+    auto &recovery_rtt = connection.application_space_.recovery.rtt_state();
+    recovery_rtt.latest_rtt = std::chrono::milliseconds(25);
+    recovery_rtt.min_rtt = std::chrono::milliseconds(12);
+    recovery_rtt.smoothed_rtt = std::chrono::milliseconds(19);
+    recovery_rtt.rttvar = std::chrono::milliseconds(7);
     connection.connection_flow_control_.highest_sent = 55;
     connection.connection_flow_control_.delivered_bytes = 13;
     connection.connection_flow_control_.received_committed = 21;
@@ -392,7 +392,7 @@ TEST(QuicCoreTest, ConnectionDiagnosticsExposeTransportRecoveryFlowAndStreamStat
     stream.stop_sending_state = coquic::quic::StreamControlFrameState::pending;
     stream.send_closed = true;
 
-    const auto diagnostics = connection.diagnostics(42);
+    auto diagnostics = connection.diagnostics(42);
 
     EXPECT_EQ(diagnostics.handle, 42u);
     EXPECT_TRUE(diagnostics.started);
@@ -453,7 +453,7 @@ TEST(QuicCoreTest, LargeAckOnlyHistoryStillEmitsTrimmedAckDatagram) {
     }
     connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(4096);
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(4096));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(4096));
 
     ASSERT_FALSE(datagram.empty());
     EXPECT_TRUE(datagram_has_application_ack(connection, datagram));
@@ -465,7 +465,7 @@ TEST(QuicCoreTest, ServerProcessesOneRttPingBeforeHandshakeCompletesWhenApplicat
     connection.handshake_confirmed_ = false;
     ASSERT_TRUE(connection.application_space_.read_secret.has_value());
 
-    const auto processed = connection.process_inbound_packet(
+    auto processed = connection.process_inbound_packet(
         coquic::quic::ProtectedOneRttPacket{
             .key_phase = false,
             .destination_connection_id = connection.config_.source_connection_id,
@@ -496,10 +496,10 @@ TEST(QuicCoreTest, ApplicationSendCanCarryBlockedControlFrames) {
     };
     stream.flow_control.stream_data_blocked_state = coquic::quic::StreamControlFrameState::pending;
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     ASSERT_FALSE(datagram.empty());
-    const auto packets = decode_sender_datagram(connection, datagram);
+    auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets[0]);
     ASSERT_NE(application, nullptr);
@@ -570,10 +570,10 @@ TEST(QuicCoreTest, ApplicationProbePacketCanCarryAllControlFrames) {
             },
     };
 
-    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     ASSERT_FALSE(datagram.empty());
-    const auto packets = decode_sender_datagram(connection, datagram);
+    auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets[0]);
     ASSERT_NE(application, nullptr);
@@ -779,14 +779,14 @@ TEST(QuicCoreTest,
     }
 
     std::size_t prefix = 63u;
-    std::size_t gap = 4u;
+    std::size_t crypto_gap = 4u;
     std::size_t tail_offset = 1230u;
     if (client_hello.size() <= tail_offset) {
         prefix = std::min<std::size_t>(63u, client_hello.size() / 4u);
-        gap = 1u;
-        tail_offset = prefix + gap + ((client_hello.size() - (prefix + gap)) / 2u);
+        crypto_gap = 1u;
+        tail_offset = prefix + crypto_gap + ((client_hello.size() - (prefix + crypto_gap)) / 2u);
     }
-    ASSERT_LT(prefix + gap, tail_offset);
+    ASSERT_LT(prefix + crypto_gap, tail_offset);
     ASSERT_LT(tail_offset, client_hello.size());
 
     const auto slice_bytes = [&](std::size_t begin, std::size_t end) {
@@ -805,7 +805,7 @@ TEST(QuicCoreTest,
             {
                 coquic::quic::CryptoFrame{
                     .offset = static_cast<std::uint64_t>(prefix),
-                    .crypto_data = slice_bytes(prefix, prefix + gap),
+                    .crypto_data = slice_bytes(prefix, prefix + crypto_gap),
                 },
                 coquic::quic::CryptoFrame{
                     .offset = static_cast<std::uint64_t>(tail_offset),
@@ -823,8 +823,8 @@ TEST(QuicCoreTest,
         .frames =
             {
                 coquic::quic::CryptoFrame{
-                    .offset = static_cast<std::uint64_t>(prefix + gap),
-                    .crypto_data = slice_bytes(prefix + gap, tail_offset),
+                    .offset = static_cast<std::uint64_t>(prefix + crypto_gap),
+                    .crypto_data = slice_bytes(prefix + crypto_gap, tail_offset),
                 },
                 coquic::quic::CryptoFrame{
                     .offset = 0,
@@ -833,7 +833,8 @@ TEST(QuicCoreTest,
             },
     };
 
-    const auto pad_initial = [&](coquic::quic::ProtectedInitialPacket packet) {
+    const auto pad_initial = [&](const coquic::quic::ProtectedInitialPacket &input_packet) {
+        auto packet = input_packet;
         auto encoded = coquic::quic::serialize_protected_datagram(
             std::array<coquic::quic::ProtectedPacket, 1>{packet},
             coquic::quic::SerializeProtectionContext{
@@ -871,15 +872,15 @@ TEST(QuicCoreTest,
     };
 
     const auto first_datagram = pad_initial(delivered_packet_one);
-    const auto server_after_first = server.advance(
-        coquic::quic::QuicCoreInboundDatagram{first_datagram}, coquic::quic::test::test_time(1));
+    auto server_after_first = server.advance(coquic::quic::QuicCoreInboundDatagram{first_datagram},
+                                             coquic::quic::test::test_time(1));
     EXPECT_FALSE(server.has_failed());
 
     const auto first_response_datagrams =
         coquic::quic::test::send_datagrams_from(server_after_first);
     ASSERT_FALSE(first_response_datagrams.empty());
     for (const auto &datagram : first_response_datagrams) {
-        const auto packets = decode_sender_datagram(*server.connection_, datagram);
+        auto packets = decode_sender_datagram(*server.connection_, datagram);
         for (const auto &packet : packets) {
             const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packet);
             if (initial == nullptr) {
@@ -892,7 +893,7 @@ TEST(QuicCoreTest,
     }
 
     const auto second_datagram = pad_initial(delivered_packet_two);
-    const auto server_after_second = server.advance(
+    auto server_after_second = server.advance(
         coquic::quic::QuicCoreInboundDatagram{second_datagram}, coquic::quic::test::test_time(2));
     EXPECT_FALSE(server.has_failed());
 
@@ -902,7 +903,7 @@ TEST(QuicCoreTest,
     bool saw_initial_crypto = false;
     bool saw_handshake_crypto = false;
     for (const auto &datagram : response_datagrams) {
-        const auto packets = decode_sender_datagram(*server.connection_, datagram);
+        auto packets = decode_sender_datagram(*server.connection_, datagram);
         for (const auto &packet : packets) {
             if (const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packet)) {
                 for (const auto &frame : initial->frames) {
@@ -971,7 +972,7 @@ TEST(QuicCoreTest, ApplicationPtoWaitsForClientHandshakeConfirmation) {
         server_after_client_probe, client, coquic::quic::test::test_time(4));
     EXPECT_TRUE(coquic::quic::test::received_application_data_from(client_after_ack).empty());
 
-    const auto client_after_confirmation = client.advance(
+    auto client_after_confirmation = client.advance(
         coquic::quic::QuicCoreSendStreamData{
             .stream_id = 0,
             .bytes = coquic::quic::test::bytes_from_string("client-after-ack"),
@@ -1003,10 +1004,10 @@ TEST(QuicCoreTest, ServerApplicationPtoRunsBeforeHandshakeConfirmation) {
     }
 
     connection.on_timeout(*next_wakeup);
-    const auto probe_datagram = connection.drain_outbound_datagram(*next_wakeup);
+    auto probe_datagram = connection.drain_outbound_datagram(*next_wakeup);
     ASSERT_FALSE(probe_datagram.empty());
 
-    const auto packets = decode_sender_datagram(connection, probe_datagram);
+    auto packets = decode_sender_datagram(connection, probe_datagram);
     ASSERT_EQ(packets.size(), 1u);
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets[0]);
     ASSERT_NE(application, nullptr);
@@ -1088,7 +1089,7 @@ TEST(QuicCoreTest, CompletedBidirectionalStreamRetiresAfterLocalFinAckAndPeerFin
     EXPECT_TRUE(coquic::quic::test::received_application_data_from(request_acked).empty());
     ASSERT_TRUE(client.connection_->streams_.contains(4));
 
-    const auto response = server.advance(
+    auto response = server.advance(
         coquic::quic::QuicCoreSendStreamData{
             .stream_id = 4,
             .bytes = coquic::quic::test::bytes_from_string("response"),
@@ -1120,7 +1121,7 @@ TEST(QuicCoreTest, AckProcessingUsesLargestNewlyAcknowledgedPacketForRttSample) 
                                      .in_flight = false,
                                  });
 
-    const auto processed = connection.process_inbound_ack(
+    auto processed = connection.process_inbound_ack(
         connection.application_space_,
         coquic::quic::AckFrame{
             .largest_acknowledged = 2,
@@ -1147,7 +1148,7 @@ TEST(QuicCoreTest, AckProcessingClampsAckDelayWhenExponentIsTooLarge) {
                                      .in_flight = true,
                                  });
 
-    const auto processed = connection.process_inbound_ack(
+    auto processed = connection.process_inbound_ack(
         connection.application_space_,
         coquic::quic::AckFrame{
             .largest_acknowledged = 1,
@@ -1185,7 +1186,7 @@ TEST(QuicCoreTest, OptimisticAckMitigationSkipsPacketNumbersAndRejectsAcksForThe
     EXPECT_EQ(connection.application_space_.recovery.find_packet(8), nullptr);
     EXPECT_EQ(connection.application_space_.recovery.find_packet(17), nullptr);
 
-    const auto processed = connection.process_inbound_ack(
+    auto processed = connection.process_inbound_ack(
         connection.application_space_,
         coquic::quic::AckFrame{
             .largest_acknowledged = 8,
@@ -1217,7 +1218,7 @@ TEST(QuicCoreTest, AckProcessingDisablesEcnWhenAckOmitsCountsForNewlyAckedEct0Pa
                                      .ecn = coquic::quic::QuicEcnCodepoint::ect0,
                                  });
 
-    const auto processed = connection.process_inbound_ack(
+    auto processed = connection.process_inbound_ack(
         connection.application_space_,
         coquic::quic::AckFrame{
             .largest_acknowledged = 1,
@@ -1257,37 +1258,37 @@ TEST(QuicCoreTest, AckProcessingTreatsCeCounterGrowthAsSingleCongestionEvent) {
                                      .ecn = coquic::quic::QuicEcnCodepoint::ect0,
                                  });
 
-    const auto first = connection.process_inbound_ack(
-        connection.application_space_,
-        coquic::quic::AckFrame{
-            .largest_acknowledged = 1,
-            .first_ack_range = 0,
-            .ecn_counts =
-                coquic::quic::AckEcnCounts{
-                    .ect0 = 0,
-                    .ect1 = 0,
-                    .ecn_ce = 1,
-                },
-        },
-        coquic::quic::test::test_time(10), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
-        /*suppress_pto_reset=*/false);
+    auto first = connection.process_inbound_ack(connection.application_space_,
+                                                coquic::quic::AckFrame{
+                                                    .largest_acknowledged = 1,
+                                                    .first_ack_range = 0,
+                                                    .ecn_counts =
+                                                        coquic::quic::AckEcnCounts{
+                                                            .ect0 = 0,
+                                                            .ect1 = 0,
+                                                            .ecn_ce = 1,
+                                                        },
+                                                },
+                                                coquic::quic::test::test_time(10),
+                                                /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+                                                /*suppress_pto_reset=*/false);
     ASSERT_TRUE(first.has_value());
-    const auto first_reduction = connection.congestion_controller_.congestion_window();
+    auto first_reduction = connection.congestion_controller_.congestion_window();
 
-    const auto second = connection.process_inbound_ack(
-        connection.application_space_,
-        coquic::quic::AckFrame{
-            .largest_acknowledged = 2,
-            .first_ack_range = 0,
-            .ecn_counts =
-                coquic::quic::AckEcnCounts{
-                    .ect0 = 1,
-                    .ect1 = 0,
-                    .ecn_ce = 1,
-                },
-        },
-        coquic::quic::test::test_time(12), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
-        /*suppress_pto_reset=*/false);
+    auto second = connection.process_inbound_ack(connection.application_space_,
+                                                 coquic::quic::AckFrame{
+                                                     .largest_acknowledged = 2,
+                                                     .first_ack_range = 0,
+                                                     .ecn_counts =
+                                                         coquic::quic::AckEcnCounts{
+                                                             .ect0 = 1,
+                                                             .ect1 = 0,
+                                                             .ecn_ce = 1,
+                                                         },
+                                                 },
+                                                 coquic::quic::test::test_time(12),
+                                                 /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+                                                 /*suppress_pto_reset=*/false);
 
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(connection.congestion_controller_.congestion_window(), first_reduction);
@@ -1309,7 +1310,7 @@ TEST(QuicCoreTest, AckProcessingValidatesEct1CountsIndependently) {
                                      .ecn = coquic::quic::QuicEcnCodepoint::ect1,
                                  });
 
-    const auto processed = connection.process_inbound_ack(
+    auto processed = connection.process_inbound_ack(
         connection.application_space_,
         coquic::quic::AckFrame{
             .largest_acknowledged = 1,
@@ -1346,25 +1347,25 @@ TEST(QuicCoreTest, StaleLargestAcknowledgedPacketDoesNotGenerateRttSample) {
                                      .in_flight = false,
                                  });
 
-    const auto first = connection.process_inbound_ack(
-        connection.application_space_,
-        coquic::quic::AckFrame{
-            .largest_acknowledged = 2,
-            .first_ack_range = 0,
-        },
-        coquic::quic::test::test_time(20), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
-        /*suppress_pto_reset=*/false);
+    auto first = connection.process_inbound_ack(connection.application_space_,
+                                                coquic::quic::AckFrame{
+                                                    .largest_acknowledged = 2,
+                                                    .first_ack_range = 0,
+                                                },
+                                                coquic::quic::test::test_time(20),
+                                                /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+                                                /*suppress_pto_reset=*/false);
     ASSERT_TRUE(first.has_value());
     EXPECT_EQ(connection.application_space_.recovery.rtt_state().latest_rtt, std::nullopt);
 
-    const auto second = connection.process_inbound_ack(
-        connection.application_space_,
-        coquic::quic::AckFrame{
-            .largest_acknowledged = 2,
-            .first_ack_range = 1,
-        },
-        coquic::quic::test::test_time(70), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
-        /*suppress_pto_reset=*/false);
+    auto second = connection.process_inbound_ack(connection.application_space_,
+                                                 coquic::quic::AckFrame{
+                                                     .largest_acknowledged = 2,
+                                                     .first_ack_range = 1,
+                                                 },
+                                                 coquic::quic::test::test_time(70),
+                                                 /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+                                                 /*suppress_pto_reset=*/false);
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(connection.application_space_.recovery.rtt_state().latest_rtt, std::nullopt);
 }
@@ -1494,7 +1495,7 @@ TEST(QuicCoreTest, NewlyAcknowledgedNonAckElicitingPacketsResetPtoBackoff) {
                                      .in_flight = false,
                                  });
 
-    const auto processed = connection.process_inbound_ack(
+    auto processed = connection.process_inbound_ack(
         connection.application_space_,
         coquic::quic::AckFrame{
             .largest_acknowledged = 7,
@@ -1534,9 +1535,9 @@ TEST(QuicCoreTest, DetectLostPacketsMarksCryptoRangesLostAndKeepsRecoveryStateFo
     EXPECT_TRUE(connection.initial_space_.send_crypto.has_pending_data());
     EXPECT_EQ(connection.initial_space_.recovery.largest_acked_packet_number(),
               std::optional<std::uint64_t>{5});
-    const auto &initial_packet = tracked_packet_or_terminate(connection.initial_space_, 0);
-    EXPECT_TRUE(initial_packet.declared_lost);
-    EXPECT_FALSE(initial_packet.in_flight);
+    auto initial_packet = &tracked_packet_or_terminate(connection.initial_space_, 0);
+    EXPECT_TRUE(initial_packet->declared_lost);
+    EXPECT_FALSE(initial_packet->in_flight);
 }
 
 TEST(QuicCoreTest, DetectLostApplicationPacketsRequeuesApplicationCryptoRanges) {

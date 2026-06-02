@@ -261,6 +261,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                                         const quic::QuicCoreReceiveStreamData &received,
                                         quic::QuicCoreTimePoint now) {
     if (received.stream_id != kQuicPerfControlStreamId) {
+        // Data streams are ignored until the control stream has delivered a valid session start.
         if (!session.start.has_value()) {
             return true;
         }
@@ -273,6 +274,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
         if (session.start->mode == QuicPerfMode::bulk &&
             session.start->direction == QuicPerfDirection::download &&
             !session.start->total_bytes.has_value() && received.fin) {
+            // Unbounded bulk download replies with the configured payload on each finished stream.
             const auto response_bytes = static_cast<std::size_t>(session.start->response_bytes);
             auto send_result = core_.advance_endpoint(
                 quic::QuicCoreConnectionCommand{
@@ -295,6 +297,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
 
         if (session.start->mode == QuicPerfMode::bulk &&
             session.start->direction == QuicPerfDirection::download && received.fin) {
+            // Bounded bulk download divides total bytes across all requested streams.
             const auto stream_index = session.requests_completed - 1;
             const auto total_bytes = session.start->total_bytes.value_or(0);
             const auto per_stream = total_bytes / session.start->streams;
@@ -331,6 +334,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
         if (session.start->mode == QuicPerfMode::bulk &&
             session.start->direction == QuicPerfDirection::upload &&
             session.requests_completed >= session.start->streams) {
+            // Bulk upload completes once every client upload stream reaches FIN.
             session.complete_sent = true;
             completed_session_seen_ = true;
             return send_control(session, QuicPerfSessionComplete{
@@ -342,6 +346,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
 
         if ((session.start->mode == QuicPerfMode::rr || session.start->mode == QuicPerfMode::crr) &&
             received.fin) {
+            // Request/response modes answer each finished request stream with one response body.
             const auto response_bytes = static_cast<std::size_t>(session.start->response_bytes);
             auto send_result = core_.advance_endpoint(
                 quic::QuicCoreConnectionCommand{
@@ -373,6 +378,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
         return true;
     }
 
+    // Control frames are accumulated until FIN, then decoded as a single perf message.
     const auto control_payload = received.payload();
     session.control_bytes.insert(session.control_bytes.end(), control_payload.begin(),
                                  control_payload.end());
@@ -395,6 +401,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
         return send_control(session, QuicPerfSessionError{.reason = *error});
     }
 
+    // A valid start message arms the session and acknowledges readiness on the control stream.
     session.start = *start;
     session.ready_sent = true;
     return send_control(session,

@@ -156,7 +156,7 @@ int linux_traffic_class_for_ecn(QuicEcnCodepoint ecn) {
     const auto index = static_cast<unsigned>(ecn);
     return index < kEcnToTrafficClass.size() ? kEcnToTrafficClass[index] : 0x00; }
 
-QuicEcnCodepoint ecn_from_linux_traffic_class(int traffic_class) { return kTrafficClassToEcn[static_cast<unsigned>(traffic_class) & 0x03u]; }
+QuicEcnCodepoint ecn_from_linux_traffic_class(int linux_traffic_class) { return kTrafficClassToEcn[static_cast<unsigned>(linux_traffic_class) & 0x03u]; }
 // clang-format on
 
 bool is_ipv4_mapped_ipv6_address(const sockaddr_storage &peer, socklen_t peer_len) {
@@ -164,8 +164,8 @@ bool is_ipv4_mapped_ipv6_address(const sockaddr_storage &peer, socklen_t peer_le
         return false;
     }
 
-    const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(&peer);
-    return IN6_IS_ADDR_V4MAPPED(&ipv6->sin6_addr);
+    const auto *ipv6_peer = reinterpret_cast<const sockaddr_in6 *>(&peer);
+    return IN6_IS_ADDR_V4MAPPED(&ipv6_peer->sin6_addr);
 }
 
 bool should_apply_ipv6_flow_label(const sockaddr_storage &peer, socklen_t peer_len) {
@@ -199,14 +199,14 @@ std::uint32_t hash_ipv6_flow_label_input(const sockaddr_in6 &peer,
 
 sockaddr_storage peer_with_ipv6_flow_label(const sockaddr_storage &peer, socklen_t peer_len,
                                            std::span<const std::byte> datagram) {
-    sockaddr_storage out = peer;
+    sockaddr_storage peer_with_flow_label = peer;
     if (!should_apply_ipv6_flow_label(peer, peer_len)) {
-        return out;
+        return peer_with_flow_label;
     }
 
-    auto *ipv6 = reinterpret_cast<sockaddr_in6 *>(&out);
-    ipv6->sin6_flowinfo = htonl(hash_ipv6_flow_label_input(*ipv6, datagram));
-    return out;
+    auto *ipv6_peer = reinterpret_cast<sockaddr_in6 *>(&peer_with_flow_label);
+    ipv6_peer->sin6_flowinfo = htonl(hash_ipv6_flow_label_input(*ipv6_peer, datagram));
+    return peer_with_flow_label;
 }
 
 QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message) {
@@ -214,18 +214,19 @@ QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message) {
     if ((message.msg_flags & MSG_CTRUNC) != 0) {
         return QuicEcnCodepoint::unavailable;
     }
-    auto *control = CMSG_FIRSTHDR(&message);
-    while (control != nullptr) {
-        if ((control->cmsg_level == IPPROTO_IP && control->cmsg_type == IP_TOS) ||
-            (control->cmsg_level == IPPROTO_IPV6 && control->cmsg_type == IPV6_TCLASS)) {
-            int traffic_class = 0;
+    auto *control_header = CMSG_FIRSTHDR(&message);
+    while (control_header != nullptr) {
+        if ((control_header->cmsg_level == IPPROTO_IP && control_header->cmsg_type == IP_TOS) ||
+            (control_header->cmsg_level == IPPROTO_IPV6 &&
+             control_header->cmsg_type == IPV6_TCLASS)) {
+            int received_traffic_class = 0;
             const auto payload_size =
-                control->cmsg_len > CMSG_LEN(0) ? control->cmsg_len - CMSG_LEN(0) : 0;
-            std::memcpy(&traffic_class, CMSG_DATA(control),
-                        std::min<std::size_t>(sizeof(traffic_class), payload_size));
-            return ecn_from_linux_traffic_class(traffic_class);
+                control_header->cmsg_len > CMSG_LEN(0) ? control_header->cmsg_len - CMSG_LEN(0) : 0;
+            std::memcpy(&received_traffic_class, CMSG_DATA(control_header),
+                        std::min<std::size_t>(sizeof(received_traffic_class), payload_size));
+            return ecn_from_linux_traffic_class(received_traffic_class);
         }
-        control = CMSG_NXTHDR(const_cast<msghdr *>(&message), control);
+        control_header = CMSG_NXTHDR(const_cast<msghdr *>(&message), control_header);
     }
 #else
     static_cast<void>(message);
@@ -238,17 +239,17 @@ std::size_t recvmsg_udp_gro_segment_size_from_control(const msghdr &message) {
     if ((message.msg_flags & MSG_CTRUNC) != 0) {
         return 0;
     }
-    auto *control = CMSG_FIRSTHDR(const_cast<msghdr *>(&message));
-    while (control != nullptr) {
-        if (control->cmsg_level == SOL_UDP && control->cmsg_type == UDP_GRO) {
+    auto *control_header = CMSG_FIRSTHDR(const_cast<msghdr *>(&message));
+    while (control_header != nullptr) {
+        if (control_header->cmsg_level == SOL_UDP && control_header->cmsg_type == UDP_GRO) {
             std::uint16_t segment_size = 0;
             const auto payload_size =
-                control->cmsg_len > CMSG_LEN(0) ? control->cmsg_len - CMSG_LEN(0) : 0;
-            std::memcpy(&segment_size, CMSG_DATA(control),
+                control_header->cmsg_len > CMSG_LEN(0) ? control_header->cmsg_len - CMSG_LEN(0) : 0;
+            std::memcpy(&segment_size, CMSG_DATA(control_header),
                         std::min<std::size_t>(sizeof(segment_size), payload_size));
             return segment_size;
         }
-        control = CMSG_NXTHDR(const_cast<msghdr *>(&message), control);
+        control_header = CMSG_NXTHDR(const_cast<msghdr *>(&message), control_header);
     }
 #else
     static_cast<void>(message);
@@ -348,10 +349,10 @@ bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_s
         if (io_profile_enabled()) {
             ++io_profile_counters().sendto_calls;
         }
-        const ssize_t sent = socket_io_backend_ops_state().sendto_fn(
+        const ssize_t sendto_result = socket_io_backend_ops_state().sendto_fn(
             fd, buffer, datagram.size(), 0, reinterpret_cast<const sockaddr *>(&send_peer),
             peer_len);
-        if (sent >= 0) {
+        if (sendto_result >= 0) {
             return true;
         }
         if (ignorable_udp_send_error(errno, is_pmtu_probe)) {
@@ -363,36 +364,38 @@ bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_s
         return false;
     }
 
-    iovec iov{
+    iovec send_iovec{
         .iov_base = const_cast<void *>(buffer),
         .iov_len = datagram.size(),
     };
-    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> control{};
-    msghdr message{};
-    message.msg_name = const_cast<sockaddr *>(reinterpret_cast<const sockaddr *>(&send_peer));
-    message.msg_namelen = peer_len;
-    message.msg_iov = &iov;
-    message.msg_iovlen = 1;
+    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> control_storage{};
+    msghdr outbound_message{};
+    outbound_message.msg_name =
+        const_cast<sockaddr *>(reinterpret_cast<const sockaddr *>(&send_peer));
+    outbound_message.msg_namelen = peer_len;
+    outbound_message.msg_iov = &send_iovec;
+    outbound_message.msg_iovlen = 1;
     if (is_ect_codepoint(ecn)) {
-        message.msg_control = control.data();
-        message.msg_controllen = control.size();
+        outbound_message.msg_control = control_storage.data();
+        outbound_message.msg_controllen = control_storage.size();
 
-        auto *header = reinterpret_cast<cmsghdr *>(control.data());
+        auto *control_header = reinterpret_cast<cmsghdr *>(control_storage.data());
         const bool use_ipv4_traffic_class =
             peer.ss_family == AF_INET || is_ipv4_mapped_ipv6_address(peer, peer_len);
-        header->cmsg_level = use_ipv4_traffic_class ? IPPROTO_IP : IPPROTO_IPV6;
-        header->cmsg_type = use_ipv4_traffic_class ? IP_TOS : IPV6_TCLASS;
-        header->cmsg_len = CMSG_LEN(sizeof(int));
-        const int traffic_class = linux_traffic_class_for_ecn(ecn);
-        std::memcpy(CMSG_DATA(header), &traffic_class, sizeof(traffic_class));
-        message.msg_controllen = header->cmsg_len;
+        control_header->cmsg_level = use_ipv4_traffic_class ? IPPROTO_IP : IPPROTO_IPV6;
+        control_header->cmsg_type = use_ipv4_traffic_class ? IP_TOS : IPV6_TCLASS;
+        control_header->cmsg_len = CMSG_LEN(sizeof(int));
+        const int datagram_ecn_tclass = linux_traffic_class_for_ecn(ecn);
+        std::memcpy(CMSG_DATA(control_header), &datagram_ecn_tclass, sizeof(datagram_ecn_tclass));
+        outbound_message.msg_controllen = control_header->cmsg_len;
     }
 
     if (io_profile_enabled()) {
         ++io_profile_counters().sendmsg_calls;
     }
-    const ssize_t sent = socket_io_backend_ops_state().sendmsg_fn(fd, &message, 0);
-    if (sent >= 0) {
+    const ssize_t sendmsg_result =
+        socket_io_backend_ops_state().sendmsg_fn(fd, &outbound_message, 0);
+    if (sendmsg_result >= 0) {
         return true;
     }
     if (ignorable_udp_send_error(errno, is_pmtu_probe)) {
@@ -476,11 +479,11 @@ COQUIC_NO_PROFILE bool can_extend_sendmmsg_run(std::size_t same_peer_end,
     return same_peer_end < datagram_count;
 }
 
-COQUIC_NO_PROFILE bool sendmmsg_run_can_include(const QuicIoEngineTxDatagram &first,
+COQUIC_NO_PROFILE bool sendmmsg_run_can_include(const QuicIoEngineTxDatagram &first_datagram,
                                                 std::span<const QuicIoEngineTxDatagram> datagrams,
                                                 std::size_t index) {
     return can_extend_sendmmsg_run(index, datagrams.size()) &&
-           tx_datagram_matches_sendmmsg_batch(first, datagrams[index]);
+           tx_datagram_matches_sendmmsg_batch(first_datagram, datagrams[index]);
 }
 
 COQUIC_NO_PROFILE bool uses_ipv4_traffic_class_control(const sockaddr_storage &peer,
@@ -488,46 +491,49 @@ COQUIC_NO_PROFILE bool uses_ipv4_traffic_class_control(const sockaddr_storage &p
     return peer.ss_family == AF_INET || is_ipv4_mapped_ipv6_address(peer, peer_len);
 }
 
-COQUIC_NO_PROFILE void set_traffic_class_control_message_header(cmsghdr &header,
+COQUIC_NO_PROFILE void set_traffic_class_control_message_header(cmsghdr &control_header,
                                                                 bool use_ipv4_traffic_class) {
-    header.cmsg_level = use_ipv4_traffic_class ? IPPROTO_IP : IPPROTO_IPV6;
-    header.cmsg_type = use_ipv4_traffic_class ? IP_TOS : IPV6_TCLASS;
+    control_header.cmsg_level = use_ipv4_traffic_class ? IPPROTO_IP : IPPROTO_IPV6;
+    control_header.cmsg_type = use_ipv4_traffic_class ? IP_TOS : IPV6_TCLASS;
 }
 
-void set_sendmsg_ecn_control(msghdr &message, EcnControlStorage &control, QuicEcnCodepoint ecn,
-                             const sockaddr_storage &peer, socklen_t peer_len) {
-    auto *header = reinterpret_cast<cmsghdr *>(control.bytes.data());
+void set_sendmsg_ecn_control(msghdr &message, EcnControlStorage &control_storage,
+                             QuicEcnCodepoint ecn, const sockaddr_storage &peer,
+                             socklen_t peer_len) {
+    auto *control_header = reinterpret_cast<cmsghdr *>(control_storage.bytes.data());
     const bool use_ipv4_traffic_class = uses_ipv4_traffic_class_control(peer, peer_len);
-    set_traffic_class_control_message_header(*header, use_ipv4_traffic_class);
-    header->cmsg_len = CMSG_LEN(sizeof(int));
-    const int traffic_class = linux_traffic_class_for_ecn(ecn);
-    std::memcpy(CMSG_DATA(header), &traffic_class, sizeof(traffic_class));
-    message.msg_control = control.bytes.data();
-    message.msg_controllen = header->cmsg_len;
+    set_traffic_class_control_message_header(*control_header, use_ipv4_traffic_class);
+    control_header->cmsg_len = CMSG_LEN(sizeof(int));
+    const int sendmsg_ecn_tclass = linux_traffic_class_for_ecn(ecn);
+    std::memcpy(CMSG_DATA(control_header), &sendmsg_ecn_tclass, sizeof(sendmsg_ecn_tclass));
+    message.msg_control = control_storage.bytes.data();
+    message.msg_controllen = control_header->cmsg_len;
 }
 
-void append_sendmsg_ecn_control(msghdr &message, UdpGsoControlStorage &control,
+void append_sendmsg_ecn_control(msghdr &message, UdpGsoControlStorage &control_storage,
                                 QuicEcnCodepoint ecn, const sockaddr_storage &peer,
                                 socklen_t peer_len, std::byte *&control_cursor) {
-    auto *header = reinterpret_cast<cmsghdr *>(control_cursor);
+    auto *control_header = reinterpret_cast<cmsghdr *>(control_cursor);
     const bool use_ipv4_traffic_class = uses_ipv4_traffic_class_control(peer, peer_len);
-    set_traffic_class_control_message_header(*header, use_ipv4_traffic_class);
-    header->cmsg_len = CMSG_LEN(sizeof(int));
-    const int traffic_class = linux_traffic_class_for_ecn(ecn);
-    std::memcpy(CMSG_DATA(header), &traffic_class, sizeof(traffic_class));
+    set_traffic_class_control_message_header(*control_header, use_ipv4_traffic_class);
+    control_header->cmsg_len = CMSG_LEN(sizeof(int));
+    const int udp_gso_ecn_tclass = linux_traffic_class_for_ecn(ecn);
+    std::memcpy(CMSG_DATA(control_header), &udp_gso_ecn_tclass, sizeof(udp_gso_ecn_tclass));
     control_cursor += CMSG_SPACE(sizeof(int));
-    message.msg_controllen = static_cast<std::size_t>(control_cursor - control.bytes.data());
+    message.msg_controllen =
+        static_cast<std::size_t>(control_cursor - control_storage.bytes.data());
 }
 
-void append_udp_gso_control(msghdr &message, UdpGsoControlStorage &control,
+void append_udp_gso_control(msghdr &message, UdpGsoControlStorage &control_storage,
                             std::uint16_t segment_size, std::byte *&control_cursor) {
-    auto *header = reinterpret_cast<cmsghdr *>(control_cursor);
-    header->cmsg_level = SOL_UDP;
-    header->cmsg_type = UDP_SEGMENT;
-    header->cmsg_len = CMSG_LEN(sizeof(segment_size));
-    std::memcpy(CMSG_DATA(header), &segment_size, sizeof(segment_size));
+    auto *control_header = reinterpret_cast<cmsghdr *>(control_cursor);
+    control_header->cmsg_level = SOL_UDP;
+    control_header->cmsg_type = UDP_SEGMENT;
+    control_header->cmsg_len = CMSG_LEN(sizeof(segment_size));
+    std::memcpy(CMSG_DATA(control_header), &segment_size, sizeof(segment_size));
     control_cursor += CMSG_SPACE(sizeof(segment_size));
-    message.msg_controllen = static_cast<std::size_t>(control_cursor - control.bytes.data());
+    message.msg_controllen =
+        static_cast<std::size_t>(control_cursor - control_storage.bytes.data());
 }
 
 bool udp_gso_supports_batch(std::span<const QuicIoEngineTxDatagram> datagrams) {
@@ -569,34 +575,36 @@ bool send_udp_gso_batch(std::span<const QuicIoEngineTxDatagram> datagrams,
         };
     }
 
-    UdpGsoControlStorage control{};
-    msghdr message{};
+    UdpGsoControlStorage gso_control_storage{};
+    msghdr gso_send_message{};
     peers.front() = peer_with_ipv6_flow_label(datagrams.front().peer, datagrams.front().peer_len,
                                               datagrams.front().bytes);
-    message.msg_name = reinterpret_cast<sockaddr *>(&peers.front());
-    message.msg_namelen = datagrams.front().peer_len;
-    message.msg_iov = iovecs.data();
-    message.msg_iovlen = iovecs.size();
-    message.msg_control = control.bytes.data();
-    message.msg_controllen = 0;
+    gso_send_message.msg_name = reinterpret_cast<sockaddr *>(&peers.front());
+    gso_send_message.msg_namelen = datagrams.front().peer_len;
+    gso_send_message.msg_iov = iovecs.data();
+    gso_send_message.msg_iovlen = iovecs.size();
+    gso_send_message.msg_control = gso_control_storage.bytes.data();
+    gso_send_message.msg_controllen = 0;
 
-    auto *control_cursor = control.bytes.data();
+    auto *control_cursor = gso_control_storage.bytes.data();
     if (is_ect_codepoint(datagrams.front().ecn)) {
-        append_sendmsg_ecn_control(message, control, datagrams.front().ecn, datagrams.front().peer,
-                                   datagrams.front().peer_len, control_cursor);
+        append_sendmsg_ecn_control(gso_send_message, gso_control_storage, datagrams.front().ecn,
+                                   datagrams.front().peer, datagrams.front().peer_len,
+                                   control_cursor);
     }
-    append_udp_gso_control(message, control, static_cast<std::uint16_t>(segment_size),
-                           control_cursor);
+    append_udp_gso_control(gso_send_message, gso_control_storage,
+                           static_cast<std::uint16_t>(segment_size), control_cursor);
 
-    ssize_t sent = 0;
+    ssize_t sendmsg_result = 0;
     do {
         if (io_profile_enabled()) {
             ++io_profile_counters().udp_gso_sendmsg_calls;
         }
-        sent = socket_io_backend_ops_state().sendmsg_fn(datagrams.front().socket_fd, &message, 0);
-    } while (sent < 0 && errno == EINTR);
+        sendmsg_result = socket_io_backend_ops_state().sendmsg_fn(datagrams.front().socket_fd,
+                                                                  &gso_send_message, 0);
+    } while (sendmsg_result < 0 && errno == EINTR);
 
-    if (sent >= 0) {
+    if (sendmsg_result >= 0) {
         if (io_profile_enabled()) {
             io_profile_counters().udp_gso_datagrams += datagrams.size();
         }
@@ -651,12 +659,12 @@ bool sendmmsg_batch(std::span<const QuicIoEngineTxDatagram> datagrams, std::stri
 
     auto &scratch = sendmmsg_batch_scratch();
     auto &iovecs = scratch.iovecs;
-    auto &messages = scratch.messages;
+    auto &send_messages = scratch.messages;
     auto &ecn_controls = scratch.ecn_controls;
     auto &peers = scratch.peers;
 
     iovecs.resize(datagrams.size());
-    messages.resize(datagrams.size());
+    send_messages.resize(datagrams.size());
     peers.resize(datagrams.size());
     if (is_ect_codepoint(datagrams.front().ecn)) {
         ecn_controls.resize(datagrams.size());
@@ -670,32 +678,33 @@ bool sendmmsg_batch(std::span<const QuicIoEngineTxDatagram> datagrams, std::stri
             .iov_len = datagram.bytes.size(),
         };
         peers[index] = peer_with_ipv6_flow_label(datagram.peer, datagram.peer_len, datagram.bytes);
-        auto &message = messages[index];
-        message = {};
-        message.msg_hdr.msg_name = reinterpret_cast<sockaddr *>(&peers[index]);
-        message.msg_hdr.msg_namelen = datagram.peer_len;
-        message.msg_hdr.msg_iov = &iovecs[index];
-        message.msg_hdr.msg_iovlen = 1;
+        auto &outbound_message = send_messages[index];
+        outbound_message = {};
+        outbound_message.msg_hdr.msg_name = reinterpret_cast<sockaddr *>(&peers[index]);
+        outbound_message.msg_hdr.msg_namelen = datagram.peer_len;
+        outbound_message.msg_hdr.msg_iov = &iovecs[index];
+        outbound_message.msg_hdr.msg_iovlen = 1;
         if (!ecn_controls.empty()) {
-            set_sendmsg_ecn_control(message.msg_hdr, ecn_controls[index], datagram.ecn,
+            set_sendmsg_ecn_control(outbound_message.msg_hdr, ecn_controls[index], datagram.ecn,
                                     datagram.peer, datagram.peer_len);
         }
     }
 
-    unsigned sent_total = 0;
-    while (sent_total < messages.size()) {
-        const auto remaining =
-            static_cast<unsigned>(messages.size() - static_cast<std::size_t>(sent_total));
-        int sent = 0;
+    unsigned sent_message_total = 0;
+    while (sent_message_total < send_messages.size()) {
+        const auto remaining = static_cast<unsigned>(send_messages.size() -
+                                                     static_cast<std::size_t>(sent_message_total));
+        int sent_message_count = 0;
         do {
             if (io_profile_enabled()) {
                 ++io_profile_counters().sendmmsg_calls;
             }
-            sent = socket_io_backend_ops_state().sendmmsg_fn(
-                datagrams.front().socket_fd, messages.data() + sent_total, remaining, 0);
-        } while (sent < 0 && errno == EINTR);
+            sent_message_count = socket_io_backend_ops_state().sendmmsg_fn(
+                datagrams.front().socket_fd, send_messages.data() + sent_message_total, remaining,
+                0);
+        } while (sent_message_count < 0 && errno == EINTR);
 
-        if (sent < 0) {
+        if (sent_message_count < 0) {
             if (ignorable_udp_send_error(errno, /*is_pmtu_probe=*/false)) {
                 return true;
             }
@@ -703,23 +712,25 @@ bool sendmmsg_batch(std::span<const QuicIoEngineTxDatagram> datagrams, std::stri
                       << '\n';
             return false;
         }
-        if (sent == 0) {
+        if (sent_message_count == 0) {
             return true;
         }
         if (io_profile_enabled()) {
-            io_profile_counters().sendmmsg_datagrams += static_cast<std::uint64_t>(sent);
+            io_profile_counters().sendmmsg_datagrams +=
+                static_cast<std::uint64_t>(sent_message_count);
         }
-        sent_total += static_cast<unsigned>(sent);
+        sent_message_total += static_cast<unsigned>(sent_message_count);
     }
     return true;
 }
 
 bool send_datagrams(std::span<const QuicIoEngineTxDatagram> datagrams, std::string_view role_name) {
     for (std::size_t offset = 0; offset < datagrams.size();) {
-        const auto &first = datagrams[offset];
-        if (!sendmmsg_supports_datagram(first)) {
-            if (!send_datagram(first.socket_fd, first.bytes, first.peer, first.peer_len, role_name,
-                               first.ecn, first.is_pmtu_probe)) {
+        const auto &first_datagram = datagrams[offset];
+        if (!sendmmsg_supports_datagram(first_datagram)) {
+            if (!send_datagram(first_datagram.socket_fd, first_datagram.bytes, first_datagram.peer,
+                               first_datagram.peer_len, role_name, first_datagram.ecn,
+                               first_datagram.is_pmtu_probe)) {
                 return false;
             }
             ++offset;
@@ -727,7 +738,7 @@ bool send_datagrams(std::span<const QuicIoEngineTxDatagram> datagrams, std::stri
         }
 
         std::size_t same_peer_end = offset + 1;
-        while (sendmmsg_run_can_include(first, datagrams, same_peer_end)) {
+        while (sendmmsg_run_can_include(first_datagram, datagrams, same_peer_end)) {
             ++same_peer_end;
         }
 
@@ -735,27 +746,28 @@ bool send_datagrams(std::span<const QuicIoEngineTxDatagram> datagrams, std::stri
         while (run_offset < same_peer_end) {
             const auto equal_size_run_end = [&](std::size_t begin) {
                 const auto &run_first = datagrams[begin];
-                std::size_t end = begin + 1;
-                while (end < same_peer_end &&
-                       tx_datagram_matches_udp_gso_batch(run_first, datagrams[end])) {
-                    ++end;
+                std::size_t run_end = begin + 1;
+                while (run_end < same_peer_end &&
+                       tx_datagram_matches_udp_gso_batch(run_first, datagrams[run_end])) {
+                    ++run_end;
                 }
-                return end;
+                return run_end;
             };
 
-            const auto gso_run_end = equal_size_run_end(run_offset);
-            if (gso_run_end - run_offset > 1 && datagrams[run_offset].bytes.size() > 0) {
+            auto same_size_run_end = equal_size_run_end(run_offset);
+            if (same_size_run_end - run_offset > 1 && datagrams[run_offset].bytes.size() > 0) {
                 const auto max_segments = std::min<std::size_t>(
                     64, std::max<std::size_t>(1u, kMaxDatagramBytes /
                                                       datagrams[run_offset].bytes.size()));
-                for (std::size_t chunk_offset = run_offset; chunk_offset < gso_run_end;) {
-                    const auto chunk_size = std::min(max_segments, gso_run_end - chunk_offset);
+                for (std::size_t chunk_offset = run_offset; chunk_offset < same_size_run_end;) {
+                    const auto chunk_size =
+                        std::min(max_segments, same_size_run_end - chunk_offset);
                     if (!sendmmsg_batch(datagrams.subspan(chunk_offset, chunk_size), role_name)) {
                         return false;
                     }
                     chunk_offset += chunk_size;
                 }
-                run_offset = gso_run_end;
+                run_offset = same_size_run_end;
                 continue;
             }
 
@@ -791,26 +803,27 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
                 socket_fd, inbound.data(), inbound.size(), flags,
                 reinterpret_cast<sockaddr *>(&source), &source_len);
         } else {
-            std::array<std::byte, 256> control{};
-            iovec iov{
+            std::array<std::byte, 256> recv_control_storage{};
+            iovec recv_iovec{
                 .iov_base = inbound.data(),
                 .iov_len = inbound.size(),
             };
-            msghdr message{};
-            message.msg_name = &source;
-            message.msg_namelen = sizeof(source);
-            message.msg_iov = &iov;
-            message.msg_iovlen = 1;
-            message.msg_control = control.data();
-            message.msg_controllen = control.size();
+            msghdr inbound_message{};
+            inbound_message.msg_name = &source;
+            inbound_message.msg_namelen = sizeof(source);
+            inbound_message.msg_iov = &recv_iovec;
+            inbound_message.msg_iovlen = 1;
+            inbound_message.msg_control = recv_control_storage.data();
+            inbound_message.msg_controllen = recv_control_storage.size();
             if (io_profile_enabled()) {
                 ++io_profile_counters().recvmsg_calls;
             }
-            bytes_read = socket_io_backend_ops_state().recvmsg_fn(socket_fd, &message, flags);
-            source_len = static_cast<socklen_t>(message.msg_namelen);
+            bytes_read =
+                socket_io_backend_ops_state().recvmsg_fn(socket_fd, &inbound_message, flags);
+            source_len = static_cast<socklen_t>(inbound_message.msg_namelen);
             if (bytes_read >= 0) {
-                inbound_ecn = recvmsg_ecn_from_control(message);
-                auto segment_size = recvmsg_udp_gro_segment_size_from_control(message);
+                inbound_ecn = recvmsg_ecn_from_control(inbound_message);
+                auto segment_size = recvmsg_udp_gro_segment_size_from_control(inbound_message);
                 if (segment_size > 0) {
                     segment_size = std::min(segment_size, static_cast<std::size_t>(bytes_read));
                 }
@@ -895,18 +908,19 @@ receive_datagram_batch_status_for_error(bool retryable_error) {
     return retryable_error ? ReceiveDatagramStatus::would_block : ReceiveDatagramStatus::error;
 }
 
-void append_received_datagram_segments(std::vector<ReceiveDatagramResult> &out,
+void append_received_datagram_segments(std::vector<ReceiveDatagramResult> &output_datagrams,
                                        ReceiveDatagramResult received) {
     const auto received_size = received.payload().size();
     const auto segment_size = received.udp_gro_segment_size;
     if (segment_size == 0 || segment_size >= received_size) {
-        out.push_back(std::move(received));
+        output_datagrams.push_back(std::move(received));
         return;
     }
 
-    auto shared = received.shared_bytes;
-    if (shared == nullptr) {
-        shared = std::make_shared<std::vector<std::byte>>(std::move(received.bytes));
+    auto shared_datagram_storage = received.shared_bytes;
+    if (shared_datagram_storage == nullptr) {
+        shared_datagram_storage =
+            std::make_shared<std::vector<std::byte>>(std::move(received.bytes));
     }
     const auto base_begin = received.begin;
     const auto segment_count = (received_size + segment_size - 1u) / segment_size;
@@ -917,35 +931,35 @@ void append_received_datagram_segments(std::vector<ReceiveDatagramResult> &out,
     for (std::size_t segment_index = 0; segment_index < segment_count; ++segment_index) {
         const auto begin = base_begin + segment_index * segment_size;
         const auto end = std::min(base_begin + received_size, begin + segment_size);
-        out.push_back(ReceiveDatagramResult{
+        output_datagrams.push_back(ReceiveDatagramResult{
             .status = ReceiveDatagramStatus::ok,
             .ecn = received.ecn,
             .source = received.source,
             .source_len = received.source_len,
             .input_time = received.input_time,
-            .shared_bytes = shared,
+            .shared_bytes = shared_datagram_storage,
             .begin = begin,
             .end = end,
         });
     }
 }
 
-void append_shared_received_datagram_segments(std::vector<ReceiveDatagramResult> &out,
-                                              const std::shared_ptr<std::vector<std::byte>> &shared,
-                                              std::size_t datagram_begin, std::size_t datagram_size,
-                                              QuicEcnCodepoint ecn, const sockaddr_storage &source,
-                                              socklen_t source_len, QuicCoreTimePoint input_time,
-                                              std::size_t udp_gro_segment_size) {
+void append_shared_received_datagram_segments(
+    std::vector<ReceiveDatagramResult> &output_datagrams,
+    const std::shared_ptr<std::vector<std::byte>> &shared_datagram_storage,
+    std::size_t datagram_begin, std::size_t datagram_size, QuicEcnCodepoint ecn,
+    const sockaddr_storage &source, socklen_t source_len, QuicCoreTimePoint input_time,
+    std::size_t udp_gro_segment_size) {
     const auto segment_size =
         udp_gro_segment_size > 0 ? std::min(udp_gro_segment_size, datagram_size) : 0u;
     if (segment_size == 0 || segment_size >= datagram_size) {
-        out.push_back(ReceiveDatagramResult{
+        output_datagrams.push_back(ReceiveDatagramResult{
             .status = ReceiveDatagramStatus::ok,
             .ecn = ecn,
             .source = source,
             .source_len = source_len,
             .input_time = input_time,
-            .shared_bytes = shared,
+            .shared_bytes = shared_datagram_storage,
             .begin = datagram_begin,
             .end = datagram_begin + datagram_size,
         });
@@ -960,13 +974,13 @@ void append_shared_received_datagram_segments(std::vector<ReceiveDatagramResult>
     for (std::size_t segment_index = 0; segment_index < segment_count; ++segment_index) {
         const auto begin = datagram_begin + segment_index * segment_size;
         const auto end = std::min(datagram_begin + datagram_size, begin + segment_size);
-        out.push_back(ReceiveDatagramResult{
+        output_datagrams.push_back(ReceiveDatagramResult{
             .status = ReceiveDatagramStatus::ok,
             .ecn = ecn,
             .source = source,
             .source_len = source_len,
             .input_time = input_time,
-            .shared_bytes = shared,
+            .shared_bytes = shared_datagram_storage,
             .begin = begin,
             .end = end,
         });
@@ -1000,28 +1014,28 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
     auto &controls = scratch.controls;
     auto &sources = scratch.sources;
     auto &iovecs = scratch.iovecs;
-    auto &messages = scratch.messages;
+    auto &recv_messages = scratch.messages;
     auto &begins = scratch.begins;
     auto &sizes = scratch.sizes;
 
     for (std::size_t index = 0; index < batch_size; ++index) {
         sources[index] = {};
-        messages[index] = {};
+        recv_messages[index] = {};
         iovecs[index] = iovec{
             .iov_base = inbound[index].data(),
             .iov_len = inbound[index].size(),
         };
-        auto &message = messages[index].msg_hdr;
-        message.msg_name = &sources[index];
-        message.msg_namelen = sizeof(sources[index]);
-        message.msg_iov = &iovecs[index];
-        message.msg_iovlen = 1;
-        message.msg_control = controls[index].data();
-        message.msg_controllen = controls[index].size();
+        auto &inbound_message = recv_messages[index].msg_hdr;
+        inbound_message.msg_name = &sources[index];
+        inbound_message.msg_namelen = sizeof(sources[index]);
+        inbound_message.msg_iov = &iovecs[index];
+        inbound_message.msg_iovlen = 1;
+        inbound_message.msg_control = controls[index].data();
+        inbound_message.msg_controllen = controls[index].size();
     }
 
     const int received_count = recvmmsg_retry_on_eintr(
-        socket_fd, messages.data(), static_cast<unsigned int>(batch_size), MSG_DONTWAIT);
+        socket_fd, recv_messages.data(), static_cast<unsigned int>(batch_size), MSG_DONTWAIT);
 
     if (received_count <= 0) {
         const bool retryable_error = receive_error_is_would_block_or_ignorable(errno);
@@ -1040,42 +1054,42 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
     }
 
     const auto input_time = now();
-    const auto received_datagrams = static_cast<std::size_t>(received_count);
-    begins.resize(received_datagrams);
-    sizes.resize(received_datagrams);
+    auto received_datagram_count = static_cast<std::size_t>(received_count);
+    begins.resize(received_datagram_count);
+    sizes.resize(received_datagram_count);
     std::size_t shared_size = 0;
     for (int index = 0; index < received_count; ++index) {
         const auto received_size =
-            static_cast<std::size_t>(messages[static_cast<std::size_t>(index)].msg_len);
+            static_cast<std::size_t>(recv_messages[static_cast<std::size_t>(index)].msg_len);
         begins[static_cast<std::size_t>(index)] = shared_size;
         sizes[static_cast<std::size_t>(index)] = received_size;
         shared_size += received_size;
     }
 
-    auto shared = std::make_shared<std::vector<std::byte>>();
-    shared->resize(shared_size);
+    auto shared_datagram_storage = std::make_shared<std::vector<std::byte>>();
+    shared_datagram_storage->resize(shared_size);
     for (int index = 0; index < received_count; ++index) {
         const auto datagram_index = static_cast<std::size_t>(index);
-        std::memcpy(shared->data() + begins[datagram_index], inbound[datagram_index].data(),
-                    sizes[datagram_index]);
+        std::memcpy(shared_datagram_storage->data() + begins[datagram_index],
+                    inbound[datagram_index].data(), sizes[datagram_index]);
     }
 
-    std::vector<ReceiveDatagramResult> out;
-    out.reserve(received_datagrams);
+    std::vector<ReceiveDatagramResult> received_results;
+    received_results.reserve(received_datagram_count);
     for (int index = 0; index < received_count; ++index) {
         const auto datagram_index = static_cast<std::size_t>(index);
-        auto &message = messages[static_cast<std::size_t>(index)].msg_hdr;
-        auto segment_size = recvmsg_udp_gro_segment_size_from_control(message);
-        const auto ecn = recvmsg_ecn_from_control(message);
+        auto &inbound_message = recv_messages[static_cast<std::size_t>(index)].msg_hdr;
+        auto segment_size = recvmsg_udp_gro_segment_size_from_control(inbound_message);
+        const auto ecn = recvmsg_ecn_from_control(inbound_message);
         const auto source = sources[static_cast<std::size_t>(index)];
-        const auto source_len = static_cast<socklen_t>(message.msg_namelen);
-        append_shared_received_datagram_segments(out, shared, begins[datagram_index],
-                                                 sizes[datagram_index], ecn, source, source_len,
-                                                 input_time, segment_size);
+        const auto source_len = static_cast<socklen_t>(inbound_message.msg_namelen);
+        append_shared_received_datagram_segments(received_results, shared_datagram_storage,
+                                                 begins[datagram_index], sizes[datagram_index], ecn,
+                                                 source, source_len, input_time, segment_size);
     }
     return ReceiveDatagramBatchResult{
         .status = ReceiveDatagramStatus::ok,
-        .datagrams = std::move(out),
+        .datagrams = std::move(received_results),
         .may_have_more_datagrams = static_cast<std::size_t>(received_count) == batch_size,
     };
 }
@@ -1110,21 +1124,21 @@ int poll_descriptors(std::span<pollfd> descriptors, int timeout_ms,
 PathMtuUpdateResult receive_path_mtu_update(int socket_fd, std::string_view role_name) {
 #if defined(__linux__)
     std::array<std::byte, 256> inbound{};
-    std::array<std::byte, 512> control{};
+    std::array<std::byte, 512> control_storage{};
     sockaddr_storage peer{};
-    iovec iov{
+    iovec recv_iovec{
         .iov_base = inbound.data(),
         .iov_len = inbound.size(),
     };
-    msghdr message{};
-    message.msg_name = &peer;
-    message.msg_namelen = sizeof(peer);
-    message.msg_iov = &iov;
-    message.msg_iovlen = 1;
-    message.msg_control = control.data();
-    message.msg_controllen = control.size();
+    msghdr inbound_message{};
+    inbound_message.msg_name = &peer;
+    inbound_message.msg_namelen = sizeof(peer);
+    inbound_message.msg_iov = &recv_iovec;
+    inbound_message.msg_iovlen = 1;
+    inbound_message.msg_control = control_storage.data();
+    inbound_message.msg_controllen = control_storage.size();
 
-    const ssize_t bytes_read = recvmsg_retry_on_eintr(socket_fd, &message, MSG_ERRQUEUE);
+    const ssize_t bytes_read = recvmsg_retry_on_eintr(socket_fd, &inbound_message, MSG_ERRQUEUE);
 
     if (bytes_read < 0) {
         return PathMtuUpdateResult{
@@ -1132,7 +1146,7 @@ PathMtuUpdateResult receive_path_mtu_update(int socket_fd, std::string_view role
         };
     }
 
-    auto *control_message = first_control_message(message);
+    auto *control_message = first_control_message(inbound_message);
     while (control_message != nullptr) {
         const bool ipv4_error = control_message_is_ipv4_error(*control_message);
         const bool ipv6_error = control_message_is_ipv6_error(*control_message);
@@ -1146,12 +1160,12 @@ PathMtuUpdateResult receive_path_mtu_update(int socket_fd, std::string_view role
                     .status = PathMtuUpdateStatus::ok,
                     .max_udp_payload_size = max_udp_payload_size,
                     .peer = peer,
-                    .peer_len = static_cast<socklen_t>(message.msg_namelen),
+                    .peer_len = static_cast<socklen_t>(inbound_message.msg_namelen),
                     .input_time = now(),
                 };
             }
         }
-        control_message = CMSG_NXTHDR(&message, control_message);
+        control_message = CMSG_NXTHDR(&inbound_message, control_message);
     }
 
     return PathMtuUpdateResult{
@@ -1408,7 +1422,7 @@ struct RecordedSendMsgForTests {
     int socket_fd = -1;
     int level = 0;
     int type = 0;
-    int traffic_class = 0;
+    int linux_traffic_class = 0;
     int family = AF_UNSPEC;
     std::uint32_t ipv6_flowinfo = 0;
 };
@@ -1472,7 +1486,7 @@ struct SendManyBatchCoverageTrace {
     bool saw_udp_segment_control = false;
     int ecn_level = 0;
     int ecn_type = 0;
-    int traffic_class = 0;
+    int linux_traffic_class = 0;
     std::uint16_t udp_segment_size = 0;
     int peer_family = AF_UNSPEC;
     std::uint32_t ipv6_flowinfo = 0;
@@ -1497,23 +1511,27 @@ void record_batch_controls_for_tests(const msghdr &message) {
         const auto *peer = static_cast<const sockaddr *>(message.msg_name);
         g_send_many_batch_coverage_trace.peer_family = peer->sa_family;
         if (peer->sa_family == AF_INET6) {
-            const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(message.msg_name);
-            g_send_many_batch_coverage_trace.ipv6_flowinfo = ntohl(ipv6->sin6_flowinfo);
+            const auto *ipv6_peer = reinterpret_cast<const sockaddr_in6 *>(message.msg_name);
+            g_send_many_batch_coverage_trace.ipv6_flowinfo = ntohl(ipv6_peer->sin6_flowinfo);
         }
     }
-    for (auto *control = CMSG_FIRSTHDR(const_cast<msghdr *>(&message)); control != nullptr;
-         control = CMSG_NXTHDR(const_cast<msghdr *>(&message), control)) {
-        if ((control->cmsg_level == IPPROTO_IP && control->cmsg_type == IP_TOS) ||
-            (control->cmsg_level == IPPROTO_IPV6 && control->cmsg_type == IPV6_TCLASS)) {
+    for (auto *control_header = CMSG_FIRSTHDR(const_cast<msghdr *>(&message));
+         control_header != nullptr;
+         control_header = CMSG_NXTHDR(const_cast<msghdr *>(&message), control_header)) {
+        if ((control_header->cmsg_level == IPPROTO_IP && control_header->cmsg_type == IP_TOS) ||
+            (control_header->cmsg_level == IPPROTO_IPV6 &&
+             control_header->cmsg_type == IPV6_TCLASS)) {
             g_send_many_batch_coverage_trace.saw_ecn_control = true;
-            g_send_many_batch_coverage_trace.ecn_level = control->cmsg_level;
-            g_send_many_batch_coverage_trace.ecn_type = control->cmsg_type;
-            std::memcpy(&g_send_many_batch_coverage_trace.traffic_class, CMSG_DATA(control),
-                        sizeof(g_send_many_batch_coverage_trace.traffic_class));
+            g_send_many_batch_coverage_trace.ecn_level = control_header->cmsg_level;
+            g_send_many_batch_coverage_trace.ecn_type = control_header->cmsg_type;
+            std::memcpy(&g_send_many_batch_coverage_trace.linux_traffic_class,
+                        CMSG_DATA(control_header),
+                        sizeof(g_send_many_batch_coverage_trace.linux_traffic_class));
         }
-        if (control->cmsg_level == SOL_UDP && control->cmsg_type == UDP_SEGMENT) {
+        if (control_header->cmsg_level == SOL_UDP && control_header->cmsg_type == UDP_SEGMENT) {
             g_send_many_batch_coverage_trace.saw_udp_segment_control = true;
-            std::memcpy(&g_send_many_batch_coverage_trace.udp_segment_size, CMSG_DATA(control),
+            std::memcpy(&g_send_many_batch_coverage_trace.udp_segment_size,
+                        CMSG_DATA(control_header),
                         sizeof(g_send_many_batch_coverage_trace.udp_segment_size));
         }
     }
@@ -1566,12 +1584,13 @@ ssize_t batch_sendmsg_for_tests(int socket_fd, const msghdr *message, int) {
     return static_cast<ssize_t>(g_send_many_batch_coverage_trace.last_sendmsg_total_bytes);
 }
 
-int batch_sendmmsg_for_tests(int socket_fd, mmsghdr *messages, unsigned int message_count, int) {
+int batch_sendmmsg_for_tests(int socket_fd, mmsghdr *send_messages, unsigned int message_count,
+                             int) {
     g_send_many_batch_coverage_trace.sendmmsg_calls += 1;
     g_send_many_batch_coverage_trace.socket_fd = socket_fd;
     g_send_many_batch_coverage_trace.last_sendmmsg_message_count = message_count;
-    if (messages != nullptr && message_count > 0) {
-        record_batch_controls_for_tests(messages[0].msg_hdr);
+    if (send_messages != nullptr && message_count > 0) {
+        record_batch_controls_for_tests(send_messages[0].msg_hdr);
     }
 
     switch (g_send_many_batch_coverage_trace.mode) {
@@ -1654,7 +1673,7 @@ ssize_t record_sendmsg_for_tests(int socket_fd, const msghdr *message, int) {
     g_recorded_sendmsg_for_tests.socket_fd = socket_fd;
     g_recorded_sendmsg_for_tests.level = 0;
     g_recorded_sendmsg_for_tests.type = 0;
-    g_recorded_sendmsg_for_tests.traffic_class = 0;
+    g_recorded_sendmsg_for_tests.linux_traffic_class = 0;
     g_recorded_sendmsg_for_tests.family = AF_UNSPEC;
     g_recorded_sendmsg_for_tests.ipv6_flowinfo = 0;
     if (message == nullptr) {
@@ -1664,15 +1683,16 @@ ssize_t record_sendmsg_for_tests(int socket_fd, const msghdr *message, int) {
         const auto *peer = static_cast<const sockaddr *>(message->msg_name);
         g_recorded_sendmsg_for_tests.family = peer->sa_family;
         if (peer->sa_family == AF_INET6) {
-            const auto *ipv6 = reinterpret_cast<const sockaddr_in6 *>(message->msg_name);
-            g_recorded_sendmsg_for_tests.ipv6_flowinfo = ntohl(ipv6->sin6_flowinfo);
+            const auto *ipv6_peer = reinterpret_cast<const sockaddr_in6 *>(message->msg_name);
+            g_recorded_sendmsg_for_tests.ipv6_flowinfo = ntohl(ipv6_peer->sin6_flowinfo);
         }
     }
-    if (auto *control = CMSG_FIRSTHDR(const_cast<msghdr *>(message)); control != nullptr) {
-        g_recorded_sendmsg_for_tests.level = control->cmsg_level;
-        g_recorded_sendmsg_for_tests.type = control->cmsg_type;
-        std::memcpy(&g_recorded_sendmsg_for_tests.traffic_class, CMSG_DATA(control),
-                    sizeof(g_recorded_sendmsg_for_tests.traffic_class));
+    if (auto *control_header = CMSG_FIRSTHDR(const_cast<msghdr *>(message));
+        control_header != nullptr) {
+        g_recorded_sendmsg_for_tests.level = control_header->cmsg_level;
+        g_recorded_sendmsg_for_tests.type = control_header->cmsg_type;
+        std::memcpy(&g_recorded_sendmsg_for_tests.linux_traffic_class, CMSG_DATA(control_header),
+                    sizeof(g_recorded_sendmsg_for_tests.linux_traffic_class));
     }
     if (message->msg_iov == nullptr) {
         return 0;
@@ -1707,23 +1727,23 @@ ssize_t record_recvmsg_for_tests(int, msghdr *message, int flags) {
                         sizeof(sockaddr_storage));
             message->msg_namelen = g_recorded_recvmsg_for_tests.peer_len;
         }
-        auto *header = CMSG_FIRSTHDR(message);
-        if (header == nullptr) {
+        auto *control_header = CMSG_FIRSTHDR(message);
+        if (control_header == nullptr) {
             errno = EINVAL;
             return -1;
         }
-        const bool ipv6 = g_recorded_recvmsg_for_tests.peer.ss_family == AF_INET6;
-        header->cmsg_level = ipv6 ? IPPROTO_IPV6 : IPPROTO_IP;
-        header->cmsg_type = ipv6 ? IPV6_RECVERR : IP_RECVERR;
-        header->cmsg_len = CMSG_LEN(sizeof(sock_extended_err));
+        const bool peer_is_ipv6 = g_recorded_recvmsg_for_tests.peer.ss_family == AF_INET6;
+        control_header->cmsg_level = peer_is_ipv6 ? IPPROTO_IPV6 : IPPROTO_IP;
+        control_header->cmsg_type = peer_is_ipv6 ? IPV6_RECVERR : IP_RECVERR;
+        control_header->cmsg_len = CMSG_LEN(sizeof(sock_extended_err));
         auto error = sock_extended_err{};
         error.ee_errno =
             g_recorded_recvmsg_for_tests.errqueue_errno != 0
                 ? static_cast<std::uint32_t>(g_recorded_recvmsg_for_tests.errqueue_errno)
                 : static_cast<std::uint32_t>(EMSGSIZE);
         error.ee_info = static_cast<std::uint32_t>(g_recorded_recvmsg_for_tests.pmtu);
-        std::memcpy(CMSG_DATA(header), &error, sizeof(error));
-        message->msg_controllen = header->cmsg_len;
+        std::memcpy(CMSG_DATA(control_header), &error, sizeof(error));
+        message->msg_controllen = control_header->cmsg_len;
         return 0;
 #else
         errno = EAGAIN;
@@ -1742,34 +1762,35 @@ ssize_t record_recvmsg_for_tests(int, msghdr *message, int flags) {
         message->msg_namelen = g_recorded_recvmsg_for_tests.peer_len;
     }
 
-    auto *header = CMSG_FIRSTHDR(message);
-    if (header != nullptr) {
-        const bool ipv6 = g_recorded_recvmsg_for_tests.peer.ss_family == AF_INET6;
-        header->cmsg_level = ipv6 ? IPPROTO_IPV6 : IPPROTO_IP;
-        header->cmsg_type = ipv6 ? IPV6_TCLASS : IP_TOS;
-        header->cmsg_len = CMSG_LEN(sizeof(int));
-        const int traffic_class =
+    auto *control_header = CMSG_FIRSTHDR(message);
+    if (control_header != nullptr) {
+        const bool peer_is_ipv6 = g_recorded_recvmsg_for_tests.peer.ss_family == AF_INET6;
+        control_header->cmsg_level = peer_is_ipv6 ? IPPROTO_IPV6 : IPPROTO_IP;
+        control_header->cmsg_type = peer_is_ipv6 ? IPV6_TCLASS : IP_TOS;
+        control_header->cmsg_len = CMSG_LEN(sizeof(int));
+        const int recvmsg_traffic_class =
             internal::linux_traffic_class_for_ecn(g_recorded_recvmsg_for_tests.ecn);
-        std::memcpy(CMSG_DATA(header), &traffic_class, sizeof(traffic_class));
-        message->msg_controllen = header->cmsg_len;
+        std::memcpy(CMSG_DATA(control_header), &recvmsg_traffic_class,
+                    sizeof(recvmsg_traffic_class));
+        message->msg_controllen = control_header->cmsg_len;
     }
 
     return static_cast<ssize_t>(bytes_to_copy);
 }
 
-int readable_poll_then_retry_with_datagram_for_tests(pollfd *descriptors, nfds_t descriptor_count,
-                                                     int) {
+int readable_poll_then_retry_with_datagram_for_tests(pollfd *poll_descriptors,
+                                                     nfds_t descriptor_count, int) {
     g_retry_readable_poll_for_tests.poll_calls += 1;
     for (nfds_t index = 0; index < descriptor_count; ++index) {
-        descriptors[index].revents = POLLIN;
+        poll_descriptors[index].revents = POLLIN;
     }
     return descriptor_count == 0 ? 0 : 1;
 }
 
-int eintr_then_timeout_poll_for_tests(pollfd *descriptors, nfds_t descriptor_count, int) {
+int eintr_then_timeout_poll_for_tests(pollfd *poll_descriptors, nfds_t descriptor_count, int) {
     g_poll_engine_coverage_trace.eintr_then_timeout_calls += 1;
     for (nfds_t index = 0; index < descriptor_count; ++index) {
-        descriptors[index].revents = 0;
+        poll_descriptors[index].revents = 0;
     }
     if (g_poll_engine_coverage_trace.eintr_then_timeout_calls == 1) {
         errno = EINTR;
@@ -1778,9 +1799,10 @@ int eintr_then_timeout_poll_for_tests(pollfd *descriptors, nfds_t descriptor_cou
     return 0;
 }
 
-int positive_poll_without_revents_for_tests(pollfd *descriptors, nfds_t descriptor_count, int) {
+int positive_poll_without_revents_for_tests(pollfd *poll_descriptors, nfds_t descriptor_count,
+                                            int) {
     for (nfds_t index = 0; index < descriptor_count; ++index) {
-        descriptors[index].revents = 0;
+        poll_descriptors[index].revents = 0;
     }
     if (descriptor_count == 0) {
         return 0;
@@ -1788,16 +1810,16 @@ int positive_poll_without_revents_for_tests(pollfd *descriptors, nfds_t descript
     return 1;
 }
 
-int readable_poll_for_tests(pollfd *descriptors, nfds_t descriptor_count, int) {
+int readable_poll_for_tests(pollfd *poll_descriptors, nfds_t descriptor_count, int) {
     for (nfds_t index = 0; index < descriptor_count; ++index) {
-        descriptors[index].revents = POLLIN;
+        poll_descriptors[index].revents = POLLIN;
     }
     return descriptor_count == 0 ? 0 : 1;
 }
 
-int hard_errqueue_poll_for_tests(pollfd *descriptors, nfds_t descriptor_count, int) {
+int hard_errqueue_poll_for_tests(pollfd *poll_descriptors, nfds_t descriptor_count, int) {
     for (nfds_t index = 0; index < descriptor_count; ++index) {
-        descriptors[index].revents = POLLERR;
+        poll_descriptors[index].revents = POLLERR;
     }
     return descriptor_count == 0 ? 0 : 1;
 }
@@ -1826,10 +1848,10 @@ int first_recvmmsg_batch_then_hard_error_for_tests(int, mmsghdr *messages,
     return static_cast<int>(message_count);
 }
 
-int errqueue_then_timeout_poll_for_tests(pollfd *descriptors, nfds_t descriptor_count, int) {
+int errqueue_then_timeout_poll_for_tests(pollfd *poll_descriptors, nfds_t descriptor_count, int) {
     g_poll_engine_coverage_trace.ignored_errqueue_poll_calls += 1;
     for (nfds_t index = 0; index < descriptor_count; ++index) {
-        descriptors[index].revents =
+        poll_descriptors[index].revents =
             g_poll_engine_coverage_trace.ignored_errqueue_poll_calls == 1 ? POLLERR : 0;
     }
     if (descriptor_count == 0 || g_poll_engine_coverage_trace.ignored_errqueue_poll_calls > 1) {
@@ -1855,8 +1877,8 @@ int socket_io_backend_linux_traffic_class_for_ecn_for_runtime_tests(QuicEcnCodep
 }
 
 QuicEcnCodepoint
-socket_io_backend_ecn_from_linux_traffic_class_for_runtime_tests(int traffic_class) {
-    return internal::ecn_from_linux_traffic_class(traffic_class);
+socket_io_backend_ecn_from_linux_traffic_class_for_runtime_tests(int linux_traffic_class) {
+    return internal::ecn_from_linux_traffic_class(linux_traffic_class);
 }
 
 bool socket_io_backend_is_ipv4_mapped_ipv6_address_for_runtime_tests(const sockaddr_storage &peer,
@@ -1919,16 +1941,16 @@ bool socket_io_backend_sendmsg_uses_outbound_ecn_for_tests() {
     ipv4.sin_port = htons(4433);
     ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-    const bool sent =
+    bool datagram_sent =
         internal::send_datagram(17, datagram, peer, static_cast<socklen_t>(sizeof(sockaddr_in)),
                                 "client", QuicEcnCodepoint::ect1);
     return all_true({
-        sent,
+        datagram_sent,
         g_recorded_sendmsg_for_tests.calls == 1,
         g_recorded_sendmsg_for_tests.socket_fd == 17,
         g_recorded_sendmsg_for_tests.level == IPPROTO_IP,
         g_recorded_sendmsg_for_tests.type == IP_TOS,
-        g_recorded_sendmsg_for_tests.traffic_class == 0x01,
+        g_recorded_sendmsg_for_tests.linux_traffic_class == 0x01,
     });
 }
 
@@ -1944,24 +1966,24 @@ bool socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests()
     };
 
     sockaddr_storage peer{};
-    auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&peer);
-    ipv6.sin6_family = AF_INET6;
-    ipv6.sin6_port = htons(4433);
-    ipv6.sin6_addr.s6_addr[10] = 0xff;
-    ipv6.sin6_addr.s6_addr[11] = 0xff;
-    ipv6.sin6_addr.s6_addr[12] = 127;
-    ipv6.sin6_addr.s6_addr[15] = 1;
+    auto &ipv6_peer = *reinterpret_cast<sockaddr_in6 *>(&peer);
+    ipv6_peer.sin6_family = AF_INET6;
+    ipv6_peer.sin6_port = htons(4433);
+    ipv6_peer.sin6_addr.s6_addr[10] = 0xff;
+    ipv6_peer.sin6_addr.s6_addr[11] = 0xff;
+    ipv6_peer.sin6_addr.s6_addr[12] = 127;
+    ipv6_peer.sin6_addr.s6_addr[15] = 1;
 
-    const bool sent =
+    bool datagram_sent =
         internal::send_datagram(23, datagram, peer, static_cast<socklen_t>(sizeof(sockaddr_in6)),
                                 "server", QuicEcnCodepoint::ect1);
     return all_true({
-        sent,
+        datagram_sent,
         g_recorded_sendmsg_for_tests.calls == 1,
         g_recorded_sendmsg_for_tests.socket_fd == 23,
         g_recorded_sendmsg_for_tests.level == IPPROTO_IP,
         g_recorded_sendmsg_for_tests.type == IP_TOS,
-        g_recorded_sendmsg_for_tests.traffic_class == 0x01,
+        g_recorded_sendmsg_for_tests.linux_traffic_class == 0x01,
     });
 }
 
@@ -1980,23 +2002,56 @@ bool socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests() {
     };
 
     sockaddr_storage peer{};
-    auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&peer);
-    ipv6.sin6_family = AF_INET6;
-    ipv6.sin6_port = htons(4433);
-    ipv6.sin6_addr = in6addr_loopback;
+    auto &ipv6_peer = *reinterpret_cast<sockaddr_in6 *>(&peer);
+    ipv6_peer.sin6_family = AF_INET6;
+    ipv6_peer.sin6_port = htons(4433);
+    ipv6_peer.sin6_addr = in6addr_loopback;
 
     sockaddr_storage ipv4_peer{};
     ipv4_peer.ss_family = AF_INET;
-    const bool skipped_non_ipv6 = !internal::should_apply_ipv6_flow_label(
-        ipv4_peer, static_cast<socklen_t>(sizeof(sockaddr_in)));
-    const bool skipped_short_ipv6 = !internal::should_apply_ipv6_flow_label(peer, 1);
-    const bool normalized_zero_hash = internal::normalize_ipv6_flow_label_hash(0x12300000u) == 1u;
-
-    const bool sent =
+    bool datagram_sent =
         internal::send_datagram(29, datagram, peer, static_cast<socklen_t>(sizeof(sockaddr_in6)),
                                 "server", QuicEcnCodepoint::not_ect);
-    const bool single_send_applied_flow_label = all_true({
-        sent,
+
+    g_send_many_batch_coverage_trace = {};
+    ScopedSocketIoBackendOpsOverride batch_ops{
+        SocketIoBackendOpsOverride{
+            .sendmsg_fn = &batch_sendmsg_for_tests,
+            .sendmmsg_fn = &batch_sendmmsg_for_tests,
+        },
+    };
+    std::array<std::byte, 2> first_payload = {
+        std::byte{0xaa},
+        std::byte{0xbb},
+    };
+    std::array<std::byte, 2> second_payload = {
+        std::byte{0xcc},
+        std::byte{0xdd},
+    };
+    auto first_flow_label_datagram = QuicIoEngineTxDatagram{
+        .socket_fd = 31,
+        .peer = peer,
+        .peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6)),
+        .bytes = first_payload,
+        .ecn = QuicEcnCodepoint::not_ect,
+    };
+    auto second_flow_label_datagram = QuicIoEngineTxDatagram{
+        .socket_fd = 31,
+        .peer = peer,
+        .peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6)),
+        .bytes = second_payload,
+        .ecn = QuicEcnCodepoint::not_ect,
+    };
+    std::array<QuicIoEngineTxDatagram, 2> datagrams = {first_flow_label_datagram,
+                                                       second_flow_label_datagram};
+
+    bool batched = internal::sendmmsg_batch(datagrams, "server");
+    return all_true({
+        !internal::should_apply_ipv6_flow_label(ipv4_peer,
+                                                static_cast<socklen_t>(sizeof(sockaddr_in))),
+        !internal::should_apply_ipv6_flow_label(peer, 1),
+        internal::normalize_ipv6_flow_label_hash(0x12300000u) == 1u,
+        datagram_sent,
         g_recorded_sendmsg_for_tests.calls == 1,
         g_recorded_sendmsg_for_tests.socket_fd == 29,
         g_recorded_sendmsg_for_tests.family == AF_INET6,
@@ -2004,41 +2059,6 @@ bool socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests() {
         g_recorded_sendmsg_for_tests.type == 0,
         g_recorded_sendmsg_for_tests.ipv6_flowinfo != 0,
         (g_recorded_sendmsg_for_tests.ipv6_flowinfo & ~0x000fffffu) == 0,
-    });
-
-    g_send_many_batch_coverage_trace = {};
-    const ScopedSocketIoBackendOpsOverride batch_ops{
-        SocketIoBackendOpsOverride{
-            .sendmsg_fn = &batch_sendmsg_for_tests,
-            .sendmmsg_fn = &batch_sendmmsg_for_tests,
-        },
-    };
-    const std::array<std::byte, 2> first_payload = {
-        std::byte{0xaa},
-        std::byte{0xbb},
-    };
-    const std::array<std::byte, 2> second_payload = {
-        std::byte{0xcc},
-        std::byte{0xdd},
-    };
-    const auto first = QuicIoEngineTxDatagram{
-        .socket_fd = 31,
-        .peer = peer,
-        .peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6)),
-        .bytes = first_payload,
-        .ecn = QuicEcnCodepoint::not_ect,
-    };
-    const auto second = QuicIoEngineTxDatagram{
-        .socket_fd = 31,
-        .peer = peer,
-        .peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6)),
-        .bytes = second_payload,
-        .ecn = QuicEcnCodepoint::not_ect,
-    };
-    std::array<QuicIoEngineTxDatagram, 2> datagrams = {first, second};
-
-    const bool batched = internal::sendmmsg_batch(datagrams, "server");
-    const bool batch_applied_flow_label = all_true({
         batched,
         g_send_many_batch_coverage_trace.sendmsg_calls +
                 g_send_many_batch_coverage_trace.sendmmsg_calls >
@@ -2047,9 +2067,6 @@ bool socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests() {
         g_send_many_batch_coverage_trace.ipv6_flowinfo != 0,
         (g_send_many_batch_coverage_trace.ipv6_flowinfo & ~0x000fffffu) == 0,
     });
-
-    return skipped_non_ipv6 && skipped_short_ipv6 && normalized_zero_hash &&
-           single_send_applied_flow_label && batch_applied_flow_label;
 }
 
 bool socket_io_backend_recvmsg_maps_ecn_for_tests() {
@@ -2096,16 +2113,16 @@ bool socket_io_backend_wait_retries_after_spurious_readable_poll_for_tests() {
 
     PollIoEngine engine;
     constexpr std::array<int, 1> kSockets = {41};
-    const auto event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
-    const auto observed = event.value_or(QuicIoEngineEvent{});
-    const auto received = observed.rx.value_or(QuicIoEngineRxCompletion{});
+    auto wait_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    auto observed_event = wait_event.value_or(QuicIoEngineEvent{});
+    auto received_completion = observed_event.rx.value_or(QuicIoEngineRxCompletion{});
     return all_true({
-        event.has_value(),
-        observed.kind == QuicIoEngineEvent::Kind::rx_datagram,
-        observed.rx.has_value(),
-        received.socket_fd == kSockets.front(),
-        received.bytes == g_recorded_recvmsg_for_tests.bytes,
-        received.ecn == QuicEcnCodepoint::ect0,
+        wait_event.has_value(),
+        observed_event.kind == QuicIoEngineEvent::Kind::rx_datagram,
+        observed_event.rx.has_value(),
+        received_completion.socket_fd == kSockets.front(),
+        received_completion.bytes == g_recorded_recvmsg_for_tests.bytes,
+        received_completion.ecn == QuicEcnCodepoint::ect0,
         g_retry_readable_poll_for_tests.poll_calls == 2,
         g_retry_readable_poll_for_tests.recvmsg_calls == 2,
     });
@@ -2115,7 +2132,7 @@ bool poll_io_engine_restamps_queued_receive_events_for_tests() {
     PollIoEngine engine;
     const auto first_time = QuicCoreTimePoint{} + std::chrono::microseconds{1};
     const auto queued_time = QuicCoreTimePoint{} + std::chrono::microseconds{2};
-    auto shared = std::make_shared<std::vector<std::byte>>(
+    auto shared_receive_bytes = std::make_shared<std::vector<std::byte>>(
         std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}});
 
     engine.queued_events_.push_back(QuicIoEngineEvent{
@@ -2135,9 +2152,9 @@ bool poll_io_engine_restamps_queued_receive_events_for_tests() {
             QuicIoEngineRxCompletion{
                 .socket_fd = 78,
                 .now = queued_time,
-                .shared_bytes = shared,
+                .shared_bytes = shared_receive_bytes,
                 .begin = 0,
-                .end = shared->size(),
+                .end = shared_receive_bytes->size(),
             },
     });
     engine.queued_events_.push_back(QuicIoEngineEvent{
@@ -2146,24 +2163,24 @@ bool poll_io_engine_restamps_queued_receive_events_for_tests() {
     });
 
     constexpr std::array<int, 1> kSockets = {79};
-    const auto first = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
-    const auto second = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
-    const auto third = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
-    if (!first.has_value() || !second.has_value() || !third.has_value() || !first->rx.has_value() ||
-        !second->rx.has_value()) {
+    auto first_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    auto second_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    auto third_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    if (!first_event.has_value() || !second_event.has_value() || !third_event.has_value() ||
+        !first_event->rx.has_value() || !second_event->rx.has_value()) {
         return false;
     }
 
     return all_true({
-        first->kind == QuicIoEngineEvent::Kind::rx_datagram,
-        second->kind == QuicIoEngineEvent::Kind::rx_datagram,
-        third->kind == QuicIoEngineEvent::Kind::timer_expired,
-        first->now != first_time,
-        first->rx->now == first->now,
-        second->now != queued_time,
-        second->rx->now == second->now,
-        third->now == queued_time,
-        second->rx->shared_bytes == shared,
+        first_event->kind == QuicIoEngineEvent::Kind::rx_datagram,
+        second_event->kind == QuicIoEngineEvent::Kind::rx_datagram,
+        third_event->kind == QuicIoEngineEvent::Kind::timer_expired,
+        first_event->now != first_time,
+        first_event->rx->now == first_event->now,
+        second_event->now != queued_time,
+        second_event->rx->now == second_event->now,
+        third_event->now == queued_time,
+        second_event->rx->shared_bytes == shared_receive_bytes,
     });
 }
 
@@ -2182,16 +2199,16 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
         internal::udp_gso_disabled() = false;
     };
 
-    bool ok = true;
+    bool coverage_ok = true;
     const auto record = [&](bool condition, const char *label) {
         if (!condition) {
             std::cerr << "poll_io_engine_send_many_batching_coverage_for_tests failed: " << label
                       << '\n';
         }
-        ok &= condition;
+        coverage_ok &= condition;
     };
 
-    const auto invalid_ecn = [] {
+    auto invalid_ecn_codepoint = [] {
         const auto raw = static_cast<std::underlying_type_t<QuicEcnCodepoint>>(0xff);
         QuicEcnCodepoint value{};
         std::memcpy(&value, &raw, sizeof(value));
@@ -2203,7 +2220,7 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
                internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ce) == 0x03,
                internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::unavailable) == 0x00,
                internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::not_ect) == 0x00,
-               internal::linux_traffic_class_for_ecn(invalid_ecn) == 0x00,
+               internal::linux_traffic_class_for_ecn(invalid_ecn_codepoint) == 0x00,
                internal::ecn_from_linux_traffic_class(0x00) == QuicEcnCodepoint::not_ect,
                internal::ecn_from_linux_traffic_class(0x01) == QuicEcnCodepoint::ect1,
                internal::ecn_from_linux_traffic_class(0x02) == QuicEcnCodepoint::ect0,
@@ -2245,7 +2262,7 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
                g_recorded_sendmsg_for_tests.socket_fd == 9,
                g_recorded_sendmsg_for_tests.level == 0,
                g_recorded_sendmsg_for_tests.type == 0,
-               g_recorded_sendmsg_for_tests.traffic_class == 0,
+               g_recorded_sendmsg_for_tests.linux_traffic_class == 0,
            }),
            "record_sendmsg handles missing control and iov");
 
@@ -2267,8 +2284,8 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     send_header->cmsg_level = IPPROTO_IP;
     send_header->cmsg_type = IP_TOS;
     send_header->cmsg_len = CMSG_LEN(sizeof(int));
-    const int send_traffic_class = internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ce);
-    std::memcpy(CMSG_DATA(send_header), &send_traffic_class, sizeof(send_traffic_class));
+    int manual_sendmsg_tclass = internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ce);
+    std::memcpy(CMSG_DATA(send_header), &manual_sendmsg_tclass, sizeof(manual_sendmsg_tclass));
     reset_for_case();
     record(all_true({
                record_sendmsg_for_tests(9, &send_message, 0) == 2,
@@ -2276,16 +2293,16 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
                g_recorded_sendmsg_for_tests.socket_fd == 9,
                g_recorded_sendmsg_for_tests.level == IPPROTO_IP,
                g_recorded_sendmsg_for_tests.type == IP_TOS,
-               g_recorded_sendmsg_for_tests.traffic_class == send_traffic_class,
+               g_recorded_sendmsg_for_tests.linux_traffic_class == manual_sendmsg_tclass,
            }),
            "record_sendmsg copies ancillary traffic class control data");
 
     {
         sockaddr_storage ipv6_peer{};
-        auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&ipv6_peer);
-        ipv6.sin6_family = AF_INET6;
-        ipv6.sin6_port = htons(9443);
-        ipv6.sin6_addr = in6addr_loopback;
+        auto &ipv6_loopback = *reinterpret_cast<sockaddr_in6 *>(&ipv6_peer);
+        ipv6_loopback.sin6_family = AF_INET6;
+        ipv6_loopback.sin6_port = htons(9443);
+        ipv6_loopback.sin6_addr = in6addr_loopback;
 
         msghdr ipv6_send_message{};
         internal::UdpGsoControlStorage gso_control{};
@@ -2294,16 +2311,16 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
         internal::append_sendmsg_ecn_control(
             ipv6_send_message, gso_control, QuicEcnCodepoint::ect1, ipv6_peer,
             static_cast<socklen_t>(sizeof(sockaddr_in6)), control_cursor);
-        auto *header = CMSG_FIRSTHDR(&ipv6_send_message);
+        auto *ecn_control_header = CMSG_FIRSTHDR(&ipv6_send_message);
         int ancillary_traffic_class = 0;
-        if (header != nullptr) {
-            std::memcpy(&ancillary_traffic_class, CMSG_DATA(header),
+        if (ecn_control_header != nullptr) {
+            std::memcpy(&ancillary_traffic_class, CMSG_DATA(ecn_control_header),
                         sizeof(ancillary_traffic_class));
         }
         record(all_true({
-                   header != nullptr,
-                   header->cmsg_level == IPPROTO_IPV6,
-                   header->cmsg_type == IPV6_TCLASS,
+                   ecn_control_header != nullptr,
+                   ecn_control_header->cmsg_level == IPPROTO_IPV6,
+                   ecn_control_header->cmsg_type == IPV6_TCLASS,
                    ancillary_traffic_class ==
                        internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1),
                }),
@@ -2337,37 +2354,37 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
            "record_recvmsg rejects missing iov");
 
     std::array<std::byte, 4> payload = {};
-    iovec iov{
+    iovec payload_iov{
         .iov_base = payload.data(),
         .iov_len = payload.size(),
     };
-    invalid_recv_message.msg_iov = &iov;
+    invalid_recv_message.msg_iov = &payload_iov;
     invalid_recv_message.msg_iovlen = 0;
     reset_for_case();
     record(record_recvmsg_for_tests(0, &invalid_recv_message, 0) == -1,
            "record_recvmsg rejects zero iov length");
 
     g_recorded_recvmsg_for_tests.bytes = {std::byte{0x10}, std::byte{0x20}};
-    auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&g_recorded_recvmsg_for_tests.peer);
-    ipv6.sin6_family = AF_INET6;
-    ipv6.sin6_port = htons(9443);
-    ipv6.sin6_addr = in6addr_loopback;
+    auto &recvmsg_ipv6_peer = *reinterpret_cast<sockaddr_in6 *>(&g_recorded_recvmsg_for_tests.peer);
+    recvmsg_ipv6_peer.sin6_family = AF_INET6;
+    recvmsg_ipv6_peer.sin6_port = htons(9443);
+    recvmsg_ipv6_peer.sin6_addr = in6addr_loopback;
     g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in6);
 
-    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> control{};
+    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> recv_control_storage{};
 
     reset_for_case();
     g_recorded_recvmsg_for_tests.bytes = {std::byte{0x10}, std::byte{0x20}};
-    ipv6 = {};
-    ipv6.sin6_family = AF_INET6;
-    ipv6.sin6_port = htons(9443);
-    ipv6.sin6_addr = in6addr_loopback;
+    recvmsg_ipv6_peer = {};
+    recvmsg_ipv6_peer.sin6_family = AF_INET6;
+    recvmsg_ipv6_peer.sin6_port = htons(9443);
+    recvmsg_ipv6_peer.sin6_addr = in6addr_loopback;
     g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in6);
     msghdr recv_message{};
-    recv_message.msg_iov = &iov;
+    recv_message.msg_iov = &payload_iov;
     recv_message.msg_iovlen = 1;
-    recv_message.msg_control = control.data();
-    recv_message.msg_controllen = control.size();
+    recv_message.msg_control = recv_control_storage.data();
+    recv_message.msg_controllen = recv_control_storage.size();
     record(all_true({
                record_recvmsg_for_tests(0, &recv_message, 0) == 2,
                payload[0] == std::byte{0x10},
@@ -2382,7 +2399,7 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     g_recorded_recvmsg_for_tests.bytes = {std::byte{0x30}};
     sockaddr_storage name_storage{};
     recv_message = {};
-    recv_message.msg_iov = &iov;
+    recv_message.msg_iov = &payload_iov;
     recv_message.msg_iovlen = 1;
     recv_message.msg_name = &name_storage;
     recv_message.msg_namelen = sizeof(sockaddr_storage) - 1;
@@ -2395,7 +2412,7 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     reset_for_case();
     g_recorded_recvmsg_for_tests.bytes = {std::byte{0x40}};
     recv_message = {};
-    recv_message.msg_iov = &iov;
+    recv_message.msg_iov = &payload_iov;
     recv_message.msg_iovlen = 1;
     recv_message.msg_control = nullptr;
     recv_message.msg_controllen = 0;
@@ -2418,8 +2435,9 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     second_header->cmsg_level = IPPROTO_IPV6;
     second_header->cmsg_type = IPV6_TCLASS;
     second_header->cmsg_len = CMSG_LEN(sizeof(int));
-    const int traffic_class = internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1);
-    std::memcpy(CMSG_DATA(second_header), &traffic_class, sizeof(traffic_class));
+    int ancillary_traffic_class = internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1);
+    std::memcpy(CMSG_DATA(second_header), &ancillary_traffic_class,
+                sizeof(ancillary_traffic_class));
     record(internal::recvmsg_ecn_from_control(recv_message) == QuicEcnCodepoint::ect1,
            "recvmsg ecn walk advances past ignored ancillary headers");
 
@@ -2489,13 +2507,13 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     gro_header->cmsg_level = SOL_UDP;
     gro_header->cmsg_type = UDP_GRO;
     gro_header->cmsg_len = CMSG_LEN(sizeof(std::uint16_t));
-    const std::uint16_t gro_segment_size = 2;
-    std::memcpy(CMSG_DATA(gro_header), &gro_segment_size, sizeof(gro_segment_size));
-    record(internal::recvmsg_udp_gro_segment_size_from_control(recv_message) == gro_segment_size,
+    constexpr std::uint16_t kGroSegmentSize = 2;
+    std::memcpy(CMSG_DATA(gro_header), &kGroSegmentSize, sizeof(kGroSegmentSize));
+    record(internal::recvmsg_udp_gro_segment_size_from_control(recv_message) == kGroSegmentSize,
            "recvmsg UDP GRO parser extracts segment size");
 
     auto gro_source = loopback_peer_for_batch_tests(9443);
-    internal::ReceiveDatagramResult gro_received{
+    internal::ReceiveDatagramResult gro_datagram_result{
         .status = internal::ReceiveDatagramStatus::ok,
         .bytes = {std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
                   std::byte{0x05}},
@@ -2503,10 +2521,10 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
         .source = gro_source,
         .source_len = static_cast<socklen_t>(sizeof(sockaddr_in)),
         .input_time = internal::now(),
-        .udp_gro_segment_size = gro_segment_size,
+        .udp_gro_segment_size = kGroSegmentSize,
     };
     std::vector<internal::ReceiveDatagramResult> gro_split;
-    internal::append_received_datagram_segments(gro_split, std::move(gro_received));
+    internal::append_received_datagram_segments(gro_split, std::move(gro_datagram_result));
     record(all_true({
                gro_split.size() == 3,
                gro_split[0].payload().size() == 2,
@@ -2560,7 +2578,7 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
         .shared_bytes = shared_gro_bytes,
         .begin = 0,
         .end = shared_gro_bytes->size(),
-        .udp_gro_segment_size = gro_segment_size,
+        .udp_gro_segment_size = kGroSegmentSize,
     };
     std::vector<internal::ReceiveDatagramResult> shared_gro_split;
     internal::append_received_datagram_segments(shared_gro_split, std::move(shared_gro_received));
@@ -2576,9 +2594,9 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     {
         const ScopedSocketIoBackendOpsOverride runtime_ops{
             SocketIoBackendOpsOverride{
-                .recvmsg_fn = [](int, msghdr *message, int) -> ssize_t {
-                    if (message == nullptr || message->msg_iov == nullptr ||
-                        message->msg_iovlen == 0) {
+                .recvmsg_fn = [](int, msghdr *recv_message, int) -> ssize_t {
+                    if (recv_message == nullptr || recv_message->msg_iov == nullptr ||
+                        recv_message->msg_iovlen == 0) {
                         errno = EINVAL;
                         return -1;
                     }
@@ -2586,34 +2604,37 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
                         std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
                         std::byte{0x04}, std::byte{0x05},
                     };
-                    std::memcpy(message->msg_iov[0].iov_base, kPayload.data(), kPayload.size());
-                    if (message->msg_name != nullptr &&
-                        message->msg_namelen >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
-                        auto *source = static_cast<sockaddr_in *>(message->msg_name);
+                    std::memcpy(recv_message->msg_iov[0].iov_base, kPayload.data(),
+                                kPayload.size());
+                    if (recv_message->msg_name != nullptr &&
+                        recv_message->msg_namelen >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
+                        auto *source = static_cast<sockaddr_in *>(recv_message->msg_name);
                         source->sin_family = AF_INET;
                         source->sin_port = htons(9445);
                         source->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-                        message->msg_namelen = sizeof(sockaddr_in);
+                        recv_message->msg_namelen = sizeof(sockaddr_in);
                     }
-                    if (message->msg_control != nullptr &&
-                        message->msg_controllen >= CMSG_SPACE(sizeof(std::uint16_t))) {
-                        auto *header = static_cast<cmsghdr *>(message->msg_control);
-                        header->cmsg_level = SOL_UDP;
-                        header->cmsg_type = UDP_GRO;
-                        header->cmsg_len = CMSG_LEN(sizeof(std::uint16_t));
+                    if (recv_message->msg_control != nullptr &&
+                        recv_message->msg_controllen >= CMSG_SPACE(sizeof(std::uint16_t))) {
+                        auto *gro_control_header =
+                            static_cast<cmsghdr *>(recv_message->msg_control);
+                        gro_control_header->cmsg_level = SOL_UDP;
+                        gro_control_header->cmsg_type = UDP_GRO;
+                        gro_control_header->cmsg_len = CMSG_LEN(sizeof(std::uint16_t));
                         const std::uint16_t segment_size = 2;
-                        std::memcpy(CMSG_DATA(header), &segment_size, sizeof(segment_size));
-                        message->msg_controllen = header->cmsg_len;
+                        std::memcpy(CMSG_DATA(gro_control_header), &segment_size,
+                                    sizeof(segment_size));
+                        recv_message->msg_controllen = gro_control_header->cmsg_len;
                     }
                     return static_cast<ssize_t>(kPayload.size());
                 },
             },
         };
-        const auto gro_received = internal::receive_datagram(61, "client", 0);
+        auto gro_datagram = internal::receive_datagram(61, "client", 0);
         record(all_true({
-                   gro_received.status == internal::ReceiveDatagramStatus::ok,
-                   gro_received.bytes.size() == 5,
-                   gro_received.udp_gro_segment_size == 2,
+                   gro_datagram.status == internal::ReceiveDatagramStatus::ok,
+                   gro_datagram.bytes.size() == 5,
+                   gro_datagram.udp_gro_segment_size == 2,
                }),
                "receive_datagram returns direct UDP GRO receive metadata");
     }
@@ -2773,12 +2794,12 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
         };
         PollIoEngine engine;
         constexpr std::array<int, 1> kSockets = {51};
-        const auto event = engine.wait(kSockets, /*idle_timeout_ms=*/5,
-                                       internal::now() + std::chrono::milliseconds(5), "client");
-        const auto observed = event.value_or(QuicIoEngineEvent{});
+        auto wait_event = engine.wait(kSockets, /*idle_timeout_ms=*/5,
+                                      internal::now() + std::chrono::milliseconds(5), "client");
+        auto observed_event = wait_event.value_or(QuicIoEngineEvent{});
         record(all_true({
-                   event.has_value(),
-                   observed.kind == QuicIoEngineEvent::Kind::timer_expired,
+                   wait_event.has_value(),
+                   observed_event.kind == QuicIoEngineEvent::Kind::timer_expired,
                    g_poll_engine_coverage_trace.eintr_then_timeout_calls == 2,
                }),
                "poll wait retries after EINTR before future timer expiry");
@@ -2789,9 +2810,9 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
         const ScopedSocketIoBackendOpsOverride runtime_ops{
             SocketIoBackendOpsOverride{
                 .poll_fn =
-                    [](pollfd *descriptors, nfds_t descriptor_count, int) {
+                    [](pollfd *poll_descriptors, nfds_t descriptor_count, int) {
                         for (nfds_t index = 0; index < descriptor_count; ++index) {
-                            descriptors[index].revents = 0;
+                            poll_descriptors[index].revents = 0;
                         }
                         return 0;
                     },
@@ -2799,12 +2820,12 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
         };
         PollIoEngine engine;
         constexpr std::array<int, 1> kSockets = {52};
-        const auto event = engine.wait(kSockets, /*idle_timeout_ms=*/5,
-                                       internal::now() - std::chrono::milliseconds(1), "client");
-        const auto observed = event.value_or(QuicIoEngineEvent{});
+        auto wait_event = engine.wait(kSockets, /*idle_timeout_ms=*/5,
+                                      internal::now() - std::chrono::milliseconds(1), "client");
+        auto observed_event = wait_event.value_or(QuicIoEngineEvent{});
         record(all_true({
-                   event.has_value(),
-                   observed.kind == QuicIoEngineEvent::Kind::timer_expired,
+                   wait_event.has_value(),
+                   observed_event.kind == QuicIoEngineEvent::Kind::timer_expired,
                }),
                "poll wait returns immediate timer expiry when deadline already passed");
     }
@@ -2864,19 +2885,20 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
             SocketIoBackendOpsOverride{
                 .poll_fn = &readable_poll_for_tests,
                 .recvmmsg_fn =
-                    [](int, mmsghdr *messages, unsigned int message_count, int, timespec *) {
+                    [](int, mmsghdr *recv_messages, unsigned int message_count, int, timespec *) {
                         g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls += 1;
                         if (g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls > 1) {
                             errno = EAGAIN;
                             return -1;
                         }
                         for (unsigned int index = 0; index < message_count; ++index) {
-                            auto &message = messages[index].msg_hdr;
-                            if (message.msg_iov != nullptr && message.msg_iovlen > 0 &&
-                                message.msg_iov[0].iov_len > 0) {
-                                auto *byte = static_cast<std::byte *>(message.msg_iov[0].iov_base);
+                            auto &recv_message = recv_messages[index].msg_hdr;
+                            if (recv_message.msg_iov != nullptr && recv_message.msg_iovlen > 0 &&
+                                recv_message.msg_iov[0].iov_len > 0) {
+                                auto *byte =
+                                    static_cast<std::byte *>(recv_message.msg_iov[0].iov_base);
                                 *byte = static_cast<std::byte>(index & 0xffu);
-                                messages[index].msg_len = 1;
+                                recv_messages[index].msg_len = 1;
                             }
                         }
                         return static_cast<int>(message_count);
@@ -2885,13 +2907,11 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
         };
         PollIoEngine engine;
         constexpr std::array<int, 1> kSockets = {62};
-        const auto event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
-        bool received_datagram = false;
-        if (event.has_value()) {
-            received_datagram = event->kind == QuicIoEngineEvent::Kind::rx_datagram;
-        }
+        auto wait_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+        auto observed_event = wait_event.value_or(QuicIoEngineEvent{});
         record(all_true({
-                   received_datagram,
+                   wait_event.has_value(),
+                   observed_event.kind == QuicIoEngineEvent::Kind::rx_datagram,
                    g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls == 2,
                }),
                "poll wait stops extra receive draining when recvmmsg would block");
@@ -2916,7 +2936,7 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     g_retry_readable_poll_for_tests = saved_retry;
     g_poll_engine_coverage_trace = saved_poll_trace;
     internal::udp_gso_disabled() = saved_udp_gso_disabled;
-    return ok;
+    return coverage_ok;
 }
 
 bool poll_io_engine_send_many_batching_coverage_for_tests() {
@@ -2929,13 +2949,13 @@ bool poll_io_engine_send_many_batching_coverage_for_tests() {
         internal::udp_gso_disabled() = false;
     };
 
-    bool ok = true;
+    bool coverage_ok = true;
     const auto record = [&](bool condition, const char *label) {
         if (!condition) {
             std::cerr << "poll_io_engine_send_many_batching_coverage_for_tests failed: " << label
                       << '\n';
         }
-        ok &= condition;
+        coverage_ok &= condition;
     };
 
     constexpr int kSocketFd = 77;
@@ -2964,7 +2984,7 @@ bool poll_io_engine_send_many_batching_coverage_for_tests() {
         std::byte{0x06},
         std::byte{0x07},
     };
-    const std::array<std::byte, 0> kEmptyPayload{};
+    std::array<std::byte, 0> kEmptyPayload{};
     constexpr std::array<std::byte, 700> kLargePayload{};
 
     {
@@ -3039,7 +3059,7 @@ bool poll_io_engine_send_many_batching_coverage_for_tests() {
                        datagrams.size() * kSmallPayload.size(),
                    g_send_many_batch_coverage_trace.saw_ecn_control,
                    g_send_many_batch_coverage_trace.saw_udp_segment_control,
-                   g_send_many_batch_coverage_trace.traffic_class ==
+                   g_send_many_batch_coverage_trace.linux_traffic_class ==
                        internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect0),
                    g_send_many_batch_coverage_trace.udp_segment_size == kSmallPayload.size(),
                }),
@@ -3478,7 +3498,7 @@ bool poll_io_engine_send_many_batching_coverage_for_tests() {
                    g_send_many_batch_coverage_trace.last_sendmmsg_message_count == 1,
                    g_send_many_batch_coverage_trace.saw_ecn_control,
                    g_send_many_batch_coverage_trace.saw_udp_segment_control,
-                   g_send_many_batch_coverage_trace.traffic_class ==
+                   g_send_many_batch_coverage_trace.linux_traffic_class ==
                        internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1),
                }),
                "send_many falls back from unsupported GSO to partial sendmmsg completion");
@@ -3671,24 +3691,24 @@ bool poll_io_engine_send_many_batching_coverage_for_tests() {
     g_send_many_batch_coverage_trace = saved_trace;
     g_recorded_sendmsg_for_tests = saved_sendmsg;
     internal::udp_gso_disabled() = saved_udp_gso_disabled;
-    return ok;
+    return coverage_ok;
 }
 
 bool poll_io_engine_pmtud_coverage_for_tests() {
     g_recorded_recvmsg_for_tests = {};
-    auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&g_recorded_recvmsg_for_tests.peer);
-    ipv6.sin6_family = AF_INET6;
-    ipv6.sin6_port = htons(7443);
-    ipv6.sin6_addr = in6addr_loopback;
+    auto &pmtud_ipv6_peer = *reinterpret_cast<sockaddr_in6 *>(&g_recorded_recvmsg_for_tests.peer);
+    pmtud_ipv6_peer.sin6_family = AF_INET6;
+    pmtud_ipv6_peer.sin6_port = htons(7443);
+    pmtud_ipv6_peer.sin6_addr = in6addr_loopback;
     g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in6);
     g_recorded_recvmsg_for_tests.pmtu = 1500;
 
     const ScopedSocketIoBackendOpsOverride runtime_ops{
         SocketIoBackendOpsOverride{
             .poll_fn =
-                [](pollfd *descriptors, nfds_t descriptor_count, int) {
+                [](pollfd *poll_descriptors, nfds_t descriptor_count, int) {
                     for (nfds_t index = 0; index < descriptor_count; ++index) {
-                        descriptors[index].revents = POLLERR;
+                        poll_descriptors[index].revents = POLLERR;
                     }
                     return descriptor_count == 0 ? 0 : 1;
                 },
@@ -3698,17 +3718,17 @@ bool poll_io_engine_pmtud_coverage_for_tests() {
 
     PollIoEngine engine;
     constexpr std::array<int, 1> kSockets = {61};
-    const auto event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
-    const auto observed = event.value_or(QuicIoEngineEvent{});
-    const auto update = observed.path_mtu.value_or(QuicIoEnginePathMtuUpdate{});
+    auto wait_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    auto observed_event = wait_event.value_or(QuicIoEngineEvent{});
+    auto path_mtu_update = observed_event.path_mtu.value_or(QuicIoEnginePathMtuUpdate{});
     return all_true({
-        event.has_value(),
-        observed.kind == QuicIoEngineEvent::Kind::path_mtu_update,
-        observed.path_mtu.has_value(),
-        update.socket_fd == kSockets.front(),
-        update.max_udp_payload_size == 1452,
-        update.peer.ss_family == AF_INET6,
-        update.peer_len == sizeof(sockaddr_in6),
+        wait_event.has_value(),
+        observed_event.kind == QuicIoEngineEvent::Kind::path_mtu_update,
+        observed_event.path_mtu.has_value(),
+        path_mtu_update.socket_fd == kSockets.front(),
+        path_mtu_update.max_udp_payload_size == 1452,
+        path_mtu_update.peer.ss_family == AF_INET6,
+        path_mtu_update.peer_len == sizeof(sockaddr_in6),
     });
 }
 
@@ -3731,11 +3751,11 @@ bool poll_io_engine_ignores_non_pmtu_errqueue_for_tests() {
 
     PollIoEngine engine;
     constexpr std::array<int, 1> kSockets = {62};
-    const auto event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
-    const auto observed = event.value_or(QuicIoEngineEvent{});
+    auto wait_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    auto observed_event = wait_event.value_or(QuicIoEngineEvent{});
     return all_true({
-        event.has_value(),
-        observed.kind == QuicIoEngineEvent::Kind::idle_timeout,
+        wait_event.has_value(),
+        observed_event.kind == QuicIoEngineEvent::Kind::idle_timeout,
         g_poll_engine_coverage_trace.ignored_errqueue_poll_calls == 2,
     });
 }
@@ -3760,15 +3780,15 @@ bool socket_io_backend_poll_engine_primes_descriptor_cache_for_tests() {
     second_registration_ok &= descriptor_cache_matches(2, 2, true);
     second_registration_ok &= engine.descriptor_scratch_.capacity() >= first_capacity;
 
-    bool ok = initial_state_ok;
-    ok &= first_registration_ok;
-    ok &= second_registration_ok;
-    return ok;
+    bool cache_state_ok = initial_state_ok;
+    cache_state_ok &= first_registration_ok;
+    cache_state_ok &= second_registration_ok;
+    return cache_state_ok;
 }
 
 bool poll_io_engine_descriptor_cache_guard_branches_for_tests() {
     PollIoEngine engine;
-    bool ok = true;
+    bool cache_guards_ok = true;
     struct DescriptorCacheExpectation {
         std::size_t expected_count;
         std::size_t minimum_capacity;
@@ -3784,14 +3804,14 @@ bool poll_io_engine_descriptor_cache_guard_branches_for_tests() {
         return engine.descriptor_scratch_.capacity() >= expected.minimum_capacity;
     };
 
-    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
         .expected_count = 1,
         .minimum_capacity = 0,
         .expect_empty = true,
     });
 
     engine.descriptor_scratch_.push_back(pollfd{});
-    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
         .expected_count = 0,
         .minimum_capacity = 0,
         .expect_empty = true,
@@ -3799,10 +3819,10 @@ bool poll_io_engine_descriptor_cache_guard_branches_for_tests() {
 
     engine.descriptor_scratch_.clear();
     engine.descriptor_scratch_.shrink_to_fit();
-    ok &= engine.register_socket(41);
+    cache_guards_ok &= engine.register_socket(41);
 
     engine.registered_socket_count_ = 0;
-    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
         .expected_count = 1,
         .minimum_capacity = 1,
         .expect_empty = true,
@@ -3810,19 +3830,19 @@ bool poll_io_engine_descriptor_cache_guard_branches_for_tests() {
 
     engine.registered_socket_count_ = 1;
     engine.descriptor_scratch_.push_back(pollfd{});
-    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
         .expected_count = 1,
         .minimum_capacity = 1,
         .expect_empty = true,
     });
 
     engine.descriptor_scratch_.clear();
-    ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
+    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
         .expected_count = 1,
         .minimum_capacity = engine.descriptor_scratch_.capacity() + 1,
         .expect_empty = true,
     });
-    return ok;
+    return cache_guards_ok;
 }
 
 } // namespace test

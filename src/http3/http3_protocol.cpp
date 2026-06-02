@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string_view>
 #include <type_traits>
 #include <unordered_set>
@@ -52,24 +53,30 @@ CodecResult<std::uint64_t> read_varint(BufferReader &reader) {
     return CodecResult<std::uint64_t>::success(decoded.value().value);
 }
 
-CodecResult<std::vector<std::byte>>
-serialize_http3_payload_frame(std::uint64_t type, std::span<const std::byte> payload) {
+std::optional<quic::CodecError> write_http3_payload_frame(BufferWriter &writer, std::uint64_t type,
+                                                          std::span<const std::byte> payload) {
     const auto encoded_type = encode_varint(type);
     if (!encoded_type.has_value()) {
-        return codec_failure<std::vector<std::byte>>(encoded_type.error().code,
-                                                     encoded_type.error().offset);
+        return encoded_type.error();
     }
 
     const auto encoded_length = encode_varint(payload.size());
     if (!encoded_length.has_value()) {
-        return codec_failure<std::vector<std::byte>>(encoded_length.error().code,
-                                                     encoded_length.error().offset);
+        return encoded_length.error();
     }
 
-    BufferWriter writer;
     writer.write_bytes(encoded_type.value());
     writer.write_bytes(encoded_length.value());
     writer.write_bytes(payload);
+    return std::nullopt;
+}
+
+CodecResult<std::vector<std::byte>>
+serialize_http3_payload_frame(std::uint64_t type, std::span<const std::byte> payload) {
+    BufferWriter writer;
+    if (const auto error = write_http3_payload_frame(writer, type, payload); error.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(*error);
+    }
     return CodecResult<std::vector<std::byte>>::success(writer.bytes());
 }
 
@@ -124,10 +131,10 @@ Http3Result<std::uint64_t> parse_content_length_value(std::string_view value) {
         }
 
         std::uint64_t current = 0;
-        const auto *begin = token.data();
-        const auto *end = begin + token.size();
-        const auto parsed = std::from_chars(begin, end, current);
-        if (parsed.ec != std::errc{} || parsed.ptr != end) {
+        const auto *field_begin = token.data();
+        const auto *field_end = field_begin + token.size();
+        const auto parsed_number = std::from_chars(field_begin, field_end, current);
+        if (parsed_number.ec != std::errc{} || parsed_number.ptr != field_end) {
             return http3_failure<std::uint64_t>(Http3ErrorCode::message_error,
                                                 "invalid content-length header");
         }
@@ -150,56 +157,83 @@ Http3Result<std::uint64_t> parse_content_length_value(std::string_view value) {
 } // namespace
 
 CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &frame) {
-    return std::visit(
-        [](const auto &typed_frame) -> CodecResult<std::vector<std::byte>> {
-            using T = std::decay_t<decltype(typed_frame)>;
-            if constexpr (std::is_same_v<T, Http3DataFrame>) {
-                return serialize_http3_payload_frame(kHttp3FrameTypeData, typed_frame.payload);
-            } else if constexpr (std::is_same_v<T, Http3HeadersFrame>) {
-                return serialize_http3_payload_frame(kHttp3FrameTypeHeaders,
-                                                     typed_frame.field_section);
-            } else if constexpr (std::is_same_v<T, Http3SettingsFrame>) {
-                BufferWriter writer;
-                for (const auto &setting : typed_frame.settings) {
-                    const auto encoded_id = encode_varint(setting.id);
-                    if (!encoded_id.has_value()) {
-                        return codec_failure<std::vector<std::byte>>(encoded_id.error().code,
-                                                                     encoded_id.error().offset);
-                    }
+    struct FrameSerializer {
+        CodecResult<std::vector<std::byte>> operator()(const Http3DataFrame &typed_frame) const {
+            BufferWriter writer;
+            if (const auto error =
+                    write_http3_payload_frame(writer, kHttp3FrameTypeData, typed_frame.payload);
+                error.has_value()) {
+                return CodecResult<std::vector<std::byte>>::failure(*error);
+            }
+            return CodecResult<std::vector<std::byte>>::success(writer.bytes());
+        }
 
-                    const auto encoded_value = encode_varint(setting.value);
-                    if (!encoded_value.has_value()) {
-                        return codec_failure<std::vector<std::byte>>(encoded_value.error().code,
-                                                                     encoded_value.error().offset);
-                    }
+        CodecResult<std::vector<std::byte>> operator()(const Http3HeadersFrame &typed_frame) const {
+            BufferWriter writer;
+            if (const auto error = write_http3_payload_frame(writer, kHttp3FrameTypeHeaders,
+                                                             typed_frame.field_section);
+                error.has_value()) {
+                return CodecResult<std::vector<std::byte>>::failure(*error);
+            }
+            return CodecResult<std::vector<std::byte>>::success(writer.bytes());
+        }
 
-                    writer.write_bytes(encoded_id.value());
-                    writer.write_bytes(encoded_value.value());
-                }
-
-                return serialize_http3_payload_frame(kHttp3FrameTypeSettings, writer.bytes());
-            } else if constexpr (std::is_same_v<T, Http3GoawayFrame>) {
-                const auto encoded_id = encode_varint(typed_frame.id);
+        CodecResult<std::vector<std::byte>>
+        operator()(const Http3SettingsFrame &typed_frame) const {
+            BufferWriter writer;
+            for (const auto &setting : typed_frame.settings) {
+                const auto encoded_id = encode_varint(setting.id);
                 if (!encoded_id.has_value()) {
                     return codec_failure<std::vector<std::byte>>(encoded_id.error().code,
                                                                  encoded_id.error().offset);
                 }
 
-                return serialize_http3_payload_frame(kHttp3FrameTypeGoaway, encoded_id.value());
-            } else if constexpr (std::is_same_v<T, Http3MaxPushIdFrame>) {
-                const auto encoded_push_id = encode_varint(typed_frame.push_id);
-                if (!encoded_push_id.has_value()) {
-                    return codec_failure<std::vector<std::byte>>(encoded_push_id.error().code,
-                                                                 encoded_push_id.error().offset);
+                const auto encoded_value = encode_varint(setting.value);
+                if (!encoded_value.has_value()) {
+                    return codec_failure<std::vector<std::byte>>(encoded_value.error().code,
+                                                                 encoded_value.error().offset);
                 }
 
-                return serialize_http3_payload_frame(kHttp3FrameTypeMaxPushId,
-                                                     encoded_push_id.value());
-            } else {
-                return serialize_http3_payload_frame(typed_frame.type, typed_frame.payload);
+                writer.write_bytes(encoded_id.value());
+                writer.write_bytes(encoded_value.value());
             }
-        },
-        frame);
+
+            return serialize_http3_payload_frame(kHttp3FrameTypeSettings, writer.bytes());
+        }
+
+        CodecResult<std::vector<std::byte>> operator()(const Http3GoawayFrame &typed_frame) const {
+            const auto encoded_id = encode_varint(typed_frame.id);
+            if (!encoded_id.has_value()) {
+                return codec_failure<std::vector<std::byte>>(encoded_id.error().code,
+                                                             encoded_id.error().offset);
+            }
+
+            return serialize_http3_payload_frame(kHttp3FrameTypeGoaway, encoded_id.value());
+        }
+
+        CodecResult<std::vector<std::byte>>
+        operator()(const Http3MaxPushIdFrame &typed_frame) const {
+            const auto encoded_push_id = encode_varint(typed_frame.push_id);
+            if (!encoded_push_id.has_value()) {
+                return codec_failure<std::vector<std::byte>>(encoded_push_id.error().code,
+                                                             encoded_push_id.error().offset);
+            }
+
+            return serialize_http3_payload_frame(kHttp3FrameTypeMaxPushId, encoded_push_id.value());
+        }
+
+        CodecResult<std::vector<std::byte>> operator()(const Http3UnknownFrame &typed_frame) const {
+            BufferWriter writer;
+            if (const auto error =
+                    write_http3_payload_frame(writer, typed_frame.type, typed_frame.payload);
+                error.has_value()) {
+                return CodecResult<std::vector<std::byte>>::failure(*error);
+            }
+            return CodecResult<std::vector<std::byte>>::success(writer.bytes());
+        }
+    };
+
+    return std::visit(FrameSerializer{}, frame);
 }
 
 CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> bytes) {
@@ -526,16 +560,15 @@ Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const H
         }
         saw_status = true;
 
-        unsigned int status = 0;
-        const auto *begin = field.value.data();
-        const auto *end = begin + field.value.size();
-        const auto parsed = std::from_chars(begin, end, status);
-        if (field.value.size() != 3 || parsed.ec != std::errc{} || parsed.ptr != end ||
-            status < 100) {
+        if (field.value.size() != 3 || field.value[0] < '1' || field.value[0] > '9' ||
+            field.value[1] < '0' || field.value[1] > '9' || field.value[2] < '0' ||
+            field.value[2] > '9') {
             return http3_failure<Http3ResponseHead>(Http3ErrorCode::message_error,
                                                     "invalid :status");
         }
 
+        const auto status = static_cast<unsigned int>(
+            (field.value[0] - '0') * 100 + (field.value[1] - '0') * 10 + (field.value[2] - '0'));
         head.status = static_cast<std::uint16_t>(status);
     }
 

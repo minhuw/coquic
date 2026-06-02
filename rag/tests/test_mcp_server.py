@@ -11,7 +11,6 @@ import coquic_rag.query.service as query_service_module
 from coquic_rag.cli.main import main as cli_main
 from coquic_rag.config import ProjectPaths
 from coquic_rag.embed.provider import FakeEmbedder
-from coquic_rag.mcp_server.server import create_mcp_server, main as mcp_main
 from coquic_rag.query.service import IndexNotBuiltError, IndexStatus, QueryService
 from coquic_rag.store.qdrant_store import QdrantSectionStore
 
@@ -60,7 +59,7 @@ def _build_server(tmp_path: Path):
         ),
         embedder=FakeEmbedder(),
     )
-    return create_mcp_server(service=service)
+    return mcp_server_module.create_mcp_server(service=service)
 
 
 def _build_index(source_dir: Path, state_dir: Path) -> None:
@@ -179,7 +178,7 @@ def test_create_mcp_server_fails_fast_when_index_is_incomplete(
     )
 
     with pytest.raises(IndexNotBuiltError, match="ready: no"):
-        create_mcp_server(paths=paths)
+        mcp_server_module.create_mcp_server(paths=paths)
 
 
 def test_mcp_main_returns_nonzero_when_index_is_incomplete(
@@ -195,7 +194,7 @@ def test_mcp_main_returns_nonzero_when_index_is_incomplete(
         state_dir=state_dir,
     )
 
-    assert mcp_main(paths=paths) == 1
+    assert mcp_server_module.main(paths=paths) == 1
 
     error_output = capsys.readouterr().err
     assert "QUIC index is not ready" in error_output
@@ -239,7 +238,7 @@ def test_mcp_main_returns_nonzero_with_clear_remote_backend_error(
 
     monkeypatch.setattr(QdrantSectionStore, "section_count", _raise_connection_error)
 
-    assert mcp_main(paths=paths) == 1
+    assert mcp_server_module.main(paths=paths) == 1
 
     error_output = capsys.readouterr().err
     assert remote_url in error_output
@@ -278,7 +277,7 @@ def test_mcp_main_remote_unreachable_probes_status_once(
     monkeypatch.setattr(query_service_module, "get_index_status", _fake_status)
     monkeypatch.setattr(mcp_server_module, "get_index_status", _fake_status)
 
-    assert mcp_main(paths=paths) == 1
+    assert mcp_server_module.main(paths=paths) == 1
 
     error_output = capsys.readouterr().err
     assert remote_url in error_output
@@ -305,7 +304,7 @@ def test_mcp_main_preserves_incomplete_index_message_when_remote_unreachable_wit
 
     monkeypatch.setattr(QdrantSectionStore, "section_count", _raise_connection_error)
 
-    assert mcp_main(paths=paths) == 1
+    assert mcp_server_module.main(paths=paths) == 1
 
     error_output = capsys.readouterr().err
     assert "QUIC index is not ready" in error_output
@@ -337,7 +336,7 @@ def test_mcp_main_returns_nonzero_with_clear_local_lock_error(
 
     monkeypatch.setattr(QdrantSectionStore, "section_count", _raise_local_lock_error)
 
-    assert mcp_main(paths=paths) == 1
+    assert mcp_server_module.main(paths=paths) == 1
 
     error_output = capsys.readouterr().err
     assert "shared server workflow" in error_output

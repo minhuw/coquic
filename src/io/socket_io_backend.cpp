@@ -446,6 +446,7 @@ bool socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
     bool ok = true;
     const auto record = [&](bool condition, const char *) { ok &= condition; };
 
+    // Send recording covers IPv6, truncated IPv4, and null destination address handling.
     reset_for_case();
 
     sockaddr_in6 ipv6_peer{};
@@ -484,6 +485,7 @@ bool socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
     reset_for_case();
     record(record_socket_family_and_open(-1, SOCK_DGRAM, 0) == -1, "record socket invalid family");
 
+    // Poll and recvmsg guards cover missing descriptors, messages, and iovec state.
     reset_for_case();
     record(record_poll_descriptor_count_and_second_readable(nullptr, 0, 0) == 0,
            "poll helper idle path");
@@ -520,6 +522,7 @@ bool socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
            }),
            "recvmsg ipv4 fallback peer");
 
+    // IPv6 receive coverage keeps truncated name storage from writing past the caller buffer.
     reset_for_case();
     g_multi_socket_backend_test_trace.readable_socket_fd = 22;
     message = {};
@@ -533,6 +536,7 @@ bool socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
            }),
            "recvmsg ipv6 truncated name storage");
 
+    // Runtime socket-open failures cover both direct send and wait helper error paths.
     reset_for_case();
     {
         const ScopedSocketIoBackendOpsOverride runtime_ops{
@@ -558,6 +562,7 @@ bool socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
     record(!socket_io_backend_wait_returns_second_route_datagram_for_tests(),
            "wait helper fails when recorded fds are unavailable");
 
+    // Invalid backend discriminants are rejected by the generic route/send/wait test adapters.
     const auto invalid_kind = [] {
         constexpr std::uint8_t raw_kind = 0xff;
         auto kind = QuicIoBackendKind::socket;

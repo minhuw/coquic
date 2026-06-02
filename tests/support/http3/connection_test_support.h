@@ -1,3 +1,6 @@
+#ifndef COQUIC_TESTS_SUPPORT_HTTP3_CONNECTION_TEST_SUPPORT_H
+#define COQUIC_TESTS_SUPPORT_HTTP3_CONNECTION_TEST_SUPPORT_H
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -602,3 +605,5 @@ struct Http3ConnectionTestAccess {
 };
 
 } // namespace coquic::http3
+
+#endif // COQUIC_TESTS_SUPPORT_HTTP3_CONNECTION_TEST_SUPPORT_H

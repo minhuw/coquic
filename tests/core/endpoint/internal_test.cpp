@@ -20,13 +20,13 @@ std::vector<std::byte> make_client_initial_datagram() {
     client_config.application_protocol = "coquic";
 
     QuicCore client(std::move(client_config));
-    const auto opened = client.advance_endpoint(
+    auto opened = client.advance_endpoint(
         QuicCoreOpenConnection{
             .connection = make_client_open_config(),
             .initial_route_handle = 17,
         },
         coquic::quic::test::test_time(0));
-    const auto sends = send_effects_from(opened);
+    auto sends = send_effects_from(opened);
     EXPECT_FALSE(sends.empty());
     if (sends.empty()) {
         return {};
@@ -35,7 +35,7 @@ std::vector<std::byte> make_client_initial_datagram() {
 }
 
 std::vector<std::byte> make_plaintext_initial_datagram_with_token(std::vector<std::byte> token) {
-    const auto encoded = serialize_packet(InitialPacket{
+    auto encoded = serialize_packet(InitialPacket{
         .version = kQuicVersion1,
         .destination_connection_id =
             bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}),
@@ -117,7 +117,7 @@ std::vector<std::byte> make_ipv6_identity(std::initializer_list<std::uint8_t> ad
     std::vector<std::byte> bytes;
     bytes.reserve(19);
     bytes.push_back(std::byte{0x06});
-    for (const auto value : address) {
+    for (auto value : address) {
         bytes.push_back(static_cast<std::byte>(value));
     }
     while (bytes.size() < 17) {
@@ -169,7 +169,7 @@ TEST(QuicCoreEndpointInternalTest, LegacyViewAndLegacyEntryHelpersHandleNullAndM
         FAIL() << "expected legacy connection handle";
         return;
     }
-    const auto legacy_handle = *legacy_core.legacy_connection_handle_;
+    auto legacy_handle = *legacy_core.legacy_connection_handle_;
     legacy_core.connections_.erase(legacy_handle);
 
     const QuicCore &const_core = legacy_core;
@@ -189,8 +189,7 @@ TEST(QuicCoreEndpointInternalTest, ReceiveStreamDataPayloadPrefersSharedBytes) {
     EXPECT_EQ(std::vector<std::byte>(owned.payload().begin(), owned.payload().end()),
               bytes_from_ints({0x01, 0x02}));
 
-    const auto storage =
-        std::make_shared<std::vector<std::byte>>(bytes_from_ints({0xaa, 0xbb, 0xcc}));
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_ints({0xaa, 0xbb, 0xcc}));
     QuicCoreReceiveStreamData shared{
         .bytes = bytes_from_ints({0x01}),
         .shared_bytes = SharedBytes(storage, 1, 3),
@@ -202,8 +201,7 @@ TEST(QuicCoreEndpointInternalTest, ReceiveStreamDataPayloadPrefersSharedBytes) {
 }
 
 TEST(QuicCoreEndpointInternalTest, InboundDatagramMaterializeClampsSharedPayload) {
-    const auto storage =
-        std::make_shared<std::vector<std::byte>>(bytes_from_ints({0xaa, 0xbb, 0xcc}));
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_ints({0xaa, 0xbb, 0xcc}));
     QuicCoreInboundDatagram shared{
         .bytes = bytes_from_ints({0x01}),
         .shared_bytes = storage,
@@ -219,52 +217,51 @@ TEST(QuicCoreEndpointInternalTest, InboundDatagramMaterializeClampsSharedPayload
 TEST(QuicCoreEndpointInternalTest, ParseEndpointDatagramRejectsMalformedInputs) {
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(std::span<const std::byte>{}).has_value());
 
-    const auto invalid_short_header = bytes_from_ints({0x00});
+    auto invalid_short_header = bytes_from_ints({0x00});
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(invalid_short_header).has_value());
 
-    const auto too_short_short_header = bytes_from_ints({0x40, 0, 1, 2});
+    auto too_short_short_header = bytes_from_ints({0x40, 0, 1, 2});
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(too_short_short_header).has_value());
 
-    const auto version_negotiation =
-        bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x00, 0x01, 0xaa, 0x00});
+    auto version_negotiation = bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x00, 0x01, 0xaa, 0x00});
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(version_negotiation).has_value());
 
-    const auto truncated_destination_connection_id = bytes_from_ints(
+    auto truncated_destination_connection_id = bytes_from_ints(
         {0xc0, 0x00, 0x00, 0x00, 0x01, 0x08, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x10});
     EXPECT_FALSE(
         QuicCore::parse_endpoint_datagram(truncated_destination_connection_id).has_value());
 
-    const auto truncated_source_connection_id =
+    auto truncated_source_connection_id =
         bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0xaa, 0x08, 0xbb});
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(truncated_source_connection_id).has_value());
 
-    const auto truncated_initial_token_varint =
+    auto truncated_initial_token_varint =
         bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0xaa, 0x01, 0xbb, 0x40});
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(truncated_initial_token_varint).has_value());
 
-    const auto initial_token_length_exceeds_remaining =
+    auto initial_token_length_exceeds_remaining =
         bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x01, 0x01, 0xaa, 0x01, 0xbb, 0x05});
     EXPECT_FALSE(
         QuicCore::parse_endpoint_datagram(initial_token_length_exceeds_remaining).has_value());
 }
 
 TEST(QuicCoreEndpointInternalTest, ParseEndpointDatagramAcceptsGreasedQuicBitWhenEnabled) {
-    const auto greased_short_header =
+    auto greased_short_header =
         bytes_from_ints({0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x02});
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(greased_short_header).has_value());
-    const auto short_header =
+    auto short_header =
         QuicCore::parse_endpoint_datagram(greased_short_header, /*accept_greased_quic_bit=*/true);
     ASSERT_TRUE(short_header.has_value());
-    const auto &short_header_value = optional_ref_or_terminate(short_header);
+    auto &short_header_value = optional_ref_or_terminate(short_header);
     EXPECT_EQ(short_header_value.kind, QuicCore::ParsedEndpointDatagram::Kind::short_header);
 
-    const auto greased_initial =
+    auto greased_initial =
         bytes_from_ints({0x80, 0x00, 0x00, 0x00, 0x01, 0x01, 0xaa, 0x01, 0xbb, 0x00});
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(greased_initial).has_value());
-    const auto initial =
+    auto initial =
         QuicCore::parse_endpoint_datagram(greased_initial, /*accept_greased_quic_bit=*/true);
     ASSERT_TRUE(initial.has_value());
-    const auto &initial_value = optional_ref_or_terminate(initial);
+    auto &initial_value = optional_ref_or_terminate(initial);
     EXPECT_EQ(initial_value.kind, QuicCore::ParsedEndpointDatagram::Kind::supported_initial);
     EXPECT_EQ(initial_value.destination_connection_id, bytes_from_ints({0xaa}));
     ASSERT_TRUE(initial_value.source_connection_id.has_value());
@@ -292,7 +289,9 @@ TEST(QuicCoreEndpointInternalTest, RetryContextAndPacketBuildersRejectMissingOrM
         .token = pending.token,
     };
 
-    EXPECT_FALSE(core.take_retry_context(parsed, 9, coquic::quic::test::test_time(0)).has_value());
+    EXPECT_FALSE(core.take_retry_context(parsed, 9, coquic::quic::test::test_time(0),
+                                         std::span<const std::byte>{})
+                     .has_value());
     EXPECT_TRUE(core.retry_tokens_.contains(QuicCore::connection_id_key(pending.token)));
 
     auto no_source = parsed;
@@ -320,25 +319,23 @@ TEST(QuicCoreEndpointInternalTest, VersionNegotiationCanGreaseReservedVersion) {
     };
     constexpr std::array<std::uint32_t, 1> supported_versions = {kQuicVersion1};
 
-    const auto bytes =
-        QuicCore::make_version_negotiation_packet_bytes(parsed, supported_versions, true);
+    auto bytes = QuicCore::make_version_negotiation_packet_bytes(parsed, supported_versions, true);
     ASSERT_FALSE(bytes.empty());
 
-    const auto decoded = deserialize_packet(bytes, {});
+    auto decoded = deserialize_packet(bytes, {});
     ASSERT_TRUE(decoded.has_value());
-    const auto *version_negotiation =
-        std::get_if<VersionNegotiationPacket>(&decoded.value().packet);
+    auto *version_negotiation = std::get_if<VersionNegotiationPacket>(&decoded.value().packet);
     ASSERT_NE(version_negotiation, nullptr);
     EXPECT_EQ(version_negotiation->supported_versions,
               (std::vector<std::uint32_t>{kQuicVersion1, 0x0a0a0a0a}));
 
     constexpr std::array<std::uint32_t, 2> already_greased = {kQuicVersion1, 0x1a2a3a4a};
-    const auto already_greased_bytes =
+    auto already_greased_bytes =
         QuicCore::make_version_negotiation_packet_bytes(parsed, already_greased, true);
     ASSERT_FALSE(already_greased_bytes.empty());
-    const auto already_greased_decoded = deserialize_packet(already_greased_bytes, {});
+    auto already_greased_decoded = deserialize_packet(already_greased_bytes, {});
     ASSERT_TRUE(already_greased_decoded.has_value());
-    const auto *already_greased_vn =
+    auto *already_greased_vn =
         std::get_if<VersionNegotiationPacket>(&already_greased_decoded.value().packet);
     ASSERT_NE(already_greased_vn, nullptr);
     EXPECT_EQ(already_greased_vn->supported_versions,
@@ -370,7 +367,7 @@ TEST(QuicCoreEndpointInternalTest, RouteRefreshRememberPathAndLegacySeedingCover
     server_core.refresh_server_connection_routes(route_entry);
     route_entry.connection.reset();
 
-    const auto live_key = QuicCore::connection_id_key(ConnectionId{std::byte{0x44}});
+    auto live_key = QuicCore::connection_id_key(ConnectionId{std::byte{0x44}});
     EXPECT_FALSE(server_core.connection_id_routes_.contains("stale"));
     EXPECT_EQ(server_core.connection_id_routes_.at(live_key), route_entry.handle);
     EXPECT_EQ(route_entry.active_connection_id_keys.size(), 1u);
@@ -384,7 +381,7 @@ TEST(QuicCoreEndpointInternalTest, RouteRefreshRememberPathAndLegacySeedingCover
     path_entry.route_handle_by_path_id.emplace(1, 12);
     path_entry.path_id_by_route_handle.emplace(12, 1);
     path_entry.next_path_id = 1;
-    EXPECT_EQ(server_core.remember_inbound_path(path_entry, 13), 2u);
+    EXPECT_EQ(server_core.remember_inbound_path(path_entry, 13, std::span<const std::byte>{}), 2u);
 
     QuicCore endpoint_core(make_client_endpoint_config());
     EXPECT_FALSE(coquic::quic::test::seed_legacy_route_handle_path_for_tests(endpoint_core, 7, 0));
@@ -457,7 +454,7 @@ TEST(QuicCoreEndpointInternalTest, ConnectionCommandDrainsPendingEndpointEffects
         .status = QuicZeroRttStatus::accepted,
     };
 
-    const auto result = endpoint.advance_endpoint(
+    auto result = endpoint.advance_endpoint(
         QuicCoreConnectionCommand{
             .connection = 1,
             .input = QuicCoreRequestKeyUpdate{},
@@ -468,30 +465,30 @@ TEST(QuicCoreEndpointInternalTest, ConnectionCommandDrainsPendingEndpointEffects
     bool saw_stop = false;
     bool saw_preferred = false;
     bool saw_zero_rtt = false;
-    for (const auto &effect : result.effects) {
-        if (const auto *reset = std::get_if<QuicCorePeerResetStream>(&effect)) {
+    for (auto &effect : result.effects) {
+        if (auto *reset_stream = std::get_if<QuicCorePeerResetStream>(&effect)) {
             saw_reset = true;
-            EXPECT_EQ(reset->connection, 1u);
-            EXPECT_EQ(reset->stream_id, 9u);
-            EXPECT_EQ(reset->application_error_code, 21u);
-            EXPECT_EQ(reset->final_size, 34u);
+            EXPECT_EQ(reset_stream->connection, 1u);
+            EXPECT_EQ(reset_stream->stream_id, 9u);
+            EXPECT_EQ(reset_stream->application_error_code, 21u);
+            EXPECT_EQ(reset_stream->final_size, 34u);
             continue;
         }
-        if (const auto *stop = std::get_if<QuicCorePeerStopSending>(&effect)) {
+        if (auto *stop = std::get_if<QuicCorePeerStopSending>(&effect)) {
             saw_stop = true;
             EXPECT_EQ(stop->connection, 1u);
             EXPECT_EQ(stop->stream_id, 11u);
             EXPECT_EQ(stop->application_error_code, 22u);
             continue;
         }
-        if (const auto *preferred = std::get_if<QuicCorePeerPreferredAddressAvailable>(&effect)) {
+        if (auto *preferred = std::get_if<QuicCorePeerPreferredAddressAvailable>(&effect)) {
             saw_preferred = true;
             EXPECT_EQ(preferred->connection, 1u);
             EXPECT_EQ(preferred->preferred_address.connection_id,
                       make_test_preferred_address().connection_id);
             continue;
         }
-        if (const auto *status = std::get_if<QuicCoreZeroRttStatusEvent>(&effect)) {
+        if (auto *status = std::get_if<QuicCoreZeroRttStatusEvent>(&effect)) {
             saw_zero_rtt = true;
             EXPECT_EQ(status->connection, 1u);
             EXPECT_EQ(status->status, QuicZeroRttStatus::accepted);
@@ -525,11 +522,11 @@ TEST(QuicCoreEndpointInternalTest, EndpointDiagnosticsSkipNullEntriesAndTrackCon
 
     entry.send_continuation_wakeup = coquic::quic::test::test_time(2);
     EXPECT_TRUE(endpoint.has_send_continuation_pending());
-    const auto next_wakeup = endpoint.next_wakeup();
+    auto next_wakeup = endpoint.next_wakeup();
     ASSERT_TRUE(next_wakeup.has_value());
     EXPECT_EQ(optional_value_or_terminate(next_wakeup), coquic::quic::test::test_time(2));
 
-    const auto diagnostics = endpoint.connection_diagnostics();
+    auto diagnostics = endpoint.connection_diagnostics();
     ASSERT_EQ(diagnostics.size(), 1u);
     EXPECT_EQ(diagnostics.front().handle, 1u);
     EXPECT_TRUE(diagnostics.front().started);
@@ -550,7 +547,7 @@ TEST(QuicCoreEndpointInternalTest, EndpointPacketInspectionEffectsCarryConnectio
     *entry.connection = make_connected_client_connection();
     entry.connection->config_.enable_packet_inspection = true;
 
-    const auto result = endpoint.advance_endpoint(
+    auto result = endpoint.advance_endpoint(
         QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -563,8 +560,8 @@ TEST(QuicCoreEndpointInternalTest, EndpointPacketInspectionEffectsCarryConnectio
 
     ASSERT_FALSE(send_effects_from(result).empty());
     bool saw_inspection = false;
-    for (const auto &effect : result.effects) {
-        const auto *inspection = std::get_if<QuicCorePacketInspection>(&effect);
+    for (auto &effect : result.effects) {
+        auto *inspection = std::get_if<QuicCorePacketInspection>(&effect);
         if (inspection == nullptr) {
             continue;
         }
@@ -599,7 +596,7 @@ TEST(QuicCoreEndpointInternalTest, EndpointDrainMarksContinuationAfterBatchCap) 
     peer_transport_parameters.initial_max_stream_data_bidi_remote = 1u << 30u;
     entry.connection->initialize_peer_flow_control_from_transport_parameters();
 
-    const auto result = endpoint.advance_endpoint(
+    auto result = endpoint.advance_endpoint(
         QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -631,14 +628,14 @@ TEST(QuicCoreEndpointInternalTest, EndpointSendContinuationResumesPacedBurst) {
     entry.connection->config_.max_outbound_datagram_size = 1200;
     entry.connection->congestion_controller_ = QuicCongestionController(
         QuicCongestionControlAlgorithm::bbr, entry.connection->config_.max_outbound_datagram_size);
-    auto &bbr =
+    auto &bbr_controller =
         std::get<BbrCongestionController>(entry.connection->congestion_controller_.storage_);
-    bbr.mode_ = BbrCongestionController::Mode::probe_bw_cruise;
-    bbr.max_bandwidth_bytes_per_second_ = 120000000.0;
-    bbr.bandwidth_bytes_per_second_ = 120000000.0;
-    bbr.pacing_rate_bytes_per_second_ = 120000000.0;
-    bbr.min_rtt_ = std::chrono::milliseconds{1};
-    bbr.send_quantum_ = 400000;
+    bbr_controller.mode_ = BbrCongestionController::Mode::probe_bw_cruise;
+    bbr_controller.max_bandwidth_bytes_per_second_ = 120000000.0;
+    bbr_controller.bandwidth_bytes_per_second_ = 120000000.0;
+    bbr_controller.pacing_rate_bytes_per_second_ = 120000000.0;
+    bbr_controller.min_rtt_ = std::chrono::milliseconds{1};
+    bbr_controller.send_quantum_ = 400000;
     entry.connection->congestion_controller_.congestion_window_ = 1u << 30u;
     entry.connection->congestion_controller_.bytes_in_flight_ = 0;
     entry.connection->connection_flow_control_.peer_max_data = 1u << 30u;
@@ -648,8 +645,8 @@ TEST(QuicCoreEndpointInternalTest, EndpointSendContinuationResumesPacedBurst) {
     peer_transport_parameters.initial_max_stream_data_bidi_remote = 1u << 30u;
     entry.connection->initialize_peer_flow_control_from_transport_parameters();
 
-    const auto send_time = coquic::quic::test::test_time(1);
-    const auto first = endpoint.advance_endpoint(
+    auto send_time = coquic::quic::test::test_time(1);
+    auto first = endpoint.advance_endpoint(
         QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -666,7 +663,7 @@ TEST(QuicCoreEndpointInternalTest, EndpointSendContinuationResumesPacedBurst) {
     ASSERT_TRUE(first.next_wakeup.has_value());
     EXPECT_EQ(optional_value_or_terminate(first.next_wakeup), send_time);
 
-    const auto continued = endpoint.advance_endpoint(QuicCoreTimerExpired{}, send_time);
+    auto continued = endpoint.advance_endpoint(QuicCoreTimerExpired{}, send_time);
 
     EXPECT_FALSE(continued.local_error.has_value());
     EXPECT_FALSE(send_effects_from(continued).empty());
@@ -693,7 +690,7 @@ TEST(QuicCoreEndpointInternalTest, LegacyDrainMarksContinuationAndCarriesPacketI
         .packet_number = 9,
     });
 
-    const auto result = legacy_core.advance(
+    auto result = legacy_core.advance(
         QuicCoreSendStreamData{
             .stream_id = 0,
             .bytes = std::vector<std::byte>(400000, std::byte{0x52}),
@@ -706,8 +703,8 @@ TEST(QuicCoreEndpointInternalTest, LegacyDrainMarksContinuationAndCarriesPacketI
     EXPECT_EQ(send_effects_from(result).size(), 10u);
 
     bool saw_inspection = false;
-    for (const auto &effect : result.effects) {
-        const auto *inspection = std::get_if<QuicCorePacketInspection>(&effect);
+    for (auto &effect : result.effects) {
+        auto *inspection = std::get_if<QuicCorePacketInspection>(&effect);
         if (inspection == nullptr) {
             continue;
         }
@@ -756,7 +753,7 @@ TEST(QuicCoreEndpointInternalTest, EndpointPathMtuUpdateAppliesToMatchedRouteOnl
     second.connection->paths_.at(0).mtu.validated_datagram_size = 1500;
     second.connection->paths_.at(0).mtu.probe_ceiling = 4096;
 
-    const auto ignored = endpoint.advance_endpoint(
+    auto ignored = endpoint.advance_endpoint(
         QuicCorePathMtuUpdate{
             .route_handle = 99,
             .max_udp_payload_size = 1300,
@@ -765,7 +762,7 @@ TEST(QuicCoreEndpointInternalTest, EndpointPathMtuUpdateAppliesToMatchedRouteOnl
     EXPECT_TRUE(ignored.effects.empty());
     EXPECT_EQ(first.connection->paths_.at(0).mtu.validated_datagram_size, 1500u);
 
-    const auto updated = endpoint.advance_endpoint(
+    auto updated = endpoint.advance_endpoint(
         QuicCorePathMtuUpdate{
             .route_handle = 17,
             .max_udp_payload_size = 1400,
@@ -827,9 +824,9 @@ TEST(QuicCoreEndpointInternalTest,
     auto server_config = make_server_endpoint_config();
     server_config.application_protocol = "coquic";
     QuicCore server(std::move(server_config));
-    const auto initial = make_client_initial_datagram();
+    auto initial = make_client_initial_datagram();
 
-    const auto accepted = server.advance_endpoint(
+    auto accepted = server.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = initial,
             .route_handle = 31,
@@ -842,17 +839,17 @@ TEST(QuicCoreEndpointInternalTest,
     ASSERT_EQ(entry.default_route_handle, std::optional<QuicRouteHandle>{31u});
     entry.connection->pending_terminal_state_ = QuicConnectionTerminalState::closed;
 
-    const auto closed = server.advance_endpoint(
+    auto closed = server.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = initial,
         },
         coquic::quic::test::test_time(2));
 
     EXPECT_EQ(server.connection_count(), 0u);
-    const auto lifecycle = lifecycle_events_from(closed);
+    auto lifecycle = lifecycle_events_from(closed);
     ASSERT_EQ(lifecycle.size(), 1u);
     EXPECT_EQ(lifecycle.front().event, QuicCoreConnectionLifecycle::closed);
-    const auto sends = send_effects_from(closed);
+    auto sends = send_effects_from(closed);
     if (!sends.empty()) {
         EXPECT_EQ(sends.front().route_handle, std::optional<QuicRouteHandle>{31u});
     }
@@ -862,8 +859,8 @@ TEST(QuicCoreEndpointInternalTest, SelfMoveAssignmentLeavesLegacyCoreUsable) {
     QuicCore core(coquic::quic::test::make_client_core_config());
 
     auto &self = core;
-    const auto original_handle = core.legacy_connection_handle_;
-    const auto original_count = core.connection_count();
+    auto original_handle = core.legacy_connection_handle_;
+    auto original_count = core.connection_count();
     core = std::move(self);
 
     EXPECT_EQ(core.legacy_connection_handle_, original_handle);
@@ -876,21 +873,21 @@ TEST(QuicCoreEndpointInternalTest, InboundEndpointBranchesCoverAcceptDropAndUnkn
     server_config.application_protocol = "coquic";
     QuicCore server(std::move(server_config));
 
-    const auto accepted = server.advance_endpoint(
+    auto accepted = server.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = make_client_initial_datagram(),
         },
         coquic::quic::test::test_time(1));
 
-    const auto lifecycle = lifecycle_events_from(accepted);
+    auto lifecycle = lifecycle_events_from(accepted);
     ASSERT_FALSE(lifecycle.empty());
     EXPECT_EQ(lifecycle.front().event, QuicCoreConnectionLifecycle::accepted);
-    const auto accepted_sends = send_effects_from(accepted);
+    auto accepted_sends = send_effects_from(accepted);
     ASSERT_FALSE(accepted_sends.empty());
     EXPECT_EQ(accepted_sends.front().route_handle, std::nullopt);
 
     QuicCore client(make_client_endpoint_config());
-    const auto ignored = client.advance_endpoint(
+    auto ignored = client.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = bytes_from_ints({0x40, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}),
         },
@@ -901,7 +898,7 @@ TEST(QuicCoreEndpointInternalTest, InboundEndpointBranchesCoverAcceptDropAndUnkn
     auto retry_config = make_server_endpoint_config();
     retry_config.retry_enabled = true;
     QuicCore retry_server(std::move(retry_config));
-    const auto dropped = retry_server.advance_endpoint(
+    auto dropped = retry_server.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = make_plaintext_initial_datagram_with_token(bytes_from_ints({0xaa})),
             .route_handle = 55,
@@ -929,7 +926,7 @@ TEST(QuicCoreEndpointInternalTest, EndpointAndLegacyCommandsCoverErrorAndCleanup
     auto &peer_transport_parameters = *entry.connection->peer_transport_parameters_;
     peer_transport_parameters.disable_active_migration = true;
 
-    const auto reset_result = endpoint.advance_endpoint(
+    auto reset_result = endpoint.advance_endpoint(
         QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -943,11 +940,11 @@ TEST(QuicCoreEndpointInternalTest, EndpointAndLegacyCommandsCoverErrorAndCleanup
         FAIL() << "expected reset local error";
         return;
     }
-    const auto &reset_error = *reset_result.local_error;
+    auto &reset_error = *reset_result.local_error;
     EXPECT_EQ(reset_error.connection, std::optional<QuicConnectionHandle>{1u});
     EXPECT_EQ(reset_error.code, QuicCoreLocalErrorCode::invalid_stream_direction);
 
-    const auto stop_result = endpoint.advance_endpoint(
+    auto stop_result = endpoint.advance_endpoint(
         QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -961,11 +958,11 @@ TEST(QuicCoreEndpointInternalTest, EndpointAndLegacyCommandsCoverErrorAndCleanup
         FAIL() << "expected stop local error";
         return;
     }
-    const auto &stop_error = *stop_result.local_error;
+    auto &stop_error = *stop_result.local_error;
     EXPECT_EQ(stop_error.connection, std::optional<QuicConnectionHandle>{1u});
     EXPECT_EQ(stop_error.code, QuicCoreLocalErrorCode::invalid_stream_direction);
 
-    const auto migration_result = endpoint.advance_endpoint(
+    auto migration_result = endpoint.advance_endpoint(
         QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -979,7 +976,7 @@ TEST(QuicCoreEndpointInternalTest, EndpointAndLegacyCommandsCoverErrorAndCleanup
         FAIL() << "expected migration local error";
         return;
     }
-    const auto &migration_error = *migration_result.local_error;
+    auto &migration_error = *migration_result.local_error;
     EXPECT_EQ(migration_error.connection, std::optional<QuicConnectionHandle>{1u});
     EXPECT_EQ(migration_error.code, QuicCoreLocalErrorCode::unsupported_operation);
 
@@ -996,10 +993,10 @@ TEST(QuicCoreEndpointInternalTest, EndpointAndLegacyCommandsCoverErrorAndCleanup
         coquic::quic::test::test_time(5);
     timer_entry.connection->pending_terminal_state_ = QuicConnectionTerminalState::closed;
 
-    const auto timeout_result =
+    auto timeout_result =
         timer_core.advance_endpoint(QuicCoreTimerExpired{}, coquic::quic::test::test_time(5));
     EXPECT_EQ(timer_core.connection_count(), 0u);
-    const auto timeout_lifecycle = lifecycle_events_from(timeout_result);
+    auto timeout_lifecycle = lifecycle_events_from(timeout_result);
     ASSERT_EQ(timeout_lifecycle.size(), 1u);
     EXPECT_EQ(timeout_lifecycle.front().event, QuicCoreConnectionLifecycle::closed);
 
@@ -1007,13 +1004,13 @@ TEST(QuicCoreEndpointInternalTest, EndpointAndLegacyCommandsCoverErrorAndCleanup
     auto *missing_legacy_entry = missing_legacy.ensure_legacy_entry();
     ASSERT_NE(missing_legacy_entry, nullptr);
     missing_legacy_entry->connection.reset();
-    const auto missing_legacy_result =
+    auto missing_legacy_result =
         missing_legacy.advance(QuicCoreStart{}, coquic::quic::test::test_time(6));
     EXPECT_TRUE(missing_legacy_result.effects.empty());
     EXPECT_FALSE(missing_legacy_result.local_error.has_value());
 
     QuicCore legacy_core(coquic::quic::test::make_client_core_config());
-    const auto shared_send_result = legacy_core.advance(
+    auto shared_send_result = legacy_core.advance(
         QuicCoreSendSharedStreamData{
             .stream_id = 0,
             .bytes = SharedBytes(bytes_from_ints({0x68, 0x69})),
@@ -1024,7 +1021,7 @@ TEST(QuicCoreEndpointInternalTest, EndpointAndLegacyCommandsCoverErrorAndCleanup
         FAIL() << "expected shared-send local error";
         return;
     }
-    const auto &shared_send_error = *shared_send_result.local_error;
+    auto &shared_send_error = *shared_send_result.local_error;
     EXPECT_EQ(shared_send_error.connection, std::nullopt);
     EXPECT_EQ(shared_send_error.code, QuicCoreLocalErrorCode::invalid_stream_id);
 }
@@ -1082,8 +1079,7 @@ TEST(QuicCoreEndpointInternalTest, RouteMaintenanceSkipsForeignOwnersAndMissingI
     EXPECT_FALSE(server_core.connection_id_routes_.contains("owned-refresh"));
     EXPECT_EQ(server_core.connection_id_routes_.at("foreign-refresh"), 88u);
     EXPECT_EQ(server_core.initial_destination_routes_.at("foreign-refresh-initial"), 88u);
-    const auto has_refreshed_initial =
-        refresh_entry.initial_destination_connection_id_key.has_value();
+    auto has_refreshed_initial = refresh_entry.initial_destination_connection_id_key.has_value();
     EXPECT_TRUE(has_refreshed_initial);
     if (has_refreshed_initial) {
         EXPECT_NE(refresh_entry.initial_destination_connection_id_key.value(),
@@ -1112,10 +1108,10 @@ TEST(QuicCoreEndpointInternalTest,
     empty_versions.supported_versions.clear();
     QuicCore version_negotiation_server(std::move(empty_versions));
 
-    const auto supported_long_header = make_supported_long_header_datagram(
+    auto supported_long_header = make_supported_long_header_datagram(
         kQuicVersion1, bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}),
         bytes_from_ints({0xc1, 0x01}));
-    const auto version_negotiation_result = version_negotiation_server.advance_endpoint(
+    auto version_negotiation_result = version_negotiation_server.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = supported_long_header,
             .route_handle = 41,
@@ -1126,7 +1122,7 @@ TEST(QuicCoreEndpointInternalTest,
     EXPECT_EQ(version_negotiation_server.connection_count(), 0u);
 
     QuicCore short_header_server(make_server_endpoint_config());
-    const auto short_header_result = short_header_server.advance_endpoint(
+    auto short_header_result = short_header_server.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = bytes_from_ints({0x40, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}),
             .route_handle = 42,
@@ -1140,13 +1136,13 @@ TEST(QuicCoreEndpointInternalTest,
     retry_config.retry_enabled = true;
     QuicCore retry_server(std::move(retry_config));
 
-    const auto oversized_source_connection_id =
+    auto oversized_source_connection_id =
         bytes_from_ints({0xc1, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
                          0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14});
-    const auto retry_initial = make_supported_initial_datagram(
+    auto retry_initial = make_supported_initial_datagram(
         kQuicVersion1, bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}),
         oversized_source_connection_id, {});
-    const auto retry_result = retry_server.advance_endpoint(
+    auto retry_result = retry_server.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = retry_initial,
             .route_handle = 55,
@@ -1164,11 +1160,11 @@ TEST(QuicCoreEndpointInternalTest, ServerDiscardsSupportedInitialDatagramSmaller
     server_config.retry_enabled = true;
     QuicCore server(std::move(server_config));
 
-    const auto undersized_initial = make_supported_initial_datagram(
+    auto undersized_initial = make_supported_initial_datagram(
         kQuicVersion1, bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}),
         bytes_from_ints({0xc1, 0x01}), {}, 1199);
 
-    const auto result = server.advance_endpoint(
+    auto result = server.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = undersized_initial,
             .route_handle = 55,
@@ -1187,7 +1183,7 @@ TEST(QuicCoreEndpointInternalTest, RetryTokensUseUnpredictablePerIssueBytes) {
     server_config.retry_enabled = true;
     QuicCore server(std::move(server_config));
 
-    const auto first_initial = make_supported_initial_datagram(
+    auto first_initial = make_supported_initial_datagram(
         kQuicVersion1, bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}),
         bytes_from_ints({0xc1, 0x01}), {});
     static_cast<void>(server.advance_endpoint(
@@ -1197,7 +1193,7 @@ TEST(QuicCoreEndpointInternalTest, RetryTokensUseUnpredictablePerIssueBytes) {
         },
         coquic::quic::test::test_time(1)));
 
-    const auto second_initial = make_supported_initial_datagram(
+    auto second_initial = make_supported_initial_datagram(
         kQuicVersion1, bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x09}),
         bytes_from_ints({0xc1, 0x02}), {});
     static_cast<void>(server.advance_endpoint(
@@ -1209,13 +1205,13 @@ TEST(QuicCoreEndpointInternalTest, RetryTokensUseUnpredictablePerIssueBytes) {
 
     ASSERT_EQ(server.retry_tokens_.size(), 2u);
     std::vector<std::vector<std::byte>> tokens;
-    for (const auto &[key, pending] : server.retry_tokens_) {
+    for (auto &[key, pending] : server.retry_tokens_) {
         static_cast<void>(key);
         tokens.push_back(pending.token);
     }
     ASSERT_EQ(tokens.size(), 2u);
     EXPECT_NE(tokens[0], tokens[1]);
-    for (const auto &token : tokens) {
+    for (auto &token : tokens) {
         EXPECT_EQ(token.size(), 16u);
         ASSERT_GE(token.size(), 4u);
         EXPECT_NE(std::vector<std::byte>(token.begin(), token.begin() + 4),
@@ -1245,18 +1241,23 @@ TEST(QuicCoreEndpointInternalTest, NewTokenContextValidatesRouteVersionAndExpiry
         .token = token,
     };
 
-    EXPECT_FALSE(
-        server.take_new_token_context(parsed, 56, coquic::quic::test::test_time(1)).has_value());
+    EXPECT_FALSE(server
+                     .take_new_token_context(parsed, 56, coquic::quic::test::test_time(1),
+                                             std::span<const std::byte>{})
+                     .has_value());
     EXPECT_EQ(server.new_tokens_.size(), 1u);
 
     auto wrong_version = parsed;
     wrong_version.version = kQuicVersion2;
-    EXPECT_FALSE(server.take_new_token_context(wrong_version, 55, coquic::quic::test::test_time(1))
+    EXPECT_FALSE(server
+                     .take_new_token_context(wrong_version, 55, coquic::quic::test::test_time(1),
+                                             std::span<const std::byte>{})
                      .has_value());
     EXPECT_EQ(server.new_tokens_.size(), 1u);
 
-    auto validated = server.take_new_token_context(parsed, 55, coquic::quic::test::test_time(1));
-    const auto validated_context = optional_value_or_terminate(validated);
+    auto validated = server.take_new_token_context(parsed, 55, coquic::quic::test::test_time(1),
+                                                   std::span<const std::byte>{});
+    auto validated_context = optional_value_or_terminate(validated);
     EXPECT_EQ(validated_context.token, token);
     EXPECT_TRUE(server.new_tokens_.empty());
 }
@@ -1267,26 +1268,26 @@ TEST(QuicCoreEndpointInternalTest, SealedRetryTokenSurvivesRestartAndBindsRouteI
     config.address_validation_token_secret = make_address_validation_secret(0x30);
     QuicCore original(std::move(config));
 
-    const auto destination_connection_id =
+    auto destination_connection_id =
         bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});
-    const auto source_connection_id = bytes_from_ints({0xc1, 0x01});
-    const auto identity = bytes_from_ints({0x7f, 0x00, 0x00, 0x01});
-    const auto initial = make_supported_initial_datagram(kQuicVersion1, destination_connection_id,
-                                                         source_connection_id, {});
+    auto source_connection_id = bytes_from_ints({0xc1, 0x01});
+    auto identity = bytes_from_ints({0x7f, 0x00, 0x00, 0x01});
+    auto initial = make_supported_initial_datagram(kQuicVersion1, destination_connection_id,
+                                                   source_connection_id, {});
 
-    const auto retry_result = original.advance_endpoint(
+    auto retry_result = original.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = initial,
             .route_handle = 55,
             .address_validation_identity = identity,
         },
         coquic::quic::test::test_time(1));
-    const auto retry_sends = send_effects_from(retry_result);
+    auto retry_sends = send_effects_from(retry_result);
     ASSERT_EQ(retry_sends.size(), 1u);
-    const auto decoded_retry = deserialize_packet(retry_sends.front().bytes.span(), {});
+    auto decoded_retry = deserialize_packet(retry_sends.front().bytes.span(), {});
     ASSERT_TRUE(decoded_retry.has_value());
     ASSERT_EQ(decoded_retry.value().bytes_consumed, retry_sends.front().bytes.size());
-    const auto *retry_packet = std::get_if<RetryPacket>(&decoded_retry.value().packet);
+    auto *retry_packet = std::get_if<RetryPacket>(&decoded_retry.value().packet);
     ASSERT_NE(retry_packet, nullptr);
     EXPECT_GT(retry_packet->retry_token.size(), 48u);
     EXPECT_EQ(original.retry_tokens_.size(), 1u);
@@ -1321,7 +1322,7 @@ TEST(QuicCoreEndpointInternalTest, SealedRetryTokenSurvivesRestartAndBindsRouteI
 
     auto accepted =
         restarted.take_retry_context(parsed, 55, coquic::quic::test::test_time(2), identity);
-    const auto accepted_retry = optional_value_or_terminate(accepted);
+    auto accepted_retry = optional_value_or_terminate(accepted);
     EXPECT_EQ(accepted_retry.original_destination_connection_id, destination_connection_id);
     EXPECT_EQ(accepted_retry.retry_source_connection_id, retry_packet->source_connection_id);
     EXPECT_EQ(accepted_retry.address_validation_identity, identity);
@@ -1344,9 +1345,9 @@ TEST(QuicCoreEndpointInternalTest, SealedNewTokenSurvivesRestartAndIsSingleUse) 
     auto config = make_server_endpoint_config();
     config.address_validation_token_secret = make_address_validation_secret(0x40);
     QuicCore original(std::move(config));
-    const auto identity = bytes_from_ints({0x20, 0x01, 0x0d, 0xb8});
-    const auto token = original.make_endpoint_new_token(9, kQuicVersion1, 77, identity,
-                                                        coquic::quic::test::test_time(100));
+    auto identity = bytes_from_ints({0x20, 0x01, 0x0d, 0xb8});
+    auto token = original.make_endpoint_new_token(9, kQuicVersion1, 77, identity,
+                                                  coquic::quic::test::test_time(100));
     ASSERT_GT(token.size(), 48u);
     ASSERT_TRUE(original.new_tokens_.empty());
 
@@ -1380,7 +1381,7 @@ TEST(QuicCoreEndpointInternalTest, SealedNewTokenSurvivesRestartAndIsSingleUse) 
 
     auto accepted =
         restarted.take_new_token_context(parsed, 77, coquic::quic::test::test_time(101), identity);
-    const auto accepted_token = optional_value_or_terminate(accepted);
+    auto accepted_token = optional_value_or_terminate(accepted);
     EXPECT_EQ(accepted_token.route_handle, std::optional<QuicRouteHandle>{77u});
     EXPECT_EQ(accepted_token.address_validation_identity, identity);
     EXPECT_TRUE(accepted_token.used);
@@ -1405,9 +1406,9 @@ TEST(QuicCoreEndpointInternalTest, SealedNewTokenCanValidateWithPreviousSecret) 
     auto issuer_config = make_server_endpoint_config();
     issuer_config.address_validation_token_secret = make_address_validation_secret(0x50);
     QuicCore issuer(std::move(issuer_config));
-    const auto identity = bytes_from_ints({0x0a, 0x00, 0x00, 0x01});
-    const auto token = issuer.make_endpoint_new_token(5, kQuicVersion1, 9, identity,
-                                                      coquic::quic::test::test_time(20));
+    auto identity = bytes_from_ints({0x0a, 0x00, 0x00, 0x01});
+    auto token = issuer.make_endpoint_new_token(5, kQuicVersion1, 9, identity,
+                                                coquic::quic::test::test_time(20));
     ASSERT_FALSE(token.empty());
 
     auto rotated_config = make_server_endpoint_config();
@@ -1429,13 +1430,13 @@ TEST(QuicCoreEndpointInternalTest, SealedNewTokenCanValidateWithPreviousSecret) 
 }
 
 TEST(QuicCoreEndpointInternalTest, AddressValidationReplayStoreSurvivesEndpointRestart) {
-    const auto replay_store = make_replay_store_path_for_test("address-validation-replay");
+    auto replay_store = make_replay_store_path_for_test("address-validation-replay");
     auto issuer_config = make_server_endpoint_config();
     issuer_config.address_validation_token_secret = make_address_validation_secret(0x70);
     issuer_config.address_validation_replay_store_path = replay_store;
 
-    const auto identity = bytes_from_ints({0xc0, 0xa8, 0x00, 0x01});
-    const auto token = [&] {
+    auto identity = bytes_from_ints({0xc0, 0xa8, 0x00, 0x01});
+    auto token = [&] {
         QuicCore issuer(issuer_config);
         return issuer.make_endpoint_new_token(11, kQuicVersion1, 42, identity,
                                               coquic::quic::test::test_time(30));
@@ -1488,25 +1489,25 @@ TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeInitialRoute
     config.request_forgery_policy.blocked_udp_ports = {53};
     QuicCore client(std::move(config));
 
-    const auto loopback = client.advance_endpoint(
+    auto loopback = client.advance_endpoint(
         QuicCoreOpenConnection{
             .connection = make_client_open_config(),
             .initial_route_handle = 7,
             .address_validation_identity = make_ipv4_identity(127, 0, 0, 1, 4433),
         },
         coquic::quic::test::test_time(1));
-    const auto loopback_error = optional_value_or_terminate(loopback.local_error);
+    auto loopback_error = optional_value_or_terminate(loopback.local_error);
     EXPECT_EQ(loopback_error.code, QuicCoreLocalErrorCode::unsupported_operation);
     EXPECT_EQ(client.connection_count(), 0u);
 
-    const auto blocked_port = client.advance_endpoint(
+    auto blocked_port = client.advance_endpoint(
         QuicCoreOpenConnection{
             .connection = make_client_open_config(2),
             .initial_route_handle = 8,
             .address_validation_identity = make_ipv4_identity(198, 51, 100, 7, 53),
         },
         coquic::quic::test::test_time(2));
-    const auto blocked_port_error = optional_value_or_terminate(blocked_port.local_error);
+    auto blocked_port_error = optional_value_or_terminate(blocked_port.local_error);
     EXPECT_EQ(blocked_port_error.code, QuicCoreLocalErrorCode::unsupported_operation);
     EXPECT_EQ(client.connection_count(), 0u);
 }
@@ -1519,7 +1520,7 @@ TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeServerInitia
     config.request_forgery_policy.blocked_udp_ports = {53};
     QuicCore server(std::move(config));
 
-    const auto private_initial = server.advance_endpoint(
+    auto private_initial = server.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = make_client_initial_datagram(),
             .route_handle = 41,
@@ -1531,7 +1532,7 @@ TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeServerInitia
     EXPECT_EQ(server.connection_count(), 0u);
     EXPECT_TRUE(server.retry_tokens_.empty());
 
-    const auto blocked_port_initial = server.advance_endpoint(
+    auto blocked_port_initial = server.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = make_client_initial_datagram(),
             .route_handle = 42,
@@ -1562,7 +1563,7 @@ TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeNewRoutes) {
     *entry.connection = make_connected_client_connection();
     entry.connection->current_send_path_id_ = 0;
 
-    const auto private_migration = client.advance_endpoint(
+    auto private_migration = client.advance_endpoint(
         QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -1573,11 +1574,11 @@ TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeNewRoutes) {
                 },
         },
         coquic::quic::test::test_time(2));
-    const auto private_migration_error = optional_value_or_terminate(private_migration.local_error);
+    auto private_migration_error = optional_value_or_terminate(private_migration.local_error);
     EXPECT_EQ(private_migration_error.code, QuicCoreLocalErrorCode::unsupported_operation);
     EXPECT_FALSE(entry.path_id_by_route_handle.contains(29));
 
-    const auto link_local_inbound = client.advance_endpoint(
+    auto link_local_inbound = client.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = bytes_from_ints({0x40, 0xa1, 0xb2, 0x00, 0x00}),
             .route_handle = 31,
@@ -1611,11 +1612,13 @@ TEST(QuicCoreEndpointInternalTest, ExpiredRetryAndNewTokensAreRemoved) {
         .version = kQuicVersion1,
         .token = pending_retry.token,
     };
-    EXPECT_FALSE(
-        server.take_retry_context(retry_parsed, 55, coquic::quic::test::test_time(11)).has_value());
+    EXPECT_FALSE(server
+                     .take_retry_context(retry_parsed, 55, coquic::quic::test::test_time(11),
+                                         std::span<const std::byte>{})
+                     .has_value());
     EXPECT_TRUE(server.retry_tokens_.empty());
 
-    const auto new_token = bytes_from_ints({0x4e, 0x01, 0x02});
+    auto new_token = bytes_from_ints({0x4e, 0x01, 0x02});
     server.new_tokens_.insert_or_assign(QuicCore::connection_id_key(new_token),
                                         QuicCore::StoredEndpointNewToken{
                                             .token = new_token,
@@ -1628,9 +1631,11 @@ TEST(QuicCoreEndpointInternalTest, ExpiredRetryAndNewTokensAreRemoved) {
     new_token_parsed.destination_connection_id = bytes_from_ints({0x83, 0x02});
     new_token_parsed.token = new_token;
 
-    EXPECT_FALSE(
-        server.take_new_token_context(new_token_parsed, 55, coquic::quic::test::test_time(21))
-            .has_value());
+    EXPECT_FALSE(server
+                     .take_new_token_context(new_token_parsed, 55,
+                                             coquic::quic::test::test_time(21),
+                                             std::span<const std::byte>{})
+                     .has_value());
     EXPECT_TRUE(server.new_tokens_.empty());
 }
 
@@ -1663,8 +1668,8 @@ TEST(QuicCoreEndpointInternalTest, ClientStoresMostRecentUnusedNewTokenForOpen) 
     }
 
     auto open = make_client_open_config();
-    const auto selected = client.take_client_new_token_for_open(open);
-    const auto selected_token = optional_value_or_terminate(selected);
+    auto selected = client.take_client_new_token_for_open(open);
+    auto selected_token = optional_value_or_terminate(selected);
     if (selected_token != bytes_from_ints({0x02})) {
         std::abort();
     }
@@ -1672,8 +1677,8 @@ TEST(QuicCoreEndpointInternalTest, ClientStoresMostRecentUnusedNewTokenForOpen) 
         std::abort();
     }
 
-    const auto selected_again = client.take_client_new_token_for_open(open);
-    const auto selected_again_token = optional_value_or_terminate(selected_again);
+    auto selected_again = client.take_client_new_token_for_open(open);
+    auto selected_again_token = optional_value_or_terminate(selected_again);
     if (selected_again_token != bytes_from_ints({0x01})) {
         std::abort();
     }
@@ -1686,8 +1691,8 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetHelpersGenerateAndDetectResets)
     QuicCore server(make_server_endpoint_config());
     auto server_entry = make_server_connection_entry(9);
     server_entry.connection->local_connection_ids_.clear();
-    const auto connection_id = bytes_from_ints({0x53, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33});
-    const auto token = std::array<std::byte, 16>{
+    auto connection_id = bytes_from_ints({0x53, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33});
+    auto token = std::array<std::byte, 16>{
         std::byte{0x00}, std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
         std::byte{0x04}, std::byte{0x05}, std::byte{0x06}, std::byte{0x07},
         std::byte{0x08}, std::byte{0x09}, std::byte{0x0a}, std::byte{0x0b},
@@ -1704,12 +1709,12 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetHelpersGenerateAndDetectResets)
     std::vector<std::byte> unknown_short_header(43, std::byte{0xaa});
     unknown_short_header.front() = std::byte{0x40};
     std::copy(connection_id.begin(), connection_id.end(), unknown_short_header.begin() + 1);
-    const auto parsed = QuicCore::parse_endpoint_datagram(unknown_short_header);
-    const auto parsed_datagram = optional_value_or_terminate(parsed);
+    auto parsed = QuicCore::parse_endpoint_datagram(unknown_short_header);
+    auto parsed_datagram = optional_value_or_terminate(parsed);
 
-    auto reset =
-        server.make_stateless_reset_for_unknown_cid(parsed_datagram, unknown_short_header, 55);
-    const auto reset_datagram = optional_value_or_terminate(reset);
+    auto stateless_reset = server.make_stateless_reset_for_unknown_cid(
+        parsed_datagram, unknown_short_header, 55, coquic::quic::test::test_time(0));
+    auto reset_datagram = optional_value_or_terminate(stateless_reset);
     EXPECT_EQ(reset_datagram.connection, 9u);
     EXPECT_EQ(reset_datagram.route_handle, std::optional<QuicRouteHandle>{55u});
     EXPECT_EQ(reset_datagram.bytes.size(), 42u);
@@ -1738,8 +1743,8 @@ TEST(QuicCoreEndpointInternalTest, ClosedConnectionResetTokensAreRetainedUntilEx
 
     auto server_entry = make_server_connection_entry(9);
     server_entry.connection->local_connection_ids_.clear();
-    const auto connection_id = bytes_from_ints({0x53, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70});
-    const auto token = std::array<std::byte, 16>{
+    auto connection_id = bytes_from_ints({0x53, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70});
+    auto token = std::array<std::byte, 16>{
         std::byte{0x20}, std::byte{0x21}, std::byte{0x22}, std::byte{0x23},
         std::byte{0x24}, std::byte{0x25}, std::byte{0x26}, std::byte{0x27},
         std::byte{0x28}, std::byte{0x29}, std::byte{0x2a}, std::byte{0x2b},
@@ -1757,16 +1762,16 @@ TEST(QuicCoreEndpointInternalTest, ClosedConnectionResetTokensAreRetainedUntilEx
     std::vector<std::byte> unknown_short_header(43, std::byte{0xaa});
     unknown_short_header.front() = std::byte{0x40};
     std::copy(connection_id.begin(), connection_id.end(), unknown_short_header.begin() + 1);
-    const auto parsed = QuicCore::parse_endpoint_datagram(unknown_short_header);
-    const auto parsed_datagram = optional_value_or_terminate(parsed);
+    auto parsed = QuicCore::parse_endpoint_datagram(unknown_short_header);
+    auto parsed_datagram = optional_value_or_terminate(parsed);
 
     auto retained = server.make_stateless_reset_for_unknown_cid(
         parsed_datagram, unknown_short_header, 55, coquic::quic::test::test_time(59));
-    const auto retained_reset = optional_value_or_terminate(retained);
+    auto retained_reset = optional_value_or_terminate(retained);
     EXPECT_TRUE(std::equal(token.begin(), token.end(),
                            retained_reset.bytes.end() - static_cast<std::ptrdiff_t>(token.size())));
 
-    const auto expired = server.make_stateless_reset_for_unknown_cid(
+    auto expired = server.make_stateless_reset_for_unknown_cid(
         parsed_datagram, unknown_short_header, 55, coquic::quic::test::test_time(60));
     EXPECT_FALSE(expired.has_value());
 
@@ -1809,7 +1814,7 @@ TEST(QuicCoreEndpointInternalTest, ConfiguredResetSecretSupportsUnknownCidAfterS
         original_entry.connection->config_.source_connection_id;
     token_source_config.stateless_reset_secret = reset_secret;
     const QuicConnection token_source(std::move(token_source_config));
-    const auto expected_token = token_source.local_connection_ids_.at(0).stateless_reset_token;
+    auto expected_token = token_source.local_connection_ids_.at(0).stateless_reset_token;
     original_entry.connection->local_connection_ids_.emplace(
         0, LocalConnectionIdRecord{
                .sequence_number = 0,
@@ -1819,7 +1824,7 @@ TEST(QuicCoreEndpointInternalTest, ConfiguredResetSecretSupportsUnknownCidAfterS
            });
     original.refresh_server_connection_routes(original_entry);
 
-    const auto connection_id = original_entry.connection->config_.source_connection_id;
+    auto connection_id = original_entry.connection->config_.source_connection_id;
     EXPECT_EQ(
         original.local_stateless_reset_tokens_by_cid_.at(QuicCore::connection_id_key(connection_id))
             .stateless_reset_token,
@@ -1828,17 +1833,17 @@ TEST(QuicCoreEndpointInternalTest, ConfiguredResetSecretSupportsUnknownCidAfterS
     std::vector<std::byte> unknown_short_header(64, std::byte{0xaa});
     unknown_short_header.front() = std::byte{0x40};
     std::copy(connection_id.begin(), connection_id.end(), unknown_short_header.begin() + 1);
-    const auto parsed = QuicCore::parse_endpoint_datagram(unknown_short_header);
-    const auto parsed_datagram = optional_value_or_terminate(parsed);
+    auto parsed = QuicCore::parse_endpoint_datagram(unknown_short_header);
+    auto parsed_datagram = optional_value_or_terminate(parsed);
 
     auto restarted_config = make_server_endpoint_config();
     restarted_config.stateless_reset_secret = reset_secret;
     QuicCore restarted(std::move(restarted_config));
     ASSERT_TRUE(restarted.local_stateless_reset_tokens_by_cid_.empty());
 
-    auto reset = restarted.make_stateless_reset_for_unknown_cid(
+    auto stateless_reset = restarted.make_stateless_reset_for_unknown_cid(
         parsed_datagram, unknown_short_header, 55, coquic::quic::test::test_time(10));
-    const auto reset_datagram = optional_value_or_terminate(reset);
+    auto reset_datagram = optional_value_or_terminate(stateless_reset);
     EXPECT_EQ(reset_datagram.connection, 0u);
     EXPECT_EQ(reset_datagram.route_handle, std::optional<QuicRouteHandle>{55u});
     EXPECT_TRUE(std::equal(expected_token.begin(), expected_token.end(),
@@ -1887,20 +1892,20 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetDatagramEntersDrainingWithoutRe
     entry.connection->peer_transport_parameters_validated_ = true;
     entry.connection->current_send_path_id_ = 0;
     entry.connection->ensure_path_state(0).validated = true;
-    const auto handle = entry.handle;
+    auto handle = entry.handle;
     client.refresh_server_connection_routes(entry);
     client.connections_.emplace(handle, std::move(entry));
 
     std::vector<std::byte> datagram(43, std::byte{0x55});
     datagram.front() = std::byte{0x40};
-    const auto &peer_transport_parameters =
+    auto &peer_transport_parameters =
         client.connections_.at(handle).connection->peer_transport_parameters_;
-    const auto &parameters = optional_ref_or_terminate(peer_transport_parameters);
-    const auto token = optional_value_or_terminate(parameters.stateless_reset_token);
+    auto &parameters = optional_ref_or_terminate(peer_transport_parameters);
+    auto token = optional_value_or_terminate(parameters.stateless_reset_token);
     std::copy(token.begin(), token.end(),
               datagram.end() - static_cast<std::ptrdiff_t>(token.size()));
 
-    const auto result = client.advance_endpoint(
+    auto result = client.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = std::move(datagram),
             .route_handle = 17,
@@ -1920,7 +1925,7 @@ TEST(QuicCoreEndpointInternalTest, ParseableButInvalidInitialSkipsAcceptedConnec
     server_config.application_protocol = "coquic";
     QuicCore server(std::move(server_config));
 
-    const auto result = server.advance_endpoint(
+    auto result = server.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = make_plaintext_initial_datagram_with_token({}),
             .route_handle = 61,
@@ -1928,7 +1933,7 @@ TEST(QuicCoreEndpointInternalTest, ParseableButInvalidInitialSkipsAcceptedConnec
         coquic::quic::test::test_time(1));
 
     EXPECT_EQ(server.connection_count(), 0u);
-    const auto lifecycle = lifecycle_events_from(result);
+    auto lifecycle = lifecycle_events_from(result);
     ASSERT_EQ(lifecycle.size(), 1u);
     EXPECT_EQ(lifecycle.front().event, QuicCoreConnectionLifecycle::accepted);
 }
@@ -1945,7 +1950,7 @@ TEST(QuicCoreEndpointInternalTest, EndpointCommandsAndTimersCoverSuccessAndClean
     auto &entry = endpoint.connections_.at(1);
     *entry.connection = make_connected_client_connection();
 
-    const auto reset_result = endpoint.advance_endpoint(
+    auto reset_result = endpoint.advance_endpoint(
         QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -1962,7 +1967,7 @@ TEST(QuicCoreEndpointInternalTest, EndpointCommandsAndTimersCoverSuccessAndClean
     ASSERT_TRUE(coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
         *stop_entry.connection,
         {coquic::quic::test::make_inbound_application_stream_frame("a", 0, 3)}));
-    const auto stop_result = endpoint.advance_endpoint(
+    auto stop_result = endpoint.advance_endpoint(
         QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -1986,14 +1991,14 @@ TEST(QuicCoreEndpointInternalTest, EndpointCommandsAndTimersCoverSuccessAndClean
     *cleanup_entry.connection = make_connected_client_connection();
     cleanup_entry.connection->pending_terminal_state_ = QuicConnectionTerminalState::closed;
 
-    const auto cleanup_result = cleanup_endpoint.advance_endpoint(
+    auto cleanup_result = cleanup_endpoint.advance_endpoint(
         QuicCoreConnectionCommand{
             .connection = 1,
             .input = QuicCoreRequestKeyUpdate{},
         },
         coquic::quic::test::test_time(3));
     EXPECT_EQ(cleanup_endpoint.connection_count(), 0u);
-    const auto cleanup_lifecycle = lifecycle_events_from(cleanup_result);
+    auto cleanup_lifecycle = lifecycle_events_from(cleanup_result);
     ASSERT_EQ(cleanup_lifecycle.size(), 1u);
     EXPECT_EQ(cleanup_lifecycle.front().event, QuicCoreConnectionLifecycle::closed);
 
@@ -2009,7 +2014,7 @@ TEST(QuicCoreEndpointInternalTest, EndpointCommandsAndTimersCoverSuccessAndClean
     timer_entry.connection->application_space_.pending_ack_deadline =
         coquic::quic::test::test_time(5);
 
-    const auto timer_result =
+    auto timer_result =
         timer_core.advance_endpoint(QuicCoreTimerExpired{}, coquic::quic::test::test_time(5));
     EXPECT_EQ(timer_core.connection_count(), 1u);
     EXPECT_FALSE(timer_result.local_error.has_value());
@@ -2020,7 +2025,7 @@ TEST(QuicCoreEndpointInternalTest, LegacyAdvanceSuccessfulSharedSendQueuesDatagr
     QuicCore legacy_core(coquic::quic::test::make_client_core_config());
     *legacy_core.connection_ = make_connected_client_connection();
 
-    const auto shared_send_result = legacy_core.advance(
+    auto shared_send_result = legacy_core.advance(
         QuicCoreSendSharedStreamData{
             .stream_id = 0,
             .bytes = SharedBytes(bytes_from_ints({0x68, 0x69})),

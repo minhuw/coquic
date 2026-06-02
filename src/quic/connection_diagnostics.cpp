@@ -36,31 +36,6 @@ std::optional<std::uint64_t> optional_ms(std::optional<QuicCoreDuration> value) 
     return nonnegative_milliseconds(*value);
 }
 
-QuicCoreStreamDiagnostics stream_diagnostics(const StreamState &stream) {
-    return QuicCoreStreamDiagnostics{
-        .stream_id = stream.stream_id,
-        .initiator = static_cast<std::uint8_t>(stream.id_info.initiator),
-        .direction = static_cast<std::uint8_t>(stream.id_info.direction),
-        .local_can_send = stream.id_info.local_can_send,
-        .local_can_receive = stream.id_info.local_can_receive,
-        .send_closed = stream.send_closed,
-        .receive_closed = stream.receive_closed,
-        .peer_send_closed = stream.peer_send_closed,
-        .peer_fin_delivered = stream.peer_fin_delivered,
-        .peer_reset_received = stream.peer_reset_received,
-        .send_fin_state = static_cast<std::uint8_t>(stream.send_fin_state),
-        .reset_state = static_cast<std::uint8_t>(stream.reset_state),
-        .stop_sending_state = static_cast<std::uint8_t>(stream.stop_sending_state),
-        .pending_send = stream.has_pending_send(),
-        .outstanding_send = stream.has_outstanding_send(),
-        .sendable_bytes = stream.sendable_bytes(),
-        .send_flow_control_limit = stream.send_flow_control_limit,
-        .receive_flow_control_limit = stream.receive_flow_control_limit,
-        .highest_received_offset = stream.highest_received_offset,
-        .receive_flow_control_consumed = stream.receive_flow_control_consumed,
-    };
-}
-
 } // namespace
 
 QuicCoreConnectionDiagnostics QuicConnection::diagnostics(QuicConnectionHandle handle) const {
@@ -122,7 +97,28 @@ QuicCoreConnectionDiagnostics QuicConnection::diagnostics(QuicConnectionHandle h
     out.streams.reserve(streams_.size());
     for (const auto &[stream_id, stream] : streams_) {
         static_cast<void>(stream_id);
-        out.streams.push_back(stream_diagnostics(stream));
+        out.streams.push_back(QuicCoreStreamDiagnostics{
+            .stream_id = stream.stream_id,
+            .initiator = static_cast<std::uint8_t>(stream.id_info.initiator),
+            .direction = static_cast<std::uint8_t>(stream.id_info.direction),
+            .local_can_send = stream.id_info.local_can_send,
+            .local_can_receive = stream.id_info.local_can_receive,
+            .send_closed = stream.send_closed,
+            .receive_closed = stream.receive_closed,
+            .peer_send_closed = stream.peer_send_closed,
+            .peer_fin_delivered = stream.peer_fin_delivered,
+            .peer_reset_received = stream.peer_reset_received,
+            .send_fin_state = static_cast<std::uint8_t>(stream.send_fin_state),
+            .reset_state = static_cast<std::uint8_t>(stream.reset_state),
+            .stop_sending_state = static_cast<std::uint8_t>(stream.stop_sending_state),
+            .pending_send = stream.has_pending_send(),
+            .outstanding_send = stream.has_outstanding_send(),
+            .sendable_bytes = stream.sendable_bytes(),
+            .send_flow_control_limit = stream.send_flow_control_limit,
+            .receive_flow_control_limit = stream.receive_flow_control_limit,
+            .highest_received_offset = stream.highest_received_offset,
+            .receive_flow_control_consumed = stream.receive_flow_control_consumed,
+        });
     }
     return out;
 }

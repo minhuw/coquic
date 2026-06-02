@@ -409,15 +409,15 @@ std::vector<std::uint64_t> packet_numbers_from(const PacketRange &packets) {
 }
 
 std::vector<std::uint64_t>
-packet_numbers_from_handles(const PacketSpaceRecovery &recovery,
+packet_numbers_from_handles(const PacketSpaceRecovery &packet_recovery,
                             std::span<const RecoveryPacketHandle> handles) {
     std::vector<std::uint64_t> packet_numbers;
     packet_numbers.reserve(handles.size());
-    for (const auto handle : handles) {
-        const auto *packet = recovery.packet_for_handle(handle);
-        EXPECT_NE(packet, nullptr);
-        if (packet != nullptr) {
-            packet_numbers.push_back(packet->packet_number);
+    for (const auto packet_handle : handles) {
+        const auto *record = packet_recovery.packet_for_handle(packet_handle);
+        EXPECT_NE(record, nullptr);
+        if (record != nullptr) {
+            packet_numbers.push_back(record->packet_number);
         }
     }
     return packet_numbers;
@@ -432,7 +432,7 @@ coquic::quic::QuicEcnCodepoint invalid_ecn_codepoint() {
 
 std::vector<AckPacketNumberRange>
 ack_ranges_descending_from(const std::vector<bool> &acknowledged_by_peer) {
-    std::vector<AckPacketNumberRange> ranges;
+    std::vector<AckPacketNumberRange> ack_ranges;
     std::size_t index = acknowledged_by_peer.size();
     while (index != 0) {
         --index;
@@ -445,13 +445,13 @@ ack_ranges_descending_from(const std::vector<bool> &acknowledged_by_peer) {
         while (smallest_index != 0 && acknowledged_by_peer[smallest_index - 1]) {
             --smallest_index;
         }
-        ranges.push_back(AckPacketNumberRange{
+        ack_ranges.push_back(AckPacketNumberRange{
             .smallest = static_cast<std::uint64_t>(smallest_index),
             .largest = largest,
         });
         index = smallest_index;
     }
-    return ranges;
+    return ack_ranges;
 }
 
 void consume_ack_apply_result(PacketSpaceRecovery &recovery,
@@ -506,11 +506,11 @@ TEST(QuicRecoveryTest, FastAckApplyMatchesReferenceLossScanAcrossSparseAckBatche
         const auto ack_ranges = ack_ranges_descending_from(acknowledged_by_peer);
         ASSERT_FALSE(ack_ranges.empty());
         const auto now = coquic::quic::test::test_time(1000 + static_cast<std::int64_t>(step));
-        const auto fast =
+        auto fast =
             coquic::quic::test::PacketSpaceRecoveryTestPeer::apply_ack_received_descending_fast(
                 fast_recovery, std::span<const AckPacketNumberRange>(ack_ranges),
                 largest_acknowledged, now);
-        const auto reference = coquic::quic::test::PacketSpaceRecoveryTestPeer::
+        auto reference = coquic::quic::test::PacketSpaceRecoveryTestPeer::
             apply_ack_received_descending_reference(
                 reference_recovery, std::span<const AckPacketNumberRange>(ack_ranges),
                 largest_acknowledged, now);
@@ -650,8 +650,8 @@ TEST(QuicRecoveryTest, AckHistoryOutboundSnapshotWalkerIgnoresPostSnapshotHistor
 
     history.record_received(/*packet_number=*/10, /*ack_eliciting=*/true,
                             coquic::quic::test::test_time(6));
-    const auto mutated_header = history.build_outbound_ack_header(/*ack_delay_exponent=*/3,
-                                                                  coquic::quic::test::test_time(7));
+    auto mutated_header = history.build_outbound_ack_header(/*ack_delay_exponent=*/3,
+                                                            coquic::quic::test::test_time(7));
     ASSERT_TRUE(mutated_header.has_value());
     if (!mutated_header.has_value()) {
         GTEST_FAIL() << "expected outbound ACK header after mutation";
@@ -731,7 +731,7 @@ TEST(QuicRecoveryTest, AckHistoryCapsSparseTrackedRanges) {
     const auto ack =
         history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(200));
     ASSERT_TRUE(ack.has_value());
-    const auto ack_value = optional_value_or_terminate(ack);
+    auto ack_value = optional_value_or_terminate(ack);
     EXPECT_EQ(ack_value.additional_ranges.size(), coquic::quic::kMaxTrackedAckRanges - 1);
 }
 
@@ -752,7 +752,7 @@ TEST(QuicRecoveryTest, AckHistoryCapStillMergesRetainedBridgedRanges) {
     const auto ack =
         history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(201));
     ASSERT_TRUE(ack.has_value());
-    const auto ack_value = optional_value_or_terminate(ack);
+    auto ack_value = optional_value_or_terminate(ack);
     EXPECT_EQ(ack_value.first_ack_range, 2u);
 }
 
@@ -1007,7 +1007,7 @@ TEST(QuicRecoveryTest, AckProcessingReturnsLightweightAckedAndLostPacketMetadata
         .in_flight = true,
     });
 
-    const auto result =
+    auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/3), coquic::quic::test::test_time(10));
 
     ASSERT_EQ(result.acked_packets.size(), 1u);
@@ -1046,11 +1046,11 @@ TEST(QuicRecoveryTest, PacketThresholdLossKeepsRunningLargestAcknowledgedState) 
     }
     EXPECT_EQ(*first_largest_acked, 6u);
 
-    const auto stale_ack =
+    auto stale_ack =
         recovery.on_ack_received(make_ack_frame(/*largest=*/5), coquic::quic::test::test_time(11));
     EXPECT_TRUE(stale_ack.acked_packets.empty());
     EXPECT_TRUE(stale_ack.lost_packets.empty());
-    const auto stale_largest_acked = recovery.largest_acked_packet_number();
+    auto stale_largest_acked = recovery.largest_acked_packet_number();
     ASSERT_TRUE(stale_largest_acked.has_value());
     if (!stale_largest_acked.has_value()) {
         GTEST_FAIL() << "expected running largest acknowledged packet number";
@@ -1083,7 +1083,7 @@ TEST(QuicRecoveryTest, PacketThresholdLossFrontierAdvancesAcrossAckBatches) {
         coquic::quic::test::PacketSpaceRecoveryTestPeer::next_packet_threshold_loss_slot(recovery),
         2u);
 
-    const auto stale_ack =
+    auto stale_ack =
         recovery.on_ack_received(make_ack_frame(/*largest=*/4), coquic::quic::test::test_time(12));
     EXPECT_TRUE(stale_ack.acked_packets.empty());
     EXPECT_TRUE(stale_ack.lost_packets.empty());
@@ -1104,7 +1104,7 @@ TEST(QuicRecoveryTest, PacketThresholdScanSkipsPacketsBelowReorderingGap) {
                                              coquic::quic::test::test_time(3)));
     coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(recovery, 0, 2);
 
-    const auto result =
+    auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/3), coquic::quic::test::test_time(4));
 
     EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{3}));
@@ -1122,7 +1122,7 @@ TEST(QuicRecoveryTest, PacketThresholdLossMarksCauseForAdaptiveReordering) {
             coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number))));
     }
 
-    const auto result =
+    auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/3), coquic::quic::test::test_time(10));
 
     ASSERT_EQ(result.lost_packets.size(), 1u);
@@ -1160,7 +1160,7 @@ TEST(QuicRecoveryTest, LateAckedPacketThresholdLossRaisesReorderingThreshold) {
     EXPECT_EQ(packet_numbers_from(same_distance.acked_packets), (std::vector<std::uint64_t>{4}));
     EXPECT_TRUE(same_distance.lost_packets.empty());
 
-    const auto larger_distance =
+    auto larger_distance =
         recovery.on_ack_received(make_ack_frame(/*largest=*/5), coquic::quic::test::test_time(13));
     EXPECT_EQ(packet_numbers_from(larger_distance.acked_packets), (std::vector<std::uint64_t>{5}));
     EXPECT_EQ(packet_numbers_from(larger_distance.lost_packets), (std::vector<std::uint64_t>{1}));
@@ -1227,7 +1227,7 @@ TEST(QuicRecoveryTest, TimeThresholdLossMarksCauseForAdaptiveReordering) {
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(1)));
 
-    const auto result =
+    auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/1), coquic::quic::test::test_time(12));
 
     ASSERT_EQ(result.lost_packets.size(), 1u);
@@ -1273,8 +1273,8 @@ TEST(QuicRecoveryTest, AckProcessingRejectsMalformedFirstAckRange) {
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(0)));
 
-    const auto result = recovery.on_ack_received(
-        make_ack_frame(/*largest=*/0, /*first_ack_range=*/1), coquic::quic::test::test_time(10));
+    auto result = recovery.on_ack_received(make_ack_frame(/*largest=*/0, /*first_ack_range=*/1),
+                                           coquic::quic::test::test_time(10));
 
     EXPECT_TRUE(result.acked_packets.empty());
     EXPECT_TRUE(result.lost_packets.empty());
@@ -1285,7 +1285,7 @@ TEST(QuicRecoveryTest, AckProcessingRejectsMalformedAdditionalRangeGapUnderflow)
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(0)));
 
-    const auto result = recovery.on_ack_received(
+    auto result = recovery.on_ack_received(
         AckFrame{
             .largest_acknowledged = 1,
             .first_ack_range = 0,
@@ -1308,7 +1308,7 @@ TEST(QuicRecoveryTest, AckProcessingRejectsMalformedAdditionalRangeLengthUnderfl
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(0)));
 
-    const auto result = recovery.on_ack_received(
+    auto result = recovery.on_ack_received(
         AckFrame{
             .largest_acknowledged = 3,
             .first_ack_range = 0,
@@ -1333,7 +1333,7 @@ TEST(QuicRecoveryTest, AckProcessingMatchesPacketsInAdditionalAckRanges) {
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/5, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(1)));
 
-    const auto result = recovery.on_ack_received(
+    auto result = recovery.on_ack_received(
         AckFrame{
             .largest_acknowledged = 5,
             .first_ack_range = 0,
@@ -1358,7 +1358,7 @@ TEST(QuicRecoveryTest, AckProcessingLeavesPacketsUnackedWhenAdditionalRangeStart
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/5, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(1)));
 
-    const auto result = recovery.on_ack_received(
+    auto result = recovery.on_ack_received(
         AckFrame{
             .largest_acknowledged = 5,
             .first_ack_range = 0,
@@ -1402,10 +1402,10 @@ TEST(QuicRecoveryTest, AckFrameDirectRecoveryMatchesExpandedRangeRecovery) {
             },
     };
 
-    const auto direct = direct_recovery.on_ack_received(ack, coquic::quic::test::test_time(100));
-    const auto ranges = coquic::quic::ack_frame_packet_number_ranges(ack);
+    auto direct = direct_recovery.on_ack_received(ack, coquic::quic::test::test_time(100));
+    auto ranges = coquic::quic::ack_frame_packet_number_ranges(ack);
     ASSERT_TRUE(ranges.has_value());
-    const auto expanded = expanded_recovery.on_ack_received(
+    auto expanded = expanded_recovery.on_ack_received(
         std::span<const coquic::quic::AckPacketNumberRange>(ranges.value()),
         ack.largest_acknowledged, coquic::quic::test::test_time(100));
 
@@ -1458,9 +1458,9 @@ TEST(QuicRecoveryTest, AckApplyResultMatchesCompatibilityResult) {
     auto cursor = coquic::quic::make_ack_range_cursor(ack);
     ASSERT_TRUE(cursor.has_value());
 
-    const auto fast = fast_recovery.apply_ack_received(cursor.value(), ack.largest_acknowledged,
-                                                       coquic::quic::test::test_time(100));
-    const auto compatibility =
+    auto fast = fast_recovery.apply_ack_received(cursor.value(), ack.largest_acknowledged,
+                                                 coquic::quic::test::test_time(100));
+    auto compatibility =
         compatibility_recovery.on_ack_received(ack, coquic::quic::test::test_time(100));
 
     EXPECT_EQ(
@@ -1492,7 +1492,7 @@ TEST(QuicRecoveryTest, AckApplyResultMatchesCompatibilityResult) {
         return;
     }
     const auto fast_largest = *fast.largest_newly_acked_packet;
-    const auto compatibility_largest = compatibility.largest_newly_acked_packet.value();
+    auto compatibility_largest = compatibility.largest_newly_acked_packet.value();
     EXPECT_EQ(fast_largest.packet_number, compatibility_largest.packet_number);
     EXPECT_EQ(fast_largest.sent_time, compatibility_largest.sent_time);
     EXPECT_EQ(fast.largest_acknowledged_was_newly_acked,
@@ -1541,11 +1541,11 @@ TEST(QuicRecoveryTest, ReceivedAckCursorMatchesOwnedAckApply) {
     auto received_cursor = coquic::quic::make_ack_range_cursor(*received_ack);
     ASSERT_TRUE(received_cursor.has_value());
 
-    const auto owned = owned_recovery.apply_ack_received(
-        owned_cursor.value(), ack.largest_acknowledged, coquic::quic::test::test_time(100));
-    const auto received = received_recovery.apply_ack_received(received_cursor.value(),
-                                                               received_ack->largest_acknowledged,
-                                                               coquic::quic::test::test_time(100));
+    auto owned = owned_recovery.apply_ack_received(owned_cursor.value(), ack.largest_acknowledged,
+                                                   coquic::quic::test::test_time(100));
+    auto received = received_recovery.apply_ack_received(received_cursor.value(),
+                                                         received_ack->largest_acknowledged,
+                                                         coquic::quic::test::test_time(100));
 
     EXPECT_EQ(packet_numbers_from_handles(owned_recovery, owned.acked_packets),
               packet_numbers_from_handles(received_recovery, received.acked_packets));
@@ -1578,7 +1578,7 @@ TEST(QuicRecoveryTest, CompatibilityAckResultKeepsAscendingOrderAfterFastApply) 
     recovery.on_packet_declared_lost(1);
     recovery.on_packet_declared_lost(5);
 
-    const auto result = recovery.on_ack_received(
+    auto result = recovery.on_ack_received(
         AckFrame{
             .largest_acknowledged = 7,
             .first_ack_range = 0,
@@ -1640,8 +1640,8 @@ TEST(QuicRecoveryTest, AckApplyResultKeepsAscendingOrderAcrossSparseRanges) {
         return;
     }
 
-    const auto result = recovery.apply_ack_received(cursor.value(), /*largest_acknowledged=*/9,
-                                                    coquic::quic::test::test_time(10));
+    auto result = recovery.apply_ack_received(cursor.value(), /*largest_acknowledged=*/9,
+                                              coquic::quic::test::test_time(10));
 
     EXPECT_EQ(packet_numbers_from_handles(recovery, result.acked_packets),
               (std::vector<std::uint64_t>{5, 9}));
@@ -1663,8 +1663,8 @@ TEST(QuicRecoveryTest,
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/false,
                                              coquic::quic::test::test_time(10)));
 
-    const auto result = recovery.on_ack_received(
-        make_ack_frame(/*largest=*/2, /*first_ack_range=*/1), coquic::quic::test::test_time(70));
+    auto result = recovery.on_ack_received(make_ack_frame(/*largest=*/2, /*first_ack_range=*/1),
+                                           coquic::quic::test::test_time(70));
 
     ASSERT_TRUE(result.largest_newly_acked_packet.has_value());
     if (!result.largest_newly_acked_packet.has_value()) {
@@ -1686,7 +1686,7 @@ TEST(QuicRecoveryTest, AckProcessingPreservesAscendingOrderForLateAckedPackets) 
     recovery.on_packet_declared_lost(1);
     recovery.on_packet_declared_lost(5);
 
-    const auto result = recovery.on_ack_received(
+    auto result = recovery.on_ack_received(
         AckFrame{
             .largest_acknowledged = 7,
             .first_ack_range = 0,
@@ -1716,7 +1716,7 @@ TEST(QuicRecoveryTest, AckProcessingSnapshotsLargestNewlyAckedPacketMetadataBefo
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/7, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(33)));
 
-    const auto result =
+    auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/7), coquic::quic::test::test_time(40));
 
     ASSERT_TRUE(result.largest_newly_acked_packet.has_value());
@@ -1829,9 +1829,9 @@ TEST(QuicRecoveryTest, TrackedPacketsPreservePacketNumberOrderAcrossLateLosses) 
 
     EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.tracked_packets()),
               (std::vector<std::uint64_t>{2, 4, 7}));
-    const auto oldest = recovery.oldest_tracked_packet();
+    auto oldest = recovery.oldest_tracked_packet();
     ASSERT_TRUE(oldest.has_value());
-    const auto newest = recovery.newest_tracked_packet();
+    auto newest = recovery.newest_tracked_packet();
     ASSERT_TRUE(newest.has_value());
     if (!oldest.has_value() || !newest.has_value()) {
         return;
@@ -1897,8 +1897,8 @@ TEST(QuicRecoveryTest, UnsortedAckRangesAreSortedBeforeApply) {
         AckPacketNumberRange{.smallest = 1, .largest = 1},
         AckPacketNumberRange{.smallest = 3, .largest = 3},
     };
-    const auto result = recovery.on_ack_received(ranges, /*largest_acknowledged=*/3,
-                                                 coquic::quic::test::test_time(10));
+    auto result = recovery.on_ack_received(ranges, /*largest_acknowledged=*/3,
+                                           coquic::quic::test::test_time(10));
 
     EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{1, 3}));
 }
@@ -1916,8 +1916,8 @@ TEST(QuicRecoveryTest, AckRangeSortBreaksTiesBySmallestDescending) {
         AckPacketNumberRange{.smallest = 3, .largest = 3},
     };
 
-    const auto result = recovery.on_ack_received(ranges, /*largest_acknowledged=*/3,
-                                                 coquic::quic::test::test_time(10));
+    auto result = recovery.on_ack_received(ranges, /*largest_acknowledged=*/3,
+                                           coquic::quic::test::test_time(10));
 
     EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{2, 3}));
 }
@@ -1946,7 +1946,7 @@ TEST(QuicRecoveryTest, PmtuProbeDeadlineHelpersSelectEarliestProbeAndCollectExpi
 
     const auto earliest = recovery.earliest_pmtu_probe_packet();
     ASSERT_TRUE(earliest.has_value());
-    const auto earliest_probe = optional_value_or_terminate(earliest);
+    auto earliest_probe = optional_value_or_terminate(earliest);
     EXPECT_EQ(earliest_probe.packet_number, 3u);
     EXPECT_EQ(earliest_probe.sent_time, coquic::quic::test::test_time(3));
 
@@ -2019,7 +2019,7 @@ TEST(QuicRecoveryTest, StaleAckStillDeclaresNewTimeThresholdLosses) {
     EXPECT_EQ(packet_numbers_from(first_ack.acked_packets), (std::vector<std::uint64_t>{2}));
     EXPECT_EQ(packet_numbers_from(first_ack.lost_packets), (std::vector<std::uint64_t>{0}));
 
-    const auto stale_ack =
+    auto stale_ack =
         recovery.on_ack_received(make_ack_frame(/*largest=*/2), coquic::quic::test::test_time(40));
     EXPECT_TRUE(stale_ack.acked_packets.empty());
     EXPECT_EQ(packet_numbers_from(stale_ack.lost_packets), (std::vector<std::uint64_t>{1}));
@@ -2037,7 +2037,7 @@ TEST(QuicRecoveryTest, TimeThresholdLossesSortMultipleExpiredCandidates) {
                                                  coquic::quic::test::test_time(0)));
     }
 
-    const auto result =
+    auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/3), coquic::quic::test::test_time(40));
 
     EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{3}));
@@ -2120,7 +2120,7 @@ TEST(QuicRecoveryTest, RecoveryTracksEarliestLossPacketAcrossLargestAckAdvance) 
 
     recovery.on_packet_declared_lost(2);
 
-    const auto earliest_loss_after_declaring_packet_2_lost = recovery.earliest_loss_packet();
+    auto earliest_loss_after_declaring_packet_2_lost = recovery.earliest_loss_packet();
     ASSERT_TRUE(earliest_loss_after_declaring_packet_2_lost.has_value());
     EXPECT_EQ(
         optional_value_or_terminate(earliest_loss_after_declaring_packet_2_lost).packet_number, 1u);
@@ -2180,9 +2180,8 @@ TEST(QuicRecoveryTest, AckProcessingResultSynthesizesMetadataForMissingHandles) 
         .sent_time = coquic::quic::test::test_time(33),
     };
 
-    const auto result =
-        coquic::quic::test::PacketSpaceRecoveryTestPeer::ack_processing_result_from_apply(recovery,
-                                                                                          apply);
+    auto result = coquic::quic::test::PacketSpaceRecoveryTestPeer::ack_processing_result_from_apply(
+        recovery, apply);
 
     ASSERT_EQ(result.acked_packets.size(), 1u);
     EXPECT_EQ(result.acked_packets.front().packet_number, 7u);
@@ -2273,7 +2272,7 @@ TEST(QuicRecoveryTest, AckProcessingSkipsPacketsAlreadyLostOrNotInFlight) {
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(0)));
 
-    const auto result =
+    auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/3), coquic::quic::test::test_time(20));
 
     EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{3}));
@@ -2299,7 +2298,7 @@ TEST(QuicRecoveryTest, AckProcessingSkipsDeclaredLostAndNotInFlightPacketsIndepe
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(0)));
 
-    const auto result =
+    auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/4), coquic::quic::test::test_time(20));
 
     EXPECT_EQ(packet_numbers_from(result.acked_packets), (std::vector<std::uint64_t>{4}));
@@ -2317,7 +2316,7 @@ TEST(QuicRecoveryTest, AckProcessingCanStillAcknowledgeDeclaredLostPackets) {
         .bytes_in_flight = 0,
     });
 
-    const auto result =
+    auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/2), coquic::quic::test::test_time(20));
 
     EXPECT_TRUE(result.acked_packets.empty());
@@ -2347,8 +2346,8 @@ TEST(QuicRecoveryTest, AckProcessingRemovesAckedAndLateAckedPacketsFromTrackedPa
         },
     };
 
-    const auto result = recovery.on_ack_received(ack_ranges, /*largest_acknowledged=*/2,
-                                                 coquic::quic::test::test_time(10));
+    auto result = recovery.on_ack_received(ack_ranges, /*largest_acknowledged=*/2,
+                                           coquic::quic::test::test_time(10));
 
     EXPECT_EQ(packet_numbers_from_handles(recovery, result.acked_packets.handles()),
               (std::vector<std::uint64_t>{2}));
@@ -2356,9 +2355,9 @@ TEST(QuicRecoveryTest, AckProcessingRemovesAckedAndLateAckedPacketsFromTrackedPa
               (std::vector<std::uint64_t>{1}));
     EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.tracked_packets()),
               (std::vector<std::uint64_t>{0}));
-    const auto oldest = recovery.oldest_tracked_packet();
+    auto oldest = recovery.oldest_tracked_packet();
     ASSERT_TRUE(oldest.has_value());
-    const auto newest = recovery.newest_tracked_packet();
+    auto newest = recovery.newest_tracked_packet();
     ASSERT_TRUE(newest.has_value());
     if (!oldest.has_value() || !newest.has_value()) {
         return;
@@ -2372,7 +2371,7 @@ TEST(QuicRecoveryTest, AckProcessingHidesAcknowledgedPacketsFromCompatibilitySen
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(4)));
 
-    const auto result =
+    auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/4), coquic::quic::test::test_time(8));
 
     ASSERT_EQ(result.acked_packets.size(), 1u);
@@ -2404,8 +2403,8 @@ TEST(QuicRecoveryTest, AckProcessingSeparatesActiveAndLateAckedPacketsInLedger) 
         },
     };
 
-    const auto result = recovery.on_ack_received(ack_ranges, /*largest_acknowledged=*/5,
-                                                 coquic::quic::test::test_time(10));
+    auto result = recovery.on_ack_received(ack_ranges, /*largest_acknowledged=*/5,
+                                           coquic::quic::test::test_time(10));
 
     EXPECT_EQ(packet_numbers_from_handles(recovery, result.acked_packets.handles()),
               (std::vector<std::uint64_t>{5}));
@@ -2424,7 +2423,7 @@ TEST(QuicRecoveryTest, AckProcessingMaintainsTrackedPacketLinksAfterContiguousMi
     }
     recovery.on_packet_declared_lost(4);
 
-    const auto result = recovery.on_ack_received(
+    auto result = recovery.on_ack_received(
         AckFrame{
             .largest_acknowledged = 5,
             .first_ack_range = 2,
@@ -2438,14 +2437,14 @@ TEST(QuicRecoveryTest, AckProcessingMaintainsTrackedPacketLinksAfterContiguousMi
     EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.tracked_packets()),
               (std::vector<std::uint64_t>{0, 1, 2, 6}));
 
-    const auto oldest = recovery.oldest_tracked_packet();
+    auto oldest = recovery.oldest_tracked_packet();
     if (!oldest.has_value()) {
         ADD_FAILURE() << "missing oldest tracked packet";
         return;
     }
     EXPECT_EQ(oldest->packet_number, 0u);
 
-    const auto newest = recovery.newest_tracked_packet();
+    auto newest = recovery.newest_tracked_packet();
     if (!newest.has_value()) {
         ADD_FAILURE() << "missing newest tracked packet";
         return;
@@ -2481,7 +2480,7 @@ TEST(QuicRecoveryTest, CopyMoveAndMetadataHelpersPreserveRecoveryState) {
     EXPECT_TRUE(copied_metadata.in_flight);
     EXPECT_FALSE(copied_metadata.declared_lost);
 
-    const auto missing_metadata = coquic::quic::resolved_packet_metadata(
+    auto missing_metadata = coquic::quic::resolved_packet_metadata(
         &copied, RecoveryPacketHandle{.packet_number = 99, .slot_index = 99});
     EXPECT_EQ(missing_metadata.packet_number, 99u);
     EXPECT_EQ(missing_metadata.sent_time, coquic::quic::QuicCoreTimePoint{});
@@ -2489,7 +2488,7 @@ TEST(QuicRecoveryTest, CopyMoveAndMetadataHelpersPreserveRecoveryState) {
     EXPECT_FALSE(missing_metadata.in_flight);
     EXPECT_FALSE(missing_metadata.declared_lost);
 
-    const auto null_metadata = coquic::quic::resolved_packet_metadata(
+    auto null_metadata = coquic::quic::resolved_packet_metadata(
         nullptr, RecoveryPacketHandle{.packet_number = 7, .slot_index = 0});
     EXPECT_EQ(null_metadata.packet_number, 7u);
     EXPECT_EQ(null_metadata.sent_time, coquic::quic::QuicCoreTimePoint{});
@@ -2645,7 +2644,7 @@ TEST(QuicRecoveryTest, PacketLookupHelpersHandleUnknownAndMismatchedSlots) {
     PacketSpaceRecovery mismatched_handle;
     mismatched_handle.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
                                                       coquic::quic::test::test_time(2)));
-    const auto mismatched = mismatched_handle.handle_for_packet_number(2);
+    auto mismatched = mismatched_handle.handle_for_packet_number(2);
     ASSERT_TRUE(mismatched.has_value());
     coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(mismatched_handle, 2,
                                                                             9);
@@ -2655,7 +2654,7 @@ TEST(QuicRecoveryTest, PacketLookupHelpersHandleUnknownAndMismatchedSlots) {
     PacketSpaceRecovery lost_handle;
     lost_handle.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
                                                 coquic::quic::test::test_time(2)));
-    const auto lost = lost_handle.handle_for_packet_number(2);
+    auto lost = lost_handle.handle_for_packet_number(2);
     ASSERT_TRUE(lost.has_value());
     coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_state_declared_lost(lost_handle, 2);
     EXPECT_TRUE(lost_handle.retire_packet_if_present(optional_value_or_terminate(lost)));
@@ -2663,7 +2662,7 @@ TEST(QuicRecoveryTest, PacketLookupHelpersHandleUnknownAndMismatchedSlots) {
     PacketSpaceRecovery mismatched_take;
     mismatched_take.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
                                                     coquic::quic::test::test_time(2)));
-    const auto mismatched_take_handle = mismatched_take.handle_for_packet_number(2);
+    auto mismatched_take_handle = mismatched_take.handle_for_packet_number(2);
     ASSERT_TRUE(mismatched_take_handle.has_value());
     coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_packet_number(mismatched_take, 2, 9);
     EXPECT_FALSE(
@@ -2698,10 +2697,10 @@ TEST(QuicRecoveryTest, RetireAndTakeRetiredPacketHelpersCoverHandleEdges) {
                                              coquic::quic::test::test_time(7)));
     const auto handle = recovery.handle_for_packet_number(7);
     ASSERT_TRUE(handle.has_value());
-    const auto handle_value = optional_value_or_terminate(handle);
+    auto handle_value = optional_value_or_terminate(handle);
     const auto moved = recovery.take_retired_packet_if_present(handle_value);
     ASSERT_TRUE(moved.has_value());
-    const auto moved_value = optional_value_or_terminate(moved);
+    auto moved_value = optional_value_or_terminate(moved);
     EXPECT_EQ(moved_value.packet_number, 7u);
     EXPECT_FALSE(recovery.take_retired_packet_if_present(handle_value).has_value());
     EXPECT_FALSE(recovery
@@ -2715,14 +2714,14 @@ TEST(QuicRecoveryTest, RetireAndTakeRetiredPacketHelpersCoverHandleEdges) {
     already_acknowledged_take.on_packet_sent(make_sent_packet(/*packet_number=*/0,
                                                               /*ack_eliciting=*/true,
                                                               coquic::quic::test::test_time(0)));
-    const auto acknowledged_handle = already_acknowledged_take.handle_for_packet_number(0);
+    auto acknowledged_handle = already_acknowledged_take.handle_for_packet_number(0);
     ASSERT_TRUE(acknowledged_handle.has_value());
     coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_acknowledged(
         already_acknowledged_take, 0, true);
-    const auto already_acknowledged_packet = already_acknowledged_take.take_retired_packet(
+    auto already_acknowledged_packet = already_acknowledged_take.take_retired_packet(
         optional_value_or_terminate(acknowledged_handle));
     ASSERT_TRUE(already_acknowledged_packet.has_value());
-    const auto already_acknowledged_packet_value =
+    auto already_acknowledged_packet_value =
         optional_value_or_terminate(already_acknowledged_packet);
     EXPECT_EQ(already_acknowledged_packet_value.packet_number, 0u);
 }
@@ -2835,8 +2834,8 @@ TEST(QuicRecoveryTest, AckProcessingTracksLargestPacketAcrossOutOfOrderLiveSlots
     EXPECT_EQ(packet_numbers_from_handles(recovery, recovery.tracked_packets()),
               (std::vector<std::uint64_t>{1, 2, 3}));
 
-    const auto result = recovery.on_ack_received(
-        make_ack_frame(/*largest=*/3, /*first_ack_range=*/2), coquic::quic::test::test_time(10));
+    auto result = recovery.on_ack_received(make_ack_frame(/*largest=*/3, /*first_ack_range=*/2),
+                                           coquic::quic::test::test_time(10));
 
     ASSERT_TRUE(result.largest_newly_acked_packet.has_value());
     EXPECT_EQ(result.largest_newly_acked_packet->packet_number, 3u);
@@ -2845,10 +2844,10 @@ TEST(QuicRecoveryTest, AckProcessingTracksLargestPacketAcrossOutOfOrderLiveSlots
     PacketSpaceRecovery no_op_recovery;
     no_op_recovery.on_packet_sent(make_sent_packet(/*packet_number=*/10, /*ack_eliciting=*/true,
                                                    coquic::quic::test::test_time(10)));
-    const auto version_before = no_op_recovery.compatibility_version();
+    auto version_before = no_op_recovery.compatibility_version();
 
-    const auto no_op_result = no_op_recovery.on_ack_received(make_ack_frame(/*largest=*/5),
-                                                             coquic::quic::test::test_time(11));
+    auto no_op_result = no_op_recovery.on_ack_received(make_ack_frame(/*largest=*/5),
+                                                       coquic::quic::test::test_time(11));
 
     EXPECT_TRUE(no_op_result.acked_packets.empty());
     EXPECT_TRUE(no_op_result.late_acked_packets.empty());
@@ -2886,7 +2885,7 @@ TEST(QuicRecoveryTest, DirectRecoveryColdBranchEdgesUsePeerHooks) {
     state_edges.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
                                                 coquic::quic::test::test_time(0)));
     Peer::set_slot_state_retired(state_edges, 0);
-    const auto state_ack = make_ack_frame(/*largest=*/0);
+    auto state_ack = make_ack_frame(/*largest=*/0);
     auto state_cursor = coquic::quic::make_ack_range_cursor(state_ack);
     ASSERT_TRUE(state_cursor.has_value());
     EXPECT_FALSE(Peer::ack_ranges_include_newly_ackable_ack_eliciting_packet(state_edges,
@@ -2897,7 +2896,7 @@ TEST(QuicRecoveryTest, DirectRecoveryColdBranchEdgesUsePeerHooks) {
                                                        /*ack_eliciting=*/true,
                                                        coquic::quic::test::test_time(0)));
     Peer::set_slot_acknowledged(acknowledged_edges, 0, true);
-    const auto acked_ack = make_ack_frame(/*largest=*/0);
+    auto acked_ack = make_ack_frame(/*largest=*/0);
     auto acked_cursor = coquic::quic::make_ack_range_cursor(acked_ack);
     ASSERT_TRUE(acked_cursor.has_value());
     EXPECT_FALSE(Peer::ack_ranges_include_newly_ackable_ack_eliciting_packet(acknowledged_edges,
@@ -2906,15 +2905,15 @@ TEST(QuicRecoveryTest, DirectRecoveryColdBranchEdgesUsePeerHooks) {
     PacketSpaceRecovery no_pending_range;
     no_pending_range.on_packet_sent(make_sent_packet(/*packet_number=*/0, /*ack_eliciting=*/true,
                                                      coquic::quic::test::test_time(0)));
-    const auto no_pending_ack = make_ack_frame(/*largest=*/0);
+    auto no_pending_ack = make_ack_frame(/*largest=*/0);
     auto no_pending_cursor = coquic::quic::make_ack_range_cursor(no_pending_ack);
     ASSERT_TRUE(no_pending_cursor.has_value());
     auto no_pending_cursor_value = no_pending_cursor.value();
     no_pending_cursor_value.first_range_pending = false;
     no_pending_cursor_value.next_additional_index =
         no_pending_cursor_value.additional_ranges.size();
-    const auto result = Peer::apply_ack_received(no_pending_range, no_pending_cursor_value, 0,
-                                                 coquic::quic::test::test_time(1));
+    auto result = Peer::apply_ack_received(no_pending_range, no_pending_cursor_value, 0,
+                                           coquic::quic::test::test_time(1));
     EXPECT_TRUE(result.acked_packets.empty());
 }
 
@@ -2958,8 +2957,8 @@ TEST(QuicRecoveryTest, AckProcessingSkipsLiveSlotsWithUnexpectedRetiredState) {
                                              coquic::quic::test::test_time(1)));
     coquic::quic::test::PacketSpaceRecoveryTestPeer::set_slot_state_retired(recovery, 1);
 
-    const auto version_before = recovery.compatibility_version();
-    const auto result =
+    auto version_before = recovery.compatibility_version();
+    auto result =
         recovery.on_ack_received(make_ack_frame(/*largest=*/1), coquic::quic::test::test_time(2));
 
     EXPECT_TRUE(result.acked_packets.empty());
@@ -2980,7 +2979,7 @@ TEST(QuicRecoveryTest, EmptyAndUnknownRecoveryLookupsReturnWithoutStateChanges) 
     EXPECT_FALSE(recovery.newest_tracked_packet().has_value());
     EXPECT_TRUE(recovery.collect_time_threshold_losses(coquic::quic::test::test_time(5)).empty());
 
-    const auto version_before = recovery.compatibility_version();
+    auto version_before = recovery.compatibility_version();
     recovery.on_packet_declared_lost(42);
     recovery.retire_packet(RecoveryPacketHandle{.packet_number = 42, .slot_index = 0});
     recovery.retire_packet(42);

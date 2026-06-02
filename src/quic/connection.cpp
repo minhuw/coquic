@@ -159,10 +159,8 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
     maybe_discard_server_zero_rtt_packet_space(now);
     maybe_discard_previous_application_read_secret(now);
 
-    const bool accept_greased_quic_bit = static_cast<bool>(
-        config_.transport.grease_quic_bit | local_transport_parameters_.grease_quic_bit);
     maybe_note_inbound_datagram_bytes(
-        count_inbound_bytes, bytes, accept_greased_quic_bit,
+        count_inbound_bytes, bytes, accepts_greased_quic_bit(),
         [&](std::size_t byte_count) { note_inbound_datagram_bytes(byte_count); });
 
     if (!started_) {
@@ -186,11 +184,8 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
     }
 
     auto synced = CodecResult<bool>::success(true);
-    const bool steady_state_one_rtt_receive = can_skip_steady_state_receive_sync(
-        config_.role, status_, peer_transport_parameters_validated_, application_space_.read_secret,
-        application_space_.write_secret, resumption_state_emitted_, peer_preferred_address_emitted_,
-        peer_transport_parameters_, qlog_session_.get(), bytes, accept_greased_quic_bit);
-    if (!steady_state_one_rtt_receive) {
+    auto receive_sync_state = can_skip_receive_tls_sync(bytes);
+    if (!receive_sync_state) {
         if (send_profile_enabled()) {
             ++send_profile_counters().inbound_initial_sync_tls_calls;
         }
@@ -254,7 +249,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
             .largest_authenticated_application_packet_number =
                 application_space_.largest_authenticated_packet_number,
             .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
-            .accept_greased_quic_bit = accept_greased_quic_bit,
+            .accept_greased_quic_bit = accepts_greased_quic_bit(),
         });
     };
     const auto make_short_header_deserialize_context =
@@ -278,7 +273,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
             .largest_authenticated_application_packet_number =
                 application_space_.largest_authenticated_packet_number,
             .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
-            .accept_greased_quic_bit = accept_greased_quic_bit,
+            .accept_greased_quic_bit = accepts_greased_quic_bit(),
         });
     };
     struct PacketProcessingLabels {
@@ -784,7 +779,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
     if (!replay_deferred_packets()) {
         return;
     }
-    if (can_use_single_short_header_datagram_fast_path(steady_state_one_rtt_receive,
+    if (can_use_single_short_header_datagram_fast_path(receive_sync_state,
                                                        allow_in_place_receive_decode,
                                                        previous_application_read_secret_, bytes) &&
         !packet_trace_matches_connection(config_.source_connection_id)) {
@@ -881,15 +876,7 @@ QuicConnection::queue_stream_send_impl(std::uint64_t stream_id,
     note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
                                    *stream);
 
-    const bool should_emit_zero_rtt_attempt =
-        (config_.role == EndpointRole::client) & config_.zero_rtt.attempt &
-        decoded_resumption_state_.has_value() & zero_rtt_space_.write_secret.has_value() &
-        (status_ != HandshakeStatus::connected) & !zero_rtt_attempted_event_emitted_;
-    if (should_emit_zero_rtt_attempt) {
-        pending_zero_rtt_status_event_ =
-            QuicCoreZeroRttStatusEvent{.status = QuicZeroRttStatus::attempted};
-        zero_rtt_attempted_event_emitted_ = true;
-    }
+    maybe_emit_zero_rtt_attempted_event();
 
     return StreamStateResult<bool>::success(true);
 }
@@ -911,17 +898,19 @@ CodecResult<bool> QuicConnection::queue_datagram_send_shared(SharedBytes bytes) 
 
     pending_datagram_send_queue_.push_back(std::move(bytes));
 
-    const bool should_emit_zero_rtt_attempt =
-        (config_.role == EndpointRole::client) & config_.zero_rtt.attempt &
+    maybe_emit_zero_rtt_attempted_event();
+
+    return CodecResult<bool>::success(true);
+}
+
+void QuicConnection::maybe_emit_zero_rtt_attempted_event() {
+    if ((config_.role == EndpointRole::client) & config_.zero_rtt.attempt &
         decoded_resumption_state_.has_value() & zero_rtt_space_.write_secret.has_value() &
-        (status_ != HandshakeStatus::connected) & !zero_rtt_attempted_event_emitted_;
-    if (should_emit_zero_rtt_attempt) {
+        (status_ != HandshakeStatus::connected) & !zero_rtt_attempted_event_emitted_) {
         pending_zero_rtt_status_event_ =
             QuicCoreZeroRttStatusEvent{.status = QuicZeroRttStatus::attempted};
         zero_rtt_attempted_event_emitted_ = true;
     }
-
-    return CodecResult<bool>::success(true);
 }
 
 StreamStateResult<bool> QuicConnection::queue_stream_reset(LocalResetCommand command) {
@@ -1198,15 +1187,7 @@ bool QuicConnection::has_sendable_datagram(QuicCoreTimePoint now, bool continue_
         return false;
     }
     const bool application_ack_due = application_ack_due_for_send(application_space_, now);
-    const bool pending_application_send = has_pending_application_send();
-    const bool has_pending_new_token_frames = !pending_new_token_frames_.empty();
-    const bool has_pending_new_connection_id_frames = !pending_new_connection_id_frames_.empty();
-    const bool has_pending_retire_connection_id_frames =
-        !pending_retire_connection_id_frames_.empty();
-    if (!application_space_has_sendable_data(application_ack_due, pending_application_send,
-                                             application_space_, has_pending_new_token_frames,
-                                             has_pending_new_connection_id_frames,
-                                             has_pending_retire_connection_id_frames)) {
+    if (!has_application_space_sendable_data(application_ack_due)) {
         note_not_sendable(&SendProfileCounters::has_sendable_no_application_data);
         return false;
     }
@@ -1236,6 +1217,25 @@ bool QuicConnection::has_sendable_datagram(QuicCoreTimePoint now, bool continue_
         return false;
     }
     return true;
+}
+
+bool QuicConnection::has_application_space_sendable_data(bool application_ack_due) const {
+    return application_space_has_sendable_data(
+        application_ack_due, has_pending_application_send(), application_space_,
+        !pending_new_token_frames_.empty(), !pending_new_connection_id_frames_.empty(),
+        !pending_retire_connection_id_frames_.empty());
+}
+
+bool QuicConnection::accepts_greased_quic_bit() const {
+    return static_cast<bool>(config_.transport.grease_quic_bit |
+                             local_transport_parameters_.grease_quic_bit);
+}
+
+bool QuicConnection::can_skip_receive_tls_sync(std::span<const std::byte> bytes) const {
+    return can_skip_steady_state_receive_sync(
+        config_.role, status_, peer_transport_parameters_validated_, application_space_.read_secret,
+        application_space_.write_secret, resumption_state_emitted_, peer_preferred_address_emitted_,
+        peer_transport_parameters_, qlog_session_.get(), bytes, accepts_greased_quic_bit());
 }
 
 } // namespace coquic::quic

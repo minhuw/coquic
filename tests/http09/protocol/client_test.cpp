@@ -98,7 +98,7 @@ bool http09_client_internal_coverage_for_tests() {
             .request_index = 0,
             .stream_id = 0,
         });
-    const auto pending_completion = pending_completion_endpoint.on_core_result(
+    auto pending_completion = pending_completion_endpoint.on_core_result(
         QuicCoreResult{}, coquic::quic::test::test_time());
     if (pending_completion.terminal_success || pending_completion_endpoint.complete_) {
         return false;
@@ -115,7 +115,7 @@ bool http09_client_internal_coverage_for_tests() {
                .request_target = "/alpha.txt",
                .complete = false,
            });
-    const auto active_completion = active_completion_endpoint.on_core_result(
+    auto active_completion = active_completion_endpoint.on_core_result(
         QuicCoreResult{}, coquic::quic::test::test_time());
     return !active_completion.terminal_success && !active_completion_endpoint.complete_;
 }
@@ -243,8 +243,8 @@ TEST(QuicHttp09ClientTest, OpensNextBidirectionalStreamAfterHandshake) {
         endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
     EXPECT_TRUE(first_accepted.has_pending_work);
 
-    const auto second_update = endpoint.poll(coquic::quic::test::test_time(1));
-    const auto second_sends = send_stream_inputs_from(second_update);
+    auto second_update = endpoint.poll(coquic::quic::test::test_time(1));
+    auto second_sends = send_stream_inputs_from(second_update);
     ASSERT_EQ(second_sends.size(), 1u);
     EXPECT_EQ(second_sends[0].stream_id, 4u);
     EXPECT_EQ(second_sends[0].bytes, coquic::quic::test::bytes_from_string("GET /beta.txt\r\n"));
@@ -323,8 +323,8 @@ TEST(QuicHttp09ClientTest, HandshakeDoesNotNeedToBatchRemainingZeroRttRequestsAf
         endpoint.on_core_result(handshake_ready_result(), coquic::quic::test::test_time(1));
     EXPECT_FALSE(on_handshake.has_pending_work);
 
-    const auto post_handshake = endpoint.poll(coquic::quic::test::test_time(1));
-    const auto post_handshake_sends = send_stream_inputs_from(post_handshake);
+    auto post_handshake = endpoint.poll(coquic::quic::test::test_time(1));
+    auto post_handshake_sends = send_stream_inputs_from(post_handshake);
 
     EXPECT_TRUE(post_handshake_sends.empty());
 }
@@ -371,7 +371,7 @@ TEST(QuicHttp09ClientTest, KeyUpdateCaseQueuesRequestOnlyOnceAcrossLaterActivity
         endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(2));
     EXPECT_EQ(key_update_input_count(second_accepted), 0u);
 
-    const auto third_polled = endpoint.poll(coquic::quic::test::test_time(2));
+    auto third_polled = endpoint.poll(coquic::quic::test::test_time(2));
     EXPECT_EQ(key_update_input_count(third_polled), 0u);
 }
 
@@ -521,12 +521,12 @@ TEST(QuicHttp09ClientTest, ReportsSuccessOnlyAfterAllStreamsFinishWithFin) {
     EXPECT_FALSE(first.terminal_success);
     EXPECT_FALSE(first.terminal_failure);
 
-    const auto second =
+    auto second =
         endpoint.on_core_result(receive_result(4, "done", true), coquic::quic::test::test_time(4));
     EXPECT_FALSE(second.terminal_success);
     EXPECT_FALSE(second.terminal_failure);
 
-    const auto third =
+    auto third =
         endpoint.on_core_result(receive_result(0, "", true), coquic::quic::test::test_time(5));
     EXPECT_TRUE(third.terminal_success);
     EXPECT_FALSE(third.terminal_failure);
@@ -580,13 +580,13 @@ TEST(QuicHttp09ClientTest, RetriesOpeningRequestAfterStreamLimitBackpressure) {
     EXPECT_FALSE(blocked.terminal_failure);
     EXPECT_FALSE(blocked.has_pending_work);
 
-    const auto completed =
+    auto completed =
         endpoint.on_core_result(receive_result(0, "done", true), coquic::quic::test::test_time(4));
     EXPECT_FALSE(completed.terminal_failure);
     EXPECT_TRUE(completed.has_pending_work);
 
-    const auto retried = endpoint.poll(coquic::quic::test::test_time(5));
-    const auto retried_sends = send_stream_inputs_from(retried);
+    auto retried = endpoint.poll(coquic::quic::test::test_time(5));
+    auto retried_sends = send_stream_inputs_from(retried);
     ASSERT_EQ(retried_sends.size(), 1u);
     EXPECT_EQ(retried_sends[0].stream_id, 4u);
 }

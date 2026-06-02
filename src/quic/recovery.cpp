@@ -24,9 +24,11 @@ std::uint64_t encode_ack_delay(std::chrono::microseconds ack_delay,
     return static_cast<std::uint64_t>(ack_delay.count()) >> ack_delay_exponent;
 }
 
-QuicCoreDuration latest_loss_delay(const RecoveryRttState &rtt) {
+QuicCoreDuration latest_loss_delay(const RecoveryRttState &recovery_rtt_state) {
     const auto base_rtt =
-        rtt.latest_rtt.has_value() ? std::max(*rtt.latest_rtt, rtt.smoothed_rtt) : kInitialRtt;
+        recovery_rtt_state.latest_rtt.has_value()
+            ? std::max(*recovery_rtt_state.latest_rtt, recovery_rtt_state.smoothed_rtt)
+            : kInitialRtt;
     const auto rounded_up_loss_delay = QuicCoreDuration((base_rtt.count() * 9 + 7) / 8);
     return std::max(kGranularity, rounded_up_loss_delay);
 }
@@ -1610,21 +1612,23 @@ bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest
     return largest_acked > packet_number && largest_acked - packet_number >= packet_threshold;
 }
 
-QuicCoreTimePoint compute_time_threshold_deadline(const RecoveryRttState &rtt,
+QuicCoreTimePoint compute_time_threshold_deadline(const RecoveryRttState &rtt_state,
                                                   QuicCoreTimePoint sent_time) {
-    return sent_time + latest_loss_delay(rtt);
+    return sent_time + latest_loss_delay(rtt_state);
 }
 
-bool is_time_threshold_lost(const RecoveryRttState &rtt, QuicCoreTimePoint sent_time,
+bool is_time_threshold_lost(const RecoveryRttState &rtt_state, QuicCoreTimePoint sent_time,
                             QuicCoreTimePoint now) {
-    return now >= compute_time_threshold_deadline(rtt, sent_time);
+    return now >= compute_time_threshold_deadline(rtt_state, sent_time);
 }
 
-QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt, QuicCoreDuration max_ack_delay,
-                                       QuicCoreTimePoint now, std::uint32_t pto_count) {
+QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt_state,
+                                       QuicCoreDuration max_ack_delay, QuicCoreTimePoint now,
+                                       std::uint32_t pto_count) {
     auto timeout = kInitialRtt * 3;
-    if (rtt.latest_rtt.has_value()) {
-        timeout = rtt.smoothed_rtt + std::max(rtt.rttvar * 4, kGranularity) + max_ack_delay;
+    if (rtt_state.latest_rtt.has_value()) {
+        timeout =
+            rtt_state.smoothed_rtt + std::max(rtt_state.rttvar * 4, kGranularity) + max_ack_delay;
     }
 
     for (std::uint32_t count = 0; count < pto_count; ++count) {
@@ -1634,53 +1638,55 @@ QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt, QuicCoreDura
     return now + timeout;
 }
 
-void update_rtt(RecoveryRttState &rtt, QuicCoreTimePoint ack_receive_time,
+void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
                 const SentPacketRecord &largest_newly_acked_packet,
                 std::chrono::microseconds ack_delay, std::chrono::microseconds max_ack_delay) {
     const auto latest_sample_duration = std::max(
         ack_receive_time - largest_newly_acked_packet.sent_time, QuicCoreClock::duration::zero());
     const auto latest_sample = std::chrono::duration_cast<QuicCoreDuration>(latest_sample_duration);
-    const auto first_sample = !rtt.latest_rtt.has_value();
-    auto previous_min_rtt_sample = rtt.min_rtt_sample;
-    if (!previous_min_rtt_sample.has_value() && rtt.min_rtt.has_value()) {
-        previous_min_rtt_sample = *rtt.min_rtt;
+    const auto first_sample = !rtt_state.latest_rtt.has_value();
+    auto previous_min_rtt_sample = rtt_state.min_rtt_sample;
+    if (!previous_min_rtt_sample.has_value() && rtt_state.min_rtt.has_value()) {
+        previous_min_rtt_sample = *rtt_state.min_rtt;
     }
 
-    rtt.latest_rtt = latest_sample;
-    rtt.latest_rtt_sample = latest_sample;
-    rtt.min_rtt = rtt.min_rtt.has_value() ? std::min(*rtt.min_rtt, latest_sample) : latest_sample;
-    rtt.min_rtt_sample = previous_min_rtt_sample.has_value()
-                             ? std::min(*previous_min_rtt_sample, latest_sample)
-                             : latest_sample;
+    rtt_state.latest_rtt = latest_sample;
+    rtt_state.latest_rtt_sample = latest_sample;
+    rtt_state.min_rtt =
+        rtt_state.min_rtt.has_value() ? std::min(*rtt_state.min_rtt, latest_sample) : latest_sample;
+    rtt_state.min_rtt_sample = previous_min_rtt_sample.has_value()
+                                   ? std::min(*previous_min_rtt_sample, latest_sample)
+                                   : latest_sample;
 
     if (first_sample) {
-        rtt.smoothed_rtt = latest_sample;
-        rtt.rttvar = latest_sample / 2;
-        rtt.latest_adjusted_rtt.reset();
-        rtt.latest_adjusted_rtt_sample.reset();
-        rtt.latest_ack_delay_compensated_rtt_sample.reset();
+        rtt_state.smoothed_rtt = latest_sample;
+        rtt_state.rttvar = latest_sample / 2;
+        rtt_state.latest_adjusted_rtt.reset();
+        rtt_state.latest_adjusted_rtt_sample.reset();
+        rtt_state.latest_ack_delay_compensated_rtt_sample.reset();
         return;
     }
 
     const auto bounded_ack_delay = std::min(ack_delay, max_ack_delay);
     auto adjusted_rtt = latest_sample;
-    if (latest_sample >= *rtt.min_rtt + bounded_ack_delay) {
+    if (latest_sample >= *rtt_state.min_rtt + bounded_ack_delay) {
         adjusted_rtt = latest_sample - bounded_ack_delay;
     }
-    rtt.latest_adjusted_rtt = adjusted_rtt;
+    rtt_state.latest_adjusted_rtt = adjusted_rtt;
 
     auto adjusted_rtt_us = latest_sample;
-    if (latest_sample >= *rtt.min_rtt_sample + bounded_ack_delay) {
+    if (latest_sample >= *rtt_state.min_rtt_sample + bounded_ack_delay) {
         adjusted_rtt_us = latest_sample - bounded_ack_delay;
     }
-    rtt.latest_adjusted_rtt_sample = adjusted_rtt_us;
-    rtt.latest_ack_delay_compensated_rtt_sample =
+    rtt_state.latest_adjusted_rtt_sample = adjusted_rtt_us;
+    rtt_state.latest_ack_delay_compensated_rtt_sample =
         latest_sample > bounded_ack_delay ? latest_sample - bounded_ack_delay : latest_sample;
 
-    const auto rtt_sample_delta = rtt.smoothed_rtt > adjusted_rtt ? rtt.smoothed_rtt - adjusted_rtt
-                                                                  : adjusted_rtt - rtt.smoothed_rtt;
-    rtt.rttvar = (rtt.rttvar * 3 + rtt_sample_delta) / 4;
-    rtt.smoothed_rtt = (rtt.smoothed_rtt * 7 + adjusted_rtt) / 8;
+    const auto rtt_sample_delta = rtt_state.smoothed_rtt > adjusted_rtt
+                                      ? rtt_state.smoothed_rtt - adjusted_rtt
+                                      : adjusted_rtt - rtt_state.smoothed_rtt;
+    rtt_state.rttvar = (rtt_state.rttvar * 3 + rtt_sample_delta) / 4;
+    rtt_state.smoothed_rtt = (rtt_state.smoothed_rtt * 7 + adjusted_rtt) / 8;
 }
 
 } // namespace coquic::quic

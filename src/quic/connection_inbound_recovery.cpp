@@ -257,8 +257,8 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                     note_endpoint_route_state_changed();
                 }
                 note_authenticated_packet_number(handshake_space_, protected_packet.packet_number);
-                const auto processed = process_inbound_crypto(EncryptionLevel::handshake,
-                                                              protected_packet.frames, now);
+                auto processed = process_inbound_crypto(EncryptionLevel::handshake,
+                                                        protected_packet.frames, now);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     if (config_.role == EndpointRole::server) {
@@ -476,8 +476,8 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                     note_endpoint_route_state_changed();
                 }
                 note_authenticated_packet_number(handshake_space_, protected_packet.packet_number);
-                const auto processed = process_inbound_received_crypto(
-                    EncryptionLevel::handshake, protected_packet.frames, now);
+                auto processed = process_inbound_received_crypto(EncryptionLevel::handshake,
+                                                                 protected_packet.frames, now);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     if (config_.role == EndpointRole::server) {
@@ -593,7 +593,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                     std::ranges::any_of(protected_packet.frames, [](const ReceivedFrame &frame) {
                         return std::holds_alternative<ReceivedCryptoFrame>(frame);
                     });
-                const auto processed = process_inbound_received_application(
+                auto processed = process_inbound_received_application(
                     protected_packet.frames, now, has_crypto_frame, last_inbound_path_id_,
                     used_previous_application_read_secret, protected_packet.packet_number);
                 if (processed.has_value()) {
@@ -991,9 +991,9 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
     }
 
     std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-    const auto simple_stream_ack_sample_span =
+    auto simple_stream_ack_sample_span =
         std::span<const AckedStreamPacketSample>(simple_stream_ack_samples);
-    const auto acked_packet_span = std::span<const SentPacketRecord>(acked_packets);
+    auto acked_packet_span = std::span<const SentPacketRecord>(acked_packets);
     if (ack_result.largest_acknowledged_was_newly_acked) {
         struct PathEcnAckSummary {
             std::uint64_t newly_acked_ect0 = 0;
@@ -1031,7 +1031,7 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
                 &handshake_space_,
                 &application_space_,
             };
-            const auto packet_space_index = ecn_packet_space_index(packet_space, packet_spaces);
+            auto packet_space_index = ecn_packet_space_index(packet_space, packet_spaces);
             for (const auto &[path_id, summary] : acked_ecn_by_path) {
                 auto &path = ensure_path_state(path_id);
                 if (path.ecn.state == QuicPathEcnState::failed) {
@@ -1047,21 +1047,21 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
                                                  ? path.ecn.last_peer_counts[packet_space_index]
                                                  : AckEcnCounts{};
                 const auto &current_counts = *ecn_counts;
-                const bool counts_decreased = current_counts.ect0 < previous_counts.ect0 ||
-                                              current_counts.ect1 < previous_counts.ect1 ||
-                                              current_counts.ecn_ce < previous_counts.ecn_ce;
+                bool counts_decreased = current_counts.ect0 < previous_counts.ect0 ||
+                                        current_counts.ect1 < previous_counts.ect1 ||
+                                        current_counts.ecn_ce < previous_counts.ecn_ce;
                 if (counts_decreased) {
                     disable_ecn_on_path(path_id);
                     continue;
                 }
 
                 const auto delta_ect0 = current_counts.ect0 - previous_counts.ect0;
-                const auto delta_ect1 = current_counts.ect1 - previous_counts.ect1;
-                const auto delta_ce = current_counts.ecn_ce - previous_counts.ecn_ce;
-                const bool missing_ect0_feedback = delta_ect0 + delta_ce < summary.newly_acked_ect0;
-                const bool missing_ect1_feedback = delta_ect1 + delta_ce < summary.newly_acked_ect1;
-                const bool impossible_ect0_count = current_counts.ect0 > path.ecn.total_sent_ect0;
-                const bool impossible_ect1_count = current_counts.ect1 > path.ecn.total_sent_ect1;
+                auto delta_ect1 = current_counts.ect1 - previous_counts.ect1;
+                auto delta_ce = current_counts.ecn_ce - previous_counts.ecn_ce;
+                bool missing_ect0_feedback = delta_ect0 + delta_ce < summary.newly_acked_ect0;
+                bool missing_ect1_feedback = delta_ect1 + delta_ce < summary.newly_acked_ect1;
+                bool impossible_ect0_count = current_counts.ect0 > path.ecn.total_sent_ect0;
+                bool impossible_ect1_count = current_counts.ect1 > path.ecn.total_sent_ect1;
                 if (missing_ect0_feedback || missing_ect1_feedback || impossible_ect0_count ||
                     impossible_ect1_count) {
                     disable_ecn_on_path(path_id);
@@ -1103,7 +1103,7 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
         confirm_handshake();
     }
     const auto &shared_rtt_state = shared_recovery_rtt_state();
-    const auto ack_eliciting_lost_packets = ack_eliciting_in_flight_losses(newly_lost_packets);
+    auto ack_eliciting_lost_packets = ack_eliciting_in_flight_losses(newly_lost_packets);
     if (!ack_eliciting_lost_packets.empty()) {
         if (send_profile_enabled()) {
             ++send_profile_counters().loss_events;
@@ -1283,19 +1283,20 @@ bool QuicConnection::try_retire_simple_stream_acked_packet(
                                             additional_retirement_candidates, stream_id);
     };
     const auto acknowledge_metadata = [&](const StreamFrameSendMetadata &metadata) {
-        const auto stream = streams_.find(metadata.stream_id);
-        if (stream == streams_.end()) {
+        const auto stream_it = streams_.find(metadata.stream_id);
+        if (stream_it == streams_.end()) {
             return;
         }
 
-        const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
-        const auto previous_has_lost_send_data =
-            stream->second.reset_state == StreamControlFrameState::none &&
-            stream->second.send_buffer.has_lost_data();
-        stream->second.acknowledge_send_metadata(metadata);
-        note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
-                                       stream->second);
-        maybe_refresh_peer_stream_limit(stream->second);
+        const auto previous_fresh_sendable_bytes =
+            fresh_sendable_bytes_for_cache(stream_it->second);
+        const auto previous_stream_has_lost_send_data =
+            stream_it->second.reset_state == StreamControlFrameState::none &&
+            stream_it->second.send_buffer.has_lost_data();
+        stream_it->second.acknowledge_send_metadata(metadata);
+        note_stream_send_state_changed(previous_fresh_sendable_bytes,
+                                       previous_stream_has_lost_send_data, stream_it->second);
+        maybe_refresh_peer_stream_limit(stream_it->second);
         note_retirement_candidate(metadata.stream_id);
     };
     if (first_stream_frame_metadata.has_value()) {
@@ -1430,7 +1431,7 @@ bool QuicConnection::process_simple_stream_ack_ecn(
         &handshake_space_,
         &application_space_,
     };
-    const auto packet_space_index = ecn_packet_space_index(packet_space, packet_spaces);
+    auto packet_space_index = ecn_packet_space_index(packet_space, packet_spaces);
     for (const auto &[path_id, summary] : acked_ecn_by_path) {
         auto &path = ensure_path_state(path_id);
         if (path.ecn.state == QuicPathEcnState::failed) {
@@ -1455,12 +1456,12 @@ bool QuicConnection::process_simple_stream_ack_ecn(
         }
 
         const auto delta_ect0 = current_counts.ect0 - previous_counts.ect0;
-        const auto delta_ect1 = current_counts.ect1 - previous_counts.ect1;
-        const auto delta_ce = current_counts.ecn_ce - previous_counts.ecn_ce;
-        const bool missing_ect0_feedback = delta_ect0 + delta_ce < summary.newly_acked_ect0;
-        const bool missing_ect1_feedback = delta_ect1 + delta_ce < summary.newly_acked_ect1;
-        const bool impossible_ect0_count = current_counts.ect0 > path.ecn.total_sent_ect0;
-        const bool impossible_ect1_count = current_counts.ect1 > path.ecn.total_sent_ect1;
+        auto delta_ect1 = current_counts.ect1 - previous_counts.ect1;
+        auto delta_ce = current_counts.ecn_ce - previous_counts.ecn_ce;
+        bool missing_ect0_feedback = delta_ect0 + delta_ce < summary.newly_acked_ect0;
+        bool missing_ect1_feedback = delta_ect1 + delta_ce < summary.newly_acked_ect1;
+        bool impossible_ect0_count = current_counts.ect0 > path.ecn.total_sent_ect0;
+        bool impossible_ect1_count = current_counts.ect1 > path.ecn.total_sent_ect1;
         if (missing_ect0_feedback || missing_ect1_feedback || impossible_ect0_count ||
             impossible_ect1_count) {
             disable_ecn_on_path(path_id);
@@ -1494,7 +1495,7 @@ bool QuicConnection::process_single_path_simple_stream_ack_ecn(
         &handshake_space_,
         &application_space_,
     };
-    const auto packet_space_index = ecn_packet_space_index(packet_space, packet_spaces);
+    auto packet_space_index = ecn_packet_space_index(packet_space, packet_spaces);
     auto &path = ensure_path_state(path_id);
     if (path.ecn.state == QuicPathEcnState::failed) {
         return true;
@@ -1518,12 +1519,12 @@ bool QuicConnection::process_single_path_simple_stream_ack_ecn(
     }
 
     const auto delta_ect0 = current_counts.ect0 - previous_counts.ect0;
-    const auto delta_ect1 = current_counts.ect1 - previous_counts.ect1;
-    const auto delta_ce = current_counts.ecn_ce - previous_counts.ecn_ce;
-    const bool missing_ect0_feedback = delta_ect0 + delta_ce < newly_acked_ect0;
-    const bool missing_ect1_feedback = delta_ect1 + delta_ce < newly_acked_ect1;
-    const bool impossible_ect0_count = current_counts.ect0 > path.ecn.total_sent_ect0;
-    const bool impossible_ect1_count = current_counts.ect1 > path.ecn.total_sent_ect1;
+    auto delta_ect1 = current_counts.ect1 - previous_counts.ect1;
+    auto delta_ce = current_counts.ecn_ce - previous_counts.ecn_ce;
+    bool missing_ect0_feedback = delta_ect0 + delta_ce < newly_acked_ect0;
+    bool missing_ect1_feedback = delta_ect1 + delta_ce < newly_acked_ect1;
+    bool impossible_ect0_count = current_counts.ect0 > path.ecn.total_sent_ect0;
+    bool impossible_ect1_count = current_counts.ect1 > path.ecn.total_sent_ect1;
     if (missing_ect0_feedback || missing_ect1_feedback || impossible_ect0_count ||
         impossible_ect1_count) {
         disable_ecn_on_path(path_id);
@@ -1661,7 +1662,7 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
         }
 
         const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
-        const auto previous_has_lost_send_data =
+        auto previous_has_lost_send_data =
             stream->second.reset_state == StreamControlFrameState::none &&
             stream->second.send_buffer.has_lost_data();
         stream->second.acknowledge_send_metadata(metadata);
@@ -1677,7 +1678,7 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
         }
 
         const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
-        const auto previous_has_lost_send_data =
+        auto previous_has_lost_send_data =
             stream->second.reset_state == StreamControlFrameState::none &&
             stream->second.send_buffer.has_lost_data();
         stream->second.acknowledge_send_fragment(fragment);
@@ -1839,7 +1840,7 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
         }
 
         const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
-        const auto previous_has_lost_send_data =
+        auto previous_has_lost_send_data =
             stream->second.reset_state == StreamControlFrameState::none &&
             stream->second.send_buffer.has_lost_data();
         stream->second.mark_send_metadata_lost(metadata);
@@ -1853,7 +1854,7 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
         }
 
         const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
-        const auto previous_has_lost_send_data =
+        auto previous_has_lost_send_data =
             stream->second.reset_state == StreamControlFrameState::none &&
             stream->second.send_buffer.has_lost_data();
         stream->second.mark_send_fragment_lost(fragment);
@@ -2047,7 +2048,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             }
 
             const auto previous_highest_offset = stream_state->highest_received_offset;
-            const auto validated = stream_state->validate_receive_range(
+            auto validated = stream_state->validate_receive_range(
                 stream_offset, stream_frame->stream_data.size(), stream_frame->fin);
             if (!validated.has_value()) {
                 return CodecResult<bool>::failure(stream_state_codec_error(
@@ -2064,11 +2065,11 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             }
             connection_flow_control_.received_committed += received_delta;
 
-            const auto contiguous_bytes =
+            auto owned_contiguous_bytes =
                 stream_state->receive_buffer.push(stream_offset, stream_frame->stream_data);
-            if (!contiguous_bytes.has_value()) {
-                return CodecResult<bool>::failure(contiguous_bytes.error().code,
-                                                  contiguous_bytes.error().offset);
+            if (!owned_contiguous_bytes.has_value()) {
+                return CodecResult<bool>::failure(owned_contiguous_bytes.error().code,
+                                                  owned_contiguous_bytes.error().offset);
             }
             if (stream_frame->stream_id == 0 &&
                 packet_trace_matches_connection(config_.source_connection_id)) {
@@ -2077,27 +2078,27 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                           << " offset=" << stream_offset
                           << " len=" << stream_frame->stream_data.size()
                           << " fin=" << stream_frame->fin
-                          << " contiguous=" << contiguous_bytes.value().size()
+                          << " contiguous=" << owned_contiguous_bytes.value().size()
                           << " highest=" << stream_state->highest_received_offset << '\n';
             }
 
-            const auto contiguous_size = contiguous_bytes.value().size();
+            const auto contiguous_size = owned_contiguous_bytes.value().size();
             stream_state->receive_flow_control_consumed +=
                 static_cast<std::uint64_t>(contiguous_size);
-            const auto fin_ready =
+            auto fin_ready =
                 stream_state->peer_final_size.has_value() &&
                 stream_state->receive_flow_control_consumed == *stream_state->peer_final_size &&
                 !stream_state->peer_fin_delivered;
             if (contiguous_size != 0 || fin_ready) {
                 pending_stream_receive_effects_.push_back(QuicCoreReceiveStreamData{
                     .stream_id = stream_frame->stream_id,
-                    .bytes = contiguous_bytes.value(),
+                    .bytes = owned_contiguous_bytes.value(),
                     .fin = fin_ready,
                 });
                 stream_state->flow_control.delivered_bytes +=
-                    static_cast<std::uint64_t>(contiguous_bytes.value().size());
+                    static_cast<std::uint64_t>(owned_contiguous_bytes.value().size());
                 connection_flow_control_.delivered_bytes +=
-                    static_cast<std::uint64_t>(contiguous_bytes.value().size());
+                    static_cast<std::uint64_t>(owned_contiguous_bytes.value().size());
                 if (fin_ready) {
                     stream_state->peer_fin_delivered = true;
                 }
@@ -2354,8 +2355,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
 
         const bool has_transport_close =
             std::holds_alternative<TransportConnectionCloseFrame>(frame);
-        const bool has_application_close =
-            std::holds_alternative<ApplicationConnectionCloseFrame>(frame);
+        bool has_application_close = std::holds_alternative<ApplicationConnectionCloseFrame>(frame);
         if (has_transport_close | has_application_close) {
             enter_draining_state(now);
             continue;
@@ -2371,7 +2371,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
         }
 
         const auto &retire_connection_id = std::get<RetireConnectionIdFrame>(frame);
-        const auto retired = process_retire_connection_id_frame(retire_connection_id);
+        auto retired = process_retire_connection_id_frame(retire_connection_id);
         if (!retired.has_value()) {
             return CodecResult<bool>::failure(retired.error());
         }
@@ -2748,8 +2748,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
 
         const bool has_transport_close =
             std::holds_alternative<TransportConnectionCloseFrame>(frame);
-        const bool has_application_close =
-            std::holds_alternative<ApplicationConnectionCloseFrame>(frame);
+        bool has_application_close = std::holds_alternative<ApplicationConnectionCloseFrame>(frame);
         if (has_transport_close | has_application_close) {
             enter_draining_state(now);
             continue;
@@ -2765,7 +2764,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
         }
 
         const auto &retire_connection_id = std::get<RetireConnectionIdFrame>(frame);
-        const auto retired = process_retire_connection_id_frame(retire_connection_id);
+        auto retired = process_retire_connection_id_frame(retire_connection_id);
         if (!retired.has_value()) {
             return CodecResult<bool>::failure(retired.error());
         }
@@ -2800,7 +2799,7 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
     }
 
     const auto previous_highest_offset = stream_state->highest_received_offset;
-    const auto validated = stream_state->validate_receive_range(
+    auto validated = stream_state->validate_receive_range(
         stream_offset, stream_frame.stream_data.size(), stream_frame.fin);
     if (!validated.has_value()) {
         return CodecResult<bool>::failure(
@@ -2815,13 +2814,13 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
     }
     connection_flow_control_.received_committed += received_delta;
 
-    auto contiguous_bytes =
+    auto shared_contiguous_bytes =
         stream_state->receive_buffer.push_shared(stream_offset, stream_frame.stream_data);
-    if (!contiguous_bytes.has_value()) {
-        return CodecResult<bool>::failure(contiguous_bytes.error().code,
-                                          contiguous_bytes.error().offset);
+    if (!shared_contiguous_bytes.has_value()) {
+        return CodecResult<bool>::failure(shared_contiguous_bytes.error().code,
+                                          shared_contiguous_bytes.error().offset);
     }
-    const auto contiguous_size = contiguous_bytes.value().span().size();
+    const auto contiguous_size = shared_contiguous_bytes.value().span().size();
     if (stream_frame.stream_id == 0 &&
         packet_trace_matches_connection(config_.source_connection_id)) {
         std::cerr << "quic-packet-trace stream scid="
@@ -2832,7 +2831,7 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
     }
 
     stream_state->receive_flow_control_consumed += static_cast<std::uint64_t>(contiguous_size);
-    const auto fin_ready =
+    auto fin_ready =
         stream_state->peer_final_size.has_value() &&
         stream_state->receive_flow_control_consumed == *stream_state->peer_final_size &&
         !stream_state->peer_fin_delivered;
@@ -2841,10 +2840,11 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
             .stream_id = stream_frame.stream_id,
             .fin = fin_ready,
         };
-        if (config_.emit_shared_receive_stream_data && contiguous_bytes.value().owned.empty()) {
-            receive.shared_bytes = std::move(contiguous_bytes.value().shared);
+        if (config_.emit_shared_receive_stream_data &&
+            shared_contiguous_bytes.value().owned.empty()) {
+            receive.shared_bytes = std::move(shared_contiguous_bytes.value().shared);
         } else {
-            receive.bytes = contiguous_bytes.value().to_vector();
+            receive.bytes = shared_contiguous_bytes.value().to_vector();
         }
         pending_stream_receive_effects_.push_back(std::move(receive));
         stream_state->flow_control.delivered_bytes += static_cast<std::uint64_t>(contiguous_size);

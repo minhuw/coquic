@@ -705,6 +705,7 @@ bool io_uring_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
     const auto record = [&](bool condition, const char *) { ok &= condition; };
     reset_for_case();
 
+    // Peer-port extraction covers null, missing, IPv6, and unsupported-family addresses.
     record(peer_port_from_msghdr(nullptr) == 0, "peer_port null");
 
     msghdr message{};
@@ -745,6 +746,7 @@ bool io_uring_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
         .ecn = QuicEcnCodepoint::ect0,
     };
 
+    // Receive completion injection covers payload, peer address, ECN, and ECN-unavailable branches.
     message = {};
     message.msg_iov = &iov;
     message.msg_iovlen = 1;
@@ -764,6 +766,7 @@ bool io_uring_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
     record(message.msg_controllen == 0, "receive unavailable ecn");
     g_io_uring_test_config.force_receive_ecn_unavailable = false;
 
+    // Submit and wait helpers must return stable results even with default or empty harness state.
     g_io_uring_test_harness.sqe = {};
     g_io_uring_test_harness.sqe.opcode = 0;
     record(submit_for_tests(nullptr) == 0, "submit default opcode");
@@ -776,6 +779,7 @@ bool io_uring_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
            }),
            "wait empty");
 
+    // Queue initialization failures should make every backend-level coverage probe fail closed.
     reset_for_case();
     g_io_uring_test_config.queue_init_rc = -EPERM;
     record(!io_uring_backend_route_handles_are_stable_per_peer_tuple_for_tests(),
@@ -792,6 +796,7 @@ bool io_uring_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
     record(!io_uring_backend_wait_prefers_ready_receive_over_due_timer_for_tests(),
            "queue_init ready_over_timer");
 
+    // Socket opening and missing SQE branches cover setup failures after queue creation succeeds.
     reset_for_case();
     g_io_uring_test_config.fail_socket_open = true;
     record(!io_uring_backend_wait_returns_second_route_datagram_for_tests(),
@@ -808,6 +813,7 @@ bool io_uring_backend_internal_coverage_hook_exercises_cold_paths_for_tests() {
     record(!io_uring_backend_wait_prefers_ready_receive_over_due_timer_for_tests(),
            "null_sqe ready_over_timer");
 
+    // Counter suppression toggles verify that each probe depends on the expected side effect.
     reset_for_case();
     g_io_uring_test_config.force_zero_last_send_peer_port = true;
     record(!io_uring_backend_send_uses_route_handle_for_tests(), "wrong_peer_port send_route");
@@ -851,6 +857,7 @@ bool io_uring_backend_internal_coverage_hook_exercises_remaining_branches_for_te
 
     reset_for_case();
 
+    // Peer-port parsing covers IPv4 success plus truncated IPv4 and IPv6 addresses.
     msghdr message{};
     const auto ipv4_peer = make_ipv4_loopback_peer(5443);
     message.msg_name = const_cast<sockaddr_storage *>(&ipv4_peer);
@@ -891,6 +898,8 @@ bool io_uring_backend_internal_coverage_hook_exercises_remaining_branches_for_te
         .ecn = QuicEcnCodepoint::ect0,
     };
 
+    // Scripted receive injection guards absent iovecs, null buffers, short names, and small
+    // control.
     message = {};
     apply_scripted_receive_to_message(message, completion);
     record(payload_storage[0] == std::byte{0x00}, "receive missing iov");
@@ -948,6 +957,7 @@ bool io_uring_backend_internal_coverage_hook_exercises_remaining_branches_for_te
            }),
            "receive ipv6 control");
 
+    // SENDMSG submission is checked for explicit error, null message, and null iovec cases.
     reset_for_case();
 
     msghdr send_message{};
@@ -979,6 +989,7 @@ bool io_uring_backend_internal_coverage_hook_exercises_remaining_branches_for_te
            }),
            "submit send null iov");
 
+    // Empty wait paths cover nonnegative returns from both normal and timeout wait helpers.
     reset_for_case();
 
     io_uring_cqe *cqe = reinterpret_cast<io_uring_cqe *>(1);
@@ -1001,6 +1012,8 @@ bool io_uring_backend_internal_coverage_hook_exercises_remaining_branches_for_te
            }),
            "wait timeout empty nonnegative");
 
+    // Completion wait paths cover missing message entries, null message slots, and negative
+    // results.
     reset_for_case();
 
     g_io_uring_test_harness.completions.push_back(ScriptedCompletion{
@@ -1062,6 +1075,7 @@ bool io_uring_backend_internal_coverage_hook_exercises_remaining_branches_for_te
            }),
            "enqueue receive error normalizes positive errno");
 
+    // Socket-family recording rejects invalid families without recording an opened descriptor.
     reset_for_case();
     record(all_true({
                record_socket_family_and_open_for_tests(-1, SOCK_DGRAM, 0) == -1,

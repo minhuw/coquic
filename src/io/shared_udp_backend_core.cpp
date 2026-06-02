@@ -825,6 +825,7 @@ bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests() {
     };
 
     {
+        // Empty route state must not satisfy any cached-route expectation.
         internal::SocketIoRouteState state;
         ok &= !cached_route_matches(state, CachedRouteExpectation{
                                                .route_handle = 1,
@@ -834,6 +835,7 @@ bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests() {
     }
 
     {
+        // Corrupted peer lookup entries are rejected even when the route object still exists.
         internal::SocketIoRouteState state;
         const auto handle = internal::remember_route_handle(state, peer, peer_len, 4);
         ok &= cached_route_matches(state, CachedRouteExpectation{
@@ -861,6 +863,7 @@ bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests() {
     }
 
     {
+        // Socket fd corruption forces a mismatch for the duplicate route entry.
         internal::SocketIoRouteState state;
         const auto handle = internal::remember_route_handle(state, peer, peer_len, 4);
         ok &= cached_route_matches(state, CachedRouteExpectation{
@@ -878,6 +881,7 @@ bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests() {
     }
 
     {
+        // Peer length corruption is also treated as an invalid cached-route match.
         internal::SocketIoRouteState state;
         const auto handle = internal::remember_route_handle(state, peer, peer_len, 4);
         ok &= cached_route_matches(state, CachedRouteExpectation{
@@ -895,6 +899,7 @@ bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests() {
     }
 
     {
+        // Missing route objects are rejected after the peer tuple still points at the old handle.
         internal::SocketIoRouteState state;
         const auto handle = internal::remember_route_handle(state, peer, peer_len, 4);
         ok &= cached_route_matches(state, CachedRouteExpectation{
@@ -912,6 +917,7 @@ bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests() {
     }
 
     {
+        // Duplicate route records violate the one-peer-to-one-handle invariant under test.
         internal::SocketIoRouteState state;
         const auto handle = internal::remember_route_handle(state, peer, peer_len, 4);
         ok &= cached_route_matches(state, CachedRouteExpectation{

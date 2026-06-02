@@ -73,18 +73,6 @@ serialize_http3_payload_frame(std::uint64_t type, std::span<const std::byte> pay
     return CodecResult<std::vector<std::byte>>::success(writer.bytes());
 }
 
-CodecResult<std::vector<std::byte>> serialize_http3_data_frame(const Http3DataFrame &frame) {
-    return serialize_http3_payload_frame(kHttp3FrameTypeData, frame.payload);
-}
-
-CodecResult<std::vector<std::byte>> serialize_http3_headers_frame(const Http3HeadersFrame &frame) {
-    return serialize_http3_payload_frame(kHttp3FrameTypeHeaders, frame.field_section);
-}
-
-CodecResult<std::vector<std::byte>> serialize_http3_unknown_frame(const Http3UnknownFrame &frame) {
-    return serialize_http3_payload_frame(frame.type, frame.payload);
-}
-
 bool header_name_has_uppercase(std::string_view name) {
     for (const unsigned char ch : name) {
         if (std::isupper(ch) != 0) {
@@ -164,11 +152,43 @@ Http3Result<std::uint64_t> parse_content_length_value(std::string_view value) {
 CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &frame) {
     struct FrameSerializer {
         CodecResult<std::vector<std::byte>> operator()(const Http3DataFrame &typed_frame) const {
-            return serialize_http3_data_frame(typed_frame);
+            const auto encoded_type = encode_varint(kHttp3FrameTypeData);
+            if (!encoded_type.has_value()) {
+                return codec_failure<std::vector<std::byte>>(encoded_type.error().code,
+                                                             encoded_type.error().offset);
+            }
+
+            const auto encoded_length = encode_varint(typed_frame.payload.size());
+            if (!encoded_length.has_value()) {
+                return codec_failure<std::vector<std::byte>>(encoded_length.error().code,
+                                                             encoded_length.error().offset);
+            }
+
+            BufferWriter writer;
+            writer.write_bytes(encoded_type.value());
+            writer.write_bytes(encoded_length.value());
+            writer.write_bytes(typed_frame.payload);
+            return CodecResult<std::vector<std::byte>>::success(writer.bytes());
         }
 
         CodecResult<std::vector<std::byte>> operator()(const Http3HeadersFrame &typed_frame) const {
-            return serialize_http3_headers_frame(typed_frame);
+            const auto encoded_type = encode_varint(kHttp3FrameTypeHeaders);
+            if (!encoded_type.has_value()) {
+                return codec_failure<std::vector<std::byte>>(encoded_type.error().code,
+                                                             encoded_type.error().offset);
+            }
+
+            const auto encoded_length = encode_varint(typed_frame.field_section.size());
+            if (!encoded_length.has_value()) {
+                return codec_failure<std::vector<std::byte>>(encoded_length.error().code,
+                                                             encoded_length.error().offset);
+            }
+
+            BufferWriter writer;
+            writer.write_bytes(encoded_type.value());
+            writer.write_bytes(encoded_length.value());
+            writer.write_bytes(typed_frame.field_section);
+            return CodecResult<std::vector<std::byte>>::success(writer.bytes());
         }
 
         CodecResult<std::vector<std::byte>>
@@ -216,7 +236,23 @@ CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &fram
         }
 
         CodecResult<std::vector<std::byte>> operator()(const Http3UnknownFrame &typed_frame) const {
-            return serialize_http3_unknown_frame(typed_frame);
+            const auto encoded_type = encode_varint(typed_frame.type);
+            if (!encoded_type.has_value()) {
+                return codec_failure<std::vector<std::byte>>(encoded_type.error().code,
+                                                             encoded_type.error().offset);
+            }
+
+            const auto encoded_length = encode_varint(typed_frame.payload.size());
+            if (!encoded_length.has_value()) {
+                return codec_failure<std::vector<std::byte>>(encoded_length.error().code,
+                                                             encoded_length.error().offset);
+            }
+
+            BufferWriter writer;
+            writer.write_bytes(encoded_type.value());
+            writer.write_bytes(encoded_length.value());
+            writer.write_bytes(typed_frame.payload);
+            return CodecResult<std::vector<std::byte>>::success(writer.bytes());
         }
     };
 
@@ -547,16 +583,15 @@ Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const H
         }
         saw_status = true;
 
-        unsigned int status = 0;
-        const auto *status_begin = field.value.data();
-        const auto *status_end = status_begin + field.value.size();
-        const auto parsed_status = std::from_chars(status_begin, status_end, status);
-        if (field.value.size() != 3 || parsed_status.ec != std::errc{} ||
-            parsed_status.ptr != status_end || status < 100) {
+        if (field.value.size() != 3 || field.value[0] < '1' || field.value[0] > '9' ||
+            field.value[1] < '0' || field.value[1] > '9' || field.value[2] < '0' ||
+            field.value[2] > '9') {
             return http3_failure<Http3ResponseHead>(Http3ErrorCode::message_error,
                                                     "invalid :status");
         }
 
+        const auto status = static_cast<unsigned int>(
+            (field.value[0] - '0') * 100 + (field.value[1] - '0') * 10 + (field.value[2] - '0'));
         head.status = static_cast<std::uint16_t>(status);
     }
 

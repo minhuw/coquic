@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 requested_output_dir="${1:-${repo_root}/zig-out/demo-app}"
-requested_next_dir="${2:-${repo_root}/demo/next}"
+requested_next_dir="${2:-${repo_root}/site/next}"
 requested_wasm_module="${3:-${repo_root}/zig-out/share/wasm-quic/coquic-wasm-quic.wasm}"
 output_dir="$(realpath -m -- "${requested_output_dir}")"
 next_dir="$(realpath -m -- "${requested_next_dir}")"
@@ -20,7 +20,7 @@ server_js="${standalone_dir}/server.js"
 
 if [[ ! -f "${server_js}" ]]; then
   echo "missing Next.js standalone server: ${server_js}" >&2
-  echo "run: npm --prefix demo/next run build" >&2
+  echo "run: npm --prefix site/next run build" >&2
   exit 1
 fi
 if [[ ! -d "${static_dir}" ]]; then
@@ -55,7 +55,7 @@ is_same_or_descendant() {
 }
 
 if is_same_or_descendant "${output_dir}" "${next_dir}" || is_same_or_descendant "${next_dir}" "${output_dir}"; then
-  echo "output directory must not overlap demo source ancestry: ${output_dir}" >&2
+  echo "output directory must not overlap site source ancestry: ${output_dir}" >&2
   exit 1
 fi
 

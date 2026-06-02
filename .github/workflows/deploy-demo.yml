@@ -9,7 +9,7 @@ on:
     branches:
       - main
     paths:
-      - demo/**
+      - site/**
       - rag/**
       - references/rfc/**
       - references/demo-deployment.md
@@ -19,7 +19,7 @@ on:
       - build.zig.zon
       - flake.nix
       - flake.lock
-      - demo/h3-server/Dockerfile
+      - site/h3-server/Dockerfile
       - scripts/build-boringssl-wasm.sh
       - scripts/wasm-quic-smoke.mjs
       - .github/workflows/deploy-demo.yml
@@ -44,13 +44,13 @@ jobs:
         run: nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false
 
       - name: Build Next.js demo
-        working-directory: demo/next
+        working-directory: site/next
         run: |
           npm install
           npm run build:demo
 
       - name: Package demo app
-        working-directory: demo/next
+        working-directory: site/next
         run: npm run package:demo -- "${RUNNER_TEMP}/demo-app"
 
       - name: Configure SSH
@@ -73,4 +73,4 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           COQUIC_QDRANT_URL: ${{ secrets.COQUIC_QDRANT_URL }}
           COQUIC_QDRANT_API_KEY: ${{ secrets.COQUIC_QDRANT_API_KEY }}
-        run: demo/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-app"
+        run: site/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "${RUNNER_TEMP}/demo-app"

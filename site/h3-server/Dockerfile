@@ -2,7 +2,7 @@ FROM node:22-alpine
 RUN apk add --no-cache bash curl
 COPY zig-out/bin/h3-server /opt/coquic-demo/current/h3-server
 COPY zig-out/demo-app /opt/coquic-demo/current/app
-COPY demo/deploy/run-demo.sh /opt/coquic-demo/current/run-demo.sh
+COPY site/deploy/run-demo.sh /opt/coquic-demo/current/run-demo.sh
 ENV COQUIC_DEMO_CERTIFICATE_CHAIN=/run/certs/cert.pem
 ENV COQUIC_DEMO_PRIVATE_KEY=/run/certs/key.pem
 ENV COQUIC_DEMO_PORT=4433

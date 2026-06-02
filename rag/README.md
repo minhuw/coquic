@@ -163,7 +163,7 @@ Useful environment variables:
 | `COQUIC_QA_MAX_OUTPUT_TOKENS` | `650` | Generation cap |
 | `COQUIC_QA_ALLOWED_ORIGINS` | local Next origins | CORS origin allowlist |
 
-The demo page is available at `/qa` in `demo/next`. Browser code calls
+The demo page is available at `/qa` in `site/next`. Browser code calls
 same-origin `/rag-api/*`; the Next.js server forwards that path to this FastAPI
 service on `127.0.0.1:8787` in local development and in production. Do not
 expose FastAPI directly to browsers.

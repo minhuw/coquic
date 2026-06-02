@@ -9,14 +9,14 @@ Build the complete production demo server bundle, including the Zig-built WASM
 module:
 
 ```bash
-npm --prefix demo/next install
-npm --prefix demo/next run build:demo
+npm --prefix site/next install
+npm --prefix site/next run build:demo
 ```
 
 Package the standalone Next.js server bundle:
 
 ```bash
-npm --prefix demo/next run package:demo
+npm --prefix site/next run package:demo
 ```
 
 The `/qa` page calls same-origin `/rag-api/*`; browser code must not call
@@ -25,7 +25,7 @@ The `/qa` page calls same-origin `/rag-api/*`; browser code must not call
 
 ```bash
 rag/scripts/run-qa-api --log-level info
-npm --prefix demo/next run dev
+npm --prefix site/next run dev
 ```
 
 Those commands run two local services:
@@ -46,8 +46,8 @@ are available in `/etc/coquic-demo/rag.env`.
 Run a full Next.js development server behind `h3-server`:
 
 ```bash
-npm --prefix demo/next run build:wasm
-npm --prefix demo/next run dev
+npm --prefix site/next run build:wasm
+npm --prefix site/next run dev
 ./zig-out/bin/h3-server --host 127.0.0.1 --port 4433 --bootstrap-port 4433 \
   --reverse-proxy http://127.0.0.1:3001 \
   --certificate-chain tests/fixtures/quic-server-cert.pem \

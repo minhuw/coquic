@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="demo/next/public/coquic-logo.svg" alt="CoQUIC logo" width="96" height="96">
+  <img src="site/next/public/coquic-logo.svg" alt="CoQUIC logo" width="96" height="96">
 </p>
 
 <p align="center">

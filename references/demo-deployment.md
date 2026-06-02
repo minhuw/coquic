@@ -5,25 +5,25 @@ This document covers the remote continuous deployment flow for the public
 
 ## Repo Layout
 
-- `demo/next/` is the framework-backed browser demo source. It owns the
+- `site/next/` is the framework-backed browser demo source. It owns the
   homepage, workbench, performance, interop, and coverage HTML routes, plus the
-  browser runtime assets in `demo/next/public/`.
-- `demo/h3-server/Dockerfile` is the optional container wrapper for serving
+  browser runtime assets in `site/next/public/`.
+- `site/h3-server/Dockerfile` is the optional container wrapper for serving
   the built `h3-server` binary and packaged demo app.
-- `npm --prefix demo/next run build:wasm` builds the WASM dependencies,
+- `npm --prefix site/next run build:wasm` builds the WASM dependencies,
   compiles the Zig WASM module, and smoke-tests the result. The generated
   module is written to
   `zig-out/share/wasm-quic/coquic-wasm-quic.wasm`.
-- `npm --prefix demo/next run build:demo` runs `build:wasm`, then writes a
-  standalone Next.js server bundle under `demo/next/.next/standalone/`.
-- `demo/deploy/package-demo.sh` packages the standalone Next.js server bundle
-  and overlays the generated WASM module. `npm --prefix demo/next run
+- `npm --prefix site/next run build:demo` runs `build:wasm`, then writes a
+  standalone Next.js server bundle under `site/next/.next/standalone/`.
+- `site/deploy/package-demo.sh` packages the standalone Next.js server bundle
+  and overlays the generated WASM module. `npm --prefix site/next run
   package:demo` is the Next.js project wrapper for this packaging step.
-- `demo/deploy/run-demo.sh` starts the packaged Next.js server on loopback and
+- `site/deploy/run-demo.sh` starts the packaged Next.js server on loopback and
   starts `h3-server` as the public HTTP/3 reverse proxy.
-- `demo/deploy/deploy-remote.sh` uploads the built binary, prepared app
+- `site/deploy/deploy-remote.sh` uploads the built binary, prepared app
   directory, runner script, and TLS material to the remote host.
-- `demo/deploy/coquic-demo.service` is the systemd unit installed on the
+- `site/deploy/coquic-demo.service` is the systemd unit installed on the
   remote host.
 - `.github/workflows/deploy-demo.yml` is the GitHub Actions entrypoint.
 - `.github/workflows/perf.yml` uploads the latest `perf-results.json` snapshot
@@ -136,7 +136,7 @@ loopback FastAPI service.
 
 ## Verification
 
-`demo/deploy/deploy-remote.sh` verifies the release before it is kept:
+`site/deploy/deploy-remote.sh` verifies the release before it is kept:
 
 - bootstrap HTTPS headers return `HTTP/1.1 200 OK`
 - `Alt-Svc` advertises HTTP/3 on the public port
@@ -151,15 +151,15 @@ loopback FastAPI service.
 Local packaging:
 
 ```bash
-npm --prefix demo/next install
-npm --prefix demo/next run build:demo
-npm --prefix demo/next run package:demo -- "${RUNNER_TEMP:-/tmp}/demo-app"
+npm --prefix site/next install
+npm --prefix site/next run build:demo
+npm --prefix site/next run package:demo -- "${RUNNER_TEMP:-/tmp}/demo-app"
 ```
 
 Manual CI-style deployment from a prepared workspace:
 
 ```bash
-demo/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "/path/to/app-dir"
+site/deploy/deploy-remote.sh "$(pwd)/zig-out/bin/h3-server" "/path/to/app-dir"
 ```
 
 ## Next.js Reverse Proxy Mode
@@ -169,8 +169,8 @@ server. The Next.js server handles application routing and forwards `/rag-api/*`
 to the loopback FastAPI service when that service is running.
 
 ```bash
-npm --prefix demo/next run build:wasm
-npm --prefix demo/next run dev
+npm --prefix site/next run build:wasm
+npm --prefix site/next run dev
 ./zig-out/bin/h3-server \
   --host 127.0.0.1 \
   --port 4433 \

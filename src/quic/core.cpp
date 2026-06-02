@@ -385,21 +385,22 @@ bool is_reserved_version(std::uint32_t version) {
     return (version & 0x0f0f0f0fu) == 0x0a0a0a0au;
 }
 
-void append_u16_be(std::vector<std::byte> &output, std::uint16_t value) {
-    output.push_back(static_cast<std::byte>((value >> 8) & 0xffu));
-    output.push_back(static_cast<std::byte>(value & 0xffu));
+void append_u16_be(std::vector<std::byte> &encoded_bytes, std::uint16_t value) {
+    encoded_bytes.push_back(static_cast<std::byte>((value >> 8) & 0xffu));
+    encoded_bytes.push_back(static_cast<std::byte>(value & 0xffu));
 }
 
-void append_u32_be(std::vector<std::byte> &output, std::uint32_t value) {
-    output.push_back(static_cast<std::byte>((value >> 24) & 0xffu));
-    output.push_back(static_cast<std::byte>((value >> 16) & 0xffu));
-    output.push_back(static_cast<std::byte>((value >> 8) & 0xffu));
-    output.push_back(static_cast<std::byte>(value & 0xffu));
+void append_u32_be(std::vector<std::byte> &encoded_bytes, std::uint32_t value) {
+    encoded_bytes.push_back(static_cast<std::byte>((value >> 24) & 0xffu));
+    encoded_bytes.push_back(static_cast<std::byte>((value >> 16) & 0xffu));
+    encoded_bytes.push_back(static_cast<std::byte>((value >> 8) & 0xffu));
+    encoded_bytes.push_back(static_cast<std::byte>(value & 0xffu));
 }
 
-void append_u64_be(std::vector<std::byte> &output, std::uint64_t value) {
+void append_u64_be(std::vector<std::byte> &encoded_bytes, std::uint64_t value) {
     for (int shift = 56; shift >= 0; shift -= 8) {
-        output.push_back(static_cast<std::byte>((value >> static_cast<unsigned>(shift)) & 0xffu));
+        encoded_bytes.push_back(
+            static_cast<std::byte>((value >> static_cast<unsigned>(shift)) & 0xffu));
     }
 }
 
@@ -467,13 +468,13 @@ read_length_prefixed_bytes(BufferReader &reader) {
     return std::vector<std::byte>(encoded_value.value().begin(), encoded_value.value().end());
 }
 
-COQUIC_NO_PROFILE bool append_length_prefixed_bytes(std::vector<std::byte> &output,
+COQUIC_NO_PROFILE bool append_length_prefixed_bytes(std::vector<std::byte> &encoded_bytes,
                                                     std::span<const std::byte> value) {
     if (value.size() > std::numeric_limits<std::uint16_t>::max()) {
         return false;
     }
-    append_u16_be(output, static_cast<std::uint16_t>(value.size()));
-    output.insert(output.end(), value.begin(), value.end());
+    append_u16_be(encoded_bytes, static_cast<std::uint16_t>(value.size()));
+    encoded_bytes.insert(encoded_bytes.end(), value.begin(), value.end());
     return true;
 }
 

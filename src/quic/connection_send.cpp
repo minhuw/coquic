@@ -171,18 +171,18 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             return std::optional<std::size_t>{pending.fallback_packet_length};
         });
     };
-    const auto congestion_blocks_datagram = [&](std::size_t bytes, bool bypass_congestion_window) {
+    const auto congestion_blocks_datagram = [&](std::size_t bytes, bool skips_congestion_window) {
         if (duplicate_initial_congestion_is_forced(
                 connection_drain_test_hooks().force_duplicate_initial_congestion_blocked,
-                bypass_congestion_window, !packets.empty())) {
+                skips_congestion_window, !packets.empty())) {
             return true;
         }
         if (application_send_congestion_is_forced(
                 connection_drain_test_hooks().force_application_send_congestion_blocked,
-                bypass_congestion_window, application_space_)) {
+                skips_congestion_window, application_space_)) {
             return true;
         }
-        if (bypass_congestion_window) {
+        if (skips_congestion_window) {
             return false;
         }
         if (!congestion_controller_.can_send_ack_eliciting(bytes)) {

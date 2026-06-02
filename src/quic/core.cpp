@@ -381,13 +381,6 @@ bool should_keep_endpoint_connection_entry(const QuicConnection &quic_connection
            !should_remove_endpoint_connection_entry(quic_connection, drained_result, now);
 }
 
-std::uint32_t read_u32_be_from(std::span<const std::byte> bytes, std::size_t offset) {
-    return (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset])) << 24) |
-           (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 1])) << 16) |
-           (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 2])) << 8) |
-           static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + 3]));
-}
-
 bool contains_version(std::span<const std::uint32_t> versions, std::uint32_t version) {
     return std::find(versions.begin(), versions.end(), version) != versions.end();
 }
@@ -446,7 +439,11 @@ std::optional<std::uint32_t> read_u32_be(BufferReader &reader) {
     if (!bytes.has_value()) {
         return std::nullopt;
     }
-    return read_u32_be_from(bytes.value(), 0);
+    const auto value_bytes = bytes.value();
+    return (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(value_bytes[0])) << 24) |
+           (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(value_bytes[1])) << 16) |
+           (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(value_bytes[2])) << 8) |
+           static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(value_bytes[3]));
 }
 
 std::optional<std::uint64_t> read_u64_be(BufferReader &reader) {
@@ -681,12 +678,12 @@ COQUIC_NO_PROFILE std::optional<std::string> hex_decode_to_string(std::string_vi
     decoded.reserve(hex.size() / 2u);
     for (std::size_t offset = 0; offset < hex.size(); offset += 2u) {
         const auto high = nibble(hex[offset]);
-        auto low = nibble(hex[offset + 1u]);
-        if (!high.has_value() || !low.has_value()) {
+        auto low_nibble = nibble(hex[offset + 1u]);
+        if (!high.has_value() || !low_nibble.has_value()) {
             return std::nullopt;
         }
-        decoded.push_back(
-            static_cast<char>(static_cast<unsigned>(*high << 4u) | static_cast<unsigned>(*low)));
+        decoded.push_back(static_cast<char>(static_cast<unsigned>(*high << 4u) |
+                                            static_cast<unsigned>(*low_nibble)));
     }
     return decoded;
 }
@@ -921,7 +918,15 @@ bool is_initial_long_header_type(std::uint32_t version, std::uint8_t type) {
 
 std::optional<VersionNegotiationPacket>
 parse_version_negotiation_packet(std::span<const std::byte> bytes) {
-    if (bytes.size() < 5 || read_u32_be_from(bytes, 1) != kVersionNegotiationVersion) {
+    if (bytes.size() < 5) {
+        return std::nullopt;
+    }
+    const auto version =
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[1])) << 24) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[2])) << 16) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[3])) << 8) |
+        static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[4]));
+    if (version != kVersionNegotiationVersion) {
         return std::nullopt;
     }
 
@@ -934,7 +939,15 @@ parse_version_negotiation_packet(std::span<const std::byte> bytes) {
 }
 
 std::optional<RetryPacket> parse_retry_packet(std::span<const std::byte> bytes) {
-    if (bytes.size() < 5 || read_u32_be_from(bytes, 1) == kVersionNegotiationVersion) {
+    if (bytes.size() < 5) {
+        return std::nullopt;
+    }
+    const auto version =
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[1])) << 24) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[2])) << 16) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[3])) << 8) |
+        static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[4]));
+    if (version == kVersionNegotiationVersion) {
         return std::nullopt;
     }
 
@@ -1117,7 +1130,11 @@ QuicCore::parse_endpoint_datagram(std::span<const std::byte> bytes, bool accept_
         return std::nullopt;
     }
 
-    const auto version = read_u32_be_from(bytes, 1);
+    const auto version =
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[1])) << 24) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[2])) << 16) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[3])) << 8) |
+        static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[4]));
     if (version == kVersionNegotiationVersion) {
         return std::nullopt;
     }
@@ -3472,8 +3489,8 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
 
         auto handle = next_connection_handle_++;
         auto inserted_connection = connections_.try_emplace(handle);
-        auto it = inserted_connection.first;
-        auto &entry = it->second;
+        auto connection_iter = inserted_connection.first;
+        auto &entry = connection_iter->second;
         entry = {};
         entry.handle = handle;
         entry.default_route_handle = open->initial_route_handle;
@@ -3483,7 +3500,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
         if (!open->address_validation_identity.empty()) {
             if (!address_validation_identity_allowed_for_new_route(
                     nullptr, open->address_validation_identity)) {
-                connections_.erase(it);
+                connections_.erase(connection_iter);
                 QuicCoreResult denied;
                 denied.local_error = QuicCoreLocalError{
                     .connection = handle,
@@ -3753,8 +3770,8 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             const auto handle = entry.handle;
             store_send_continuation_wakeup(entry, result.send_continuation_pending, now);
             auto inserted_connection = connections_.emplace(handle, std::move(entry));
-            auto it = inserted_connection.first;
-            refresh_server_connection_routes(it->second);
+            auto connection_iter = inserted_connection.first;
+            refresh_server_connection_routes(connection_iter->second);
         }
         return finalize_endpoint_result(std::move(result), now);
     }

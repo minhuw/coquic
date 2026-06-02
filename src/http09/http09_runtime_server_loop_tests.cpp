@@ -334,11 +334,11 @@ void cover_runtime_retry_helpers_for_tests(bool &coverage_ok,
 void cover_runtime_trace_inputs_for_tests(bool &coverage_ok) {
     {
         const auto run_traced_input = [&](QuicCoreInput input) {
-            QuicCore core = make_local_error_client_core_for_tests();
+            QuicCore trace_core = make_local_error_client_core_for_tests();
             const std::array<QuicCoreInput, 1> inputs = {
                 std::move(input),
             };
-            static_cast<void>(advance_core_with_inputs(core, inputs, now()));
+            static_cast<void>(advance_core_with_inputs(trace_core, inputs, now()));
         };
         run_traced_input(QuicCoreStart{});
         run_traced_input(QuicCoreInboundDatagram{
@@ -525,8 +525,8 @@ void cover_runtime_connection_result_helpers_for_tests(bool &coverage_ok,
     }
 
     {
-        ServerConnectionEndpointMap connection_endpoints;
-        connection_endpoints.emplace(
+        ServerConnectionEndpointMap accepted_endpoint_map;
+        accepted_endpoint_map.emplace(
             17, ServerConnectionEndpointState{
                     .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
                         .document_root = std::filesystem::path("."),
@@ -537,17 +537,17 @@ void cover_runtime_connection_result_helpers_for_tests(bool &coverage_ok,
             .connection = 17,
             .event = QuicCoreConnectionLifecycle::accepted,
         });
-        ensure_server_connection_endpoints_for_accepts(connection_endpoints, accept_result,
+        ensure_server_connection_endpoints_for_accepts(accepted_endpoint_map, accept_result,
                                                        std::filesystem::path("."));
         server_loop_coverage_check(coverage_ok,
                                    "accept handling keeps pre-existing endpoint entries stable",
-                                   connection_endpoints.size() == 1);
+                                   accepted_endpoint_map.size() == 1);
     }
 
     {
-        QuicCore core = make_failing_server_core_for_tests();
-        EndpointDriveState drive_state;
-        ServerConnectionEndpointMap connection_endpoints;
+        QuicCore failing_server_core = make_failing_server_core_for_tests();
+        EndpointDriveState endpoint_drive_state;
+        ServerConnectionEndpointMap server_endpoint_map;
         QuicCoreResult transport_error_result;
         transport_error_result.local_error = QuicCoreLocalError{
             .connection = std::nullopt,
@@ -556,10 +556,10 @@ void cover_runtime_connection_result_helpers_for_tests(bool &coverage_ok,
         };
         server_loop_coverage_check(
             coverage_ok, "server endpoint processing rejects transport-wide local errors",
-            !process_server_endpoint_core_result(core, drive_state, connection_endpoints,
-                                                 std::filesystem::path("."), transport_error_result,
-                                                 /*fallback_socket_fd=*/77, &peer,
-                                                 sizeof(sockaddr_in)));
+            !process_server_endpoint_core_result(
+                failing_server_core, endpoint_drive_state, server_endpoint_map,
+                std::filesystem::path("."), transport_error_result,
+                /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in)));
 
         QuicCoreResult send_failure_result;
         send_failure_result.effects.emplace_back(QuicCoreSendDatagram{
@@ -567,8 +567,9 @@ void cover_runtime_connection_result_helpers_for_tests(bool &coverage_ok,
         });
         server_loop_coverage_check(
             coverage_ok, "server endpoint processing rejects missing fallback routes",
-            !process_server_endpoint_core_result(core, drive_state, connection_endpoints,
-                                                 std::filesystem::path("."), send_failure_result,
+            !process_server_endpoint_core_result(failing_server_core, endpoint_drive_state,
+                                                 server_endpoint_map, std::filesystem::path("."),
+                                                 send_failure_result,
                                                  /*fallback_socket_fd=*/-1,
                                                  /*fallback_peer=*/nullptr,
                                                  /*fallback_peer_len=*/0));
@@ -580,10 +581,10 @@ void cover_runtime_connection_result_helpers_for_tests(bool &coverage_ok,
         });
         server_loop_coverage_check(
             coverage_ok, "server endpoint processing tolerates missing connection endpoints",
-            process_server_endpoint_core_result(core, drive_state, connection_endpoints,
-                                                std::filesystem::path("."), missing_endpoint_result,
-                                                /*fallback_socket_fd=*/77, &peer,
-                                                sizeof(sockaddr_in)));
+            process_server_endpoint_core_result(
+                failing_server_core, endpoint_drive_state, server_endpoint_map,
+                std::filesystem::path("."), missing_endpoint_result,
+                /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in)));
     }
 }
 
@@ -722,7 +723,7 @@ void cover_runtime_server_loop_script_cases_for_tests(bool &coverage_ok) {
     }
 }
 
-void cover_runtime_backend_loop_script_cases_for_tests(bool &coverage_ok) {
+void cover_runtime_backend_loop_top_due_script_cases_for_tests(bool &coverage_ok) {
     {
         const auto base_time = now();
         server_loop_coverage_check(
@@ -911,7 +912,12 @@ void cover_runtime_backend_loop_script_cases_for_tests(bool &coverage_ok) {
                                        ExpectedServerLoopResultForTests{
                                            .pump_calls = 1,
                                        }));
+    }
+}
 
+void cover_runtime_backend_loop_ready_probe_script_cases_for_tests(bool &coverage_ok) {
+    {
+        const auto base_time = now();
         server_loop_coverage_check(coverage_ok, "backend loop covers ready-probe wait failures",
                                    server_loop_result_matches_for_tests(
                                        run_backend_loop_script_for_tests(BackendLoopScriptForTests{
@@ -1119,7 +1125,12 @@ void cover_runtime_backend_loop_script_cases_for_tests(bool &coverage_ok) {
                                        ExpectedServerLoopResultForTests{
                                            .wait_calls = 1,
                                        }));
+    }
+}
 
+void cover_runtime_backend_loop_main_wait_script_cases_for_tests(bool &coverage_ok) {
+    {
+        const auto base_time = now();
         server_loop_coverage_check(coverage_ok, "backend loop covers main-wait timer failures",
                                    server_loop_result_matches_for_tests(
                                        run_backend_loop_script_for_tests(BackendLoopScriptForTests{
@@ -1320,6 +1331,12 @@ void cover_runtime_backend_loop_script_cases_for_tests(bool &coverage_ok) {
                     wait_calls == 3 & timer_calls == 1 & datagram_calls == 1);
         }
     }
+}
+
+void cover_runtime_backend_loop_script_cases_for_tests(bool &coverage_ok) {
+    cover_runtime_backend_loop_top_due_script_cases_for_tests(coverage_ok);
+    cover_runtime_backend_loop_ready_probe_script_cases_for_tests(coverage_ok);
+    cover_runtime_backend_loop_main_wait_script_cases_for_tests(coverage_ok);
 }
 
 void cover_runtime_backend_loop_entry_cases_for_tests(bool &coverage_ok) {
@@ -1856,10 +1873,10 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                                            .peer_len = sizeof(sockaddr_in),
                                                        });
         QuicCoreTimePoint step_now = now();
-        const auto accepted =
+        const auto handshake_result =
             drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now);
         auto connection = accepted_connection_or_default(
-            "server-endpoint pump fixture handshake succeeds", accepted);
+            "server-endpoint pump fixture handshake succeeds", handshake_result);
 
         {
             ServerConnectionEndpointMap connection_endpoints;

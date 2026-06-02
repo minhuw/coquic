@@ -6,7 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
+#include <new>
 #include <optional>
 #include <random>
 #include <span>
@@ -25,6 +27,57 @@
 #include "src/quic/version.h"
 
 namespace coquic::quic {
+
+namespace detail {
+struct CoreEffectStorageBytes {
+    std::size_t value = 0;
+};
+
+struct CoreEffectStorageAlignment {
+    std::size_t value = 0;
+};
+
+void *allocate_core_effect_storage(CoreEffectStorageBytes bytes,
+                                   CoreEffectStorageAlignment alignment);
+void deallocate_core_effect_storage(void *pointer, CoreEffectStorageBytes bytes,
+                                    CoreEffectStorageAlignment alignment) noexcept;
+bool core_effect_storage_cache_coverage_for_tests();
+} // namespace detail
+
+template <typename T> class CoreEffectAllocator {
+  public:
+    using value_type = T;
+
+    CoreEffectAllocator() = default;
+
+    template <typename U>
+    explicit constexpr CoreEffectAllocator(const CoreEffectAllocator<U> &) noexcept {
+    }
+
+    [[nodiscard]] T *allocate(std::size_t count) {
+        if (count > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+            throw std::bad_array_new_length();
+        }
+        return static_cast<T *>(
+            detail::allocate_core_effect_storage(detail::CoreEffectStorageBytes{count * sizeof(T)},
+                                                 detail::CoreEffectStorageAlignment{alignof(T)}));
+    }
+
+    void deallocate(T *pointer, std::size_t count) noexcept {
+        detail::deallocate_core_effect_storage(pointer,
+                                               detail::CoreEffectStorageBytes{count * sizeof(T)},
+                                               detail::CoreEffectStorageAlignment{alignof(T)});
+    }
+
+    template <typename U> struct rebind {
+        using other = CoreEffectAllocator<U>;
+    };
+};
+
+template <typename T, typename U>
+constexpr bool operator==(const CoreEffectAllocator<T> &, const CoreEffectAllocator<U> &) noexcept {
+    return true;
+}
 
 enum class QuicCongestionControlAlgorithm : std::uint8_t {
     newreno,
@@ -524,7 +577,7 @@ using QuicCoreEffect =
                  QuicCorePacketInspection, QuicCoreNewTokenAvailable>;
 
 struct QuicCoreResult {
-    std::vector<QuicCoreEffect> effects;
+    std::vector<QuicCoreEffect, CoreEffectAllocator<QuicCoreEffect>> effects;
     std::optional<QuicCoreTimePoint> next_wakeup;
     std::optional<QuicCoreLocalError> local_error;
     bool send_continuation_pending = false;

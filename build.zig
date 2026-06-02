@@ -254,6 +254,12 @@ fn apiSourceFiles() []const []const u8 {
     };
 }
 
+fn ffiSourceFiles() []const []const u8 {
+    return &.{
+        "src/ffi/core.cpp",
+    };
+}
+
 fn addProjectLibrary(
     b: *std.Build,
     name: []const u8,
@@ -286,6 +292,7 @@ fn addProjectLibrary(
     appendSourceFiles(&files, http3SourceFiles());
     appendSourceFiles(&files, perfSourceFiles());
     appendSourceFiles(&files, apiSourceFiles());
+    appendSourceFiles(&files, ffiSourceFiles());
     addCSourceFiles(lib, .{
         .root = b.path("."),
         .files = files.toOwnedSlice() catch @panic("oom"),
@@ -528,6 +535,7 @@ pub fn build(b: *std.Build) void {
     const smoke_test_files = &.{
         "tests/smoke/smoke_test.cpp",
         "tests/api/public_api_test.cpp",
+        "tests/ffi/core_ffi_test.cpp",
     };
     const core_test_files = &.{
         "tests/core/recovery/congestion_test.cpp",

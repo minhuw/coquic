@@ -5,7 +5,7 @@
 #include <poll.h>
 
 #include <cstddef>
-#include <deque>
+#include <optional>
 #include <vector>
 
 namespace coquic::io {
@@ -18,7 +18,7 @@ bool poll_io_engine_descriptor_cache_guard_branches_for_tests();
 
 class PollIoEngine final : public QuicIoEngine {
   public:
-    PollIoEngine() = default;
+    PollIoEngine();
     ~PollIoEngine() override = default;
 
     bool register_socket(int socket_fd) override;
@@ -33,8 +33,13 @@ class PollIoEngine final : public QuicIoEngine {
     bool has_pending_events() const override;
 
   private:
-    std::deque<QuicIoEngineEvent> queued_events_;
+    void queue_event(QuicIoEngineEvent event);
+    std::size_t queued_event_count() const;
+    std::optional<QuicIoEngineEvent> pop_queued_event();
+
+    std::vector<QuicIoEngineEvent> queued_events_;
     std::vector<pollfd> descriptor_scratch_;
+    std::size_t next_queued_event_index_ = 0;
     std::size_t registered_socket_count_ = 0;
 
     friend bool test::socket_io_backend_poll_engine_primes_descriptor_cache_for_tests();

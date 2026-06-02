@@ -94,9 +94,105 @@ constexpr std::byte kAddressValidationRetryTokenType{0x52};
 constexpr std::byte kAddressValidationNewTokenType{0x4e};
 constexpr std::uint32_t kGreasedReservedVersion = 0x0a0a0a0a;
 constexpr std::byte kServerConnectionIdPrefix{0x53};
+constexpr std::size_t kCoreEffectStorageCacheMaxBytes = std::size_t{64} * 1024;
+constexpr std::size_t kCoreEffectStorageCacheBucketBytes = std::size_t{4} * 1024;
+constexpr std::size_t kCoreEffectStorageCacheSlots = 128;
 
 static_assert(kStreamStateErrorMap.size() ==
               static_cast<std::size_t>(StreamStateErrorCode::final_size_conflict) + 1);
+
+#if !defined(COQUIC_DISABLE_CORE_EFFECT_STORAGE_CACHE)
+#if defined(__wasm__)
+#define COQUIC_DISABLE_CORE_EFFECT_STORAGE_CACHE 1
+#else
+#define COQUIC_DISABLE_CORE_EFFECT_STORAGE_CACHE 0
+#endif
+#endif
+
+COQUIC_NO_PROFILE std::size_t core_effect_storage_allocation_bytes(std::size_t bytes) {
+#if COQUIC_DISABLE_CORE_EFFECT_STORAGE_CACHE != 0
+    return bytes;
+#else
+    if (bytes == 0 || bytes > kCoreEffectStorageCacheMaxBytes) {
+        return bytes;
+    }
+
+    return ((bytes + kCoreEffectStorageCacheBucketBytes - 1) / kCoreEffectStorageCacheBucketBytes) *
+           kCoreEffectStorageCacheBucketBytes;
+#endif
+}
+
+#if COQUIC_DISABLE_CORE_EFFECT_STORAGE_CACHE == 0
+COQUIC_NO_PROFILE void *allocate_aligned_storage(std::size_t bytes, std::size_t alignment) {
+    if (alignment > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+        return ::operator new(bytes, std::align_val_t{alignment});
+    }
+    return ::operator new(bytes);
+}
+
+COQUIC_NO_PROFILE void deallocate_aligned_storage(void *pointer, std::size_t alignment) noexcept {
+    if (alignment > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+        ::operator delete(pointer, std::align_val_t{alignment});
+        return;
+    }
+    ::operator delete(pointer);
+}
+
+struct CoreEffectStorageCache {
+    struct Entry {
+        void *pointer = nullptr;
+        std::size_t bytes = 0;
+        std::size_t alignment = 0;
+    };
+
+    ~CoreEffectStorageCache() {
+        for (std::size_t index = 0; index < used; ++index) {
+            auto &entry = entries[index];
+            if (entry.pointer != nullptr) {
+                deallocate_aligned_storage(entry.pointer, entry.alignment);
+            }
+        }
+    }
+
+    COQUIC_NO_PROFILE std::optional<void *> take(std::size_t bytes, std::size_t alignment) {
+        for (std::size_t index = 0; index < used; ++index) {
+            if (entries[index].bytes != bytes || entries[index].alignment != alignment) {
+                continue;
+            }
+
+            auto *pointer = entries[index].pointer;
+            --used;
+            entries[index] = entries[used];
+            entries[used] = Entry{};
+            return pointer;
+        }
+
+        return std::nullopt;
+    }
+
+    COQUIC_NO_PROFILE bool put(void *pointer, std::size_t bytes, std::size_t alignment) {
+        if (used == entries.size()) {
+            return false;
+        }
+
+        entries[used] = Entry{
+            .pointer = pointer,
+            .bytes = bytes,
+            .alignment = alignment,
+        };
+        ++used;
+        return true;
+    }
+
+    std::array<Entry, kCoreEffectStorageCacheSlots> entries{};
+    std::size_t used = 0;
+};
+
+COQUIC_NO_PROFILE CoreEffectStorageCache &core_effect_storage_cache() {
+    thread_local CoreEffectStorageCache cache;
+    return cache;
+}
+#endif
 
 COQUIC_NO_PROFILE bool has_send_continuation(std::size_t emitted,
                                              bool last_drained_allows_send_continuation,
@@ -332,8 +428,13 @@ COQUIC_NO_PROFILE bool legacy_stream_send_batchable(const QuicCoreInput &input) 
 }
 
 COQUIC_NO_PROFILE void append_sequential_result(QuicCoreResult &target, QuicCoreResult source) {
-    target.effects.insert(target.effects.end(), std::make_move_iterator(source.effects.begin()),
-                          std::make_move_iterator(source.effects.end()));
+    if (target.effects.empty()) {
+        target.effects = std::move(source.effects);
+    } else if (!source.effects.empty()) {
+        target.effects.reserve(target.effects.size() + source.effects.size());
+        target.effects.insert(target.effects.end(), std::make_move_iterator(source.effects.begin()),
+                              std::make_move_iterator(source.effects.end()));
+    }
     target.next_wakeup = source.next_wakeup;
     target.send_continuation_pending = source.send_continuation_pending;
     if (!target.local_error.has_value() && source.local_error.has_value()) {
@@ -342,8 +443,13 @@ COQUIC_NO_PROFILE void append_sequential_result(QuicCoreResult &target, QuicCore
 }
 
 void append_result(QuicCoreResult &target, QuicCoreResult source) {
-    target.effects.insert(target.effects.end(), std::make_move_iterator(source.effects.begin()),
-                          std::make_move_iterator(source.effects.end()));
+    if (target.effects.empty()) {
+        target.effects = std::move(source.effects);
+    } else if (!source.effects.empty()) {
+        target.effects.reserve(target.effects.size() + source.effects.size());
+        target.effects.insert(target.effects.end(), std::make_move_iterator(source.effects.begin()),
+                              std::make_move_iterator(source.effects.end()));
+    }
     merge_send_continuation_pending(target, source);
     if (source.next_wakeup.has_value()) {
         target.next_wakeup =
@@ -999,6 +1105,66 @@ void fill_random_bytes(std::span<std::byte> bytes, std::mt19937_64 &fallback_ran
 }
 
 } // namespace
+
+namespace detail {
+
+COQUIC_NO_PROFILE void *allocate_core_effect_storage(CoreEffectStorageBytes bytes,
+                                                     CoreEffectStorageAlignment alignment) {
+    if (bytes.value == 0) {
+        return nullptr;
+    }
+
+    const auto allocation_bytes = core_effect_storage_allocation_bytes(bytes.value);
+#if COQUIC_DISABLE_CORE_EFFECT_STORAGE_CACHE == 0
+    if (auto cached = core_effect_storage_cache().take(allocation_bytes, alignment.value)) {
+        return *cached;
+    }
+
+    return allocate_aligned_storage(allocation_bytes, alignment.value);
+#else
+    if (alignment.value > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+        return ::operator new(allocation_bytes, std::align_val_t{alignment.value});
+    }
+    return ::operator new(allocation_bytes);
+#endif
+}
+
+COQUIC_NO_PROFILE void
+deallocate_core_effect_storage(void *pointer, CoreEffectStorageBytes bytes,
+                               CoreEffectStorageAlignment alignment) noexcept {
+    if (pointer == nullptr || bytes.value == 0) {
+        return;
+    }
+
+    const auto allocation_bytes = core_effect_storage_allocation_bytes(bytes.value);
+#if COQUIC_DISABLE_CORE_EFFECT_STORAGE_CACHE == 0
+    if (allocation_bytes <= kCoreEffectStorageCacheMaxBytes &&
+        core_effect_storage_cache().put(pointer, allocation_bytes, alignment.value)) {
+        return;
+    }
+
+    deallocate_aligned_storage(pointer, alignment.value);
+#else
+    if (alignment.value > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+        ::operator delete(pointer, std::align_val_t{alignment.value});
+        return;
+    }
+    ::operator delete(pointer);
+#endif
+}
+
+bool core_effect_storage_cache_coverage_for_tests() {
+#if COQUIC_DISABLE_CORE_EFFECT_STORAGE_CACHE == 0
+    CoreEffectStorageCache cache;
+    cache.used = 1;
+    cache.entries[0] = CoreEffectStorageCache::Entry{};
+    return cache.take(kCoreEffectStorageCacheBucketBytes, alignof(QuicCoreEffect)) == std::nullopt;
+#else
+    return true;
+#endif
+}
+
+} // namespace detail
 
 QuicCore::LegacyConnectionView &
 QuicCore::LegacyConnectionView::operator=(std::unique_ptr<QuicConnection> connection) {
@@ -2230,6 +2396,8 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
     coverage_check(ok, #expr ":" COQUIC_CORE_STRINGIFY(__LINE__), static_cast<bool>(expr))
 
     {
+        COQUIC_CORE_HOOK_RECORD(detail::core_effect_storage_cache_coverage_for_tests());
+
         QuicCore legacy(make_client_core_config_for_core_coverage(0x01, 0x41));
         auto *connection = legacy.connection_.get();
         COQUIC_CORE_HOOK_RECORD(connection != nullptr);

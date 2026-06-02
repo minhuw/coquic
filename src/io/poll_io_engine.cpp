@@ -23,6 +23,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <new>
 #include <string_view>
 #include <vector>
 
@@ -46,6 +47,9 @@ namespace {
 constexpr std::size_t kMaxDatagramBytes = 65535;
 constexpr std::size_t kMaxReceiveDrainBatch = 64;
 constexpr std::size_t kRecvmmsgDrainBatch = 32;
+constexpr std::size_t kReceiveResultStorageCacheMaxBytes = std::size_t{256} * 1024;
+constexpr std::size_t kReceiveResultStorageCacheBucketBytes = std::size_t{4} * 1024;
+constexpr std::size_t kReceiveResultStorageCacheSlots = 128;
 constexpr std::array<int, 5> kEcnToTrafficClass{
     0x00, 0x00, 0x02, 0x01, 0x03,
 };
@@ -74,10 +78,16 @@ struct IoProfileCounters {
     std::uint64_t rx_datagrams = 0;
     std::uint64_t udp_gro_receive_calls = 0;
     std::uint64_t udp_gro_segments = 0;
+    std::uint64_t rx_storage_allocations = 0;
+    std::uint64_t rx_storage_pool_reuses = 0;
+    std::uint64_t rx_storage_scratch_reuses = 0;
+    std::uint64_t rx_storage_recycles = 0;
+    std::uint64_t rx_storage_drops = 0;
+    std::uint64_t rx_storage_pool_high_water = 0;
 };
 
 struct RecvmmsgScratch {
-    std::array<std::array<std::byte, kMaxDatagramBytes>, kRecvmmsgDrainBatch> inbound{};
+    std::array<std::shared_ptr<std::vector<std::byte>>, kRecvmmsgDrainBatch> inbound{};
     std::array<std::array<std::byte, 256>, kRecvmmsgDrainBatch> controls{};
     std::array<sockaddr_storage, kRecvmmsgDrainBatch> sources{};
     std::array<iovec, kRecvmmsgDrainBatch> iovecs{};
@@ -86,11 +96,214 @@ struct RecvmmsgScratch {
     std::vector<std::size_t> sizes;
 };
 
+COQUIC_NO_PROFILE std::size_t receive_result_storage_allocation_bytes(std::size_t bytes) {
+    if (bytes == 0 || bytes > kReceiveResultStorageCacheMaxBytes) {
+        return bytes;
+    }
+
+    return ((bytes + kReceiveResultStorageCacheBucketBytes - 1) /
+            kReceiveResultStorageCacheBucketBytes) *
+           kReceiveResultStorageCacheBucketBytes;
+}
+
+COQUIC_NO_PROFILE void *allocate_receive_result_storage(std::size_t bytes, std::size_t alignment) {
+    if (alignment > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+        return ::operator new(bytes, std::align_val_t{alignment});
+    }
+    return ::operator new(bytes);
+}
+
+COQUIC_NO_PROFILE void deallocate_receive_result_storage(void *pointer,
+                                                         std::size_t alignment) noexcept {
+    if (alignment > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+        ::operator delete(pointer, std::align_val_t{alignment});
+        return;
+    }
+    ::operator delete(pointer);
+}
+
+struct ReceiveResultStorageCache {
+    struct Entry {
+        void *pointer = nullptr;
+        std::size_t bytes = 0;
+        std::size_t alignment = 0;
+    };
+
+    COQUIC_NO_PROFILE std::optional<void *> take(std::size_t bytes, std::size_t alignment) {
+        for (std::size_t index = 0; index < used; ++index) {
+            if (entries[index].bytes != bytes || entries[index].alignment != alignment) {
+                continue;
+            }
+
+            auto *pointer = entries[index].pointer;
+            --used;
+            entries[index] = entries[used];
+            entries[used] = Entry{};
+            return pointer;
+        }
+        return std::nullopt;
+    }
+
+    COQUIC_NO_PROFILE bool put(void *pointer, std::size_t bytes, std::size_t alignment) {
+        if (used == entries.size()) {
+            return false;
+        }
+        entries[used] = Entry{
+            .pointer = pointer,
+            .bytes = bytes,
+            .alignment = alignment,
+        };
+        ++used;
+        return true;
+    }
+
+    std::array<Entry, kReceiveResultStorageCacheSlots> entries{};
+    std::size_t used = 0;
+};
+
+COQUIC_NO_PROFILE ReceiveResultStorageCache &receive_result_storage_cache() {
+    thread_local auto *cache = new ReceiveResultStorageCache;
+    return *cache;
+}
+
+template <typename T> class ReceiveResultAllocator {
+  public:
+    using value_type = T;
+
+    ReceiveResultAllocator() = default;
+
+    template <typename U>
+    explicit constexpr ReceiveResultAllocator(const ReceiveResultAllocator<U> &) noexcept {
+    }
+
+    [[nodiscard]] T *allocate(std::size_t count) {
+        if (count > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+            throw std::bad_array_new_length();
+        }
+
+        const auto bytes = receive_result_storage_allocation_bytes(count * sizeof(T));
+        if (auto cached = receive_result_storage_cache().take(bytes, alignof(T))) {
+            return static_cast<T *>(*cached);
+        }
+        return static_cast<T *>(allocate_receive_result_storage(bytes, alignof(T)));
+    }
+
+    void deallocate(T *pointer, std::size_t count) noexcept {
+        if (pointer == nullptr || count == 0) {
+            return;
+        }
+
+        const auto bytes = receive_result_storage_allocation_bytes(count * sizeof(T));
+        if (bytes <= kReceiveResultStorageCacheMaxBytes &&
+            receive_result_storage_cache().put(pointer, bytes, alignof(T))) {
+            return;
+        }
+        deallocate_receive_result_storage(pointer, alignof(T));
+    }
+
+    template <typename U> struct rebind {
+        using other = ReceiveResultAllocator<U>;
+    };
+};
+
+template <typename T, typename U>
+constexpr bool operator==(const ReceiveResultAllocator<T> &,
+                          const ReceiveResultAllocator<U> &) noexcept {
+    return true;
+}
+
+using ReceiveDatagramResultVector =
+    std::vector<internal::ReceiveDatagramResult,
+                ReceiveResultAllocator<internal::ReceiveDatagramResult>>;
+
 struct ReceiveDatagramBatchResult {
     internal::ReceiveDatagramStatus status = internal::ReceiveDatagramStatus::would_block;
-    std::vector<internal::ReceiveDatagramResult> datagrams;
+    ReceiveDatagramResultVector datagrams;
     bool may_have_more_datagrams = false;
 };
+
+struct ReceiveByteStoragePool {
+    ReceiveByteStoragePool() {
+        for (auto &entry : entries) {
+            entry = nullptr;
+        }
+    }
+
+    std::array<std::unique_ptr<std::vector<std::byte>>, kMaxReceiveDrainBatch * 2> entries{};
+    std::size_t size = 0;
+};
+
+COQUIC_NO_PROFILE bool io_profile_enabled();
+COQUIC_NO_PROFILE IoProfileCounters &io_profile_counters();
+
+COQUIC_NO_PROFILE ReceiveByteStoragePool &receive_byte_storage_pool() {
+    thread_local auto *pool = new ReceiveByteStoragePool;
+    return *pool;
+}
+
+COQUIC_NO_PROFILE void recycle_receive_byte_storage(std::vector<std::byte> *storage) noexcept {
+    if (storage == nullptr) {
+        return;
+    }
+
+    if (storage->size() != kMaxDatagramBytes) {
+        if (io_profile_enabled()) {
+            ++io_profile_counters().rx_storage_drops;
+        }
+        delete storage;
+        return;
+    }
+
+    auto &pool = receive_byte_storage_pool();
+    if (pool.size >= pool.entries.size()) {
+        if (io_profile_enabled()) {
+            ++io_profile_counters().rx_storage_drops;
+        }
+        delete storage;
+        return;
+    }
+    pool.entries[pool.size].reset(storage);
+    ++pool.size;
+    if (io_profile_enabled()) {
+        auto &counters = io_profile_counters();
+        ++counters.rx_storage_recycles;
+        counters.rx_storage_pool_high_water = std::max<std::uint64_t>(
+            counters.rx_storage_pool_high_water, static_cast<std::uint64_t>(pool.size));
+    }
+}
+
+COQUIC_NO_PROFILE std::shared_ptr<std::vector<std::byte>> acquire_receive_byte_storage() {
+    auto &pool = receive_byte_storage_pool();
+    std::unique_ptr<std::vector<std::byte>> storage;
+    if (pool.size != 0) {
+        --pool.size;
+        storage = std::move(pool.entries[pool.size]);
+        if (io_profile_enabled()) {
+            ++io_profile_counters().rx_storage_pool_reuses;
+        }
+    } else {
+        storage = std::make_unique<std::vector<std::byte>>();
+        storage->resize(kMaxDatagramBytes);
+        if (io_profile_enabled()) {
+            ++io_profile_counters().rx_storage_allocations;
+        }
+    }
+
+    return std::shared_ptr<std::vector<std::byte>>(storage.release(), recycle_receive_byte_storage);
+}
+
+COQUIC_NO_PROFILE void
+prepare_receive_byte_storage(std::shared_ptr<std::vector<std::byte>> &storage) {
+    if (storage != nullptr && storage.use_count() == 1 && storage->size() == kMaxDatagramBytes) {
+        if (io_profile_enabled()) {
+            ++io_profile_counters().rx_storage_scratch_reuses;
+        }
+        return;
+    }
+
+    storage.reset();
+    storage = acquire_receive_byte_storage();
+}
 
 COQUIC_NO_PROFILE bool io_profile_enabled() {
     if constexpr (!kCoquicProfileHooksEnabled) {
@@ -127,7 +340,13 @@ COQUIC_NO_PROFILE void print_io_profile() {
               << " recvmmsg_datagrams=" << c.recvmmsg_datagrams << " poll_calls=" << c.poll_calls
               << " rx_datagrams=" << c.rx_datagrams
               << " udp_gro_receive_calls=" << c.udp_gro_receive_calls
-              << " udp_gro_segments=" << c.udp_gro_segments << '\n';
+              << " udp_gro_segments=" << c.udp_gro_segments
+              << " rx_storage_allocations=" << c.rx_storage_allocations
+              << " rx_storage_pool_reuses=" << c.rx_storage_pool_reuses
+              << " rx_storage_scratch_reuses=" << c.rx_storage_scratch_reuses
+              << " rx_storage_recycles=" << c.rx_storage_recycles
+              << " rx_storage_drops=" << c.rx_storage_drops
+              << " rx_storage_pool_high_water=" << c.rx_storage_pool_high_water << '\n';
 }
 
 COQUIC_NO_PROFILE void register_io_profile_printer_once() {
@@ -908,7 +1127,8 @@ receive_datagram_batch_status_for_error(bool retryable_error) {
     return retryable_error ? ReceiveDatagramStatus::would_block : ReceiveDatagramStatus::error;
 }
 
-void append_received_datagram_segments(std::vector<ReceiveDatagramResult> &output_datagrams,
+template <typename OutputDatagrams>
+void append_received_datagram_segments(OutputDatagrams &output_datagrams,
                                        ReceiveDatagramResult received) {
     const auto received_size = received.payload().size();
     const auto segment_size = received.udp_gro_segment_size;
@@ -944,8 +1164,9 @@ void append_received_datagram_segments(std::vector<ReceiveDatagramResult> &outpu
     }
 }
 
+template <typename OutputDatagrams>
 void append_shared_received_datagram_segments(
-    std::vector<ReceiveDatagramResult> &output_datagrams,
+    OutputDatagrams &output_datagrams,
     const std::shared_ptr<std::vector<std::byte>> &shared_datagram_storage,
     std::size_t datagram_begin, std::size_t datagram_size, QuicEcnCodepoint ecn,
     const sockaddr_storage &source, socklen_t source_len, QuicCoreTimePoint input_time,
@@ -995,7 +1216,7 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
     if (recvmmsg_batch_requires_recvmsg_fallback()) {
         auto received = receive_datagram(socket_fd, role_name, MSG_DONTWAIT);
         if (received.status == ReceiveDatagramStatus::ok) {
-            std::vector<ReceiveDatagramResult> datagrams;
+            ReceiveDatagramResultVector datagrams;
             append_received_datagram_segments(datagrams, std::move(received));
             return ReceiveDatagramBatchResult{
                 .status = ReceiveDatagramStatus::ok,
@@ -1019,11 +1240,12 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
     auto &sizes = scratch.sizes;
 
     for (std::size_t index = 0; index < batch_size; ++index) {
+        prepare_receive_byte_storage(inbound[index]);
         sources[index] = {};
         recv_messages[index] = {};
         iovecs[index] = iovec{
-            .iov_base = inbound[index].data(),
-            .iov_len = inbound[index].size(),
+            .iov_base = inbound[index]->data(),
+            .iov_len = inbound[index]->size(),
         };
         auto &inbound_message = recv_messages[index].msg_hdr;
         inbound_message.msg_name = &sources[index];
@@ -1058,24 +1280,26 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
     begins.resize(received_datagram_count);
     sizes.resize(received_datagram_count);
     std::size_t shared_size = 0;
-    for (int index = 0; index < received_count; ++index) {
-        const auto received_size =
-            static_cast<std::size_t>(recv_messages[static_cast<std::size_t>(index)].msg_len);
-        begins[static_cast<std::size_t>(index)] = shared_size;
-        sizes[static_cast<std::size_t>(index)] = received_size;
-        shared_size += received_size;
-    }
-
-    auto shared_datagram_storage = std::make_shared<std::vector<std::byte>>();
-    shared_datagram_storage->resize(shared_size);
+    std::size_t received_result_count = 0;
     for (int index = 0; index < received_count; ++index) {
         const auto datagram_index = static_cast<std::size_t>(index);
-        std::memcpy(shared_datagram_storage->data() + begins[datagram_index],
-                    inbound[datagram_index].data(), sizes[datagram_index]);
+        const auto received_size = static_cast<std::size_t>(recv_messages[datagram_index].msg_len);
+        auto &inbound_message = recv_messages[datagram_index].msg_hdr;
+        const auto udp_gro_segment_size =
+            recvmsg_udp_gro_segment_size_from_control(inbound_message);
+        const auto segment_size = udp_gro_segment_size > 0
+                                      ? std::min(udp_gro_segment_size, received_size)
+                                      : std::size_t{0};
+        begins[datagram_index] = shared_size;
+        sizes[datagram_index] = received_size;
+        shared_size += received_size;
+        received_result_count += segment_size == 0 || segment_size >= received_size
+                                     ? 1
+                                     : (received_size + segment_size - 1u) / segment_size;
     }
 
-    std::vector<ReceiveDatagramResult> received_results;
-    received_results.reserve(received_datagram_count);
+    ReceiveDatagramResultVector received_results;
+    received_results.reserve(received_result_count);
     for (int index = 0; index < received_count; ++index) {
         const auto datagram_index = static_cast<std::size_t>(index);
         auto &inbound_message = recv_messages[static_cast<std::size_t>(index)].msg_hdr;
@@ -1083,9 +1307,9 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
         const auto ecn = recvmsg_ecn_from_control(inbound_message);
         const auto source = sources[static_cast<std::size_t>(index)];
         const auto source_len = static_cast<socklen_t>(inbound_message.msg_namelen);
-        append_shared_received_datagram_segments(received_results, shared_datagram_storage,
-                                                 begins[datagram_index], sizes[datagram_index], ecn,
-                                                 source, source_len, input_time, segment_size);
+        append_shared_received_datagram_segments(received_results, inbound[datagram_index], 0,
+                                                 sizes[datagram_index], ecn, source, source_len,
+                                                 input_time, segment_size);
     }
     return ReceiveDatagramBatchResult{
         .status = ReceiveDatagramStatus::ok,
@@ -1247,15 +1471,49 @@ bool PollIoEngine::send_many(std::span<const QuicIoEngineTxDatagram> datagrams,
 }
 
 bool PollIoEngine::has_pending_events() const {
-    return !queued_events_.empty();
+    return next_queued_event_index_ < queued_events_.size();
+}
+
+PollIoEngine::PollIoEngine() {
+    queued_events_.reserve(kMaxReceiveDrainBatch);
+}
+
+void PollIoEngine::queue_event(QuicIoEngineEvent event) {
+    if (next_queued_event_index_ > 0 && (next_queued_event_index_ == queued_events_.size() ||
+                                         queued_events_.size() == queued_events_.capacity())) {
+        queued_events_.erase(queued_events_.begin(),
+                             queued_events_.begin() +
+                                 static_cast<std::ptrdiff_t>(next_queued_event_index_));
+        next_queued_event_index_ = 0;
+    }
+    queued_events_.push_back(std::move(event));
+}
+
+std::size_t PollIoEngine::queued_event_count() const {
+    return queued_events_.size() - next_queued_event_index_;
+}
+
+std::optional<QuicIoEngineEvent> PollIoEngine::pop_queued_event() {
+    if (!has_pending_events()) {
+        queued_events_.clear();
+        next_queued_event_index_ = 0;
+        return std::nullopt;
+    }
+
+    auto event = std::move(queued_events_[next_queued_event_index_]);
+    ++next_queued_event_index_;
+    if (next_queued_event_index_ == queued_events_.size()) {
+        queued_events_.clear();
+        next_queued_event_index_ = 0;
+    }
+    return event;
 }
 
 std::optional<QuicIoEngineEvent>
 PollIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
                    std::optional<quic::QuicCoreTimePoint> next_wakeup, std::string_view role_name) {
-    if (!queued_events_.empty()) {
-        auto event = std::move(queued_events_.front());
-        queued_events_.pop_front();
+    if (auto queued_event = pop_queued_event()) {
+        auto event = std::move(*queued_event);
         refresh_queued_receive_event_time(event);
         return event;
     }
@@ -1367,14 +1625,13 @@ PollIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
 
             auto event = make_rx_event(descriptor.fd, std::move(received_batch.datagrams.front()));
             for (std::size_t index = 1; index < received_batch.datagrams.size(); ++index) {
-                queued_events_.push_back(
+                queue_event(
                     make_rx_event(descriptor.fd, std::move(received_batch.datagrams[index])));
             }
             if (received_batch.may_have_more_datagrams) {
-                while (queued_events_.size() < kMaxReceiveDrainBatch - 1) {
-                    auto extra_batch = internal::receive_datagram_batch(descriptor.fd, role_name,
-                                                                        kMaxReceiveDrainBatch - 1 -
-                                                                            queued_events_.size());
+                while (queued_event_count() < kMaxReceiveDrainBatch - 1) {
+                    auto extra_batch = internal::receive_datagram_batch(
+                        descriptor.fd, role_name, kMaxReceiveDrainBatch - 1 - queued_event_count());
                     if (extra_batch.status == internal::ReceiveDatagramStatus::would_block) {
                         break;
                     }
@@ -1382,7 +1639,7 @@ PollIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
                         return std::nullopt;
                     }
                     for (auto &extra : extra_batch.datagrams) {
-                        queued_events_.push_back(make_rx_event(descriptor.fd, std::move(extra)));
+                        queue_event(make_rx_event(descriptor.fd, std::move(extra)));
                     }
                     if (!extra_batch.may_have_more_datagrams) {
                         break;
@@ -2135,7 +2392,7 @@ bool poll_io_engine_restamps_queued_receive_events_for_tests() {
     auto shared_receive_bytes = std::make_shared<std::vector<std::byte>>(
         std::vector<std::byte>{std::byte{0xaa}, std::byte{0xbb}});
 
-    engine.queued_events_.push_back(QuicIoEngineEvent{
+    engine.queue_event(QuicIoEngineEvent{
         .kind = QuicIoEngineEvent::Kind::rx_datagram,
         .now = first_time,
         .rx =
@@ -2145,7 +2402,7 @@ bool poll_io_engine_restamps_queued_receive_events_for_tests() {
                 .now = first_time,
             },
     });
-    engine.queued_events_.push_back(QuicIoEngineEvent{
+    engine.queue_event(QuicIoEngineEvent{
         .kind = QuicIoEngineEvent::Kind::rx_datagram,
         .now = queued_time,
         .rx =
@@ -2157,7 +2414,7 @@ bool poll_io_engine_restamps_queued_receive_events_for_tests() {
                 .end = shared_receive_bytes->size(),
             },
     });
-    engine.queued_events_.push_back(QuicIoEngineEvent{
+    engine.queue_event(QuicIoEngineEvent{
         .kind = QuicIoEngineEvent::Kind::timer_expired,
         .now = queued_time,
     });

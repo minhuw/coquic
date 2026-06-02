@@ -1202,6 +1202,7 @@ inline InMemoryHttp09TransferResult
 run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_config) {
     InMemoryHttp09TransferResult observed;
 
+    // The in-memory client still uses the real request parser so bad request envs fail early.
     const auto requests =
         coquic::http09::parse_http09_requests_env(transfer_config.client_config.requests_env);
     if (!requests.has_value()) {
@@ -1247,6 +1248,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
     std::deque<std::vector<std::byte>> to_client;
     std::deque<std::vector<std::byte>> to_server;
 
+    // Transport state snapshots let tests assert congestion and queued-stream side effects.
     const auto capture_connection_state = [&]() {
         observed.client_bytes_in_flight =
             client.core.connection_->congestion_controller_.bytes_in_flight();
@@ -1262,6 +1264,8 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
         observed.server_has_next_wakeup = server.next_wakeup.has_value();
     };
 
+    // The client driver forwards send effects into the synthetic server queue and polls the
+    // endpoint.
     const auto drive_client = [&](coquic::quic::QuicCoreResult result,
                                   coquic::quic::QuicCoreTimePoint now) {
         for (;;) {
@@ -1325,6 +1329,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
         }
     };
 
+    // The server driver mirrors the client path while tracking server-send counters.
     const auto drive_server = [&](coquic::quic::QuicCoreResult result,
                                   coquic::quic::QuicCoreTimePoint now) {
         for (;;) {
@@ -1379,6 +1384,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
     };
 
     auto now = coquic::quic::test::test_time();
+    // Start the client core before entering the transfer loop so initial packets are queued.
     if (!drive_client(client.core.advance(coquic::quic::QuicCoreStart{}, now), now)) {
         capture_connection_state();
         return observed;
@@ -1389,6 +1395,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
            observed.steps < kStepLimit) {
         ++observed.steps;
 
+        // Datagrams are delivered in FIFO order, then timers advance whichever side wakes first.
         if (!to_server.empty()) {
             now += std::chrono::milliseconds(1);
             auto inbound = std::move(to_server.front());
@@ -1457,6 +1464,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     ObservingServerResult observed;
     constexpr std::size_t kTimerSpinLimit = 100000;
 
+    // The observing server binds a real UDP socket so tests can inspect runtime network behavior.
     const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (socket_fd < 0) {
         return observed;
@@ -1498,6 +1506,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     bool saw_peer_activity = false;
     std::unordered_set<std::uint64_t> response_packet_numbers;
 
+    // The next poll timeout is derived from the earliest pending QUIC timer across sessions.
     auto earliest_wakeup = [&]() -> std::optional<coquic::quic::QuicCoreTimePoint> {
         std::optional<coquic::quic::QuicCoreTimePoint> next_wakeup;
         for (const auto &[key, session] : sessions) {
@@ -1539,6 +1548,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
                                        });
         };
         const auto track_response_packet_state = [&]() {
+            // Response packets move from sent/lost tracking to acked once QUIC drops the record.
             const auto &application_space = session.core.connection_->application_space_;
             for (const auto &[packet_number, packet] : application_space.sent_packets) {
                 if (!packet_is_response(packet)) {
@@ -1570,6 +1580,8 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
             }
         };
 
+        // Driving a session records core effects, sends datagrams, and feeds endpoint outputs back
+        // in.
         for (;;) {
             session.next_wakeup = result.next_wakeup;
             capture_transport_state();
@@ -1623,6 +1635,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
         }
     };
 
+    // New sessions are keyed by local CID while retaining the initial-destination CID route.
     auto create_session = [&](const coquic::quic::ConnectionId &initial_destination_connection_id,
                               const sockaddr_storage &peer, socklen_t peer_len) -> Session & {
         auto core_config = make_session_core_config(next_connection_index++);
@@ -1648,6 +1661,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     const auto process_inbound_datagram = [&](std::vector<std::byte> inbound,
                                               const sockaddr_storage &source,
                                               socklen_t source_len) -> bool {
+        // Unsupported packets are ignored; supported Initials either find or create a session.
         saw_peer_activity = true;
         ++observed.inbound_datagrams;
 
@@ -1689,6 +1703,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     };
 
     const auto drain_ready_datagrams = [&]() -> bool {
+        // Nonblocking reads drain all queued datagrams before returning to poll.
         while (true) {
             std::vector<std::byte> inbound(65535);
             sockaddr_storage source{};
@@ -1714,6 +1729,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     };
 
     const auto pump_endpoint_work_once = [&]() -> bool {
+        // Endpoint poll work can enqueue more core inputs even without a fresh datagram.
         for (const auto &[key, session] : sessions) {
             (void)key;
             if (!session->endpoint_has_pending_work) {
@@ -1741,6 +1757,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
 
     const auto process_expired_timers = [&](coquic::quic::QuicCoreTimePoint current,
                                             bool &processed_any) -> bool {
+        // Timer processing is bounded so a broken test session cannot spin forever.
         processed_any = false;
         for (const auto &[key, session] : sessions) {
             (void)key;
@@ -1764,6 +1781,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     };
 
     for (;;) {
+        // Each loop prefers already-due timers, then ready datagrams, then endpoint poll work.
         bool processed_timers = false;
         if (!process_expired_timers(runtime_now(), processed_timers)) {
             return observed;
@@ -1803,6 +1821,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
         descriptor.fd = socket_fd;
         descriptor.events = POLLIN;
 
+        // Poll waits only until the next QUIC timer and exits idle if no peer ever spoke.
         int poll_result = 0;
         do {
             poll_result = ::poll(&descriptor, 1, timeout_ms);

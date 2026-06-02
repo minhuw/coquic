@@ -1,4 +1,4 @@
-const wasmPath = "./coquic-wasm-quic.wasm";
+const wasmPath = "/coquic-wasm-quic.wasm";
 const packetDelayMs = 1000;
 const defaultNetworkEnvironment = {
   delayMs: packetDelayMs,
@@ -119,15 +119,6 @@ const scenarioPresets = {
     packetDelayMs: 2200,
     maxReplies: 2,
   },
-  ipv6: {
-    label: "IPv6",
-    summary: "IPv6 interop showcase with IPv6 Ethernet frames in PCAP export.",
-    workload: "transfer",
-    initialMessages: 1,
-    payloadBytes: 320,
-    maxReplies: 1,
-    pcapIpVersion: 6,
-  },
   multiplexing: {
     label: "Multiplexing",
     summary: "Several bidirectional streams are queued after handshake.",
@@ -169,31 +160,6 @@ const scenarioPresets = {
     wasmFlags: wasmOptionFlags.onlyVersion2,
     maxReplies: 0,
   },
-  amplificationlimit: {
-    label: "Amplification Limit",
-    summary: "Handshake-only run to inspect address validation and server flight size.",
-    workload: "handshake",
-    maxReplies: 0,
-    annotation: "Watch Path And Recovery for address validation state and server bytes sent.",
-  },
-  "rebind-port": {
-    label: "Rebind Port",
-    summary: "Client packets switch to a new route handle after handshake.",
-    workload: "transfer",
-    initialMessages: 1,
-    payloadBytes: 320,
-    maxReplies: 1,
-    rebindAfterHandshake: { clientRoute: 11, serverRoute: 1, label: "client UDP port rebound" },
-  },
-  "rebind-addr": {
-    label: "Rebind Addr",
-    summary: "Client packets switch to a distinct address-validation route.",
-    workload: "transfer",
-    initialMessages: 1,
-    payloadBytes: 320,
-    maxReplies: 1,
-    rebindAfterHandshake: { clientRoute: 17, serverRoute: 1, label: "client address rebound" },
-  },
   connectionmigration: {
     label: "Connection Migration",
     summary: "Native migration request switches the client send path.",
@@ -203,36 +169,6 @@ const scenarioPresets = {
     maxReplies: 1,
     wasmFlags: wasmOptionFlags.allowPeerAddressChange,
     migrationAfterHandshake: { route: 23, reason: 0 },
-  },
-  ecn: {
-    label: "ECN",
-    summary: "Delivered datagrams are marked ECT(0) so ACK ECN counts can appear.",
-    workload: "transfer",
-    initialMessages: 1,
-    payloadBytes: 300,
-    maxReplies: 1,
-    inboundEcn: ecnCodepoints.ect0,
-  },
-  goodput: {
-    label: "Goodput",
-    summary: "High-volume stream transfer to stress flow control and packetization.",
-    workload: "transfer",
-    initialMessages: 6,
-    payloadBytes: 1200,
-    maxReplies: 0,
-  },
-  crosstraffic: {
-    label: "Cross Traffic",
-    summary: "Mixed stream burst with loss to create queue pressure.",
-    workload: "multiplexing",
-    initialMessages: 6,
-    payloadBytes: 520,
-    lossEnabled: true,
-    lossRate: 15,
-    dropKinds: ["1-RTT"],
-    maxDrops: 2,
-    maxReplies: 1,
-    streamIds: [0n, 4n, 8n, 12n],
   },
 };
 
@@ -287,6 +223,7 @@ let packetRecords = [];
 let datagramRecords = [];
 let selectedPacketId = 0;
 let demoState = "idle";
+let wasmLoadError = "";
 let activeRunToken = 0;
 let paused = false;
 let pauseWaiters = [];
@@ -491,6 +428,7 @@ function stopDemoForUnmount() {
   stepBudget = 0;
   protocolStepInProgress = false;
   currentRunState = null;
+  currentRunPromise = null;
   releasePauseWaiters();
   wakeScheduler();
 }
@@ -547,15 +485,27 @@ function updateRunButton() {
   const startLabel = el("start-label");
   const stepLabel = el("step-label");
   if (!startButton) return;
-  startButton.disabled = wasm === undefined || demoState === "running";
+  const wasmUnavailable = wasm === undefined;
+  const wasmFailed = wasmUnavailable && wasmLoadError.length > 0;
+  startButton.disabled = wasmUnavailable || demoState === "running";
+  startButton.title = wasmFailed
+    ? wasmLoadError
+    : wasmUnavailable
+      ? "Waiting for the WebAssembly module to load"
+      : "";
   startButton.setAttribute("aria-label", demoState === "paused" ? "Resume protocol exchange" : "Start protocol exchange");
-  if (startLabel) startLabel.textContent = demoState === "paused" ? "Resume" : "Start";
+  if (startLabel) startLabel.textContent = wasmFailed ? "Failed" : wasmUnavailable ? "Loading" : demoState === "paused" ? "Resume" : "Start";
   if (stopButton) {
-    stopButton.disabled = wasm === undefined || demoState !== "running";
+    stopButton.disabled = wasmUnavailable || demoState !== "running";
     stopButton.setAttribute("aria-label", "Stop protocol exchange");
   }
   if (stepButton) {
-    stepButton.disabled = wasm === undefined;
+    stepButton.disabled = wasmUnavailable;
+    stepButton.title = wasmFailed
+      ? wasmLoadError
+      : wasmUnavailable
+        ? "Waiting for the WebAssembly module to load"
+        : "";
     stepButton.setAttribute(
       "aria-label",
       demoState === "running" ? "Pause after current protocol action" : "Step one protocol action",
@@ -676,14 +626,28 @@ function wasmI64ToNumber(value, label) {
   return number;
 }
 
-function pingPongPayload(sender, sequence, payloadBytes = pingPongPayloadBytes) {
-  const prefix = `${sender} ping-pong ${sequence} `;
-  const fill = "flow-control-window ";
+function repeatedPayload(prefix, fill, payloadBytes) {
   let text = prefix;
   while (encoder.encode(text).length < payloadBytes) {
     text += fill;
   }
   return encoder.encode(text).slice(0, payloadBytes);
+}
+
+function pingPongPayload(sender, sequence, payloadBytes = pingPongPayloadBytes) {
+  return repeatedPayload(
+    `${sender} ping-pong ${sequence} `,
+    "flow-control-window ",
+    payloadBytes,
+  );
+}
+
+function quicDatagramPayload(sender, sequence, payloadBytes) {
+  return repeatedPayload(
+    `${sender} quic-datagram ${sequence} `,
+    "cross-traffic-datagram ",
+    payloadBytes,
+  );
 }
 
 function pauseDemo() {
@@ -761,8 +725,11 @@ async function runAutomaticStep(runState, action) {
 function startDemo(startPaused) {
   if (demoState !== "idle" || currentRunPromise) return;
   activeRunToken += 1;
-  currentRunPromise = runDemo({ startPaused })
+  const runToken = activeRunToken;
+  let promise;
+  promise = runDemo({ startPaused })
     .catch((error) => {
+      if (runToken !== activeRunToken) return;
       demoState = "idle";
       paused = false;
       stepBudget = 0;
@@ -772,9 +739,10 @@ function startDemo(startPaused) {
       log(0, error.message, "error");
     })
     .finally(() => {
-      currentRunPromise = null;
-      updateRunButton();
+      if (currentRunPromise === promise) currentRunPromise = null;
+      if (runToken === activeRunToken) updateRunButton();
     });
+  currentRunPromise = promise;
 }
 
 function requestNextStep() {
@@ -1805,6 +1773,7 @@ async function loadModule() {
     },
   };
 
+  wasmLoadError = "";
   setModuleState("fetching wasm");
   const response = await fetch(wasmPath);
   if (!response.ok) {
@@ -1825,6 +1794,7 @@ async function loadModule() {
     throw new Error("wasm module is missing _initialize export");
   }
   wasm._initialize();
+  wasmLoadError = "";
   resetEndpointDiagnostics();
   setModuleState("wasm ready", "ready");
   updateRunButton();
@@ -1945,6 +1915,7 @@ function pill(value) {
 function renderTable(id, columns, rows, emptyText) {
   const wrap = el(id);
   wrap.textContent = "";
+  wrap.classList.toggle("empty", rows.length === 0);
   if (!rows.length) {
     const empty = document.createElement("div");
     empty.className = "diag-empty";
@@ -2284,6 +2255,10 @@ function handleOneEvent(endpoint, label, runState) {
     if (!runState.quiet) {
       log(runState.timelineMs, `${label} resumption state ${event.payload.length} bytes`);
     }
+  } else if (event.type === 10) {
+    const text = decoder.decode(event.payload);
+    runState.receivedQuicDatagrams += 1;
+    log(runState.timelineMs, `${label} QUIC DATAGRAM ${event.payload.length} bytes: ${text}`);
   }
   return true;
 }
@@ -2495,6 +2470,38 @@ function queuePingPongMessage(runState, protocolNow, sender, streamId) {
   );
 }
 
+function queueQuicDatagramMessage(runState, protocolNow, sender) {
+  if (typeof wasm.coquic_wasm_endpoint_send_datagram !== "function") {
+    throw new Error("WASM DATAGRAM API is unavailable");
+  }
+  const endpoint = sender === "client" ? runState.clientEndpoint : runState.serverEndpoint;
+  const connection =
+    sender === "client" ? runState.clientConnection : runState.serverConnection;
+  if (connection === 0n) {
+    throw new Error(`${sender} connection is not ready for QUIC DATAGRAM send`);
+  }
+  runState.quicDatagramSequence += 1;
+  const payload = quicDatagramPayload(
+    sender,
+    runState.quicDatagramSequence,
+    runState.scenario.datagramPayloadBytes ?? 256,
+  );
+  withBytes(payload, (pointer, length) => {
+    const rc = wasm.coquic_wasm_endpoint_send_datagram(
+      endpoint,
+      BigInt(protocolNow),
+      connection,
+      pointer,
+      length,
+    );
+    if (rc < 0) throw new Error(`${sender} send QUIC DATAGRAM failed ${rc}`);
+  });
+  log(
+    runState.timelineMs,
+    `${sender} queued QUIC DATAGRAM ${runState.quicDatagramSequence} (${payload.length} bytes)`,
+  );
+}
+
 function queueScenarioWorkload(runState, protocolNow) {
   const scenario = runState.scenario;
   if (scenario.queueEarlyData && !runState.earlyDataQueued) {
@@ -2505,7 +2512,8 @@ function queueScenarioWorkload(runState, protocolNow) {
     return;
   }
   const messageCount = Math.max(0, scenario.initialMessages ?? (scenario.workload === "handshake" ? 0 : 1));
-  if (messageCount === 0) {
+  const datagramCount = Math.max(0, scenario.datagramMessages ?? 0);
+  if (messageCount === 0 && datagramCount === 0) {
     runState.workloadQueued = true;
     log(runState.timelineMs, `${scenario.label} showcase: handshake complete`);
     return;
@@ -2513,6 +2521,10 @@ function queueScenarioWorkload(runState, protocolNow) {
   const streamIds = scenario.streamIds?.length ? scenario.streamIds : [0n];
   for (let index = 0; index < messageCount; index += 1) {
     queuePingPongMessage(runState, protocolNow, "client", streamIds[index % streamIds.length]);
+  }
+  const datagramSenders = scenario.datagramSenders?.length ? scenario.datagramSenders : ["client"];
+  for (let index = 0; index < datagramCount; index += 1) {
+    queueQuicDatagramMessage(runState, protocolNow, datagramSenders[index % datagramSenders.length]);
   }
   runState.workloadQueued = true;
 }
@@ -2538,6 +2550,8 @@ function makeRunState({ scenario, flags, client, server, runToken, quiet = false
     pendingPingPong: [],
     streamReceiveBytes: new Map(),
     pingPongSequence: 0,
+    quicDatagramSequence: 0,
+    receivedQuicDatagrams: 0,
     replyCount: 0,
     maxReplies: scenario.maxReplies ?? maxPendingPingPong,
     workloadQueued: false,
@@ -2907,21 +2921,27 @@ function bindWorkbenchControls() {
 
 function initializeWorkbenchPage() {
   const root = el("packet-rail");
-  if (!root || root === activeWorkbenchRoot) return;
-  activeWorkbenchRoot = root;
-  stopDemoForUnmount();
   bindWorkbenchControls();
-  resetPacketInspector();
-  resetEndpointDiagnostics();
-  updateScenarioControls();
-  updateNetworkControls();
-  setModuleState(wasm ? "wasm ready" : "loading wasm", wasm ? "ready" : "");
-  updateRunButton();
+  if (!root) return;
+  if (root !== activeWorkbenchRoot) {
+    activeWorkbenchRoot = root;
+    stopDemoForUnmount();
+    resetPacketInspector();
+    resetEndpointDiagnostics();
+    updateScenarioControls();
+    updateNetworkControls();
+    setModuleState(wasm ? "wasm ready" : "loading wasm", wasm ? "ready" : "");
+    updateRunButton();
+  } else {
+    updateRunButton();
+  }
 }
 
 loadModule().catch((error) => {
+  wasmLoadError = error.message;
   setModuleState("wasm failed", "failed");
   log(0, error.message, "error");
+  updateRunButton();
 });
 
 document.addEventListener("keydown", (event) => {
@@ -2938,13 +2958,7 @@ window.addEventListener("resize", () => {
   renderPacketQueues();
 });
 
-const pageObserver = new MutationObserver(() => {
-  if (activeWorkbenchRoot && !document.body.contains(activeWorkbenchRoot)) {
-    activeWorkbenchRoot = null;
-    stopDemoForUnmount();
-  }
-  initializeWorkbenchPage();
-});
-pageObserver.observe(document.body, { childList: true, subtree: true });
-
 initializeWorkbenchPage();
+for (let attempt = 1; attempt <= 8 && !activeWorkbenchRoot; attempt += 1) {
+  setTimeout(initializeWorkbenchPage, attempt * 50);
+}

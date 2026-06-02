@@ -62,6 +62,7 @@ const {
   coquic_wasm_endpoint_open_connection_with_resumption,
   coquic_wasm_endpoint_input_datagram,
   coquic_wasm_endpoint_send_stream,
+  coquic_wasm_endpoint_send_datagram,
   coquic_wasm_endpoint_timer_expired,
   coquic_wasm_endpoint_next_wakeup_ms,
   coquic_wasm_endpoint_next_datagram_header,
@@ -95,6 +96,7 @@ const eventTypes = {
   localError: 4,
   zeroRttStatus: 7,
   resumptionStateAvailable: 8,
+  receiveDatagram: 10,
 };
 const zeroRttStatusCodes = {
   unavailable: 0,
@@ -319,6 +321,7 @@ function makeState() {
     inspectedFrames: 0,
     pendingPacketInspections: new Map(),
     received: [],
+    receivedDatagrams: [],
     flowControlFrames: new Set(),
     resumptionState: null,
     zeroRttStatuses: [],
@@ -369,6 +372,13 @@ function drainEvents(endpoint, label, state) {
         endpoint: label,
         streamId: event.streamId,
         fin: event.fin,
+        payloadLength: event.payload.length,
+        text: new TextDecoder().decode(event.payload),
+      });
+    }
+    if (event.type === eventTypes.receiveDatagram) {
+      state.receivedDatagrams.push({
+        endpoint: label,
         payloadLength: event.payload.length,
         text: new TextDecoder().decode(event.payload),
       });
@@ -463,6 +473,15 @@ function sendStream(endpoint, now, connection, streamId, payload, label) {
   });
 }
 
+function sendDatagram(endpoint, now, connection, payload, label) {
+  withBytes(payload, (pointer, length) => {
+    checked(
+      label,
+      coquic_wasm_endpoint_send_datagram(endpoint, now, connection, pointer, length),
+    );
+  });
+}
+
 function createEndpoint(role, flags = 0) {
   return flags === 0
     ? coquic_wasm_endpoint_create(role, 0, 0, 0, 0)
@@ -509,6 +528,13 @@ function receivedBytes(state, endpoint) {
 
 function receivedText(state, endpoint) {
   return state.received
+    .filter((event) => event.endpoint === endpoint)
+    .map((event) => event.text)
+    .join("");
+}
+
+function receivedDatagramText(state, endpoint) {
+  return state.receivedDatagrams
     .filter((event) => event.endpoint === endpoint)
     .map((event) => event.text)
     .join("");
@@ -706,6 +732,43 @@ function runResumptionZeroRttSmoke() {
   }
 }
 
+function runDatagramSmoke() {
+  if (typeof coquic_wasm_endpoint_send_datagram !== "function") {
+    throw new Error("missing coquic_wasm_endpoint_send_datagram export");
+  }
+  const { client, server } = createEndpointPair();
+  const state = makeState();
+  const clientPayload = encoder.encode("client QUIC DATAGRAM smoke payload");
+  const serverPayload = encoder.encode("server QUIC DATAGRAM smoke payload");
+  try {
+    let now = driveHandshake(client, server, state, 0n);
+
+    sendDatagram(client, now, state.clientConnection, clientPayload, "client send datagram");
+    now = pumpUntil(
+      client,
+      server,
+      state,
+      now,
+      () => receivedDatagramText(state, "server").includes(decoder.decode(clientPayload)),
+      "client datagram receive",
+    );
+
+    sendDatagram(server, now, state.serverConnection, serverPayload, "server send datagram");
+    now = pumpUntil(
+      client,
+      server,
+      state,
+      now,
+      () => receivedDatagramText(state, "client").includes(decoder.decode(serverPayload)),
+      "server datagram receive",
+    );
+  } finally {
+    coquic_wasm_endpoint_destroy(client);
+    coquic_wasm_endpoint_destroy(server);
+  }
+}
+
 runTransferSmoke();
 runResumptionZeroRttSmoke();
+runDatagramSmoke();
 console.log("wasm-quic smoke ok");

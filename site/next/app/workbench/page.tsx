@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Script from 'next/script';
-import { Gauge, ListChecks, Play, Square, StepForward, X } from 'lucide-react';
+import { Gauge, Info, ListChecks, Play, Square, StepForward, X } from 'lucide-react';
 
 import { DemoNav } from '@/components/demo-nav';
 import { PageHeader } from '@/components/page-header';
@@ -36,19 +36,12 @@ const interopPresets = [
   ['blackhole', 'Blackhole'],
   ['chacha20', 'ChaCha20'],
   ['longrtt', 'Long RTT'],
-  ['ipv6', 'IPv6'],
   ['multiplexing', 'Multiplexing'],
   ['retry', 'Retry'],
   ['resumption', 'Resumption'],
   ['zerortt', '0-RTT'],
   ['v2', 'Version 2'],
-  ['amplificationlimit', 'Amplification Limit'],
-  ['rebind-port', 'Rebind Port'],
-  ['rebind-addr', 'Rebind Addr'],
   ['connectionmigration', 'Connection Migration'],
-  ['ecn', 'ECN'],
-  ['goodput', 'Goodput'],
-  ['crosstraffic', 'Cross Traffic'],
 ] as const;
 
 function statLabel(key: (typeof miniStats)[number]) {
@@ -125,7 +118,7 @@ function EndpointPanel({ endpoint }: { endpoint: Endpoint }) {
             Initial / Handshake / 1-RTT
           </span>
         </div>
-        <div id={`${prefix}-packet-spaces`} className="diag-table-wrap" />
+        <div id={`${prefix}-packet-spaces`} className="diag-table-wrap packet-space-table-wrap" />
       </div>
 
       <div className="diag-section">
@@ -153,29 +146,58 @@ function EndpointPanel({ endpoint }: { endpoint: Endpoint }) {
 export default function WorkbenchPage() {
   return (
     <>
-      <main className="coquic-page">
+      <main className="coquic-page workbench-page">
         <DemoNav active="workbench" />
         <PageHeader eyebrow="wasm QUIC laboratory" title="CoQUIC Protocol Workbench" />
 
         <div className="scenario-toolbar" aria-label="Interop case controls">
-          <label className="scenario-control" htmlFor="scenario-preset">
-            <span className="scenario-label">
+          <div className="scenario-control">
+            <label className="scenario-label" htmlFor="scenario-preset">
               <span className="control-icon" aria-hidden="true">
                 <ListChecks />
               </span>
               <span>Interop Case</span>
+            </label>
+            <span className="scenario-select-row">
+              <select id="scenario-preset" className="scenario-select" defaultValue="transfer">
+                {interopPresets.map(([value, label]) => (
+                  <option value={value} key={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              <button className="scenario-info" type="button" aria-label="Selected interop case details" aria-describedby="scenario-summary">
+                <Info />
+                <span id="scenario-summary" className="scenario-summary" role="tooltip">
+                  Stream transfer with packet inspection.
+                </span>
+              </button>
             </span>
-            <select id="scenario-preset" className="scenario-select" defaultValue="transfer">
-              {interopPresets.map(([value, label]) => (
-                <option value={value} key={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-            <span id="scenario-summary" className="scenario-summary">
-              Stream transfer with packet inspection.
-            </span>
-          </label>
+            <div className="stage-controls" aria-label="Debugger controls">
+              <button id="start" className="control-button" type="button" aria-label="Start protocol exchange">
+                <span className="control-icon" aria-hidden="true">
+                  <Play />
+                </span>
+                <span id="start-label" className="control-label">
+                  Start
+                </span>
+              </button>
+              <button id="stop" className="control-button" type="button" aria-label="Stop protocol exchange">
+                <span className="control-icon" aria-hidden="true">
+                  <Square />
+                </span>
+                <span className="control-label">Stop</span>
+              </button>
+              <button id="step" className="control-button" type="button" aria-label="Step one protocol action">
+                <span className="control-icon" aria-hidden="true">
+                  <StepForward />
+                </span>
+                <span id="step-label" className="control-label">
+                  Step
+                </span>
+              </button>
+            </div>
+          </div>
           <div className="network-control" aria-label="Network environment">
             <span className="network-control-head">
               <span className="control-icon" aria-hidden="true">
@@ -208,36 +230,15 @@ export default function WorkbenchPage() {
               <input id="network-delay" type="range" min="50" max="2500" step="50" defaultValue="1000" />
             </label>
           </div>
-          <div className="stage-controls" aria-label="Debugger controls">
-            <div className="control-timer" aria-live="polite">
-              <span>Global Timer</span>
-              <strong id="global-timer">0ms</strong>
-            </div>
-            <div id="module-state" className="module-state" aria-live="polite">
-              loading wasm
-            </div>
-            <button id="start" className="control-button" type="button" aria-label="Start protocol exchange">
-              <span className="control-icon" aria-hidden="true">
-                <Play />
-              </span>
-              <span id="start-label" className="control-label">
-                Start
-              </span>
-            </button>
-            <button id="stop" className="control-button" type="button" aria-label="Stop protocol exchange">
-              <span className="control-icon" aria-hidden="true">
-                <Square />
-              </span>
-              <span className="control-label">Stop</span>
-            </button>
-            <button id="step" className="control-button" type="button" aria-label="Step one protocol action">
-              <span className="control-icon" aria-hidden="true">
-                <StepForward />
-              </span>
-              <span id="step-label" className="control-label">
-                Step
-              </span>
-            </button>
+        </div>
+
+        <div className="visualization-status" aria-label="Protocol status">
+          <div className="control-timer" aria-live="polite">
+            <span>Global Timer</span>
+            <strong id="global-timer">0ms</strong>
+          </div>
+          <div id="module-state" className="module-state" aria-live="polite">
+            loading wasm
           </div>
         </div>
 
@@ -255,14 +256,10 @@ export default function WorkbenchPage() {
             <div className="packet-lane c2s">
               <span className="pipe-back" aria-hidden="true" />
               <span className="pipe-front" aria-hidden="true" />
-              <span className="lane-end lane-left">C</span>
-              <span className="lane-end lane-right">S</span>
             </div>
             <div className="packet-lane s2c">
               <span className="pipe-back" aria-hidden="true" />
               <span className="pipe-front" aria-hidden="true" />
-              <span className="lane-end lane-left">C</span>
-              <span className="lane-end lane-right">S</span>
             </div>
           </div>
 

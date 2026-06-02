@@ -156,6 +156,50 @@
     @apply mx-auto w-full max-w-[1340px] px-3 pb-10 sm:px-[18px] lg:px-6 lg:pb-14;
   }
 
+  .workbench-page {
+    --surface: var(--bg);
+    --surface-2: var(--bg);
+    --workbench-field: transparent;
+    --workbench-hover: rgba(15, 98, 254, 0.06);
+    --workbench-selected: rgba(15, 98, 254, 0.1);
+    --workbench-danger: rgba(207, 45, 86, 0.08);
+    --workbench-warning: rgba(141, 109, 0, 0.08);
+    --surface-3: var(--workbench-hover);
+    --shadow-popover: rgba(22, 22, 22, 0.1);
+    --shadow-modal: rgba(22, 22, 22, 0.16);
+    background: var(--bg);
+  }
+
+  html[data-theme="dark"] .workbench-page {
+    --bg: #070b11;
+    --surface: var(--bg);
+    --surface-2: var(--bg);
+    --primary: #8ab4ff;
+    --primary-hover: #b6d2ff;
+    --primary-active: #d8e7ff;
+    --primary-soft: rgba(138, 180, 255, 0.12);
+    --danger-soft: rgba(255, 126, 182, 0.1);
+    --warning-soft: rgba(241, 194, 27, 0.1);
+    --ink: #f7f9fc;
+    --soft: #d6dfeb;
+    --muted: #93a4b8;
+    --line: rgba(148, 163, 184, 0.22);
+    --line-strong: rgba(148, 163, 184, 0.34);
+    --client: #8ab4ff;
+    --client-ink: #d8e7ff;
+    --server: #b6d2ff;
+    --server-ink: #cfe0ff;
+    --packet: #8ab4ff;
+    --packet-ink: #d8e7ff;
+    --workbench-hover: rgba(138, 180, 255, 0.1);
+    --workbench-selected: rgba(138, 180, 255, 0.14);
+    --workbench-danger: rgba(255, 126, 182, 0.12);
+    --workbench-warning: rgba(241, 194, 27, 0.12);
+    --surface-3: var(--workbench-hover);
+    --shadow-popover: rgba(0, 0, 0, 0.42);
+    --shadow-modal: rgba(0, 0, 0, 0.58);
+  }
+
   .top-nav {
     @apply sticky top-0 z-20 flex min-h-12 items-center justify-between gap-3 border-b border-[var(--line)] bg-[var(--nav-surface)] py-1.5 backdrop-blur-md lg:gap-5;
   }
@@ -566,11 +610,11 @@
 
 @layer components {
   .packet-stage {
-    @apply my-0 grid min-h-[258px] grid-cols-[minmax(104px,0.14fr)_minmax(0,1fr)_minmax(104px,0.14fr)] items-stretch gap-5 border-t border-[var(--line)] py-5;
+    @apply my-0 grid min-h-[258px] grid-cols-[minmax(104px,0.14fr)_minmax(0,1fr)_minmax(104px,0.14fr)] items-stretch gap-5 py-5;
   }
 
   .packet-rail {
-    @apply rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] shadow-none;
+    @apply rounded-[var(--radius)] border border-[var(--line)] bg-transparent shadow-none;
   }
 
   .stage-node {
@@ -611,66 +655,86 @@
   }
 
   .packet-rail {
-    @apply isolate relative min-h-[338px] overflow-hidden bg-[var(--surface-2)];
+    @apply isolate relative min-h-[250px] overflow-hidden bg-transparent;
   }
 
   .packet-rail::before {
     content: "";
-    @apply absolute inset-[44px_28px] rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)];
+    @apply absolute left-8 right-8 top-1/2 h-px -translate-y-1/2 bg-[var(--line)];
   }
 
   .relay-timer-label {
-    @apply absolute left-1/2 top-3 z-[8] -translate-x-1/2 whitespace-nowrap rounded-full border border-[var(--line)] bg-[var(--surface)] px-[9px] py-[5px] font-mono text-[11px] text-[var(--muted)];
+    @apply absolute left-1/2 top-3 z-[8] -translate-x-1/2 whitespace-nowrap rounded-full border border-[var(--line)] bg-transparent px-[9px] py-[5px] font-mono text-[11px] text-[var(--muted)];
   }
 
   .packet-lane {
-    @apply pointer-events-none absolute left-12 right-12 h-[118px] rounded-full;
+    @apply pointer-events-none absolute left-12 right-12 h-12;
   }
 
   .packet-lane::after {
     content: "";
-    @apply absolute top-1/2 z-[5] size-0 -translate-y-1/2 border-y-[8px] border-y-transparent;
+    @apply absolute top-1/2 z-[5] size-0 -translate-y-1/2 border-y-[5px] border-y-transparent;
   }
 
   .pipe-back,
   .pipe-front {
-    @apply pointer-events-none absolute left-0 right-0 top-0 h-full rounded-full;
+    @apply pointer-events-none absolute left-0 right-0 top-1/2 -translate-y-1/2 rounded-full;
   }
 
   .pipe-back {
-    @apply z-[1] border bg-[var(--surface)];
-    border-color: var(--pipe-border-soft);
+    @apply z-[1] h-px border-0 opacity-75;
   }
 
   .pipe-front {
-    @apply z-[4] border;
-    border-color: var(--pipe-border);
-    background: var(--pipe-front);
+    @apply z-[1] h-[3px] border-0 opacity-80;
   }
 
   .packet-lane.c2s {
-    @apply top-[56px] border-[rgba(15,98,254,0.24)];
-    background: var(--pipe-c2s);
+    @apply top-[60px] border-0 bg-transparent;
   }
 
   .packet-lane.c2s .pipe-back {
-    @apply bg-[var(--pipe-c2s-back)];
+    background: rgba(15, 98, 254, 0.28);
+  }
+
+  .packet-lane.c2s .pipe-front {
+    background: linear-gradient(90deg, rgba(15, 98, 254, 0.12), rgba(15, 98, 254, 0.74));
+  }
+
+  html[data-theme="dark"] .workbench-page .packet-lane.c2s .pipe-back {
+    background: rgba(138, 180, 255, 0.28);
+  }
+
+  html[data-theme="dark"] .workbench-page .packet-lane.c2s .pipe-front {
+    background: linear-gradient(90deg, rgba(138, 180, 255, 0.16), rgba(138, 180, 255, 0.82));
   }
 
   .packet-lane.c2s::after {
-    @apply right-[58px] border-l-[12px] border-l-[var(--primary)];
+    @apply right-[58px] border-l-[9px] border-l-[var(--primary)];
   }
 
   .packet-lane.s2c {
-    @apply bottom-[56px] border-[rgba(0,67,206,0.24)] bg-[var(--pipe-s2c)];
+    @apply bottom-[50px] border-0 bg-transparent;
   }
 
   .packet-lane.s2c .pipe-back {
-    @apply bg-[var(--pipe-s2c-back)];
+    background: rgba(0, 67, 206, 0.26);
+  }
+
+  .packet-lane.s2c .pipe-front {
+    background: linear-gradient(90deg, rgba(0, 67, 206, 0.74), rgba(0, 67, 206, 0.12));
+  }
+
+  html[data-theme="dark"] .workbench-page .packet-lane.s2c .pipe-back {
+    background: rgba(182, 210, 255, 0.24);
+  }
+
+  html[data-theme="dark"] .workbench-page .packet-lane.s2c .pipe-front {
+    background: linear-gradient(90deg, rgba(182, 210, 255, 0.72), rgba(182, 210, 255, 0.14));
   }
 
   .packet-lane.s2c::after {
-    @apply left-[58px] border-r-[12px] border-r-[var(--server-ink)];
+    @apply left-[58px] border-r-[9px] border-r-[var(--server-ink)];
   }
 
   .packet-lane .lane-end,
@@ -691,11 +755,15 @@
   }
 
   .scenario-toolbar {
-    @apply mt-5 grid items-start gap-y-4 border-y border-[var(--line)] py-3 lg:grid-cols-[minmax(220px,0.65fr)_minmax(420px,1.25fr)_minmax(156px,0.48fr)] lg:gap-x-6 lg:gap-y-0;
+    @apply mt-5 grid items-stretch gap-y-4 border-y border-[var(--line)] py-3 lg:grid-cols-[minmax(220px,0.65fr)_minmax(420px,1.35fr)] lg:gap-x-6;
   }
 
   .stage-controls {
-    @apply grid min-w-0 content-start gap-0 bg-transparent lg:border-l lg:border-[var(--line)] lg:pl-6;
+    @apply mt-auto grid w-full min-w-0 gap-2 border-t border-[var(--line)] bg-transparent pt-3 sm:grid-cols-3;
+  }
+
+  .visualization-status {
+    @apply grid min-w-0 grid-cols-1 items-stretch gap-3 border-b border-[var(--line)] py-2 sm:grid-cols-[minmax(128px,max-content)_minmax(128px,max-content)] sm:justify-end sm:gap-4;
   }
 
   .control-timer,
@@ -719,6 +787,11 @@
     @apply grid min-h-[34px] place-items-center px-1 py-[5px] text-center text-[0.72rem] font-bold leading-tight;
   }
 
+  .visualization-status .control-timer,
+  .visualization-status .module-state {
+    @apply min-h-[46px] border-b-0;
+  }
+
   .module-state.ready {
     @apply border-[rgba(15,98,254,0.28)] bg-transparent text-[var(--primary)];
   }
@@ -728,23 +801,78 @@
   }
 
   .control-button {
-    @apply grid min-h-[44px] w-full min-w-0 grid-cols-[28px_max-content] items-center gap-[9px] border-b border-[var(--line)] bg-transparent px-1 py-2 text-left text-sm font-semibold text-[var(--ink)] transition-colors duration-200 hover:bg-[var(--surface-2)] disabled:opacity-55;
+    @apply grid min-h-9 w-full min-w-0 grid-cols-[20px_minmax(0,max-content)] items-center justify-center gap-1 rounded-[var(--radius)] border border-[var(--line)] bg-transparent px-2 py-1.5 text-center text-sm font-semibold text-[var(--ink)] transition-colors duration-200 hover:border-[var(--primary)] hover:bg-[var(--workbench-hover)] disabled:opacity-55;
   }
 
   .scenario-control {
-    @apply grid min-h-[126px] min-w-0 content-start gap-2 border-b border-[var(--line)] pb-4 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-6;
+    @apply grid min-h-full min-w-0 content-start gap-2 border-b border-[var(--line)] pb-4 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-6;
   }
 
   .scenario-label {
     @apply grid min-h-9 grid-cols-[28px_minmax(0,1fr)] items-center gap-[9px] text-sm font-semibold text-[var(--ink)];
   }
 
+  .scenario-select-row {
+    @apply relative grid min-w-0 grid-cols-[minmax(0,1fr)_36px] items-center gap-2;
+  }
+
   .scenario-select {
-    @apply min-h-9 w-full cursor-pointer rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] px-2 font-mono text-[11px] font-semibold text-[var(--ink)] outline-none transition-colors duration-200 hover:bg-[var(--surface-3)] focus-visible:border-[var(--primary)] focus-visible:ring-2 focus-visible:ring-[rgba(15,98,254,0.18)];
+    @apply min-h-9 w-full cursor-pointer rounded-[var(--radius)] border border-[var(--line)] bg-transparent px-2 font-mono text-[11px] font-semibold text-[var(--ink)] outline-none transition-colors duration-200 hover:bg-[var(--workbench-hover)] focus-visible:border-[var(--primary)] focus-visible:ring-2 focus-visible:ring-[rgba(15,98,254,0.18)];
+  }
+
+  .scenario-info {
+    @apply relative grid size-9 cursor-pointer place-items-center rounded-[var(--radius)] border border-[var(--line)] bg-transparent text-[var(--muted)] transition-colors duration-200 hover:border-[var(--primary)] hover:bg-[var(--workbench-hover)] hover:text-[var(--primary)] focus-visible:border-[var(--primary)] focus-visible:text-[var(--primary)] focus-visible:ring-2 focus-visible:ring-[rgba(15,98,254,0.18)];
+  }
+
+  .scenario-info svg {
+    @apply size-4 stroke-current;
   }
 
   .scenario-summary {
-    @apply block min-h-[30px] border-t border-[var(--line)] px-1 pt-2 font-mono text-[10px] leading-snug text-[var(--muted)];
+    display: none;
+    pointer-events: none;
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    z-index: 20;
+    width: min(280px, calc(100vw - 32px));
+    max-width: calc(100vw - 32px);
+    transform: translateY(4px);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: 0 12px 28px rgba(17, 24, 39, 0.12);
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--soft);
+    opacity: 0;
+    transition:
+      opacity 200ms ease,
+      transform 200ms ease;
+  }
+
+  .scenario-summary::after {
+    content: "";
+    position: absolute;
+    right: 0.75rem;
+    top: 100%;
+    width: 0.5rem;
+    height: 0.5rem;
+    transform: rotate(45deg);
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .scenario-info:hover .scenario-summary,
+  .scenario-info:focus-visible .scenario-summary,
+  .scenario-info:focus-within .scenario-summary {
+    display: block;
+    transform: translateY(0);
+    opacity: 1;
   }
 
   .network-control {
@@ -816,8 +944,8 @@
   }
 
   .datagram {
-    @apply pointer-events-none absolute z-[2] min-h-12 min-w-[126px] rounded-md border border-dashed border-[rgba(15,98,254,0.32)] shadow-none transition-[border-color,opacity,transform] duration-200;
-    background: var(--primary-soft);
+    @apply pointer-events-none absolute z-[2] min-h-10 min-w-[120px] rounded-md border border-dashed border-[rgba(15,98,254,0.32)] shadow-none transition-[border-color,opacity,transform] duration-200;
+    background: transparent;
   }
 
   .datagram-label {
@@ -825,16 +953,16 @@
   }
 
   .packet {
-    @apply pointer-events-auto absolute z-[3] grid min-h-9 w-[126px] cursor-pointer grid-cols-[6px_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-[rgba(15,98,254,0.48)] bg-[var(--surface)] px-2 py-1.5 font-mono text-[11px] leading-tight text-[var(--ink)] shadow-[inset_3px_0_0_var(--primary)] transition-[background,border-color,box-shadow,opacity,transform] duration-200;
+    @apply pointer-events-auto absolute z-[3] grid min-h-8 w-[120px] cursor-pointer grid-cols-[6px_minmax(0,1fr)_auto] items-center gap-1.5 rounded-md border border-[rgba(15,98,254,0.48)] bg-[var(--bg)] px-2 py-1 font-mono text-[10px] leading-tight text-[var(--ink)] shadow-[inset_3px_0_0_var(--primary)] transition-[background,border-color,box-shadow,opacity,transform] duration-200;
   }
 
   .packet::before {
     content: "";
-    @apply size-[6px_20px] rounded-full bg-[var(--client)];
+    @apply size-[6px_18px] rounded-full bg-[var(--client)];
   }
 
   .packet.from-server {
-    @apply border-[rgba(0,67,206,0.36)] bg-[var(--surface)] text-[var(--ink)] shadow-[inset_4px_0_0_var(--server-ink)];
+    @apply border-[rgba(0,67,206,0.36)] bg-[var(--bg)] text-[var(--ink)] shadow-[inset_4px_0_0_var(--server-ink)];
   }
 
   .packet.from-server::before {
@@ -842,7 +970,7 @@
   }
 
   .packet.selected {
-    @apply border-[var(--primary)] bg-[var(--primary-soft)] shadow-[inset_4px_0_0_var(--primary)];
+    @apply border-[var(--primary)] bg-[var(--workbench-selected)] shadow-[inset_4px_0_0_var(--primary)];
   }
 
   .packet[data-phase="generated"] {
@@ -862,11 +990,11 @@
   }
 
   .packet[data-phase="lost"] {
-    @apply border-[rgba(207,45,86,0.72)] bg-[var(--danger-soft)] text-[var(--danger)] shadow-[inset_4px_0_0_var(--danger)];
+    @apply border-[rgba(207,45,86,0.72)] bg-[var(--workbench-danger)] text-[var(--danger)] shadow-[inset_4px_0_0_var(--danger)];
   }
 
   .packet[data-phase="corrupted"] {
-    @apply border-[rgba(207,45,86,0.72)] bg-[var(--danger-soft)] text-[var(--danger)] shadow-[inset_4px_0_0_var(--danger)];
+    @apply border-[rgba(207,45,86,0.72)] bg-[var(--workbench-danger)] text-[var(--danger)] shadow-[inset_4px_0_0_var(--danger)];
   }
 
   .datagram[data-phase="in-flight"] {
@@ -879,7 +1007,7 @@
 
   .datagram[data-phase="received"] {
     @apply border-[rgba(15,98,254,0.86)];
-    background: var(--primary-soft);
+    background: var(--workbench-selected);
   }
 
   .datagram[data-phase="accepted"] {
@@ -887,11 +1015,11 @@
   }
 
   .datagram[data-phase="lost"] {
-    @apply border-[rgba(207,45,86,0.7)] bg-[var(--danger-soft)] opacity-80;
+    @apply border-[rgba(207,45,86,0.7)] bg-[var(--workbench-danger)] opacity-80;
   }
 
   .datagram[data-phase="corrupted"] {
-    @apply border-[rgba(207,45,86,0.7)] bg-[var(--danger-soft)] opacity-80;
+    @apply border-[rgba(207,45,86,0.7)] bg-[var(--workbench-danger)] opacity-80;
   }
 
   .packet strong,
@@ -925,7 +1053,7 @@
 
   .endpoint-chip,
   .diag-pill {
-    @apply inline-flex min-h-6 items-center border-l border-[var(--line)] pl-3 font-mono text-[11px] font-semibold text-[var(--muted)];
+    @apply inline-flex min-h-6 shrink-0 items-center whitespace-nowrap border-l border-[var(--line)] pl-3 font-mono text-[11px] font-semibold text-[var(--muted)];
   }
 
   .client .endpoint-chip,
@@ -950,7 +1078,7 @@
   }
 
   .state-machine {
-    @apply grid-cols-2 border-t border-[var(--line)] sm:grid-cols-4;
+    @apply grid-cols-2 border-y border-[var(--line)] sm:grid-cols-4;
   }
 
   .state-step,
@@ -973,7 +1101,7 @@
 
   .summary-item,
   .packet-tree details {
-    @apply rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] p-3;
+    @apply rounded-[var(--radius)] border border-[var(--line)] bg-transparent p-3;
   }
 
   .state-step {
@@ -1042,17 +1170,30 @@
     @apply overflow-auto border-y border-[var(--line)] bg-transparent;
   }
 
+  .diag-table-wrap.empty {
+    @apply border-y-0;
+  }
+
   .diag-table {
     @apply min-w-full border-collapse font-mono text-xs;
   }
 
+  .packet-space-table-wrap .diag-table {
+    @apply min-w-[760px];
+  }
+
   .diag-table th,
   .diag-table td {
-    @apply border-b border-[var(--line)] px-3 py-2 text-left;
+    @apply whitespace-nowrap border-b border-[var(--line)] px-3 py-2 text-left align-middle;
   }
 
   .diag-table th {
     @apply text-[11px] uppercase text-[var(--muted)];
+  }
+
+  .packet-space-table-wrap .diag-table th,
+  .packet-space-table-wrap .diag-table td {
+    @apply px-3.5;
   }
 
   .diag-table td {
@@ -1112,7 +1253,7 @@
   }
 
   .panel-button {
-    @apply inline-flex min-h-9 cursor-pointer items-center justify-center rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] px-3 text-xs font-semibold text-[var(--ink)] transition-colors duration-200 hover:bg-[var(--surface-3)] disabled:cursor-default disabled:opacity-55;
+    @apply inline-flex min-h-9 cursor-pointer items-center justify-center rounded-[var(--radius)] border border-[var(--line)] bg-transparent px-3 text-xs font-semibold text-[var(--ink)] transition-colors duration-200 hover:bg-[var(--workbench-hover)] disabled:cursor-default disabled:opacity-55;
   }
 
   .panel-actions span {
@@ -1120,11 +1261,11 @@
   }
 
   .packet-row {
-    @apply grid w-full cursor-pointer grid-cols-[56px_72px_minmax(120px,1fr)_minmax(180px,2fr)_72px] items-center gap-3 border-b border-[var(--line)] bg-transparent px-4 py-3 text-left font-mono text-xs text-[var(--soft)] transition-colors duration-200 hover:bg-[var(--primary-soft)];
+    @apply grid w-full cursor-pointer grid-cols-[56px_72px_minmax(120px,1fr)_minmax(180px,2fr)_72px] items-center gap-3 border-b border-[var(--line)] bg-transparent px-4 py-3 text-left font-mono text-xs text-[var(--soft)] transition-colors duration-200 hover:bg-[var(--workbench-hover)];
   }
 
   .packet-row.selected {
-    @apply bg-[var(--primary-soft)] shadow-[inset_3px_0_0_var(--primary)];
+    @apply bg-[var(--workbench-selected)] shadow-[inset_3px_0_0_var(--primary)];
   }
 
   .packet-row strong {
@@ -1150,12 +1291,12 @@
   }
 
   .packet-modal {
-    @apply flex max-h-[88vh] w-full max-w-[980px] flex-col overflow-hidden rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)];
+    @apply flex max-h-[88vh] w-full max-w-[980px] flex-col overflow-hidden rounded-[var(--radius)] border border-[var(--line)] bg-[var(--bg)];
     box-shadow: 0 24px 90px var(--shadow-modal);
   }
 
   .modal-head {
-    @apply flex items-center justify-between gap-3 border-b border-[var(--line)] bg-[var(--surface)] p-4;
+    @apply flex items-center justify-between gap-3 border-b border-[var(--line)] bg-transparent p-4;
   }
 
   .modal-head h2 {
@@ -1167,7 +1308,7 @@
   }
 
   .modal-close {
-    @apply inline-flex size-10 cursor-pointer items-center justify-center rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] text-[var(--ink)] transition-colors duration-200 hover:bg-[var(--surface-3)];
+    @apply inline-flex size-10 cursor-pointer items-center justify-center rounded-[var(--radius)] border border-[var(--line)] bg-transparent text-[var(--ink)] transition-colors duration-200 hover:bg-[var(--workbench-hover)];
   }
 
   .detail-summary {
@@ -1848,16 +1989,8 @@
       @apply gap-5;
     }
 
-    .stage-controls {
-      @apply grid-cols-[repeat(2,minmax(130px,1fr))] gap-x-4;
-    }
-
-    .control-timer {
-      @apply col-span-full;
-    }
-
-    .module-state {
-      @apply col-span-full;
+    .control-button {
+      @apply min-w-0;
     }
 
     .plot-grid {
@@ -1898,11 +2031,11 @@
     }
 
     .stage-controls {
-      @apply grid-cols-1 gap-x-0;
+      @apply max-w-none grid-cols-1 gap-x-0;
     }
 
     .control-button {
-      @apply min-h-[50px] min-w-0;
+      @apply min-h-10 min-w-0;
     }
 
     .scenario-toolbar {
@@ -1922,11 +2055,11 @@
     }
 
     .packet-rail {
-      @apply min-h-[300px];
+      @apply min-h-[230px];
     }
 
     .packet-lane {
-      @apply left-[18px] right-[18px] h-[98px];
+      @apply left-[18px] right-[18px] h-11;
     }
 
     .packet-lane.c2s::after {
@@ -1942,7 +2075,7 @@
     }
 
     .packet-lane.s2c {
-      @apply bottom-[42px];
+      @apply bottom-[44px];
     }
 
     .lane-end {
@@ -1950,7 +2083,7 @@
     }
 
     .packet {
-      @apply min-h-9 w-[112px];
+      @apply min-h-8 w-[108px];
     }
 
     .plot-grid {

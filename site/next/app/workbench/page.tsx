@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Script from 'next/script';
-import { Play, Square, StepForward, X } from 'lucide-react';
+import { Play, Shuffle, Square, StepForward, X } from 'lucide-react';
 
 import { DemoNav } from '@/components/demo-nav';
 import { PageHeader } from '@/components/page-header';
@@ -133,10 +133,16 @@ export default function WorkbenchPage() {
 
           <div id="packet-rail" className="packet-rail">
             <div className="packet-lane c2s">
-              <span>C -&gt; S</span>
+              <span className="pipe-back" aria-hidden="true" />
+              <span className="pipe-front" aria-hidden="true" />
+              <span className="lane-end lane-left">C</span>
+              <span className="lane-end lane-right">S</span>
             </div>
             <div className="packet-lane s2c">
-              <span>S -&gt; C</span>
+              <span className="pipe-back" aria-hidden="true" />
+              <span className="pipe-front" aria-hidden="true" />
+              <span className="lane-end lane-left">C</span>
+              <span className="lane-end lane-right">S</span>
             </div>
           </div>
 
@@ -153,6 +159,24 @@ export default function WorkbenchPage() {
             </div>
             <div id="module-state" className="module-state" aria-live="polite">
               loading wasm
+            </div>
+            <div className="loss-control" aria-label="Packet loss simulation">
+              <button
+                id="loss-toggle"
+                className="loss-toggle"
+                type="button"
+                aria-pressed="false"
+                aria-label="Toggle packet loss simulation"
+              >
+                <span className="control-icon" aria-hidden="true">
+                  <Shuffle />
+                </span>
+                <span className="control-label">Loss</span>
+              </button>
+              <label className="loss-rate" htmlFor="loss-rate">
+                <span id="loss-rate-label">0%</span>
+                <input id="loss-rate" type="range" min="0" max="40" step="5" defaultValue="15" />
+              </label>
             </div>
             <button id="start" className="control-button" type="button" aria-label="Start protocol exchange">
               <span className="control-icon" aria-hidden="true">

@@ -517,45 +517,82 @@
   }
 
   .packet-rail {
-    @apply relative min-h-[258px] overflow-hidden bg-[var(--surface-2)];
+    @apply isolate relative min-h-[338px] overflow-hidden bg-[var(--surface-2)];
   }
 
   .packet-rail::before {
     content: "";
-    @apply absolute bottom-[57px] left-[30px] right-[30px] top-[57px] rounded-[24px] border border-[var(--line)] bg-[var(--surface)];
+    @apply absolute inset-[44px_28px] rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)];
   }
 
   .packet-rail::after {
     content: "global relay timer: 1000ms";
-    @apply absolute left-1/2 top-4 -translate-x-1/2 whitespace-nowrap rounded-full border border-[var(--line)] bg-[var(--surface)] px-[9px] py-[5px] font-mono text-[11px] text-[var(--muted)];
+    @apply absolute left-1/2 top-3 -translate-x-1/2 whitespace-nowrap rounded-full border border-[var(--line)] bg-[var(--surface)] px-[9px] py-[5px] font-mono text-[11px] text-[var(--muted)];
   }
 
   .packet-lane {
-    @apply absolute left-12 right-12 h-[46px] rounded-full border-[7px] border-[var(--line-strong)] bg-[var(--surface)] shadow-none;
+    @apply pointer-events-none absolute left-12 right-12 h-[118px] rounded-full;
+  }
+
+  .packet-lane::after {
+    content: "";
+    @apply absolute top-1/2 z-[5] size-0 -translate-y-1/2 border-y-[8px] border-y-transparent;
+  }
+
+  .pipe-back,
+  .pipe-front {
+    @apply pointer-events-none absolute left-0 right-0 top-0 h-full rounded-full;
+  }
+
+  .pipe-back {
+    @apply z-[1] border bg-[var(--surface)];
+    border-color: rgba(22, 22, 22, 0.12);
+  }
+
+  .pipe-front {
+    @apply z-[4] border;
+    border-color: rgba(22, 22, 22, 0.14);
+    background: rgba(255, 255, 255, 0.18);
   }
 
   .packet-lane.c2s {
-    @apply top-[72px] border-[rgba(15,98,254,0.3)];
+    @apply top-[56px] border-[rgba(15,98,254,0.24)] bg-[#edf5ff]/45;
+  }
+
+  .packet-lane.c2s .pipe-back {
+    @apply bg-[#f7fbff];
+  }
+
+  .packet-lane.c2s::after {
+    @apply right-[58px] border-l-[12px] border-l-[var(--primary)];
   }
 
   .packet-lane.s2c {
-    @apply top-36 border-[rgba(0,67,206,0.3)];
+    @apply bottom-[56px] border-[rgba(0,67,206,0.24)] bg-[#f3f6ff]/65;
   }
 
-  .packet-lane span,
+  .packet-lane.s2c .pipe-back {
+    @apply bg-[#f8faff];
+  }
+
+  .packet-lane.s2c::after {
+    @apply left-[58px] border-r-[12px] border-r-[var(--server-ink)];
+  }
+
+  .packet-lane .lane-end,
   .datagram-label {
     @apply absolute rounded-full border border-[var(--line)] bg-[var(--surface)] px-2 py-1 font-mono text-[11px] font-extrabold text-[var(--muted)];
   }
 
-  .packet-lane span {
-    @apply top-1/2 -translate-y-1/2;
+  .lane-end {
+    @apply top-1/2 z-[6] grid size-8 -translate-y-1/2 place-items-center p-0 text-xs;
   }
 
-  .packet-lane.c2s span {
+  .lane-left {
     @apply left-3 text-[var(--client-ink)];
   }
 
-  .packet-lane.s2c span {
+  .lane-right {
     @apply right-3 text-[var(--server-ink)];
   }
 
@@ -596,6 +633,26 @@
     @apply grid min-h-[50px] w-full min-w-[156px] grid-cols-[32px_max-content] items-center gap-[9px] rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-[9px] py-2 text-left text-sm font-semibold text-[var(--ink)] transition-[background,border-color,box-shadow] duration-200 hover:bg-[var(--surface-3)] disabled:opacity-55;
   }
 
+  .loss-control {
+    @apply grid min-h-[82px] min-w-[156px] gap-2 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] p-2;
+  }
+
+  .loss-toggle {
+    @apply grid min-h-10 w-full cursor-pointer grid-cols-[32px_minmax(0,1fr)] items-center gap-[9px] rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] px-[7px] py-1.5 text-left text-sm font-semibold text-[var(--ink)] transition-colors duration-200 hover:bg-[var(--surface-3)] aria-pressed:border-[rgba(207,45,86,0.46)] aria-pressed:bg-[#fff1f1] aria-pressed:text-[var(--danger)];
+  }
+
+  .loss-rate {
+    @apply grid grid-cols-[32px_minmax(0,1fr)] items-center gap-[9px] px-[7px];
+  }
+
+  .loss-rate span {
+    @apply font-mono text-[11px] font-bold text-[var(--muted)];
+  }
+
+  .loss-rate input {
+    @apply h-5 min-w-0 cursor-pointer accent-[var(--danger)] disabled:cursor-default disabled:opacity-45;
+  }
+
   #start {
     @apply border-[rgba(15,98,254,0.68)] text-[var(--client-ink)] hover:border-[var(--primary)];
   }
@@ -617,20 +674,20 @@
   }
 
   .datagram {
-    @apply pointer-events-none absolute z-[1] min-h-[66px] min-w-[168px] rounded-xl border border-dashed border-[rgba(15,98,254,0.32)] bg-[#edf5ff]/75 shadow-none transition-[border-color,opacity,transform] duration-200;
+    @apply pointer-events-none absolute z-[2] min-h-12 min-w-[126px] rounded-md border border-dashed border-[rgba(15,98,254,0.32)] bg-[#edf5ff]/70 shadow-none transition-[border-color,opacity,transform] duration-200;
   }
 
   .datagram-label {
-    @apply left-2 top-[-11px] whitespace-nowrap px-1.5 py-[3px] text-[10px];
+    @apply left-1.5 top-[-9px] whitespace-nowrap px-1.5 py-0.5 text-[9px];
   }
 
   .packet {
-    @apply pointer-events-auto absolute z-[2] grid min-h-11 w-[150px] cursor-pointer grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-[9px] rounded-lg border border-[rgba(15,98,254,0.48)] bg-[var(--surface)] px-[11px] py-2 font-mono text-xs leading-tight text-[var(--ink)] shadow-[inset_4px_0_0_var(--primary)] transition-[background,border-color,box-shadow,opacity,transform] duration-200;
+    @apply pointer-events-auto absolute z-[3] grid min-h-9 w-[126px] cursor-pointer grid-cols-[6px_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-[rgba(15,98,254,0.48)] bg-[var(--surface)] px-2 py-1.5 font-mono text-[11px] leading-tight text-[var(--ink)] shadow-[inset_3px_0_0_var(--primary)] transition-[background,border-color,box-shadow,opacity,transform] duration-200;
   }
 
   .packet::before {
     content: "";
-    @apply size-[8px_24px] rounded-full bg-[var(--client)];
+    @apply size-[6px_20px] rounded-full bg-[var(--client)];
   }
 
   .packet.from-server {
@@ -661,6 +718,10 @@
     @apply scale-[0.96] opacity-20;
   }
 
+  .packet[data-phase="lost"] {
+    @apply border-[rgba(207,45,86,0.72)] bg-[#fff1f1] text-[var(--danger)] shadow-[inset_4px_0_0_var(--danger)];
+  }
+
   .datagram[data-phase="in-flight"] {
     @apply border-[rgba(15,98,254,0.58)];
   }
@@ -677,13 +738,17 @@
     @apply scale-[0.98] opacity-0;
   }
 
+  .datagram[data-phase="lost"] {
+    @apply border-[rgba(207,45,86,0.7)] bg-[#fff1f1]/90 opacity-80;
+  }
+
   .packet strong,
   .packet span {
     @apply overflow-hidden truncate whitespace-nowrap;
   }
 
   .packet span {
-    @apply mt-1 font-mono text-[11px] text-[var(--muted)];
+    @apply mt-0.5 font-mono text-[10px] text-[var(--muted)];
   }
 
   .workbench {
@@ -855,6 +920,11 @@
 
   .entry.error .time,
   .entry.error .text {
+    @apply text-[var(--danger)];
+  }
+
+  .entry.loss .time,
+  .entry.loss .text {
     @apply text-[var(--danger)];
   }
 
@@ -1598,10 +1668,14 @@
     }
 
     .stage-controls {
-      @apply w-full grid-cols-[repeat(3,minmax(130px,1fr))];
+      @apply w-full grid-cols-[repeat(2,minmax(130px,1fr))];
     }
 
     .control-timer {
+      @apply col-span-full;
+    }
+
+    .module-state {
       @apply col-span-full;
     }
 
@@ -1651,23 +1725,35 @@
     }
 
     .packet-rail {
-      @apply min-h-[222px];
+      @apply min-h-[300px];
     }
 
     .packet-lane {
-      @apply left-[18px] right-[18px] h-[42px] border-[6px];
+      @apply left-[18px] right-[18px] h-[98px];
+    }
+
+    .packet-lane.c2s::after {
+      @apply right-[48px];
+    }
+
+    .packet-lane.s2c::after {
+      @apply left-[48px];
     }
 
     .packet-lane.c2s {
-      @apply top-[78px];
+      @apply top-[58px];
     }
 
     .packet-lane.s2c {
-      @apply top-36;
+      @apply bottom-[42px];
+    }
+
+    .lane-end {
+      @apply size-7;
     }
 
     .packet {
-      @apply min-h-10 w-[122px];
+      @apply min-h-9 w-[112px];
     }
 
     .plot-grid {

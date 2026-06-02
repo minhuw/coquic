@@ -1,5 +1,6 @@
 const wasmPath = "./coquic-wasm-quic.wasm";
 const packetDelayMs = 1000;
+const defaultLossRatePercent = 15;
 const initialDestinationConnectionId = Uint8Array.from([0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08]);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -74,6 +75,8 @@ let schedulerWaiters = [];
 let currentRunPromise = null;
 let protocolStepInProgress = false;
 let activeWorkbenchRoot = null;
+let packetLossEnabled = false;
+let packetLossRatePercent = defaultLossRatePercent;
 const activePackets = new Map();
 const activeDatagrams = new Map();
 const boundControlNodes = new WeakSet();
@@ -176,6 +179,48 @@ function setModuleState(text, className = "") {
 function setGlobalTimer(timeMs) {
   const node = el("global-timer");
   if (node) node.textContent = `${timeMs}ms`;
+}
+
+function updateLossControls() {
+  const toggle = el("loss-toggle");
+  const rate = el("loss-rate");
+  const label = el("loss-rate-label");
+  if (toggle) {
+    toggle.setAttribute("aria-pressed", packetLossEnabled ? "true" : "false");
+    toggle.dataset.state = packetLossEnabled ? "on" : "off";
+  }
+  if (rate) {
+    rate.value = `${packetLossRatePercent}`;
+    rate.disabled = !packetLossEnabled;
+  }
+  if (label) label.textContent = packetLossEnabled ? `${packetLossRatePercent}%` : "0%";
+}
+
+function setPacketLossEnabled(enabled) {
+  packetLossEnabled = enabled;
+  updateLossControls();
+}
+
+function setPacketLossRate(value) {
+  const parsed = Number.parseInt(value, 10);
+  packetLossRatePercent = Number.isFinite(parsed)
+    ? Math.max(0, Math.min(40, parsed))
+    : defaultLossRatePercent;
+  if (packetLossRatePercent === 0) packetLossEnabled = false;
+  updateLossControls();
+}
+
+function shouldDropDatagram(runState, direction, datagram, records) {
+  if (!packetLossEnabled || packetLossRatePercent <= 0) return false;
+  if (runState.clientState !== "handshake_confirmed" || runState.serverState !== "handshake_confirmed") {
+    return false;
+  }
+  if (records.some((record) => record.kind !== "1-RTT")) return false;
+  const attempt = runState.lossAttempt;
+  runState.lossAttempt += 1;
+  const period = Math.max(2, Math.round(100 / packetLossRatePercent));
+  const phase = direction === "client" ? 3 : 5;
+  return (attempt + phase) % period === 0;
 }
 
 function wasmI64ToNumber(value, label) {
@@ -541,18 +586,32 @@ function clearPackets() {
   rail.querySelectorAll(".datagram").forEach((datagram) => datagram.remove());
 }
 
-function packetLaneBaseTop(direction) {
+function packetLaneNode(direction) {
+  const rail = el("packet-rail");
+  if (!rail) return null;
+  return rail.querySelector(direction === "client" ? ".packet-lane.c2s" : ".packet-lane.s2c");
+}
+
+function packetLaneBaseTop(direction, packetNode = null) {
+  const lane = packetLaneNode(direction);
+  if (lane) {
+    const packetHeight = packetNode?.offsetHeight ?? 44;
+    return lane.offsetTop + Math.max(0, (lane.clientHeight - packetHeight) / 2);
+  }
   const mobile = window.matchMedia("(max-width: 680px)").matches;
-  if (direction === "client") return mobile ? 99 : 95;
-  return mobile ? 165 : 167;
+  if (direction === "client") return mobile ? 106 : 110;
+  return mobile ? 208 : 226;
 }
 
 function packetTravelBounds(item) {
   const rail = el("packet-rail");
   if (!rail) return { leftEdge: 0, rightEdge: 0 };
-  const laneInset = window.matchMedia("(max-width: 680px)").matches ? 18 : 48;
-  const leftEdge = laneInset;
-  const rightEdge = Math.max(leftEdge, rail.clientWidth - laneInset - item.node.offsetWidth);
+  const lane = packetLaneNode(item.direction);
+  const laneInset = window.matchMedia("(max-width: 680px)").matches ? 56 : 94;
+  const laneLeft = lane?.offsetLeft ?? 0;
+  const laneWidth = lane?.clientWidth ?? rail.clientWidth;
+  const leftEdge = laneLeft + laneInset;
+  const rightEdge = Math.max(leftEdge, laneLeft + laneWidth - laneInset - item.node.offsetWidth);
   return { leftEdge, rightEdge };
 }
 
@@ -575,7 +634,7 @@ function directionPackets(direction) {
 
 function renderPacketItem(item, x) {
   item.node.style.left = `${x}px`;
-  item.node.style.top = `${packetLaneBaseTop(item.direction)}px`;
+  item.node.style.top = `${packetLaneBaseTop(item.direction, item.node)}px`;
   item.node.style.opacity = item.phase === "accepted" ? "0.2" : "1";
 }
 
@@ -585,13 +644,14 @@ function renderDatagramEnvelope(datagram) {
     datagram.node.style.opacity = "0";
     return;
   }
-  const left = Math.min(...packets.map((item) => item.node.offsetLeft)) - 10;
-  const right = Math.max(...packets.map((item) => item.node.offsetLeft + item.node.offsetWidth)) + 10;
-  const top = packetLaneBaseTop(datagram.direction) - 12;
+  const left = Math.min(...packets.map((item) => item.node.offsetLeft)) - 6;
+  const right = Math.max(...packets.map((item) => item.node.offsetLeft + item.node.offsetWidth)) + 6;
+  const top = Math.min(...packets.map((item) => item.node.offsetTop)) - 7;
+  const bottom = Math.max(...packets.map((item) => item.node.offsetTop + item.node.offsetHeight)) + 7;
   datagram.node.style.left = `${left}px`;
   datagram.node.style.top = `${top}px`;
-  datagram.node.style.width = `${Math.max(168, right - left)}px`;
-  datagram.node.style.height = `${Math.max(66, packets[0].node.offsetHeight + 24)}px`;
+  datagram.node.style.width = `${Math.max(136, right - left)}px`;
+  datagram.node.style.height = `${Math.max(48, bottom - top)}px`;
 }
 
 function renderDatagramEnvelopes(direction) {
@@ -663,7 +723,9 @@ function setPacketPhase(item, phase) {
   item.node.dataset.phase = phase;
   const status = item.node.querySelector("span");
   if (status) {
-    status.textContent = phase === "received" || phase === "accepted" ? phase : item.sizeLabel;
+    status.textContent = phase === "received" || phase === "accepted" || phase === "lost"
+      ? phase
+      : item.sizeLabel;
   }
   item.node.setAttribute(
     "aria-label",
@@ -685,9 +747,9 @@ function retirePacket(item) {
   renderPacketDirection(item.direction);
 }
 
-function retireDatagram(datagram) {
+function retireDatagram(datagram, phase = "accepted") {
   if (!activeDatagrams.has(datagram.id)) return;
-  setDatagramPhase(datagram, "accepted");
+  setDatagramPhase(datagram, phase);
   setTimeout(() => {
     activeDatagrams.delete(datagram.id);
     datagram.node.remove();
@@ -752,6 +814,11 @@ function visualizePacket(direction, record) {
       setPacketPhase(item, "accepted");
       setTimeout(() => retirePacket(item), 180);
     },
+    lose() {
+      item.elapsedMs = packetDelayMs;
+      setPacketPhase(item, "lost");
+      setTimeout(() => retirePacket(item), 560);
+    },
   };
 }
 
@@ -761,7 +828,7 @@ function visualizeDatagram(direction, datagram, records, packetItems) {
   node.className = `datagram ${fromClient ? "from-client" : "from-server"}`;
   node.innerHTML = '<span class="datagram-label"></span>';
   node.querySelector(".datagram-label").textContent =
-    `UDP d${datagramRecords.length} ${records.length} QUIC pkt${records.length === 1 ? "" : "s"} ${datagram.bytes.length}B`;
+    `UDP d${datagramRecords.length} / ${records.length} pkt / ${datagram.bytes.length}B`;
   el("packet-rail").prepend(node);
   const item = {
     id: datagramRecords.length,
@@ -1732,6 +1799,18 @@ function queueDatagramIfAvailable(from, to, toRoute, runState, label, direction)
   runState.endpointStats[direction].sentDatagrams += 1;
   runState.endpointStats[direction].sentBytes += datagram.bytes.length;
   const sentAtMs = runState.timelineMs;
+  if (shouldDropDatagram(runState, direction, datagram, records)) {
+    runState.droppedDatagrams += 1;
+    setDatagramPhase(visual, "lost");
+    for (const animation of animations) animation.lose();
+    log(
+      runState.timelineMs,
+      `${label} ${datagram.bytes.length} bytes dropped by simulated loss (${packetLossRatePercent}%)`,
+      "loss",
+    );
+    retireDatagram(visual, "lost");
+    return true;
+  }
   runState.inFlight.push({
     datagram,
     records,
@@ -1893,6 +1972,8 @@ async function runDemo({ startPaused = false } = {}) {
     inFlight: [],
     arrived: [],
     accepting: [],
+    droppedDatagrams: 0,
+    lossAttempt: 0,
     pendingPingPong: [],
     streamReceiveBytes: new Map(),
     pingPongSequence: 0,
@@ -1953,39 +2034,6 @@ async function runDemo({ startPaused = false } = {}) {
         progressed = true;
         continue;
       }
-      if (hasDatagram(client)) {
-        if (!(await runProtocolStep(runState, "client emits datagram", () => {
-          if (!queueDatagramIfAvailable(client, server, 7, runState, "client -> server", "client")) {
-            throw new Error("client datagram disappeared before emit step");
-          }
-        }))) {
-          break;
-        }
-        progressed = true;
-        continue;
-      }
-      if (hasDatagram(server)) {
-        if (!(await runProtocolStep(runState, "server emits datagram", () => {
-          if (!queueDatagramIfAvailable(server, client, 1, runState, "server -> client", "server")) {
-            throw new Error("server datagram disappeared before emit step");
-          }
-        }))) {
-          break;
-        }
-        progressed = true;
-        continue;
-      }
-      if (runState.inFlight.length > 0) {
-        const arrivalAtMs = Math.min(...runState.inFlight.map((item) => item.arrivalAtMs));
-        const dueCount = runState.inFlight.filter((item) => item.arrivalAtMs === arrivalAtMs).length;
-        if (!(await runProtocolStep(runState, `${dueCount} datagram${dueCount === 1 ? "" : "s"} arrive`, (stepMode) =>
-          arriveDueDatagrams(runState, { instant: stepMode === "single" })
-        ))) {
-          break;
-        }
-        progressed = true;
-        continue;
-      }
       if (hasEvent(client) || hasEvent(server)) {
         drainInternalEvents(runState);
         updateEndpointDiagnostics(client, server, runState);
@@ -2010,6 +2058,41 @@ async function runDemo({ startPaused = false } = {}) {
         if (!(await runAutomaticStep(runState, () => {
           queuePingPongMessage(runState, protocolNow, next.sender, next.streamId);
         }))) {
+          break;
+        }
+        progressed = true;
+        continue;
+      }
+
+      if (hasDatagram(client)) {
+        if (!(await runProtocolStep(runState, "client emits datagram", () => {
+          if (!queueDatagramIfAvailable(client, server, 7, runState, "client -> server", "client")) {
+            throw new Error("client datagram disappeared before emit step");
+          }
+        }))) {
+          break;
+        }
+        progressed = true;
+        continue;
+      }
+      if (hasDatagram(server)) {
+        if (!(await runProtocolStep(runState, "server emits datagram", () => {
+          if (!queueDatagramIfAvailable(server, client, 1, runState, "server -> client", "server")) {
+            throw new Error("server datagram disappeared before emit step");
+          }
+        }))) {
+          break;
+        }
+        progressed = true;
+        continue;
+      }
+
+      if (runState.inFlight.length > 0) {
+        const arrivalAtMs = Math.min(...runState.inFlight.map((item) => item.arrivalAtMs));
+        const dueCount = runState.inFlight.filter((item) => item.arrivalAtMs === arrivalAtMs).length;
+        if (!(await runProtocolStep(runState, `${dueCount} datagram${dueCount === 1 ? "" : "s"} arrive`, (stepMode) =>
+          arriveDueDatagrams(runState, { instant: stepMode === "single" })
+        ))) {
           break;
         }
         progressed = true;
@@ -2088,6 +2171,12 @@ function bindWorkbenchControls() {
   bindControl("start", "click", handleStartClick);
   bindControl("stop", "click", pauseDemo);
   bindControl("step", "click", requestNextStep);
+  bindControl("loss-toggle", "click", () => setPacketLossEnabled(!packetLossEnabled));
+  bindControl("loss-rate", "input", (event) => {
+    setPacketLossRate(event.target.value);
+    if (packetLossRatePercent > 0) packetLossEnabled = true;
+    updateLossControls();
+  });
   bindControl("download-pcap", "click", downloadPcap);
   bindControl("packet-modal-close", "click", closePacketModal);
   bindControl("packet-modal", "click", (event) => {
@@ -2103,6 +2192,7 @@ function initializeWorkbenchPage() {
   bindWorkbenchControls();
   resetPacketInspector();
   resetEndpointDiagnostics();
+  updateLossControls();
   setModuleState(wasm ? "wasm ready" : "loading wasm", wasm ? "ready" : "");
   updateRunButton();
 }

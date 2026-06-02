@@ -381,10 +381,6 @@ bool should_keep_endpoint_connection_entry(const QuicConnection &quic_connection
            !should_remove_endpoint_connection_entry(quic_connection, drained_result, now);
 }
 
-bool contains_version(std::span<const std::uint32_t> versions, std::uint32_t version) {
-    return std::find(versions.begin(), versions.end(), version) != versions.end();
-}
-
 bool is_reserved_version(std::uint32_t version) {
     return (version & 0x0f0f0f0fu) == 0x0a0a0a0au;
 }
@@ -3607,7 +3603,9 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
         }
 
         const bool endpoint_supports_version =
-            contains_version(endpoint_config_.supported_versions, parsed->version);
+            std::find(endpoint_config_.supported_versions.begin(),
+                      endpoint_config_.supported_versions.end(),
+                      parsed->version) != endpoint_config_.supported_versions.end();
         bool should_send_version_negotiation =
             parsed->kind == ParsedEndpointDatagram::Kind::unsupported_version_long_header ||
             ((parsed->kind == ParsedEndpointDatagram::Kind::supported_initial ||
@@ -3997,13 +3995,18 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                             const bool valid_source_connection_id =
                                 version_negotiation->source_connection_id ==
                                 config.initial_destination_connection_id;
-                            const bool echoes_original_version = contains_version(
-                                version_negotiation->supported_versions, config.original_version);
+                            const bool echoes_original_version =
+                                std::find(version_negotiation->supported_versions.begin(),
+                                          version_negotiation->supported_versions.end(),
+                                          config.original_version) !=
+                                version_negotiation->supported_versions.end();
                             if (valid_destination_connection_id && valid_source_connection_id &&
                                 !echoes_original_version) {
                                 for (const auto supported_version : config.supported_versions) {
-                                    if (!contains_version(version_negotiation->supported_versions,
-                                                          supported_version)) {
+                                    if (std::find(version_negotiation->supported_versions.begin(),
+                                                  version_negotiation->supported_versions.end(),
+                                                  supported_version) ==
+                                        version_negotiation->supported_versions.end()) {
                                         continue;
                                     }
                                     config.initial_version = supported_version;

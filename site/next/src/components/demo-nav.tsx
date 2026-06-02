@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { ChevronDown } from 'lucide-react';
 import { useState } from 'react';
 
-import { CoquicLogoIcon, GitHubIcon } from './icons';
+import { CoquicLogoIcon, GitHubIcon, HomepageIcon } from './icons';
 import { ThemeToggle } from './theme-toggle';
 
 export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'interop' | 'coverage' | 'qa';
@@ -100,6 +100,15 @@ export function DemoNav({ active }: DemoNavProps) {
         </span>
         <span className="nav-icon-actions">
           <ThemeToggle />
+          <a
+            className="repo-link"
+            href="https://www.minhuw.dev"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Minhu Wang homepage"
+          >
+            <HomepageIcon className="size-[19px]" />
+          </a>
           <a
             className="repo-link"
             href="https://github.com/minhuw/coquic"

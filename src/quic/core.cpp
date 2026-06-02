@@ -385,21 +385,21 @@ bool is_reserved_version(std::uint32_t version) {
     return (version & 0x0f0f0f0fu) == 0x0a0a0a0au;
 }
 
-void append_u16_be(std::vector<std::byte> &bytes, std::uint16_t value) {
-    bytes.push_back(static_cast<std::byte>((value >> 8) & 0xffu));
-    bytes.push_back(static_cast<std::byte>(value & 0xffu));
+void append_u16_be(std::vector<std::byte> &output, std::uint16_t value) {
+    output.push_back(static_cast<std::byte>((value >> 8) & 0xffu));
+    output.push_back(static_cast<std::byte>(value & 0xffu));
 }
 
-void append_u32_be(std::vector<std::byte> &bytes, std::uint32_t value) {
-    bytes.push_back(static_cast<std::byte>((value >> 24) & 0xffu));
-    bytes.push_back(static_cast<std::byte>((value >> 16) & 0xffu));
-    bytes.push_back(static_cast<std::byte>((value >> 8) & 0xffu));
-    bytes.push_back(static_cast<std::byte>(value & 0xffu));
+void append_u32_be(std::vector<std::byte> &output, std::uint32_t value) {
+    output.push_back(static_cast<std::byte>((value >> 24) & 0xffu));
+    output.push_back(static_cast<std::byte>((value >> 16) & 0xffu));
+    output.push_back(static_cast<std::byte>((value >> 8) & 0xffu));
+    output.push_back(static_cast<std::byte>(value & 0xffu));
 }
 
-void append_u64_be(std::vector<std::byte> &bytes, std::uint64_t value) {
+void append_u64_be(std::vector<std::byte> &output, std::uint64_t value) {
     for (int shift = 56; shift >= 0; shift -= 8) {
-        bytes.push_back(static_cast<std::byte>((value >> static_cast<unsigned>(shift)) & 0xffu));
+        output.push_back(static_cast<std::byte>((value >> static_cast<unsigned>(shift)) & 0xffu));
     }
 }
 
@@ -421,21 +421,21 @@ compute_hmac_sha256_for_core(std::span<const std::byte> secret,
 }
 
 std::optional<std::uint16_t> read_u16_be(BufferReader &reader) {
-    const auto bytes = reader.read_exact(sizeof(std::uint16_t));
-    if (!bytes.has_value()) {
+    const auto encoded_value = reader.read_exact(sizeof(std::uint16_t));
+    if (!encoded_value.has_value()) {
         return std::nullopt;
     }
     return static_cast<std::uint16_t>(
-        (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes.value()[0])) << 8) |
-        static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes.value()[1])));
+        (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(encoded_value.value()[0])) << 8) |
+        static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(encoded_value.value()[1])));
 }
 
 std::optional<std::uint32_t> read_u32_be(BufferReader &reader) {
-    const auto bytes = reader.read_exact(sizeof(std::uint32_t));
-    if (!bytes.has_value()) {
+    const auto encoded_value = reader.read_exact(sizeof(std::uint32_t));
+    if (!encoded_value.has_value()) {
         return std::nullopt;
     }
-    const auto value_bytes = bytes.value();
+    const auto value_bytes = encoded_value.value();
     return (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(value_bytes[0])) << 24) |
            (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(value_bytes[1])) << 16) |
            (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(value_bytes[2])) << 8) |
@@ -443,12 +443,12 @@ std::optional<std::uint32_t> read_u32_be(BufferReader &reader) {
 }
 
 std::optional<std::uint64_t> read_u64_be(BufferReader &reader) {
-    const auto bytes = reader.read_exact(sizeof(std::uint64_t));
-    if (!bytes.has_value()) {
+    const auto encoded_value = reader.read_exact(sizeof(std::uint64_t));
+    if (!encoded_value.has_value()) {
         return std::nullopt;
     }
     std::uint64_t value = 0;
-    for (const auto byte : bytes.value()) {
+    for (const auto byte : encoded_value.value()) {
         value = (value << 8) | std::to_integer<std::uint8_t>(byte);
     }
     return value;
@@ -460,20 +460,20 @@ read_length_prefixed_bytes(BufferReader &reader) {
     if (!size.has_value() || reader.remaining() < *size) {
         return std::nullopt;
     }
-    const auto bytes = reader.read_exact(*size);
-    if (!bytes.has_value()) {
+    const auto encoded_value = reader.read_exact(*size);
+    if (!encoded_value.has_value()) {
         return std::nullopt;
     }
-    return std::vector<std::byte>(bytes.value().begin(), bytes.value().end());
+    return std::vector<std::byte>(encoded_value.value().begin(), encoded_value.value().end());
 }
 
-COQUIC_NO_PROFILE bool append_length_prefixed_bytes(std::vector<std::byte> &bytes,
+COQUIC_NO_PROFILE bool append_length_prefixed_bytes(std::vector<std::byte> &output,
                                                     std::span<const std::byte> value) {
     if (value.size() > std::numeric_limits<std::uint16_t>::max()) {
         return false;
     }
-    append_u16_be(bytes, static_cast<std::uint16_t>(value.size()));
-    bytes.insert(bytes.end(), value.begin(), value.end());
+    append_u16_be(output, static_cast<std::uint16_t>(value.size()));
+    output.insert(output.end(), value.begin(), value.end());
     return true;
 }
 
@@ -513,9 +513,10 @@ compute_address_validation_token_tag(
         return std::nullopt;
     }
 
-    std::array<std::byte, kAddressValidationTokenTagLength> tag{};
-    std::copy_n(reinterpret_cast<const std::byte *>(digest->data()), tag.size(), tag.begin());
-    return tag;
+    std::array<std::byte, kAddressValidationTokenTagLength> token_tag{};
+    std::copy_n(reinterpret_cast<const std::byte *>(digest->data()), token_tag.size(),
+                token_tag.begin());
+    return token_tag;
 }
 
 struct SelfContainedAddressValidationToken {

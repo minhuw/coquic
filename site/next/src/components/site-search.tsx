@@ -15,6 +15,8 @@ const searchEngine = createSearchEngine(siteSearchItems);
 export function SiteSearch() {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
@@ -47,8 +49,25 @@ export function SiteSearch() {
       }
     }
 
+    function closeOnOutsidePointer(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (dialogRef.current?.contains(target) || triggerRef.current?.contains(target)) {
+        return;
+      }
+
+      setOpen(false);
+    }
+
     document.addEventListener('keydown', closeOnEscape);
-    return () => document.removeEventListener('keydown', closeOnEscape);
+    document.addEventListener('pointerdown', closeOnOutsidePointer, true);
+    return () => {
+      document.removeEventListener('keydown', closeOnEscape);
+      document.removeEventListener('pointerdown', closeOnOutsidePointer, true);
+    };
   }, [open]);
 
   useEffect(() => {
@@ -85,7 +104,7 @@ export function SiteSearch() {
 
   return (
     <span className="site-search">
-      <button className="site-search-trigger" type="button" aria-haspopup="dialog" onClick={() => setOpen(true)}>
+      <button ref={triggerRef} className="site-search-trigger" type="button" aria-haspopup="dialog" onClick={() => setOpen(true)}>
         <Search aria-hidden="true" />
         <span className="site-search-trigger-label">Search</span>
         <kbd>Ctrl K</kbd>
@@ -94,6 +113,7 @@ export function SiteSearch() {
       {open ? (
         <div className="site-search-backdrop" role="presentation" onClick={closeSearch} onMouseDown={closeSearch}>
           <section
+            ref={dialogRef}
             aria-label="Site search"
             aria-modal="true"
             className="site-search-dialog"

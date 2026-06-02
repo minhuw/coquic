@@ -1,10 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { ChevronDown } from 'lucide-react';
+import { ChevronDown, Contact } from 'lucide-react';
 import { useState } from 'react';
 
-import { CoquicLogoIcon, GitHubIcon, HomepageIcon } from './icons';
+import { CoquicLogoIcon, GitHubIcon } from './icons';
 import { SiteSearch } from './site-search';
 import { ThemeToggle } from './theme-toggle';
 
@@ -107,9 +107,9 @@ export function DemoNav({ active }: DemoNavProps) {
             href="https://www.minhuw.dev"
             target="_blank"
             rel="noopener noreferrer"
-            aria-label="Minhu Wang homepage"
+            aria-label="Minhu Wang contact page"
           >
-            <HomepageIcon className="size-[19px]" />
+            <Contact aria-hidden="true" className="size-[19px]" />
           </a>
           <a
             className="repo-link"

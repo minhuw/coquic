@@ -289,7 +289,9 @@ TEST(QuicCoreEndpointInternalTest, RetryContextAndPacketBuildersRejectMissingOrM
         .token = pending.token,
     };
 
-    EXPECT_FALSE(core.take_retry_context(parsed, 9, coquic::quic::test::test_time(0)).has_value());
+    EXPECT_FALSE(core.take_retry_context(parsed, 9, coquic::quic::test::test_time(0),
+                                         std::span<const std::byte>{})
+                     .has_value());
     EXPECT_TRUE(core.retry_tokens_.contains(QuicCore::connection_id_key(pending.token)));
 
     auto no_source = parsed;
@@ -379,7 +381,7 @@ TEST(QuicCoreEndpointInternalTest, RouteRefreshRememberPathAndLegacySeedingCover
     path_entry.route_handle_by_path_id.emplace(1, 12);
     path_entry.path_id_by_route_handle.emplace(12, 1);
     path_entry.next_path_id = 1;
-    EXPECT_EQ(server_core.remember_inbound_path(path_entry, 13), 2u);
+    EXPECT_EQ(server_core.remember_inbound_path(path_entry, 13, std::span<const std::byte>{}), 2u);
 
     QuicCore endpoint_core(make_client_endpoint_config());
     EXPECT_FALSE(coquic::quic::test::seed_legacy_route_handle_path_for_tests(endpoint_core, 7, 0));
@@ -1239,17 +1241,22 @@ TEST(QuicCoreEndpointInternalTest, NewTokenContextValidatesRouteVersionAndExpiry
         .token = token,
     };
 
-    EXPECT_FALSE(
-        server.take_new_token_context(parsed, 56, coquic::quic::test::test_time(1)).has_value());
+    EXPECT_FALSE(server
+                     .take_new_token_context(parsed, 56, coquic::quic::test::test_time(1),
+                                             std::span<const std::byte>{})
+                     .has_value());
     EXPECT_EQ(server.new_tokens_.size(), 1u);
 
     auto wrong_version = parsed;
     wrong_version.version = kQuicVersion2;
-    EXPECT_FALSE(server.take_new_token_context(wrong_version, 55, coquic::quic::test::test_time(1))
+    EXPECT_FALSE(server
+                     .take_new_token_context(wrong_version, 55, coquic::quic::test::test_time(1),
+                                             std::span<const std::byte>{})
                      .has_value());
     EXPECT_EQ(server.new_tokens_.size(), 1u);
 
-    auto validated = server.take_new_token_context(parsed, 55, coquic::quic::test::test_time(1));
+    auto validated = server.take_new_token_context(parsed, 55, coquic::quic::test::test_time(1),
+                                                   std::span<const std::byte>{});
     auto validated_context = optional_value_or_terminate(validated);
     EXPECT_EQ(validated_context.token, token);
     EXPECT_TRUE(server.new_tokens_.empty());
@@ -1605,8 +1612,10 @@ TEST(QuicCoreEndpointInternalTest, ExpiredRetryAndNewTokensAreRemoved) {
         .version = kQuicVersion1,
         .token = pending_retry.token,
     };
-    EXPECT_FALSE(
-        server.take_retry_context(retry_parsed, 55, coquic::quic::test::test_time(11)).has_value());
+    EXPECT_FALSE(server
+                     .take_retry_context(retry_parsed, 55, coquic::quic::test::test_time(11),
+                                         std::span<const std::byte>{})
+                     .has_value());
     EXPECT_TRUE(server.retry_tokens_.empty());
 
     auto new_token = bytes_from_ints({0x4e, 0x01, 0x02});
@@ -1622,9 +1631,11 @@ TEST(QuicCoreEndpointInternalTest, ExpiredRetryAndNewTokensAreRemoved) {
     new_token_parsed.destination_connection_id = bytes_from_ints({0x83, 0x02});
     new_token_parsed.token = new_token;
 
-    EXPECT_FALSE(
-        server.take_new_token_context(new_token_parsed, 55, coquic::quic::test::test_time(21))
-            .has_value());
+    EXPECT_FALSE(server
+                     .take_new_token_context(new_token_parsed, 55,
+                                             coquic::quic::test::test_time(21),
+                                             std::span<const std::byte>{})
+                     .has_value());
     EXPECT_TRUE(server.new_tokens_.empty());
 }
 
@@ -1701,8 +1712,8 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetHelpersGenerateAndDetectResets)
     auto parsed = QuicCore::parse_endpoint_datagram(unknown_short_header);
     auto parsed_datagram = optional_value_or_terminate(parsed);
 
-    auto stateless_reset =
-        server.make_stateless_reset_for_unknown_cid(parsed_datagram, unknown_short_header, 55);
+    auto stateless_reset = server.make_stateless_reset_for_unknown_cid(
+        parsed_datagram, unknown_short_header, 55, coquic::quic::test::test_time(0));
     auto reset_datagram = optional_value_or_terminate(stateless_reset);
     EXPECT_EQ(reset_datagram.connection, 9u);
     EXPECT_EQ(reset_datagram.route_handle, std::optional<QuicRouteHandle>{55u});

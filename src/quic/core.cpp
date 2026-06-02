@@ -2530,15 +2530,17 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         auto wrong_destination = parsed;
         wrong_destination.destination_connection_id =
             make_connection_id_for_core_coverage({0x99, 0x01});
-        COQUIC_CORE_HOOK_RECORD(
-            !core.take_retry_context(wrong_destination, 7, QuicCoreTimePoint{}).has_value());
+        COQUIC_CORE_HOOK_RECORD(!core.take_retry_context(wrong_destination, 7, QuicCoreTimePoint{},
+                                                         std::span<const std::byte>{})
+                                     .has_value());
         COQUIC_CORE_HOOK_RECORD(
             core.retry_tokens_.contains(QuicCore::connection_id_key(pending.token)));
 
         auto wrong_version = parsed;
         wrong_version.version = kQuicVersion2;
-        COQUIC_CORE_HOOK_RECORD(
-            !core.take_retry_context(wrong_version, 7, QuicCoreTimePoint{}).has_value());
+        COQUIC_CORE_HOOK_RECORD(!core.take_retry_context(wrong_version, 7, QuicCoreTimePoint{},
+                                                         std::span<const std::byte>{})
+                                     .has_value());
         COQUIC_CORE_HOOK_RECORD(
             core.retry_tokens_.contains(QuicCore::connection_id_key(pending.token)));
     }

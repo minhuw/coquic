@@ -672,14 +672,13 @@ class QuicCore {
         std::optional<QuicRouteHandle> route_handle = std::nullopt,
         std::span<const std::byte> address_validation_identity = std::span<const std::byte>{},
         QuicCoreTimePoint now = QuicCoreTimePoint{});
-    std::optional<PendingRetryToken> take_retry_context(
-        const ParsedEndpointDatagram &parsed, const std::optional<QuicRouteHandle> &route_handle,
-        QuicCoreTimePoint now,
-        std::span<const std::byte> address_validation_identity = std::span<const std::byte>{});
+    std::optional<PendingRetryToken>
+    take_retry_context(const ParsedEndpointDatagram &parsed,
+                       const std::optional<QuicRouteHandle> &route_handle, QuicCoreTimePoint now,
+                       std::span<const std::byte> address_validation_identity);
     std::optional<StoredEndpointNewToken> take_new_token_context(
         const ParsedEndpointDatagram &parsed, const std::optional<QuicRouteHandle> &route_handle,
-        QuicCoreTimePoint now,
-        std::span<const std::byte> address_validation_identity = std::span<const std::byte>{});
+        QuicCoreTimePoint now, std::span<const std::byte> address_validation_identity);
     void maybe_queue_server_new_token(ConnectionEntry &entry, QuicCoreTimePoint now);
     void drain_queued_server_new_token(ConnectionEntry &entry, QuicCoreResult &drained,
                                        QuicCoreTimePoint now);
@@ -688,11 +687,9 @@ class QuicCore {
     take_client_new_token_for_open(const QuicCoreClientConnectionConfig &connection);
     std::optional<QuicConnectionHandle>
     detect_stateless_reset(std::span<const std::byte> bytes) const;
-    std::optional<QuicCoreSendDatagram>
-    make_stateless_reset_for_unknown_cid(const ParsedEndpointDatagram &parsed,
-                                         std::span<const std::byte> inbound_bytes,
-                                         const std::optional<QuicRouteHandle> &route_handle,
-                                         QuicCoreTimePoint now = QuicCoreTimePoint{});
+    std::optional<QuicCoreSendDatagram> make_stateless_reset_for_unknown_cid(
+        const ParsedEndpointDatagram &parsed, std::span<const std::byte> inbound_bytes,
+        const std::optional<QuicRouteHandle> &route_handle, QuicCoreTimePoint now);
     void load_consumed_address_validation_tokens();
     void persist_consumed_address_validation_tokens();
     bool address_validation_token_consumed(std::span<const std::byte> token) const;
@@ -720,12 +717,12 @@ class QuicCore {
     static void
     remember_address_validation_identity(ConnectionEntry &entry, QuicPathId path_id,
                                          std::span<const std::byte> address_validation_identity);
-    QuicPathId remember_inbound_path(
-        ConnectionEntry &entry, QuicRouteHandle route_handle,
-        std::span<const std::byte> address_validation_identity = std::span<const std::byte>{});
-    std::optional<QuicPathId> path_id_for_inbound_route(
-        ConnectionEntry &entry, const std::optional<QuicRouteHandle> &route_handle,
-        std::span<const std::byte> address_validation_identity = std::span<const std::byte>{});
+    QuicPathId remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle,
+                                     std::span<const std::byte> address_validation_identity);
+    std::optional<QuicPathId>
+    path_id_for_inbound_route(ConnectionEntry &entry,
+                              const std::optional<QuicRouteHandle> &route_handle,
+                              std::span<const std::byte> address_validation_identity);
     static std::optional<QuicRouteHandle>
     route_handle_for_path(const ConnectionEntry &entry, const std::optional<QuicPathId> &path_id);
     static bool should_run_connection_timeout(const ConnectionEntry &entry, QuicCoreTimePoint now);

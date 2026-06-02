@@ -17,6 +17,13 @@ rag_dir="${repo_root}/rag"
 rfc_dir="${repo_root}/references/rfc"
 rag_artifacts_dir="${repo_root}/.rag/artifacts"
 server_js="${standalone_dir}/server.js"
+runtime_public_entries=(
+  "perf-results.json"
+  "perf-history.json"
+  "interop-results.json"
+  "coverage-results.json"
+  "coverage"
+)
 
 if [[ ! -f "${server_js}" ]]; then
   echo "missing Next.js standalone server: ${server_js}" >&2
@@ -68,6 +75,9 @@ cp -R -- "${next_runtime_router_utils_dir}" "${output_dir}/node_modules/next/dis
 install -d -m 755 -- "${output_dir}/.next"
 cp -R -- "${static_dir}" "${output_dir}/.next/static"
 cp -R -- "${public_dir}" "${output_dir}/public"
+for entry in "${runtime_public_entries[@]}"; do
+  rm -rf -- "${output_dir}/public/${entry}"
+done
 rm -f -- "${output_dir}/public/coquic-wasm-quic.wasm"
 install -m 644 -- "${wasm_module}" "${output_dir}/public/coquic-wasm-quic.wasm"
 install -d -m 755 -- "${output_dir}/rag"

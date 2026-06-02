@@ -535,22 +535,23 @@ previous_app_public_dir="/opt/coquic-demo/current/app/public"
 if [[ "${same_release_repair_mode}" == "1" ]]; then
   previous_app_public_dir="${remote_upload_dir}/current.app.bak/public"
 fi
-if sudo test -f "${previous_app_public_dir}/perf-results.json" &&
-   ! sudo test -f "${remote_release_dir}/app/public/perf-results.json"; then
-  sudo install -m 644 "${previous_app_public_dir}/perf-results.json" "${remote_release_dir}/app/public/perf-results.json"
-fi
-if sudo test -f "${previous_app_public_dir}/perf-history.json" &&
-   ! sudo test -f "${remote_release_dir}/app/public/perf-history.json"; then
-  sudo install -m 644 "${previous_app_public_dir}/perf-history.json" "${remote_release_dir}/app/public/perf-history.json"
-fi
-if sudo test -f "${previous_app_public_dir}/interop-results.json" &&
-   ! sudo test -f "${remote_release_dir}/app/public/interop-results.json"; then
-  sudo install -m 644 "${previous_app_public_dir}/interop-results.json" "${remote_release_dir}/app/public/interop-results.json"
-fi
-if sudo test -f "${previous_app_public_dir}/coverage-results.json" &&
-   ! sudo test -f "${remote_release_dir}/app/public/coverage-results.json"; then
-  sudo install -m 644 "${previous_app_public_dir}/coverage-results.json" "${remote_release_dir}/app/public/coverage-results.json"
-fi
+preserve_runtime_public_file() {
+  local entry="$1"
+  local source_path="${previous_app_public_dir}/${entry}"
+  local dest_path="${remote_release_dir}/app/public/${entry}"
+  if ! sudo test -f "${source_path}" || sudo test -f "${dest_path}"; then
+    return
+  fi
+  if sudo grep -Eq '"event_name"[[:space:]]*:[[:space:]]*"local_fake_preview"|"commit"[[:space:]]*:[[:space:]]*"fake-preview|fake://' "${source_path}"; then
+    echo "skipping preview runtime data: ${entry}" >&2
+    return
+  fi
+  sudo install -m 644 "${source_path}" "${dest_path}"
+}
+preserve_runtime_public_file "perf-results.json"
+preserve_runtime_public_file "perf-history.json"
+preserve_runtime_public_file "interop-results.json"
+preserve_runtime_public_file "coverage-results.json"
 if sudo test -d "${previous_app_public_dir}/coverage" &&
    ! sudo test -d "${remote_release_dir}/app/public/coverage"; then
   sudo cp -a "${previous_app_public_dir}/coverage" "${remote_release_dir}/app/public/coverage"

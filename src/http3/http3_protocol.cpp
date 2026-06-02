@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string_view>
 #include <type_traits>
 #include <unordered_set>
@@ -52,24 +53,30 @@ CodecResult<std::uint64_t> read_varint(BufferReader &reader) {
     return CodecResult<std::uint64_t>::success(decoded.value().value);
 }
 
-CodecResult<std::vector<std::byte>>
-serialize_http3_payload_frame(std::uint64_t type, std::span<const std::byte> payload) {
+std::optional<quic::CodecError> write_http3_payload_frame(BufferWriter &writer, std::uint64_t type,
+                                                          std::span<const std::byte> payload) {
     const auto encoded_type = encode_varint(type);
     if (!encoded_type.has_value()) {
-        return codec_failure<std::vector<std::byte>>(encoded_type.error().code,
-                                                     encoded_type.error().offset);
+        return encoded_type.error();
     }
 
     const auto encoded_length = encode_varint(payload.size());
     if (!encoded_length.has_value()) {
-        return codec_failure<std::vector<std::byte>>(encoded_length.error().code,
-                                                     encoded_length.error().offset);
+        return encoded_length.error();
     }
 
-    BufferWriter writer;
     writer.write_bytes(encoded_type.value());
     writer.write_bytes(encoded_length.value());
     writer.write_bytes(payload);
+    return std::nullopt;
+}
+
+CodecResult<std::vector<std::byte>>
+serialize_http3_payload_frame(std::uint64_t type, std::span<const std::byte> payload) {
+    BufferWriter writer;
+    if (const auto error = write_http3_payload_frame(writer, type, payload); error.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(*error);
+    }
     return CodecResult<std::vector<std::byte>>::success(writer.bytes());
 }
 
@@ -152,42 +159,22 @@ Http3Result<std::uint64_t> parse_content_length_value(std::string_view value) {
 CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &frame) {
     struct FrameSerializer {
         CodecResult<std::vector<std::byte>> operator()(const Http3DataFrame &typed_frame) const {
-            const auto encoded_type = encode_varint(kHttp3FrameTypeData);
-            if (!encoded_type.has_value()) {
-                return codec_failure<std::vector<std::byte>>(encoded_type.error().code,
-                                                             encoded_type.error().offset);
-            }
-
-            const auto encoded_length = encode_varint(typed_frame.payload.size());
-            if (!encoded_length.has_value()) {
-                return codec_failure<std::vector<std::byte>>(encoded_length.error().code,
-                                                             encoded_length.error().offset);
-            }
-
             BufferWriter writer;
-            writer.write_bytes(encoded_type.value());
-            writer.write_bytes(encoded_length.value());
-            writer.write_bytes(typed_frame.payload);
+            if (const auto error =
+                    write_http3_payload_frame(writer, kHttp3FrameTypeData, typed_frame.payload);
+                error.has_value()) {
+                return CodecResult<std::vector<std::byte>>::failure(*error);
+            }
             return CodecResult<std::vector<std::byte>>::success(writer.bytes());
         }
 
         CodecResult<std::vector<std::byte>> operator()(const Http3HeadersFrame &typed_frame) const {
-            const auto encoded_type = encode_varint(kHttp3FrameTypeHeaders);
-            if (!encoded_type.has_value()) {
-                return codec_failure<std::vector<std::byte>>(encoded_type.error().code,
-                                                             encoded_type.error().offset);
-            }
-
-            const auto encoded_length = encode_varint(typed_frame.field_section.size());
-            if (!encoded_length.has_value()) {
-                return codec_failure<std::vector<std::byte>>(encoded_length.error().code,
-                                                             encoded_length.error().offset);
-            }
-
             BufferWriter writer;
-            writer.write_bytes(encoded_type.value());
-            writer.write_bytes(encoded_length.value());
-            writer.write_bytes(typed_frame.field_section);
+            if (const auto error = write_http3_payload_frame(writer, kHttp3FrameTypeHeaders,
+                                                             typed_frame.field_section);
+                error.has_value()) {
+                return CodecResult<std::vector<std::byte>>::failure(*error);
+            }
             return CodecResult<std::vector<std::byte>>::success(writer.bytes());
         }
 
@@ -236,22 +223,12 @@ CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &fram
         }
 
         CodecResult<std::vector<std::byte>> operator()(const Http3UnknownFrame &typed_frame) const {
-            const auto encoded_type = encode_varint(typed_frame.type);
-            if (!encoded_type.has_value()) {
-                return codec_failure<std::vector<std::byte>>(encoded_type.error().code,
-                                                             encoded_type.error().offset);
-            }
-
-            const auto encoded_length = encode_varint(typed_frame.payload.size());
-            if (!encoded_length.has_value()) {
-                return codec_failure<std::vector<std::byte>>(encoded_length.error().code,
-                                                             encoded_length.error().offset);
-            }
-
             BufferWriter writer;
-            writer.write_bytes(encoded_type.value());
-            writer.write_bytes(encoded_length.value());
-            writer.write_bytes(typed_frame.payload);
+            if (const auto error =
+                    write_http3_payload_frame(writer, typed_frame.type, typed_frame.payload);
+                error.has_value()) {
+                return CodecResult<std::vector<std::byte>>::failure(*error);
+            }
             return CodecResult<std::vector<std::byte>>::success(writer.bytes());
         }
     };

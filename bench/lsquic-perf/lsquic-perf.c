@@ -38,7 +38,7 @@ static int debug_enabled(void) {
 }
 
 static FILE *open_json_output(const char *path) {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
     if (fd < 0) {
         return NULL;
     }

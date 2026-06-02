@@ -9,9 +9,24 @@ permissions:
   contents: read
 
 jobs:
+  perf-config:
+    name: Check Perf Configuration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check Perf Configuration
+        run: python3 scripts/check-bench-implementations.py
+
   perf-impl:
     name: ${{ matrix.display_name }} Perf
     runs-on: ubuntu-latest
+    needs:
+      - perf-config
     timeout-minutes: 120
     env:
       NIX_CONFIG: |
@@ -223,6 +238,7 @@ jobs:
     name: Publish Perf Results
     runs-on: ubuntu-latest
     needs:
+      - perf-config
       - perf-impl
     if: always()
 
@@ -233,6 +249,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download Perf Result Snapshots
+        if: needs.perf-config.result == 'success'
         uses: actions/download-artifact@v4
         with:
           pattern: perf-results-*
@@ -240,6 +257,7 @@ jobs:
           merge-multiple: true
 
       - name: Merge Perf Result Snapshots
+        if: needs.perf-config.result == 'success'
         run: |
           python3 scripts/render-perf-comparison.py \
             --manifest coquic=.bench-results/downloaded/perf-results-coquic.json \
@@ -263,7 +281,7 @@ jobs:
             --json-out .bench-results/perf-results.json >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Configure Demo SSH
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && needs.perf-config.result == 'success' && needs.perf-impl.result == 'success'
         env:
           COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}
         run: |
@@ -277,7 +295,7 @@ jobs:
           chmod 600 "${RUNNER_TEMP}/coquic-demo.key" "${HOME}/.ssh/known_hosts"
 
       - name: Upload Perf Results To Demo
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && needs.perf-config.result == 'success' && needs.perf-impl.result == 'success'
         run: |
           if [ ! -f .bench-results/perf-results.json ]; then
             echo "missing .bench-results/perf-results.json" >&2
@@ -346,6 +364,7 @@ jobs:
               failed=1
             fi
           }
+          check_job "perf-config" "${{ needs.perf-config.result }}"
           check_job "perf-impl" "${{ needs.perf-impl.result }}"
           exit "${failed}"
 

@@ -149,6 +149,25 @@ def require_marker(path: Path, marker: str, label: str) -> None:
         raise ValueError(f"`{label}` implementation metadata points at an untracked Nixpkgs package marker: {marker}")
 
 
+def validate_c_json_output_modes(repo_root: Path) -> None:
+    for path in sorted((repo_root / "bench").glob("*-perf/*-perf.c")):
+        content = read_text(path)
+        if "open_json_output" not in content:
+            continue
+        match = re.search(r"static\s+FILE\s+\*open_json_output\s*\([^)]*\)\s*\{(?P<body>.*?)\n\}", content, re.DOTALL)
+        if not match:
+            raise ValueError(f"`{path.relative_to(repo_root)}` open_json_output helper was not found")
+        body = match.group("body")
+        if "O_CREAT" not in body:
+            continue
+        missing = [flag for flag in ("S_IRGRP", "S_IROTH") if flag not in body]
+        if missing:
+            raise ValueError(
+                f"`{path.relative_to(repo_root)}` open_json_output creates Docker-mounted JSON without "
+                f"group/other read bits: {', '.join(missing)}"
+            )
+
+
 def validate(args: argparse.Namespace) -> None:
     repo_root = args.repo_root.resolve()
     data = load_manifest(args.manifest)
@@ -200,6 +219,8 @@ def validate(args: argparse.Namespace) -> None:
         "ngtcp2": "version = pkgs.ngtcp2.version;",
     }.items():
         require_marker(flake, marker, label)
+
+    validate_c_json_output_modes(repo_root)
 
 
 def main() -> int:

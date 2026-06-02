@@ -457,7 +457,7 @@ function ModelPicker({
       <button
         aria-expanded={open}
         aria-haspopup="listbox"
-        className="inline-flex h-11 max-w-[min(72vw,360px)] items-center gap-2 rounded-[var(--radius)] border border-[var(--line-strong)] bg-[var(--surface)] px-2.5 text-left text-[var(--ink)] transition-colors duration-200 hover:border-[var(--primary)] hover:bg-[#edf5ff] focus-visible:border-[var(--primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgba(15,98,254,0.48)] disabled:pointer-events-none disabled:opacity-55"
+        className="inline-flex h-11 max-w-[min(72vw,360px)] items-center gap-2 rounded-[var(--radius)] border border-[var(--line-strong)] bg-[var(--surface)] px-2.5 text-left text-[var(--ink)] transition-colors duration-200 hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] focus-visible:border-[var(--primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgba(15,98,254,0.48)] disabled:pointer-events-none disabled:opacity-55"
         disabled={disabled}
         onClick={() => onOpenChange(!open)}
         type="button"
@@ -477,7 +477,7 @@ function ModelPicker({
 
       {open ? (
         <div
-          className="absolute bottom-[calc(100%+8px)] left-0 z-30 w-[min(88vw,390px)] rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] p-1.5 shadow-[0_18px_48px_rgba(22,22,22,0.14)]"
+          className="theme-popover absolute bottom-[calc(100%+8px)] left-0 z-30 w-[min(88vw,390px)] rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] p-1.5"
           role="listbox"
         >
           {options.map((option) => {
@@ -486,7 +486,7 @@ function ModelPicker({
             return (
               <button
                 aria-selected={selectedOption}
-                className="grid w-full cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-[var(--radius)] px-2.5 py-2 text-left transition-colors duration-200 hover:bg-[var(--surface-2)] focus-visible:bg-[var(--surface-2)] focus-visible:outline-none aria-selected:bg-[#edf5ff]"
+                className="grid w-full cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-[var(--radius)] px-2.5 py-2 text-left transition-colors duration-200 hover:bg-[var(--surface-2)] focus-visible:bg-[var(--surface-2)] focus-visible:outline-none aria-selected:bg-[var(--primary-soft)]"
                 key={option.id}
                 onClick={() => {
                   onChange(option.id);
@@ -519,13 +519,13 @@ function PrivacyNotice() {
     <span className="group relative inline-flex items-center">
       <button
         aria-label="Privacy notice"
-        className="inline-flex size-5 items-center justify-center rounded-full text-[var(--muted)] transition-colors duration-200 hover:bg-[#fff4df] hover:text-[#8d6d00] focus-visible:bg-[#fff4df] focus-visible:text-[#8d6d00] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgba(141,109,0,0.32)]"
+        className="inline-flex size-5 items-center justify-center rounded-full text-[var(--muted)] transition-colors duration-200 hover:bg-[var(--warning-soft)] hover:text-[var(--warning)] focus-visible:bg-[var(--warning-soft)] focus-visible:text-[var(--warning)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgba(141,109,0,0.32)]"
         type="button"
       >
         <TriangleAlert aria-hidden="true" className="size-3.5" />
       </button>
       <span
-        className="pointer-events-none absolute bottom-[calc(100%+10px)] right-0 z-40 w-[min(82vw,340px)] rounded-[var(--radius)] border border-[rgba(141,109,0,0.22)] bg-[#fffaf0] p-3 text-left text-xs font-normal leading-relaxed text-[var(--ink)] opacity-0 shadow-[0_18px_48px_rgba(22,22,22,0.14)] transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100"
+        className="theme-popover pointer-events-none absolute bottom-[calc(100%+10px)] right-0 z-40 w-[min(82vw,340px)] rounded-[var(--radius)] border border-[rgba(141,109,0,0.22)] bg-[var(--warning-tooltip)] p-3 text-left text-xs font-normal leading-relaxed text-[var(--ink)] opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100"
         role="tooltip"
       >
         CoQUIC does not store your questions or generated answers. Requests are sent through OpenRouter, and free-model
@@ -671,7 +671,7 @@ function CopyAnswerButton({ answer, disabled, label }: { answer: string; disable
   return (
     <button
       aria-label={copied ? `Copied ${label}` : `Copy ${label}`}
-      className="inline-flex size-[22px] shrink-0 items-center justify-center rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] p-0 text-[var(--muted)] transition-colors duration-200 hover:border-[var(--primary)] hover:bg-[#edf5ff] hover:text-[var(--primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgba(15,98,254,0.48)] disabled:pointer-events-none disabled:opacity-55"
+      className="inline-flex size-[22px] shrink-0 items-center justify-center rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] p-0 text-[var(--muted)] transition-colors duration-200 hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-[var(--primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[rgba(15,98,254,0.48)] disabled:pointer-events-none disabled:opacity-55"
       disabled={copyDisabled}
       onClick={copyAnswer}
       title={copied ? 'Copied' : 'Copy answer'}
@@ -705,7 +705,7 @@ function Citations({ citations }: { citations: Citation[] }) {
               <div className="flex items-start justify-between gap-3">
                 {citation.url ? (
                   <a
-                    className="min-w-0 text-sm font-semibold text-[var(--primary)] underline decoration-[rgba(15,98,254,0.32)] underline-offset-4 transition-colors duration-200 hover:text-[var(--primary-hover)] hover:decoration-[var(--primary-hover)]"
+                    className="themed-link min-w-0 text-sm font-semibold text-[var(--primary)] underline underline-offset-4 transition-colors duration-200 hover:text-[var(--primary-hover)] hover:decoration-[var(--primary-hover)]"
                     href={citation.url}
                     rel="noopener noreferrer"
                     target="_blank"
@@ -1053,12 +1053,12 @@ function confidenceLabel(confidence: number) {
 
 function confidenceClassName(confidence: number) {
   if (confidence >= 0.72) {
-    return 'border-[rgba(31,138,101,0.28)] bg-[#edf8f4] text-[var(--ok)]';
+    return 'border-[rgba(31,138,101,0.28)] bg-[var(--success-soft)] text-[var(--ok)]';
   }
   if (confidence >= 0.45) {
-    return 'border-[rgba(141,109,0,0.28)] bg-[#fff4df] text-[#8d6d00]';
+    return 'border-[rgba(141,109,0,0.28)] bg-[var(--warning-soft)] text-[var(--warning)]';
   }
-  return 'border-[rgba(207,45,86,0.28)] bg-[#fff1f1] text-[var(--danger)]';
+  return 'border-[rgba(207,45,86,0.28)] bg-[var(--danger-soft)] text-[var(--danger)]';
 }
 
 function modelMeta(model: string): ModelMeta {

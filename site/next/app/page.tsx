@@ -1,6 +1,5 @@
-import Image from 'next/image';
-
 import { DemoNav } from '@/components/demo-nav';
+import { CoquicLogoIcon } from '@/components/icons';
 
 export default function Home() {
   return (
@@ -10,11 +9,11 @@ export default function Home() {
       <DemoNav active="home" />
 
       <section className="grid flex-1 place-items-center content-center py-16 text-center sm:py-20 lg:py-24" aria-label="coquic slogan">
-        <Image className="h-auto w-[clamp(72px,12vw,116px)]" src="/coquic-logo.svg" width={116} height={116} alt="CoQUIC logo" priority />
+        <CoquicLogoIcon className="h-auto w-[clamp(72px,12vw,116px)] text-[var(--ink)]" />
         <h1 className="mx-auto mt-5 w-full max-w-[920px] text-[44px] font-normal leading-none text-[var(--ink)] sm:text-[64px] lg:text-[104px]">
-          <span className="bg-[linear-gradient(110deg,#161616_0%,#393939_48%,#0f62fe_100%)] bg-clip-text text-transparent">Co</span>
+          <span className="bg-[linear-gradient(110deg,var(--ink)_0%,var(--soft)_48%,var(--primary)_100%)] bg-clip-text text-transparent">Co</span>
           <span className="bg-[linear-gradient(110deg,#002d9c_0%,#0f62fe_48%,#78a9ff_100%)] bg-clip-text text-transparent">QUIC</span>
-          <span className="bg-[linear-gradient(90deg,var(--ink)_0%,#393939_58%,var(--primary)_100%)] bg-clip-text text-transparent">
+          <span className="bg-[linear-gradient(90deg,var(--ink)_0%,var(--soft)_58%,var(--primary)_100%)] bg-clip-text text-transparent">
             , from Prompt to Packet.
           </span>
         </h1>

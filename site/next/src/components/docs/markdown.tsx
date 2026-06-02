@@ -71,7 +71,11 @@ export async function Markdown({ markdown, currentSlug, skipFirstH1 = false }: M
 async function HighlightedCode({ code, language }: { code: string; language: string }) {
   const html = await codeToHtml(code, {
     lang: normalizeLanguage(language),
-    theme: 'github-light',
+    themes: {
+      light: 'github-light',
+      dark: 'github-dark',
+    },
+    defaultColor: false,
   });
 
   return (

@@ -1,11 +1,11 @@
 'use client';
 
-import Image from 'next/image';
 import Link from 'next/link';
 import { ChevronDown } from 'lucide-react';
 import { useState } from 'react';
 
-import { GitHubIcon } from './icons';
+import { CoquicLogoIcon, GitHubIcon } from './icons';
+import { ThemeToggle } from './theme-toggle';
 
 export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'interop' | 'coverage' | 'qa';
 
@@ -50,7 +50,7 @@ export function DemoNav({ active }: DemoNavProps) {
   return (
     <nav className="top-nav" aria-label="Demo views" onMouseLeave={() => setOpenMenu(null)}>
       <Link className="top-nav-home" href="/" aria-label="Home" aria-current={active === 'home' ? 'page' : undefined}>
-        <Image src="/coquic-logo.svg" width={32} height={32} alt="" aria-hidden="true" priority={active === 'home'} />
+        <CoquicLogoIcon className="size-8" aria-hidden="true" />
       </Link>
       <span className="top-nav-links">
         {primaryViews.map((view) => (
@@ -98,15 +98,18 @@ export function DemoNav({ active }: DemoNavProps) {
             ))}
           </span>
         </span>
-        <a
-          className="repo-link"
-          href="https://github.com/minhuw/coquic"
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label="CoQUIC on GitHub"
-        >
-          <GitHubIcon className="size-6" />
-        </a>
+        <span className="nav-icon-actions">
+          <ThemeToggle />
+          <a
+            className="repo-link"
+            href="https://github.com/minhuw/coquic"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="CoQUIC on GitHub"
+          >
+            <GitHubIcon className="size-6" />
+          </a>
+        </span>
       </span>
     </nav>
   );

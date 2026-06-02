@@ -11,8 +11,8 @@ const buttonVariants = cva(
       variant: {
         default: 'border-[var(--primary)] bg-[var(--primary)] text-white hover:border-[var(--primary-hover)] hover:bg-[var(--primary-hover)]',
         secondary: 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink)] hover:bg-[var(--surface-3)]',
-        outline: 'border-[var(--line-strong)] bg-[var(--surface)] text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[#edf5ff] hover:text-[var(--primary)]',
-        destructive: 'border-[rgba(207,45,86,0.28)] bg-[#fff1f1] text-[var(--danger)] hover:border-[var(--danger)]',
+        outline: 'border-[var(--line-strong)] bg-[var(--surface)] text-[var(--ink)] hover:border-[var(--primary)] hover:bg-[var(--primary-soft)] hover:text-[var(--primary)]',
+        destructive: 'border-[rgba(207,45,86,0.28)] bg-[var(--danger-soft)] text-[var(--danger)] hover:border-[var(--danger)]',
         ghost: 'border-transparent bg-transparent text-[var(--ink)] hover:bg-[var(--surface-3)]',
       },
       size: {

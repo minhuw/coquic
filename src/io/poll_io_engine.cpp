@@ -156,7 +156,7 @@ int linux_traffic_class_for_ecn(QuicEcnCodepoint ecn) {
     const auto index = static_cast<unsigned>(ecn);
     return index < kEcnToTrafficClass.size() ? kEcnToTrafficClass[index] : 0x00; }
 
-QuicEcnCodepoint ecn_from_linux_traffic_class(int traffic_class) { return kTrafficClassToEcn[static_cast<unsigned>(traffic_class) & 0x03u]; }
+QuicEcnCodepoint ecn_from_linux_traffic_class(int linux_traffic_class) { return kTrafficClassToEcn[static_cast<unsigned>(linux_traffic_class) & 0x03u]; }
 // clang-format on
 
 bool is_ipv4_mapped_ipv6_address(const sockaddr_storage &peer, socklen_t peer_len) {
@@ -219,12 +219,12 @@ QuicEcnCodepoint recvmsg_ecn_from_control(const msghdr &message) {
         if ((control_header->cmsg_level == IPPROTO_IP && control_header->cmsg_type == IP_TOS) ||
             (control_header->cmsg_level == IPPROTO_IPV6 &&
              control_header->cmsg_type == IPV6_TCLASS)) {
-            int traffic_class = 0;
+            int received_traffic_class = 0;
             const auto payload_size =
                 control_header->cmsg_len > CMSG_LEN(0) ? control_header->cmsg_len - CMSG_LEN(0) : 0;
-            std::memcpy(&traffic_class, CMSG_DATA(control_header),
-                        std::min<std::size_t>(sizeof(traffic_class), payload_size));
-            return ecn_from_linux_traffic_class(traffic_class);
+            std::memcpy(&received_traffic_class, CMSG_DATA(control_header),
+                        std::min<std::size_t>(sizeof(received_traffic_class), payload_size));
+            return ecn_from_linux_traffic_class(received_traffic_class);
         }
         control_header = CMSG_NXTHDR(const_cast<msghdr *>(&message), control_header);
     }
@@ -385,8 +385,8 @@ bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_s
         control_header->cmsg_level = use_ipv4_traffic_class ? IPPROTO_IP : IPPROTO_IPV6;
         control_header->cmsg_type = use_ipv4_traffic_class ? IP_TOS : IPV6_TCLASS;
         control_header->cmsg_len = CMSG_LEN(sizeof(int));
-        const int traffic_class = linux_traffic_class_for_ecn(ecn);
-        std::memcpy(CMSG_DATA(control_header), &traffic_class, sizeof(traffic_class));
+        const int send_traffic_class = linux_traffic_class_for_ecn(ecn);
+        std::memcpy(CMSG_DATA(control_header), &send_traffic_class, sizeof(send_traffic_class));
         outbound_message.msg_controllen = control_header->cmsg_len;
     }
 
@@ -504,8 +504,8 @@ void set_sendmsg_ecn_control(msghdr &message, EcnControlStorage &control_storage
     const bool use_ipv4_traffic_class = uses_ipv4_traffic_class_control(peer, peer_len);
     set_traffic_class_control_message_header(*control_header, use_ipv4_traffic_class);
     control_header->cmsg_len = CMSG_LEN(sizeof(int));
-    const int traffic_class = linux_traffic_class_for_ecn(ecn);
-    std::memcpy(CMSG_DATA(control_header), &traffic_class, sizeof(traffic_class));
+    const int send_traffic_class = linux_traffic_class_for_ecn(ecn);
+    std::memcpy(CMSG_DATA(control_header), &send_traffic_class, sizeof(send_traffic_class));
     message.msg_control = control_storage.bytes.data();
     message.msg_controllen = control_header->cmsg_len;
 }
@@ -517,8 +517,8 @@ void append_sendmsg_ecn_control(msghdr &message, UdpGsoControlStorage &control_s
     const bool use_ipv4_traffic_class = uses_ipv4_traffic_class_control(peer, peer_len);
     set_traffic_class_control_message_header(*control_header, use_ipv4_traffic_class);
     control_header->cmsg_len = CMSG_LEN(sizeof(int));
-    const int traffic_class = linux_traffic_class_for_ecn(ecn);
-    std::memcpy(CMSG_DATA(control_header), &traffic_class, sizeof(traffic_class));
+    const int send_traffic_class = linux_traffic_class_for_ecn(ecn);
+    std::memcpy(CMSG_DATA(control_header), &send_traffic_class, sizeof(send_traffic_class));
     control_cursor += CMSG_SPACE(sizeof(int));
     message.msg_controllen =
         static_cast<std::size_t>(control_cursor - control_storage.bytes.data());
@@ -1768,9 +1768,10 @@ ssize_t record_recvmsg_for_tests(int, msghdr *message, int flags) {
         control_header->cmsg_level = peer_is_ipv6 ? IPPROTO_IPV6 : IPPROTO_IP;
         control_header->cmsg_type = peer_is_ipv6 ? IPV6_TCLASS : IP_TOS;
         control_header->cmsg_len = CMSG_LEN(sizeof(int));
-        const int traffic_class =
+        const int recvmsg_traffic_class =
             internal::linux_traffic_class_for_ecn(g_recorded_recvmsg_for_tests.ecn);
-        std::memcpy(CMSG_DATA(control_header), &traffic_class, sizeof(traffic_class));
+        std::memcpy(CMSG_DATA(control_header), &recvmsg_traffic_class,
+                    sizeof(recvmsg_traffic_class));
         message->msg_controllen = control_header->cmsg_len;
     }
 
@@ -1876,8 +1877,8 @@ int socket_io_backend_linux_traffic_class_for_ecn_for_runtime_tests(QuicEcnCodep
 }
 
 QuicEcnCodepoint
-socket_io_backend_ecn_from_linux_traffic_class_for_runtime_tests(int traffic_class) {
-    return internal::ecn_from_linux_traffic_class(traffic_class);
+socket_io_backend_ecn_from_linux_traffic_class_for_runtime_tests(int linux_traffic_class) {
+    return internal::ecn_from_linux_traffic_class(linux_traffic_class);
 }
 
 bool socket_io_backend_is_ipv4_mapped_ipv6_address_for_runtime_tests(const sockaddr_storage &peer,
@@ -2434,8 +2435,9 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
     second_header->cmsg_level = IPPROTO_IPV6;
     second_header->cmsg_type = IPV6_TCLASS;
     second_header->cmsg_len = CMSG_LEN(sizeof(int));
-    int traffic_class = internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1);
-    std::memcpy(CMSG_DATA(second_header), &traffic_class, sizeof(traffic_class));
+    int ancillary_traffic_class = internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1);
+    std::memcpy(CMSG_DATA(second_header), &ancillary_traffic_class,
+                sizeof(ancillary_traffic_class));
     record(internal::recvmsg_ecn_from_control(recv_message) == QuicEcnCodepoint::ect1,
            "recvmsg ecn walk advances past ignored ancillary headers");
 

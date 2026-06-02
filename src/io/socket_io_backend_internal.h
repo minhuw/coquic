@@ -123,7 +123,7 @@ bool has_legacy_recvfrom_override();
 
 QuicCoreTimePoint now();
 int linux_traffic_class_for_ecn(QuicEcnCodepoint ecn);
-QuicEcnCodepoint ecn_from_linux_traffic_class(int traffic_class);
+QuicEcnCodepoint ecn_from_linux_traffic_class(int linux_traffic_class);
 void configure_udp_socket_buffers(LinuxSocketDescriptor socket);
 bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family);
 bool configure_linux_pmtud_socket_options(LinuxSocketDescriptor socket, int family);

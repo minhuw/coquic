@@ -20,39 +20,41 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.peer_preferred_address_emitted_ = true;
         return connection;
     };
-    const auto process_fast_path_datagram = [](QuicConnection &covered_connection,
+    const auto process_fast_path_datagram = [](QuicConnection &fast_path_connection,
                                                std::vector<std::byte> datagram,
                                                QuicCoreTimePoint now = QuicCoreTimePoint{}) {
         auto storage = std::make_shared<std::vector<std::byte>>(std::move(datagram));
-        covered_connection.process_inbound_datagram(
+        fast_path_connection.process_inbound_datagram(
             storage, /*begin=*/0, /*end=*/storage->size(), now, /*path_id=*/0,
             QuicEcnCodepoint::unavailable, std::nullopt, /*replay_trigger=*/false,
             /*count_inbound_bytes=*/true, /*allow_in_place_receive_decode=*/true);
     };
-    const auto make_runtime_transport_parameters = [](const QuicConnection &covered_connection) {
+    const auto make_runtime_transport_parameters = [](const QuicConnection &parameter_connection) {
         return TransportParameters{
             .original_destination_connection_id =
-                covered_connection.config_.initial_destination_connection_id,
-            .max_udp_payload_size = covered_connection.config_.transport.max_udp_payload_size,
+                parameter_connection.config_.initial_destination_connection_id,
+            .max_udp_payload_size = parameter_connection.config_.transport.max_udp_payload_size,
             .active_connection_id_limit =
-                covered_connection.config_.transport.active_connection_id_limit,
-            .ack_delay_exponent = covered_connection.config_.transport.ack_delay_exponent,
-            .max_ack_delay = covered_connection.config_.transport.max_ack_delay,
-            .initial_max_data = covered_connection.config_.transport.initial_max_data,
+                parameter_connection.config_.transport.active_connection_id_limit,
+            .ack_delay_exponent = parameter_connection.config_.transport.ack_delay_exponent,
+            .max_ack_delay = parameter_connection.config_.transport.max_ack_delay,
+            .initial_max_data = parameter_connection.config_.transport.initial_max_data,
             .initial_max_stream_data_bidi_local =
-                covered_connection.config_.transport.initial_max_stream_data_bidi_local,
+                parameter_connection.config_.transport.initial_max_stream_data_bidi_local,
             .initial_max_stream_data_bidi_remote =
-                covered_connection.config_.transport.initial_max_stream_data_bidi_remote,
+                parameter_connection.config_.transport.initial_max_stream_data_bidi_remote,
             .initial_max_stream_data_uni =
-                covered_connection.config_.transport.initial_max_stream_data_uni,
+                parameter_connection.config_.transport.initial_max_stream_data_uni,
             .initial_max_streams_bidi =
-                covered_connection.config_.transport.initial_max_streams_bidi,
-            .initial_max_streams_uni = covered_connection.config_.transport.initial_max_streams_uni,
-            .initial_source_connection_id = covered_connection.peer_source_connection_id_,
+                parameter_connection.config_.transport.initial_max_streams_bidi,
+            .initial_max_streams_uni =
+                parameter_connection.config_.transport.initial_max_streams_uni,
+            .initial_source_connection_id = parameter_connection.peer_source_connection_id_,
             .version_information = version_information_for_handshake(
-                covered_connection.config_.supported_versions, covered_connection.current_version_,
-                covered_connection.config_.retry_source_connection_id,
-                covered_connection.original_version_, covered_connection.current_version_),
+                parameter_connection.config_.supported_versions,
+                parameter_connection.current_version_,
+                parameter_connection.config_.retry_source_connection_id,
+                parameter_connection.original_version_, parameter_connection.current_version_),
         };
     };
     const auto make_new_connection_id_frame = [](std::uint64_t sequence_number) {
@@ -78,40 +80,39 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         };
     };
 
-    const auto serialize_one_rtt_ack_datagram = [](const QuicConnection &covered_connection,
-                                                   const TrafficSecret &secret,
-                                                   std::uint64_t packet_number,
-                                                   bool key_phase = false) {
-        const auto encoded = serialize_protected_datagram(
-            std::array<ProtectedPacket, 1>{
-                ProtectedOneRttPacket{
-                    .key_phase = key_phase,
-                    .destination_connection_id = covered_connection.config_.source_connection_id,
-                    .packet_number_length = 2,
-                    .packet_number = packet_number,
-                    .frames = {AckFrame{}},
+    const auto serialize_one_rtt_ack_datagram =
+        [](const QuicConnection &ack_connection, const TrafficSecret &secret,
+           std::uint64_t packet_number, bool key_phase = false) {
+            const auto encoded = serialize_protected_datagram(
+                std::array<ProtectedPacket, 1>{
+                    ProtectedOneRttPacket{
+                        .key_phase = key_phase,
+                        .destination_connection_id = ack_connection.config_.source_connection_id,
+                        .packet_number_length = 2,
+                        .packet_number = packet_number,
+                        .frames = {AckFrame{}},
+                    },
                 },
-            },
-            SerializeProtectionContext{
-                .local_role = EndpointRole::server,
-                .client_initial_destination_connection_id =
-                    covered_connection.client_initial_destination_connection_id(),
-                .one_rtt_secret = secret,
-                .one_rtt_key_phase = key_phase,
-            });
-        if (!encoded.has_value()) {
-            return std::vector<std::byte>{};
-        }
-        return encoded.value();
-    };
-    const auto serialize_handshake_ping_datagram = [](const QuicConnection &covered_connection,
+                SerializeProtectionContext{
+                    .local_role = EndpointRole::server,
+                    .client_initial_destination_connection_id =
+                        ack_connection.client_initial_destination_connection_id(),
+                    .one_rtt_secret = secret,
+                    .one_rtt_key_phase = key_phase,
+                });
+            if (!encoded.has_value()) {
+                return std::vector<std::byte>{};
+            }
+            return encoded.value();
+        };
+    const auto serialize_handshake_ping_datagram = [](const QuicConnection &handshake_connection,
                                                       const TrafficSecret &secret,
                                                       std::uint64_t packet_number) {
         const auto encoded = serialize_protected_datagram(
             std::array<ProtectedPacket, 1>{
                 ProtectedHandshakePacket{
                     .version = kQuicVersion1,
-                    .destination_connection_id = covered_connection.config_.source_connection_id,
+                    .destination_connection_id = handshake_connection.config_.source_connection_id,
                     .source_connection_id = bytes_from_ints_for_tests({0x11, 0x90}),
                     .packet_number_length = 2,
                     .packet_number = packet_number,
@@ -121,7 +122,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             SerializeProtectionContext{
                 .local_role = EndpointRole::server,
                 .client_initial_destination_connection_id =
-                    covered_connection.client_initial_destination_connection_id(),
+                    handshake_connection.client_initial_destination_connection_id(),
                 .handshake_secret = secret,
             });
         if (!encoded.has_value()) {
@@ -129,33 +130,31 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         }
         return encoded.value();
     };
-    const auto serialize_one_rtt_frames_datagram = [](const QuicConnection &covered_connection,
-                                                      const TrafficSecret &secret,
-                                                      std::uint64_t packet_number,
-                                                      std::vector<Frame> frames,
-                                                      bool key_phase = false) {
-        const auto encoded = serialize_protected_datagram(
-            std::array<ProtectedPacket, 1>{
-                ProtectedOneRttPacket{
-                    .key_phase = key_phase,
-                    .destination_connection_id = covered_connection.config_.source_connection_id,
-                    .packet_number_length = 2,
-                    .packet_number = packet_number,
-                    .frames = std::move(frames),
+    const auto serialize_one_rtt_frames_datagram =
+        [](const QuicConnection &frames_connection, const TrafficSecret &secret,
+           std::uint64_t packet_number, std::vector<Frame> frames, bool key_phase = false) {
+            const auto encoded = serialize_protected_datagram(
+                std::array<ProtectedPacket, 1>{
+                    ProtectedOneRttPacket{
+                        .key_phase = key_phase,
+                        .destination_connection_id = frames_connection.config_.source_connection_id,
+                        .packet_number_length = 2,
+                        .packet_number = packet_number,
+                        .frames = std::move(frames),
+                    },
                 },
-            },
-            SerializeProtectionContext{
-                .local_role = EndpointRole::server,
-                .client_initial_destination_connection_id =
-                    covered_connection.client_initial_destination_connection_id(),
-                .one_rtt_secret = secret,
-                .one_rtt_key_phase = key_phase,
-            });
-        if (!encoded.has_value()) {
-            return std::vector<std::byte>{};
-        }
-        return encoded.value();
-    };
+                SerializeProtectionContext{
+                    .local_role = EndpointRole::server,
+                    .client_initial_destination_connection_id =
+                        frames_connection.client_initial_destination_connection_id(),
+                    .one_rtt_secret = secret,
+                    .one_rtt_key_phase = key_phase,
+                });
+            if (!encoded.has_value()) {
+                return std::vector<std::byte>{};
+            }
+            return encoded.value();
+        };
 
     {
         const auto now = QuicCoreTimePoint{} + std::chrono::milliseconds(123);
@@ -958,11 +957,11 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          .retire_connection_id_frames = {retire_connection_id},
                                          .bytes_in_flight = 1,
                                      });
-        auto probe = connection.select_pto_probe(connection.application_space_);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.packet_number == 43);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.new_token_frames.size() == 1);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.new_connection_id_frames.size() == 1);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.retire_connection_id_frames.size() == 1);
+        auto selected_pto_probe = connection.select_pto_probe(connection.application_space_);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.packet_number == 43);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.new_token_frames.size() == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.new_connection_id_frames.size() == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.retire_connection_id_frames.size() == 1);
     }
 
     {
@@ -1053,15 +1052,15 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                     },
                 .bytes_in_flight = 1,
             });
-        auto probe = connection.select_pto_probe(connection.application_space_);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.packet_number == 44);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.max_data_frame.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(probe.max_streams_frames.size() == 2);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.data_blocked_frame.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(probe.stream_data_blocked_frames.size() == 1);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.first_stream_frame_metadata.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(probe.stream_frame_metadata.size() == 1);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.stream_fragments.size() == 1);
+        auto selected_pto_probe = connection.select_pto_probe(connection.application_space_);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.packet_number == 44);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.max_data_frame.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.max_streams_frames.size() == 2);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.data_blocked_frame.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.stream_data_blocked_frames.size() == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.first_stream_frame_metadata.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.stream_frame_metadata.size() == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.stream_fragments.size() == 1);
     }
 
     {
@@ -1084,11 +1083,11 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          .data_blocked_frame = DataBlockedFrame{.maximum_data = 21},
                                          .bytes_in_flight = 1,
                                      });
-        auto probe = connection.select_pto_probe(connection.application_space_);
-        COQUIC_CONNECTION_HOOK_RECORD(probe.packet_number == 45);
-        COQUIC_CONNECTION_HOOK_RECORD(!probe.max_data_frame.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(!probe.data_blocked_frame.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(probe.has_ping);
+        auto selected_pto_probe = connection.select_pto_probe(connection.application_space_);
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.packet_number == 45);
+        COQUIC_CONNECTION_HOOK_RECORD(!selected_pto_probe.max_data_frame.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(!selected_pto_probe.data_blocked_frame.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.has_ping);
     }
 
     {
@@ -3154,10 +3153,10 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                          .bytes_in_flight = 1,
                                      });
 
-        auto probe = connection.select_pto_probe(connection.application_space_);
+        auto selected_pto_probe = connection.select_pto_probe(connection.application_space_);
 
-        COQUIC_CONNECTION_HOOK_RECORD(!probe.first_stream_frame_metadata.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(probe.stream_frame_metadata.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!selected_pto_probe.first_stream_frame_metadata.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(selected_pto_probe.stream_frame_metadata.empty());
     }
 
     {

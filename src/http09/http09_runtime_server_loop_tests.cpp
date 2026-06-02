@@ -723,7 +723,7 @@ void cover_runtime_server_loop_script_cases_for_tests(bool &coverage_ok) {
     }
 }
 
-void cover_runtime_backend_loop_top_due_script_cases_for_tests(bool &coverage_ok) {
+void cover_runtime_backend_loop_top_due_event_script_cases_for_tests(bool &coverage_ok) {
     {
         const auto base_time = now();
         server_loop_coverage_check(
@@ -810,7 +810,12 @@ void cover_runtime_backend_loop_top_due_script_cases_for_tests(bool &coverage_ok
                                            .wait_calls = 1,
                                            .process_path_mtu_calls = 1,
                                        }));
+    }
+}
 
+void cover_runtime_backend_loop_top_due_timer_script_cases_for_tests(bool &coverage_ok) {
+    {
+        const auto base_time = now();
         server_loop_coverage_check(coverage_ok,
                                    "backend loop covers due timer events that fail while tracing",
                                    server_loop_result_matches_for_tests(
@@ -915,7 +920,7 @@ void cover_runtime_backend_loop_top_due_script_cases_for_tests(bool &coverage_ok
     }
 }
 
-void cover_runtime_backend_loop_ready_probe_script_cases_for_tests(bool &coverage_ok) {
+void cover_runtime_backend_loop_ready_probe_event_script_cases_for_tests(bool &coverage_ok) {
     {
         const auto base_time = now();
         server_loop_coverage_check(coverage_ok, "backend loop covers ready-probe wait failures",
@@ -1020,7 +1025,12 @@ void cover_runtime_backend_loop_ready_probe_script_cases_for_tests(bool &coverag
                                            .wait_calls = 1,
                                            .process_path_mtu_calls = 1,
                                        }));
+    }
+}
 
+void cover_runtime_backend_loop_ready_probe_timer_script_cases_for_tests(bool &coverage_ok) {
+    {
+        const auto base_time = now();
         server_loop_coverage_check(coverage_ok, "backend loop covers ready-probe idle timeouts",
                                    server_loop_result_matches_for_tests(
                                        run_backend_loop_script_for_tests(BackendLoopScriptForTests{
@@ -1334,8 +1344,10 @@ void cover_runtime_backend_loop_main_wait_script_cases_for_tests(bool &coverage_
 }
 
 void cover_runtime_backend_loop_script_cases_for_tests(bool &coverage_ok) {
-    cover_runtime_backend_loop_top_due_script_cases_for_tests(coverage_ok);
-    cover_runtime_backend_loop_ready_probe_script_cases_for_tests(coverage_ok);
+    cover_runtime_backend_loop_top_due_event_script_cases_for_tests(coverage_ok);
+    cover_runtime_backend_loop_top_due_timer_script_cases_for_tests(coverage_ok);
+    cover_runtime_backend_loop_ready_probe_event_script_cases_for_tests(coverage_ok);
+    cover_runtime_backend_loop_ready_probe_timer_script_cases_for_tests(coverage_ok);
     cover_runtime_backend_loop_main_wait_script_cases_for_tests(coverage_ok);
 }
 
@@ -1873,10 +1885,9 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                                            .peer_len = sizeof(sockaddr_in),
                                                        });
         QuicCoreTimePoint step_now = now();
-        const auto handshake_result =
-            drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now);
         auto connection = accepted_connection_or_default(
-            "server-endpoint pump fixture handshake succeeds", handshake_result);
+            "server-endpoint pump fixture handshake succeeds",
+            drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now));
 
         {
             ServerConnectionEndpointMap connection_endpoints;

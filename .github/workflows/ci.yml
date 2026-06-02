@@ -3,6 +3,9 @@ name: Format / Lint
 on:
   pull_request:
   push:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 8 * * *"
 
 permissions:
   contents: read
@@ -11,6 +14,7 @@ jobs:
   format:
     name: Format
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
 
     steps:
       - name: Checkout
@@ -27,6 +31,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
 
     steps:
       - name: Checkout
@@ -37,8 +42,32 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
 
-      - name: Refresh compile_commands.json
-        run: nix develop -c ./scripts/refresh-compile-commands.sh
-
       - name: Lint
-        run: nix develop -c pre-commit run coquic-clang-tidy --all-files --show-diff-on-failure
+        env:
+          COQUIC_CLANG_TIDY_DIFF_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          COQUIC_CLANG_TIDY_DIFF_HEAD: ${{ github.sha }}
+        run: |
+          if [ "${COQUIC_CLANG_TIDY_DIFF_BASE}" = "0000000000000000000000000000000000000000" ]; then
+            COQUIC_CLANG_TIDY_DIFF_BASE="$(git rev-parse HEAD^)"
+            export COQUIC_CLANG_TIDY_DIFF_BASE
+          fi
+          nix develop .#lint -c ./scripts/run-clang-tidy.sh --diff
+
+  full-lint:
+    name: Full Lint
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
+
+      - name: Full Lint
+        env:
+          COQUIC_CLANG_TIDY_MODE: full
+        run: nix develop .#lint -c ./scripts/run-clang-tidy.sh --full

@@ -1529,6 +1529,19 @@ EOF
           pkgs.wireshark
         ];
       };
+      lintShell = mkCoquicShell {
+        profile = quictlsProfile;
+        banner = "coquic lint shell ready. Run: pre-commit run coquic-clang-tidy";
+        extraPackages =
+          [
+            llvmPkgs.clang
+            llvmPkgs.clang-tools
+            pkgs.git
+            pkgs.pre-commit
+            pkgs.python3
+          ]
+          ++ pre-commit-check.enabledPackages;
+      };
       pre-commit-check = git-hooks.lib.${system}.run {
         src = ./.;
         hooks = {
@@ -1683,6 +1696,7 @@ EOF
         interop-image = quictlsMuslShell;
         boringssl = boringsslShell;
         boringssl-musl = boringsslMuslShell;
+        lint = lintShell;
       };
     };
 }

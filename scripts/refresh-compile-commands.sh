@@ -16,7 +16,8 @@ if [ -z "${COQUIC_CLANG_TIDY_IN_NIX:-}" ] &&
         echo "clang-tidy compile database generation requires nix develop or the coquic build environment" >&2
         exit 1
     }
-    exec nix develop -c env COQUIC_CLANG_TIDY_IN_NIX=1 bash "${BASH_SOURCE[0]}"
+    cd "${repo_root}"
+    exec nix develop .#lint -c env COQUIC_CLANG_TIDY_IN_NIX=1 bash "${BASH_SOURCE[0]}"
 fi
 
 mkdir -p "${repo_root}/.zig-cache"

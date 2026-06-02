@@ -1566,6 +1566,7 @@ bool runtime_make_client_transfer_plans_for_test(const Http3RuntimeConfig &confi
 bool runtime_misc_internal_coverage_for_test() {
     bool ok = true;
 
+    // JSON helpers need coverage for escaped ASCII and non-printable control bytes.
     std::string escaped;
     append_json_escaped(escaped, "\"\\\b\f\n\r\t");
     runtime_misc_internal_coverage_check(ok, escaped == "\"\\\"\\\\\\b\\f\\n\\r\\t\"",
@@ -1575,6 +1576,7 @@ bool runtime_misc_internal_coverage_for_test() {
     runtime_misc_internal_coverage_check(ok, escaped_control == "\"\\u0001\"",
                                          "append_json_escaped hex-encodes other control bytes");
 
+    // Inspect output checks the body metadata and trailer array serialization.
     const auto inspect_body = inspect_json_body(Http3Request{
         .head =
             {
@@ -1596,6 +1598,7 @@ bool runtime_misc_internal_coverage_for_test() {
         ok, inspect_text.find("\"content_length\":5") != std::string::npos,
         "inspect_json_body serializes content length values");
 
+    // File helpers use a scoped document root plus one relative path without parents.
     RuntimeScopedTempDir document_root;
     runtime_misc_internal_coverage_check(ok, document_root.write_file("payload.txt", "payload"),
                                          "write temp payload for runtime_server_response");
@@ -1646,6 +1649,7 @@ bool runtime_misc_internal_coverage_for_test() {
         std::filesystem::remove(no_parent_path, ignored);
     }
 
+    // Header, backend, authority, and URL parsing paths are exercised together.
     {
         const auto parsed = parse_header_arg(" X-Test : value \t");
         const auto parsed_header = parsed.value_or(Http3RuntimeHeader{});
@@ -1690,6 +1694,7 @@ bool runtime_misc_internal_coverage_for_test() {
     runtime_misc_internal_coverage_check(ok, !parse_http3_authority("localhost:").has_value(),
                                          "parse_http3_authority rejects empty port suffixes");
     {
+        // Bare IPv6 literals are accepted only when there is no ambiguous port separator.
         const auto bare_ipv6 = parse_http3_authority("2001:db8::1");
         runtime_misc_internal_coverage_check(ok, bare_ipv6.has_value(),
                                              "parse_http3_authority accepts bare IPv6 literals");
@@ -1703,6 +1708,7 @@ bool runtime_misc_internal_coverage_for_test() {
     runtime_misc_internal_coverage_check(ok, !parse_http3_authority("localhost:99999").has_value(),
                                          "parse_http3_authority rejects oversized non-IPv6 ports");
     {
+        // Query-only and fragment-only HTTPS URLs normalize to rooted request targets.
         const auto url = parse_https_url("https://localhost?x=1");
         const auto parsed_url = url.value_or(ParsedHttpsUrl{});
         runtime_misc_internal_coverage_check(ok, url.has_value(),
@@ -1740,6 +1746,8 @@ bool runtime_misc_internal_coverage_for_test() {
     runtime_misc_internal_coverage_check(
         ok, !resolve_runtime_path_under_root(document_root.path(), "/./payload.txt").has_value(),
         "resolve_runtime_path_under_root rejects raw dot path segments");
+
+    // MIME mapping covers adjacent HTML suffixes and the WebAssembly special case.
     runtime_misc_internal_coverage_check(
         ok, content_type_for_path("page.htm") == "text/html; charset=utf-8",
         "content_type_for_path treats .htm files as HTML");
@@ -1747,6 +1755,7 @@ bool runtime_misc_internal_coverage_for_test() {
         ok, content_type_for_path("module.wasm") == "application/wasm",
         "content_type_for_path serves wasm with the WebAssembly MIME type");
 
+    // Static response handling covers method rejection, filesystem errors, and directories.
     const auto method_not_allowed =
         runtime_server_response(document_root_config, Http3Request{
                                                           .head =
@@ -1823,6 +1832,7 @@ bool runtime_misc_internal_coverage_for_test() {
             "runtime_server_response rejects directory targets as non-regular files");
     }
 
+    // Runtime event conversion maps only network and timer events into QUIC core inputs.
     {
         const auto inputs = make_endpoint_inputs_from_io_event(io::QuicIoEvent{
             .kind = io::QuicIoEvent::Kind::timer_expired,
@@ -1876,6 +1886,7 @@ bool runtime_misc_internal_coverage_for_test() {
         "shutdown produces no core inputs");
 
     {
+        // The fake backend records waits and returns nullopt after its script is exhausted.
         RuntimeTestBackend backend;
         const auto waited = backend.wait(std::nullopt);
         runtime_misc_internal_coverage_check(
@@ -1885,6 +1896,7 @@ bool runtime_misc_internal_coverage_for_test() {
                                              "runtime test backend records wait calls");
     }
 
+    // Send-effect flushing is checked for missing route handles, backend failure, and success.
     {
         RuntimeTestBackend backend;
         quic::QuicCoreResult result;
@@ -1941,6 +1953,7 @@ bool runtime_misc_internal_coverage_for_test() {
                                              "flush_send_effects preserves route handles");
     }
 
+    // Core-effect helpers distinguish connection ownership from endpoint relevance.
     {
         const auto handle = connection_handle_of_effect(
             quic::QuicCoreEffect{quic::QuicCorePeerPreferredAddressAvailable{
@@ -2007,6 +2020,7 @@ bool runtime_misc_internal_coverage_for_test() {
             "filter_result_for_connection keeps endpoint-relevant matching effects");
     }
 
+    // Endpoint-generated commands must be wrapped with a connection before returning to core.
     runtime_misc_internal_coverage_check(ok,
                                          make_connection_command(9,
                                                                  quic::QuicCoreResetStream{
@@ -2043,6 +2057,7 @@ bool runtime_misc_internal_coverage_for_test() {
         ok, !make_connection_command(9, quic::QuicCoreTimerExpired{}).has_value(),
         "make_connection_command rejects endpoint-only inputs");
 
+    // Bootstrap configuration, guarded bootstrap execution, and update-work probes close the hook.
     {
         const auto config = Http3RuntimeConfig{
             .host = "127.0.0.1",
@@ -2175,6 +2190,7 @@ std::uint64_t runtime_loop_internal_coverage_mask_for_test() {
                 bit;
     };
 
+    // The test backend route probe is independent of either runtime loop.
     {
         RuntimeTestBackend backend;
         io::QuicIoRemote remote{
@@ -2204,6 +2220,7 @@ std::uint64_t runtime_loop_internal_coverage_mask_for_test() {
     };
 
     const auto event_now = quic::QuicCoreClock::now();
+    // Scripted server loop cases cover wait, shutdown, timer, and empty datagram branches.
     mark(kRuntimeLoopMaskServerIdleTimeout,
          server_endpoint_ready & run_server_case(
                                      io::QuicIoEvent{
@@ -2237,6 +2254,7 @@ std::uint64_t runtime_loop_internal_coverage_mask_for_test() {
                                      2),
          "server runtime handles rx events without payloads");
 
+    // A live client datagram exercises the server path that has actual packet payload bytes.
     const auto live_rx_now = quic::QuicCoreClock::now() - std::chrono::seconds{5};
     const auto live_rx_event =
         make_live_initial_rx_event(make_runtime_client_config_for_test(), live_rx_now);
@@ -2271,6 +2289,7 @@ std::uint64_t runtime_loop_internal_coverage_mask_for_test() {
         },
     };
 
+    // Scripted client loop cases mirror the server branches before the response-write probe.
     const auto run_client_case = [&](io::QuicIoEvent event, std::size_t expected_wait_calls) {
         auto backend = std::make_unique<RuntimeTestBackend>();
         auto *backend_ptr = backend.get();
@@ -2312,6 +2331,7 @@ std::uint64_t runtime_loop_internal_coverage_mask_for_test() {
                                  2),
          "client runtime handles rx events without payloads");
 
+    // The final mask bit covers a polled response written to the pending output file.
     auto backend = std::make_unique<RuntimeTestBackend>();
     Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
     runtime.connection_ = 7;
@@ -2377,12 +2397,14 @@ std::uint64_t runtime_loop_internal_coverage_mask_for_test() {
 bool runtime_loop_internal_coverage_for_test() {
     bool ok = true;
 
+    // First assert that the compact loop mask still covers all scripted event cases.
     runtime_loop_internal_coverage_check(
         ok, runtime_loop_internal_coverage_mask_for_test() == kRuntimeLoopExpectedCoverageMask,
         "runtime loop mask covers scripted event branches");
 
     const auto now = quic::QuicCoreClock::now();
 
+    // Server runtime cases cover fatal results, lifecycle creation/removal, and endpoint draining.
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         auto *backend_ptr = backend.get();
@@ -2433,6 +2455,7 @@ bool runtime_loop_internal_coverage_for_test() {
         runtime_loop_internal_coverage_check(ok, !runtime.endpoints_.contains(11),
                                              "server runtime erases closed connections");
 
+        // Connection-scoped errors remove only the affected server endpoint.
         runtime.endpoints_.emplace(12, Http3ServerEndpoint{});
         quic::QuicCoreResult connection_error;
         connection_error.local_error = quic::QuicCoreLocalError{
@@ -2446,6 +2469,7 @@ bool runtime_loop_internal_coverage_for_test() {
             ok, !runtime.endpoints_.contains(12),
             "server runtime erases endpoints after connection-scoped errors");
 
+        // Server endpoint-drain cases cover bad commands, terminal failure, and polling.
         runtime_loop_internal_coverage_check(
             ok,
             !runtime.drain_endpoint(19,
@@ -2506,6 +2530,7 @@ bool runtime_loop_internal_coverage_for_test() {
                                              "server runtime exits on backend wait failure");
     }
 
+    // Client runtime cases cover open failure, lifecycle state, response writes, and bad updates.
     {
         RuntimeScopedTempDir output_root;
         const auto config = make_runtime_client_config_for_test();
@@ -2541,6 +2566,7 @@ bool runtime_loop_internal_coverage_for_test() {
             ok, runtime.handle_result(quic::QuicCoreResult{}, now),
             "client runtime ignores empty results before connection creation");
 
+        // Client lifecycle handling records the created connection and fails on premature close.
         quic::QuicCoreResult created;
         created.effects.push_back(quic::QuicCoreEffect{
             quic::QuicCoreConnectionLifecycleEvent{
@@ -2572,6 +2598,7 @@ bool runtime_loop_internal_coverage_for_test() {
                 now),
             "client runtime fails when connection closes before all responses arrive");
 
+        // Client response draining covers unknown outputs, successful writes, and bad commands.
         runtime_loop_internal_coverage_check(
             ok,
             !runtime.drain_endpoint(
@@ -2654,6 +2681,7 @@ bool runtime_loop_internal_coverage_for_test() {
 bool runtime_additional_internal_coverage_for_test() {
     bool ok = true;
 
+    // Shared fixtures and pure helpers are checked before runtime-specific scripts.
     const auto now = quic::QuicCoreClock::now();
     RuntimeScopedTempDir document_root;
     runtime_additional_internal_coverage_check(ok, document_root.write_file("index.html", "ok"),
@@ -2702,6 +2730,9 @@ bool runtime_additional_internal_coverage_for_test() {
     const auto server_endpoint_config = server_endpoint.value_or(quic::QuicCoreEndpointConfig{});
     runtime_additional_internal_coverage_check(
         ok, server_endpoint.has_value(), "server endpoint config loads for additional coverage");
+
+    // Live RX helper inputs cover both invalid plans and missing datagram send metadata.
+    // Forced server loop branches confirm run() fails after synthetic core errors.
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         force_server_due_timer_count_for_test() = 1;
@@ -2741,6 +2772,7 @@ bool runtime_additional_internal_coverage_for_test() {
             "server runtime fails when rx events trigger handle_result failures");
     }
 
+    // Server handle_result checks include backend send failure and unknown affected connections.
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         backend->send_result = false;
@@ -2772,6 +2804,7 @@ bool runtime_additional_internal_coverage_for_test() {
             "server runtime ignores affected connections without endpoints");
     }
 
+    // A synthetic HEADERS frame drives a full accepted-endpoint request/response path.
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         Http3ServerRuntime runtime(server_config, server_endpoint_config, std::move(backend));
@@ -2799,6 +2832,8 @@ bool runtime_additional_internal_coverage_for_test() {
         runtime_additional_internal_coverage_check(
             ok, !handshake_update.terminal_failure,
             "accepted endpoint primes its transport before synthetic request handling");
+
+        // QPACK and frame helpers provide bytes for the synthetic request stream.
         std::array<Http3Field, 4> request_fields{
             Http3Field{":method", "GET"},
             Http3Field{":scheme", "https"},
@@ -2881,6 +2916,7 @@ bool runtime_additional_internal_coverage_for_test() {
             "server runtime drains synthetic request updates without failing");
     }
 
+    // Server command submission and endpoint polling failure paths are forced directly.
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         Http3ServerRuntime runtime(server_config, server_endpoint_config, std::move(backend));
@@ -2950,10 +2986,12 @@ bool runtime_additional_internal_coverage_for_test() {
             "server handle_result fails when draining a filtered endpoint update fails");
     }
 
+    // A standalone hook protects the server branch where local errors lack connection ids.
     runtime_additional_internal_coverage_check(
         ok, runtime_server_local_error_without_connection_coverage_for_test(),
         "server handle_result rejects local errors without connection ids");
 
+    // Client setup scripts cover initial submit, open, due timer, and timer-event failures.
     RuntimeScopedTempDir output_root;
     const auto client_config = make_runtime_client_config_for_test();
     const auto plan = make_client_execution_plan(client_config);
@@ -3018,6 +3056,7 @@ bool runtime_additional_internal_coverage_for_test() {
             "client runtime fails when timer events trigger handle_result failures");
     }
 
+    // Client handle_result and direct command submission cover backend and core failure paths.
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         backend->send_result = false;
@@ -3066,6 +3105,7 @@ bool runtime_additional_internal_coverage_for_test() {
             "client submit_endpoint_commands propagates handle_result failures");
     }
 
+    // Polled client responses without matching outputs must fail before writing to disk.
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
@@ -3121,6 +3161,7 @@ bool runtime_additional_internal_coverage_for_test() {
             "client drain_endpoint rejects polled responses without matching outputs");
     }
 
+    // Polled client responses targeting directories exercise file-write failure handling.
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
@@ -3178,6 +3219,7 @@ bool runtime_additional_internal_coverage_for_test() {
             "client drain_endpoint propagates polled file write failures");
     }
 
+    // Polled reset events and forced command failures cover the remaining client drain exits.
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
         Http3ClientRuntime runtime(client_config, transfers, 3, {}, std::move(backend));
@@ -3283,6 +3325,7 @@ bool runtime_additional_internal_coverage_for_test() {
             "client drain_endpoint returns the poll terminal failure comparison result");
     }
 
+    // Bootstrap helpers are checked last because they exercise thread and forced-bootstrap state.
     auto bootstrap_backend = std::make_unique<RuntimeTestBackend>();
     bootstrap_backend->wait_results.push_back(std::nullopt);
     runtime_additional_internal_coverage_check(
@@ -3307,6 +3350,8 @@ bool runtime_additional_internal_coverage_for_test() {
         std::optional<std::future<int>> empty_result;
         std::optional<std::thread> empty_thread;
         std::atomic<bool> bootstrap_stop_requested_for_runtime = false;
+
+        // Runtime failures pass through unchanged when no bootstrap thread exists.
         runtime_additional_internal_coverage_check(
             ok,
             finish_http3_server_run(3, empty_result, empty_thread,
@@ -3461,6 +3506,7 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
     config.mode =
         mode == Http3CliMode::server ? Http3RuntimeMode::server : Http3RuntimeMode::client;
 
+    // The option loop validates mode-specific switches as soon as each argument is consumed.
     int index = 1;
     while (index < argc) {
         const std::string_view arg = argv[index++];
@@ -3502,6 +3548,8 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             config.port = static_cast<std::uint16_t>(*port);
             continue;
         }
+
+        // Server transport/listener options are rejected in client mode.
         if (arg == "--bootstrap-port") {
             if (!is_server_mode) {
                 print_usage(mode);
@@ -3540,6 +3588,8 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             config.alt_svc_max_age = static_cast<std::uint64_t>(*max_age);
             continue;
         }
+
+        // Backend and congestion control options are shared by client and server modes.
         if (arg == "--io-backend") {
             const auto value = require_value(arg);
             if (!value.has_value()) {
@@ -3566,6 +3616,8 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             config.congestion_control = *parsed;
             continue;
         }
+
+        // Server content and TLS options are accepted only by h3-server.
         if (arg == "--document-root") {
             if (!is_server_mode) {
                 print_usage(mode);
@@ -3619,6 +3671,8 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             config.private_key_path = std::filesystem::path(*value);
             continue;
         }
+
+        // Client request-shaping options are accepted only by h3-client.
         if (arg == "--method") {
             if (is_server_mode) {
                 print_usage(mode);
@@ -3705,6 +3759,7 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
             continue;
         }
 
+        // The remaining bare argument is the client URL; anything dash-prefixed is invalid here.
         if (arg.starts_with("--")) {
             print_usage(mode);
             return std::nullopt;
@@ -3727,6 +3782,7 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
         }
     }
 
+    // Final validation either resolves the client execution plan or fills the bootstrap port.
     if (config.mode == Http3RuntimeMode::client) {
         if (config.url.empty()) {
             print_usage(mode);

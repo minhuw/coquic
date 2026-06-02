@@ -40,8 +40,7 @@ fi
 qa_should_start=0
 case "${qa_enabled}" in
   auto)
-    if [[ -n "${OPENROUTER_API_KEY:-}" &&
-          -n "${DEEPSEEK_API_KEY:-}" &&
+    if [[ -n "${DEEPSEEK_API_KEY:-}" &&
           -n "${COQUIC_QDRANT_URL:-}" &&
           -n "${COQUIC_QDRANT_API_KEY:-}" ]]; then
       qa_should_start=1
@@ -60,11 +59,10 @@ case "${qa_enabled}" in
 esac
 
 if [[ "${qa_should_start}" == "1" ]]; then
-  if [[ -z "${OPENROUTER_API_KEY:-}" ||
-        -z "${DEEPSEEK_API_KEY:-}" ||
+  if [[ -z "${DEEPSEEK_API_KEY:-}" ||
         -z "${COQUIC_QDRANT_URL:-}" ||
         -z "${COQUIC_QDRANT_API_KEY:-}" ]]; then
-    echo "QA is enabled but OPENROUTER_API_KEY, DEEPSEEK_API_KEY, COQUIC_QDRANT_URL, and COQUIC_QDRANT_API_KEY are required" >&2
+    echo "QA is enabled but DEEPSEEK_API_KEY, COQUIC_QDRANT_URL, and COQUIC_QDRANT_API_KEY are required" >&2
     exit 1
   fi
   if [[ ! -f "${rag_root}/src/coquic_rag/qa/app.py" ]]; then

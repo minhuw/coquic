@@ -2952,6 +2952,28 @@ bool has_pending_shared_server_endpoint_work(const ServerConnectionEndpointMap &
                        [](const auto &entry) { return entry.second.has_pending_work; });
 }
 
+bool process_server_path_mtu_update_with_backend(
+    QuicCore &core, EndpointDriveState &transport_state, ServerConnectionEndpointMap &endpoints,
+    const std::filesystem::path &document_root, QuicIoBackend &backend,
+    std::vector<QuicIoTxDatagram> &deferred_output,
+    std::optional<QuicCoreTimePoint> &defer_output_until,
+    const QuicIoPathMtuUpdate &path_mtu_update, QuicCoreTimePoint input_time) {
+    auto result = core.advance_endpoint(
+        QuicCorePathMtuUpdate{
+            .route_handle = path_mtu_update.route_handle,
+            .max_udp_payload_size = path_mtu_update.max_udp_payload_size,
+        },
+        input_time);
+    bool observed_early_stream_data = false;
+    const bool ok = process_server_endpoint_core_result_with_backend(
+        core, transport_state, endpoints, document_root, std::move(result),
+        path_mtu_update.route_handle, backend, nullptr, &deferred_output,
+        &observed_early_stream_data);
+    maybe_note_server_early_stream_data_deferral(ok, observed_early_stream_data, defer_output_until,
+                                                 input_time);
+    return ok;
+}
+
 COQUIC_NO_PROFILE bool process_path_mtu_update_event(const ServerBackendLoopDriver &driver,
                                                      const QuicIoPathMtuUpdate &update,
                                                      QuicCoreTimePoint now) {
@@ -3347,24 +3369,6 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
                                                      defer_output_until, input_time);
         return ok;
     };
-    const auto process_path_mtu_update = [&](const QuicIoPathMtuUpdate &path_mtu_update,
-                                             QuicCoreTimePoint mtu_event_time) -> bool {
-        auto result = core.advance_endpoint(
-            QuicCorePathMtuUpdate{
-                .route_handle = path_mtu_update.route_handle,
-                .max_udp_payload_size = path_mtu_update.max_udp_payload_size,
-            },
-            mtu_event_time);
-        bool observed_early_stream_data = false;
-        const bool ok = process_server_endpoint_core_result_with_backend(
-            core, transport_state, endpoints, config.document_root, std::move(result),
-            path_mtu_update.route_handle, backend, nullptr, &deferred_output,
-            &observed_early_stream_data);
-        maybe_note_server_early_stream_data_deferral(ok, observed_early_stream_data,
-                                                     defer_output_until, mtu_event_time);
-        return ok;
-    };
-
     return run_server_backend_loop_with_driver(ServerBackendLoopDriver{
         .current_time = [] { return now(); },
         .next_wakeup = [&] { return core.next_wakeup(); },
@@ -3392,7 +3396,12 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
                 return ok;
             },
         .process_datagram = process_server_datagram,
-        .process_path_mtu_update = process_path_mtu_update,
+        .process_path_mtu_update =
+            [&](const QuicIoPathMtuUpdate &path_mtu_update, QuicCoreTimePoint input_time) {
+                return process_server_path_mtu_update_with_backend(
+                    core, transport_state, endpoints, config.document_root, backend,
+                    deferred_output, defer_output_until, path_mtu_update, input_time);
+            },
         .flush_deferred_output = flush_deferred_output,
         .defer_output_until = [&] { return defer_output_until; },
     });

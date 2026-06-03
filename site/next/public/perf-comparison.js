@@ -120,6 +120,7 @@ const colors = {
 };
 
 const implementationOrder = ["coquic", "coquic-rust", "coquic-python", "quic-go", "quinn", "picoquic", "msquic", "quiche", "quicly", "google-quiche", "tquic", "mvfst", "s2n-quic", "xquic", "aioquic", "ngtcp2", "lsquic", "neqo"];
+const coquicFamily = new Set(["coquic", "coquic-rust", "coquic-python"]);
 
 const deviconBase = "https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/";
 
@@ -144,9 +145,9 @@ function githubPage(owner, repo) {
 }
 
 const implementationMeta = {
-  coquic: { company: "CoQUIC", companyCode: "CQ", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: githubPage("minhuw", "coquic"), language: "C++", languageCode: "C++" },
-  "coquic-rust": { company: "CoQUIC Rust", companyCode: "CQR", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: "https://github.com/minhuw/coquic/tree/main/src/perf/rust", language: "Rust", languageCode: "Rs" },
-  "coquic-python": { company: "CoQUIC Python", companyCode: "CQP", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: "https://github.com/minhuw/coquic/tree/main/src/perf/python", language: "Python", languageCode: "Py" },
+  coquic: { company: "CoQUIC", companyCode: "CQ", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: githubPage("minhuw", "coquic"), language: "C++", languageCode: "C++", familyLabel: "CoQUIC", surfaceLabel: "C++ core" },
+  "coquic-rust": { company: "CoQUIC Rust", companyCode: "CQR", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: "https://github.com/minhuw/coquic/tree/main/src/perf/rust", language: "Rust", languageCode: "Rs", familyLabel: "CoQUIC", surfaceLabel: "Rust facade" },
+  "coquic-python": { company: "CoQUIC Python", companyCode: "CQP", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: "https://github.com/minhuw/coquic/tree/main/src/perf/python", language: "Python", languageCode: "Py", familyLabel: "CoQUIC", surfaceLabel: "Python facade" },
   "quic-go": { company: "quic-go", companyCode: "QG", companyIcon: githubAvatar("quic-go"), companyUrl: githubPage("quic-go"), sourceUrl: githubPage("quic-go", "quic-go"), language: "Go", languageCode: "Go" },
   quinn: { company: "Quinn", companyCode: "QN", companyIcon: githubAvatar("quinn-rs"), companyUrl: githubPage("quinn-rs"), sourceUrl: githubPage("quinn-rs", "quinn"), language: "Rust", languageCode: "Rs" },
   picoquic: { company: "Private Octopus", companyCode: "PO", companyIcon: githubAvatar("private-octopus"), companyUrl: githubPage("private-octopus"), sourceUrl: githubPage("private-octopus", "picoquic"), language: "C", languageCode: "C" },
@@ -214,6 +215,10 @@ function formatNumber(value, decimals = 3) {
 
 function implementationInfo(implementation) {
   return implementationMeta[implementation] || { company: "unknown", companyCode: "?", companyIcon: "", companyUrl: "", sourceUrl: "", language: "unknown", languageCode: "?" };
+}
+
+function isCoquicFamilyImplementation(implementation) {
+  return coquicFamily.has(implementation);
 }
 
 function normalizeLibraryVersion(value) {
@@ -323,10 +328,20 @@ function renderBarImplementationIdentity(implementation, info, versionLabel) {
 
   const text = document.createElement("span");
   text.className = "bar-identity-text";
+  const nameRow = document.createElement("span");
+  nameRow.className = "bar-name-row";
+  nameRow.append(renderImplementationName(implementation, info));
+  if (info.familyLabel) {
+    const family = document.createElement("span");
+    family.className = "coquic-family-chip";
+    family.textContent = info.surfaceLabel || info.familyLabel;
+    family.title = `${info.familyLabel} ${info.surfaceLabel || ""}`.trim();
+    nameRow.append(family);
+  }
   const version = document.createElement("small");
   version.className = "bar-version";
   version.textContent = versionLabel;
-  text.append(renderImplementationName(implementation, info), version);
+  text.append(nameRow, version);
 
   const icons = document.createElement("span");
   icons.className = "bar-identity-icons";
@@ -423,7 +438,11 @@ function renderBarplot(mode) {
       const value = Number(row[config.metric]);
       const percent = maxValue > 0 ? Math.max((value / maxValue) * 100, 0.8) : 0;
       const element = document.createElement("div");
-      element.className = `bar-row${row.implementation === "coquic" ? " own-impl" : ""}`;
+      const isCoquicFamily = isCoquicFamilyImplementation(row.implementation);
+      element.className = `bar-row${isCoquicFamily ? " own-impl coquic-family" : ""}`;
+      if (isCoquicFamily) {
+        element.style.setProperty("--family-color", colors[row.implementation] || colors.coquic);
+      }
 
       const rank = index + 1;
       const rankBadge = document.createElement("span");
@@ -687,7 +706,8 @@ function renderTrendChart(mode) {
     const filtered = points.filter((point) => point.value !== null);
     const pathData = filtered.map((point, index) => `${index === 0 ? "M" : "L"} ${xForIndex(point.index).toFixed(2)} ${yForValue(point.value).toFixed(2)}`).join(" ");
     const path = makeSvgElement("path");
-    path.setAttribute("class", "trend-line");
+    const isCoquicFamily = isCoquicFamilyImplementation(implementation);
+    path.setAttribute("class", `trend-line${isCoquicFamily ? " coquic-family" : ""}`);
     path.setAttribute("d", pathData);
     path.setAttribute("stroke", colors[implementation] || "#c3d4d8");
     svg.append(path);
@@ -701,7 +721,7 @@ function renderTrendChart(mode) {
         date: snapshots[point.index].date || snapshots[point.index].generated_at || "latest",
       };
       const circle = makeSvgElement("circle");
-      circle.setAttribute("class", "trend-point");
+      circle.setAttribute("class", `trend-point${isCoquicFamily ? " coquic-family" : ""}`);
       circle.setAttribute("cx", x);
       circle.setAttribute("cy", y);
       circle.setAttribute("r", "2.7");
@@ -743,13 +763,25 @@ function renderTrendChart(mode) {
     ...[...valuesByImplementation.keys()].map((implementation) => {
       const info = implementationInfo(implementation);
       const item = document.createElement("span");
+      if (isCoquicFamilyImplementation(implementation)) {
+        item.className = "coquic-family";
+        item.style.setProperty("--family-color", colors[implementation] || colors.coquic);
+      }
       const swatch = document.createElement("i");
       swatch.style.setProperty("--legend-color", colors[implementation] || "#c3d4d8");
       const text = document.createElement("b");
       text.textContent = implementation;
+      if (info.familyLabel) {
+        const family = document.createElement("em");
+        family.className = "trend-family-chip";
+        family.textContent = info.surfaceLabel || info.familyLabel;
+        item.append(swatch, text, family);
+      } else {
+        item.append(swatch, text);
+      }
       const meta = document.createElement("small");
       meta.textContent = `${info.company} | ${info.language} | ${libraryVersionLabel(implementation)}`;
-      item.append(swatch, text, meta);
+      item.append(meta);
       return item;
     }),
   );

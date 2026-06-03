@@ -49,23 +49,33 @@ function vendorFavicon(domain) {
   return `https://www.google.com/s2/favicons?sz=64&domain=${domain}`;
 }
 
+const deviconBase = "https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/";
+
+const languageIconSources = {
+  C: `${deviconBase}c/c-original.svg`,
+  "C++": `${deviconBase}cplusplus/cplusplus-original.svg`,
+  Go: `${deviconBase}go/go-original.svg`,
+  Python: `${deviconBase}python/python-original.svg`,
+  Rust: `${deviconBase}rust/rust-original.svg`,
+};
+
 const implementationMeta = {
-  coquic: { name: "CoQUIC", code: "CQ", avatar: githubAvatar("minhuw") },
-  "quic-go": { name: "quic-go", code: "QG", avatar: githubAvatar("quic-go") },
-  quinn: { name: "quinn", code: "QN", avatar: githubAvatar("quinn-rs") },
-  picoquic: { name: "picoquic", code: "PO", avatar: githubAvatar("private-octopus") },
-  msquic: { name: "msquic", code: "MS", avatar: vendorFavicon("microsoft.com") },
-  quiche: { name: "quiche", code: "CF", avatar: vendorFavicon("cloudflare.com") },
-  quicly: { name: "quicly", code: "H2", avatar: githubAvatar("h2o") },
-  "google-quiche": { name: "google-quiche", code: "G", avatar: vendorFavicon("google.com") },
-  tquic: { name: "tquic", code: "TC", avatar: vendorFavicon("tencent.com") },
-  mvfst: { name: "mvfst", code: "M", avatar: vendorFavicon("meta.com") },
-  "s2n-quic": { name: "s2n-quic", code: "AWS", avatar: vendorFavicon("aws.amazon.com") },
-  xquic: { name: "xquic", code: "A", avatar: vendorFavicon("alibabacloud.com") },
-  aioquic: { name: "aioquic", code: "AQ", avatar: githubAvatar("aiortc") },
-  ngtcp2: { name: "ngtcp2", code: "NG", avatar: githubAvatar("ngtcp2") },
-  lsquic: { name: "lsquic", code: "LS", avatar: vendorFavicon("litespeedtech.com") },
-  neqo: { name: "neqo", code: "MZ", avatar: vendorFavicon("mozilla.org") },
+  coquic: { name: "CoQUIC", code: "CQ", sourceIcon: "./coquic-logo.svg", language: "C++", languageCode: "C++" },
+  "quic-go": { name: "quic-go", code: "QG", sourceIcon: githubAvatar("quic-go"), language: "Go", languageCode: "Go" },
+  quinn: { name: "quinn", code: "QN", sourceIcon: githubAvatar("quinn-rs"), language: "Rust", languageCode: "Rs" },
+  picoquic: { name: "picoquic", code: "PO", sourceIcon: githubAvatar("private-octopus"), language: "C", languageCode: "C" },
+  msquic: { name: "msquic", code: "MS", sourceIcon: vendorFavicon("microsoft.com"), language: "C", languageCode: "C" },
+  quiche: { name: "quiche", code: "CF", sourceIcon: vendorFavicon("cloudflare.com"), language: "Rust", languageCode: "Rs" },
+  quicly: { name: "quicly", code: "H2", sourceIcon: githubAvatar("h2o"), language: "C", languageCode: "C" },
+  "google-quiche": { name: "google-quiche", code: "G", sourceIcon: vendorFavicon("google.com"), language: "C++", languageCode: "C++" },
+  tquic: { name: "tquic", code: "TC", sourceIcon: vendorFavicon("tencent.com"), language: "Rust", languageCode: "Rs" },
+  mvfst: { name: "mvfst", code: "M", sourceIcon: vendorFavicon("meta.com"), language: "C++", languageCode: "C++" },
+  "s2n-quic": { name: "s2n-quic", code: "AWS", sourceIcon: vendorFavicon("aws.amazon.com"), language: "Rust", languageCode: "Rs" },
+  xquic: { name: "xquic", code: "A", sourceIcon: vendorFavicon("alibabacloud.com"), language: "C", languageCode: "C" },
+  aioquic: { name: "aioquic", code: "AQ", sourceIcon: githubAvatar("aiortc"), language: "Python", languageCode: "Py" },
+  ngtcp2: { name: "ngtcp2", code: "NG", sourceIcon: githubAvatar("ngtcp2"), language: "C", languageCode: "C" },
+  lsquic: { name: "lsquic", code: "LS", sourceIcon: vendorFavicon("litespeedtech.com"), language: "C", languageCode: "C" },
+  neqo: { name: "neqo", code: "MZ", sourceIcon: vendorFavicon("mozilla.org"), language: "Rust", languageCode: "Rs" },
 };
 
 function sourceRows() {
@@ -169,28 +179,46 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
   return sawUnsupported ? "unsupported" : "unknown";
 }
 
-function renderParticipant(name) {
-  const meta = implementationMeta[name] || { name, code: name.slice(0, 2).toUpperCase(), avatar: "" };
-  const chip = document.createElement("span");
-  chip.className = `participant-chip${name === "coquic" ? " coquic" : ""}`;
+function renderParticipantIcon(kind, iconUrl, code, label) {
+  const badge = document.createElement("span");
+  badge.className = `participant-identity-icon ${kind}`;
+  badge.title = label;
+  badge.setAttribute("aria-label", label);
 
-  if (meta.avatar) {
+  if (iconUrl) {
     const image = document.createElement("img");
-    image.src = meta.avatar;
+    image.src = iconUrl;
     image.alt = "";
     image.loading = "lazy";
     image.decoding = "async";
     image.referrerPolicy = "no-referrer";
     image.addEventListener("error", () => image.remove(), { once: true });
-    chip.append(image);
+    badge.append(image);
   }
 
   const fallback = document.createElement("span");
   fallback.className = "participant-fallback";
-  fallback.textContent = meta.code;
+  fallback.textContent = code;
+  badge.append(fallback);
+  return badge;
+}
+
+function renderParticipant(name) {
+  const code = name.slice(0, 2).toUpperCase();
+  const meta = implementationMeta[name] || { name, code, sourceIcon: "", language: "unknown", languageCode: "?" };
+  const chip = document.createElement("span");
+  chip.className = `participant-chip${name === "coquic" ? " coquic" : ""}`;
+
+  const icons = document.createElement("span");
+  icons.className = "participant-icons";
+  icons.append(
+    renderParticipantIcon("source", meta.sourceIcon, meta.code, meta.name),
+    renderParticipantIcon("language", languageIconSources[meta.language], meta.languageCode, meta.language),
+  );
+
   const label = document.createElement("strong");
   label.textContent = meta.name;
-  chip.append(fallback, label);
+  chip.append(icons, label);
   return chip;
 }
 

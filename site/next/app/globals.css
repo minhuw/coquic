@@ -1655,6 +1655,7 @@
   }
 
   .bar-row {
+    position: relative;
     display: grid;
     grid-template-columns: 34px 232px minmax(0, 1fr) minmax(112px, auto);
     align-items: center;
@@ -1670,6 +1671,22 @@
     border-color: color-mix(in srgb, var(--primary) 30%, transparent);
     background: var(--primary-soft);
     box-shadow: none;
+  }
+
+  .bar-row.coquic-family {
+    border-color: color-mix(in srgb, var(--family-color, var(--primary)) 34%, transparent);
+    background:
+      linear-gradient(90deg, color-mix(in srgb, var(--family-color, var(--primary)) 14%, transparent), transparent 54%),
+      var(--primary-soft);
+  }
+
+  .bar-row.coquic-family::before {
+    content: "";
+    position: absolute;
+    inset: 6px auto 6px 0;
+    width: 3px;
+    border-radius: 999px;
+    background: var(--family-color, var(--primary));
   }
 
   .rank-badge {
@@ -1788,6 +1805,14 @@
     min-width: 0;
   }
 
+  .bar-name-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: 100%;
+  }
+
   .identity-name {
     overflow: hidden;
     color: var(--ink);
@@ -1797,6 +1822,38 @@
     text-decoration: none;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .bar-name-row .identity-name {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .coquic-family-chip,
+  .trend-family-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--primary-active);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-style: normal;
+    font-weight: 850;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .coquic-family-chip {
+    flex: 0 0 auto;
+    max-width: 92px;
+    height: 18px;
+    padding: 0 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .identity-name:hover,
@@ -1950,9 +2007,17 @@
     stroke-linejoin: round;
   }
 
+  .trend-line.coquic-family {
+    stroke-width: 3;
+  }
+
   .trend-point {
     stroke: var(--surface);
     stroke-width: 1.2;
+  }
+
+  .trend-point.coquic-family {
+    stroke-width: 2;
   }
 
   .trend-hit-point,
@@ -2018,6 +2083,11 @@
     background: var(--surface-2);
   }
 
+  .trend-legend span.coquic-family {
+    border-color: color-mix(in srgb, var(--family-color, var(--primary)) 34%, transparent);
+    background: var(--primary-soft);
+  }
+
   .trend-legend i {
     width: 8px;
     height: 8px;
@@ -2030,6 +2100,12 @@
     font-family: var(--font-mono);
     font-size: 10px;
     font-weight: 850;
+  }
+
+  .trend-family-chip {
+    height: 17px;
+    max-width: 104px;
+    padding: 0 6px;
   }
 
   .interop-head {
@@ -2099,13 +2175,33 @@
     @apply inline-flex min-w-0 items-center gap-2;
   }
 
-  .participant-chip img,
-  .participant-fallback {
-    @apply size-7 shrink-0 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)];
+  .participant-icons {
+    @apply inline-grid shrink-0 grid-cols-2 items-center gap-1.5;
   }
 
-  .participant-chip img {
+  .participant-identity-icon {
+    @apply inline-flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)];
+  }
+
+  .participant-identity-icon img,
+  .participant-fallback {
+    @apply size-full;
+  }
+
+  .participant-identity-icon img {
     @apply object-cover;
+  }
+
+  .participant-identity-icon.language img {
+    @apply size-5 object-contain;
+  }
+
+  .participant-identity-icon.source img {
+    @apply size-full;
+  }
+
+  .participant-identity-icon img + .participant-fallback {
+    @apply hidden;
   }
 
   .participant-fallback {
@@ -2324,6 +2420,20 @@
 
     .bar-value {
       text-align: left;
+    }
+
+    .bar-name-row {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .coquic-family-chip {
+      max-width: 128px;
+    }
+
+    .trend-family-chip {
+      max-width: 88px;
     }
   }
 }

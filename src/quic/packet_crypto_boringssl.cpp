@@ -708,7 +708,8 @@ CodecResult<std::size_t> seal_cipher_chunks_into(const EVP_CIPHER *packet_cipher
     int final_length = 0;
     const auto seal_final_failed =
         consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_final) |
-        (EVP_EncryptFinal_ex(seal_context, openssl_data(payload_output.subspan(total_produced)),
+        (EVP_EncryptFinal_ex(seal_context,
+                             openssl_data(payload_output.subspan(payload_bytes_produced)),
                              &final_length) <= 0);
     if (seal_final_failed) {
         reset_packet_cipher_context(seal_cache);
@@ -716,7 +717,8 @@ CodecResult<std::size_t> seal_cipher_chunks_into(const EVP_CIPHER *packet_cipher
                                                  0);
     }
 
-    const auto total_ciphertext_length = total_produced + static_cast<std::size_t>(final_length);
+    const auto total_ciphertext_length =
+        payload_bytes_produced + static_cast<std::size_t>(final_length);
     if (total_ciphertext_length + aead_tag_length > request.ciphertext.size()) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);

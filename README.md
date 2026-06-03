@@ -6,7 +6,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://coquic.minhuw.dev/"><img src="https://img.shields.io/badge/Website-CoQUIC-0F62FE" alt="CoQUIC website"></a>
-  <a href="https://coquic.minhuw.dev/perf-comparison.html"><img src="https://img.shields.io/badge/Performance-Dashboard-0F62FE" alt="CoQUIC performance dashboard"></a>
+  <a href="https://coquic.minhuw.dev/performance"><img src="https://img.shields.io/badge/Performance-Dashboard-0F62FE" alt="CoQUIC performance dashboard"></a>
 </p>
 
 <p align="center">

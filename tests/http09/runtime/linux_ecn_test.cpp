@@ -1,4 +1,4 @@
-#include <gtest/gtest.h>
+#include "../../support/gtest_compat.h"
 
 #include "tests/support/http09/runtime_test_fixtures.h"
 

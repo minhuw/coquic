@@ -1,7 +1,7 @@
 #include <cstdint>
 #include <optional>
 
-#include <gtest/gtest.h>
+#include "../../support/gtest_compat.h"
 
 #include "src/quic/packet_number.h"
 

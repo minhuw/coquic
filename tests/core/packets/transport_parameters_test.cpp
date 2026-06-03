@@ -6,7 +6,7 @@
 #include <optional>
 #include <vector>
 
-#include <gtest/gtest.h>
+#include "../../support/gtest_compat.h"
 
 #include "src/quic/transport_parameters.h"
 #include "tests/support/core/connection_test_fixtures.h"

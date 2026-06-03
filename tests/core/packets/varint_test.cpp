@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <vector>
 
-#include <gtest/gtest.h>
+#include "../../support/gtest_compat.h"
 
 #include "src/quic/buffer.h"
 #include "src/quic/varint.h"

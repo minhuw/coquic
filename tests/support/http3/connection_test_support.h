@@ -13,7 +13,7 @@
 #include <variant>
 #include <vector>
 
-#include <gtest/gtest.h>
+#include "../gtest_compat.h"
 
 #include "src/http3/http3_connection.h"
 

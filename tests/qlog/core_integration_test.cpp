@@ -1,4 +1,4 @@
-#include <gtest/gtest.h>
+#include "../support/gtest_compat.h"
 
 #include "src/quic/qlog/session.h"
 #include "src/quic/qlog/types.h"

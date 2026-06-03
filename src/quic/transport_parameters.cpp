@@ -92,7 +92,8 @@ void append_u16_be(std::vector<std::byte> &output, std::uint16_t value) {
     output.push_back(static_cast<std::byte>(value & 0xffu));
 }
 
-std::uint32_t read_u32_be(std::span<const std::byte, sizeof(std::uint32_t)> bytes) {
+template <std::size_t Extent> std::uint32_t read_u32_be(std::span<const std::byte, Extent> bytes) {
+    static_assert(Extent == std::dynamic_extent || Extent == sizeof(std::uint32_t));
     return (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[0])) << 24) |
            (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[1])) << 16) |
            (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[2])) << 8) |

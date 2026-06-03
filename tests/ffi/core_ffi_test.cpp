@@ -1,7 +1,7 @@
 #include <cstdint>
 #include <vector>
 
-#include <gtest/gtest.h>
+#include "../support/gtest_compat.h"
 
 #include "coquic/ffi/core.h"
 

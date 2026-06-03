@@ -1,7 +1,7 @@
 #include <algorithm>
 #include <cerrno>
 
-#include <gtest/gtest.h>
+#include "../support/gtest_compat.h"
 
 #include "tests/support/core/endpoint_test_fixtures.h"
 #include "tests/support/perf/perf_test_fixtures.h"

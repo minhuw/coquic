@@ -1,6 +1,6 @@
 #include <array>
 
-#include <gtest/gtest.h>
+#include "../../support/gtest_compat.h"
 
 #include <cstdlib>
 #include <cstdint>

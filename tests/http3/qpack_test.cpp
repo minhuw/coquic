@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-#include <gtest/gtest.h>
+#include "../support/gtest_compat.h"
 
 #include "src/http3/http3_qpack.h"
 

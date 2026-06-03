@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <cstring>
 #include <iostream>
+#include <memory>
 
 #include <liburing.h>
 
@@ -128,9 +129,9 @@ void queue_exit_noop_for_factory_tests(io_uring *) {
 }
 
 io_uring_sqe *get_sqe_for_factory_tests(io_uring *) {
-    static thread_local io_uring_sqe factory_sqe{};
-    factory_sqe = {};
-    return &factory_sqe;
+    static thread_local auto factory_sqe = std::make_unique<io_uring_sqe>();
+    *factory_sqe = {};
+    return factory_sqe.get();
 }
 
 int submit_success_for_factory_tests(io_uring *) {

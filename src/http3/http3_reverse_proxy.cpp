@@ -749,17 +749,15 @@ void stream_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
             chunked = parsed_head.chunked;
             remaining_content_length = parsed_head.content_length;
             auto response_head = response_head_from_proxy_head(parsed_head, head_request);
-            const bool response_is_complete =
-                head_request || (!chunked && remaining_content_length == 0u);
             if (!emit(Http3ResponsePart{
                     .head = std::move(response_head),
-                    .complete = response_is_complete,
+                    .complete = head_request || (!chunked && remaining_content_length == 0u),
                 })) {
                 return;
             }
             emitted_head = true;
             pending.erase(0, header_end + 4);
-            if (response_is_complete) {
+            if (head_request || (!chunked && remaining_content_length == 0u)) {
                 return;
             }
         }

@@ -98,10 +98,9 @@ COQUIC_NO_PROFILE DatagramByteStorageCache &datagram_byte_storage_cache() {
 #endif
 
 std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> output,
-                                                       std::size_t *offset_ptr,
-                                                       std::uint64_t value) {
+                                                       std::size_t &offset, std::uint64_t value) {
     constexpr std::uint64_t kMaxQuicVarInt = 4611686018427387903ull;
-    const auto start_offset = *offset_ptr;
+    const auto start_offset = offset;
     if (value > kMaxQuicVarInt) {
         return CodecError{
             .code = CodecErrorCode::invalid_varint,
@@ -123,7 +122,7 @@ std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> outp
     }
 
     const auto written = encode_varint_into(output.subspan(start_offset), value).value();
-    *offset_ptr += written;
+    offset += written;
     return std::nullopt;
 }
 
@@ -410,7 +409,7 @@ std::optional<CodecError> SpanBufferWriter::write_bytes(std::span<const std::byt
 }
 
 std::optional<CodecError> SpanBufferWriter::write_varint(std::uint64_t value) {
-    return write_varint_into_fixed_span(bytes_, &offset_, value);
+    return write_varint_into_fixed_span(bytes_, offset_, value);
 }
 
 void SpanBufferWriter::write_varint_unchecked(std::uint64_t value) {

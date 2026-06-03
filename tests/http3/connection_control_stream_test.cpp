@@ -1,3 +1,4 @@
+#include "../support/gtest_compat.h"
 #include "tests/support/http3/connection_test_support.h"
 
 namespace {

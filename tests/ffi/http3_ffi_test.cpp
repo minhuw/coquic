@@ -3,7 +3,7 @@
 #include <string_view>
 #include <vector>
 
-#include <gtest/gtest.h>
+#include "../support/gtest_compat.h"
 
 #include "coquic/ffi/http3.h"
 

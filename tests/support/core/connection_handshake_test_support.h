@@ -3,7 +3,7 @@
 
 #include <array>
 
-#include <gtest/gtest.h>
+#include "../gtest_compat.h"
 
 #include <cstdlib>
 #include <cstdint>

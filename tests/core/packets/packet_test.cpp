@@ -5,7 +5,7 @@
 #include <variant>
 #include <vector>
 
-#include <gtest/gtest.h>
+#include "../../support/gtest_compat.h"
 
 #include "src/quic/packet.h"
 #include "src/quic/recovery.h"

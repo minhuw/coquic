@@ -1,4 +1,4 @@
-#include <gtest/gtest.h>
+#include "../../support/gtest_compat.h"
 
 #include "tests/support/core/endpoint_test_fixtures.h"
 

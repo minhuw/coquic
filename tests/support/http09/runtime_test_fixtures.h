@@ -1,7 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include <gtest/gtest.h>
+#include "../gtest_compat.h"
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -1201,14 +1201,14 @@ struct InMemoryHttp09TransferConfig {
 
 inline InMemoryHttp09TransferResult
 run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_config) {
-    InMemoryHttp09TransferResult observed;
+    InMemoryHttp09TransferResult transfer_result;
 
     // The in-memory client still uses the real request parser so bad request envs fail early.
     const auto requests =
         coquic::http09::parse_http09_requests_env(transfer_config.client_config.requests_env);
     if (!requests.has_value()) {
-        observed.client_failed = true;
-        return observed;
+        transfer_result.client_failed = true;
+        return transfer_result;
     }
 
     struct ClientSession {
@@ -1226,7 +1226,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
         bool terminal_failure = false;
     };
 
-    ClientSession client{
+    ClientSession client_session{
         .endpoint = coquic::http09::QuicHttp09ClientEndpoint(coquic::http09::QuicHttp09ClientConfig{
             .requests = requests.value(),
             .download_root = transfer_config.client_config.download_root,
@@ -1251,18 +1251,20 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
 
     // Transport state snapshots let tests assert congestion and queued-stream side effects.
     const auto capture_connection_state = [&]() {
-        observed.client_bytes_in_flight =
-            client.core.connection_->congestion_controller_.bytes_in_flight();
-        observed.server_bytes_in_flight =
+        transfer_result.client_bytes_in_flight =
+            client_session.core.connection_->congestion_controller_.bytes_in_flight();
+        transfer_result.server_bytes_in_flight =
             server.core.connection_->congestion_controller_.bytes_in_flight();
-        observed.client_congestion_window =
-            client.core.connection_->congestion_controller_.congestion_window();
-        observed.server_congestion_window =
+        transfer_result.client_congestion_window =
+            client_session.core.connection_->congestion_controller_.congestion_window();
+        transfer_result.server_congestion_window =
             server.core.connection_->congestion_controller_.congestion_window();
-        observed.client_queued_stream_bytes = client.core.connection_->total_queued_stream_bytes();
-        observed.server_queued_stream_bytes = server.core.connection_->total_queued_stream_bytes();
-        observed.client_has_next_wakeup = client.next_wakeup.has_value();
-        observed.server_has_next_wakeup = server.next_wakeup.has_value();
+        transfer_result.client_queued_stream_bytes =
+            client_session.core.connection_->total_queued_stream_bytes();
+        transfer_result.server_queued_stream_bytes =
+            server.core.connection_->total_queued_stream_bytes();
+        transfer_result.client_has_next_wakeup = client_session.next_wakeup.has_value();
+        transfer_result.server_has_next_wakeup = server.next_wakeup.has_value();
     };
 
     // The client driver forwards send effects into the synthetic server queue and polls the
@@ -1270,7 +1272,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
     const auto drive_client = [&](coquic::quic::QuicCoreResult result,
                                   coquic::quic::QuicCoreTimePoint now) {
         for (;;) {
-            client.next_wakeup = result.next_wakeup;
+            client_session.next_wakeup = result.next_wakeup;
             capture_connection_state();
             for (const auto &effect : result.effects) {
                 const auto *send = std::get_if<coquic::quic::QuicCoreSendDatagram>(&effect);
@@ -1278,35 +1280,35 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
                     continue;
                 }
 
-                ++observed.client_sent_datagrams;
-                observed.client_sent_bytes += send->bytes.size();
+                ++transfer_result.client_sent_datagrams;
+                transfer_result.client_sent_bytes += send->bytes.size();
                 if (transfer_config.dropped_client_datagrams.contains(
-                        observed.client_sent_datagrams)) {
+                        transfer_result.client_sent_datagrams)) {
                     continue;
                 }
                 to_server.push_back(send->bytes);
             }
 
-            auto update = client.endpoint.on_core_result(result, now);
+            auto update = client_session.endpoint.on_core_result(result, now);
             if (result.local_error.has_value() && !update.handled_local_error) {
-                client.terminal_failure = true;
-                observed.client_failed = true;
+                client_session.terminal_failure = true;
+                transfer_result.client_failed = true;
                 return false;
             }
             if (update.terminal_failure) {
-                client.terminal_failure = true;
-                observed.client_failed = true;
+                client_session.terminal_failure = true;
+                transfer_result.client_failed = true;
                 return false;
             }
             if (update.terminal_success) {
-                client.terminal_success = true;
-                observed.client_complete = true;
+                client_session.terminal_success = true;
+                transfer_result.client_complete = true;
                 return true;
             }
 
             while (true) {
                 if (!update.core_inputs.empty()) {
-                    result = coquic::quic::test::advance_core_with_inputs(client.core,
+                    result = coquic::quic::test::advance_core_with_inputs(client_session.core,
                                                                           update.core_inputs, now);
                     break;
                 }
@@ -1315,15 +1317,15 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
                     return true;
                 }
 
-                update = client.endpoint.poll(now);
+                update = client_session.endpoint.poll(now);
                 if (update.terminal_failure) {
-                    client.terminal_failure = true;
-                    observed.client_failed = true;
+                    client_session.terminal_failure = true;
+                    transfer_result.client_failed = true;
                     return false;
                 }
                 if (update.terminal_success) {
-                    client.terminal_success = true;
-                    observed.client_complete = true;
+                    client_session.terminal_success = true;
+                    transfer_result.client_complete = true;
                     return true;
                 }
             }
@@ -1342,10 +1344,10 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
                     continue;
                 }
 
-                ++observed.server_sent_datagrams;
-                observed.server_sent_bytes += send->bytes.size();
+                ++transfer_result.server_sent_datagrams;
+                transfer_result.server_sent_bytes += send->bytes.size();
                 if (transfer_config.dropped_server_datagrams.contains(
-                        observed.server_sent_datagrams)) {
+                        transfer_result.server_sent_datagrams)) {
                     continue;
                 }
                 to_client.push_back(send->bytes);
@@ -1354,12 +1356,12 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
             auto update = server.endpoint.on_core_result(result, now);
             if (result.local_error.has_value() && !update.handled_local_error) {
                 server.terminal_failure = true;
-                observed.server_failed = true;
+                transfer_result.server_failed = true;
                 return false;
             }
             if (update.terminal_failure) {
                 server.terminal_failure = true;
-                observed.server_failed = true;
+                transfer_result.server_failed = true;
                 return false;
             }
 
@@ -1377,7 +1379,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
                 update = server.endpoint.poll(now);
                 if (update.terminal_failure) {
                     server.terminal_failure = true;
-                    observed.server_failed = true;
+                    transfer_result.server_failed = true;
                     return false;
                 }
             }
@@ -1386,15 +1388,15 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
 
     auto now = coquic::quic::test::test_time();
     // Start the client core before entering the transfer loop so initial packets are queued.
-    if (!drive_client(client.core.advance(coquic::quic::QuicCoreStart{}, now), now)) {
+    if (!drive_client(client_session.core.advance(coquic::quic::QuicCoreStart{}, now), now)) {
         capture_connection_state();
-        return observed;
+        return transfer_result;
     }
 
     constexpr std::size_t kStepLimit = 20000;
-    while (!client.terminal_success && !client.terminal_failure && !server.terminal_failure &&
-           observed.steps < kStepLimit) {
-        ++observed.steps;
+    while (!client_session.terminal_success && !client_session.terminal_failure &&
+           !server.terminal_failure && transfer_result.steps < kStepLimit) {
+        ++transfer_result.steps;
 
         // Datagrams are delivered in FIFO order, then timers advance whichever side wakes first.
         if (!to_server.empty()) {
@@ -1416,7 +1418,7 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
             now += std::chrono::milliseconds(1);
             auto inbound = std::move(to_client.front());
             to_client.pop_front();
-            if (!drive_client(client.core.advance(
+            if (!drive_client(client_session.core.advance(
                                   coquic::quic::QuicCoreInboundDatagram{
                                       .bytes = std::move(inbound),
                                   },
@@ -1427,16 +1429,16 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
             continue;
         }
 
-        const auto next_wakeup =
-            coquic::quic::test::earliest_next_wakeup({client.next_wakeup, server.next_wakeup});
+        const auto next_wakeup = coquic::quic::test::earliest_next_wakeup(
+            {client_session.next_wakeup, server.next_wakeup});
         if (!next_wakeup.has_value()) {
             break;
         }
 
         now = next_wakeup.value();
-        if (client.next_wakeup == next_wakeup) {
-            if (!drive_client(client.core.advance(coquic::quic::QuicCoreTimerExpired{}, now),
-                              now)) {
+        if (client_session.next_wakeup == next_wakeup) {
+            if (!drive_client(
+                    client_session.core.advance(coquic::quic::QuicCoreTimerExpired{}, now), now)) {
                 break;
             }
             continue;
@@ -1452,23 +1454,24 @@ run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_confi
     }
 
     capture_connection_state();
-    observed.client_complete = client.terminal_success;
-    observed.client_failed = client.terminal_failure;
-    observed.server_failed = server.terminal_failure;
-    observed.hit_step_limit = observed.steps >= kStepLimit && !observed.client_complete &&
-                              !observed.client_failed && !observed.server_failed;
-    return observed;
+    transfer_result.client_complete = client_session.terminal_success;
+    transfer_result.client_failed = client_session.terminal_failure;
+    transfer_result.server_failed = server.terminal_failure;
+    transfer_result.hit_step_limit =
+        transfer_result.steps >= kStepLimit && !transfer_result.client_complete &&
+        !transfer_result.client_failed && !transfer_result.server_failed;
+    return transfer_result;
 }
 
 inline ObservingServerResult
 run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
-    ObservingServerResult observed;
+    ObservingServerResult server_observation;
     constexpr std::size_t kTimerSpinLimit = 100000;
 
     // The observing server binds a real UDP socket so tests can inspect runtime network behavior.
     const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (socket_fd < 0) {
-        return observed;
+        return server_observation;
     }
     ScopedFd socket_guard(socket_fd);
 
@@ -1476,11 +1479,11 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
     bind_address.sin_family = AF_INET;
     bind_address.sin_port = htons(config.port);
     if (::inet_pton(AF_INET, config.host.c_str(), &bind_address.sin_addr) != 1) {
-        return observed;
+        return server_observation;
     }
     if (::bind(socket_fd, reinterpret_cast<const sockaddr *>(&bind_address),
                sizeof(bind_address)) != 0) {
-        return observed;
+        return server_observation;
     }
 
     struct Session {
@@ -1531,16 +1534,17 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
 
     auto drive = [&](Session &session, coquic::quic::QuicCoreResult result) -> bool {
         const auto capture_transport_state = [&]() {
-            observed.has_pending_application_send =
+            server_observation.has_pending_application_send =
                 session.core.connection_->has_pending_application_send();
-            observed.sent_packets =
+            server_observation.sent_packets =
                 session.core.connection_->application_space_.sent_packets.size();
-            observed.bytes_in_flight =
+            server_observation.bytes_in_flight =
                 session.core.connection_->congestion_controller_.bytes_in_flight();
-            observed.congestion_window =
+            server_observation.congestion_window =
                 session.core.connection_->congestion_controller_.congestion_window();
-            observed.has_next_wakeup = session.next_wakeup.has_value();
-            observed.queued_stream_bytes = session.core.connection_->total_queued_stream_bytes();
+            server_observation.has_next_wakeup = session.next_wakeup.has_value();
+            server_observation.queued_stream_bytes =
+                session.core.connection_->total_queued_stream_bytes();
         };
         const auto packet_is_response = [](const coquic::quic::SentPacketRecord &packet) {
             return std::ranges::any_of(packet.stream_fragments,
@@ -1556,7 +1560,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
                     continue;
                 }
 
-                observed.response_packet_observed = true;
+                server_observation.response_packet_observed = true;
                 response_packet_numbers.insert(packet_number);
             }
             for (const auto &[packet_number, packet] : application_space.declared_lost_packets) {
@@ -1564,7 +1568,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
                     continue;
                 }
 
-                observed.response_packet_observed = true;
+                server_observation.response_packet_observed = true;
                 response_packet_numbers.insert(packet_number);
             }
 
@@ -1576,7 +1580,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
                     continue;
                 }
 
-                observed.response_packet_acked = true;
+                server_observation.response_packet_acked = true;
                 it = response_packet_numbers.erase(it);
             }
         };
@@ -1590,14 +1594,14 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
             for (const auto &effect : result.effects) {
                 if (const auto *event = std::get_if<coquic::quic::QuicCoreStateEvent>(&effect)) {
                     if (event->change == coquic::quic::QuicCoreStateChange::handshake_ready) {
-                        ++observed.handshake_ready_events;
+                        ++server_observation.handshake_ready_events;
                     }
                     continue;
                 }
 
                 if (const auto *received =
                         std::get_if<coquic::quic::QuicCoreReceiveStreamData>(&effect)) {
-                    observed.request_stream_ids.push_back(received->stream_id);
+                    server_observation.request_stream_ids.push_back(received->stream_id);
                     continue;
                 }
 
@@ -1606,8 +1610,8 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
                     continue;
                 }
 
-                ++observed.sent_datagrams;
-                observed.sent_bytes += send->bytes.size();
+                ++server_observation.sent_datagrams;
+                server_observation.sent_bytes += send->bytes.size();
                 const auto *buffer = send->bytes.empty()
                                          ? nullptr
                                          : reinterpret_cast<const void *>(send->bytes.data());
@@ -1664,7 +1668,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
                                               socklen_t source_len) -> bool {
         // Unsupported packets are ignored; supported Initials either find or create a session.
         saw_peer_activity = true;
-        ++observed.inbound_datagrams;
+        ++server_observation.inbound_datagrams;
 
         const auto parsed = parse_server_datagram_for_routing(inbound);
         if (!parsed.has_value()) {
@@ -1768,9 +1772,9 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
             }
 
             processed_any = true;
-            ++observed.timer_expirations;
-            if (observed.timer_expirations >= kTimerSpinLimit) {
-                observed.exit_code = 2;
+            ++server_observation.timer_expirations;
+            if (server_observation.timer_expirations >= kTimerSpinLimit) {
+                server_observation.exit_code = 2;
                 return false;
             }
             if (!drive(*session,
@@ -1785,17 +1789,17 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
         // Each loop prefers already-due timers, then ready datagrams, then endpoint poll work.
         bool processed_timers = false;
         if (!process_expired_timers(runtime_now(), processed_timers)) {
-            return observed;
+            return server_observation;
         }
         if (processed_timers) {
             continue;
         }
 
         if (!drain_ready_datagrams()) {
-            return observed;
+            return server_observation;
         }
         if (!pump_endpoint_work_once()) {
-            return observed;
+            return server_observation;
         }
 
         int timeout_ms = 1000;
@@ -1804,7 +1808,7 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
             const auto current = runtime_now();
             if (*next_wakeup <= current) {
                 if (!process_expired_timers(current, processed_timers)) {
-                    return observed;
+                    return server_observation;
                 }
                 continue;
             }
@@ -1829,25 +1833,25 @@ run_observing_http09_server(const coquic::http09::Http09RuntimeConfig &config) {
         } while (poll_result < 0 && errno == EINTR);
 
         if (poll_result < 0) {
-            return observed;
+            return server_observation;
         }
         if (poll_result == 0) {
             if (next_wakeup.has_value()) {
                 const auto current = runtime_now();
                 if (!process_expired_timers(current, processed_timers)) {
-                    return observed;
+                    return server_observation;
                 }
                 continue;
             }
 
-            observed.exit_code = saw_peer_activity ? 0 : 1;
-            return observed;
+            server_observation.exit_code = saw_peer_activity ? 0 : 1;
+            return server_observation;
         }
         if ((descriptor.revents & POLLIN) == 0) {
-            return observed;
+            return server_observation;
         }
         if (!drain_ready_datagrams()) {
-            return observed;
+            return server_observation;
         }
     }
 }

@@ -1,4 +1,4 @@
-#include <gtest/gtest.h>
+#include "../../support/gtest_compat.h"
 
 #include "src/io/io_backend_test_hooks.h"
 

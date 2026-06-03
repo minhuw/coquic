@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include <gtest/gtest.h>
+#include "../../support/gtest_compat.h"
 
 #define private public
 #include "src/quic/congestion.h"

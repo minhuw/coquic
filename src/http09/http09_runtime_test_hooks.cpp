@@ -1157,13 +1157,14 @@ bool runtime_backend_preferred_address_route_failure_stops_migration_request_for
     result.effects.emplace_back(make_ipv4_preferred_address_effect_for_tests());
 
     std::vector<QuicCoreInput> core_inputs;
-    const bool preferred_route_rejected = !observe_client_runtime_policy_effects_with_backend(
-        result, state, policy, io_context, "client");
+    if (observe_client_runtime_policy_effects_with_backend(result, state, policy, io_context,
+                                                           "client")) {
+        return false;
+    }
     maybe_queue_client_runtime_policy_inputs(config, policy, core_inputs);
 
-    return preferred_route_rejected && backend_ptr->ensure_route_calls.size() == 1 &&
-           policy.handshake_ready_seen && policy.handshake_confirmed_seen &&
-           !policy.preferred_address_route_handle.has_value() &&
+    return backend_ptr->ensure_route_calls.size() == 1 && policy.handshake_ready_seen &&
+           policy.handshake_confirmed_seen && !policy.preferred_address_route_handle.has_value() &&
            !io_context.preferred_route_handle.has_value() &&
            !policy.preferred_address_request_queued && core_inputs.empty();
 }

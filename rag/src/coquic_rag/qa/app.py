@@ -18,7 +18,8 @@ from pydantic import BaseModel, Field
 
 from coquic_rag.config import ProjectPaths
 from coquic_rag.embed.provider import (
-    FakeEmbedder,
+    DEFAULT_EMBEDDING_MODEL,
+    OpenRouterEmbedder,
 )
 from coquic_rag.query.service import get_index_status
 from coquic_rag.qa.filters import (
@@ -50,7 +51,7 @@ DEFAULT_ALLOWED_ORIGINS = (
     "http://localhost:3001",
 )
 QA_COLLECTION_NAME = "quic_sections"
-QA_SEARCH_EMBEDDING_MODEL = "local-keyword-v1"
+QA_SEARCH_EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL
 LOGGER = logging.getLogger(__name__)
 GLOBAL_DEEPSEEK_RATE_KEY = "deepseek:global"
 QA_RATE_LIMIT_REQUESTS = 12
@@ -144,7 +145,7 @@ def paths() -> ProjectPaths:
 
 @lru_cache
 def qa_service() -> QaService:
-    embedder = FakeEmbedder()
+    embedder = OpenRouterEmbedder(model_name=QA_SEARCH_EMBEDDING_MODEL)
     query_service = QueryService(
         paths=paths(),
         embedder=embedder,

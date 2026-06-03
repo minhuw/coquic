@@ -70,6 +70,7 @@ jobs:
         env:
           COQUIC_DEMO_CERT_CHAIN_PEM: ${{ secrets.COQUIC_DEMO_CERT_CHAIN_PEM }}
           COQUIC_DEMO_PRIVATE_KEY_PEM: ${{ secrets.COQUIC_DEMO_PRIVATE_KEY_PEM }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           COQUIC_QDRANT_URL: ${{ secrets.COQUIC_QDRANT_URL }}
           COQUIC_QDRANT_API_KEY: ${{ secrets.COQUIC_QDRANT_API_KEY }}

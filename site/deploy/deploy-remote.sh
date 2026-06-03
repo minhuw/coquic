@@ -51,6 +51,7 @@ if [[ ! -f "${ssh_key_path}" ]]; then
 fi
 
 rag_env_vars=(
+  OPENROUTER_API_KEY
   DEEPSEEK_API_KEY
   COQUIC_QDRANT_URL
   COQUIC_QDRANT_API_KEY

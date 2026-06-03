@@ -304,7 +304,7 @@ def test_health_reports_hardcoded_models_when_old_override_env_is_set(monkeypatc
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["embedding_model"] == "local-keyword-v1"
+    assert payload["embedding_model"] == "nvidia/llama-nemotron-embed-vl-1b-v2:free"
     assert "relevance_filter_model" not in payload
     assert payload["llm_model"] == "deepseek-v4-pro"
     assert payload["answer_models"][0] == {
@@ -314,17 +314,19 @@ def test_health_reports_hardcoded_models_when_old_override_env_is_set(monkeypatc
     assert len(payload["answer_models"]) == 1
 
 
-def test_default_qa_service_uses_local_search_embedder_without_openrouter_key(monkeypatch) -> None:
+def test_default_qa_service_uses_openrouter_embedder_for_search(monkeypatch) -> None:
     import coquic_rag.qa.app as qa_app
 
     qa_app.qa_service.cache_clear()
     qa_app.paths.cache_clear()
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
 
     service = qa_app.qa_service()
 
-    assert type(service._query_service._embedder).__name__ == "FakeEmbedder"
+    embedder = service._query_service._embedder
+    assert type(embedder).__name__ == "OpenRouterEmbedder"
+    assert embedder.model_name == "nvidia/llama-nemotron-embed-vl-1b-v2:free"
 
 
 def test_random_question_endpoint_returns_validated_question(monkeypatch) -> None:

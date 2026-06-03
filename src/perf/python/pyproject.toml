@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coquic-python-perf"
+version = "0.1.0"
+description = "Asyncio perf runner for CoQUIC's Python QUIC facade"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+
+[project.scripts]
+coquic-python-perf = "coquic_python_perf.__main__:main"
+
+[tool.setuptools]
+packages = ["coquic_python_perf"]

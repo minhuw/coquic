@@ -7,6 +7,9 @@
     "coquic-rust": {
       "library_version": "${GITHUB_SHA}"
     },
+    "coquic-python": {
+      "library_version": "${GITHUB_SHA}"
+    },
     "quic-go": {
       "library_version": "v0.59.1"
     },

@@ -447,6 +447,7 @@
           quichePerfClient ? null,
           quiclyPerfClient ? null,
           coquicRustPerfClient ? null,
+          coquicPythonPerfClient ? null,
           googleQuichePerfClient ? null,
           tquicPerfClient ? null,
           mvfstPerfClient ? null,
@@ -480,6 +481,9 @@
           ''}
           ${lib.optionalString (coquicRustPerfClient != null) ''
             ln -s ${coquicRustPerfClient}/bin/coquic-rust-perf $out/usr/local/bin/coquic-rust-perf
+          ''}
+          ${lib.optionalString (coquicPythonPerfClient != null) ''
+            ln -s ${coquicPythonPerfClient}/bin/coquic-python-perf $out/usr/local/bin/coquic-python-perf
           ''}
           ${lib.optionalString (googleQuichePerfClient != null) ''
             ln -s ${googleQuichePerfClient}/bin/google-quiche-perf $out/usr/local/bin/google-quiche-perf
@@ -612,7 +616,34 @@
                 boringsslPackage
                 pkgs.stdenv.cc.cc.lib
               ]
-            }
+          }
+        '';
+      };
+      coquicPythonPerfClient = pkgs.stdenvNoCC.mkDerivation {
+        pname = "coquic-python-perf-client";
+        version = "dev";
+        src = projectSrc;
+        dontBuild = true;
+        nativeBuildInputs = [
+          pkgs.makeWrapper
+        ];
+        installPhase = ''
+          runHook preInstall
+          mkdir -p $out/bin $out/share/coquic-python $out/share/coquic-python-perf
+          cp -R bindings/python/coquic $out/share/coquic-python/coquic
+          cp -R src/perf/python/coquic_python_perf $out/share/coquic-python-perf/coquic_python_perf
+          makeWrapper "${pkgs.python3}/bin/python" "$out/bin/coquic-python-perf" \
+            --add-flags "-m coquic_python_perf" \
+            --set COQUIC_LIB_DIR "${boringsslPackage}/lib" \
+            --set COQUIC_LIB_NAME "coquic-boringssl" \
+            --prefix LD_LIBRARY_PATH : ${
+              lib.makeLibraryPath [
+                boringsslPackage
+                pkgs.stdenv.cc.cc.lib
+              ]
+            } \
+            --prefix PYTHONPATH : "$out/share/coquic-python:$out/share/coquic-python-perf"
+          runHook postInstall
         '';
       };
       aioquicPerfClient = pkgs.stdenvNoCC.mkDerivation {
@@ -1439,6 +1470,7 @@ EOF
             inherit quicgoPerfClient;
             inherit quinnPerfClient;
             inherit coquicRustPerfClient;
+            inherit coquicPythonPerfClient;
             inherit picoquicPerfClient;
             inherit msquicPerfClient;
             inherit quichePerfClient;
@@ -1493,6 +1525,22 @@ EOF
         ];
         config = {
           Entrypoint = [ "/usr/local/bin/coquic-rust-perf" ];
+          WorkingDir = "/";
+        };
+      };
+      boringsslMuslCoquicPythonPerfImage = pkgs.dockerTools.buildLayeredImage {
+        name = "coquic-perf-coquic-python";
+        tag = "boringssl-musl";
+        fromImage = simulatorEndpointBase;
+        contents = [
+          (mkPerfEndpointOverlay {
+            name = "coquic-perf-coquic-python-boringssl-musl";
+            coquicPackage = boringsslMuslPerfPackage;
+            inherit coquicPythonPerfClient;
+          })
+        ];
+        config = {
+          Entrypoint = [ "/usr/local/bin/coquic-python-perf" ];
           WorkingDir = "/";
         };
       };
@@ -1696,6 +1744,7 @@ EOF
         perf-image-coquic-quictls-musl = quictlsMuslCoquicPerfImage;
         perf-image-coquic-boringssl-musl = boringsslMuslCoquicPerfImage;
         perf-image-coquic-rust-boringssl-musl = boringsslMuslCoquicRustPerfImage;
+        perf-image-coquic-python-boringssl-musl = boringsslMuslCoquicPythonPerfImage;
         perf-image-coquic-profile-boringssl-musl = boringsslMuslCoquicProfileImage;
         perf-image-quic-go-quictls-musl = quictlsMuslQuicgoPerfImage;
         perf-image-quinn-quictls-musl = quictlsMuslQuinnPerfImage;
@@ -1714,6 +1763,7 @@ EOF
         perf-image-neqo-quictls-musl = quictlsMuslNeqoPerfImage;
         quicgo-perf-client = quicgoPerfClient;
         coquic-rust-perf-client = coquicRustPerfClient;
+        coquic-python-perf-client = coquicPythonPerfClient;
         quinn-perf-client = quinnPerfClient;
         picoquic-perf-client = picoquicPerfClient;
         msquic-perf-client = msquicPerfClient;

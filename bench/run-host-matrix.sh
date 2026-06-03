@@ -40,8 +40,8 @@ environment overrides:
   PERF_PORT                  UDP port for server/client (default: 9443)
   PERF_RUN_TIMEOUT_SECONDS   per-client Docker run timeout (default: 120)
   PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr copa")
-  PERF_CLIENT_IMPL           client implementation to run, coquic, coquic-rust, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
-  PERF_SERVER_IMPL           server implementation to run, coquic, coquic-rust, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
+  PERF_CLIENT_IMPL           client implementation to run, coquic, coquic-rust, coquic-python, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
+  PERF_SERVER_IMPL           server implementation to run, coquic, coquic-rust, coquic-python, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
   PERF_IMPLEMENTATIONS_JSON  implementation metadata JSON (default: bench/implementations.json)
   PERF_LIBRARY_VERSION       explicit implementation library version override
   PERF_DOCKER_ENV            space-separated NAME=value environment entries passed to both containers
@@ -143,7 +143,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
 done
 
 case "${client_impl}" in
-  coquic|coquic-rust|quic-go|quinn|picoquic|msquic|quiche|quicly|google-quiche|tquic|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)
+  coquic|coquic-rust|coquic-python|quic-go|quinn|picoquic|msquic|quiche|quicly|google-quiche|tquic|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)
     ;;
   *)
     echo "unsupported client implementation: ${client_impl}" >&2
@@ -152,7 +152,7 @@ case "${client_impl}" in
 esac
 
 case "${server_impl}" in
-  coquic|coquic-rust|quic-go|quinn|picoquic|msquic|quiche|quicly|google-quiche|tquic|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)
+  coquic|coquic-rust|coquic-python|quic-go|quinn|picoquic|msquic|quiche|quicly|google-quiche|tquic|mvfst|s2n-quic|xquic|aioquic|ngtcp2|lsquic|neqo)
     ;;
   *)
     echo "unsupported server implementation: ${server_impl}" >&2
@@ -288,6 +288,9 @@ for congestion_control in "${congestion_control_list[@]}"; do
       coquic-rust)
         server_entrypoint=(--entrypoint /usr/local/bin/coquic-rust-perf)
         ;;
+      coquic-python)
+        server_entrypoint=(--entrypoint /usr/local/bin/coquic-python-perf)
+        ;;
       quinn)
         server_entrypoint=(--entrypoint /usr/local/bin/quinn-perf)
         ;;
@@ -387,6 +390,9 @@ for congestion_control in "${congestion_control_list[@]}"; do
         ;;
       coquic-rust)
         client_entrypoint=(--entrypoint /usr/local/bin/coquic-rust-perf)
+        ;;
+      coquic-python)
+        client_entrypoint=(--entrypoint /usr/local/bin/coquic-python-perf)
         ;;
       quinn)
         client_entrypoint=(--entrypoint /usr/local/bin/quinn-perf)

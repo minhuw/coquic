@@ -50,6 +50,13 @@ jobs:
             congestion_controls: newreno cubic bbr copa
             image_attr: perf-image-coquic-rust-boringssl-musl
             image_tag: coquic-perf-coquic-rust:boringssl-musl
+          - label: coquic-python
+            display_name: CoQUIC Python
+            client_impl: coquic-python
+            server_impl: coquic-python
+            congestion_controls: newreno cubic bbr copa
+            image_attr: perf-image-coquic-python-boringssl-musl
+            image_tag: coquic-perf-coquic-python:boringssl-musl
           - label: quic-go
             display_name: quic-go
             client_impl: quic-go
@@ -269,6 +276,7 @@ jobs:
           python3 scripts/render-perf-comparison.py \
             --manifest coquic=.bench-results/downloaded/perf-results-coquic.json \
             --manifest coquic-rust=.bench-results/downloaded/perf-results-coquic-rust.json \
+            --manifest coquic-python=.bench-results/downloaded/perf-results-coquic-python.json \
             --manifest quic-go=.bench-results/downloaded/perf-results-quic-go.json \
             --manifest quinn=.bench-results/downloaded/perf-results-quinn.json \
             --manifest picoquic=.bench-results/downloaded/perf-results-picoquic.json \

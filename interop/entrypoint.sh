@@ -4,6 +4,14 @@ set -euo pipefail
 binary="${COQUIC_BIN:-/usr/local/bin/coquic}"
 role="${ROLE:-}"
 testcase="${TESTCASE:-}"
+case "${role}" in
+server)
+  testcase="${testcase:-${TESTCASE_SERVER:-}}"
+  ;;
+client)
+  testcase="${testcase:-${TESTCASE_CLIENT:-}}"
+  ;;
+esac
 
 supports_testcase() {
   case "$1" in
@@ -31,6 +39,9 @@ wait_for_sim() {
 if [ -n "${testcase}" ] && ! supports_testcase "${testcase}"; then
   echo "unsupported TESTCASE=${testcase}" >&2
   exit 127
+fi
+if [ -n "${testcase}" ]; then
+  export TESTCASE="${testcase}"
 fi
 
 case "${role}" in

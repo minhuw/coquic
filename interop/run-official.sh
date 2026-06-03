@@ -329,8 +329,8 @@ source "${runner_dir}/.venv/bin/activate"
 python3 -m pip install --quiet --upgrade pip
 python3 -m pip install --quiet -r "${runner_dir}/requirements.txt"
 
-nix --option eval-cache false build ".#${coquic_package}"
-docker load -i "$(nix path-info ".#${coquic_package}")" >/dev/null
+coquic_image_tar="$(nix --option eval-cache false build --print-out-paths ".#${coquic_package}")"
+docker load -i "${coquic_image_tar}" >/dev/null
 
 ensure_docker_image() {
   local image=$1

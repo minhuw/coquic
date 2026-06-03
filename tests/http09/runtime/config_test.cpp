@@ -91,6 +91,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefau
     EXPECT_EQ(client_core.transport.max_udp_payload_size, 1452u);
     EXPECT_EQ(client_core.transport.pmtud_base_datagram_size, 1452u);
     EXPECT_EQ(client_core.transport.pmtud_max_datagram_size, 1452u);
+    EXPECT_EQ(client_core.transport.max_idle_timeout, 180000u);
     EXPECT_EQ(client_core.transport.initial_max_data, 32u * 1024u * 1024u);
     EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_local, 16u * 1024u * 1024u);
     EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_remote, 256u * 1024u);
@@ -108,6 +109,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndRunnerDefau
     EXPECT_EQ(server_core.transport.max_udp_payload_size, 1452u);
     EXPECT_EQ(server_core.transport.pmtud_base_datagram_size, 1452u);
     EXPECT_EQ(server_core.transport.pmtud_max_datagram_size, 1452u);
+    EXPECT_EQ(server_core.transport.max_idle_timeout, 180000u);
     EXPECT_EQ(server_core.original_version, 0x00000001u);
     EXPECT_EQ(server_core.initial_version, 0x00000001u);
     EXPECT_EQ(server_core.supported_versions, (std::vector<std::uint32_t>{0x00000001u}));

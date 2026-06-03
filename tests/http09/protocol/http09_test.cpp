@@ -121,10 +121,22 @@ TEST(QuicHttp09Test, KeyUpdateReusesTransferTransportAndTlsProfiles) {
               transfer_tls);
 }
 
-TEST(QuicHttp09Test, UsesExtendedIdleTimeoutProfileForMulticonnectCase) {
-    const auto config = coquic::http09::http09_client_transport_for_testcase(
+TEST(QuicHttp09Test, UsesExtendedIdleTimeoutProfileForInteropCases) {
+    const auto transfer_client = coquic::http09::http09_client_transport_for_testcase(
+        coquic::http09::QuicHttp09Testcase::transfer);
+    EXPECT_EQ(transfer_client.max_idle_timeout, 180000u);
+
+    const auto transfer_server = coquic::http09::http09_server_transport_for_testcase(
+        coquic::http09::QuicHttp09Testcase::transfer);
+    EXPECT_EQ(transfer_server.max_idle_timeout, 180000u);
+
+    const auto handshake_server = coquic::http09::http09_server_transport_for_testcase(
+        coquic::http09::QuicHttp09Testcase::handshake);
+    EXPECT_EQ(handshake_server.max_idle_timeout, 180000u);
+
+    const auto multiconnect = coquic::http09::http09_client_transport_for_testcase(
         coquic::http09::QuicHttp09Testcase::multiconnect);
-    EXPECT_EQ(config.max_idle_timeout, 180000u);
+    EXPECT_EQ(multiconnect.max_idle_timeout, 180000u);
 }
 
 TEST(QuicHttp09Test, UsesExpandedServerStreamProfileForResumptionAndZeroRttCases) {

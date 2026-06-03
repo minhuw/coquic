@@ -2,11 +2,17 @@
 
 import fs from "node:fs";
 import { webcrypto } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 globalThis.crypto ??= webcrypto;
 
-const wasmPath = process.argv[2] ?? "zig-out/share/wasm-quic/coquic-wasm-quic.wasm";
-const bytes = fs.readFileSync(wasmPath);
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+process.chdir(repoRoot);
+const wasmPath = resolveRepoPath(
+  process.argv[2] ?? "zig-out/share/wasm-quic/coquic-wasm-quic.wasm",
+);
+const bytes = readWasmArtifact(wasmPath);
 const debug = process.env.COQUIC_WASM_SMOKE_DEBUG === "1";
 
 let instance;
@@ -48,6 +54,23 @@ instance = await WebAssembly.instantiate(module, {
     },
   },
 });
+
+function resolveRepoPath(inputPath) {
+  const resolved = path.resolve(repoRoot, inputPath);
+  const relative = path.relative(repoRoot, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`WASM smoke path escapes repository root: ${inputPath}`);
+  }
+  return resolved;
+}
+
+function readWasmArtifact(resolvedPath) {
+  const relative = path.relative(repoRoot, resolvedPath);
+  if (relative !== "zig-out/share/wasm-quic/coquic-wasm-quic.wasm") {
+    throw new Error(`unsupported WASM smoke artifact path: ${relative}`);
+  }
+  return fs.readFileSync("zig-out/share/wasm-quic/coquic-wasm-quic.wasm");
+}
 
 const {
   memory,
@@ -625,53 +648,62 @@ function runTransferSmoke() {
   try {
     let now = driveHandshake(client, server, state, 0n);
 
-  const expectedByEndpoint = {
-    client: "",
-    server: "",
-  };
-  for (let sequence = 1; sequence <= 4; sequence += 1) {
-    const sender = sequence % 2 === 1 ? "client" : "server";
-    const receiver = sender === "client" ? "server" : "client";
-    const endpoint = sender === "client" ? client : server;
-    const connectionHandle =
-      sender === "client" ? state.clientConnection : state.serverConnection;
-    const payload = pingPongPayload(sender, sequence);
+    const expectedByEndpoint = {
+      client: "",
+      server: "",
+    };
+    const appendExpected = (endpointName, text) => {
+      if (endpointName === "client") {
+        expectedByEndpoint.client += text;
+        return expectedByEndpoint.client.length;
+      }
+      expectedByEndpoint.server += text;
+      return expectedByEndpoint.server.length;
+    };
 
-    expectedByEndpoint[receiver] += decoder.decode(payload);
-    sendStream(
-      endpoint,
-      now,
-      connectionHandle,
-      0n,
-      payload,
-      `${sender} send ping-pong ${sequence}`,
-    );
-    now = pumpUntil(
-      client,
-      server,
-      state,
-      now,
-      () => receivedBytes(state, receiver) >= expectedByEndpoint[receiver].length,
-      `${sender} ping-pong ${sequence}`,
-    );
-  }
+    for (let sequence = 1; sequence <= 4; sequence += 1) {
+      const sender = sequence % 2 === 1 ? "client" : "server";
+      const receiver = sender === "client" ? "server" : "client";
+      const endpoint = sender === "client" ? client : server;
+      const connectionHandle =
+        sender === "client" ? state.clientConnection : state.serverConnection;
+      const payload = pingPongPayload(sender, sequence);
 
-  if (receivedText(state, "server") !== expectedByEndpoint.server) {
-    throw new Error(`unexpected server receive event ${jsonState(state.received)}`);
-  }
-  if (receivedText(state, "client") !== expectedByEndpoint.client) {
-    throw new Error(`unexpected receive event ${jsonState(state.received)}`);
-  }
-  if (state.packetInspections === 0 || state.inspectedFrames === 0) {
-    throw new Error(`packet inspection did not produce frame records: ${jsonState(state)}`);
-  }
-  if (!state.flowControlFrames.has("MAX_DATA") || !state.flowControlFrames.has("MAX_STREAM_DATA")) {
-    throw new Error(`flow-control frames were not inspected: ${jsonState([...state.flowControlFrames])}`);
-  }
-  const serverDiagnostics = endpointDiagnostics(server);
-  if (serverDiagnostics.connection_count !== 1 || serverDiagnostics.connections[0]?.active_streams === undefined) {
-    throw new Error(`server diagnostics missing connection internals ${jsonState(serverDiagnostics)}`);
-  }
+      const expectedLength = appendExpected(receiver, decoder.decode(payload));
+      sendStream(
+        endpoint,
+        now,
+        connectionHandle,
+        0n,
+        payload,
+        `${sender} send ping-pong ${sequence}`,
+      );
+      now = pumpUntil(
+        client,
+        server,
+        state,
+        now,
+        () => receivedBytes(state, receiver) >= expectedLength,
+        `${sender} ping-pong ${sequence}`,
+      );
+    }
+
+    if (receivedText(state, "server") !== expectedByEndpoint.server) {
+      throw new Error(`unexpected server receive event ${jsonState(state.received)}`);
+    }
+    if (receivedText(state, "client") !== expectedByEndpoint.client) {
+      throw new Error(`unexpected receive event ${jsonState(state.received)}`);
+    }
+    if (state.packetInspections === 0 || state.inspectedFrames === 0) {
+      throw new Error(`packet inspection did not produce frame records: ${jsonState(state)}`);
+    }
+    if (!state.flowControlFrames.has("MAX_DATA") || !state.flowControlFrames.has("MAX_STREAM_DATA")) {
+      throw new Error(`flow-control frames were not inspected: ${jsonState([...state.flowControlFrames])}`);
+    }
+    const serverDiagnostics = endpointDiagnostics(server);
+    if (serverDiagnostics.connection_count !== 1 || serverDiagnostics.connections[0]?.active_streams === undefined) {
+      throw new Error(`server diagnostics missing connection internals ${jsonState(serverDiagnostics)}`);
+    }
   } finally {
     coquic_wasm_endpoint_destroy(client);
     coquic_wasm_endpoint_destroy(server);
@@ -700,14 +732,14 @@ function runResumptionZeroRttSmoke() {
   const earlyPayload = encoder.encode("client zero-rtt smoke early data");
   const expectedEarlyText = decoder.decode(earlyPayload);
   try {
-    let now = driveHandshake(client, server, state, 100n, {
+    const now = driveHandshake(client, server, state, 100n, {
       flags: wasmOptionFlags.zeroRtt,
       resumptionState,
       afterOpen: (currentNow) => {
         sendStream(client, currentNow, state.clientConnection, 0n, earlyPayload, "client zero-rtt send");
       },
     });
-    now = pumpUntil(
+    pumpUntil(
       client,
       server,
       state,
@@ -754,7 +786,7 @@ function runDatagramSmoke() {
     );
 
     sendDatagram(server, now, state.serverConnection, serverPayload, "server send datagram");
-    now = pumpUntil(
+    pumpUntil(
       client,
       server,
       state,

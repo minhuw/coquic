@@ -964,7 +964,7 @@ bool existing_server_session_missing_input_fails_for_tests() {
     ServerConnectionIdRouteMap connection_id_routes;
     return !process_existing_server_session_datagram(
                *session, step, connection_id_routes, parsed,
-               std::bind_front(&record_erased_server_session_key_for_tests, &erased_key)) &
+               std::bind_front(&record_erased_server_session_key_for_tests, &erased_key)) &&
            erased_key.empty();
 }
 
@@ -1232,7 +1232,7 @@ bool expired_server_timer_failure_cleans_up_for_tests() {
         ServerConnectionIdRouteMap connection_id_routes;
         process_expired_server_sessions(sessions, now(), connection_id_routes, erase_session,
                                         processed_any);
-        return processed_any & sessions.empty();
+        return processed_any && sessions.empty();
     };
     const auto make_endpoint = [] {
         return QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
@@ -1244,10 +1244,12 @@ bool expired_server_timer_failure_cleans_up_for_tests() {
     const bool endpoint_reports_failure =
         failed_endpoint.on_core_result(single_receive_result_for_runtime_tests(0, "", true), now())
             .terminal_failure;
-    return run_case("expired-core-failure", make_failed_server_core_for_tests(), make_endpoint()) &
-           endpoint_reports_failure &
-           run_case("expired-endpoint-failure", make_failing_server_core_for_tests(),
-                    std::move(failed_endpoint));
+    const bool expired_core_failure =
+        run_case("expired-core-failure", make_failed_server_core_for_tests(), make_endpoint());
+    const bool expired_endpoint_failure =
+        run_case("expired-endpoint-failure", make_failing_server_core_for_tests(),
+                 std::move(failed_endpoint));
+    return expired_core_failure && endpoint_reports_failure && expired_endpoint_failure;
 }
 
 bool expired_server_timer_success_preserves_session_for_tests() {
@@ -1274,7 +1276,7 @@ bool expired_server_timer_success_preserves_session_for_tests() {
     ServerConnectionIdRouteMap connection_id_routes;
     process_expired_server_sessions(sessions, now(), connection_id_routes, erase_session,
                                     processed_any);
-    return processed_any & (sessions.size() == 1);
+    return processed_any && (sessions.size() == 1);
 }
 
 bool pending_server_work_failure_cleans_up_for_tests() {
@@ -1317,10 +1319,13 @@ bool pending_server_work_failure_cleans_up_for_tests() {
         return pending_work_available && sessions.empty();
     };
 
-    return run_case("pending-core-failure", make_failed_server_core_for_tests(),
-                    /*fail_endpoint=*/false) &
-           run_case("pending-endpoint-failure", make_failing_server_core_for_tests(),
-                    /*fail_endpoint=*/true);
+    const bool pending_core_failure =
+        run_case("pending-core-failure", make_failed_server_core_for_tests(),
+                 /*fail_endpoint=*/false);
+    const bool pending_endpoint_failure =
+        run_case("pending-endpoint-failure", make_failing_server_core_for_tests(),
+                 /*fail_endpoint=*/true);
+    return pending_core_failure && pending_endpoint_failure;
 }
 
 bool pending_server_work_success_preserves_session_for_tests() {
@@ -1352,8 +1357,8 @@ bool pending_server_work_success_preserves_session_for_tests() {
                                       [&](const std::string &local_connection_id_key) {
                                           sessions.erase(local_connection_id_key);
                                       });
-    return update.has_pending_work & !sessions.empty() &
-           !sessions.begin()->second->core.has_failed() &
+    return update.has_pending_work && !sessions.empty() &&
+           !sessions.begin()->second->core.has_failed() &&
            !sessions.begin()->second->state.terminal_failure;
 }
 
@@ -1371,15 +1376,15 @@ bool resumed_client_warmup_failure_exits_early_for_tests() {
         [&](const Http09RuntimeConfig &, const std::vector<QuicHttp09Request> &runner_requests,
             const QuicCoreConfig &core_config, std::uint64_t connection_index) {
             ++calls;
-            const bool warmup_matches = (calls == 1) & (connection_index == 1) &
-                                        (runner_requests.size() == 1) &
+            const bool warmup_matches = (calls == 1) && (connection_index == 1) &&
+                                        (runner_requests.size() == 1) &&
                                         (core_config.zero_rtt.application_context ==
                                          http09_zero_rtt_application_context(runner_requests));
             return ClientConnectionRunResult{
                 .exit_code = 98 - (static_cast<int>(warmup_matches) * 91),
             };
         });
-    return (exit_code == 7) & (calls == 1);
+    return (exit_code == 7) && (calls == 1);
 }
 
 bool zero_rtt_request_allowance_for_tests() {
@@ -1405,8 +1410,8 @@ bool zero_rtt_request_allowance_for_tests() {
         allow_requests_before_handshake_ready(true, make_result(std::nullopt));
     const bool disabled_rejected =
         !allow_requests_before_handshake_ready(false, make_result(QuicZeroRttStatus::accepted));
-    return unavailable_rejected & not_attempted_rejected & rejected_rejected & attempted_allowed &
-           accepted_allowed & missing_status_allowed & disabled_rejected;
+    return unavailable_rejected && not_attempted_rejected && rejected_rejected &&
+           attempted_allowed && accepted_allowed && missing_status_allowed && disabled_rejected;
 }
 
 bool runtime_assigns_stable_path_ids_for_tests() {
@@ -1714,8 +1719,8 @@ bool runtime_policy_core_inputs_advance_before_terminal_success_for_tests() {
         return drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core, /*fd=*/17, &peer,
                                             /*peer_len=*/0, initial_result, state, "client",
                                             &config, &policy, &client_sockets);
-    }() & state.terminal_success &
-           policy.preferred_address_request_queued & (endpoint.next_on_core_result_index == 2);
+    }() && state.terminal_success &&
+           policy.preferred_address_request_queued && (endpoint.next_on_core_result_index == 2);
 }
 
 bool server_connectionmigration_preferred_address_config_for_tests() {
@@ -1744,9 +1749,9 @@ bool server_connectionmigration_preferred_address_config_for_tests() {
         .port = 443,
         .testcase = QuicHttp09Testcase::transfer,
     });
-    return has_preferred_address & (preferred_port == 444) &
-           (preferred_connection_id == make_runtime_connection_id(std::byte{0x5a}, 1)) &
-           !transfer_has_preferred_address & (transfer_preferred_port == 0) &
+    return has_preferred_address && (preferred_port == 444) &&
+           (preferred_connection_id == make_runtime_connection_id(std::byte{0x5a}, 1)) &&
+           !transfer_has_preferred_address && (transfer_preferred_port == 0) &&
            transfer_preferred_connection_id.empty();
 }
 
@@ -1877,7 +1882,8 @@ bool runtime_misc_internal_coverage_for_tests() {
         };
         char dummy = '\0';
         runtime_misc_internal_coverage_check(ok, "zero-length gethostname fails",
-                                             (gethostname_fn(&dummy, 0) == -1) & (errno == EINVAL));
+                                             (gethostname_fn(&dummy, 0) == -1) &&
+                                                 (errno == EINVAL));
         ScopedHttp09RuntimeOpsOverride{
             Http09RuntimeOpsOverride{
                 .gethostname_fn = gethostname_fn,
@@ -1902,7 +1908,8 @@ bool runtime_misc_internal_coverage_for_tests() {
         };
         char dummy = '\0';
         runtime_misc_internal_coverage_check(ok, "empty hostname zero-length gethostname fails",
-                                             (gethostname_fn(&dummy, 0) == -1) & (errno == EINVAL));
+                                             (gethostname_fn(&dummy, 0) == -1) &&
+                                                 (errno == EINVAL));
         ScopedHttp09RuntimeOpsOverride{
             Http09RuntimeOpsOverride{
                 .gethostname_fn = gethostname_fn,
@@ -2004,7 +2011,7 @@ bool runtime_misc_internal_coverage_for_tests() {
         preferred_address_from_resolved_udp_address(unknown_family_resolved, {});
     runtime_misc_internal_coverage_check(
         ok, "preferred address unknown family leaves ports empty",
-        (resolved_unknown_family_preferred_address.ipv4_port == 0) &
+        (resolved_unknown_family_preferred_address.ipv4_port == 0) &&
             (resolved_unknown_family_preferred_address.ipv6_port == 0));
 
     runtime_misc_internal_coverage_check(ok, "wait without sockets fails",
@@ -2248,8 +2255,8 @@ bool runtime_misc_internal_coverage_for_tests() {
         refresh_server_session_connection_id_routes(session, connection_id_routes);
         runtime_misc_internal_coverage_check(
             ok, "refresh preserves live alternate routes",
-            connection_id_routes.contains(preferred_connection_id_key) &
-                (session.alternate_connection_id_keys.size() == 1) &
+            connection_id_routes.contains(preferred_connection_id_key) &&
+                (session.alternate_connection_id_keys.size() == 1) &&
                 (session.alternate_connection_id_keys.front() == preferred_connection_id_key));
     }
 

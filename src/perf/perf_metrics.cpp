@@ -100,8 +100,8 @@ void reset_perf_run_summary_measurement(QuicPerfRunSummary &summary) {
     summary.requests_per_s = 0.0;
 }
 
-QuicPerfLatencySummary summarize_latency_samples(
-    std::vector<quic::QuicCoreDuration> samples) { // NOLINT(performance-unnecessary-value-param)
+QuicPerfLatencySummary
+summarize_latency_samples(const std::vector<quic::QuicCoreDuration> &samples) {
     if (samples.empty()) {
         return {};
     }

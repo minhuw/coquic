@@ -1181,6 +1181,7 @@ open_connection_with_options(std::uint32_t endpoint_id, std::uint64_t now_ms,
     }
     const auto options = wasm_options_from_flags(flags);
     const auto supported_versions = wasm_supported_versions(options);
+    const auto initial_version = supported_versions.front();
 
     QuicCoreClientConnectionConfig connection{
         .source_connection_id = connection_id_from_input(
@@ -1191,8 +1192,8 @@ open_connection_with_options(std::uint32_t endpoint_id, std::uint64_t now_ms,
             initial_dcid, initial_dcid_len,
             {std::byte{0x83}, std::byte{0x94}, std::byte{0xc8}, std::byte{0xf0}, std::byte{0x3e},
              std::byte{0x51}, std::byte{0x57}, std::byte{0x08}}),
-        .original_version = options.only_version_2 ? kQuicVersion2 : kQuicVersion1,
-        .initial_version = options.only_version_2 ? kQuicVersion2 : kQuicVersion1,
+        .original_version = initial_version,
+        .initial_version = initial_version,
         .server_name = "localhost",
         .resumption_state = std::move(resumption_state),
     };

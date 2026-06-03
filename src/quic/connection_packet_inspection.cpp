@@ -1,5 +1,6 @@
 #include "src/quic/connection.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -13,8 +14,8 @@ namespace coquic::quic {
 
 namespace {
 
-bool &force_packet_inspection_missing_plaintext_storage_for_tests() {
-    static bool enabled = false;
+std::atomic_bool &force_packet_inspection_missing_plaintext_storage_for_tests() {
+    static std::atomic_bool enabled{false};
     return enabled;
 }
 
@@ -117,9 +118,8 @@ QuicConnection::queue_outbound_packet_inspections(const SerializedProtectedDatag
         if (!decoded.has_value()) {
             continue;
         }
-        const bool reset_plaintext_storage =
-            force_packet_inspection_missing_plaintext_storage_for_tests();
-        if (reset_plaintext_storage) {
+        if (force_packet_inspection_missing_plaintext_storage_for_tests().load(
+                std::memory_order_relaxed)) {
             std::visit(PacketInspectionPlaintextStorageResetVisitor{}, decoded.value());
         }
 
@@ -146,7 +146,8 @@ QuicConnection::queue_outbound_packet_inspections(const SerializedProtectedDatag
 namespace test {
 
 void connection_set_force_packet_inspection_missing_plaintext_storage_for_tests(bool enabled) {
-    force_packet_inspection_missing_plaintext_storage_for_tests() = enabled;
+    force_packet_inspection_missing_plaintext_storage_for_tests().store(enabled,
+                                                                        std::memory_order_relaxed);
 }
 
 } // namespace test

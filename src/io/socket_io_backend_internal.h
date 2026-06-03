@@ -115,6 +115,11 @@ struct PathMtuUpdateResult {
     QuicCoreTimePoint input_time{};
 };
 
+enum class SocketOptionResult : std::uint8_t {
+    configured,
+    failed,
+};
+
 test::SocketIoBackendOpsOverride &socket_io_backend_ops_state();
 test::SocketIoBackendOpsOverride make_default_socket_io_backend_ops();
 void apply_socket_io_backend_ops_override(const test::SocketIoBackendOpsOverride &override_ops);
@@ -125,8 +130,8 @@ QuicCoreTimePoint now();
 int linux_traffic_class_for_ecn(QuicEcnCodepoint ecn);
 QuicEcnCodepoint ecn_from_linux_traffic_class(int linux_traffic_class);
 void configure_udp_socket_buffers(LinuxSocketDescriptor socket);
-bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family);
-bool configure_linux_pmtud_socket_options(LinuxSocketDescriptor socket, int family);
+SocketOptionResult configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family);
+SocketOptionResult configure_linux_pmtud_socket_options(LinuxSocketDescriptor socket, int family);
 bool is_ipv4_mapped_ipv6_address(const sockaddr_storage &peer, socklen_t peer_len);
 bool should_apply_ipv6_flow_label(const sockaddr_storage &peer, socklen_t peer_len);
 sockaddr_storage peer_with_ipv6_flow_label(const sockaddr_storage &peer, socklen_t peer_len,

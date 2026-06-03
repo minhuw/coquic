@@ -4,6 +4,7 @@ This directory contains the local Python tooling for the QUIC specification
 knowledge base.
 
 Current scope:
+
 - index mixed RFC and Internet-Draft text from `docs/rfc`
 - store generated local state under `.rag`
 - expose query tooling through a repo-local Codex skill and CLI

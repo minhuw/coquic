@@ -1,11 +1,9 @@
 #include "src/http09/http09_server.h"
 
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <limits>
 #include <optional>
 #include <utility>
 
@@ -72,30 +70,28 @@ void queue_stream_local_file_error(std::uint64_t stream_id, std::deque<QuicCoreI
 
 bool queue_one_response_chunk(std::uint64_t stream_id, std::ifstream &input,
                               std::deque<QuicCoreInput> &out) {
-    std::array<char, kResponseChunkSize> buffer{};
-    const auto chunk_limit = static_cast<std::streamsize>(std::min(
-        kResponseChunkSize, static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())));
-    // flawfinder: ignore - read length is capped to the fixed-size buffer above.
-    input.read(buffer.data(), chunk_limit);
-    const auto count = input.gcount();
+    std::vector<std::byte> chunk;
+    chunk.reserve(kResponseChunkSize);
+    auto *stream_buffer = input.rdbuf();
+    for (std::size_t count = 0; count < kResponseChunkSize; ++count) {
+        const auto next = stream_buffer->sbumpc();
+        if (next == std::char_traits<char>::eof()) {
+            break;
+        }
+        chunk.push_back(static_cast<std::byte>(static_cast<unsigned char>(next)));
+    }
+
     if (input.bad()) {
         return false;
     }
 
-    if (count == 0) {
+    if (chunk.empty()) {
         out.emplace_back(QuicCoreSendStreamData{
             .stream_id = stream_id,
             .bytes = {},
             .fin = true,
         });
         return true;
-    }
-
-    std::vector<std::byte> chunk;
-    chunk.reserve(static_cast<std::size_t>(count));
-    for (std::streamsize i = 0; i < count; ++i) {
-        chunk.push_back(static_cast<std::byte>(
-            static_cast<unsigned char>(buffer[static_cast<std::size_t>(i)])));
     }
 
     const bool fin = input.peek() == std::char_traits<char>::eof();

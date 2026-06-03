@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import type React from 'react';
-import { codeToHtml } from 'shiki';
+import { codeToTokens } from 'shiki';
+import type { BundledLanguage } from 'shiki';
 
 import { CopyCodeButton } from '@/components/docs/copy-code-button';
 import { hrefForDocLink } from '@/lib/docs';
@@ -126,7 +127,7 @@ function renderBlock(
 }
 
 async function HighlightedCode({ code, language }: { code: string; language: string }) {
-  const html = await codeToHtml(code, {
+  const { tokens } = await codeToTokens(code, {
     lang: normalizeLanguage(language),
     themes: {
       light: 'github-light',
@@ -141,8 +142,20 @@ async function HighlightedCode({ code, language }: { code: string; language: str
         <span>{language || 'text'}</span>
         <CopyCodeButton code={code} />
       </div>
-      {/* Shiki returns escaped, tokenized HTML for the code string above. */}
-      <div className="docs-code-scroll" dangerouslySetInnerHTML={{ __html: html }} />
+      <pre className="docs-code-scroll">
+        <code>
+          {tokens.map((line, lineIndex) => (
+            <span className="docs-code-line" key={lineIndex}>
+              {line.map((token, tokenIndex) => (
+                <span key={tokenIndex} style={token.htmlStyle ?? { color: token.color }}>
+                  {token.content}
+                </span>
+              ))}
+              {lineIndex < tokens.length - 1 ? '\n' : null}
+            </span>
+          ))}
+        </code>
+      </pre>
     </div>
   );
 }
@@ -360,9 +373,18 @@ function slugify(text: string) {
     .replace(/^-|-$/g, '');
 }
 
-function normalizeLanguage(language: string) {
+type HighlightLanguage = BundledLanguage | 'text';
+
+function normalizeLanguage(language: string): HighlightLanguage {
   if (!language) return 'text';
   if (language === 'sh') return 'bash';
   if (language === 'c++') return 'cpp';
-  return language;
+  if (isBundledLanguage(language)) return language;
+  return 'text';
+}
+
+function isBundledLanguage(language: string): language is BundledLanguage {
+  return ['bash', 'c', 'cpp', 'css', 'html', 'javascript', 'json', 'markdown', 'rust', 'typescript', 'zig'].includes(
+    language,
+  );
 }

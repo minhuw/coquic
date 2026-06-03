@@ -904,9 +904,9 @@ CodecResult<bool> QuicConnection::queue_datagram_send_shared(SharedBytes bytes) 
 }
 
 void QuicConnection::maybe_emit_zero_rtt_attempted_event() {
-    if ((config_.role == EndpointRole::client) & config_.zero_rtt.attempt &
-        decoded_resumption_state_.has_value() & zero_rtt_space_.write_secret.has_value() &
-        (status_ != HandshakeStatus::connected) & !zero_rtt_attempted_event_emitted_) {
+    if ((config_.role == EndpointRole::client) && config_.zero_rtt.attempt &&
+        decoded_resumption_state_.has_value() && zero_rtt_space_.write_secret.has_value() &&
+        (status_ != HandshakeStatus::connected) && !zero_rtt_attempted_event_emitted_) {
         pending_zero_rtt_status_event_ =
             QuicCoreZeroRttStatusEvent{.status = QuicZeroRttStatus::attempted};
         zero_rtt_attempted_event_emitted_ = true;
@@ -1105,7 +1105,7 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
                 return std::count_if(
                     handles.begin(), handles.end(), [&](const RecoveryPacketHandle handle) {
                         const auto &packet = *packet_space.recovery.packet_for_handle(handle);
-                        return packet.ack_eliciting & packet.in_flight;
+                        return packet.ack_eliciting && packet.in_flight;
                     });
             };
             std::cerr << "quic-packet-trace timeout scid="

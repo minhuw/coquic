@@ -249,10 +249,10 @@ bool result_connection_helpers_cover_effect_variants_for_tests(const QuicCoreRes
         return std::find(handles.begin(), handles.end(), handle) != handles.end();
     };
     const auto sliced = slice_result_for_connection(result, 4);
-    return contains(1) & contains(2) & contains(3) & contains(4) & contains(5) & contains(6) &
-           contains(7) & contains(8) & contains(9) & contains(10) & contains(12) &
-           sliced.effects.size() == 1 &
-           std::holds_alternative<QuicCorePeerStopSending>(sliced.effects.at(0)) &
+    return contains(1) && contains(2) && contains(3) && contains(4) && contains(5) && contains(6) &&
+           contains(7) && contains(8) && contains(9) && contains(10) && contains(12) &&
+           sliced.effects.size() == 1 &&
+           std::holds_alternative<QuicCorePeerStopSending>(sliced.effects.at(0)) &&
            !result_has_connection_lifecycle(result, 4, QuicCoreConnectionLifecycle::accepted);
 }
 
@@ -302,8 +302,8 @@ void cover_runtime_retry_helpers_for_tests(bool &coverage_ok,
             /*retry_enabled=*/true, /*socket_fd=*/17, supported_initial, peer, sizeof(sockaddr_in),
             retry_tokens, next_connection_index);
         server_loop_coverage_check(coverage_ok, "retry helper traces and sends tokenless initials",
-                                   retry_result.has_value() & retry_result.value_or(false) &
-                                       g_recorded_sendto_for_tests.calls == 1 &
+                                   retry_result.has_value() && retry_result.value_or(false) &&
+                                       g_recorded_sendto_for_tests.calls == 1 &&
                                        next_connection_index == 10);
     }
 
@@ -316,7 +316,7 @@ void cover_runtime_retry_helpers_for_tests(bool &coverage_ok,
         server_loop_coverage_check(
             coverage_ok, "invalid retry tokens hit the traced rejection path",
             !populate_retry_context_if_required(/*retry_enabled=*/true, invalid_retry, peer,
-                                                sizeof(sockaddr_in), retry_tokens, retry_context) &
+                                                sizeof(sockaddr_in), retry_tokens, retry_context) &&
                 !retry_context.has_value());
     }
 
@@ -403,18 +403,18 @@ void cover_runtime_connection_result_helpers_for_tests(bool &coverage_ok,
                                             .bytes = bytes_from_string_for_runtime_tests("body"),
                                             .fin = true,
                                         })
-                    .has_value() &
+                    .has_value() &&
                 to_connection_command_input(QuicCoreResetStream{
                                                 .stream_id = 4,
                                                 .application_error_code = 9,
                                             })
-                    .has_value() &
+                    .has_value() &&
                 to_connection_command_input(QuicCoreStopSending{
                                                 .stream_id = 5,
                                                 .application_error_code = 10,
                                             })
-                    .has_value() &
-                to_connection_command_input(QuicCoreRequestKeyUpdate{}).has_value() &
+                    .has_value() &&
+                to_connection_command_input(QuicCoreRequestKeyUpdate{}).has_value() &&
                 !to_connection_command_input(QuicCoreSendSharedStreamData{
                                                  .stream_id = 6,
                                                  .bytes = quic::SharedBytes{std::byte{0x01}},
@@ -508,11 +508,13 @@ void cover_runtime_connection_result_helpers_for_tests(bool &coverage_ok,
             .connection = 13,
             .change = QuicCoreStateChange::handshake_ready,
         });
+        const bool first_ready_is_new = result_observes_new_handshake_ready(state, duplicate_ready);
+        const bool repeated_ready_is_old =
+            !result_observes_new_handshake_ready(state, duplicate_ready);
         server_loop_coverage_check(
             coverage_ok,
             "handshake-ready observation treats repeated ready events as already observed",
-            result_observes_new_handshake_ready(state, duplicate_ready) &
-                !result_observes_new_handshake_ready(state, duplicate_ready));
+            first_ready_is_new && repeated_ready_is_old);
 
         std::optional<QuicCoreTimePoint> defer_output_until;
         const auto defer_base_time = now();
@@ -1257,7 +1259,7 @@ void cover_runtime_backend_loop_main_wait_script_cases_for_tests(bool &coverage_
         };
         server_loop_coverage_check(coverage_ok,
                                    "backend loop shared default callbacks remain callable",
-                                   !default_no_pending_work() & default_accept_timer(base_time) &
+                                   !default_no_pending_work() && default_accept_timer(base_time) &&
                                        default_accept_datagram(QuicIoRxDatagram{}, base_time));
 
         {
@@ -1292,7 +1294,7 @@ void cover_runtime_backend_loop_main_wait_script_cases_for_tests(bool &coverage_
             };
             server_loop_coverage_check(
                 coverage_ok, "backend loop default path MTU callback accepts updates",
-                run_server_backend_loop_with_driver(default_path_mtu_driver) == 1 &
+                run_server_backend_loop_with_driver(default_path_mtu_driver) == 1 &&
                     wait_calls == 2);
         }
 
@@ -1347,8 +1349,8 @@ void cover_runtime_backend_loop_main_wait_script_cases_for_tests(bool &coverage_
             };
             server_loop_coverage_check(
                 coverage_ok, "backend loop default callbacks accept timer and datagram events",
-                run_server_backend_loop_with_driver(default_path_mtu_driver) == 1 &
-                    wait_calls == 3 & timer_calls == 1 & datagram_calls == 1);
+                run_server_backend_loop_with_driver(default_path_mtu_driver) == 1 &&
+                    wait_calls == 3 && timer_calls == 1 && datagram_calls == 1);
         }
     }
 }
@@ -1386,6 +1388,8 @@ void cover_runtime_backend_loop_entry_cases_for_tests(bool &coverage_ok) {
     {
         ScopedRuntimeTempDirForTests document_root;
         document_root.write_file("small.txt", "hello");
+        document_root.write_file("large.bin",
+                                 std::string(static_cast<std::size_t>(96) * 1024U, 'x'));
         EndpointDriveState drive_state;
         ServerConnectionEndpointMap connection_endpoints;
         ScriptedIoBackendForTests backend;
@@ -1439,7 +1443,7 @@ void cover_runtime_backend_loop_entry_cases_for_tests(bool &coverage_ok) {
                     .mode = Http09RuntimeMode::server,
                     .document_root = document_root.path(),
                 },
-                core, drive_state, connection_endpoints, backend) == 1 &
+                core, drive_state, connection_endpoints, backend) == 1 &&
                 backend.wait_requests.size() == 2);
     }
 }
@@ -1484,18 +1488,20 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
 
     {
         FailingSendBackendForTests backend;
+        const bool route_available = backend
+                                         .ensure_route(io::QuicIoRemote{
+                                             .family = AF_INET,
+                                         })
+                                         .has_value();
+        const bool wait_missing = !backend.wait(std::nullopt).has_value();
+        const bool send_rejected = !backend.send(io::QuicIoTxDatagram{
+            .route_handle = 17,
+            .bytes = {},
+        });
         server_loop_coverage_check(
             coverage_ok,
             "failing send backend helpers return fixed route null waits and failed sends",
-            backend.ensure_route(io::QuicIoRemote{
-                                     .family = AF_INET,
-                                 })
-                    .has_value() &
-                !backend.wait(std::nullopt).has_value() &
-                !backend.send(io::QuicIoTxDatagram{
-                    .route_handle = 17,
-                    .bytes = {},
-                }));
+            route_available && wait_missing && send_rejected);
     }
 
     server_loop_coverage_check(coverage_ok, "to_connection_command_input rejects inbound datagrams",
@@ -1553,7 +1559,8 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
         server_loop_coverage_check(
             coverage_ok,
             "advance_endpoint_connection_inputs reports unsupported endpoint-level inputs",
-            result.local_error.has_value() & (local_error.connection == QuicConnectionHandle{41}) &
+            result.local_error.has_value() &&
+                (local_error.connection == QuicConnectionHandle{41}) &&
                 (local_error.code == QuicCoreLocalErrorCode::unsupported_operation));
     }
 
@@ -1583,7 +1590,7 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
             advance_endpoint_connection_inputs(core, connection, close_inputs, now());
         server_loop_coverage_check(
             coverage_ok, "advance_endpoint_connection_inputs stops after connection close effects",
-            result_has_send_effects(close_result) & close_result.next_wakeup.has_value());
+            result_has_send_effects(close_result) && close_result.next_wakeup.has_value());
     }
 
     {
@@ -1626,13 +1633,14 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .change = QuicCoreStateChange::handshake_ready,
             });
             bool observed_send_effects = true;
+            const bool processed = process_server_endpoint_core_result(
+                core, drive_state, connection_endpoints, document_root.path(), state_only_result,
+                /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in), &observed_send_effects);
+            const bool endpoint_retained = connection_endpoints.contains(connection);
+            const bool send_effects_hidden = !observed_send_effects;
             server_loop_coverage_check(
                 coverage_ok, "process_server_endpoint_core_result ignores non-stream effects",
-                process_server_endpoint_core_result(core, drive_state, connection_endpoints,
-                                                    document_root.path(), state_only_result,
-                                                    /*fallback_socket_fd=*/77, &peer,
-                                                    sizeof(sockaddr_in), &observed_send_effects) &
-                    connection_endpoints.contains(connection) & !observed_send_effects);
+                processed && endpoint_retained && send_effects_hidden);
         }
 
         {
@@ -1650,14 +1658,14 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .code = QuicCoreLocalErrorCode::unsupported_operation,
                 .stream_id = std::nullopt,
             };
+            const bool processed = process_server_endpoint_core_result(
+                core, drive_state, connection_endpoints, document_root.path(), local_error_result,
+                /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in));
+            const bool endpoint_erased = !connection_endpoints.contains(connection);
             server_loop_coverage_check(
                 coverage_ok,
                 "process_server_endpoint_core_result erases endpoints for connection-local errors",
-                process_server_endpoint_core_result(core, drive_state, connection_endpoints,
-                                                    document_root.path(), local_error_result,
-                                                    /*fallback_socket_fd=*/77, &peer,
-                                                    sizeof(sockaddr_in)) &
-                    !connection_endpoints.contains(connection));
+                processed && endpoint_erased);
         }
 
         {
@@ -1674,12 +1682,13 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .connection = connection,
                 .event = QuicCoreConnectionLifecycle::closed,
             });
-            server_loop_coverage_check(
-                coverage_ok, "process_server_endpoint_core_result drops closed endpoints",
-                process_server_endpoint_core_result(
-                    core, drive_state, connection_endpoints, document_root.path(), closed_result,
-                    /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in)) &
-                    !connection_endpoints.contains(connection));
+            const bool processed = process_server_endpoint_core_result(
+                core, drive_state, connection_endpoints, document_root.path(), closed_result,
+                /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in));
+            const bool endpoint_erased = !connection_endpoints.contains(connection);
+            server_loop_coverage_check(coverage_ok,
+                                       "process_server_endpoint_core_result drops closed endpoints",
+                                       processed && endpoint_erased);
         }
 
         {
@@ -1706,15 +1715,15 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .fin = true,
             });
             bool observed_send_effects = false;
+            const bool processed = process_server_endpoint_core_result(
+                core, drive_state, connection_endpoints, document_root.path(), request_result,
+                /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in), &observed_send_effects);
+            const bool send_recorded =
+                (g_recorded_sendto_for_tests.calls > 0 || g_recorded_sendmsg_for_tests.calls > 0);
             server_loop_coverage_check(
                 coverage_ok,
                 "process_server_endpoint_core_result advances endpoint-generated stream sends",
-                process_server_endpoint_core_result(
-                    core, drive_state, connection_endpoints, document_root.path(), request_result,
-                    /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in), &observed_send_effects) &
-                    observed_send_effects &
-                    (g_recorded_sendto_for_tests.calls > 0 |
-                     g_recorded_sendmsg_for_tests.calls > 0));
+                processed && observed_send_effects && send_recorded);
         }
 
         {
@@ -1738,13 +1747,14 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .bytes = {},
                 .fin = true,
             });
+            const bool processed = process_server_endpoint_core_result(
+                core, drive_state, connection_endpoints, document_root.path(),
+                invalid_request_result,
+                /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in));
+            const bool endpoint_erased = !connection_endpoints.contains(connection);
             server_loop_coverage_check(
                 coverage_ok, "process_server_endpoint_core_result closes failed endpoints",
-                process_server_endpoint_core_result(core, drive_state, connection_endpoints,
-                                                    document_root.path(), invalid_request_result,
-                                                    /*fallback_socket_fd=*/77, &peer,
-                                                    sizeof(sockaddr_in)) &
-                    !connection_endpoints.contains(connection));
+                processed && endpoint_erased);
         }
     }
 
@@ -1815,13 +1825,14 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .connection = connection,
                 .event = QuicCoreConnectionLifecycle::closed,
             });
+            const bool processed = process_server_endpoint_core_result_with_backend(
+                core, drive_state, connection_endpoints, document_root.path(), closed_result,
+                kRouteHandle, backend);
+            const bool endpoint_erased = !connection_endpoints.contains(connection);
             server_loop_coverage_check(
                 coverage_ok,
                 "process_server_endpoint_core_result_with_backend removes closed endpoints",
-                process_server_endpoint_core_result_with_backend(
-                    core, drive_state, connection_endpoints, document_root.path(), closed_result,
-                    kRouteHandle, backend) &
-                    !connection_endpoints.contains(connection));
+                processed && endpoint_erased);
         }
 
         {
@@ -1840,14 +1851,15 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .bytes = bytes_from_string_for_runtime_tests("GET /small.txt\r\n"),
                 .fin = true,
             });
+            const bool processed = process_server_endpoint_core_result_with_backend(
+                core, drive_state, connection_endpoints, document_root.path(), request_result,
+                kRouteHandle, backend);
+            const bool sent_datagram = !backend.sent_datagrams.empty();
             server_loop_coverage_check(
                 coverage_ok,
                 "process_server_endpoint_core_result_with_backend routes generated sends through "
                 "the backend",
-                process_server_endpoint_core_result_with_backend(
-                    core, drive_state, connection_endpoints, document_root.path(), request_result,
-                    kRouteHandle, backend) &
-                    !backend.sent_datagrams.empty());
+                processed && sent_datagram);
         }
 
         {
@@ -1865,20 +1877,21 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .bytes = {},
                 .fin = true,
             });
+            const bool processed = process_server_endpoint_core_result_with_backend(
+                core, drive_state, connection_endpoints, document_root.path(),
+                invalid_request_result, kRouteHandle, backend);
+            const bool endpoint_erased = !connection_endpoints.contains(connection);
             server_loop_coverage_check(
                 coverage_ok,
                 "process_server_endpoint_core_result_with_backend closes failed endpoints",
-                process_server_endpoint_core_result_with_backend(
-                    core, drive_state, connection_endpoints, document_root.path(),
-                    invalid_request_result, kRouteHandle, backend) &
-                    !connection_endpoints.contains(connection));
+                processed && endpoint_erased);
         }
     }
 
     {
         ScopedRuntimeTempDirForTests document_root;
         document_root.write_file("large.bin",
-                                 std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+                                 std::string(static_cast<std::size_t>(96) * 1024U, 'x'));
         const Http09RuntimeConfig server_config{
             .mode = Http09RuntimeMode::server,
             .document_root = document_root.path(),
@@ -1911,13 +1924,16 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                 .has_pending_work = true,
                             });
             bool made_progress = true;
+            const bool pumped = pump_shared_server_endpoint_work(
+                core, drive_state, connection_endpoints, document_root.path(), made_progress);
+            const bool no_progress = !made_progress;
+            const bool endpoint_retained = connection_endpoints.contains(connection);
+            const bool pending_flag_cleared =
+                endpoint_retained && !connection_endpoints.at(connection).has_pending_work;
             server_loop_coverage_check(
                 coverage_ok,
                 "pump_shared_server_endpoint_work clears stale pending flags without work",
-                pump_shared_server_endpoint_work(core, drive_state, connection_endpoints,
-                                                 document_root.path(), made_progress) &
-                    !made_progress & connection_endpoints.contains(connection) &
-                    !connection_endpoints.at(connection).has_pending_work);
+                pumped && no_progress && endpoint_retained && pending_flag_cleared);
         }
 
         {
@@ -1930,12 +1946,14 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                 .has_pending_work = false,
                             });
             bool made_progress = true;
+            const bool pumped = pump_shared_server_endpoint_work(
+                core, drive_state, connection_endpoints, document_root.path(), made_progress);
+            const bool no_progress = !made_progress;
+            const bool endpoint_retained = connection_endpoints.contains(connection);
             server_loop_coverage_check(
                 coverage_ok,
                 "pump_shared_server_endpoint_work ignores endpoints without pending work",
-                pump_shared_server_endpoint_work(core, drive_state, connection_endpoints,
-                                                 document_root.path(), made_progress) &
-                    !made_progress & connection_endpoints.contains(connection));
+                pumped && no_progress && endpoint_retained);
         }
 
         {
@@ -1959,13 +1977,13 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                              .has_pending_work = initial_update.has_pending_work,
                                          });
             bool made_progress = false;
+            const bool pumped = pump_shared_server_endpoint_work(
+                core, drive_state, connection_endpoints, document_root.path(), made_progress);
+            const bool send_recorded =
+                (g_recorded_sendto_for_tests.calls > 0 || g_recorded_sendmsg_for_tests.calls > 0);
             server_loop_coverage_check(
                 coverage_ok, "pump_shared_server_endpoint_work advances queued response chunks",
-                pump_shared_server_endpoint_work(core, drive_state, connection_endpoints,
-                                                 document_root.path(), made_progress) &
-                    made_progress &
-                    (g_recorded_sendto_for_tests.calls > 0 |
-                     g_recorded_sendmsg_for_tests.calls > 0));
+                pumped && made_progress && send_recorded);
         }
 
         {
@@ -1986,18 +2004,19 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                                          .has_pending_work = true,
                                                      });
             bool made_progress = false;
+            const bool pumped = pump_shared_server_endpoint_work(
+                core, drive_state, connection_endpoints, document_root.path(), made_progress);
+            const bool endpoint_erased = !connection_endpoints.contains(connection);
             server_loop_coverage_check(
                 coverage_ok, "pump_shared_server_endpoint_work closes endpoints whose polls fail",
-                pump_shared_server_endpoint_work(core, drive_state, connection_endpoints,
-                                                 document_root.path(), made_progress) &
-                    !connection_endpoints.contains(connection));
+                pumped && endpoint_erased);
         }
     }
 
     {
         ScopedRuntimeTempDirForTests document_root;
         document_root.write_file("large.bin",
-                                 std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+                                 std::string(static_cast<std::size_t>(96) * 1024U, 'x'));
         const Http09RuntimeConfig server_config{
             .mode = Http09RuntimeMode::server,
             .document_root = document_root.path(),
@@ -2007,9 +2026,13 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
         QuicCore client(make_http09_client_core_config(Http09RuntimeConfig{
             .mode = Http09RuntimeMode::client,
         }));
-        ScriptedIoBackendForTests backend;
         EndpointDriveState drive_state;
         constexpr QuicRouteHandle kRouteHandle = 17;
+        ScriptedIoBackendForTests backend;
+        backend.ensure_route_results.push_back(kRouteHandle);
+        static_cast<void>(backend.ensure_route(QuicIoRemote{
+            .family = AF_INET,
+        }));
         QuicCoreTimePoint step_now = now();
         const auto accepted =
             drive_live_server_endpoint_handshake_for_tests(client, kRouteHandle, core, step_now);
@@ -2026,15 +2049,18 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                 .has_pending_work = true,
                             });
             bool made_progress = true;
+            const bool pumped = pump_shared_server_endpoint_work_with_backend(
+                core, drive_state, connection_endpoints, document_root.path(), backend,
+                made_progress);
+            const bool no_progress = !made_progress;
+            const bool endpoint_retained = connection_endpoints.contains(connection);
+            const bool pending_flag_cleared =
+                endpoint_retained && !connection_endpoints.at(connection).has_pending_work;
             server_loop_coverage_check(
                 coverage_ok,
                 "pump_shared_server_endpoint_work_with_backend clears stale pending flags "
                 "without work",
-                pump_shared_server_endpoint_work_with_backend(
-                    core, drive_state, connection_endpoints, document_root.path(), backend,
-                    made_progress) &
-                    !made_progress & connection_endpoints.contains(connection) &
-                    !connection_endpoints.at(connection).has_pending_work);
+                pumped && no_progress && endpoint_retained && pending_flag_cleared);
         }
 
         {
@@ -2051,13 +2077,14 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                              .has_pending_work = initial_update.has_pending_work,
                                          });
             bool made_progress = false;
+            const bool pumped = pump_shared_server_endpoint_work_with_backend(
+                core, drive_state, connection_endpoints, document_root.path(), backend,
+                made_progress);
+            const bool sent_datagram = !backend.sent_datagrams.empty();
             server_loop_coverage_check(
                 coverage_ok,
                 "pump_shared_server_endpoint_work_with_backend advances queued response chunks",
-                pump_shared_server_endpoint_work_with_backend(
-                    core, drive_state, connection_endpoints, document_root.path(), backend,
-                    made_progress) &
-                    made_progress & !backend.sent_datagrams.empty());
+                pumped && made_progress && sent_datagram);
         }
 
         {
@@ -2072,20 +2099,21 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                                          .has_pending_work = true,
                                                      });
             bool made_progress = false;
+            const bool pumped = pump_shared_server_endpoint_work_with_backend(
+                core, drive_state, connection_endpoints, document_root.path(), backend,
+                made_progress);
+            const bool endpoint_erased = !connection_endpoints.contains(connection);
             server_loop_coverage_check(
                 coverage_ok,
                 "pump_shared_server_endpoint_work_with_backend closes endpoints whose polls fail",
-                pump_shared_server_endpoint_work_with_backend(
-                    core, drive_state, connection_endpoints, document_root.path(), backend,
-                    made_progress) &
-                    !connection_endpoints.contains(connection));
+                pumped && endpoint_erased);
         }
     }
 
     {
         ScopedRuntimeTempDirForTests document_root;
         document_root.write_file("large.bin",
-                                 std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+                                 std::string(static_cast<std::size_t>(96) * 1024U, 'x'));
         const Http09RuntimeConfig server_config{
             .mode = Http09RuntimeMode::server,
             .document_root = document_root.path(),
@@ -2114,18 +2142,19 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                      });
         EndpointDriveState drive_state;
         bool made_progress = false;
+        const bool route_failure_result = pump_shared_server_endpoint_work(
+            core, drive_state, connection_endpoints, document_root.path(), made_progress);
         server_loop_coverage_check(
             coverage_ok,
             "pump_shared_server_endpoint_work fails when pending connection inputs cannot be "
             "routed",
-            !pump_shared_server_endpoint_work(core, drive_state, connection_endpoints,
-                                              document_root.path(), made_progress));
+            !route_failure_result);
     }
 
     {
         ScopedRuntimeTempDirForTests document_root;
         document_root.write_file("large.bin",
-                                 std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+                                 std::string(static_cast<std::size_t>(96) * 1024U, 'x'));
         const Http09RuntimeConfig server_config{
             .mode = Http09RuntimeMode::server,
             .document_root = document_root.path(),
@@ -2164,7 +2193,7 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
     {
         ScopedRuntimeTempDirForTests document_root;
         document_root.write_file("large.bin",
-                                 std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+                                 std::string(static_cast<std::size_t>(96) * 1024U, 'x'));
         const Http09RuntimeConfig server_config{
             .mode = Http09RuntimeMode::server,
             .document_root = document_root.path(),
@@ -2194,13 +2223,14 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                      });
         EndpointDriveState drive_state;
         bool made_progress = false;
+        const bool backend_send_failure_result = pump_shared_server_endpoint_work_with_backend(
+            core, drive_state, connection_endpoints, document_root.path(), failing_backend,
+            made_progress);
         server_loop_coverage_check(
             coverage_ok,
             "pump_shared_server_endpoint_work_with_backend fails when the backend rejects queued "
             "response sends",
-            !pump_shared_server_endpoint_work_with_backend(core, drive_state, connection_endpoints,
-                                                           document_root.path(), failing_backend,
-                                                           made_progress));
+            !backend_send_failure_result);
     }
 
     {
@@ -2274,10 +2304,10 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
         auto wait_input = wait_step.input.value_or(QuicCoreInput{QuicCoreInboundDatagram{}});
         server_loop_coverage_check(
             coverage_ok, "make_runtime_server_loop_io forwards to runtime wait and receive helpers",
-            (current.time_since_epoch().count() > 0) &
-                (receive.status == ReceiveDatagramStatus::ok) &
-                (inbound.bytes == g_recorded_recvmsg_for_tests.bytes) & wait.has_value() &
-                wait_step.input.has_value() &
+            (current.time_since_epoch().count() > 0) &&
+                (receive.status == ReceiveDatagramStatus::ok) &&
+                (inbound.bytes == g_recorded_recvmsg_for_tests.bytes) && wait.has_value() &&
+                wait_step.input.has_value() &&
                 std::holds_alternative<QuicCoreTimerExpired>(wait_input));
     }
 

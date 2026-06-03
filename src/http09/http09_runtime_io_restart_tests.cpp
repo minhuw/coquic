@@ -454,7 +454,7 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
         };
         runtime_io_restart_coverage_check(ok,
                                           "open udp socket fails when ipv6 v6only disable fails",
-                                          (open_udp_socket(AF_INET6) == -1) & (errno == EINVAL));
+                                          (open_udp_socket(AF_INET6) == -1) && (errno == EINVAL));
     }
 
     {
@@ -476,7 +476,7 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
             },
         };
         runtime_io_restart_coverage_check(ok, "open udp socket fails when ipv6 ecn setup fails",
-                                          (open_udp_socket(AF_INET6) == -1) &
+                                          (open_udp_socket(AF_INET6) == -1) &&
                                               (errno == ENOPROTOOPT));
     }
 
@@ -553,8 +553,8 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
                                                         sizeof(sockaddr_in6), "client",
                                                         QuicEcnCodepoint::ect0));
         runtime_io_restart_coverage_check(ok, "native ipv6 sendmsg uses ipv6 tclass",
-                                          (g_recorded_sendmsg_for_tests.level == IPPROTO_IPV6) &
-                                              (g_recorded_sendmsg_for_tests.type == IPV6_TCLASS) &
+                                          (g_recorded_sendmsg_for_tests.level == IPPROTO_IPV6) &&
+                                              (g_recorded_sendmsg_for_tests.type == IPV6_TCLASS) &&
                                               (g_recorded_sendmsg_for_tests.traffic_class == 0x02));
     }
 
@@ -584,10 +584,10 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
             }
             errno = 0;
             runtime_io_restart_coverage_check(ok, "secondary client socket was closed",
-                                              (::close(secondary_fd) == -1) & (errno == EBADF));
+                                              (::close(secondary_fd) == -1) && (errno == EBADF));
             errno = 0;
             runtime_io_restart_coverage_check(ok, "primary client socket was closed",
-                                              (::close(primary_fd) == -1) & (errno == EBADF));
+                                              (::close(primary_fd) == -1) && (errno == EBADF));
         } else {
             if (primary_fd >= 0) {
                 ::close(primary_fd);
@@ -619,7 +619,7 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
             }
             errno = 0;
             runtime_io_restart_coverage_check(ok, "shared client socket closes only once",
-                                              (::close(primary_fd) == -1) & (errno == EBADF));
+                                              (::close(primary_fd) == -1) && (errno == EBADF));
         }
     }
 
@@ -783,7 +783,7 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
             ok, "drive endpoint fails when preferred-address observation fails",
             !drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core, /*fd=*/17,
                                           /*peer=*/nullptr, /*peer_len=*/0, result, state, "client",
-                                          &config, &policy, &sockets) &
+                                          &config, &policy, &sockets) &&
                 state.terminal_failure);
     }
 
@@ -855,27 +855,40 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
 }
 
 bool runtime_connectionmigration_failure_paths_for_tests() {
-    return !runtime_backend_connectionmigration_request_flow_case_for_tests(
-               /*official_alias=*/false, /*include_preferred_address=*/false) &
-           runtime_backend_preferred_address_route_failure_stops_migration_request_for_tests() &
-           !runtime_backend_connectionmigration_request_flow_case_for_tests(
-               /*official_alias=*/true, /*include_preferred_address=*/false) &
-           !runtime_registers_all_server_core_connection_ids_case_for_tests(
-               /*include_preferred_address=*/false);
+    const bool unofficial_alias_without_preferred_address =
+        !runtime_backend_connectionmigration_request_flow_case_for_tests(
+            /*official_alias=*/false, /*include_preferred_address=*/false);
+    const bool preferred_address_route_failure =
+        runtime_backend_preferred_address_route_failure_stops_migration_request_for_tests();
+    const bool official_alias_without_preferred_address =
+        !runtime_backend_connectionmigration_request_flow_case_for_tests(
+            /*official_alias=*/true, /*include_preferred_address=*/false);
+    const bool missing_preferred_ids =
+        !runtime_registers_all_server_core_connection_ids_case_for_tests(
+            /*include_preferred_address=*/false);
+    return unofficial_alias_without_preferred_address && preferred_address_route_failure &&
+           official_alias_without_preferred_address && missing_preferred_ids;
 }
 
 bool runtime_restart_failure_paths_for_tests() {
-    return !core_version_negotiation_restart_preserves_inbound_path_ids_case_for_tests(
-               /*force_serialization_failure=*/true) &
-           !core_version_negotiation_restart_preserves_inbound_path_ids_case_for_tests(
-               /*force_serialization_failure=*/false, /*force_path_id_mismatch=*/true) &
-           !core_retry_restart_preserves_inbound_path_ids_case_for_tests(
-               /*force_integrity_failure=*/true, /*force_serialization_failure=*/false) &
-           !core_retry_restart_preserves_inbound_path_ids_case_for_tests(
-               /*force_integrity_failure=*/false, /*force_serialization_failure=*/true) &
-           !core_retry_restart_preserves_inbound_path_ids_case_for_tests(
-               /*force_integrity_failure=*/false, /*force_serialization_failure=*/false,
-               /*force_path_id_mismatch=*/true);
+    const bool version_serialization_failure =
+        !core_version_negotiation_restart_preserves_inbound_path_ids_case_for_tests(
+            /*force_serialization_failure=*/true);
+    const bool version_path_id_mismatch =
+        !core_version_negotiation_restart_preserves_inbound_path_ids_case_for_tests(
+            /*force_serialization_failure=*/false, /*force_path_id_mismatch=*/true);
+    const bool retry_integrity_failure =
+        !core_retry_restart_preserves_inbound_path_ids_case_for_tests(
+            /*force_integrity_failure=*/true, /*force_serialization_failure=*/false);
+    const bool retry_serialization_failure =
+        !core_retry_restart_preserves_inbound_path_ids_case_for_tests(
+            /*force_integrity_failure=*/false, /*force_serialization_failure=*/true);
+    const bool retry_path_id_mismatch =
+        !core_retry_restart_preserves_inbound_path_ids_case_for_tests(
+            /*force_integrity_failure=*/false, /*force_serialization_failure=*/false,
+            /*force_path_id_mismatch=*/true);
+    return version_serialization_failure && version_path_id_mismatch && retry_integrity_failure &&
+           retry_serialization_failure && retry_path_id_mismatch;
 }
 
 ExistingServerSessionDatagramRouteResultForTests route_existing_server_session_datagram_for_tests(
@@ -1034,7 +1047,7 @@ bool core_version_negotiation_restart_preserves_inbound_path_ids_case_for_tests(
             all_sends_match_path = false;
         }
     }
-    return saw_send & all_sends_match_path;
+    return saw_send && all_sends_match_path;
 }
 
 bool core_version_negotiation_restart_preserves_inbound_path_ids_for_tests() {
@@ -1109,7 +1122,7 @@ bool core_retry_restart_preserves_inbound_path_ids_case_for_tests(bool force_int
             all_sends_match_path = false;
         }
     }
-    return saw_send & all_sends_match_path;
+    return saw_send && all_sends_match_path;
 }
 
 bool core_retry_restart_preserves_inbound_path_ids_for_tests() {
@@ -1143,8 +1156,8 @@ bool drive_endpoint_rejects_unknown_transport_selected_path_for_tests() {
     QuicCore core = make_local_error_client_core_for_tests();
     return !drive_endpoint_until_blocked(
                make_endpoint_driver(endpoint), core, /*fd=*/18, &fallback_peer,
-               static_cast<socklen_t>(sizeof(sockaddr_in)), result, state, "client") &
-           state.terminal_failure & (g_recorded_sendto_for_tests.calls == 0);
+               static_cast<socklen_t>(sizeof(sockaddr_in)), result, state, "client") &&
+           state.terminal_failure && (g_recorded_sendto_for_tests.calls == 0);
 }
 
 bool version_negotiation_without_source_connection_id_fails_for_tests() {
@@ -1165,7 +1178,7 @@ std::optional<QuicConnectionHandle> seed_live_backend_response_for_tests(
     QuicCore &server_core, EndpointDriveState &transport_state,
     ServerConnectionEndpointMap &endpoint_map, ScriptedIoBackendForTests &backend,
     QuicRouteHandle route_handle) {
-    document_root.write_file("large.bin", std::string(static_cast<std::size_t>(64) * 1024U, 'x'));
+    document_root.write_file("large.bin", std::string(static_cast<std::size_t>(96) * 1024U, 'x'));
     server_core = QuicCore(make_runtime_server_endpoint_config(
         config, TlsIdentity{
                     .certificate_pem = read_text_file("tests/fixtures/quic-server-cert.pem"),
@@ -1182,6 +1195,10 @@ std::optional<QuicConnectionHandle> seed_live_backend_response_for_tests(
         return std::nullopt;
     }
 
+    backend.ensure_route_results.push_back(route_handle);
+    static_cast<void>(backend.ensure_route(QuicIoRemote{
+        .family = AF_INET,
+    }));
     step_now += std::chrono::milliseconds(1);
     const auto request_result = client.advance(
         QuicCoreSendStreamData{

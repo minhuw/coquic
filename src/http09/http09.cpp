@@ -85,11 +85,9 @@ constexpr QuicHttp09Testcase transfer_profile_testcase(QuicHttp09Testcase testca
 QuicTransportConfig http09_transport_for_testcase(QuicHttp09Testcase testcase) {
     testcase = transfer_profile_testcase(testcase);
     auto config = QuicTransportConfig{};
+    config.max_idle_timeout = 180000;
     if (testcase == QuicHttp09Testcase::transfer) {
         config.active_connection_id_limit = 4;
-    }
-    if (testcase == QuicHttp09Testcase::multiconnect) {
-        config.max_idle_timeout = 180000;
     }
     return config;
 }

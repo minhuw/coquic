@@ -116,7 +116,7 @@ configure_ipv4_pmtud_socket_options_if_needed(LinuxSocketDescriptor socket, int 
     return set_bool_socket_option(IPPROTO_IP, IP_RECVERR);
 }
 
-bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family) {
+SocketOptionResult configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family) {
 #if defined(__linux__)
     const auto set_bool_socket_option = [&](int level, int name) {
         const int enabled = 1;
@@ -126,22 +126,22 @@ bool configure_linux_ecn_socket_options(LinuxSocketDescriptor socket, int family
 
     if (family == AF_INET || family == AF_INET6) {
         if (!set_bool_socket_option(IPPROTO_IP, IP_RECVTOS)) {
-            return false;
+            return SocketOptionResult::failed;
         }
     }
     if (socket_family_is_ipv6(family)) {
         if (!set_bool_socket_option(IPPROTO_IPV6, IPV6_RECVTCLASS)) {
-            return false;
+            return SocketOptionResult::failed;
         }
     }
 #else
     static_cast<void>(socket);
     static_cast<void>(family);
 #endif
-    return true;
+    return SocketOptionResult::configured;
 }
 
-bool configure_linux_pmtud_socket_options(LinuxSocketDescriptor socket, int family) {
+SocketOptionResult configure_linux_pmtud_socket_options(LinuxSocketDescriptor socket, int family) {
 #if defined(__linux__)
     const auto set_bool_socket_option = [&](int level, int name) {
         const int enabled = 1;
@@ -150,23 +150,23 @@ bool configure_linux_pmtud_socket_options(LinuxSocketDescriptor socket, int fami
     };
 
     if (!configure_ipv4_pmtud_socket_options_if_needed(socket, family, set_bool_socket_option)) {
-        return false;
+        return SocketOptionResult::failed;
     }
     if (socket_family_is_ipv6(family)) {
         const int discover = IPV6_PMTUDISC_DO;
         if (socket_io_backend_ops_state().setsockopt_fn(socket.fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER,
                                                         &discover, sizeof(discover)) != 0) {
-            return false;
+            return SocketOptionResult::failed;
         }
         if (!set_bool_socket_option(IPPROTO_IPV6, IPV6_RECVERR)) {
-            return false;
+            return SocketOptionResult::failed;
         }
     }
 #else
     static_cast<void>(socket);
     static_cast<void>(family);
 #endif
-    return true;
+    return SocketOptionResult::configured;
 }
 
 int open_udp_socket(int family) {
@@ -189,13 +189,15 @@ int open_udp_socket(int family) {
     configure_udp_socket_buffers(LinuxSocketDescriptor{.fd = fd});
     configure_udp_gro_if_available(LinuxSocketDescriptor{.fd = fd});
 
-    if (!configure_linux_ecn_socket_options(LinuxSocketDescriptor{.fd = fd}, family)) {
+    if (configure_linux_ecn_socket_options(LinuxSocketDescriptor{.fd = fd}, family) ==
+        SocketOptionResult::failed) {
         const int option_errno = errno;
         ::close(fd);
         errno = option_errno;
         return -1;
     }
-    if (!configure_linux_pmtud_socket_options(LinuxSocketDescriptor{.fd = fd}, family)) {
+    if (configure_linux_pmtud_socket_options(LinuxSocketDescriptor{.fd = fd}, family) ==
+        SocketOptionResult::failed) {
         const int option_errno = errno;
         ::close(fd);
         errno = option_errno;
@@ -629,7 +631,8 @@ bool socket_io_backend_configure_linux_ecn_socket_options_for_runtime_tests(int 
         return false;
     }
     return internal::configure_linux_ecn_socket_options(
-        internal::LinuxSocketDescriptor{.fd = socket_fd}, family);
+               internal::LinuxSocketDescriptor{.fd = socket_fd}, family) ==
+           internal::SocketOptionResult::configured;
 }
 
 bool socket_io_backend_configure_linux_pmtud_socket_options_for_runtime_tests(int socket_fd,
@@ -638,7 +641,8 @@ bool socket_io_backend_configure_linux_pmtud_socket_options_for_runtime_tests(in
         return false;
     }
     return internal::configure_linux_pmtud_socket_options(
-        internal::LinuxSocketDescriptor{.fd = socket_fd}, family);
+               internal::LinuxSocketDescriptor{.fd = socket_fd}, family) ==
+           internal::SocketOptionResult::configured;
 }
 
 namespace {

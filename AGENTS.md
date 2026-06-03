@@ -4,67 +4,79 @@ Last updated: 2026-06-03
 
 ## Identity And Boundaries
 
-- You are a pragmatic coding agent working in the `coquic` repository.
-- Respect existing user changes in the working tree.
-- Keep generated local state, downloaded CI state, and build outputs out of
+- Required: respect existing user changes in the working tree.
+- Required: keep generated local state, downloaded CI state, and build outputs out of
   tracked source.
-- Do not expand the root `README.md` with agent workflow details.
+- Required: keep agent workflow details in this file instead of the root `README.md`.
+- Default: act as a pragmatic coding agent working in the `coquic` repository.
 
 ## Repo Overview
 
 - `coquic` is an experimental QUIC (Quick UDP Internet Connections)
   implementation plus a local QUIC RFC (Request for Comments) knowledge base.
-- Keep the root `README.md` human-facing and minimal.
-- Put agent workflow and repo conventions here instead of expanding the root
-  `README.md`.
+- UDP means User Datagram Protocol.
+- RAG means retrieval-augmented generation.
+- Required: keep the root `README.md` human-facing and minimal.
+
+## Tools
+
+- Required: use `rg` or `rg --files` for repository searches when available.
+- Required: use `nix develop -c ...` for local build, test, format, and lint
+  commands that need the reproducible toolchain.
+- Required: use `gh` for GitHub Actions inspection when debugging remote CI.
+- Required: use `uv run --project rag ...` for Python RAG project commands.
+- Required: use `rag/scripts/query-rag` for local QUIC specification lookups.
+- Required: keep downloaded CI files under `.remote-ci/`.
+- Required: keep generated RAG state under `.rag/`.
 
 ## Build And Test
 
-- Enter the reproducible development environment with `nix develop`.
-- Build the project with `zig build`.
-- Run the main test suite with `zig build test`.
-- For daily interop validation, skip the long-running measurement cases
+- Required: enter the reproducible development environment with `nix develop`.
+- Required: build the project with `zig build`.
+- Required: run the main test suite with `zig build test`.
+- Default: for daily interop validation, skip the long-running measurement cases
   `goodput` and `crosstraffic`; reserve them for full verification runs and CI.
-- Generate coverage with `zig build coverage`.
-- Run formatting and lint checks with:
+- Optional: generate coverage with `zig build coverage`.
+- Required before broad C++ commits: run formatting and lint checks with:
   - `pre-commit run clang-format --all-files --show-diff-on-failure`
   - `pre-commit run coquic-clang-tidy --all-files --show-diff-on-failure`
 
 ## Remote CI Debugging
 
-- Use the GitHub CLI (`gh`) to inspect remote GitHub Actions failures instead
+- Required: use the GitHub CLI (`gh`) to inspect remote GitHub Actions failures instead
   of guessing from the web UI.
-- Store all downloaded remote CI material under `.remote-ci/` in the repo root.
+- Required: store all downloaded remote CI material under `.remote-ci/` in the repo root.
   Do not download logs, artifacts, traces, or temporary CI state into tracked
   source directories.
-- Start from the GitHub Actions URL provided by the user. Extract the run ID
-  from `/actions/runs/<run-id>` and, when present, the job ID from
-  `/job/<job-id>`. Use `-R <owner>/<repo>` if the URL points at a fork or
-  another repository.
-- Download failed run logs with:
+- Required: start from the GitHub Actions URL provided by the user.
+- Required: extract the run ID from `/actions/runs/<run-id>`.
+- Required: extract the job ID from `/job/<job-id>` when a job URL is present.
+- Required: use `-R <owner>/<repo>` if the URL points at a fork or another
+  repository.
+- Required: download failed run logs with:
   - `gh run view <run-id> --log-failed > .remote-ci/<run-id>-failed.log`
-- Download failed job logs with:
+- Required: download failed job logs with:
   - `gh run view --job <job-id> --log-failed > .remote-ci/<run-id>-job-<job-id>-failed.log`
-- Download run artifacts directly into `.remote-ci/`:
+- Required: create an artifact directory with:
   - `mkdir -p .remote-ci/<run-id>`
-- Put artifacts under `.remote-ci/<run-id>/artifacts` with:
+- Required: put artifacts under `.remote-ci/<run-id>/artifacts` with:
   - `gh run download <run-id> --dir .remote-ci/<run-id>/artifacts`
-- When artifacts include interop logs, coverage output, benchmark results, or
-  packaged binaries, inspect them in place under `.remote-ci/<run-id>/` and
-  keep any local reproduction outputs there as well.
-- After identifying the failing job or step, reproduce locally with the closest
+- Default: inspect interop logs, coverage output, benchmark results, and
+  packaged binaries in place under `.remote-ci/<run-id>/`.
+- Required: keep local reproduction outputs for remote CI under `.remote-ci/<run-id>/`.
+- Required: after identifying the failing job or step, reproduce locally with the closest
   documented command, usually through `nix develop -c ...`.
-- Summarize the failing workflow, run ID, job, step, relevant log excerpt, and
-  local reproduction command in the final debugging notes.
+- Required: summarize the failing workflow and run ID in the final debugging notes.
+- Required: include the job, step, relevant log excerpt, and local reproduction
+  command in the final debugging notes.
 
 ## QUIC Sources And RAG
 
-- Prefer `docs/rfc/` as the source of truth for QUIC specification questions.
-- The local RAG (retrieval-augmented generation) project lives under `rag/`.
+- Required: prefer `docs/rfc/` as the source of truth for QUIC specification questions.
+- Default: the local RAG project lives under `rag/`.
 - The repo-local Codex skill for QUIC questions lives under
   `.agents/skills/quic-rag/`.
-- Generated RAG state lives under `.rag/`.
-- Do not commit generated RAG state.
+- Required: do not commit generated RAG state.
 - Build or rebuild the RAG index with:
   - `rag/scripts/build-index --source docs/rfc --state-dir .rag`
 - Check index readiness with:

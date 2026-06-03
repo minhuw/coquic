@@ -1110,6 +1110,12 @@ drive_live_server_endpoint_handshake_for_tests(QuicCore &client, QuicRouteHandle
     std::optional<QuicConnectionHandle> accepted_connection;
 
     for (int i = 0; i < 32; ++i) {
+        if (accepted_connection.has_value() && client.is_handshake_complete() &&
+            !result_has_send_datagrams_for_runtime_tests(to_server) &&
+            !result_has_send_datagrams_for_runtime_tests(to_client)) {
+            return accepted_connection;
+        }
+
         if (result_has_send_datagrams_for_runtime_tests(to_server)) {
             step_now += std::chrono::milliseconds(1);
             to_client = relay_send_datagrams_to_endpoint_core_for_tests(to_server, server,

@@ -1,24 +1,25 @@
 @import "tailwindcss";
 
 @theme inline {
-  --font-sans: "CursorGothic", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --font-sans: "CursorGothic", ui-sans-serif, system-ui, -apple-system, "BlinkMacSystemFont", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 @layer base {
   :root {
     color-scheme: light;
+
     --primary: #0f62fe;
     --primary-hover: #0050e6;
     --primary-active: #002d9c;
     --primary-action: #0f62fe;
     --primary-action-hover: #0050e6;
-    --primary-contrast: #ffffff;
-    --bg: #ffffff;
-    --surface: #ffffff;
+    --primary-contrast: #fff;
+    --bg: #fff;
+    --surface: #fff;
     --surface-2: #f4f4f4;
     --surface-3: #e8e8e8;
-    --nav-surface: rgba(255, 255, 255, 0.95);
+    --nav-surface: rgb(255 255 255 / 95%);
     --ink: #161616;
     --muted: #6f6f6f;
     --soft: #393939;
@@ -30,16 +31,16 @@
     --warning-tooltip: #fffaf0;
     --danger-soft: #fff1f1;
     --code-bg: #f6f8fa;
-    --pipe-border: rgba(22, 22, 22, 0.14);
-    --pipe-border-soft: rgba(22, 22, 22, 0.12);
-    --pipe-front: rgba(255, 255, 255, 0.18);
-    --pipe-c2s: rgba(237, 245, 255, 0.45);
+    --pipe-border: rgb(22 22 22 / 14%);
+    --pipe-border-soft: rgb(22 22 22 / 12%);
+    --pipe-front: rgb(255 255 255 / 18%);
+    --pipe-c2s: rgb(237 245 255 / 45%);
     --pipe-c2s-back: #f7fbff;
-    --pipe-s2c: rgba(243, 246, 255, 0.65);
+    --pipe-s2c: rgb(243 246 255 / 65%);
     --pipe-s2c-back: #f8faff;
-    --shadow-popover: rgba(22, 22, 22, 0.12);
-    --shadow-modal: rgba(22, 22, 22, 0.18);
-    --modal-backdrop: rgba(22, 22, 22, 0.48);
+    --shadow-popover: rgb(22 22 22 / 12%);
+    --shadow-modal: rgb(22 22 22 / 18%);
+    --modal-backdrop: rgb(22 22 22 / 48%);
     --client: var(--primary);
     --client-ink: var(--primary-active);
     --server: #78a9ff;
@@ -54,38 +55,39 @@
 
   html[data-theme="dark"] {
     color-scheme: dark;
+
     --primary: #78a9ff;
     --primary-hover: #a6c8ff;
     --primary-active: #d0e2ff;
     --primary-action: #0f62fe;
     --primary-action-hover: #4589ff;
-    --primary-contrast: #ffffff;
+    --primary-contrast: #fff;
     --bg: #0b0f14;
     --surface: #111820;
     --surface-2: #161f2a;
     --surface-3: #202b38;
-    --nav-surface: rgba(17, 24, 32, 0.94);
+    --nav-surface: rgb(17 24 32 / 94%);
     --ink: #f4f7fb;
     --muted: #9aa7b7;
     --soft: #d2dae5;
     --line: #273241;
     --line-strong: #3b4656;
-    --primary-soft: rgba(120, 169, 255, 0.16);
-    --success-soft: rgba(66, 190, 101, 0.14);
-    --warning-soft: rgba(241, 194, 27, 0.16);
+    --primary-soft: rgb(120 169 255 / 16%);
+    --success-soft: rgb(66 190 101 / 14%);
+    --warning-soft: rgb(241 194 27 / 16%);
     --warning-tooltip: #241d0b;
-    --danger-soft: rgba(255, 126, 182, 0.14);
+    --danger-soft: rgb(255 126 182 / 14%);
     --code-bg: #0d1117;
-    --pipe-border: rgba(166, 200, 255, 0.2);
-    --pipe-border-soft: rgba(166, 200, 255, 0.16);
-    --pipe-front: rgba(255, 255, 255, 0.04);
-    --pipe-c2s: rgba(120, 169, 255, 0.08);
+    --pipe-border: rgb(166 200 255 / 20%);
+    --pipe-border-soft: rgb(166 200 255 / 16%);
+    --pipe-front: rgb(255 255 255 / 4%);
+    --pipe-c2s: rgb(120 169 255 / 8%);
     --pipe-c2s-back: #111d2a;
-    --pipe-s2c: rgba(166, 200, 255, 0.08);
+    --pipe-s2c: rgb(166 200 255 / 8%);
     --pipe-s2c-back: #111b27;
-    --shadow-popover: rgba(0, 0, 0, 0.38);
-    --shadow-modal: rgba(0, 0, 0, 0.5);
-    --modal-backdrop: rgba(0, 0, 0, 0.64);
+    --shadow-popover: rgb(0 0 0 / 38%);
+    --shadow-modal: rgb(0 0 0 / 50%);
+    --modal-backdrop: rgb(0 0 0 / 64%);
     --client: var(--primary-action);
     --client-ink: var(--primary-active);
     --server: #a6c8ff;
@@ -267,6 +269,7 @@
 
   .nav-icon-actions::before {
     content: "";
+
     @apply absolute -left-2 h-5 border-l border-[var(--line)];
   }
 
@@ -401,6 +404,7 @@
 
   .eyebrow::before {
     content: "";
+
     @apply size-[7px] rounded-full bg-[var(--primary)];
   }
 
@@ -435,6 +439,7 @@
 
   .metric-bar i {
     @apply absolute inset-y-0 left-0 block rounded-full bg-[var(--primary)];
+
     width: var(--coverage-width, 0%);
   }
 
@@ -569,6 +574,7 @@
 
   .docs-function-card-header h3 {
     @apply m-0 min-w-0 scroll-mt-24 font-mono text-[15px] font-semibold leading-snug text-[var(--ink)];
+
     overflow-wrap: anywhere;
   }
 
@@ -648,6 +654,7 @@
   .docs-markdown th,
   .qa-markdown th {
     @apply border border-[var(--line-strong)] px-3 py-2 text-left align-top text-xs font-semibold uppercase leading-snug text-[var(--ink)];
+
     border-bottom-width: 2px;
   }
 
@@ -722,6 +729,7 @@
 
   .qa-markdown pre code {
     @apply block border-0 bg-transparent p-0 text-[12px] leading-relaxed text-[var(--ink)];
+
     white-space: pre;
   }
 
@@ -1270,6 +1278,7 @@
 
   .state-step::before {
     content: "";
+
     @apply absolute left-3 top-4 size-2 rounded-full bg-[var(--line-strong)];
   }
 
@@ -1817,7 +1826,7 @@
   }
 
   .identity-separator {
-    color: rgba(145, 165, 173, 0.5);
+    color: rgb(145 165 173 / 50%);
     font-size: 11px;
     line-height: 1;
     text-align: center;
@@ -2045,6 +2054,7 @@
 
   .interop-legend i {
     @apply size-2.5 rounded-full;
+
     background: var(--legend-color);
   }
 
@@ -2054,6 +2064,7 @@
 
   .compat-matrix {
     @apply min-w-full border-collapse text-sm;
+
     width: max-content;
   }
 
@@ -2131,7 +2142,7 @@
   }
 }
 
-@media (max-width: 1080px) {
+@media (width <= 1080px) {
   @layer components {
     .packet-stage {
       @apply grid-cols-1 gap-4;
@@ -2180,7 +2191,7 @@
   }
 }
 
-@media (max-width: 680px) {
+@media (width <= 680px) {
   @layer components {
     .packet-stage {
       @apply min-h-0;

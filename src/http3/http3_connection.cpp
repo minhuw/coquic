@@ -61,7 +61,6 @@ BufferedInstructionProgress parse_prefixed_integer_progress(std::span<const std:
             };
         }
 
-        value += static_cast<std::uint64_t>(byte & 0x7fu) << shift;
         if ((byte & 0x80u) == 0u) {
             return {
                 .status = BufferedInstructionStatus::complete,

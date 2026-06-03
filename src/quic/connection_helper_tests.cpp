@@ -160,13 +160,13 @@ PathState traced_path_for_summary_tests() {
 
 bool path_summary_mentions_state_for_tests(const PathState &path) {
     const auto summary = format_path_state_summary(&path);
-    return (summary.find("id=7") != std::string::npos) &
-           (summary.find("val=1") != std::string::npos) &
-           (summary.find("cur=1") != std::string::npos) &
-           (summary.find("chal=1") != std::string::npos) &
-           (summary.find("out=1") != std::string::npos) &
-           (summary.find("resp=1") != std::string::npos) &
-           (summary.find("recv=11") != std::string::npos) &
+    return (summary.find("id=7") != std::string::npos) &&
+           (summary.find("val=1") != std::string::npos) &&
+           (summary.find("cur=1") != std::string::npos) &&
+           (summary.find("chal=1") != std::string::npos) &&
+           (summary.find("out=1") != std::string::npos) &&
+           (summary.find("resp=1") != std::string::npos) &&
+           (summary.find("recv=11") != std::string::npos) &&
            (summary.find("sent=7") != std::string::npos);
 }
 
@@ -189,9 +189,9 @@ bool packet_summary_mentions_counts_for_tests() {
             .packet_number = 9,
         },
     });
-    return (summary.find("count=2") != std::string::npos) &
-           (summary.find("pn=5-9") != std::string::npos) &
-           (summary.find("stream_fragments=1") != std::string::npos) &
+    return (summary.find("count=2") != std::string::npos) &&
+           (summary.find("pn=5-9") != std::string::npos) &&
+           (summary.find("stream_fragments=1") != std::string::npos) &&
            (summary.find("first_stream_offset=4") != std::string::npos);
 }
 
@@ -204,9 +204,9 @@ bool packet_summary_without_stream_offset_omits_offset_for_tests() {
             .packet_number = 8,
         },
     });
-    return (summary.find("count=2") != std::string::npos) &
-           (summary.find("pn=6-8") != std::string::npos) &
-           (summary.find("stream_fragments=0") != std::string::npos) &
+    return (summary.find("count=2") != std::string::npos) &&
+           (summary.find("pn=6-8") != std::string::npos) &&
+           (summary.find("stream_fragments=0") != std::string::npos) &&
            (summary.find("first_stream_offset=") == std::string::npos);
 }
 
@@ -859,7 +859,7 @@ bool trace_unset_disabled_for_tests(const ConnectionId &retry_source_connection_
     ScopedEnvVarForTests original_filter("COQUIC_PACKET_TRACE_SCID", "seed");
     ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", std::nullopt);
     ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", std::nullopt);
-    return !packet_trace_enabled() & !packet_trace_matches_connection(retry_source_connection_id);
+    return !packet_trace_enabled() && !packet_trace_matches_connection(retry_source_connection_id);
 }
 
 bool trace_empty_disabled_for_tests() {
@@ -879,7 +879,7 @@ bool trace_matches_without_filter_for_tests(const ConnectionId &retry_source_con
     ScopedEnvVarForTests original_filter("COQUIC_PACKET_TRACE_SCID", "seed");
     ScopedEnvVarForTests trace("COQUIC_PACKET_TRACE", "1");
     ScopedEnvVarForTests filter("COQUIC_PACKET_TRACE_SCID", std::nullopt);
-    return packet_trace_enabled() & packet_trace_matches_connection(retry_source_connection_id);
+    return packet_trace_enabled() && packet_trace_matches_connection(retry_source_connection_id);
 }
 
 bool trace_matches_with_empty_filter_for_tests(const ConnectionId &retry_source_connection_id) {
@@ -1294,7 +1294,7 @@ bool connection_helper_edge_cases_for_tests() {
                               }}));
     connection_coverage_check(
         ok, "corrupted_long_header_discarded",
-        should_discard_corrupted_long_header_packet(false, CodecErrorCode::invalid_fixed_bit) &
+        should_discard_corrupted_long_header_packet(false, CodecErrorCode::invalid_fixed_bit) &&
             should_discard_corrupted_long_header_packet(false,
                                                         CodecErrorCode::unsupported_packet_type));
     connection_coverage_check(

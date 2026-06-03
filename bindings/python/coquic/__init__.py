@@ -38,6 +38,7 @@ from ._core import (
     ZeroRttConfig,
     ZeroRttStatus,
 )
+from . import quic
 
 __all__ = [
     "ClientConnectionConfig",
@@ -78,4 +79,5 @@ __all__ = [
     "TransportConfig",
     "ZeroRttConfig",
     "ZeroRttStatus",
+    "quic",
 ]

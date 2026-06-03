@@ -40,5 +40,19 @@
     "next": {
       "postcss": "8.5.15"
     }
+  },
+  "stylelint": {
+    "rules": {
+      "alpha-value-notation": null,
+      "at-rule-empty-line-before": null,
+      "color-function-notation": null,
+      "color-hex-length": null,
+      "custom-property-empty-line-before": null,
+      "declaration-empty-line-before": null,
+      "import-notation": null,
+      "media-feature-range-notation": null,
+      "scss/function-disallowed-list": null,
+      "value-keyword-case": null
+    }
   }
 }

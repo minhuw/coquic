@@ -1718,7 +1718,7 @@ CodecResult<ReceivedProtectedPacketDecodeResult> deserialize_received_long_heade
 
     auto header_end =
         layout.value().packet_number_offset + unprotected.value().packet_number_length;
-    std::array<std::byte, 32> nonce_storage{};
+    std::array<std::byte, 32> nonce_storage;
     auto nonce =
         make_packet_protection_nonce_or_assert(keys.iv, packet_number.value(), nonce_storage);
     auto plaintext = open_payload(OpenPayloadInput{
@@ -1846,7 +1846,7 @@ CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
             write_frame_wire_bytes(payload_bytes.subspan(payload_offset), frame).value();
     }
 
-    std::array<std::byte, 32> nonce_storage{};
+    std::array<std::byte, 32> nonce_storage;
     auto nonce = make_packet_protection_nonce_or_assert(keys.iv, full_packet_number, nonce_storage);
     auto ciphertext = seal_payload_into(SealPayloadIntoInput{
         .cipher_suite = packet_cipher_suite,
@@ -1942,7 +1942,7 @@ deserialize_protected_initial_packet(std::span<const std::byte> bytes,
 
     auto header_end =
         layout.value().packet_number_offset + unprotected.value().packet_number_length;
-    std::array<std::byte, 32> nonce_storage{};
+    std::array<std::byte, 32> nonce_storage;
     auto nonce = make_packet_protection_nonce_or_assert(keys.value().iv, packet_number.value(),
                                                         nonce_storage);
 
@@ -2106,7 +2106,7 @@ deserialize_protected_handshake_packet(std::span<const std::byte> bytes,
 
     auto header_end =
         layout.value().packet_number_offset + unprotected.value().packet_number_length;
-    std::array<std::byte, 32> nonce_storage{};
+    std::array<std::byte, 32> nonce_storage;
     auto nonce =
         make_packet_protection_nonce_or_assert(keys_ref.iv, packet_number.value(), nonce_storage);
 
@@ -2279,7 +2279,7 @@ deserialize_protected_zero_rtt_packet(std::span<const std::byte> bytes,
 
     auto header_end =
         layout.value().packet_number_offset + unprotected.value().packet_number_length;
-    std::array<std::byte, 32> nonce_storage{};
+    std::array<std::byte, 32> nonce_storage;
     auto nonce =
         make_packet_protection_nonce_or_assert(keys_ref.iv, packet_number.value(), nonce_storage);
     auto plaintext = open_payload(OpenPayloadInput{
@@ -2595,7 +2595,7 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
     }
 
     auto cipher_suite = one_rtt_secret->cipher_suite;
-    std::array<std::byte, 32> nonce_storage{};
+    std::array<std::byte, 32> nonce_storage;
     std::span<const std::byte> nonce;
     {
         COQUIC_SERIALIZE_PROFILE_TIMER(nonce_timer, nonce_ns);
@@ -3099,7 +3099,7 @@ deserialize_protected_one_rtt_packet(std::span<const std::byte> bytes,
                                                                  packet_number.error().offset);
 
     auto header_end = packet_number_offset + unprotected_value.packet_number_length;
-    std::array<std::byte, 32> nonce_storage{};
+    std::array<std::byte, 32> nonce_storage;
     auto nonce =
         make_packet_protection_nonce_or_assert(keys_ref.iv, packet_number.value(), nonce_storage);
 
@@ -3197,7 +3197,7 @@ deserialize_received_protected_one_rtt_packet(std::span<const std::byte> bytes,
     }
 
     auto header_end = packet_number_offset + unprotected_value.packet_number_length;
-    std::array<std::byte, 32> nonce_storage{};
+    std::array<std::byte, 32> nonce_storage;
     auto nonce =
         make_packet_protection_nonce_or_assert(keys_ref.iv, packet_number.value(), nonce_storage);
     auto plaintext = open_payload(OpenPayloadInput{
@@ -3309,7 +3309,7 @@ deserialize_received_protected_one_rtt_packet(
     }
 
     auto header_end = packet_number_offset + unprotected_value.packet_number_length;
-    std::array<std::byte, 32> nonce_storage{};
+    std::array<std::byte, 32> nonce_storage;
     auto nonce = [&] {
         COQUIC_DESERIALIZE_PROFILE_TIMER(timer, nonce_ns);
         return make_packet_protection_nonce_or_assert(keys_ref.iv, packet_number.value(),

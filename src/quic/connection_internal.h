@@ -832,8 +832,16 @@ ecn_packet_space_index(const PacketSpaceState &packet_space,
 }
 
 inline bool packet_trace_enabled() {
+#ifdef NDEBUG
+    static const bool enabled = [] {
+        const char *value = std::getenv("COQUIC_PACKET_TRACE");
+        return value != nullptr && value[0] != '\0' && std::string_view(value) != "0";
+    }();
+    return enabled;
+#else
     const char *value = std::getenv("COQUIC_PACKET_TRACE");
     return value != nullptr && value[0] != '\0' && std::string_view(value) != "0";
+#endif
 }
 
 inline std::string format_connection_id_hex(std::span<const std::byte> connection_id) {
@@ -1141,6 +1149,18 @@ inline bool packet_trace_matches_connection(std::span<const std::byte> local_con
         return false;
     }
 
+#ifdef NDEBUG
+    static const auto filter = [] {
+        const char *value = std::getenv("COQUIC_PACKET_TRACE_SCID");
+        return value != nullptr ? std::optional<std::string>{value} : std::nullopt;
+    }();
+    if (!filter.has_value() || filter->empty()) {
+        return true;
+    }
+
+    const auto formatted_connection_id = format_connection_id_hex(local_connection_id);
+    return std::string_view(*filter) == formatted_connection_id;
+#else
     const char *filter = std::getenv("COQUIC_PACKET_TRACE_SCID");
     if (filter == nullptr || filter[0] == '\0') {
         return true;
@@ -1148,6 +1168,7 @@ inline bool packet_trace_matches_connection(std::span<const std::byte> local_con
 
     const auto formatted_connection_id = format_connection_id_hex(local_connection_id);
     return std::string_view(filter) == formatted_connection_id;
+#endif
 }
 
 inline std::string format_optional_path_id(std::optional<QuicPathId> path_id) {

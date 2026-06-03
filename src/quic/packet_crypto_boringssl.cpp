@@ -853,7 +853,7 @@ CodecResult<std::size_t> seal_aeadv_chunks_into(const EVP_AEAD *aead,
                                                  0);
     }
 
-    std::array<CRYPTO_IOVEC, CRYPTO_IOVEC_MAX> iovecs{};
+    std::array<CRYPTO_IOVEC, CRYPTO_IOVEC_MAX> iovecs;
     std::size_t iovec_count = 0;
     std::size_t total_produced = 0;
     for (const auto &chunk : request.plaintext_chunks) {

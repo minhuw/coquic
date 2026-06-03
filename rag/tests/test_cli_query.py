@@ -1,39 +1,10 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 from coquic_rag.cli.main import main
-
-
-_DRAFT_FIXTURE_TEXT = """Network Working Group
-Internet-Draft
-Intended status: Informational
-Expires: 4 April 2027
-
-draft-ietf-quic-qlog-main-schema-13
-
-qlog: Structured Logging for Network Protocols
-
-Abstract
-
-This is a minimal draft fixture for CLI query tests.
-
-1.  Introduction
-
-This section describes structured logging for network protocol analysis.
-"""
-
-
-def _copy_query_fixtures(source_dir: Path) -> None:
-    source_dir.mkdir(parents=True, exist_ok=True)
-    for filename in ("rfc9000.txt", "rfc9369.txt"):
-        shutil.copyfile(Path("references/rfc") / filename, source_dir / filename)
-    (source_dir / "draft-ietf-quic-qlog-main-schema-13.txt").write_text(
-        _DRAFT_FIXTURE_TEXT,
-        encoding="utf-8",
-    )
+from fixtures import write_query_fixtures
 
 
 def _build_index(source_dir: Path, state_dir: Path) -> None:
@@ -54,7 +25,7 @@ def _build_index(source_dir: Path, state_dir: Path) -> None:
 def test_search_sections_returns_json_results(tmp_path: Path, capsys) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_query_fixtures(source_dir)
+    write_query_fixtures(source_dir)
     _build_index(source_dir, state_dir)
     capsys.readouterr()
 
@@ -83,7 +54,7 @@ def test_search_sections_returns_json_results(tmp_path: Path, capsys) -> None:
 def test_get_section_returns_json_payload_for_draft_doc(tmp_path: Path, capsys) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_query_fixtures(source_dir)
+    write_query_fixtures(source_dir)
     _build_index(source_dir, state_dir)
     capsys.readouterr()
 
@@ -110,7 +81,7 @@ def test_get_section_returns_json_payload_for_draft_doc(tmp_path: Path, capsys) 
 def test_trace_term_returns_definitions_and_mentions(tmp_path: Path, capsys) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_query_fixtures(source_dir)
+    write_query_fixtures(source_dir)
     _build_index(source_dir, state_dir)
     capsys.readouterr()
 
@@ -133,13 +104,13 @@ def test_trace_term_returns_definitions_and_mentions(tmp_path: Path, capsys) -> 
     assert payload["definitions"][0]["citation"] == "RFC 9000 Section 18.2"
 
 
-def test_search_sections_reports_missing_index_without_traceback(
+def test_search_sections_returns_empty_results_when_collection_is_missing(
     tmp_path: Path,
     capsys,
 ) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_query_fixtures(source_dir)
+    write_query_fixtures(source_dir)
 
     exit_code = main(
         [
@@ -154,9 +125,7 @@ def test_search_sections_reports_missing_index_without_traceback(
         ]
     )
 
-    assert exit_code == 1
+    assert exit_code == 0
     captured = capsys.readouterr()
-    assert captured.out == ""
-    error_output = captured.err
-    assert "QUIC index is not ready" in error_output
-    assert "Traceback" not in error_output
+    assert json.loads(captured.out) == {"results": []}
+    assert captured.err == ""

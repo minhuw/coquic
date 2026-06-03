@@ -25,7 +25,6 @@ next_root="${release_dir}/app"
 rag_root="${COQUIC_DEMO_RAG_ROOT:-${next_root}/rag}"
 rag_repo_root="${COQUIC_DEMO_RAG_REPO_ROOT:-${next_root}}"
 rag_state_dir="${COQUIC_RAG_STATE_DIR:-${rag_repo_root}/.rag}"
-rfc_source="${COQUIC_RFC_SOURCE:-${rag_repo_root}/references/rfc}"
 h3_server="${release_dir}/h3-server"
 
 if [[ ! -x "${h3_server}" ]]; then
@@ -105,7 +104,6 @@ if [[ "${qa_should_start}" == "1" ]]; then
     PYTHONPATH="${rag_root}/src${PYTHONPATH:+:${PYTHONPATH}}" \
     COQUIC_REPO_ROOT="${rag_repo_root}" \
     COQUIC_RAG_STATE_DIR="${rag_state_dir}" \
-    COQUIC_RFC_SOURCE="${rfc_source}" \
     COQUIC_QA_HOST="${qa_host}" \
     COQUIC_QA_PORT="${qa_port}" \
     exec uv run --no-project \

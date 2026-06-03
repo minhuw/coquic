@@ -14,7 +14,6 @@ static_dir="${next_dir}/.next/static"
 public_dir="${next_dir}/public"
 next_runtime_router_utils_dir="${next_dir}/node_modules/next/dist/server/lib/router-utils"
 rag_dir="${repo_root}/rag"
-rfc_dir="${repo_root}/references/rfc"
 rag_artifacts_dir="${repo_root}/.rag/artifacts"
 server_js="${standalone_dir}/server.js"
 runtime_public_entries=(
@@ -50,10 +49,6 @@ if [[ ! -f "${rag_dir}/src/coquic_rag/qa/app.py" ]]; then
   echo "missing RAG QA API source: ${rag_dir}/src/coquic_rag/qa/app.py" >&2
   exit 1
 fi
-if [[ ! -d "${rfc_dir}" ]]; then
-  echo "missing RFC source directory: ${rfc_dir}" >&2
-  exit 1
-fi
 
 is_same_or_descendant() {
   local path="$1"
@@ -87,8 +82,6 @@ tar -C "${rag_dir}" \
   --exclude='*/__pycache__' \
   --exclude='*.egg-info' \
   -cf - src | tar -C "${output_dir}/rag" -xf -
-install -d -m 755 -- "${output_dir}/references"
-cp -R -- "${rfc_dir}" "${output_dir}/references/rfc"
 if [[ -d "${rag_artifacts_dir}" ]]; then
   install -d -m 755 -- "${output_dir}/.rag"
   cp -R -- "${rag_artifacts_dir}" "${output_dir}/.rag/artifacts"

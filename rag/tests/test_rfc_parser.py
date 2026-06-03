@@ -6,10 +6,11 @@ import pytest
 
 from coquic_rag.ingest.models import SectionCitation
 from coquic_rag.ingest.rfc_parser import parse_rfc_document, parse_source_document
+from fixtures import write_draft_qlog_fixture, write_rfc9000_fixture
 
 
-def test_parse_rfc9000_core_metadata_and_sections() -> None:
-    doc = parse_source_document(Path("references/rfc/rfc9000.txt"))
+def test_parse_rfc9000_core_metadata_and_sections(tmp_path: Path) -> None:
+    doc = parse_source_document(write_rfc9000_fixture(tmp_path / "rfc9000.txt"))
 
     assert doc.doc_id == "rfc9000"
     assert doc.doc_kind == "rfc"
@@ -24,8 +25,12 @@ def test_parse_rfc9000_core_metadata_and_sections() -> None:
     assert section_182.section_id == "18.2"
 
 
-def test_parse_draft_qlog_main_schema_core_metadata_and_sections() -> None:
-    doc = parse_source_document(Path("references/rfc/draft-ietf-quic-qlog-main-schema-13.txt"))
+def test_parse_draft_qlog_main_schema_core_metadata_and_sections(tmp_path: Path) -> None:
+    doc = parse_source_document(
+        write_draft_qlog_fixture(
+            tmp_path / "draft-ietf-quic-qlog-main-schema-13.txt"
+        )
+    )
 
     assert doc.doc_id == "draft-ietf-quic-qlog-main-schema-13"
     assert doc.doc_kind == "internet-draft"
@@ -69,18 +74,22 @@ def test_parse_source_document_preserves_wrapped_title(tmp_path: Path) -> None:
     assert doc.title == "Wrapped RFC Title First Line Wrapped RFC Title Second Line"
 
 
-def test_parse_rfc_document_rejects_draft_fixture() -> None:
+def test_parse_rfc_document_rejects_draft_fixture(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="parse_rfc_document only accepts RFC input"):
-        parse_rfc_document(Path("references/rfc/draft-ietf-quic-qlog-main-schema-13.txt"))
+        parse_rfc_document(
+            write_draft_qlog_fixture(
+                tmp_path / "draft-ietf-quic-qlog-main-schema-13.txt"
+            )
+        )
 
 
-def test_parse_rfc_document_accepts_rfc_fixture() -> None:
-    doc = parse_rfc_document(Path("references/rfc/rfc9000.txt"))
+def test_parse_rfc_document_accepts_rfc_fixture(tmp_path: Path) -> None:
+    doc = parse_rfc_document(write_rfc9000_fixture(tmp_path / "rfc9000.txt"))
     assert doc.rfc == 9000
 
 
-def test_extract_section_citations_from_body_text() -> None:
-    doc = parse_source_document(Path("references/rfc/rfc9000.txt"))
+def test_extract_section_citations_from_body_text(tmp_path: Path) -> None:
+    doc = parse_source_document(write_rfc9000_fixture(tmp_path / "rfc9000.txt"))
 
     section_523 = doc.section_by_id("5.2.3")
     assert section_523 is not None
@@ -89,8 +98,8 @@ def test_extract_section_citations_from_body_text() -> None:
     assert "21.11" in targets
 
 
-def test_extract_appendix_citation_from_rfc9000_fixture() -> None:
-    doc = parse_source_document(Path("references/rfc/rfc9000.txt"))
+def test_extract_appendix_citation_from_rfc9000_fixture(tmp_path: Path) -> None:
+    doc = parse_source_document(write_rfc9000_fixture(tmp_path / "rfc9000.txt"))
 
     section_1342 = doc.section_by_id("13.4.2")
     assert section_1342 is not None

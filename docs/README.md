@@ -2,9 +2,8 @@
 
 These documents describe the CoQUIC project API and integration model.
 
-Reference material that is not project documentation lives under
-`references/`. That includes RFC text, Internet-Drafts, papers, audits, and
-older research notes used by tooling or implementation work.
+Reference material for RAG is stored in Qdrant. The repository does not require
+a checked-in RFC corpus for runtime search or QA.
 
 ## API Hierarchy
 
@@ -64,9 +63,6 @@ bindings/rust/coquic
 
 ## Reference Corpus
 
-- QUIC RFC and Internet-Draft text: `references/rfc/`
-- Research papers: `references/papers/`
-- Historical notes and audits: `references/*.md`
-
-Use `references/rfc/` as the source path for RAG indexing and protocol
-citations.
+RAG search and QA read indexed section payloads from Qdrant. Local source
+documents are only needed when explicitly running indexing commands with a
+chosen `--source` directory.

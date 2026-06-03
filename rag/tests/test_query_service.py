@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
@@ -8,43 +7,15 @@ import pytest
 from coquic_rag.cli.main import main as cli_main
 from coquic_rag.config import ProjectPaths
 from coquic_rag.embed.provider import FakeEmbedder
-from coquic_rag.query.service import IndexNotBuiltError, QueryService
+from coquic_rag.query.service import QueryService
 from coquic_rag.store.qdrant_store import QdrantSectionStore, SectionSearchHit
-
-
-_DRAFT_FIXTURE_TEXT = """Network Working Group
-Internet-Draft
-Intended status: Informational
-Expires: 4 April 2027
-
-draft-ietf-quic-qlog-main-schema-13
-
-qlog: Structured Logging for Network Protocols
-
-Abstract
-
-This is a minimal draft fixture for query tests.
-
-1.  Introduction
-
-This section describes structured logging for network protocol analysis.
-"""
-
-
-def _copy_query_fixtures(source_dir: Path) -> None:
-    source_dir.mkdir(parents=True, exist_ok=True)
-    for filename in ("rfc9000.txt", "rfc9369.txt"):
-        shutil.copyfile(Path("references/rfc") / filename, source_dir / filename)
-    (source_dir / "draft-ietf-quic-qlog-main-schema-13.txt").write_text(
-        _DRAFT_FIXTURE_TEXT,
-        encoding="utf-8",
-    )
+from fixtures import write_query_fixtures
 
 
 def _build_service(tmp_path: Path) -> QueryService:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_query_fixtures(source_dir)
+    write_query_fixtures(source_dir)
 
     exit_code = cli_main(
         [
@@ -229,7 +200,7 @@ def test_query_service_semantic_search_can_use_qdrant_payloads_without_artifacts
 ) -> None:
     paths = ProjectPaths(
         repo_root=tmp_path,
-        rfc_source=tmp_path / "missing-source",
+        rfc_source=None,
         state_dir=tmp_path / ".rag",
         qdrant_url="https://example.qdrant.cloud",
     )
@@ -292,13 +263,57 @@ def test_query_service_semantic_search_can_use_qdrant_payloads_without_artifacts
     ]
 
 
-def test_query_service_reports_missing_index(tmp_path: Path) -> None:
+def test_query_service_get_section_can_use_qdrant_payloads_without_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     paths = ProjectPaths(
         repo_root=tmp_path,
-        rfc_source=tmp_path / "source",
+        rfc_source=None,
+        state_dir=tmp_path / ".rag",
+        qdrant_url="https://example.qdrant.cloud",
+    )
+
+    def _get_section(
+        self: QdrantSectionStore,
+        doc_id: str,
+        section_id: str,
+    ) -> SectionSearchHit | None:
+        assert doc_id == "rfc9000"
+        assert section_id == "19.3"
+        return SectionSearchHit(
+            node_id="rfc9000#19.3",
+            score=1.0,
+            payload={
+                "node_id": "rfc9000#19.3",
+                "doc_id": "rfc9000",
+                "doc_kind": "rfc",
+                "rfc_number": 9000,
+                "section_id": "19.3",
+                "title": "ACK Frames",
+                "text": "ACK frames contain acknowledgment ranges.",
+            },
+            text="ACK frames contain acknowledgment ranges.",
+        )
+
+    monkeypatch.setattr(QdrantSectionStore, "get_section", _get_section)
+
+    service = QueryService(paths=paths, embedder=FakeEmbedder())
+
+    section = service.get_section("rfc9000", "19.3")
+
+    assert section["found"] is True
+    assert section["citation"] == "RFC 9000 Section 19.3"
+
+
+def test_query_service_search_returns_empty_when_collection_is_missing(
+    tmp_path: Path,
+) -> None:
+    paths = ProjectPaths(
+        repo_root=tmp_path,
+        rfc_source=None,
         state_dir=tmp_path / ".rag",
     )
     service = QueryService(paths=paths, embedder=FakeEmbedder())
 
-    with pytest.raises(IndexNotBuiltError):
-        service.search_sections("ACK frame behavior")
+    assert service.search_sections("ACK frame behavior") == []

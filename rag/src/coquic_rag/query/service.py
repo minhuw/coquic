@@ -34,7 +34,15 @@ class IndexStatus:
 
     @property
     def ready(self) -> bool:
-        return self.source_ok and self.artifacts_ok and self.qdrant_ok
+        return self.semantic_search_ready
+
+    @property
+    def semantic_search_ready(self) -> bool:
+        return (
+            self.qdrant_ok
+            and self.indexed_count is not None
+            and self.indexed_count > 0
+        )
 
     def lines(self) -> list[str]:
         lines = [
@@ -51,13 +59,22 @@ class IndexStatus:
     def failure_message(self, paths: ProjectPaths) -> str:
         command = (
             "uv run --project rag python -m coquic_rag.cli.main "
-            f"build-index --source {paths.rfc_source} --state-dir {paths.state_dir}"
+            f"build-index --source <source-dir> --state-dir {paths.state_dir}"
         )
         return "\n".join(
             [
                 f"QUIC index is not ready under {paths.state_dir}",
                 *self.lines(),
                 f"rebuild with: {command}",
+            ]
+        )
+
+    def semantic_search_failure_message(self) -> str:
+        return "\n".join(
+            [
+                "QUIC semantic search is not ready",
+                f"qdrant_backend: {self.qdrant_backend}",
+                f"qdrant: {self.qdrant_status}",
             ]
         )
 
@@ -124,8 +141,18 @@ def get_index_status(
     resolved_paths = paths or ProjectPaths.default()
     qdrant_url = _configured_qdrant_url(resolved_paths)
     qdrant_backend = "remote" if qdrant_url else "local"
-    source_ok = resolved_paths.rfc_source.is_dir() and bool(
-        sorted(path for path in resolved_paths.rfc_source.glob("*.txt") if path.is_file())
+    source_ok = (
+        resolved_paths.rfc_source is None
+        or (
+            resolved_paths.rfc_source.is_dir()
+            and bool(
+                sorted(
+                    path
+                    for path in resolved_paths.rfc_source.glob("*.txt")
+                    if path.is_file()
+                )
+            )
+        )
     )
 
     required_paths = _required_artifact_paths(resolved_paths)
@@ -157,9 +184,6 @@ def get_index_status(
 
     if indexed_count is None:
         qdrant_status = "missing"
-        qdrant_ok = False
-    elif section_count is not None and indexed_count != section_count:
-        qdrant_status = "stale"
         qdrant_ok = False
     else:
         qdrant_status = "ok"
@@ -195,7 +219,7 @@ class QueryService:
         *,
         embedder: EmbeddingProvider | None = None,
         collection_name: str = "quic_sections",
-        require_artifacts_for_search: bool = True,
+        require_artifacts_for_search: bool = False,
     ) -> None:
         self._paths = paths or ProjectPaths.default()
         qdrant_url = _configured_qdrant_url(self._paths)
@@ -215,27 +239,48 @@ class QueryService:
         self._edges_from: dict[str, list[dict[str, object]]] = defaultdict(list)
         self._edges_to: dict[str, list[dict[str, object]]] = defaultdict(list)
 
+    def _raise_store_error(self, error: Exception) -> None:
+        if _configured_qdrant_url(self._paths):
+            raise IndexNotBuiltError(
+                "\n".join(
+                    [
+                        "QUIC semantic search is not ready",
+                        "qdrant_backend: remote",
+                        "qdrant: unreachable",
+                    ]
+                )
+            ) from error
+        raise error
+
     def get_section(self, doc_id: str | int, section_id: str) -> dict[str, object]:
-        self._ensure_loaded()
         legacy_rfc = int(doc_id) if isinstance(doc_id, int) else None
         resolved_doc_id = _normalize_doc_selector(doc_id)
         if resolved_doc_id is None:
             raise ValueError("doc_id is required")
         key = (resolved_doc_id, str(section_id))
+        self._load_optional_artifacts()
         record = self._sections_by_key.get(key)
-        if record is None:
-            miss_result: dict[str, object] = {
-                "found": False,
-                "doc_id": resolved_doc_id,
-                "section_id": str(section_id),
-            }
-            if legacy_rfc is not None:
-                miss_result["rfc"] = legacy_rfc
-            return miss_result
-        return self._section_result(record)
+        if record is not None:
+            return self._section_result(record)
+
+        try:
+            hit = self._store.get_section(resolved_doc_id, str(section_id))
+        except Exception as error:
+            self._raise_store_error(error)
+        if hit is not None:
+            return self._search_hit_result(hit, relation="exact")
+
+        miss_result: dict[str, object] = {
+            "found": False,
+            "doc_id": resolved_doc_id,
+            "section_id": str(section_id),
+        }
+        if legacy_rfc is not None:
+            miss_result["rfc"] = legacy_rfc
+        return miss_result
 
     def lookup_term(self, term_type: str, name: str) -> dict[str, object]:
-        self._ensure_loaded()
+        self._load_optional_artifacts()
         term_id = f"term:{term_type}:{_normalize_term_name(name)}"
         node = self._nodes_by_id.get(term_id)
         if node is None:
@@ -253,7 +298,7 @@ class QueryService:
         *,
         rfc: int | None = None,
     ) -> dict[str, object]:
-        self._ensure_loaded()
+        self._load_optional_artifacts()
         resolved_doc_id = _normalize_doc_selector(doc_id, rfc=rfc)
         normalized_term = _normalize_term_name(term)
         matches = [
@@ -282,13 +327,31 @@ class QueryService:
         edge_types: tuple[str, ...] = ("cites", "mentions", "defines"),
         top_k: int = 5,
     ) -> list[dict[str, object]]:
-        self._ensure_loaded()
+        self._load_optional_artifacts()
         resolved_doc_id = _normalize_doc_selector(doc_id)
         if resolved_doc_id is None:
             raise ValueError("doc_id is required")
         source = self._sections_by_key.get((resolved_doc_id, str(section_id)))
         if source is None:
-            return []
+            try:
+                hit = self._store.get_section(resolved_doc_id, str(section_id))
+            except Exception as error:
+                self._raise_store_error(error)
+            if hit is None:
+                return []
+            source = {
+                "node_id": hit.node_id,
+                "doc_id": hit.payload["doc_id"],
+                "doc_kind": hit.payload["doc_kind"],
+                "rfc_number": hit.payload.get("rfc_number"),
+                "draft_name": hit.payload.get("draft_name"),
+                "section_id": hit.payload["section_id"],
+                "title": hit.payload["title"],
+                "text": hit.payload["text"],
+                "source_path": hit.payload.get("source_path"),
+                "source_type": hit.payload.get("source_type"),
+                "loader": hit.payload.get("loader"),
+            }
 
         source_node_id = str(source["node_id"])
         related: dict[str, dict[str, object]] = {}
@@ -320,12 +383,15 @@ class QueryService:
             return list(related.values())
 
         query_text = f"{source['title']}\n\n{source['text']}"
-        hits = self._store.search_sections(
-            query_text,
-            self._embedder_or_create(),
-            limit=top_k + 1,
-            payload_filters={"doc_id": resolved_doc_id},
-        )
+        try:
+            hits = self._store.search_sections(
+                query_text,
+                self._embedder_or_create(),
+                limit=top_k + 1,
+                payload_filters={"doc_id": resolved_doc_id},
+            )
+        except Exception as error:
+            self._raise_store_error(error)
         results = []
         for hit in hits:
             if hit.node_id == source_node_id:
@@ -355,12 +421,15 @@ class QueryService:
         if category is not None:
             payload_filters["section_kind"] = category
 
-        hits = self._store.search_sections(
-            query,
-            self._embedder_or_create(),
-            limit=top_k,
-            payload_filters=payload_filters or None,
-        )
+        try:
+            hits = self._store.search_sections(
+                query,
+                self._embedder_or_create(),
+                limit=top_k,
+                payload_filters=payload_filters or None,
+            )
+        except Exception as error:
+            self._raise_store_error(error)
         return [self._search_hit_result(hit, relation="semantic") for hit in hits]
 
     def render_section_resource(self, doc_id: str | int, section_id: str) -> str:
@@ -484,8 +553,21 @@ class QueryService:
         if self._loaded:
             return
 
-        require_index_ready(self._paths, collection_name=self._store.collection_name)
+        if not all(path.is_file() for path in _required_artifact_paths(self._paths)):
+            raise IndexNotBuiltError(
+                "\n".join(
+                    [
+                        f"QUIC graph artifacts are not ready under {self._paths.state_dir}",
+                        "artifacts: missing",
+                    ]
+                )
+            )
         self._load_artifacts()
+
+    def _ensure_semantic_search_ready(self) -> None:
+        status = get_index_status(self._paths, collection_name=self._store.collection_name)
+        if not status.semantic_search_ready:
+            raise IndexNotBuiltError(status.semantic_search_failure_message())
 
     def _load_optional_artifacts(self) -> None:
         if self._loaded or self._optional_artifacts_checked:

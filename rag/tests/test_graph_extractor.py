@@ -12,10 +12,11 @@ from coquic_rag.store.artifacts import (
     write_graph_nodes,
     write_section_records,
 )
+from fixtures import write_rfc9000_fixture
 
 
-def test_build_graph_artifacts_from_rfc9000() -> None:
-    doc = parse_source_document(Path("references/rfc/rfc9000.txt"))
+def test_build_graph_artifacts_from_rfc9000(tmp_path: Path) -> None:
+    doc = parse_source_document(write_rfc9000_fixture(tmp_path / "rfc9000.txt"))
 
     section_records, graph_nodes, graph_edges = build_graph_artifacts(doc)
 
@@ -172,7 +173,7 @@ def test_build_graph_artifacts_from_qlog_draft(tmp_path: Path) -> None:
 
 
 def test_artifact_jsonl_roundtrip(tmp_path: Path) -> None:
-    doc = parse_source_document(Path("references/rfc/rfc9000.txt"))
+    doc = parse_source_document(write_rfc9000_fixture(tmp_path / "rfc9000.txt"))
     section_records, graph_nodes, graph_edges = build_graph_artifacts(doc)
 
     sections_path = tmp_path / "sections.jsonl"

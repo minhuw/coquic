@@ -133,10 +133,10 @@ def app_config() -> QaConfig:
 def paths() -> ProjectPaths:
     repo_root = Path(os.getenv("COQUIC_REPO_ROOT", Path.cwd())).resolve()
     state_dir = Path(os.getenv("COQUIC_RAG_STATE_DIR", repo_root / ".rag"))
-    source_dir = Path(os.getenv("COQUIC_RFC_SOURCE", repo_root / "references" / "rfc"))
+    source_dir_env = os.getenv("COQUIC_RFC_SOURCE")
     return ProjectPaths(
         repo_root=repo_root,
-        rfc_source=source_dir,
+        rfc_source=Path(source_dir_env) if source_dir_env else None,
         state_dir=state_dir,
         qdrant_url=os.getenv("COQUIC_QDRANT_URL"),
         qdrant_api_key=os.getenv("COQUIC_QDRANT_API_KEY"),
@@ -369,8 +369,7 @@ def _answer_models_payload() -> list[dict[str, str]]:
 
 
 def _semantic_search_ready(status: object) -> bool:
-    indexed_count = getattr(status, "indexed_count", None)
-    return bool(getattr(status, "qdrant_ok", False) and indexed_count != 0)
+    return bool(getattr(status, "semantic_search_ready", False))
 
 
 def _usage_payload(usage: ChatUsage | None) -> UsagePayload | None:

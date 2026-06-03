@@ -56,7 +56,7 @@ class _ProgressBar:
         print(line, file=self._stream, flush=True)
 
 
-def _runtime_paths(source: Path, state_dir: Path) -> ProjectPaths:
+def _runtime_paths(source: Path | None, state_dir: Path) -> ProjectPaths:
     return ProjectPaths(
         repo_root=Path.cwd(),
         rfc_source=source,
@@ -204,6 +204,8 @@ def _dedupe_graph_edges(edges: list[dict[str, object]]) -> list[dict[str, object
 
 def _build_index(args: argparse.Namespace) -> int:
     paths = _runtime_paths(Path(args.source), Path(args.state_dir))
+    if paths.rfc_source is None:
+        raise ValueError("build-index requires --source")
     source_paths = _iter_source_paths(paths.rfc_source)
     if not paths.rfc_source.is_dir() or not source_paths:
         raise ValueError(f"no source documents found under {paths.rfc_source}")
@@ -232,6 +234,8 @@ def _build_index(args: argparse.Namespace) -> int:
 
 def _index_corpus(args: argparse.Namespace) -> int:
     paths = _runtime_paths(Path(args.source), Path(args.state_dir))
+    if paths.rfc_source is None:
+        raise ValueError("index-corpus requires --source")
     corpus = load_corpus(
         paths.rfc_source,
         CorpusLoadConfig(
@@ -276,7 +280,10 @@ def _index_corpus(args: argparse.Namespace) -> int:
 
 
 def _doctor(args: argparse.Namespace) -> int:
-    paths = _runtime_paths(Path(args.source), Path(args.state_dir))
+    paths = _runtime_paths(
+        Path(args.source) if args.source is not None else None,
+        Path(args.state_dir),
+    )
     status = get_index_status(paths, collection_name=args.collection_name)
     for line in status.lines():
         print(line)
@@ -284,7 +291,7 @@ def _doctor(args: argparse.Namespace) -> int:
 
 
 def _source_path_for_doc(
-    source: Path,
+    source: Path | None,
     record: dict[str, object],
 ) -> Path | None:
     source_path = record.get("source_path")
@@ -292,7 +299,11 @@ def _source_path_for_doc(
         path = Path(str(source_path))
         if path.is_absolute():
             return path
+        if source is None:
+            return None
         return source / path
+    if source is None:
+        return None
     doc_kind = str(record.get("doc_kind", ""))
     doc_id = str(record.get("doc_id", ""))
     if doc_kind in {"rfc", "internet-draft"}:
@@ -354,7 +365,10 @@ def _print_corpus_table(summaries: list[dict[str, object]]) -> None:
 
 
 def _list_corpus(args: argparse.Namespace) -> int:
-    paths = _runtime_paths(Path(args.source), Path(args.state_dir))
+    paths = _runtime_paths(
+        Path(args.source) if args.source is not None else None,
+        Path(args.state_dir),
+    )
     summaries = _artifact_doc_summaries(paths)
     status = get_index_status(paths, collection_name=args.collection_name)
     qdrant_summaries = []
@@ -379,7 +393,7 @@ def _list_corpus(args: argparse.Namespace) -> int:
         qdrant_doc_ids = set(qdrant_by_doc)
         artifact_doc_ids = {str(summary["doc_id"]) for summary in summaries}
         payload = {
-            "source": str(paths.rfc_source),
+            "source": str(paths.rfc_source) if paths.rfc_source is not None else None,
             "state_dir": str(paths.state_dir),
             "collection_name": args.collection_name,
             "artifact_doc_count": len(summaries),
@@ -410,11 +424,15 @@ def _list_corpus(args: argparse.Namespace) -> int:
 
 
 def _query_service(args: argparse.Namespace) -> QueryService:
-    paths = _runtime_paths(Path(args.source), Path(args.state_dir))
+    paths = _runtime_paths(
+        Path(args.source) if args.source is not None else None,
+        Path(args.state_dir),
+    )
     return QueryService(
         paths=paths,
         embedder=_build_embedder(args.embedder, _embedding_model_name(args)),
         collection_name=args.collection_name,
+        require_artifacts_for_search=False,
     )
 
 
@@ -470,8 +488,9 @@ def _add_runtime_args(
     parser: argparse.ArgumentParser,
     *,
     include_embedder: bool = False,
+    require_source: bool = False,
 ) -> None:
-    parser.add_argument("--source", default="docs/rfc")
+    parser.add_argument("--source", required=require_source)
     parser.add_argument("--state-dir", default=".rag")
     parser.add_argument("--collection-name", default="quic_sections")
     if include_embedder:
@@ -488,14 +507,14 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     build_parser = subparsers.add_parser("build-index")
-    _add_runtime_args(build_parser, include_embedder=True)
+    _add_runtime_args(build_parser, include_embedder=True, require_source=True)
     build_parser.set_defaults(handler=_build_index)
 
     index_corpus_parser = subparsers.add_parser(
         "index-corpus",
         help="Parse, embed, and upsert RFC or Internet-Draft text files into Qdrant.",
     )
-    _add_runtime_args(index_corpus_parser, include_embedder=True)
+    _add_runtime_args(index_corpus_parser, include_embedder=True, require_source=True)
     index_corpus_parser.add_argument(
         "--loader",
         choices=("auto", "rfc", "llamaindex", "cocoindex"),

@@ -72,15 +72,16 @@ Last updated: 2026-06-03
 
 ## QUIC Sources And RAG
 
-- Required: prefer `docs/rfc/` as the source of truth for QUIC specification questions.
+- Required: use the configured RAG/Qdrant index as the source of truth for QUIC
+  specification questions.
 - Default: the local RAG project lives under `rag/`.
 - The repo-local Codex skill for QUIC questions lives under
   `.agents/skills/quic-rag/`.
 - Required: do not commit generated RAG state.
-- Build or rebuild the RAG index with:
-  - `rag/scripts/build-index --source docs/rfc --state-dir .rag`
+- Build or rebuild the RAG index with an explicit source directory:
+  - `rag/scripts/build-index --source <source-dir> --state-dir .rag`
 - Check index readiness with:
-  - `rag/scripts/query-rag doctor --source docs/rfc --state-dir .rag`
+  - `rag/scripts/query-rag doctor --state-dir .rag`
 - Query the local QUIC specification knowledge base with:
   - `rag/scripts/query-rag search-sections "ACK (Acknowledgement) frame behavior" --top-k 5`
   - `rag/scripts/query-rag get-section --doc rfc9000 --section-id 18.2`

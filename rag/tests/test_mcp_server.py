@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import anyio
@@ -12,41 +11,13 @@ from coquic_rag.cli.main import main as cli_main
 from coquic_rag.config import ProjectPaths
 from coquic_rag.embed.provider import FakeEmbedder
 from coquic_rag.store.qdrant_store import QdrantSectionStore
-
-
-_DRAFT_FIXTURE_TEXT = """Network Working Group
-Internet-Draft
-Intended status: Informational
-Expires: 4 April 2027
-
-draft-ietf-quic-qlog-main-schema-13
-
-qlog: Structured Logging for Network Protocols
-
-Abstract
-
-This is a minimal draft fixture for MCP tests.
-
-1.  Introduction
-
-This section describes structured logging for network protocol analysis.
-"""
-
-
-def _copy_query_fixtures(source_dir: Path) -> None:
-    source_dir.mkdir(parents=True, exist_ok=True)
-    for filename in ("rfc9000.txt", "rfc9369.txt"):
-        shutil.copyfile(Path("references/rfc") / filename, source_dir / filename)
-    (source_dir / "draft-ietf-quic-qlog-main-schema-13.txt").write_text(
-        _DRAFT_FIXTURE_TEXT,
-        encoding="utf-8",
-    )
+from fixtures import write_query_fixtures
 
 
 def _build_server(tmp_path: Path):
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_query_fixtures(source_dir)
+    write_query_fixtures(source_dir)
 
     _build_index(source_dir, state_dir)
 
@@ -169,14 +140,17 @@ def test_create_mcp_server_fails_fast_when_index_is_incomplete(
 ) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_query_fixtures(source_dir)
+    write_query_fixtures(source_dir)
     paths = ProjectPaths(
         repo_root=tmp_path,
         rfc_source=source_dir,
         state_dir=state_dir,
     )
 
-    with pytest.raises(query_service_module.IndexNotBuiltError, match="ready: no"):
+    with pytest.raises(
+        query_service_module.IndexNotBuiltError,
+        match="QUIC semantic search is not ready",
+    ):
         mcp_server_module.create_mcp_server(paths=paths)
 
 
@@ -186,7 +160,7 @@ def test_mcp_main_returns_nonzero_when_index_is_incomplete(
 ) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_query_fixtures(source_dir)
+    write_query_fixtures(source_dir)
     paths = ProjectPaths(
         repo_root=tmp_path,
         rfc_source=source_dir,
@@ -196,7 +170,7 @@ def test_mcp_main_returns_nonzero_when_index_is_incomplete(
     assert mcp_server_module.main(paths=paths) == 1
 
     error_output = capsys.readouterr().err
-    assert "QUIC index is not ready" in error_output
+    assert "QUIC semantic search is not ready" in error_output
 
 
 def test_mcp_main_returns_nonzero_with_clear_remote_backend_error(
@@ -206,7 +180,7 @@ def test_mcp_main_returns_nonzero_with_clear_remote_backend_error(
 ) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_query_fixtures(source_dir)
+    write_query_fixtures(source_dir)
     paths = ProjectPaths(
         repo_root=tmp_path,
         rfc_source=source_dir,
@@ -285,20 +259,18 @@ def test_mcp_main_remote_unreachable_probes_status_once(
     assert probe_count == 1
 
 
-def test_mcp_main_preserves_incomplete_index_message_when_remote_unreachable_with_missing_artifacts(
+def test_mcp_main_reports_remote_backend_error_without_local_artifacts(
     tmp_path: Path,
     capsys,
     monkeypatch,
 ) -> None:
-    source_dir = tmp_path / "source"
-    state_dir = tmp_path / ".rag"
-    _copy_query_fixtures(source_dir)
     paths = ProjectPaths(
         repo_root=tmp_path,
-        rfc_source=source_dir,
-        state_dir=state_dir,
+        rfc_source=None,
+        state_dir=tmp_path / ".rag",
     )
-    monkeypatch.setenv("COQUIC_QDRANT_URL", "http://127.0.0.1:6333")
+    remote_url = "http://127.0.0.1:6333"
+    monkeypatch.setenv("COQUIC_QDRANT_URL", remote_url)
 
     def _raise_connection_error(_self: QdrantSectionStore) -> int | None:
         raise RuntimeError("connection refused")
@@ -308,9 +280,8 @@ def test_mcp_main_preserves_incomplete_index_message_when_remote_unreachable_wit
     assert mcp_server_module.main(paths=paths) == 1
 
     error_output = capsys.readouterr().err
-    assert "QUIC index is not ready" in error_output
-    assert "artifacts: missing" in error_output
-    assert "nix run .#qdrant-dev -- start" not in error_output
+    assert remote_url in error_output
+    assert "nix run .#qdrant-dev -- start" in error_output
 
 
 def test_mcp_main_returns_nonzero_with_clear_local_lock_error(
@@ -320,7 +291,7 @@ def test_mcp_main_returns_nonzero_with_clear_local_lock_error(
 ) -> None:
     source_dir = tmp_path / "source"
     state_dir = tmp_path / ".rag"
-    _copy_query_fixtures(source_dir)
+    write_query_fixtures(source_dir)
     paths = ProjectPaths(
         repo_root=tmp_path,
         rfc_source=source_dir,

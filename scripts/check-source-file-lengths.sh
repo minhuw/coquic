@@ -29,7 +29,6 @@ is_excluded_path() {
         .git/* | .zig-cache/* | zig-out/* | .rag/* | .remote-ci/* | node_modules/* | outputs/*)
             return 0
             ;;
-        references/rfc/*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -58,8 +57,7 @@ else
     while IFS= read -r file; do
         check_file "${file}" || failed=1
     done < <(rg --files \
-        -g '!{.git,.zig-cache,zig-out,.rag,.remote-ci,node_modules,outputs}/**' \
-        -g '!references/rfc/**')
+        -g '!{.git,.zig-cache,zig-out,.rag,.remote-ci,node_modules,outputs}/**')
 fi
 
 if (( failed != 0 )); then

@@ -5,7 +5,8 @@ knowledge base.
 
 Current scope:
 
-- index mixed RFC and Internet-Draft text from `docs/rfc`
+- query a Qdrant-backed RFC and Internet-Draft knowledge base without requiring
+  a local source corpus at runtime
 - store generated local state under `.rag`
 - expose query tooling through a repo-local Codex skill and CLI
 - share one localhost-only Qdrant dev backend across multiple Codex sessions
@@ -22,13 +23,13 @@ Generic document ingestion uses LlamaIndex readers, and source code ingestion
 uses CocoIndex. Embeddings are hosted through OpenRouter by default using
 `nvidia/llama-nemotron-embed-vl-1b-v2:free`.
 
-Build or rebuild the local index from the mixed specification corpus:
+Build or rebuild an index from an explicit source corpus:
 
 ```bash
 export OPENROUTER_API_KEY=...
 
-uv run --project rag python -m coquic_rag.cli.main build-index --source docs/rfc --state-dir .rag
-uv run --project rag python -m coquic_rag.cli.main doctor --source docs/rfc --state-dir .rag
+uv run --project rag python -m coquic_rag.cli.main build-index --source <source-dir> --state-dir .rag
+uv run --project rag python -m coquic_rag.cli.main doctor --state-dir .rag
 ```
 
 `build-index` now shows parse and embedding progress, and query commands exit early with a clear error if `.rag` is incomplete.
@@ -43,7 +44,7 @@ export COQUIC_QDRANT_URL=https://<cluster>.<region>.cloud.qdrant.io
 export COQUIC_QDRANT_API_KEY=...
 
 rag/scripts/build-index \
-  --source docs/rfc \
+  --source <source-dir> \
   --state-dir .rag
 ```
 
@@ -67,7 +68,7 @@ RFC corpus:
 ```bash
 rag/scripts/index-corpus \
   --loader rfc \
-  --source docs/rfc \
+  --source <source-dir> \
   --state-dir .rag
 ```
 
@@ -100,7 +101,7 @@ and rebuild it from the provided source directory:
 rag/scripts/index-corpus \
   --replace \
   --loader rfc \
-  --source docs/rfc \
+  --source <source-dir> \
   --state-dir .rag
 ```
 
@@ -120,8 +121,8 @@ The repo-root wrappers default `COQUIC_QDRANT_URL` to
 that environment variable yourself:
 
 ```bash
-rag/scripts/build-index --source docs/rfc --state-dir .rag
-rag/scripts/query-rag doctor --source docs/rfc --state-dir .rag
+rag/scripts/build-index --source <source-dir> --state-dir .rag
+rag/scripts/query-rag doctor --state-dir .rag
 ```
 
 Common query commands:

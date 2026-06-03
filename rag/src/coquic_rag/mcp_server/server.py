@@ -25,10 +25,7 @@ def _is_remote_qdrant_only_blocker(
     status: IndexStatus,
 ) -> bool:
     return (
-        status.source_ok
-        and status.artifacts_ok
-        and status.qdrant_backend == "remote"
-        and status.qdrant_status == "unreachable"
+        status.qdrant_backend == "remote" and status.qdrant_status == "unreachable"
     )
 
 
@@ -68,14 +65,15 @@ def create_mcp_server(
     if query_service is None:
         resolved_paths = paths or ProjectPaths.default()
         status = get_index_status(resolved_paths, collection_name=collection_name)
-        if not status.ready:
+        if not status.semantic_search_ready:
             qdrant_url = _configured_qdrant_url(resolved_paths)
             if qdrant_url and _is_remote_qdrant_only_blocker(status):
                 raise IndexNotBuiltError(_remote_backend_error_message(qdrant_url))
-            raise IndexNotBuiltError(status.failure_message(resolved_paths))
+            raise IndexNotBuiltError(status.semantic_search_failure_message())
         query_service = QueryService(
             paths=resolved_paths,
             collection_name=collection_name,
+            require_artifacts_for_search=False,
         )
     app = FastMCP(
         name="coquic-rag",

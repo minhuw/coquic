@@ -179,6 +179,36 @@ class QdrantSectionStore:
             )
         return hits
 
+    def get_section(
+        self,
+        doc_id: str,
+        section_id: str,
+    ) -> SectionSearchHit | None:
+        client = self._client_or_create()
+        if not client.collection_exists(self._collection_name):
+            return None
+        records, _offset = client.scroll(
+            self._collection_name,
+            scroll_filter=_payload_filter(
+                {
+                    "doc_id": doc_id,
+                    "section_id": section_id,
+                }
+            ),
+            limit=1,
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not records:
+            return None
+        payload = dict(records[0].payload or {})
+        return SectionSearchHit(
+            node_id=str(payload.get("node_id", records[0].id)),
+            score=1.0,
+            payload=payload,
+            text=str(payload.get("text", "")),
+        )
+
     def document_summaries(self, *, batch_size: int = 256) -> list[QdrantDocumentSummary]:
         client = self._client_or_create()
         if not client.collection_exists(self._collection_name):

@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-#include "../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include "coquic/coquic.h"
 

@@ -1,4 +1,4 @@
-#include "../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include "src/http09/http09_runtime.h"
 #include "src/http09/http09_runtime_test_hooks.h"

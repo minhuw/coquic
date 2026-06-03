@@ -4,7 +4,7 @@
 #include <initializer_list>
 #include <string_view>
 
-#include "../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include "src/perf/perf_client.h"
 #include "tests/support/perf/perf_test_fixtures.h"

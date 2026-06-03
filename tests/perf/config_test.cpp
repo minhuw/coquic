@@ -1,4 +1,4 @@
-#include "../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include <stdexcept>
 

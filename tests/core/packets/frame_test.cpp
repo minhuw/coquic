@@ -9,7 +9,7 @@
 #include <variant>
 #include <vector>
 
-#include "../../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include "src/quic/frame.h"
 #include "src/quic/frame_test_hooks.h"

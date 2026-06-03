@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../gtest_compat.h"
+#include <gtest/gtest.h>
 
 #define private public
 #include "src/quic/core.h"

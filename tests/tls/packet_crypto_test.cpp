@@ -10,7 +10,7 @@
 #include <type_traits>
 #include <vector>
 
-#include "../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include "src/quic/packet_crypto.h"
 #include "src/quic/packet_crypto_test_hooks.h"

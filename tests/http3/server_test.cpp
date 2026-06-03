@@ -8,7 +8,7 @@
 #include <variant>
 #include <vector>
 
-#include "../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include "src/http3/http3_server.h"
 

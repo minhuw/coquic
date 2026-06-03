@@ -5,7 +5,7 @@
 #include <string_view>
 #include <vector>
 
-#include "../../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #define private public
 #include "src/quic/crypto_stream.h"

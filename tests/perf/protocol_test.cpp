@@ -1,4 +1,4 @@
-#include "../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include "src/perf/perf_protocol.h"
 

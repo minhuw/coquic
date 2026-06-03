@@ -3,7 +3,7 @@
 #include <memory>
 #include <vector>
 
-#include "../../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #define private public
 #include "src/quic/buffer.h"

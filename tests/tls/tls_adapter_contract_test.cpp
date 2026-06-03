@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include "../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include "src/quic/tls_adapter.h"
 #include "src/quic/tls_adapter_quictls_test_hooks.h"

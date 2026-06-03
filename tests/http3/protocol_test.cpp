@@ -5,7 +5,7 @@
 #include <type_traits>
 #include <vector>
 
-#include "../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include "src/http3/http3_protocol.h"
 #include "src/http3/http3_protocol_test_hooks.h"

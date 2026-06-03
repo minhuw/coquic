@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <array>
 
-#include "../gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include <cstdlib>
 #include <cstdint>

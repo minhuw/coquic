@@ -2,7 +2,7 @@
 #include <charconv>
 #include <filesystem>
 
-#include "../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #define private public
 #include "src/perf/perf_client.h"

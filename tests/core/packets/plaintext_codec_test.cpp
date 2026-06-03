@@ -1,7 +1,7 @@
 #include <cstddef>
 #include <vector>
 
-#include "../../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include "src/quic/core.h"
 #include "src/quic/plaintext_codec.h"

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include "../gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include <arpa/inet.h>
 #include <netdb.h>

@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "../support/gtest_compat.h"
+#include <gtest/gtest.h>
 
 #include "src/quic/frame.h"
 #include "src/quic/recovery.h"

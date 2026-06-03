@@ -20,7 +20,7 @@
 #include <variant>
 #include <vector>
 
-#include "gtest_compat.h"
+#include <gtest/gtest.h>
 
 #define private public
 #include "src/quic/connection.h"

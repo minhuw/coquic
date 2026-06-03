@@ -19,6 +19,8 @@ rag/**/*.egg-info/
 compile_commands.json
 .bench-results/
 bench/*/target/
+bindings/rust/**/target/
+src/perf/rust/target/
 coverage-html.tar.gz
 perf.data
 site/next/.next/

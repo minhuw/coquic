@@ -1,0 +1,17 @@
+[package]
+name = "coquic-rs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Ergonomic Rust facade over CoQUIC"
+repository = "https://github.com/minhuw/coquic"
+
+[lib]
+name = "coquic"
+path = "src/lib.rs"
+
+[dependencies]
+coquic-sys = { path = "../coquic" }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

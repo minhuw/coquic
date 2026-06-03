@@ -10,6 +10,11 @@ const fallbackPerfSnapshot = {
       missing: true,
     },
     {
+      label: "coquic-rust",
+      path: "perf-results.json",
+      missing: true,
+    },
+    {
       label: "quic-go",
       path: "perf-results.json",
       missing: true,
@@ -90,6 +95,7 @@ const fallbackPerfSnapshot = {
 
 const colors = {
   coquic: "#24b5a6",
+  "coquic-rust": "#ce8cff",
   "quic-go": "#63a6ff",
   quinn: "#e39a3b",
   picoquic: "#f5c451",
@@ -107,7 +113,7 @@ const colors = {
   neqo: "#c59b72",
 };
 
-const implementationOrder = ["coquic", "quic-go", "quinn", "picoquic", "msquic", "quiche", "quicly", "google-quiche", "tquic", "mvfst", "s2n-quic", "xquic", "aioquic", "ngtcp2", "lsquic", "neqo"];
+const implementationOrder = ["coquic", "coquic-rust", "quic-go", "quinn", "picoquic", "msquic", "quiche", "quicly", "google-quiche", "tquic", "mvfst", "s2n-quic", "xquic", "aioquic", "ngtcp2", "lsquic", "neqo"];
 
 const deviconBase = "https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/";
 
@@ -133,6 +139,7 @@ function githubPage(owner, repo) {
 
 const implementationMeta = {
   coquic: { company: "CoQUIC", companyCode: "CQ", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: githubPage("minhuw", "coquic"), language: "C++", languageCode: "C++" },
+  "coquic-rust": { company: "CoQUIC Rust", companyCode: "CQR", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: "https://github.com/minhuw/coquic/tree/main/src/perf/rust", language: "Rust", languageCode: "Rs" },
   "quic-go": { company: "quic-go", companyCode: "QG", companyIcon: githubAvatar("quic-go"), companyUrl: githubPage("quic-go"), sourceUrl: githubPage("quic-go", "quic-go"), language: "Go", languageCode: "Go" },
   quinn: { company: "Quinn", companyCode: "QN", companyIcon: githubAvatar("quinn-rs"), companyUrl: githubPage("quinn-rs"), sourceUrl: githubPage("quinn-rs", "quinn"), language: "Rust", languageCode: "Rs" },
   picoquic: { company: "Private Octopus", companyCode: "PO", companyIcon: githubAvatar("private-octopus"), companyUrl: githubPage("private-octopus"), sourceUrl: githubPage("private-octopus", "picoquic"), language: "C", languageCode: "C" },

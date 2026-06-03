@@ -16,7 +16,7 @@ const docs = [
   { href: '/docs/api/http3', file: 'api/http3.md', section: 'API Surface', label: 'HTTP/3 API' },
   { href: '/docs/api/c-ffi', file: 'api/c-ffi.md', section: 'Native Bindings', label: 'C FFI API' },
   { href: '/docs/api/c-ffi-reference', file: 'api/c-ffi-reference.md', section: 'Native Bindings', label: 'C FFI Reference' },
-  { href: '/docs/api/rust-wrapper', file: 'api/rust-wrapper.md', section: 'Native Bindings', label: 'Rust Wrapper' },
+  { href: '/docs/api/rust-wrapper', file: 'api/rust-wrapper.md', section: 'Native Bindings', label: 'Rust Wrappers' },
   { href: '/docs/api/integration', file: 'api/integration.md', section: 'Runtime', label: 'Runtime Integration' },
 ];
 

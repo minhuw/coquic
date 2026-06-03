@@ -446,6 +446,7 @@
           msquicPerfClient ? null,
           quichePerfClient ? null,
           quiclyPerfClient ? null,
+          coquicRustPerfClient ? null,
           googleQuichePerfClient ? null,
           tquicPerfClient ? null,
           mvfstPerfClient ? null,
@@ -476,6 +477,9 @@
           ''}
           ${lib.optionalString (quiclyPerfClient != null) ''
             ln -s ${quiclyPerfClient}/bin/quicly-perf $out/usr/local/bin/quicly-perf
+          ''}
+          ${lib.optionalString (coquicRustPerfClient != null) ''
+            ln -s ${coquicRustPerfClient}/bin/coquic-rust-perf $out/usr/local/bin/coquic-rust-perf
           ''}
           ${lib.optionalString (googleQuichePerfClient != null) ''
             ln -s ${googleQuichePerfClient}/bin/google-quiche-perf $out/usr/local/bin/google-quiche-perf
@@ -573,6 +577,43 @@
         version = "dev";
         src = ./bench/quinn-perf;
         cargoHash = "sha256-k3wfuwWKkH6lMe6TXRwts5qIX1xC47x/JvbfF6Pkw2c=";
+      };
+      coquicRustPerfClient = pkgs.rustPlatform.buildRustPackage {
+        pname = "coquic-rust-perf-client";
+        version = "dev";
+        src = projectSrc;
+        cargoRoot = "src/perf/rust";
+        buildAndTestSubdir = "src/perf/rust";
+        cargoLock = {
+          lockFile = ./src/perf/rust/Cargo.lock;
+        };
+        cargoBuildFlags = [
+          "--bin"
+          "coquic-rust-perf"
+        ];
+        nativeBuildInputs = [
+          pkgs.makeWrapper
+        ];
+        buildInputs = [
+          boringsslPackage
+        ];
+        COQUIC_TLS_BACKEND = "boringssl";
+        COQUIC_LIB_DIR = "${boringsslPackage}/lib";
+        COQUIC_LIB_NAME = "coquic-boringssl";
+        COQUIC_LINK_KIND = "dylib";
+        LD_LIBRARY_PATH = lib.makeLibraryPath [
+          boringsslPackage
+          pkgs.stdenv.cc.cc.lib
+        ];
+        postFixup = ''
+          wrapProgram "$out/bin/coquic-rust-perf" \
+            --prefix LD_LIBRARY_PATH : ${
+              lib.makeLibraryPath [
+                boringsslPackage
+                pkgs.stdenv.cc.cc.lib
+              ]
+            }
+        '';
       };
       aioquicPerfClient = pkgs.stdenvNoCC.mkDerivation {
         pname = "aioquic-perf-client";
@@ -1397,6 +1438,7 @@ EOF
             coquicPackage = quictlsMuslPerfPackage;
             inherit quicgoPerfClient;
             inherit quinnPerfClient;
+            inherit coquicRustPerfClient;
             inherit picoquicPerfClient;
             inherit msquicPerfClient;
             inherit quichePerfClient;
@@ -1436,8 +1478,24 @@ EOF
             Entrypoint = [ "/usr/local/bin/coquic-perf" ];
             WorkingDir = "/";
           };
-        };
+      };
       quictlsMuslCoquicPerfImage = mkQuictlsMuslPerfImage "coquic-perf-coquic" { };
+      boringsslMuslCoquicRustPerfImage = pkgs.dockerTools.buildLayeredImage {
+        name = "coquic-perf-coquic-rust";
+        tag = "boringssl-musl";
+        fromImage = simulatorEndpointBase;
+        contents = [
+          (mkPerfEndpointOverlay {
+            name = "coquic-perf-coquic-rust-boringssl-musl";
+            coquicPackage = boringsslMuslPerfPackage;
+            inherit coquicRustPerfClient;
+          })
+        ];
+        config = {
+          Entrypoint = [ "/usr/local/bin/coquic-rust-perf" ];
+          WorkingDir = "/";
+        };
+      };
       boringsslMuslCoquicPerfImage = pkgs.dockerTools.buildLayeredImage {
         name = "coquic-perf-coquic";
         tag = "boringssl-musl";
@@ -1493,6 +1551,7 @@ EOF
             coquicPackage = quictlsMuslPackage;
             inherit quicgoPerfClient;
             inherit quinnPerfClient;
+            inherit coquicRustPerfClient;
             inherit picoquicPerfClient;
             inherit msquicPerfClient;
             inherit quichePerfClient;
@@ -1636,6 +1695,7 @@ EOF
         perf-image-stream-quictls-musl = quictlsMuslPerfImageStream;
         perf-image-coquic-quictls-musl = quictlsMuslCoquicPerfImage;
         perf-image-coquic-boringssl-musl = boringsslMuslCoquicPerfImage;
+        perf-image-coquic-rust-boringssl-musl = boringsslMuslCoquicRustPerfImage;
         perf-image-coquic-profile-boringssl-musl = boringsslMuslCoquicProfileImage;
         perf-image-quic-go-quictls-musl = quictlsMuslQuicgoPerfImage;
         perf-image-quinn-quictls-musl = quictlsMuslQuinnPerfImage;
@@ -1653,6 +1713,7 @@ EOF
         perf-image-lsquic-quictls-musl = quictlsMuslLsquicPerfImage;
         perf-image-neqo-quictls-musl = quictlsMuslNeqoPerfImage;
         quicgo-perf-client = quicgoPerfClient;
+        coquic-rust-perf-client = coquicRustPerfClient;
         quinn-perf-client = quinnPerfClient;
         picoquic-perf-client = picoquicPerfClient;
         msquic-perf-client = msquicPerfClient;

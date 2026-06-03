@@ -191,6 +191,7 @@ def validate(args: argparse.Namespace) -> None:
     flake = repo_root / "flake.nix"
 
     require_exact(versions, "coquic", "${GITHUB_SHA}")
+    require_exact(versions, "coquic-rust", "${GITHUB_SHA}")
     require_exact(versions, "quic-go", go_mod_module_version(repo_root / "bench/quicgo-perf/go.mod", "github.com/quic-go/quic-go"))
     require_semver(versions, "quinn", cargo_lock_package_version(repo_root / "bench/quinn-perf/Cargo.lock", "quinn"))
     require_semver(versions, "quiche", cargo_lock_package_version(repo_root / "bench/quiche-perf/Cargo.lock", "quiche"))

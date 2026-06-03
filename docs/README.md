@@ -33,8 +33,12 @@ include/coquic/ffi/ native binding ABI
 `-- C FFI
     C ABI wrappers over the sans-I/O Core, QUIC facade, and HTTP/3 APIs.
 bindings/rust/coquic
-`-- Rust wrapper
-    Safe owners and borrowed views over the C FFI.
+|-- coquic-sys
+|   Low-level safe owners and borrowed views over the C FFI.
+|-- coquic-rs
+|   Ergonomic Rust QUIC facade over coquic-sys.
+`-- src/perf/rust
+    Tokio UDP perf runtime over coquic-rs.
 ```
 
 ## Contents
@@ -51,7 +55,8 @@ bindings/rust/coquic
 - [C FFI API](api/c-ffi.md): C ABI, ownership, package names, and event loop.
 - [C FFI Reference](api/c-ffi-reference.md): exported C functions and
   per-function semantics.
-- [Rust Wrapper](api/rust-wrapper.md): Cargo crate over the C FFI.
+- [Rust Wrappers](api/rust-wrapper.md): `coquic-sys`, `coquic-rs`, and the
+  Tokio Rust perf runtime.
 
 ### Runtime
 

@@ -298,6 +298,17 @@ fn http3SourceFiles() []const []const u8 {
     };
 }
 
+fn http3ProtocolSourceFiles() []const []const u8 {
+    return &.{
+        "src/http3/http3_client.cpp",
+        "src/http3/http3_connection.cpp",
+        "src/http3/http3_demo_routes.cpp",
+        "src/http3/http3_protocol.cpp",
+        "src/http3/http3_qpack.cpp",
+        "src/http3/http3_server.cpp",
+    };
+}
+
 fn perfSourceFiles() []const []const u8 {
     return &.{
         "src/perf/perf_client.cpp",
@@ -323,9 +334,17 @@ fn coreApiSourceFiles() []const []const u8 {
     };
 }
 
+fn ffiApiSourceFiles() []const []const u8 {
+    return &.{
+        "src/api/core.cpp",
+        "src/api/http3.cpp",
+    };
+}
+
 fn ffiSourceFiles() []const []const u8 {
     return &.{
         "src/ffi/core.cpp",
+        "src/ffi/http3.cpp",
     };
 }
 
@@ -333,7 +352,8 @@ fn appendCoreFfiSourceFiles(files: *StringList, tls_backend: []const u8) void {
     appendSourceFiles(files, quicProductionSourceFiles());
     appendPacketCryptoSource(files, tls_backend);
     appendTlsAdapterSource(files, tls_backend);
-    appendSourceFiles(files, coreApiSourceFiles());
+    appendSourceFiles(files, http3ProtocolSourceFiles());
+    appendSourceFiles(files, ffiApiSourceFiles());
     appendSourceFiles(files, ffiSourceFiles());
 }
 
@@ -448,6 +468,7 @@ fn addCoreFfiLibrary(
     }
     linkLibCpp(lib);
     lib.installHeader(b.path("include/coquic/ffi/core.h"), "coquic/ffi/core.h");
+    lib.installHeader(b.path("include/coquic/ffi/http3.h"), "coquic/ffi/http3.h");
     return lib;
 }
 
@@ -901,6 +922,10 @@ fn installCoreFfiPackage(
         b.path("include/coquic/ffi/core.h"),
         "include/coquic/ffi/core.h",
     ).step);
+    install_package.dependOn(&b.addInstallFile(
+        b.path("include/coquic/ffi/http3.h"),
+        "include/coquic/ffi/http3.h",
+    ).step);
     install_package.dependOn(&b.addInstallFile(cmake_config, b.fmt("{s}/{s}Config.cmake", .{
         cmake_dir,
         package_name_value,
@@ -1041,6 +1066,7 @@ pub fn build(b: *std.Build) void {
         "tests/smoke/smoke_test.cpp",
         "tests/api/public_api_test.cpp",
         "tests/ffi/core_ffi_test.cpp",
+        "tests/ffi/http3_ffi_test.cpp",
     };
     const core_test_files = &.{
         "tests/core/recovery/congestion_test.cpp",

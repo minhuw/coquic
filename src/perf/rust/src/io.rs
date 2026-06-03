@@ -1,0 +1,348 @@
+use crate::{PerfError, Result};
+use coquic::{EcnCodepoint, Effect, InboundDatagram, QueryResult, RouteHandle, TimeUs};
+use std::collections::HashMap;
+use std::io;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::time::{Duration, Instant};
+use tokio::net::UdpSocket;
+use tokio::time;
+
+const MAX_UDP_DATAGRAM_SIZE: usize = 64 * 1024;
+const MAX_BUFFERED_SEND_DATAGRAMS: usize = 4096;
+
+#[derive(Clone, Debug)]
+struct Route {
+    peer: SocketAddr,
+    address_validation_identity: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct UdpRuntime {
+    socket: UdpSocket,
+    start: Instant,
+    routes_by_handle: HashMap<RouteHandle, Route>,
+    handles_by_peer: HashMap<SocketAddr, RouteHandle>,
+    next_route_handle: RouteHandle,
+    send_buffer: Vec<TxDatagram>,
+}
+
+#[derive(Clone, Debug)]
+struct TxDatagram {
+    route_handle: RouteHandle,
+    bytes: Vec<u8>,
+    ecn: EcnCodepoint,
+    is_pmtu_probe: bool,
+}
+
+pub struct RxDatagram {
+    pub bytes: Vec<u8>,
+    pub route_handle: RouteHandle,
+    pub address_validation_identity: Vec<u8>,
+}
+
+impl UdpRuntime {
+    pub async fn client(host: &str, port: u16) -> Result<(Self, RouteHandle, Vec<u8>)> {
+        let peer = resolve_remote(host, port)?;
+        let bind_addr = if peer.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let socket = UdpSocket::bind(bind_addr).await?;
+        let mut runtime = Self::new(socket);
+        let route = runtime.ensure_route(peer);
+        let identity = runtime
+            .address_validation_identity(route)
+            .ok_or_else(|| PerfError::new("missing client primary route identity"))?
+            .to_vec();
+        Ok((runtime, route, identity))
+    }
+
+    pub async fn server(host: &str, port: u16) -> Result<Self> {
+        let bind_addr = format!("{host}:{port}");
+        let socket = UdpSocket::bind(bind_addr).await?;
+        Ok(Self::new(socket))
+    }
+
+    pub fn now_us(&self) -> TimeUs {
+        self.start
+            .elapsed()
+            .as_micros()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+
+    pub fn ensure_route(&mut self, peer: SocketAddr) -> RouteHandle {
+        if let Some(handle) = self.handles_by_peer.get(&peer) {
+            return *handle;
+        }
+
+        let handle = self.next_route_handle;
+        self.next_route_handle += 1;
+        self.handles_by_peer.insert(peer, handle);
+        self.routes_by_handle.insert(
+            handle,
+            Route {
+                peer,
+                address_validation_identity: address_validation_identity(peer),
+            },
+        );
+        handle
+    }
+
+    pub fn inbound_datagram<'a>(&'a self, rx: &'a RxDatagram) -> InboundDatagram<'a> {
+        InboundDatagram {
+            bytes: rx.bytes.as_slice(),
+            route_handle: Some(rx.route_handle),
+            address_validation_identity: rx.address_validation_identity.as_slice(),
+            ecn: EcnCodepoint::Unavailable,
+        }
+    }
+
+    pub fn append_result_sends(&mut self, result: &QueryResult) -> Result<()> {
+        for effect in result.effects() {
+            if let Effect::SendDatagram {
+                route_handle,
+                bytes,
+                ecn,
+                is_pmtu_probe,
+                ..
+            } = effect?
+            {
+                if self.send_buffer.len() >= MAX_BUFFERED_SEND_DATAGRAMS {
+                    return Err(PerfError::new(
+                        "send buffer exceeded before flush; call flush_sends more often",
+                    ));
+                }
+                let route_handle = route_handle
+                    .ok_or_else(|| PerfError::new("send datagram missing route handle"))?;
+                self.send_buffer.push(TxDatagram {
+                    route_handle,
+                    bytes: bytes.to_vec(),
+                    ecn,
+                    is_pmtu_probe,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn flush_sends(&mut self) -> Result<()> {
+        let datagrams = std::mem::take(&mut self.send_buffer);
+        for datagram in datagrams {
+            let route = self
+                .routes_by_handle
+                .get(&datagram.route_handle)
+                .ok_or_else(|| {
+                    PerfError::new(format!("unknown route handle {}", datagram.route_handle))
+                })?;
+            let _ = (datagram.ecn, datagram.is_pmtu_probe);
+            self.socket.send_to(&datagram.bytes, route.peer).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn recv(&mut self) -> io::Result<RxDatagram> {
+        let mut buffer = vec![0u8; MAX_UDP_DATAGRAM_SIZE];
+        let (len, peer) = self.socket.recv_from(&mut buffer).await?;
+        buffer.truncate(len);
+        let route_handle = self.ensure_route(peer);
+        let address_validation_identity = self
+            .address_validation_identity(route_handle)
+            .unwrap_or_default()
+            .to_vec();
+        Ok(RxDatagram {
+            bytes: buffer,
+            route_handle,
+            address_validation_identity,
+        })
+    }
+
+    pub async fn wait(
+        &mut self,
+        next_wakeup: Option<TimeUs>,
+        idle_timeout: Duration,
+    ) -> Result<WaitEvent> {
+        let timer_timeout = match next_wakeup {
+            Some(wakeup) => {
+                let now = self.now_us();
+                if wakeup <= now {
+                    return Ok(WaitEvent::Timer);
+                }
+                Some(Duration::from_micros(wakeup - now))
+            }
+            None => None,
+        };
+        let timeout = timer_timeout
+            .map(|timeout| timeout.min(idle_timeout))
+            .unwrap_or(idle_timeout);
+
+        match time::timeout(timeout, self.recv()).await {
+            Ok(Ok(datagram)) => Ok(WaitEvent::Datagram(datagram)),
+            Ok(Err(error)) => Err(error.into()),
+            Err(_) if timer_timeout.is_some_and(|timer| timer <= idle_timeout) => {
+                Ok(WaitEvent::Timer)
+            }
+            Err(_) => Ok(WaitEvent::Idle),
+        }
+    }
+
+    fn new(socket: UdpSocket) -> Self {
+        Self {
+            socket,
+            start: Instant::now(),
+            routes_by_handle: HashMap::new(),
+            handles_by_peer: HashMap::new(),
+            next_route_handle: 1,
+            send_buffer: Vec::new(),
+        }
+    }
+
+    fn address_validation_identity(&self, route_handle: RouteHandle) -> Option<&[u8]> {
+        self.routes_by_handle
+            .get(&route_handle)
+            .map(|route| route.address_validation_identity.as_slice())
+    }
+}
+
+pub enum WaitEvent {
+    Datagram(RxDatagram),
+    Timer,
+    Idle,
+}
+
+pub fn copy_non_send_effects(result: &QueryResult) -> Result<Vec<OwnedEffect>> {
+    let mut out = Vec::new();
+    for effect in result.effects() {
+        match effect? {
+            Effect::ReceiveStreamData {
+                connection,
+                stream_id,
+                bytes,
+                fin,
+            } => out.push(OwnedEffect::ReceiveStreamData {
+                connection,
+                stream_id,
+                bytes: bytes.to_vec(),
+                fin,
+            }),
+            Effect::StateEvent { connection, change } => {
+                out.push(OwnedEffect::StateEvent { connection, change });
+            }
+            Effect::ConnectionLifecycleEvent { connection, event } => {
+                out.push(OwnedEffect::ConnectionLifecycleEvent { connection, event });
+            }
+            Effect::PeerResetStream {
+                connection,
+                stream_id,
+                application_error_code,
+                final_size,
+            } => out.push(OwnedEffect::PeerResetStream {
+                connection,
+                stream_id,
+                application_error_code,
+                final_size,
+            }),
+            Effect::PeerStopSending {
+                connection,
+                stream_id,
+                application_error_code,
+            } => out.push(OwnedEffect::PeerStopSending {
+                connection,
+                stream_id,
+                application_error_code,
+            }),
+            Effect::SendDatagram { .. }
+            | Effect::ReceiveDatagramData { .. }
+            | Effect::PeerPreferredAddressAvailable { .. }
+            | Effect::ResumptionStateAvailable { .. }
+            | Effect::ZeroRttStatusEvent { .. }
+            | Effect::PacketInspection(_)
+            | Effect::NewTokenAvailable { .. }
+            | Effect::Unknown(_) => {}
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Clone, Debug)]
+pub enum OwnedEffect {
+    ReceiveStreamData {
+        connection: coquic::ConnectionHandle,
+        stream_id: coquic::StreamId,
+        bytes: Vec<u8>,
+        fin: bool,
+    },
+    StateEvent {
+        connection: coquic::ConnectionHandle,
+        change: coquic::StateChange,
+    },
+    ConnectionLifecycleEvent {
+        connection: coquic::ConnectionHandle,
+        event: coquic::Lifecycle,
+    },
+    PeerResetStream {
+        connection: coquic::ConnectionHandle,
+        stream_id: coquic::StreamId,
+        application_error_code: u64,
+        final_size: u64,
+    },
+    PeerStopSending {
+        connection: coquic::ConnectionHandle,
+        stream_id: coquic::StreamId,
+        application_error_code: u64,
+    },
+}
+
+fn resolve_remote(host: &str, port: u16) -> Result<SocketAddr> {
+    let mut addrs = (host, port).to_socket_addrs()?;
+    addrs
+        .next()
+        .ok_or_else(|| PerfError::new("failed to resolve remote address"))
+}
+
+fn address_validation_identity(peer: SocketAddr) -> Vec<u8> {
+    match peer.ip() {
+        IpAddr::V4(address) => {
+            let mut identity = Vec::with_capacity(1 + 4 + 2);
+            identity.push(0x04);
+            identity.extend_from_slice(&address.octets());
+            identity.extend_from_slice(&peer.port().to_be_bytes());
+            identity
+        }
+        IpAddr::V6(address) => {
+            let mut identity = Vec::with_capacity(1 + 16 + 2);
+            identity.push(0x06);
+            identity.extend_from_slice(&address.octets());
+            identity.extend_from_slice(&peer.port().to_be_bytes());
+            identity
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn address_validation_identity_matches_socket_layout() {
+        let identity = address_validation_identity("127.0.0.1:4433".parse().unwrap());
+        assert_eq!(identity, vec![0x04, 127, 0, 0, 1, 0x11, 0x51]);
+    }
+
+    #[tokio::test]
+    async fn wait_reports_idle_when_idle_guard_expires_before_future_timer() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut runtime = UdpRuntime::new(socket);
+        let event = runtime
+            .wait(
+                Some(runtime.now_us() + Duration::from_secs(60).as_micros() as u64),
+                Duration::from_millis(1),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(event, WaitEvent::Idle));
+    }
+}

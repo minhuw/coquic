@@ -1,6 +1,7 @@
 #include "coquic/ffi/core.h"
 
 #include "coquic/core.h"
+#include "src/ffi/core_internal.h"
 
 #include <algorithm>
 #include <array>
@@ -16,20 +17,6 @@
 #include <utility>
 #include <variant>
 #include <vector>
-
-struct coquic_endpoint {
-    explicit coquic_endpoint(const coquic::core::EndpointConfig &config) : endpoint(config) {
-    }
-
-    coquic::core::Endpoint endpoint;
-};
-
-struct coquic_result {
-    explicit coquic_result(coquic::core::Result value) : result(std::move(value)) {
-    }
-
-    coquic::core::Result result;
-};
 
 namespace {
 
@@ -636,6 +623,17 @@ coquic_status_t allocate_result(coquic::core::Result result, coquic_result_t **o
     return ffi_guard([&] { *out_result = new coquic_result(std::move(result)); });
 }
 
+std::optional<coquic::core::ConnectionHandle>
+created_connection_handle(const coquic::core::Result &result) {
+    for (const auto &effect : result.effects) {
+        if (const auto *event = std::get_if<coquic::core::ConnectionLifecycleEvent>(&effect);
+            event != nullptr && event->event == coquic::core::Lifecycle::created) {
+            return event->connection;
+        }
+    }
+    return std::nullopt;
+}
+
 coquic_status_t validate_endpoint_call(coquic_endpoint_t *endpoint, coquic_result_t **out_result) {
     if (out_result != nullptr) {
         *out_result = nullptr;
@@ -663,6 +661,66 @@ coquic_status_t advance_connection(coquic_endpoint_t *endpoint,
             to_time_point(now));
         *out_result = new coquic_result(std::move(result));
     });
+}
+
+std::optional<coquic::core::ConnectionInput> to_cpp(const coquic_connection_input_t &input) {
+    switch (input.kind) {
+    case COQUIC_CONNECTION_INPUT_SEND_STREAM:
+        if (input.as.send_stream.size < kSendStreamDataSizeV1) {
+            return std::nullopt;
+        }
+        return coquic::core::SendStreamData{
+            .stream_id = input.as.send_stream.stream_id,
+            .bytes = to_vector(input.as.send_stream.bytes),
+            .fin = input.as.send_stream.fin != 0,
+        };
+    case COQUIC_CONNECTION_INPUT_SEND_DATAGRAM:
+        if (input.as.send_datagram.size < kSendDatagramDataSizeV1) {
+            return std::nullopt;
+        }
+        return coquic::core::SendDatagramData{
+            .bytes = to_vector(input.as.send_datagram.bytes),
+        };
+    case COQUIC_CONNECTION_INPUT_RESET_STREAM:
+        if (input.as.reset_stream.size < kResetStreamSizeV1) {
+            return std::nullopt;
+        }
+        return coquic::core::ResetStream{
+            .stream_id = input.as.reset_stream.stream_id,
+            .application_error_code = input.as.reset_stream.application_error_code,
+        };
+    case COQUIC_CONNECTION_INPUT_STOP_SENDING:
+        if (input.as.stop_sending.size < kStopSendingSizeV1) {
+            return std::nullopt;
+        }
+        return coquic::core::StopSending{
+            .stream_id = input.as.stop_sending.stream_id,
+            .application_error_code = input.as.stop_sending.application_error_code,
+        };
+    case COQUIC_CONNECTION_INPUT_CLOSE:
+        if (input.as.close.size < kCloseConnectionSizeV1) {
+            return std::nullopt;
+        }
+        return coquic::core::CloseConnection{
+            .application_error_code = input.as.close.application_error_code,
+            .reason_phrase =
+                to_string(input.as.close.reason_phrase, input.as.close.reason_phrase_length),
+        };
+    case COQUIC_CONNECTION_INPUT_REQUEST_KEY_UPDATE:
+        return coquic::core::RequestKeyUpdate{};
+    case COQUIC_CONNECTION_INPUT_REQUEST_MIGRATION:
+        if (input.as.request_migration.size < kRequestConnectionMigrationSizeV1) {
+            return std::nullopt;
+        }
+        return coquic::core::RequestConnectionMigration{
+            .route_handle = input.as.request_migration.route_handle,
+            .reason = migration_reason_to_cpp(input.as.request_migration.reason),
+            .address_validation_identity =
+                to_vector(input.as.request_migration.address_validation_identity),
+        };
+    default:
+        return std::nullopt;
+    }
 }
 
 } // namespace
@@ -975,6 +1033,176 @@ coquic_connection_request_migration(coquic_endpoint_t *endpoint,
         },
         now, out_result);
 }
+
+coquic_status_t coquic_connection_advance(coquic_endpoint_t *endpoint,
+                                          coquic_connection_handle_t connection,
+                                          const coquic_connection_input_t *input,
+                                          coquic_time_us_t now, coquic_result_t **out_result) {
+    if (input == nullptr) {
+        if (out_result != nullptr) {
+            *out_result = nullptr;
+        }
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    auto cpp_input = to_cpp(*input);
+    if (!cpp_input.has_value()) {
+        if (out_result != nullptr) {
+            *out_result = nullptr;
+        }
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return advance_connection(endpoint, connection, std::move(*cpp_input), now, out_result);
+}
+
+coquic_status_t coquic_quic_connect(coquic_endpoint_t *endpoint,
+                                    const coquic_open_connection_t *input, coquic_time_us_t now,
+                                    coquic_connection_handle_t *out_connection,
+                                    coquic_result_t **out_result) {
+    if (out_connection != nullptr) {
+        *out_connection = 0;
+    }
+    const auto valid = validate_endpoint_call(endpoint, out_result);
+    if (valid != COQUIC_STATUS_OK) {
+        return valid;
+    }
+    if (out_connection == nullptr || input == nullptr || input->size < kOpenConnectionSizeV1 ||
+        input->connection.size < kClientConnectionConfigSizeV1) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto result = endpoint->endpoint.open_connection(
+            coquic::core::OpenConnection{
+                .connection = to_cpp(input->connection),
+                .initial_route_handle = input->initial_route_handle,
+                .address_validation_identity = to_vector(input->address_validation_identity),
+            },
+            to_time_point(now));
+        if (const auto handle = created_connection_handle(result); handle.has_value()) {
+            *out_connection = *handle;
+        }
+        *out_result = new coquic_result(std::move(result));
+    });
+}
+
+coquic_status_t coquic_quic_receive_datagram(coquic_endpoint_t *endpoint,
+                                             const coquic_inbound_datagram_t *input,
+                                             coquic_time_us_t now, coquic_result_t **out_result) {
+    return coquic_endpoint_input_datagram(endpoint, input, now, out_result);
+}
+
+coquic_status_t coquic_quic_update_path_mtu(coquic_endpoint_t *endpoint,
+                                            const coquic_path_mtu_update_t *input,
+                                            coquic_time_us_t now, coquic_result_t **out_result) {
+    return coquic_endpoint_update_path_mtu(endpoint, input, now, out_result);
+}
+
+coquic_status_t coquic_quic_timer_expired(coquic_endpoint_t *endpoint, coquic_time_us_t now,
+                                          coquic_result_t **out_result) {
+    return coquic_endpoint_timer_expired(endpoint, now, out_result);
+}
+
+coquic_status_t coquic_quic_connection_send_stream(coquic_endpoint_t *endpoint,
+                                                   coquic_connection_handle_t connection,
+                                                   const coquic_send_stream_data_t *input,
+                                                   coquic_time_us_t now,
+                                                   coquic_result_t **out_result) {
+    return coquic_connection_send_stream(endpoint, connection, input, now, out_result);
+}
+
+coquic_status_t coquic_quic_connection_send_datagram(coquic_endpoint_t *endpoint,
+                                                     coquic_connection_handle_t connection,
+                                                     const coquic_send_datagram_data_t *input,
+                                                     coquic_time_us_t now,
+                                                     coquic_result_t **out_result) {
+    return coquic_connection_send_datagram(endpoint, connection, input, now, out_result);
+}
+
+coquic_status_t coquic_quic_connection_reset_stream(coquic_endpoint_t *endpoint,
+                                                    coquic_connection_handle_t connection,
+                                                    const coquic_reset_stream_t *input,
+                                                    coquic_time_us_t now,
+                                                    coquic_result_t **out_result) {
+    return coquic_connection_reset_stream(endpoint, connection, input, now, out_result);
+}
+
+coquic_status_t coquic_quic_connection_stop_sending(coquic_endpoint_t *endpoint,
+                                                    coquic_connection_handle_t connection,
+                                                    const coquic_stop_sending_t *input,
+                                                    coquic_time_us_t now,
+                                                    coquic_result_t **out_result) {
+    return coquic_connection_stop_sending(endpoint, connection, input, now, out_result);
+}
+
+coquic_status_t coquic_quic_connection_close(coquic_endpoint_t *endpoint,
+                                             coquic_connection_handle_t connection,
+                                             const coquic_close_connection_t *input,
+                                             coquic_time_us_t now, coquic_result_t **out_result) {
+    return coquic_connection_close(endpoint, connection, input, now, out_result);
+}
+
+coquic_status_t coquic_quic_connection_request_key_update(coquic_endpoint_t *endpoint,
+                                                          coquic_connection_handle_t connection,
+                                                          coquic_time_us_t now,
+                                                          coquic_result_t **out_result) {
+    return coquic_connection_request_key_update(endpoint, connection, now, out_result);
+}
+
+coquic_status_t coquic_quic_connection_advance(coquic_endpoint_t *endpoint,
+                                               coquic_connection_handle_t connection,
+                                               const coquic_connection_input_t *input,
+                                               coquic_time_us_t now, coquic_result_t **out_result) {
+    return coquic_connection_advance(endpoint, connection, input, now, out_result);
+}
+
+// Public C ABI helpers intentionally keep adjacent scalar stream command fields.
+// NOLINTBEGIN(bugprone-easily-swappable-parameters)
+coquic_status_t coquic_quic_stream_send(coquic_endpoint_t *endpoint,
+                                        coquic_connection_handle_t connection,
+                                        coquic_stream_id_t stream_id, coquic_bytes_t bytes,
+                                        uint8_t fin, coquic_time_us_t now,
+                                        coquic_result_t **out_result) {
+    coquic_send_stream_data_t input{
+        .size = sizeof(coquic_send_stream_data_t),
+        .stream_id = stream_id,
+        .bytes = bytes,
+        .fin = fin,
+    };
+    return coquic_connection_send_stream(endpoint, connection, &input, now, out_result);
+}
+
+coquic_status_t coquic_quic_stream_finish(coquic_endpoint_t *endpoint,
+                                          coquic_connection_handle_t connection,
+                                          coquic_stream_id_t stream_id, coquic_time_us_t now,
+                                          coquic_result_t **out_result) {
+    return coquic_quic_stream_send(endpoint, connection, stream_id, coquic_bytes_t{}, 1, now,
+                                   out_result);
+}
+
+coquic_status_t coquic_quic_stream_reset(coquic_endpoint_t *endpoint,
+                                         coquic_connection_handle_t connection,
+                                         coquic_stream_id_t stream_id,
+                                         uint64_t application_error_code, coquic_time_us_t now,
+                                         coquic_result_t **out_result) {
+    coquic_reset_stream_t input{
+        .size = sizeof(coquic_reset_stream_t),
+        .stream_id = stream_id,
+        .application_error_code = application_error_code,
+    };
+    return coquic_connection_reset_stream(endpoint, connection, &input, now, out_result);
+}
+
+coquic_status_t
+coquic_quic_stream_stop_sending(coquic_endpoint_t *endpoint, coquic_connection_handle_t connection,
+                                coquic_stream_id_t stream_id, uint64_t application_error_code,
+                                coquic_time_us_t now, coquic_result_t **out_result) {
+    coquic_stop_sending_t input{
+        .size = sizeof(coquic_stop_sending_t),
+        .stream_id = stream_id,
+        .application_error_code = application_error_code,
+    };
+    return coquic_connection_stop_sending(endpoint, connection, &input, now, out_result);
+}
+// NOLINTEND(bugprone-easily-swappable-parameters)
 
 size_t coquic_endpoint_connection_count(const coquic_endpoint_t *endpoint) {
     if (endpoint == nullptr) {

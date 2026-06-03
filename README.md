@@ -10,6 +10,12 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/minhuw/coquic/actions/workflows/ci.yml"><img src="https://github.com/minhuw/coquic/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://app.codacy.com/gh/minhuw/coquic/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade"><img src="https://app.codacy.com/project/badge/Grade/ef3ef4841ca94356b657b3c31ec2fc79" alt="Codacy Badge"></a>
+  <a href="https://app.codecov.io/github/minhuw/coquic"><img src="https://codecov.io/github/minhuw/coquic/graph/badge.svg?branch=main" alt="codecov"></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/minhuw/coquic"><img src="https://img.shields.io/badge/AI%20Generated-100%25-0F62FE?labelColor=161616" alt="AI Generated 100%"></a>
   <a href="https://openai.com/codex/"><img src="https://img.shields.io/badge/Powered%20by-Codex-0F62FE?labelColor=161616" alt="Powered by Codex"></a>
   <a href="https://openai.com/index/introducing-gpt-5-4/"><img src="https://img.shields.io/badge/Generated%20with-GPT--5.4-10A37F?labelColor=161616" alt="Generated with GPT-5.4"></a>
@@ -31,13 +37,6 @@
 
 # CoQUIC
 
-<p align="center">
-  <a href="https://github.com/minhuw/coquic/actions/workflows/ci.yml"><img src="https://github.com/minhuw/coquic/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://app.codacy.com/gh/minhuw/coquic/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade"><img src="https://app.codacy.com/project/badge/Grade/ef3ef4841ca94356b657b3c31ec2fc79" alt="Codacy Badge"></a>
-  <a href="https://app.codecov.io/github/minhuw/coquic"><img src="https://codecov.io/github/minhuw/coquic/graph/badge.svg?branch=main" alt="codecov"></a>
-</p>
 
 CoQUIC is an experimental QUIC implementation exploring how far Codex, paired with GPT-5.4 and later models, can go in building a full-featured transport stack. The whole repo is generated entirely by LLM, with careful human prompt.
-
-Public C++ API documentation lives in [docs/api/public-api.md](docs/api/public-api.md).
 <!-- markdownlint-enable MD033 -->

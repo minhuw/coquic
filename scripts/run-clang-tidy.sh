@@ -282,6 +282,7 @@ if [ "${mode}" = "diff" ]; then
     export COQUIC_CLANG_TIDY_LINE_FILTER
 fi
 
+# shellcheck disable=SC2016
 printf '%s\0' "${lintable_files[@]}" | xargs -0 -P "${job_count}" -n 1 bash -c '
     args=(
         clang-tidy

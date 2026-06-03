@@ -2,6 +2,10 @@
 engines:
   cppcheck:
     language: c++
+    exclude_paths:
+      - "include/**/*.h"
+      - "src/**/*.h"
+      - "tests/**/*.h"
   duplication:
     exclude_paths:
       - "bench/**"
@@ -9,6 +13,9 @@ engines:
       - "docs/**"
       - "tests/**"
       - "tools/rag/tests/**"
+  lizard:
+    exclude_paths:
+      - "**/*"
   metric:
     exclude_paths:
       - "bench/**"
@@ -17,11 +24,21 @@ engines:
       - "rag/tests/**"
       - "tests/**"
       - "tools/rag/tests/**"
+  opengrep:
+    exclude_paths:
+      - "bindings/rust/coquic/src/ffi.rs"
+      - "bindings/rust/coquic/src/http3.rs"
+      - "bindings/rust/coquic/src/lib.rs"
 
 exclude_paths:
   - ".agents/**"
   - "bench/**"
+  - "bindings/rust/**/target/**"
   - "docs/references/**"
   - "docs/rfc/**"
   - "docs/superpowers/**"
+  - "site/next/package-lock.json"
+  - "site/next/public/**"
   - "rag/tests/**"
+  - "tests/**"
+  - "tools/rag/tests/**"

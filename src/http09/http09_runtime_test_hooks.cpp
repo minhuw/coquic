@@ -1,5 +1,9 @@
 #include "src/http09/http09_runtime_test_support.h"
 
+#include <algorithm>
+#include <cstring>
+#include <string_view>
+
 #if defined(__clang__)
 #pragma clang attribute push(__attribute__((no_profile_instrument_function)), apply_to = function)
 #endif
@@ -1865,8 +1869,10 @@ bool runtime_misc_internal_coverage_for_tests() {
                 errno = EINVAL;
                 return -1;
             }
-            std::strncpy(buffer, "runtime-host", length);
-            buffer[length - 1] = '\0';
+            constexpr std::string_view runtime_host = "runtime-host";
+            const auto copy_length = std::min(length - 1, runtime_host.size());
+            std::memcpy(buffer, runtime_host.data(), copy_length);
+            buffer[copy_length] = '\0';
             return 0;
         };
         char dummy = '\0';

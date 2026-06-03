@@ -36,6 +36,7 @@ export WASM_BORINGSSL_CXX="${wasm_cxx}"
 export WASM_BORINGSSL_AR="${llvm_ar_path}"
 export WASM_BORINGSSL_RANLIB="${llvm_ranlib_path}"
 
+# shellcheck disable=SC2016
 nix shell nixpkgs#cmake nixpkgs#ninja -c bash -lc '
 cd "${WASM_BORINGSSL_BUILD_DIR}"
 cmake -G Ninja \

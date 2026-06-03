@@ -5,7 +5,7 @@ import argparse
 import dataclasses
 import json
 import re
-import subprocess
+import subprocess  # nosec B404: this script invokes git with validated arguments.
 import sys
 from pathlib import Path
 
@@ -179,7 +179,7 @@ def run_git(git: str, args: list[str], timeout: float) -> str:
             stderr=subprocess.PIPE,
             text=True,
             timeout=timeout,
-        )
+        )  # nosec B603: callers pass a resolved git executable and fixed argument sets.
     except subprocess.TimeoutExpired as exc:
         raise QueryError(f"`{git} {' '.join(args)}` timed out after {timeout:g}s") from exc
     except OSError as exc:

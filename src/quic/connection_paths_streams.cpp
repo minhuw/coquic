@@ -205,7 +205,7 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
     initialize_peer_flow_control_from_transport_parameters();
     auto peer_preferred_address = peer_transport_parameters.preferred_address;
     auto emitted_preferred_address = peer_preferred_address.value_or(PreferredAddress{});
-    if (!peer_preferred_address_emitted_ & peer_preferred_address.has_value()) {
+    if (!peer_preferred_address_emitted_ && peer_preferred_address.has_value()) {
         pending_preferred_address_effect_ = QuicCorePeerPreferredAddressAvailable{
             .preferred_address = emitted_preferred_address,
         };
@@ -223,9 +223,9 @@ void QuicConnection::update_handshake_status() {
         return;
     }
 
-    const bool handshake_ready = tls_->handshake_complete() & peer_transport_parameters_validated_ &
-                                 application_space_.read_secret.has_value() &
-                                 application_space_.write_secret.has_value();
+    const bool handshake_ready =
+        tls_->handshake_complete() && peer_transport_parameters_validated_ &&
+        application_space_.read_secret.has_value() && application_space_.write_secret.has_value();
     if (handshake_ready) {
         if (status_ != HandshakeStatus::connected) {
             status_ = HandshakeStatus::connected;
@@ -455,7 +455,7 @@ QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &fram
     auto duplicate_sequence = peer_connection_ids_.find(frame.sequence_number);
     if (duplicate_sequence != peer_connection_ids_.end()) {
         const bool mismatched_duplicate =
-            duplicate_sequence->second.connection_id != frame.connection_id |
+            duplicate_sequence->second.connection_id != frame.connection_id ||
             duplicate_sequence->second.stateless_reset_token != frame.stateless_reset_token;
         if (mismatched_duplicate) {
             return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeNewConnectionId));
@@ -517,7 +517,7 @@ CodecResult<bool> QuicConnection::ensure_peer_preferred_address_connection_id() 
         peer_connection_ids_.find(kPreferredAddressConnectionIdSequence);
     if (duplicate_sequence != peer_connection_ids_.end()) {
         const bool mismatched_duplicate =
-            duplicate_sequence->second.connection_id != preferred_address.connection_id |
+            duplicate_sequence->second.connection_id != preferred_address.connection_id ||
             duplicate_sequence->second.stateless_reset_token !=
                 preferred_address.stateless_reset_token;
         if (mismatched_duplicate) {
@@ -1536,7 +1536,7 @@ bool QuicConnection::has_pending_congestion_controlled_send() const {
 
     const bool can_send_application_packets =
         application_space_.write_secret.has_value() ||
-        ((config_.role == EndpointRole::client) & (status_ != HandshakeStatus::connected) &
+        ((config_.role == EndpointRole::client) && (status_ != HandshakeStatus::connected) &&
          zero_rtt_space_.write_secret.has_value());
     if (!can_send_application_packets) {
         return false;
@@ -1588,7 +1588,7 @@ bool QuicConnection::has_pending_application_control_send(bool application_ack_d
 
     for (const auto &[path_id, path] : paths_) {
         static_cast<void>(path_id);
-        if ((path.pending_response.has_value() || path.challenge_pending) & path.mtu.viable) {
+        if ((path.pending_response.has_value() || path.challenge_pending) && path.mtu.viable) {
             return true;
         }
     }
@@ -1616,7 +1616,7 @@ std::optional<std::size_t> QuicConnection::minimum_pending_application_stream_wi
         }
 
         if (stream.send_buffer.has_lost_data() ||
-            ((connection_send_credit != 0) & (stream.sendable_bytes() != 0))) {
+            ((connection_send_credit != 0) && (stream.sendable_bytes() != 0))) {
             remember_minimum_wire_size(
                 minimum_wire_bytes,
                 stream_frame_header_wire_size(stream_id, stream.flow_control.highest_sent, 1) +
@@ -1862,7 +1862,7 @@ void QuicConnection::forget_active_stream_queued_bytes(const StreamState &stream
 void QuicConnection::maybe_queue_connection_blocked_frame() {
     const auto queued_bytes = cached_total_queued_stream_bytes();
     const bool should_skip_queue =
-        !connection_flow_control_.should_send_data_blocked(queued_bytes) |
+        !connection_flow_control_.should_send_data_blocked(queued_bytes) ||
         (connection_flow_control_.sendable_bytes(queued_bytes) != 0);
     if (should_skip_queue) {
         return;
@@ -1980,7 +1980,7 @@ bool QuicConnection::should_keep_current_send_path_for_inbound_non_probing(
         *packet_number < *current->largest_inbound_application_packet_number) {
         return true;
     }
-    if (path_state_is_validating(current) & path_state_is_validated(inbound)) {
+    if (path_state_is_validating(current) && path_state_is_validated(inbound)) {
         return true;
     }
 
@@ -2045,13 +2045,13 @@ bool QuicConnection::anti_amplification_applies() const {
 }
 
 bool QuicConnection::anti_amplification_applies(QuicPathId path_id) const {
-    if ((config_.role != EndpointRole::server) | !paths_.contains(path_id)) {
+    if ((config_.role != EndpointRole::server) || !paths_.contains(path_id)) {
         return false;
     }
 
     const auto &path = paths_.at(path_id);
-    return !path.validated & ((path.anti_amplification_received_bytes != 0) |
-                              (path.anti_amplification_sent_bytes != 0));
+    return !path.validated && ((path.anti_amplification_received_bytes != 0) ||
+                               (path.anti_amplification_sent_bytes != 0));
 }
 
 std::uint64_t QuicConnection::anti_amplification_send_budget() const {

@@ -9,13 +9,13 @@ import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
-type Usage = {
+interface Usage {
   prompt_tokens?: number | null;
   completion_tokens?: number | null;
   total_tokens?: number | null;
-};
+}
 
-type Citation = {
+interface Citation {
   citation?: string | null;
   doc_id?: string | null;
   section_id?: string | null;
@@ -23,9 +23,9 @@ type Citation = {
   score?: number | null;
   text?: string | null;
   url?: string | null;
-};
+}
 
-type QaPayload = {
+interface QaPayload {
   answer: string;
   accepted: boolean;
   reason: string;
@@ -38,36 +38,36 @@ type QaPayload = {
   rag_answer?: string | null;
   rag_usage?: Usage | null;
   rag_model?: string | null;
-};
+}
 
-type StreamHandlers = {
-  onMetadata: (payload: Partial<QaPayload>) => void;
-  onDirect: (payload: StreamChunkPayload) => void;
-  onRag: (payload: StreamChunkPayload) => void;
-  onDone: (payload: QaPayload) => void;
-};
+interface StreamHandlers {
+  onMetadata(payload: Partial<QaPayload>): void;
+  onDirect(payload: StreamChunkPayload): void;
+  onRag(payload: StreamChunkPayload): void;
+  onDone(payload: QaPayload): void;
+}
 
-type StreamChunkPayload = {
+interface StreamChunkPayload {
   delta?: string;
   usage?: Usage | null;
   model?: string | null;
   done?: boolean;
-};
+}
 
-type StreamMetrics = {
+interface StreamMetrics {
   firstTokenMs: number | null;
   lastTokenMs: number | null;
   completionTokens: number | null;
-};
+}
 
-type ModelMeta = {
+interface ModelMeta {
   provider: string;
   size: string;
   avatar: string;
   swatch: string;
   label?: string;
   iconSrc?: string;
-};
+}
 
 const apiBase = '/rag-api';
 const qaModel = 'deepseek-v4-pro';
@@ -106,10 +106,14 @@ export function QaClient() {
       return;
     }
 
-    const updateElapsed = () => setQueryElapsedMs(Date.now() - queryStartedAt);
+    const updateElapsed = () => {
+      setQueryElapsedMs(Date.now() - queryStartedAt);
+    };
     updateElapsed();
     const intervalId = window.setInterval(updateElapsed, 250);
-    return () => window.clearInterval(intervalId);
+    return () => {
+      window.clearInterval(intervalId);
+    };
   }, [busy, queryStartedAt]);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -140,12 +144,12 @@ export function QaClient() {
     try {
       await askStream(trimmed, sessionId, {
         onMetadata: (payload) => {
-          setCitations(payload.citations || []);
+          setCitations(payload.citations ?? []);
           setRagConfidence(typeof payload.rag_confidence === 'number' ? payload.rag_confidence : null);
         },
         onDirect: (payload) => {
           recordStreamMetrics(payload, startedAt, directMetricsRef, setDirectMetrics);
-          setDirectAnswer((current) => appendStreamText(current, payload.delta || ''));
+          setDirectAnswer((current) => appendStreamText(current, payload.delta ?? ''));
           if (payload.usage) {
             setDirectUsage(payload.usage);
           }
@@ -155,7 +159,7 @@ export function QaClient() {
         },
         onRag: (payload) => {
           recordStreamMetrics(payload, startedAt, ragMetricsRef, setRagMetrics);
-          setRagAnswer((current) => appendStreamText(current, payload.delta || ''));
+          setRagAnswer((current) => appendStreamText(current, payload.delta ?? ''));
           if (payload.usage) {
             setRagUsage(payload.usage);
           }
@@ -164,16 +168,16 @@ export function QaClient() {
           }
         },
         onDone: (payload) => {
-          recordStreamUsage(payload.direct_usage || null, startedAt, directMetricsRef, setDirectMetrics);
-          recordStreamUsage(payload.rag_usage || payload.usage || null, startedAt, ragMetricsRef, setRagMetrics);
-          setDirectAnswer(payload.direct_answer || payload.answer || 'No direct answer returned.');
-          setRagAnswer(payload.rag_answer || payload.answer || 'No RAG answer returned.');
-          setDirectUsage(payload.direct_usage || null);
-          setRagUsage(payload.rag_usage || payload.usage || null);
-          setDirectModel(payload.direct_model || qaModel);
-          setRagModel(payload.rag_model || qaModel);
+          recordStreamUsage(payload.direct_usage ?? null, startedAt, directMetricsRef, setDirectMetrics);
+          recordStreamUsage(payload.rag_usage ?? payload.usage ?? null, startedAt, ragMetricsRef, setRagMetrics);
+          setDirectAnswer(payload.direct_answer ?? payload.answer ?? 'No direct answer returned.');
+          setRagAnswer(payload.rag_answer ?? payload.answer ?? 'No RAG answer returned.');
+          setDirectUsage(payload.direct_usage ?? null);
+          setRagUsage(payload.rag_usage ?? payload.usage ?? null);
+          setDirectModel(payload.direct_model ?? qaModel);
+          setRagModel(payload.rag_model ?? qaModel);
           setRagConfidence(typeof payload.rag_confidence === 'number' ? payload.rag_confidence : null);
-          setCitations(payload.citations || []);
+          setCitations(payload.citations ?? []);
           setStatus(publicStatus(payload));
         },
       });
@@ -247,7 +251,9 @@ export function QaClient() {
               rows={5}
               required
               value={question}
-              onChange={(event) => setQuestion(event.target.value)}
+              onChange={(event) => {
+                setQuestion(event.target.value);
+              }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && event.ctrlKey) {
                   event.preventDefault();
@@ -522,7 +528,9 @@ function CopyAnswerButton({ answer, disabled, label }: { answer: string; disable
     }
     await window.navigator.clipboard.writeText(answer);
     setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
+    window.setTimeout(() => {
+      setCopied(false);
+    }, 1600);
   }
 
   return (
@@ -557,7 +565,7 @@ function Citations({ citations }: { citations: Citation[] }) {
           return (
             <li
               className="rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] p-3"
-              key={`${citation.doc_id || 'doc'}-${citation.section_id || index}`}
+              key={`${citation.doc_id ?? 'doc'}-${citation.section_id ?? index}`}
             >
               <div className="flex items-start justify-between gap-3">
                 {citation.url ? (
@@ -567,11 +575,11 @@ function Citations({ citations }: { citations: Citation[] }) {
                     rel="noopener noreferrer"
                     target="_blank"
                   >
-                    {citation.citation || 'unknown section'}
+                    {citation.citation ?? 'unknown section'}
                   </a>
                 ) : (
                   <strong className="min-w-0 text-sm font-semibold text-[var(--ink)]">
-                    {citation.citation || 'unknown section'}
+                    {citation.citation ?? 'unknown section'}
                   </strong>
                 )}
                 {score === null ? null : (
@@ -642,7 +650,7 @@ async function askStream(question: string, sessionId: string, handlers: StreamHa
       if (value) {
         buffer += decoder.decode(value, { stream: !done });
         const events = buffer.split(/\n\n/);
-        buffer = events.pop() || '';
+        buffer = events.pop() ?? '';
         for (const eventText of events) {
           handleStreamEvent(parseSseEvent(eventText), handlers);
         }
@@ -716,7 +724,7 @@ function handleStreamEvent(parsed: { event: string; data: unknown } | null, hand
     return;
   }
   if (parsed.event === 'done') {
-    handlers.onDone(parsed.data as QaPayload);
+    handlers.onDone(parsed.data as unknown as QaPayload);
     return;
   }
   if (parsed.event === 'error') {
@@ -822,7 +830,7 @@ function publicStatus(payload: QaPayload) {
 }
 
 function displayModel(model: string) {
-  return modelMeta(model).label || model.replace(/:free$/, '');
+  return modelMeta(model).label ?? model.replace(/:free$/, '');
 }
 
 function formatElapsed(ms: number) {
@@ -921,7 +929,7 @@ function modelMeta(model: string): ModelMeta {
     };
   }
   return {
-    provider: model.split('/', 1)[0] || 'Model',
+    provider: model.split('/', 1).at(0) ?? 'Model',
     size: model.includes(':free') ? 'free' : 'selected',
     avatar: model.slice(0, 2).toUpperCase(),
     swatch: '#6f6f6f',

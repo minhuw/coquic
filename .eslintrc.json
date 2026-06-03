@@ -1,0 +1,6 @@
+{
+  "rules": {
+    "@typescript-eslint/no-confusing-void-expression": "off",
+    "security/detect-object-injection": "off"
+  }
+}

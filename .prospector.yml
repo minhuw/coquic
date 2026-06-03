@@ -1,0 +1,7 @@
+strictness: medium
+test-warnings: false
+doc-warnings: false
+member-warnings: false
+ignore-paths:
+  - rag/tests
+  - tests

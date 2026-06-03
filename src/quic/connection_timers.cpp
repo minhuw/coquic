@@ -387,13 +387,13 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         return std::min(pto_count_, 2u);
     };
     auto client_handshake_keepalive_reference_time = [this]() -> std::optional<QuicCoreTimePoint> {
-        const bool eligible = (config_.role == EndpointRole::client) &
-                              (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
-                              last_peer_activity_time_.has_value() &
+        const bool eligible = (config_.role == EndpointRole::client) &&
+                              (status_ == HandshakeStatus::in_progress) && !handshake_confirmed_ &&
+                              last_peer_activity_time_.has_value() &&
                               (initial_packet_space_discarded_ ||
-                               !has_in_flight_ack_eliciting_packet(initial_space_)) &
+                               !has_in_flight_ack_eliciting_packet(initial_space_)) &&
                               (handshake_packet_space_discarded_ ||
-                               !has_in_flight_ack_eliciting_packet(handshake_space_)) &
+                               !has_in_flight_ack_eliciting_packet(handshake_space_)) &&
                               !has_in_flight_ack_eliciting_packet(application_space_);
         if (!eligible) {
             return std::nullopt;
@@ -464,7 +464,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         }
 
         const auto current_selected_deadline = selected_deadline.value_or(packet_space_deadline);
-        if (!selected_deadline.has_value() | (packet_space_deadline < current_selected_deadline)) {
+        if (!selected_deadline.has_value() || (packet_space_deadline < current_selected_deadline)) {
             selected_deadline = packet_space_deadline;
             selected_packet_space = &packet_space;
         }
@@ -516,7 +516,7 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         }
 
         packet_space.pending_probe_packet = select_pto_probe(packet_space);
-        if ((allow_client_handshake_keepalive_probe | allow_client_receive_keepalive_probe) &
+        if ((allow_client_handshake_keepalive_probe || allow_client_receive_keepalive_probe) &&
             packet_space.pending_probe_packet.has_value()) {
             packet_space.pending_probe_packet->force_ack = true;
         }
@@ -781,9 +781,9 @@ SentPacketRecord QuicConnection::select_pto_probe(const PacketSpaceState &packet
 }
 
 COQUIC_NOINLINE void QuicConnection::queue_client_handshake_recovery_probe() {
-    if ((config_.role != EndpointRole::client) | (status_ != HandshakeStatus::in_progress) |
-        handshake_confirmed_ | handshake_packet_space_discarded_ |
-        !handshake_space_.write_secret.has_value() |
+    if ((config_.role != EndpointRole::client) || (status_ != HandshakeStatus::in_progress) ||
+        handshake_confirmed_ || handshake_packet_space_discarded_ ||
+        !handshake_space_.write_secret.has_value() ||
         !handshake_space_.send_crypto.has_pending_data()) {
         return;
     }
@@ -808,8 +808,8 @@ COQUIC_NOINLINE void QuicConnection::queue_client_handshake_recovery_probe() {
 }
 
 void QuicConnection::queue_server_handshake_recovery_probes() {
-    if ((config_.role != EndpointRole::server) | (status_ != HandshakeStatus::in_progress) |
-        handshake_confirmed_ | handshake_packet_space_discarded_) {
+    if ((config_.role != EndpointRole::server) || (status_ != HandshakeStatus::in_progress) ||
+        handshake_confirmed_ || handshake_packet_space_discarded_) {
         return;
     }
 
@@ -1131,7 +1131,7 @@ void QuicConnection::start_client_if_needed(QuicCoreTimePoint now) {
             }
         }
         const bool report_unavailable_zero_rtt_attempt =
-            !decoded_resumption_state_.has_value() & config_.zero_rtt.attempt;
+            !decoded_resumption_state_.has_value() && config_.zero_rtt.attempt;
         if (report_unavailable_zero_rtt_attempt) {
             pending_zero_rtt_status_event_ =
                 QuicCoreZeroRttStatusEvent{.status = QuicZeroRttStatus::unavailable};

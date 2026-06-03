@@ -75,6 +75,7 @@ bool queue_one_response_chunk(std::uint64_t stream_id, std::ifstream &input,
     std::array<char, kResponseChunkSize> buffer{};
     const auto chunk_limit = static_cast<std::streamsize>(std::min(
         kResponseChunkSize, static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max())));
+    // flawfinder: ignore - read length is capped to the fixed-size buffer above.
     input.read(buffer.data(), chunk_limit);
     const auto count = input.gcount();
     if (input.bad()) {
@@ -173,7 +174,7 @@ QuicHttp09EndpointUpdate QuicHttp09ServerEndpoint::drain_pending_inputs() {
         update.core_inputs.push_back(std::move(pending_core_inputs_.front()));
         pending_core_inputs_.pop_front();
     }
-    update.has_pending_work = !pending_responses_.empty() & can_send_responses();
+    update.has_pending_work = !pending_responses_.empty() && can_send_responses();
     return update;
 }
 

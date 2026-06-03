@@ -14,11 +14,11 @@ type MarkdownBlock =
 
 type RenderBlock = MarkdownBlock | { type: 'functionCard'; title: string; id: string; blocks: MarkdownBlock[] };
 
-type MarkdownProps = {
+interface MarkdownProps {
   markdown: string;
   currentSlug: string[];
   skipFirstH1?: boolean;
-};
+}
 
 export async function Markdown({ markdown, currentSlug, skipFirstH1 = false }: MarkdownProps) {
   let skippedH1 = false;
@@ -141,6 +141,7 @@ async function HighlightedCode({ code, language }: { code: string; language: str
         <span>{language || 'text'}</span>
         <CopyCodeButton code={code} />
       </div>
+      {/* Shiki returns escaped, tokenized HTML for the code string above. */}
       <div className="docs-code-scroll" dangerouslySetInnerHTML={{ __html: html }} />
     </div>
   );
@@ -171,13 +172,13 @@ function parseMarkdown(markdown: string) {
         index += 1;
       }
       index += 1;
-      blocks.push({ type: 'code', language: fence[1] || '', code: codeLines.join('\n') });
+      blocks.push({ type: 'code', language: fence.at(1) ?? '', code: codeLines.join('\n') });
       continue;
     }
 
     const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
     if (heading) {
-      blocks.push({ type: 'heading', depth: heading[1].length, text: heading[2].trim() });
+      blocks.push({ type: 'heading', depth: heading.at(1)?.length ?? 1, text: heading.at(2)?.trim() ?? '' });
       index += 1;
       continue;
     }
@@ -292,7 +293,7 @@ function isBlockStart(line: string) {
   const trimmed = line.trim();
   return (
     !trimmed ||
-    /^```/.test(trimmed) ||
+    trimmed.startsWith('```') ||
     /^#{1,3}\s+/.test(trimmed) ||
     /^-\s+/.test(trimmed) ||
     /^\d+\.\s+/.test(trimmed)

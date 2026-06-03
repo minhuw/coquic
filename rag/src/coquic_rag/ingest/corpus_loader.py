@@ -283,7 +283,7 @@ def _detect_code_language(path: Path, text: str) -> str:
                 if detected:
                     return str(detected)
             except Exception:
-                pass
+                return _language_from_suffix(path.suffix.lower())
         return _language_from_suffix(path.suffix.lower())
 
     detected = detect_code_language(filename=str(path))

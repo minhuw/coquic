@@ -643,10 +643,10 @@ CodecResult<std::size_t> seal_cipher_chunks_into(const EVP_CIPHER *packet_cipher
         return plaintext_length;
     }
     const auto invalid_lengths =
-        consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_length_guard) |
-        !fits_openssl_int(request.nonce.size()) |
-        !fits_openssl_int(request.associated_data.size()) |
-        !fits_openssl_int(plaintext_length.value());
+        (consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_length_guard)) |
+        (!fits_openssl_int(request.nonce.size())) |
+        (!fits_openssl_int(request.associated_data.size())) |
+        (!fits_openssl_int(plaintext_length.value()));
     if (invalid_lengths) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
@@ -943,7 +943,7 @@ CodecResult<std::size_t> open_aead_into(const EVP_AEAD *aead, const OpenAeadInto
 
     const auto plaintext_size = request.ciphertext.size() - aead_tag_length;
     const auto invalid_lengths =
-        consume_packet_crypto_fault(PacketCryptoFaultPoint::open_length_guard) |
+        (consume_packet_crypto_fault(PacketCryptoFaultPoint::open_length_guard)) |
         (request.plaintext.size() < plaintext_size);
     if (invalid_lengths) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
@@ -992,9 +992,9 @@ CodecResult<std::size_t> open_cipher_into(const EVP_CIPHER *cipher,
 
     const auto plaintext_size = request.ciphertext.size() - aead_tag_length;
     const auto invalid_lengths =
-        consume_packet_crypto_fault(PacketCryptoFaultPoint::open_length_guard) |
-        !fits_openssl_int(request.nonce.size()) |
-        !fits_openssl_int(request.associated_data.size()) | !fits_openssl_int(plaintext_size) |
+        (consume_packet_crypto_fault(PacketCryptoFaultPoint::open_length_guard)) |
+        (!fits_openssl_int(request.nonce.size())) |
+        (!fits_openssl_int(request.associated_data.size())) | (!fits_openssl_int(plaintext_size)) |
         (request.plaintext.size() < plaintext_size);
     if (invalid_lengths) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,

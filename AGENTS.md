@@ -1,9 +1,19 @@
 # AGENTS
 
+Last updated: 2026-06-03
+
+## Identity And Boundaries
+
+- You are a pragmatic coding agent working in the `coquic` repository.
+- Respect existing user changes in the working tree.
+- Keep generated local state, downloaded CI state, and build outputs out of
+  tracked source.
+- Do not expand the root `README.md` with agent workflow details.
+
 ## Repo Overview
 
-- `coquic` is an experimental QUIC implementation plus a local QUIC RFC
-  knowledge base.
+- `coquic` is an experimental QUIC (Quick UDP Internet Connections)
+  implementation plus a local QUIC RFC (Request for Comments) knowledge base.
 - Keep the root `README.md` human-facing and minimal.
 - Put agent workflow and repo conventions here instead of expanding the root
   `README.md`.
@@ -31,11 +41,13 @@
   from `/actions/runs/<run-id>` and, when present, the job ID from
   `/job/<job-id>`. Use `-R <owner>/<repo>` if the URL points at a fork or
   another repository.
-- Download the failed logs for the provided run or job:
+- Download failed run logs with:
   - `gh run view <run-id> --log-failed > .remote-ci/<run-id>-failed.log`
+- Download failed job logs with:
   - `gh run view --job <job-id> --log-failed > .remote-ci/<run-id>-job-<job-id>-failed.log`
 - Download run artifacts directly into `.remote-ci/`:
   - `mkdir -p .remote-ci/<run-id>`
+- Put artifacts under `.remote-ci/<run-id>/artifacts` with:
   - `gh run download <run-id> --dir .remote-ci/<run-id>/artifacts`
 - When artifacts include interop logs, coverage output, benchmark results, or
   packaged binaries, inspect them in place under `.remote-ci/<run-id>/` and
@@ -48,21 +60,22 @@
 ## QUIC Sources And RAG
 
 - Prefer `docs/rfc/` as the source of truth for QUIC specification questions.
-- The local RAG project lives under `rag/`.
+- The local RAG (retrieval-augmented generation) project lives under `rag/`.
 - The repo-local Codex skill for QUIC questions lives under
   `.agents/skills/quic-rag/`.
-- Generated RAG state lives under `.rag/` and must not be committed.
+- Generated RAG state lives under `.rag/`.
+- Do not commit generated RAG state.
 - Build or rebuild the RAG index with:
   - `rag/scripts/build-index --source docs/rfc --state-dir .rag`
 - Check index readiness with:
   - `rag/scripts/query-rag doctor --source docs/rfc --state-dir .rag`
 - Query the local QUIC specification knowledge base with:
-  - `rag/scripts/query-rag search-sections "ACK frame behavior" --top-k 5`
+  - `rag/scripts/query-rag search-sections "ACK (Acknowledgement) frame behavior" --top-k 5`
   - `rag/scripts/query-rag get-section --doc rfc9000 --section-id 18.2`
   - `rag/scripts/query-rag get-section --doc draft-ietf-quic-qlog-main-schema-13 --section-id 1`
   - `rag/scripts/query-rag trace-term max_udp_payload_size`
 - For QUIC protocol questions, use the repo-local `quic-rag` skill and the
-  query wrapper above instead of the old MCP flow.
+  query wrapper above instead of the old MCP (Model Context Protocol) flow.
 - If you change `rag/`, run:
   - `uv run --project rag pytest rag/tests`
 

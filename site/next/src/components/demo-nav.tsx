@@ -10,7 +10,7 @@ import { ThemeToggle } from './theme-toggle';
 
 export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'interop' | 'coverage' | 'qa';
 
-const views: Array<{ href: string; label: string; route: DemoRoute }> = [
+const views: { href: string; label: string; route: DemoRoute }[] = [
   { href: '/qa', label: 'Ask', route: 'qa' },
   { href: '/docs', label: 'Docs', route: 'docs' },
   { href: '/workbench', label: 'Workbench', route: 'workbench' },
@@ -24,9 +24,9 @@ const benchmarkViews = views.filter((view) => view.route === 'performance');
 const developmentViews = views.filter((view) => view.route === 'interop' || view.route === 'coverage');
 type NavMenuId = 'benchmark' | 'development';
 
-type DemoNavProps = {
+interface DemoNavProps {
   active: DemoRoute;
-};
+}
 
 export function DemoNav({ active }: DemoNavProps) {
   const [openMenu, setOpenMenu] = useState<NavMenuId | null>(null);
@@ -49,7 +49,13 @@ export function DemoNav({ active }: DemoNavProps) {
   }
 
   return (
-    <nav className="top-nav" aria-label="Demo views" onMouseLeave={() => setOpenMenu(null)}>
+    <nav
+      className="top-nav"
+      aria-label="Demo views"
+      onMouseLeave={() => {
+        setOpenMenu(null);
+      }}
+    >
       <Link className="top-nav-home" href="/" aria-label="Home" aria-current={active === 'home' ? 'page' : undefined}>
         <CoquicLogoIcon className="size-8" aria-hidden="true" />
       </Link>
@@ -66,8 +72,12 @@ export function DemoNav({ active }: DemoNavProps) {
             type="button"
             aria-current={benchmarkActive ? 'page' : undefined}
             aria-expanded={openMenu === 'benchmark'}
-            onClick={() => toggleMenu('benchmark')}
-            onKeyDown={(event) => handleTriggerKeyDown(event, 'benchmark')}
+            onClick={() => {
+              toggleMenu('benchmark');
+            }}
+            onKeyDown={(event) => {
+              handleTriggerKeyDown(event, 'benchmark');
+            }}
           >
             <span>Benchmark</span>
             <ChevronDown aria-hidden="true" />
@@ -86,8 +96,12 @@ export function DemoNav({ active }: DemoNavProps) {
             type="button"
             aria-current={developmentActive ? 'page' : undefined}
             aria-expanded={openMenu === 'development'}
-            onClick={() => toggleMenu('development')}
-            onKeyDown={(event) => handleTriggerKeyDown(event, 'development')}
+            onClick={() => {
+              toggleMenu('development');
+            }}
+            onKeyDown={(event) => {
+              handleTriggerKeyDown(event, 'development');
+            }}
           >
             <span>Development</span>
             <ChevronDown aria-hidden="true" />

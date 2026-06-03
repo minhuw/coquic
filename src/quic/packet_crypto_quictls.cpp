@@ -578,8 +578,8 @@ CodecResult<std::size_t> seal_aead_chunks_into(const EVP_CIPHER *aead_cipher,
         return plaintext_length;
     }
     const auto invalid_aead_lengths =
-        consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_length_guard) |
-        !fits_openssl_int(nonce.size()) | !fits_openssl_int(associated_data.size());
+        (consume_packet_crypto_fault(PacketCryptoFaultPoint::seal_length_guard)) |
+        (!fits_openssl_int(nonce.size())) | (!fits_openssl_int(associated_data.size()));
     if (invalid_aead_lengths)
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);
@@ -681,9 +681,9 @@ CodecResult<std::vector<std::byte>> open_aead(const EVP_CIPHER *aead_cipher,
     if (ciphertext.size() < aead_tag_length)
         return crypto_failure(CodecErrorCode::packet_decryption_failed);
     const auto invalid_aead_lengths =
-        consume_packet_crypto_fault(PacketCryptoFaultPoint::open_length_guard) |
-        !fits_openssl_int(nonce.size()) | !fits_openssl_int(associated_data.size()) |
-        !fits_openssl_int(ciphertext.size() - aead_tag_length);
+        (consume_packet_crypto_fault(PacketCryptoFaultPoint::open_length_guard)) |
+        (!fits_openssl_int(nonce.size())) | (!fits_openssl_int(associated_data.size())) |
+        (!fits_openssl_int(ciphertext.size() - aead_tag_length));
     if (invalid_aead_lengths)
         return crypto_failure(CodecErrorCode::invalid_packet_protection_state);
 
@@ -753,9 +753,9 @@ open_aead_into(const EVP_CIPHER *aead_cipher, std::span<const std::byte> key,
 
     const auto plaintext_size = ciphertext.size() - aead_tag_length;
     const auto invalid_aead_lengths =
-        consume_packet_crypto_fault(PacketCryptoFaultPoint::open_length_guard) |
-        !fits_openssl_int(nonce.size()) | !fits_openssl_int(associated_data.size()) |
-        !fits_openssl_int(plaintext_size) | (plaintext.size() < plaintext_size);
+        (consume_packet_crypto_fault(PacketCryptoFaultPoint::open_length_guard)) |
+        (!fits_openssl_int(nonce.size())) | (!fits_openssl_int(associated_data.size())) |
+        (!fits_openssl_int(plaintext_size)) | (plaintext.size() < plaintext_size);
     if (invalid_aead_lengths) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                  0);

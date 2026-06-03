@@ -2,7 +2,7 @@
 import argparse
 import json
 import os
-import subprocess
+import subprocess  # nosec B404: this script runs fixed git commands only.
 import sys
 from pathlib import Path
 
@@ -41,12 +41,13 @@ def load_manifest(path: Path) -> dict:
 
 def local_git_commit() -> str:
     repo_root = Path(__file__).resolve().parents[1]
+    git = "/usr/bin/git"
     try:
         return subprocess.check_output(
-            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            [git, "-C", str(repo_root), "rev-parse", "HEAD"],
             text=True,
             stderr=subprocess.DEVNULL,
-        ).strip()
+        ).strip()  # nosec B603: command arguments are fixed except for repo_root.
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
 

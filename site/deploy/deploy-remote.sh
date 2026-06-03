@@ -76,7 +76,7 @@ fi
 remote_releases_root="/opt/coquic-demo/releases"
 remote_release_dir="${remote_releases_root}/${release_id}"
 remote_current_link="/opt/coquic-demo/current"
-remote_target="minhuw@coquic.minhuw.dev"
+remote_target="${remote_user}@${remote_host}"
 remote_release_retention="${COQUIC_DEMO_RELEASE_RETENTION:-3}"
 
 ssh_opts=(
@@ -119,6 +119,7 @@ remote_cleanup() {
   if [[ -z "${remote_upload_dir}" ]]; then
     return
   fi
+  # shellcheck disable=SC2029
   ssh "${ssh_opts[@]}" "${remote_target}" "sudo rm -rf '${remote_upload_dir}'" >/dev/null 2>&1 || true
 }
 
@@ -417,6 +418,7 @@ if [[ "${previous_release_target}" == "${remote_release_dir}" ]]; then
 fi
 
 remote_upload_dir="$(
+  # shellcheck disable=SC2029
   ssh "${ssh_opts[@]}" "${remote_target}" \
     "umask 077 && mktemp -d /tmp/coquic-demo-release-${release_id}-XXXXXX"
 )"

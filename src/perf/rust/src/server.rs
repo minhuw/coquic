@@ -6,7 +6,7 @@ use crate::protocol::{
 };
 use crate::{PerfError, Result};
 use coquic::quic::Endpoint;
-use coquic::{ConnectionHandle, Lifecycle, QueryResult, StateChange, StreamId};
+use coquic::{ConnectionHandle, Lifecycle, QueryResult, StreamId};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -157,14 +157,6 @@ impl Server<'_> {
                     }
                     Lifecycle::Created | Lifecycle::Unknown(_) => {}
                 },
-                OwnedEffect::StateEvent {
-                    connection,
-                    change: StateChange::Failed,
-                } => {
-                    return Err(PerfError::new(format!(
-                        "server core state failed connection={connection}"
-                    )));
-                }
                 OwnedEffect::ReceiveStreamData {
                     connection,
                     stream_id,

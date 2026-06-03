@@ -1,7 +1,6 @@
 use coquic_rust_perf::config::{parse_runtime_args, Role};
 use coquic_rust_perf::metrics::{emit_summary, finalize_summary};
-use coquic_rust_perf::{PerfError, Result};
-use std::ffi::OsString;
+use coquic_rust_perf::Result;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -45,13 +44,5 @@ async fn main() {
 }
 
 fn runtime_args() -> Result<Vec<String>> {
-    std::env::args_os()
-        .skip(1)
-        .map(validated_arg)
-        .collect::<Result<Vec<_>>>()
-}
-
-fn validated_arg(arg: OsString) -> Result<String> {
-    arg.into_string()
-        .map_err(|_| PerfError::new("command-line arguments must be valid UTF-8"))
+    Ok(std::env::args().skip(1).collect())
 }

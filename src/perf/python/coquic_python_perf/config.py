@@ -63,13 +63,7 @@ def parse_runtime_args(args: list[str]) -> PerfConfig:
         raise PerfError(usage())
 
     config = PerfConfig()
-    role = args[0]
-    if role == "server":
-        config.role = Role.SERVER
-    elif role == "client":
-        config.role = Role.CLIENT
-    else:
-        raise PerfError(usage())
+    config.role = parse_role(args[0])
 
     saw_direction = False
     index = 1
@@ -84,56 +78,66 @@ def parse_runtime_args(args: list[str]) -> PerfConfig:
         value = args[index]
         index += 1
 
-        if arg == "--host":
-            config.host = value
-        elif arg == "--port":
-            config.port = _parse_size(value)
-            if config.port > 65535:
-                raise PerfError(usage())
-        elif arg == "--io-backend":
-            if value != "socket":
-                raise PerfError("coquic-python-perf currently supports --io-backend socket")
-        elif arg == "--congestion-control":
-            config.congestion_control = parse_congestion_control(value)
-        elif arg == "--mode":
-            config.mode = parse_mode(value)
-        elif arg == "--direction":
+        if arg == "--direction":
             saw_direction = True
-            config.direction = parse_direction(value)
-        elif arg == "--request-bytes":
-            config.request_bytes = _parse_size(value)
-        elif arg == "--response-bytes":
-            config.response_bytes = _parse_size(value)
-        elif arg == "--streams":
-            config.streams = _parse_size(value)
-        elif arg == "--connections":
-            config.connections = _parse_size(value)
-        elif arg == "--requests-in-flight":
-            config.requests_in_flight = _parse_size(value)
-        elif arg == "--requests":
-            config.requests = _parse_size(value)
-        elif arg == "--total-bytes":
-            config.total_bytes = _parse_size(value)
-        elif arg == "--warmup":
-            config.warmup = parse_duration(value)
-        elif arg == "--duration":
-            config.duration = parse_duration(value)
-        elif arg == "--certificate-chain":
-            config.certificate_chain_path = Path(value)
-        elif arg == "--private-key":
-            config.private_key_path = Path(value)
-        elif arg == "--server-name":
-            config.server_name = value
-        elif arg == "--json-out":
-            config.json_out = Path(value)
-        else:
-            raise PerfError(usage())
+        apply_option(config, arg, value)
 
     if config.mode != Mode.BULK and saw_direction:
         raise PerfError(usage())
     if config.streams == 0 or config.connections == 0 or config.requests_in_flight == 0:
         raise PerfError(usage())
     return config
+
+
+def parse_role(value: str) -> Role:
+    try:
+        return Role(value)
+    except ValueError:
+        raise PerfError(usage()) from None
+
+
+def apply_option(config: PerfConfig, arg: str, value: str) -> None:
+    scalar_options = {
+        "--host": lambda: setattr(config, "host", value),
+        "--server-name": lambda: setattr(config, "server_name", value),
+        "--json-out": lambda: setattr(config, "json_out", Path(value)),
+        "--certificate-chain": lambda: setattr(
+            config, "certificate_chain_path", Path(value)
+        ),
+        "--private-key": lambda: setattr(config, "private_key_path", Path(value)),
+    }
+    numeric_options = {
+        "--request-bytes": "request_bytes",
+        "--response-bytes": "response_bytes",
+        "--streams": "streams",
+        "--connections": "connections",
+        "--requests-in-flight": "requests_in_flight",
+        "--requests": "requests",
+        "--total-bytes": "total_bytes",
+    }
+    if arg == "--port":
+        config.port = _parse_size(value)
+        if config.port > 65535:
+            raise PerfError(usage())
+    elif arg == "--io-backend":
+        if value != "socket":
+            raise PerfError("coquic-python-perf currently supports --io-backend socket")
+    elif arg == "--congestion-control":
+        config.congestion_control = parse_congestion_control(value)
+    elif arg == "--mode":
+        config.mode = parse_mode(value)
+    elif arg == "--direction":
+        config.direction = parse_direction(value)
+    elif arg == "--warmup":
+        config.warmup = parse_duration(value)
+    elif arg == "--duration":
+        config.duration = parse_duration(value)
+    elif arg in numeric_options:
+        setattr(config, numeric_options[arg], _parse_size(value))
+    elif arg in scalar_options:
+        scalar_options[arg]()
+    else:
+        raise PerfError(usage())
 
 
 def client_endpoint_config(config: PerfConfig) -> coquic.quic.EndpointConfig:
@@ -166,7 +170,9 @@ def server_endpoint_config(config: PerfConfig) -> coquic.quic.EndpointConfig:
     return endpoint
 
 
-def apply_transport_defaults(config: PerfConfig, transport: coquic.TransportConfig) -> None:
+def apply_transport_defaults(
+    config: PerfConfig, transport: coquic.TransportConfig
+) -> None:
     transport.congestion_control = config.congestion_control
     transport.enable_hystart_plus_plus = perf_enable_hystart_plus_plus(config)
     transport.send_stream_fairness = perf_send_stream_fairness(config)

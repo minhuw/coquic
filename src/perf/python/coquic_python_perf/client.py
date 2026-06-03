@@ -79,7 +79,9 @@ ClientCommand = OpenConnectionCommand | SendStreamCommand | CloseCommand
 
 async def run_client(config: PerfConfig):
     endpoint = coquic.quic.Endpoint(client_endpoint_config(config))
-    io, primary_route, primary_identity = await UdpRuntime.client(config.host, config.port)
+    io, primary_route, primary_identity = await UdpRuntime.client(
+        config.host, config.port
+    )
     try:
         client = Client(config, endpoint, io, primary_route, primary_identity)
         return await client.run()
@@ -96,6 +98,7 @@ class Client:
         primary_route: int,
         primary_identity: bytes,
     ):
+        """Initialize client state for a single performance run."""
         self.config = config
         self.endpoint = endpoint
         self.io = io
@@ -139,7 +142,9 @@ class Client:
                 ):
                     raise PerfError("timed bulk download measured zero bytes")
                 self.summary.status = "ok"
-                self.summary.elapsed_ms = duration_millis(self.result_elapsed_seconds(now))
+                self.summary.elapsed_ms = duration_millis(
+                    self.result_elapsed_seconds(now)
+                )
                 if self.timed_rr_mode() or self.timed_crr_mode():
                     self.summary.server_counters = ServerCounters(
                         bytes_sent=self.summary.bytes_received,
@@ -191,7 +196,9 @@ class Client:
                 pending.append(self.execute_command(command, now))
         await self.io.flush_sends()
 
-    def collect_result_commands(self, result: coquic.QueryResult, now: int) -> list[ClientCommand]:
+    def collect_result_commands(
+        self, result: coquic.QueryResult, now: int
+    ) -> list[ClientCommand]:
         self.advance_benchmark_phase_sync(now)
         if result.local_error is not None:
             self.summary.failure_reason = f"client local error: {result.local_error!r}"
@@ -215,7 +222,9 @@ class Client:
                     effect.change == coquic.StateChange.FAILED
                     and effect.connection not in self.closing_connections
                 ):
-                    raise PerfError(f"client core state failed connection={effect.connection}")
+                    raise PerfError(
+                        f"client core state failed connection={effect.connection}"
+                    )
                 if (
                     effect.change == coquic.StateChange.HANDSHAKE_READY
                     and effect.connection in self.connections
@@ -243,87 +252,136 @@ class Client:
     def handle_stream_data(
         self, connection: int, stream_id: int, data: bytes, fin: bool, now: int
     ) -> list[ClientCommand]:
-        commands: list[ClientCommand] = []
         if stream_id == CONTROL_STREAM_ID:
-            state = self.connections.get(connection)
-            if state is None:
-                raise PerfError("control data for unknown connection")
-            state.control_bytes.extend(data)
-            messages = []
-            while True:
-                message = take_control_message(state.control_bytes)
-                if message is None:
-                    break
-                messages.append(message)
-            incomplete_at_fin = fin and bool(state.control_bytes)
-
-            for message in messages:
-                if isinstance(message, SessionReady):
-                    state.session_ready = True
-                    self.maybe_start_timed_benchmark(now)
-                    commands.extend(self.start_work_for_connection(connection, now))
-                elif isinstance(message, SessionError):
-                    state.control_complete = True
-                    raise PerfError(message.reason)
-                elif isinstance(message, SessionComplete):
-                    self.summary.server_counters = ServerCounters(
-                        bytes_sent=message.bytes_sent,
-                        bytes_received=message.bytes_received,
-                        requests_completed=message.requests_completed,
-                    )
-                    if self.config.mode == Mode.BULK:
-                        self.summary.requests_completed = message.requests_completed
-                    state.control_complete = True
-                else:
-                    raise PerfError("client received unexpected session_start")
-
-            if incomplete_at_fin:
-                raise PerfError("incomplete control frame at FIN")
-            return commands
+            return self.handle_control_stream_data(connection, data, fin, now)
 
         if self.timed_bulk_download_mode():
-            state = self.connections.get(connection)
-            counts = (
-                state.active_bulk_streams.get(stream_id, False) if state is not None else False
-            )
-            within_window = now >= self.measure_started_at and now < self.measure_deadline
-            if counts and within_window:
-                self.summary.bytes_received += len(data)
-            if fin:
-                if state is not None:
-                    state.active_bulk_streams.pop(stream_id, None)
-                commands.extend(self.maybe_start_bulk_streams(connection, now))
-                state = self.connections.get(connection)
-                if (
-                    self.phase == BenchmarkPhase.DRAIN
-                    and state is not None
-                    and not state.active_bulk_streams
-                ):
-                    commands.extend(self.maybe_close_bulk_connection(connection))
-            return commands
+            return self.handle_bulk_download_data(connection, stream_id, data, fin, now)
 
         if self.config.mode in (Mode.RR, Mode.CRR):
-            state = self.connections.get(connection)
-            request = state.outstanding_requests.get(stream_id) if state is not None else None
-            if request is not None:
-                if request.counts_toward_measurement:
-                    self.summary.bytes_received += len(data)
-                if fin:
-                    if request.counts_toward_measurement:
-                        self.summary.latency_samples.append((now - request.started_at) / 1_000_000)
-                        self.summary.requests_completed += 1
-                    state.outstanding_requests.pop(stream_id, None)
-                    if self.config.mode == Mode.RR:
-                        if self.phase == BenchmarkPhase.DRAIN and not state.outstanding_requests:
-                            commands.extend(self.maybe_close_rr_connection(connection))
-                        else:
-                            commands.extend(self.maybe_issue_rr_requests(connection, now))
-                    elif not state.close_requested:
-                        commands.extend(self.close_connection(connection, b"done"))
-            return commands
+            return self.handle_request_response_data(
+                connection, stream_id, data, fin, now
+            )
 
         self.summary.bytes_received += len(data)
+        return []
+
+    def handle_control_stream_data(
+        self, connection: int, data: bytes, fin: bool, now: int
+    ) -> list[ClientCommand]:
+        state = self.connections.get(connection)
+        if state is None:
+            raise PerfError("control data for unknown connection")
+        state.control_bytes.extend(data)
+        messages = self.take_control_messages(state)
+
+        commands: list[ClientCommand] = []
+        for message in messages:
+            commands.extend(
+                self.handle_control_message(connection, state, message, now)
+            )
+
+        if fin and state.control_bytes:
+            raise PerfError("incomplete control frame at FIN")
         return commands
+
+    def take_control_messages(self, state: ConnectionState) -> list[object]:
+        messages = []
+        while True:
+            message = take_control_message(state.control_bytes)
+            if message is None:
+                return messages
+            messages.append(message)
+
+    def handle_control_message(
+        self, connection: int, state: ConnectionState, message: object, now: int
+    ) -> list[ClientCommand]:
+        if isinstance(message, SessionReady):
+            state.session_ready = True
+            self.maybe_start_timed_benchmark(now)
+            return self.start_work_for_connection(connection, now)
+        if isinstance(message, SessionError):
+            state.control_complete = True
+            raise PerfError(message.reason)
+        if isinstance(message, SessionComplete):
+            self.summary.server_counters = ServerCounters(
+                bytes_sent=message.bytes_sent,
+                bytes_received=message.bytes_received,
+                requests_completed=message.requests_completed,
+            )
+            if self.config.mode == Mode.BULK:
+                self.summary.requests_completed = message.requests_completed
+            state.control_complete = True
+            return []
+        raise PerfError("client received unexpected session_start")
+
+    def handle_bulk_download_data(
+        self, connection: int, stream_id: int, data: bytes, fin: bool, now: int
+    ) -> list[ClientCommand]:
+        commands: list[ClientCommand] = []
+        state = self.connections.get(connection)
+        counts = (
+            state.active_bulk_streams.get(stream_id, False)
+            if state is not None
+            else False
+        )
+        within_window = now >= self.measure_started_at and now < self.measure_deadline
+        if counts and within_window:
+            self.summary.bytes_received += len(data)
+        if not fin:
+            return commands
+
+        if state is not None:
+            state.active_bulk_streams.pop(stream_id, None)
+        commands.extend(self.maybe_start_bulk_streams(connection, now))
+        state = self.connections.get(connection)
+        if (
+            self.phase == BenchmarkPhase.DRAIN
+            and state is not None
+            and not state.active_bulk_streams
+        ):
+            commands.extend(self.maybe_close_bulk_connection(connection))
+        return commands
+
+    def handle_request_response_data(
+        self, connection: int, stream_id: int, data: bytes, fin: bool, now: int
+    ) -> list[ClientCommand]:
+        commands: list[ClientCommand] = []
+        state = self.connections.get(connection)
+        request = (
+            state.outstanding_requests.get(stream_id) if state is not None else None
+        )
+        if request is None:
+            return commands
+        if request.counts_toward_measurement:
+            self.summary.bytes_received += len(data)
+        if fin:
+            commands.extend(
+                self.finish_request_response_stream(
+                    connection, stream_id, state, request, now
+                )
+            )
+        return commands
+
+    def finish_request_response_stream(
+        self,
+        connection: int,
+        stream_id: int,
+        state: ConnectionState,
+        request: OutstandingRequest,
+        now: int,
+    ) -> list[ClientCommand]:
+        if request.counts_toward_measurement:
+            self.summary.latency_samples.append((now - request.started_at) / 1_000_000)
+            self.summary.requests_completed += 1
+        state.outstanding_requests.pop(stream_id, None)
+        if self.config.mode == Mode.RR:
+            if self.phase == BenchmarkPhase.DRAIN and not state.outstanding_requests:
+                return self.maybe_close_rr_connection(connection)
+            return self.maybe_issue_rr_requests(connection, now)
+        if not state.close_requested:
+            return self.close_connection(connection, b"done")
+        return []
 
     def execute_command(self, command: ClientCommand, now: int) -> coquic.QueryResult:
         if isinstance(command, OpenConnectionCommand):
@@ -339,16 +397,22 @@ class Client:
                 .send(command.bytes, command.fin, now)
             )
         self.closing_connections.add(command.connection)
-        return self.endpoint.connection(command.connection).close(0, command.reason, now)
+        return self.endpoint.connection(command.connection).close(
+            0, command.reason, now
+        )
 
-    def start_work_for_connection(self, connection: int, now: int) -> list[ClientCommand]:
+    def start_work_for_connection(
+        self, connection: int, now: int
+    ) -> list[ClientCommand]:
         commands: list[ClientCommand] = []
         commands.extend(self.maybe_start_bulk_streams(connection, now))
         commands.extend(self.maybe_issue_rr_requests(connection, now))
         commands.extend(self.maybe_issue_crr_request(connection, now))
         return commands
 
-    def maybe_start_bulk_streams(self, connection: int, _now: int) -> list[ClientCommand]:
+    def maybe_start_bulk_streams(
+        self, connection: int, _now: int
+    ) -> list[ClientCommand]:
         commands: list[ClientCommand] = []
         if self.config.mode != Mode.BULK:
             return commands
@@ -359,7 +423,10 @@ class Client:
         if self.timed_bulk_download_mode():
             if self.phase == BenchmarkPhase.DRAIN:
                 return commands
-            while len(state.active_bulk_streams) < self.config.streams and self.benchmark_accepts_new_work():
+            while (
+                len(state.active_bulk_streams) < self.config.streams
+                and self.benchmark_accepts_new_work()
+            ):
                 commands.extend(
                     self.open_bulk_stream(
                         connection,
@@ -384,7 +451,9 @@ class Client:
             commands.append(SendStreamCommand(connection, stream_id, payload, True))
         return commands
 
-    def open_bulk_stream(self, connection: int, counts_toward_measurement: bool) -> list[ClientCommand]:
+    def open_bulk_stream(
+        self, connection: int, counts_toward_measurement: bool
+    ) -> list[ClientCommand]:
         stream_id = self.next_stream_id(connection)
         state = self.connections.get(connection)
         if state is None:
@@ -400,9 +469,8 @@ class Client:
         if state is None or not state.session_ready or state.control_complete:
             return commands
 
-        while (
-            len(state.outstanding_requests) < self.config.requests_in_flight
-            and (self.config.requests is None or self.requests_started < self.config.requests)
+        while len(state.outstanding_requests) < self.config.requests_in_flight and (
+            self.config.requests is None or self.requests_started < self.config.requests
         ):
             commands.extend(self.issue_request(connection, now))
             self.requests_started += 1
@@ -430,7 +498,9 @@ class Client:
 
     def issue_request(self, connection: int, now: int) -> list[ClientCommand]:
         stream_id = self.next_stream_id(connection)
-        counts = self.config.requests is not None or self.phase == BenchmarkPhase.MEASURE
+        counts = (
+            self.config.requests is not None or self.phase == BenchmarkPhase.MEASURE
+        )
         state = self.connections.get(connection)
         if state is None:
             raise PerfError("request for unknown connection")
@@ -449,9 +519,9 @@ class Client:
     async def maybe_open_crr_connections(self) -> None:
         if self.config.mode != Mode.CRR or not self.benchmark_accepts_new_work():
             return
-        while (
-            len(self.connections) < self.config.connections
-            and (self.config.requests is None or self.crr_requests_opened < self.config.requests)
+        while len(self.connections) < self.config.connections and (
+            self.config.requests is None
+            or self.crr_requests_opened < self.config.requests
         ):
             now = self.io.now_us()
             result = self.execute_command(OpenConnectionCommand(), now)
@@ -461,7 +531,11 @@ class Client:
     def maybe_close_rr_connection(self, connection: int) -> list[ClientCommand]:
         force = self.timed_rr_mode() and self.phase == BenchmarkPhase.DRAIN
         state = self.connections.get(connection)
-        if state is None or state.close_requested or (not force and state.outstanding_requests):
+        if (
+            state is None
+            or state.close_requested
+            or (not force and state.outstanding_requests)
+        ):
             return []
         return self.close_connection(connection, b"timed rr drain complete")
 
@@ -474,7 +548,11 @@ class Client:
     def maybe_close_crr_connection(self, connection: int) -> list[ClientCommand]:
         force = self.timed_crr_mode() and self.phase == BenchmarkPhase.DRAIN
         state = self.connections.get(connection)
-        if state is None or state.close_requested or (not force and state.outstanding_requests):
+        if (
+            state is None
+            or state.close_requested
+            or (not force and state.outstanding_requests)
+        ):
             return []
         return self.close_connection(connection, b"timed crr drain complete")
 
@@ -536,7 +614,9 @@ class Client:
         self.phase = BenchmarkPhase.DRAIN
         self.summary.elapsed_ms = duration_millis(self.result_elapsed_seconds(now))
         if self.timed_bulk_download_mode():
-            self.drain_deadline = now + duration_us(min(self.config.duration, DRAIN_TIMEOUT))
+            self.drain_deadline = now + duration_us(
+                min(self.config.duration, DRAIN_TIMEOUT)
+            )
 
         for handle in list(self.connections.keys()):
             if self.config.mode == Mode.RR:
@@ -565,7 +645,11 @@ class Client:
         )
 
     def timed_mode(self) -> bool:
-        return self.timed_rr_mode() or self.timed_crr_mode() or self.timed_bulk_download_mode()
+        return (
+            self.timed_rr_mode()
+            or self.timed_crr_mode()
+            or self.timed_bulk_download_mode()
+        )
 
     def benchmark_accepts_new_work(self) -> bool:
         return self.phase != BenchmarkPhase.DRAIN
@@ -590,7 +674,9 @@ class Client:
         if self.timed_mode():
             if self.phase == BenchmarkPhase.WARMUP:
                 return 0.0
-            measurement_now = self.measure_deadline if self.phase == BenchmarkPhase.DRAIN else now
+            measurement_now = (
+                self.measure_deadline if self.phase == BenchmarkPhase.DRAIN else now
+            )
             return max(measurement_now - self.measure_started_at, 0) / 1_000_000.0
         return max(now - self.run_started_at, 0) / 1_000_000.0
 
@@ -604,7 +690,9 @@ class Client:
                     state.close_requested and not state.active_bulk_streams
                     for state in self.connections.values()
                 )
-            control_complete = all(state.control_complete for state in self.connections.values())
+            control_complete = all(
+                state.control_complete for state in self.connections.values()
+            )
             if not control_complete:
                 return False
             if self.config.total_bytes is not None:

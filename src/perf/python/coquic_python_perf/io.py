@@ -37,6 +37,7 @@ class RxDatagram:
 
 class _DatagramProtocol(asyncio.DatagramProtocol):
     def __init__(self) -> None:
+        """Create a datagram protocol with an in-memory receive queue."""
         self.queue: asyncio.Queue[tuple[bytes, tuple[str, int]]] = asyncio.Queue()
 
     def datagram_received(self, data: bytes, addr) -> None:
@@ -45,12 +46,16 @@ class _DatagramProtocol(asyncio.DatagramProtocol):
 
 class WaitEvent:
     def __init__(self, kind: str, datagram: RxDatagram | None = None):
+        """Create a wait result for received datagrams, timers, or idle timeouts."""
         self.kind = kind
         self.datagram = datagram
 
 
 class UdpRuntime:
-    def __init__(self, transport: asyncio.DatagramTransport, protocol: _DatagramProtocol):
+    def __init__(
+        self, transport: asyncio.DatagramTransport, protocol: _DatagramProtocol
+    ):
+        """Wrap an asyncio UDP endpoint with CoQUIC route bookkeeping."""
         self.transport = transport
         self.protocol = protocol
         self.start = time.monotonic()
@@ -62,7 +67,7 @@ class UdpRuntime:
     @classmethod
     async def client(cls, host: str, port: int) -> tuple["UdpRuntime", int, bytes]:
         peer = _resolve_remote(host, port)
-        bind_addr = "0.0.0.0" if "." in peer[0] else "::"
+        bind_addr = _client_bind_address(peer[0])
         loop = asyncio.get_running_loop()
         transport, protocol = await loop.create_datagram_endpoint(
             _DatagramProtocol,
@@ -113,7 +118,9 @@ class UdpRuntime:
             if effect.kind != "send_datagram":
                 continue
             if len(self.send_buffer) >= MAX_BUFFERED_SEND_DATAGRAMS:
-                raise PerfError("send buffer exceeded before flush; call flush_sends more often")
+                raise PerfError(
+                    "send buffer exceeded before flush; call flush_sends more often"
+                )
             if effect.route_handle is None:
                 raise PerfError("send datagram missing route handle")
             self.send_buffer.append(
@@ -150,7 +157,11 @@ class UdpRuntime:
             if next_wakeup <= now:
                 return WaitEvent("timer")
             timer_timeout = (next_wakeup - now) / 1_000_000.0
-        timeout = min(timer_timeout, idle_timeout) if timer_timeout is not None else idle_timeout
+        timeout = (
+            min(timer_timeout, idle_timeout)
+            if timer_timeout is not None
+            else idle_timeout
+        )
         try:
             datagram = await asyncio.wait_for(self.recv(), timeout)
             return WaitEvent("datagram", datagram)
@@ -184,6 +195,13 @@ def address_validation_identity(peer: tuple[str, int]) -> bytes:
     if isinstance(address, ipaddress.IPv4Address):
         return b"\x04" + address.packed + port.to_bytes(2, "big")
     return b"\x06" + address.packed + port.to_bytes(2, "big")
+
+
+def _client_bind_address(peer_host: str) -> str:
+    address = ipaddress.ip_address(peer_host)
+    if address.is_loopback:
+        return "127.0.0.1" if isinstance(address, ipaddress.IPv4Address) else "::1"
+    return "0.0.0.0" if isinstance(address, ipaddress.IPv4Address) else "::"
 
 
 def _resolve_remote(host: str, port: int) -> tuple[str, int]:

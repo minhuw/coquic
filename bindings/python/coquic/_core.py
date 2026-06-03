@@ -34,11 +34,14 @@ class Status(IntEnum):
 
 
 class CoquicError(Exception):
+    """Base exception raised by the CoQUIC Python bindings."""
+
     pass
 
 
 class CoquicStatusError(CoquicError):
     def __init__(self, status: Status):
+        """Create an exception for a non-OK CoQUIC status."""
         super().__init__(status.name.lower())
         self.status = status
 
@@ -239,7 +242,9 @@ class EndpointConfig:
             supported_versions=[],
             verify_peer=bool(raw.verify_peer),
             retry_enabled=bool(raw.retry_enabled),
-            application_protocol=_bytes_view(raw.application_protocol, raw.application_protocol_length),
+            application_protocol=_bytes_view(
+                raw.application_protocol, raw.application_protocol_length
+            ),
             identity=None,
             transport=TransportConfig.from_raw(raw.transport),
             max_outbound_datagram_size=raw.max_outbound_datagram_size,
@@ -303,7 +308,9 @@ class ClientConnectionConfig:
 
 @dataclass(slots=True)
 class OpenConnection:
-    connection: ClientConnectionConfig = field(default_factory=ClientConnectionConfig.default)
+    connection: ClientConnectionConfig = field(
+        default_factory=ClientConnectionConfig.default
+    )
     initial_route_handle: RouteHandle = 0
     address_validation_identity: bytes = b""
 
@@ -546,11 +553,14 @@ class QueryResult:
 
 class Endpoint:
     def __init__(self, config: EndpointConfig):
+        """Create a CoQUIC endpoint from a materialized endpoint config."""
         self._lib = ffi.load_library()
         self._ptr = C.c_void_p()
         materialized = config.materialize()
         Status.check(
-            self._lib.coquic_endpoint_create(materialized.raw_pointer(), C.byref(self._ptr))
+            self._lib.coquic_endpoint_create(
+                materialized.raw_pointer(), C.byref(self._ptr)
+            )
         )
         if not self._ptr.value:
             raise CoquicStatusError(Status.INTERNAL_ERROR)
@@ -563,29 +573,29 @@ class Endpoint:
     def __del__(self) -> None:
         try:
             self.close_handle()
-        except Exception:
+        except Exception as error:
             # Destructors cannot report cleanup failures safely.
-            pass
+            _ = error
 
-    def open_connection(self, input: OpenConnection, now: TimeUs) -> QueryResult:
-        materialized = input.materialize()
+    def open_connection(self, request: OpenConnection, now: TimeUs) -> QueryResult:
+        materialized = request.materialize()
         return self._call_result(
             lambda out: self._lib.coquic_endpoint_open_connection(
                 self._checked_ptr(), materialized.raw_pointer(), now, out
             )
         )
 
-    def input_datagram(self, input: InboundDatagram, now: TimeUs) -> QueryResult:
+    def input_datagram(self, datagram: InboundDatagram, now: TimeUs) -> QueryResult:
         arena = _CallArena()
-        raw = input.to_raw(arena)
+        raw = datagram.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_endpoint_input_datagram(
                 self._checked_ptr(), C.byref(raw), now, out
             )
         )
 
-    def update_path_mtu(self, input: PathMtuUpdate, now: TimeUs) -> QueryResult:
-        raw = input.to_raw()
+    def update_path_mtu(self, update: PathMtuUpdate, now: TimeUs) -> QueryResult:
+        raw = update.to_raw()
         return self._call_result(
             lambda out: self._lib.coquic_endpoint_update_path_mtu(
                 self._checked_ptr(), C.byref(raw), now, out
@@ -594,14 +604,16 @@ class Endpoint:
 
     def timer_expired(self, now: TimeUs) -> QueryResult:
         return self._call_result(
-            lambda out: self._lib.coquic_endpoint_timer_expired(self._checked_ptr(), now, out)
+            lambda out: self._lib.coquic_endpoint_timer_expired(
+                self._checked_ptr(), now, out
+            )
         )
 
     def connection_send_stream(
-        self, connection: ConnectionHandle, input: SendStreamData, now: TimeUs
+        self, connection: ConnectionHandle, stream_data: SendStreamData, now: TimeUs
     ) -> QueryResult:
         arena = _CallArena()
-        raw = input.to_raw(arena)
+        raw = stream_data.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_connection_send_stream(
                 self._checked_ptr(), connection, C.byref(raw), now, out
@@ -609,10 +621,10 @@ class Endpoint:
         )
 
     def connection_send_datagram(
-        self, connection: ConnectionHandle, input: SendDatagramData, now: TimeUs
+        self, connection: ConnectionHandle, datagram_data: SendDatagramData, now: TimeUs
     ) -> QueryResult:
         arena = _CallArena()
-        raw = input.to_raw(arena)
+        raw = datagram_data.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_connection_send_datagram(
                 self._checked_ptr(), connection, C.byref(raw), now, out
@@ -620,9 +632,9 @@ class Endpoint:
         )
 
     def connection_reset_stream(
-        self, connection: ConnectionHandle, input: ResetStream, now: TimeUs
+        self, connection: ConnectionHandle, reset: ResetStream, now: TimeUs
     ) -> QueryResult:
-        raw = input.to_raw()
+        raw = reset.to_raw()
         return self._call_result(
             lambda out: self._lib.coquic_connection_reset_stream(
                 self._checked_ptr(), connection, C.byref(raw), now, out
@@ -630,9 +642,9 @@ class Endpoint:
         )
 
     def connection_stop_sending(
-        self, connection: ConnectionHandle, input: StopSending, now: TimeUs
+        self, connection: ConnectionHandle, stop: StopSending, now: TimeUs
     ) -> QueryResult:
-        raw = input.to_raw()
+        raw = stop.to_raw()
         return self._call_result(
             lambda out: self._lib.coquic_connection_stop_sending(
                 self._checked_ptr(), connection, C.byref(raw), now, out
@@ -640,17 +652,19 @@ class Endpoint:
         )
 
     def connection_close(
-        self, connection: ConnectionHandle, input: CloseConnection, now: TimeUs
+        self, connection: ConnectionHandle, close: CloseConnection, now: TimeUs
     ) -> QueryResult:
         arena = _CallArena()
-        raw = input.to_raw(arena)
+        raw = close.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_connection_close(
                 self._checked_ptr(), connection, C.byref(raw), now, out
             )
         )
 
-    def connection_request_key_update(self, connection: ConnectionHandle, now: TimeUs) -> QueryResult:
+    def connection_request_key_update(
+        self, connection: ConnectionHandle, now: TimeUs
+    ) -> QueryResult:
         return self._call_result(
             lambda out: self._lib.coquic_connection_request_key_update(
                 self._checked_ptr(), connection, now, out
@@ -658,10 +672,13 @@ class Endpoint:
         )
 
     def connection_request_migration(
-        self, connection: ConnectionHandle, input: RequestConnectionMigration, now: TimeUs
+        self,
+        connection: ConnectionHandle,
+        migration: RequestConnectionMigration,
+        now: TimeUs,
     ) -> QueryResult:
         arena = _CallArena()
-        raw = input.to_raw(arena)
+        raw = migration.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_connection_request_migration(
                 self._checked_ptr(), connection, C.byref(raw), now, out
@@ -669,18 +686,23 @@ class Endpoint:
         )
 
     def connection_advance(
-        self, connection: ConnectionHandle, input: ConnectionInput, now: TimeUs
+        self,
+        connection: ConnectionHandle,
+        connection_input: ConnectionInput,
+        now: TimeUs,
     ) -> QueryResult:
         arena = _CallArena()
-        raw = input.to_raw(arena)
+        raw = connection_input.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_connection_advance(
                 self._checked_ptr(), connection, C.byref(raw), now, out
             )
         )
 
-    def quic_connect(self, input: OpenConnection, now: TimeUs) -> tuple[ConnectionHandle, QueryResult]:
-        materialized = input.materialize()
+    def quic_connect(
+        self, request: OpenConnection, now: TimeUs
+    ) -> tuple[ConnectionHandle, QueryResult]:
+        materialized = request.materialize()
         out_connection = C.c_uint64()
         out_result = C.c_void_p()
         Status.check(
@@ -694,17 +716,19 @@ class Endpoint:
         )
         return out_connection.value, self._take_result(out_result)
 
-    def quic_receive_datagram(self, input: InboundDatagram, now: TimeUs) -> QueryResult:
+    def quic_receive_datagram(
+        self, datagram: InboundDatagram, now: TimeUs
+    ) -> QueryResult:
         arena = _CallArena()
-        raw = input.to_raw(arena)
+        raw = datagram.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_quic_receive_datagram(
                 self._checked_ptr(), C.byref(raw), now, out
             )
         )
 
-    def quic_update_path_mtu(self, input: PathMtuUpdate, now: TimeUs) -> QueryResult:
-        raw = input.to_raw()
+    def quic_update_path_mtu(self, update: PathMtuUpdate, now: TimeUs) -> QueryResult:
+        raw = update.to_raw()
         return self._call_result(
             lambda out: self._lib.coquic_quic_update_path_mtu(
                 self._checked_ptr(), C.byref(raw), now, out
@@ -713,14 +737,16 @@ class Endpoint:
 
     def quic_timer_expired(self, now: TimeUs) -> QueryResult:
         return self._call_result(
-            lambda out: self._lib.coquic_quic_timer_expired(self._checked_ptr(), now, out)
+            lambda out: self._lib.coquic_quic_timer_expired(
+                self._checked_ptr(), now, out
+            )
         )
 
     def quic_connection_send_stream(
-        self, connection: ConnectionHandle, input: SendStreamData, now: TimeUs
+        self, connection: ConnectionHandle, stream_data: SendStreamData, now: TimeUs
     ) -> QueryResult:
         arena = _CallArena()
-        raw = input.to_raw(arena)
+        raw = stream_data.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_quic_connection_send_stream(
                 self._checked_ptr(), connection, C.byref(raw), now, out
@@ -728,10 +754,10 @@ class Endpoint:
         )
 
     def quic_connection_send_datagram(
-        self, connection: ConnectionHandle, input: SendDatagramData, now: TimeUs
+        self, connection: ConnectionHandle, datagram_data: SendDatagramData, now: TimeUs
     ) -> QueryResult:
         arena = _CallArena()
-        raw = input.to_raw(arena)
+        raw = datagram_data.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_quic_connection_send_datagram(
                 self._checked_ptr(), connection, C.byref(raw), now, out
@@ -739,9 +765,9 @@ class Endpoint:
         )
 
     def quic_connection_reset_stream(
-        self, connection: ConnectionHandle, input: ResetStream, now: TimeUs
+        self, connection: ConnectionHandle, reset: ResetStream, now: TimeUs
     ) -> QueryResult:
-        raw = input.to_raw()
+        raw = reset.to_raw()
         return self._call_result(
             lambda out: self._lib.coquic_quic_connection_reset_stream(
                 self._checked_ptr(), connection, C.byref(raw), now, out
@@ -749,9 +775,9 @@ class Endpoint:
         )
 
     def quic_connection_stop_sending(
-        self, connection: ConnectionHandle, input: StopSending, now: TimeUs
+        self, connection: ConnectionHandle, stop: StopSending, now: TimeUs
     ) -> QueryResult:
-        raw = input.to_raw()
+        raw = stop.to_raw()
         return self._call_result(
             lambda out: self._lib.coquic_quic_connection_stop_sending(
                 self._checked_ptr(), connection, C.byref(raw), now, out
@@ -759,17 +785,19 @@ class Endpoint:
         )
 
     def quic_connection_close(
-        self, connection: ConnectionHandle, input: CloseConnection, now: TimeUs
+        self, connection: ConnectionHandle, close: CloseConnection, now: TimeUs
     ) -> QueryResult:
         arena = _CallArena()
-        raw = input.to_raw(arena)
+        raw = close.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_quic_connection_close(
                 self._checked_ptr(), connection, C.byref(raw), now, out
             )
         )
 
-    def quic_connection_request_key_update(self, connection: ConnectionHandle, now: TimeUs) -> QueryResult:
+    def quic_connection_request_key_update(
+        self, connection: ConnectionHandle, now: TimeUs
+    ) -> QueryResult:
         return self._call_result(
             lambda out: self._lib.coquic_quic_connection_request_key_update(
                 self._checked_ptr(), connection, now, out
@@ -777,10 +805,13 @@ class Endpoint:
         )
 
     def quic_connection_advance(
-        self, connection: ConnectionHandle, input: ConnectionInput, now: TimeUs
+        self,
+        connection: ConnectionHandle,
+        connection_input: ConnectionInput,
+        now: TimeUs,
     ) -> QueryResult:
         arena = _CallArena()
-        raw = input.to_raw(arena)
+        raw = connection_input.to_raw(arena)
         return self._call_result(
             lambda out: self._lib.coquic_quic_connection_advance(
                 self._checked_ptr(), connection, C.byref(raw), now, out
@@ -788,13 +819,24 @@ class Endpoint:
         )
 
     def quic_stream_send(
-        self, connection: ConnectionHandle, stream_id: StreamId, data: bytes, fin: bool, now: TimeUs
+        self,
+        connection: ConnectionHandle,
+        stream_id: StreamId,
+        data: bytes,
+        fin: bool,
+        now: TimeUs,
     ) -> QueryResult:
         arena = _CallArena()
         raw_bytes = arena.bytes(data)
         return self._call_result(
             lambda out: self._lib.coquic_quic_stream_send(
-                self._checked_ptr(), connection, stream_id, raw_bytes, int(fin), now, out
+                self._checked_ptr(),
+                connection,
+                stream_id,
+                raw_bytes,
+                int(fin),
+                now,
+                out,
             )
         )
 
@@ -816,7 +858,12 @@ class Endpoint:
     ) -> QueryResult:
         return self._call_result(
             lambda out: self._lib.coquic_quic_stream_reset(
-                self._checked_ptr(), connection, stream_id, application_error_code, now, out
+                self._checked_ptr(),
+                connection,
+                stream_id,
+                application_error_code,
+                now,
+                out,
             )
         )
 
@@ -829,7 +876,12 @@ class Endpoint:
     ) -> QueryResult:
         return self._call_result(
             lambda out: self._lib.coquic_quic_stream_stop_sending(
-                self._checked_ptr(), connection, stream_id, application_error_code, now, out
+                self._checked_ptr(),
+                connection,
+                stream_id,
+                application_error_code,
+                now,
+                out,
             )
         )
 
@@ -837,10 +889,14 @@ class Endpoint:
         return int(self._lib.coquic_endpoint_connection_count(self._checked_ptr()))
 
     def has_send_continuation_pending(self) -> bool:
-        return bool(self._lib.coquic_endpoint_has_send_continuation_pending(self._checked_ptr()))
+        return bool(
+            self._lib.coquic_endpoint_has_send_continuation_pending(self._checked_ptr())
+        )
 
     def next_wakeup(self) -> TimeUs | None:
-        return _optional_time(self._lib.coquic_endpoint_next_wakeup(self._checked_ptr()))
+        return _optional_time(
+            self._lib.coquic_endpoint_next_wakeup(self._checked_ptr())
+        )
 
     def _checked_ptr(self) -> C.c_void_p:
         if not self._ptr.value:
@@ -861,14 +917,18 @@ class Endpoint:
             effects: list[Effect] = []
             for index in range(effect_count):
                 raw = ffi.coquic_effect_t()
-                Status.check(self._lib.coquic_result_effect_at(ptr, index, C.byref(raw)))
+                Status.check(
+                    self._lib.coquic_result_effect_at(ptr, index, C.byref(raw))
+                )
                 effects.append(_effect_from_raw(raw))
 
             next_wakeup = _optional_time(self._lib.coquic_result_next_wakeup(ptr))
             local_error = None
             if self._lib.coquic_result_has_local_error(ptr):
                 raw_error = ffi.coquic_local_error_t()
-                Status.check(self._lib.coquic_result_local_error(ptr, C.byref(raw_error)))
+                Status.check(
+                    self._lib.coquic_result_local_error(ptr, C.byref(raw_error))
+                )
                 local_error = LocalError(
                     connection=_optional_connection(raw_error.connection),
                     code=LocalErrorCode(raw_error.code),
@@ -877,7 +937,9 @@ class Endpoint:
             send_continuation_pending = bool(
                 self._lib.coquic_result_send_continuation_pending(ptr)
             )
-            return QueryResult(tuple(effects), next_wakeup, local_error, send_continuation_pending)
+            return QueryResult(
+                tuple(effects), next_wakeup, local_error, send_continuation_pending
+            )
         finally:
             self._lib.coquic_result_destroy(ptr)
 
@@ -888,7 +950,9 @@ class _EndpointConfigMaterialization:
         self._supported_versions = _u32_array(config.supported_versions)
         self._application_protocol = config.application_protocol
         self._zero_rtt_context = config.zero_rtt.application_context
-        self._identity_certificate = config.identity.certificate_pem if config.identity else b""
+        self._identity_certificate = (
+            config.identity.certificate_pem if config.identity else b""
+        )
         self._identity_key = config.identity.private_key_pem if config.identity else b""
         self._identity = (
             ffi.coquic_tls_identity_t(
@@ -915,7 +979,9 @@ class _EndpointConfigMaterialization:
             zero_rtt=ffi.coquic_zero_rtt_config_t(
                 attempt=int(config.zero_rtt.attempt),
                 allow=int(config.zero_rtt.allow),
-                application_context=self._arena.bytes(config.zero_rtt.application_context),
+                application_context=self._arena.bytes(
+                    config.zero_rtt.application_context
+                ),
             ),
             emit_shared_receive_stream_data=int(config.emit_shared_receive_stream_data),
             enable_packet_inspection=int(config.enable_packet_inspection),
@@ -930,16 +996,24 @@ class _ClientConnectionConfigMaterialization:
     def __init__(self, config: ClientConnectionConfig):
         self._arena = _CallArena()
         self._source_connection_id = config.source_connection_id
-        self._initial_destination_connection_id = config.initial_destination_connection_id
-        self._original_destination_connection_id = config.original_destination_connection_id or b""
+        self._initial_destination_connection_id = (
+            config.initial_destination_connection_id
+        )
+        self._original_destination_connection_id = (
+            config.original_destination_connection_id or b""
+        )
         self._retry_source_connection_id = config.retry_source_connection_id or b""
         self._retry_token = config.retry_token
         self._server_name = config.server_name
         self._resumption_bytes = (
-            config.resumption_state.serialized if config.resumption_state is not None else b""
+            config.resumption_state.serialized
+            if config.resumption_state is not None
+            else b""
         )
         self._resumption_state = (
-            ffi.coquic_resumption_state_t(serialized=self._arena.bytes(self._resumption_bytes))
+            ffi.coquic_resumption_state_t(
+                serialized=self._arena.bytes(self._resumption_bytes)
+            )
             if config.resumption_state is not None
             else None
         )
@@ -955,8 +1029,12 @@ class _ClientConnectionConfigMaterialization:
             has_original_destination_connection_id=int(
                 config.original_destination_connection_id is not None
             ),
-            retry_source_connection_id=self._arena.bytes(self._retry_source_connection_id),
-            has_retry_source_connection_id=int(config.retry_source_connection_id is not None),
+            retry_source_connection_id=self._arena.bytes(
+                self._retry_source_connection_id
+            ),
+            has_retry_source_connection_id=int(
+                config.retry_source_connection_id is not None
+            ),
             retry_token=self._arena.bytes(self._retry_token),
             original_version=config.original_version,
             initial_version=config.initial_version,
@@ -964,12 +1042,16 @@ class _ClientConnectionConfigMaterialization:
             server_name=self._arena.char_pointer(self._server_name),
             server_name_length=len(self._server_name),
             resumption_state=(
-                C.pointer(self._resumption_state) if self._resumption_state is not None else None
+                C.pointer(self._resumption_state)
+                if self._resumption_state is not None
+                else None
             ),
             zero_rtt=ffi.coquic_zero_rtt_config_t(
                 attempt=int(config.zero_rtt.attempt),
                 allow=int(config.zero_rtt.allow),
-                application_context=self._arena.bytes(config.zero_rtt.application_context),
+                application_context=self._arena.bytes(
+                    config.zero_rtt.application_context
+                ),
             ),
         )
 
@@ -983,7 +1065,9 @@ class _OpenConnectionMaterialization:
             size=C.sizeof(ffi.coquic_open_connection_t),
             connection=self.connection.raw,
             initial_route_handle=open_connection.initial_route_handle,
-            address_validation_identity=self._arena.bytes(self._address_validation_identity),
+            address_validation_identity=self._arena.bytes(
+                self._address_validation_identity
+            ),
         )
 
     def raw_pointer(self) -> C.POINTER(ffi.coquic_open_connection_t):
@@ -1059,7 +1143,9 @@ def _effect_from_raw(raw: ffi.coquic_effect_t) -> Effect:
                 ipv4_port=address.ipv4_port,
                 ipv6_address=bytes(address.ipv6_address),
                 ipv6_port=address.ipv6_port,
-                connection_id=_bytes_view(address.connection_id.data, address.connection_id.length),
+                connection_id=_bytes_view(
+                    address.connection_id.data, address.connection_id.length
+                ),
                 stateless_reset_token=bytes(address.stateless_reset_token),
             ),
         )
@@ -1136,7 +1222,9 @@ class _CallArena:
         self._buffers.append(buffer)
         return ffi.coquic_bytes_t(C.cast(buffer, C.POINTER(C.c_uint8)), len(raw))
 
-    def char_pointer(self, value: bytes | bytearray | memoryview) -> C.POINTER(C.c_char):
+    def char_pointer(self, value: bytes | bytearray | memoryview) -> C.POINTER(
+        C.c_char
+    ):
         raw = bytes(value)
         if not raw:
             return C.POINTER(C.c_char)()
@@ -1154,14 +1242,20 @@ def _u32_array(values: Iterable[int]) -> C.Array[C.c_uint32] | C.POINTER(C.c_uin
 
 
 def _optional_route(value: RouteHandle | None) -> ffi.coquic_optional_route_handle_t:
-    return ffi.coquic_optional_route_handle_t(int(value is not None), 0 if value is None else value)
+    return ffi.coquic_optional_route_handle_t(
+        int(value is not None), 0 if value is None else value
+    )
 
 
-def _optional_route_from_raw(raw: ffi.coquic_optional_route_handle_t) -> RouteHandle | None:
+def _optional_route_from_raw(
+    raw: ffi.coquic_optional_route_handle_t,
+) -> RouteHandle | None:
     return raw.value if raw.has_value else None
 
 
-def _optional_connection(raw: ffi.coquic_optional_connection_handle_t) -> ConnectionHandle | None:
+def _optional_connection(
+    raw: ffi.coquic_optional_connection_handle_t,
+) -> ConnectionHandle | None:
     return raw.value if raw.has_value else None
 
 

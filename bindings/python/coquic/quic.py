@@ -45,7 +45,9 @@ class ClientConfig:
     ) -> "ClientConfig":
         core = ClientConnectionConfig.default()
         core.source_connection_id = bytes(source_connection_id)
-        core.initial_destination_connection_id = bytes(initial_destination_connection_id)
+        core.initial_destination_connection_id = bytes(
+            initial_destination_connection_id
+        )
         return cls(core=core)
 
     def to_open_connection(self) -> OpenConnection:
@@ -64,6 +66,7 @@ class ConnectResult:
 
 class Endpoint:
     def __init__(self, config: EndpointConfig | None = None):
+        """Create a high-level QUIC endpoint wrapper."""
         self._core = CoreEndpoint((config or EndpointConfig()).core)
 
     def connect(self, config: ClientConfig, now: TimeUs) -> ConnectResult:
@@ -94,6 +97,7 @@ class Endpoint:
 
 class Connection:
     def __init__(self, endpoint: Endpoint, handle: ConnectionHandle):
+        """Bind a connection handle to its owning endpoint."""
         self._endpoint = weakref.ref(endpoint)
         self._handle = handle
 
@@ -107,13 +111,19 @@ class Connection:
     def stream(self, stream_id: StreamId) -> "Stream":
         return Stream(self, stream_id)
 
-    def advance(self, input: ConnectionInput, now: TimeUs) -> QueryResult:
+    def advance(self, connection_input: ConnectionInput, now: TimeUs) -> QueryResult:
         return self._with_endpoint(
-            lambda endpoint: endpoint._core.quic_connection_advance(self._handle, input, now)
+            lambda endpoint: endpoint._core.quic_connection_advance(
+                self._handle, connection_input, now
+            )
         )
 
     def send_stream(
-        self, stream_id: StreamId, data: bytes | bytearray | memoryview, fin: bool, now: TimeUs
+        self,
+        stream_id: StreamId,
+        data: bytes | bytearray | memoryview,
+        fin: bool,
+        now: TimeUs,
     ) -> QueryResult:
         return self._with_endpoint(
             lambda endpoint: endpoint._core.quic_connection_send_stream(
@@ -121,7 +131,9 @@ class Connection:
             )
         )
 
-    def send_datagram(self, data: bytes | bytearray | memoryview, now: TimeUs) -> QueryResult:
+    def send_datagram(
+        self, data: bytes | bytearray | memoryview, now: TimeUs
+    ) -> QueryResult:
         return self._with_endpoint(
             lambda endpoint: endpoint._core.quic_connection_send_datagram(
                 self._handle, SendDatagramData(bytes(data)), now
@@ -146,16 +158,22 @@ class Connection:
             )
         )
 
-    def close(self, application_error_code: int, reason_phrase: bytes, now: TimeUs) -> QueryResult:
+    def close(
+        self, application_error_code: int, reason_phrase: bytes, now: TimeUs
+    ) -> QueryResult:
         return self._with_endpoint(
             lambda endpoint: endpoint._core.quic_connection_close(
-                self._handle, CloseConnection(application_error_code, reason_phrase), now
+                self._handle,
+                CloseConnection(application_error_code, reason_phrase),
+                now,
             )
         )
 
     def request_key_update(self, now: TimeUs) -> QueryResult:
         return self._with_endpoint(
-            lambda endpoint: endpoint._core.quic_connection_request_key_update(self._handle, now)
+            lambda endpoint: endpoint._core.quic_connection_request_key_update(
+                self._handle, now
+            )
         )
 
     def request_migration(
@@ -176,6 +194,7 @@ class Connection:
 
 class Stream:
     def __init__(self, connection: Connection, stream_id: StreamId):
+        """Bind a stream ID to a high-level connection wrapper."""
         self._connection = connection
         self._stream_id = stream_id
 
@@ -186,14 +205,20 @@ class Stream:
     def is_valid(self) -> bool:
         return self._connection.is_valid()
 
-    def send(self, data: bytes | bytearray | memoryview, fin: bool, now: TimeUs) -> QueryResult:
+    def send(
+        self, data: bytes | bytearray | memoryview, fin: bool, now: TimeUs
+    ) -> QueryResult:
         return self._connection.send_stream(self._stream_id, bytes(data), fin, now)
 
     def finish(self, now: TimeUs) -> QueryResult:
         return self._connection.send_stream(self._stream_id, b"", True, now)
 
     def reset(self, application_error_code: int, now: TimeUs) -> QueryResult:
-        return self._connection.reset_stream(self._stream_id, application_error_code, now)
+        return self._connection.reset_stream(
+            self._stream_id, application_error_code, now
+        )
 
     def stop_sending(self, application_error_code: int, now: TimeUs) -> QueryResult:
-        return self._connection.stop_sending(self._stream_id, application_error_code, now)
+        return self._connection.stop_sending(
+            self._stream_id, application_error_code, now
+        )

@@ -63,6 +63,7 @@ async def run_server(config: PerfConfig):
 
 class Server:
     def __init__(self, endpoint: coquic.quic.Endpoint, io: UdpRuntime):
+        """Initialize server state for one performance session."""
         self.endpoint = endpoint
         self.io = io
         self.sessions: dict[int, Session] = {}
@@ -73,7 +74,10 @@ class Server:
     async def run(self) -> None:
         while True:
             await self.handle_due_timer()
-            if self.should_exit_on_session_complete() or self.should_exit_on_idle_empty():
+            if (
+                self.should_exit_on_session_complete()
+                or self.should_exit_on_idle_empty()
+            ):
                 return
 
             event = await self.io.wait(self.endpoint.next_wakeup(), IDLE_TIMEOUT)
@@ -89,7 +93,10 @@ class Server:
                 await self.handle_result(result, now)
             else:
                 await self.io.flush_sends()
-                if self.should_exit_on_idle_empty() or self.should_exit_on_session_complete():
+                if (
+                    self.should_exit_on_idle_empty()
+                    or self.should_exit_on_session_complete()
+                ):
                     return
 
     async def handle_due_timer(self) -> None:
@@ -112,7 +119,9 @@ class Server:
                 pending.append(self.execute_command(command, now))
         await self.io.flush_sends()
 
-    def collect_result_commands(self, result: coquic.QueryResult, now: int) -> list[ServerCommand]:
+    def collect_result_commands(
+        self, result: coquic.QueryResult, now: int
+    ) -> list[ServerCommand]:
         if result.local_error is not None:
             raise PerfError(f"server local error: {result.local_error!r}")
 
@@ -135,9 +144,14 @@ class Server:
                     ):
                         self.completed_crr_sessions.add(effect.connection)
                     self.sessions.pop(effect.connection, None)
-            elif effect.kind == "state_event" and effect.change == coquic.StateChange.FAILED:
+            elif (
+                effect.kind == "state_event"
+                and effect.change == coquic.StateChange.FAILED
+            ):
                 if not self._tolerate_failed_state(effect.connection):
-                    raise PerfError(f"server core state failed connection={effect.connection}")
+                    raise PerfError(
+                        f"server core state failed connection={effect.connection}"
+                    )
             elif effect.kind == "receive_stream_data":
                 commands.extend(
                     self.handle_stream_data(
@@ -152,81 +166,111 @@ class Server:
     def handle_stream_data(
         self, connection: int, stream_id: int, data: bytes, fin: bool
     ) -> list[ServerCommand]:
-        commands: list[ServerCommand] = []
         if stream_id == CONTROL_STREAM_ID:
-            session = self.sessions.get(connection)
-            if session is None:
-                raise PerfError("control stream for unknown session")
-            session.control_bytes.extend(data)
-            if not fin:
-                return commands
-
-            decoded = decode_control_message(bytes(session.control_bytes))
-            session.control_bytes.clear()
-            if not isinstance(decoded, SessionStart):
-                commands.append(
-                    SendControlCommand(
-                        connection,
-                        SessionError("expected session_start"),
-                    )
-                )
-                return commands
-
-            reason = validate_session_start(decoded)
-            if reason is not None:
-                commands.append(SendControlCommand(connection, SessionError(reason)))
-                return commands
-
-            session.start = decoded
-            commands.append(
-                SendControlCommand(connection, SessionReady(protocol_version=PROTOCOL_VERSION))
-            )
-            return commands
+            return self.handle_control_stream_data(connection, data, fin)
 
         session = self.sessions.get(connection)
         if session is None or session.start is None:
-            return commands
-        start = session.start
+            return []
 
+        self.record_stream_data(session, data, fin)
+        if not fin:
+            return []
+        if session.start.mode == Mode.BULK:
+            return self.handle_bulk_stream_fin(connection, stream_id, session)
+        if session.start.mode in (Mode.RR, Mode.CRR):
+            return self.handle_request_response_fin(connection, stream_id, session)
+        return []
+
+    def handle_control_stream_data(
+        self, connection: int, data: bytes, fin: bool
+    ) -> list[ServerCommand]:
+        session = self.sessions.get(connection)
+        if session is None:
+            raise PerfError("control stream for unknown session")
+        session.control_bytes.extend(data)
+        if not fin:
+            return []
+
+        decoded = decode_control_message(bytes(session.control_bytes))
+        session.control_bytes.clear()
+        if not isinstance(decoded, SessionStart):
+            return [
+                SendControlCommand(connection, SessionError("expected session_start"))
+            ]
+
+        reason = validate_session_start(decoded)
+        if reason is not None:
+            return [SendControlCommand(connection, SessionError(reason))]
+
+        session.start = decoded
+        return [
+            SendControlCommand(
+                connection, SessionReady(protocol_version=PROTOCOL_VERSION)
+            )
+        ]
+
+    def record_stream_data(self, session: Session, data: bytes, fin: bool) -> None:
         session.bytes_received += len(data)
         if fin:
             session.requests_completed += 1
 
-        if start.mode == Mode.BULK and start.direction == Direction.DOWNLOAD and fin:
-            if start.total_bytes is None:
-                commands.append(SendResponseCommand(connection, stream_id, start.response_bytes))
-                session.bytes_sent += start.response_bytes
-            else:
-                stream_index = max(session.requests_completed - 1, 0)
-                total_bytes = start.total_bytes
-                per_stream = total_bytes // start.streams
-                remainder = total_bytes % start.streams
-                target = per_stream + (1 if stream_index < remainder else 0)
-                commands.append(SendResponseCommand(connection, stream_id, target))
-                session.bytes_sent += target
-                if session.requests_completed >= start.streams:
-                    complete = self.make_complete_command(connection)
-                    if complete is not None:
-                        commands.append(complete)
-        elif start.mode == Mode.BULK and start.direction == Direction.UPLOAD and fin:
-            if session.requests_completed >= start.streams:
-                complete = self.make_complete_command(connection)
-                if complete is not None:
-                    commands.append(complete)
-        elif start.mode in (Mode.RR, Mode.CRR) and fin:
-            commands.append(SendResponseCommand(connection, stream_id, start.response_bytes))
-            session.bytes_sent += start.response_bytes
-            complete = (
-                start.mode == Mode.RR
-                and start.requests is not None
-                and session.requests_completed >= start.requests
-            )
-            if complete:
-                complete_command = self.make_complete_command(connection)
-                if complete_command is not None:
-                    commands.append(complete_command)
+    def handle_bulk_stream_fin(
+        self, connection: int, stream_id: int, session: Session
+    ) -> list[ServerCommand]:
+        start = session.start
+        if start is None:
+            return []
+        if start.direction == Direction.DOWNLOAD:
+            return self.handle_bulk_download_fin(connection, stream_id, session)
+        if session.requests_completed >= start.streams:
+            return self.complete_session(connection)
+        return []
 
+    def handle_bulk_download_fin(
+        self, connection: int, stream_id: int, session: Session
+    ) -> list[ServerCommand]:
+        start = session.start
+        if start is None:
+            return []
+
+        target = start.response_bytes
+        commands: list[ServerCommand] = []
+        if start.total_bytes is not None:
+            stream_index = max(session.requests_completed - 1, 0)
+            per_stream = start.total_bytes // start.streams
+            remainder = start.total_bytes % start.streams
+            target = per_stream + (1 if stream_index < remainder else 0)
+        commands.append(SendResponseCommand(connection, stream_id, target))
+        session.bytes_sent += target
+        if (
+            start.total_bytes is not None
+            and session.requests_completed >= start.streams
+        ):
+            commands.extend(self.complete_session(connection))
         return commands
+
+    def handle_request_response_fin(
+        self, connection: int, stream_id: int, session: Session
+    ) -> list[ServerCommand]:
+        start = session.start
+        if start is None:
+            return []
+        commands: list[ServerCommand] = [
+            SendResponseCommand(connection, stream_id, start.response_bytes)
+        ]
+        session.bytes_sent += start.response_bytes
+        if (
+            start.mode == Mode.RR
+            and start.requests is not None
+            and session.requests_completed >= start.requests
+        ):
+            commands.extend(self.complete_session(connection))
+        return commands
+
+    def complete_session(self, connection: int) -> list[ServerCommand]:
+        complete = self.make_complete_command(connection)
+        return [complete] if complete is not None else []
 
     def execute_command(self, command: ServerCommand, now: int) -> coquic.QueryResult:
         if isinstance(command, SendResponseCommand):
@@ -278,14 +322,11 @@ class Server:
 
     def _tolerate_failed_state(self, connection: int) -> bool:
         session = self.sessions.get(connection)
-        return (
-            connection in self.completed_crr_sessions
-            or (
-                session is not None
-                and session.start is not None
-                and session.start.mode == Mode.CRR
-                and session.requests_completed > 0
-            )
+        return connection in self.completed_crr_sessions or (
+            session is not None
+            and session.start is not None
+            and session.start.mode == Mode.CRR
+            and session.requests_completed > 0
         )
 
 

@@ -1484,11 +1484,13 @@ bool bootstrap_internal_coverage_for_test() {
     // Listening and server-loop paths use forced sockets, poll results, and accept results.
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_listen_socket_failures = 1;
-    bootstrap_internal_coverage_check(ok, make_listen_socket(config) == -1);
+    const auto socket_failure_result = make_listen_socket(config);
+    bootstrap_internal_coverage_check(ok, socket_failure_result == -1);
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_listen_failures = 1;
-    bootstrap_internal_coverage_check(ok, make_listen_socket(config) == -1);
+    const auto listen_failure_result = make_listen_socket(config);
+    bootstrap_internal_coverage_check(ok, listen_failure_result == -1);
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_poll_results = {

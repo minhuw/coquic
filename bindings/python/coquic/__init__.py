@@ -1,3 +1,5 @@
+"""Python bindings for the CoQUIC runtime."""
+
 from ._core import (
     ClientConnectionConfig,
     CloseConnection,

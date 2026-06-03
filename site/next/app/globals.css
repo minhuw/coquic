@@ -1,8 +1,12 @@
 @import "tailwindcss";
 
 @theme inline {
-  --font-sans: "CursorGothic", ui-sans-serif, system-ui, -apple-system, "BlinkMacSystemFont", "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-sans:
+    "CursorGothic", ui-sans-serif, system-ui, -apple-system,
+    "BlinkMacSystemFont", "Segoe UI", sans-serif;
+  --font-mono:
+    "JetBrains Mono", "Fira Code", ui-monospace, "SFMono-Regular", menlo,
+    consolas, "Liberation Mono", monospace;
 }
 
 @layer base {
@@ -162,13 +166,14 @@
     --surface: var(--bg);
     --surface-2: var(--bg);
     --workbench-field: transparent;
-    --workbench-hover: rgba(15, 98, 254, 0.06);
-    --workbench-selected: rgba(15, 98, 254, 0.1);
-    --workbench-danger: rgba(207, 45, 86, 0.08);
-    --workbench-warning: rgba(141, 109, 0, 0.08);
+    --workbench-hover: rgb(15 98 254 / 6%);
+    --workbench-selected: rgb(15 98 254 / 10%);
+    --workbench-danger: rgb(207 45 86 / 8%);
+    --workbench-warning: rgb(141 109 0 / 8%);
     --surface-3: var(--workbench-hover);
-    --shadow-popover: rgba(22, 22, 22, 0.1);
-    --shadow-modal: rgba(22, 22, 22, 0.16);
+    --shadow-popover: rgb(22 22 22 / 10%);
+    --shadow-modal: rgb(22 22 22 / 16%);
+
     background: var(--bg);
   }
 
@@ -179,27 +184,27 @@
     --primary: #8ab4ff;
     --primary-hover: #b6d2ff;
     --primary-active: #d8e7ff;
-    --primary-soft: rgba(138, 180, 255, 0.12);
-    --danger-soft: rgba(255, 126, 182, 0.1);
-    --warning-soft: rgba(241, 194, 27, 0.1);
+    --primary-soft: rgb(138 180 255 / 12%);
+    --danger-soft: rgb(255 126 182 / 10%);
+    --warning-soft: rgb(241 194 27 / 10%);
     --ink: #f7f9fc;
     --soft: #d6dfeb;
     --muted: #93a4b8;
-    --line: rgba(148, 163, 184, 0.22);
-    --line-strong: rgba(148, 163, 184, 0.34);
+    --line: rgb(148 163 184 / 22%);
+    --line-strong: rgb(148 163 184 / 34%);
     --client: #8ab4ff;
     --client-ink: #d8e7ff;
     --server: #b6d2ff;
     --server-ink: #cfe0ff;
     --packet: #8ab4ff;
     --packet-ink: #d8e7ff;
-    --workbench-hover: rgba(138, 180, 255, 0.1);
-    --workbench-selected: rgba(138, 180, 255, 0.14);
-    --workbench-danger: rgba(255, 126, 182, 0.12);
-    --workbench-warning: rgba(241, 194, 27, 0.12);
+    --workbench-hover: rgb(138 180 255 / 10%);
+    --workbench-selected: rgb(138 180 255 / 14%);
+    --workbench-danger: rgb(255 126 182 / 12%);
+    --workbench-warning: rgb(241 194 27 / 12%);
     --surface-3: var(--workbench-hover);
-    --shadow-popover: rgba(0, 0, 0, 0.42);
-    --shadow-modal: rgba(0, 0, 0, 0.58);
+    --shadow-popover: rgb(0 0 0 / 42%);
+    --shadow-modal: rgb(0 0 0 / 58%);
   }
 
   .top-nav {
@@ -236,6 +241,7 @@
 
   .nav-menu-content {
     @apply absolute right-0 top-[calc(100%+6px)] z-30 grid min-w-36 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] p-1;
+
     box-shadow: 0 18px 48px var(--shadow-popover);
   }
 
@@ -490,7 +496,9 @@
 
   .source-time::after {
     content: attr(data-tooltip);
+
     @apply pointer-events-none absolute right-0 top-[calc(100%+8px)] z-30 hidden w-max max-w-[260px] rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] px-3 py-2 font-mono text-xs text-[var(--ink)];
+
     box-shadow: 0 18px 48px var(--shadow-popover);
   }
 
@@ -565,6 +573,7 @@
 
   .docs-function-card::before {
     content: "";
+
     @apply absolute left-0 top-0 h-full w-1 bg-[var(--primary)];
   }
 
@@ -580,6 +589,7 @@
 
   .docs-markdown .docs-function-permalink {
     @apply mt-0.5 shrink-0 rounded-[var(--radius)] px-1.5 py-0.5 font-mono text-xs font-semibold text-[var(--muted)] no-underline opacity-70 transition-colors duration-200 hover:bg-[var(--primary-soft)] hover:text-[var(--primary)] hover:opacity-100 focus-visible:bg-[var(--primary-soft)] focus-visible:text-[var(--primary)] focus-visible:opacity-100;
+
     text-decoration: none;
   }
 
@@ -661,6 +671,7 @@
   .docs-markdown td,
   .qa-markdown td {
     @apply border border-[var(--line)] px-3 py-2.5 align-top text-sm leading-relaxed text-[var(--soft)];
+
     overflow-wrap: anywhere;
   }
 
@@ -828,6 +839,7 @@
 
   .packet-rail::before {
     content: "";
+
     @apply absolute left-8 right-8 top-1/2 h-px -translate-y-1/2 bg-[var(--line)];
   }
 
@@ -841,6 +853,7 @@
 
   .packet-lane::after {
     content: "";
+
     @apply absolute top-1/2 z-[5] size-0 -translate-y-1/2 border-y-[5px] border-y-transparent;
   }
 
@@ -862,19 +875,27 @@
   }
 
   .packet-lane.c2s .pipe-back {
-    background: rgba(15, 98, 254, 0.28);
+    background: rgb(15 98 254 / 28%);
   }
 
   .packet-lane.c2s .pipe-front {
-    background: linear-gradient(90deg, rgba(15, 98, 254, 0.12), rgba(15, 98, 254, 0.74));
+    background: linear-gradient(
+      90deg,
+      rgb(15 98 254 / 12%),
+      rgb(15 98 254 / 74%)
+    );
   }
 
   html[data-theme="dark"] .workbench-page .packet-lane.c2s .pipe-back {
-    background: rgba(138, 180, 255, 0.28);
+    background: rgb(138 180 255 / 28%);
   }
 
   html[data-theme="dark"] .workbench-page .packet-lane.c2s .pipe-front {
-    background: linear-gradient(90deg, rgba(138, 180, 255, 0.16), rgba(138, 180, 255, 0.82));
+    background: linear-gradient(
+      90deg,
+      rgb(138 180 255 / 16%),
+      rgb(138 180 255 / 82%)
+    );
   }
 
   .packet-lane.c2s::after {
@@ -890,7 +911,11 @@
   }
 
   .packet-lane.s2c .pipe-front {
-    background: linear-gradient(90deg, rgba(0, 67, 206, 0.74), rgba(0, 67, 206, 0.12));
+    background: linear-gradient(
+      90deg,
+      rgba(0, 67, 206, 0.74),
+      rgba(0, 67, 206, 0.12)
+    );
   }
 
   html[data-theme="dark"] .workbench-page .packet-lane.s2c .pipe-back {
@@ -898,7 +923,11 @@
   }
 
   html[data-theme="dark"] .workbench-page .packet-lane.s2c .pipe-front {
-    background: linear-gradient(90deg, rgba(182, 210, 255, 0.72), rgba(182, 210, 255, 0.14));
+    background: linear-gradient(
+      90deg,
+      rgba(182, 210, 255, 0.72),
+      rgba(182, 210, 255, 0.14)
+    );
   }
 
   .packet-lane.s2c::after {
@@ -1576,7 +1605,10 @@
     background: var(--surface-2);
     cursor: pointer;
     text-align: left;
-    transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+    transition:
+      border-color 160ms ease,
+      background 160ms ease,
+      color 160ms ease;
   }
 
   .plot-tab:hover,
@@ -1674,9 +1706,21 @@
   }
 
   .bar-row.coquic-family {
-    border-color: color-mix(in srgb, var(--family-color, var(--primary)) 34%, transparent);
+    border-color: color-mix(
+      in srgb,
+      var(--family-color, var(--primary)) 34%,
+      transparent
+    );
     background:
-      linear-gradient(90deg, color-mix(in srgb, var(--family-color, var(--primary)) 14%, transparent), transparent 54%),
+      linear-gradient(
+        90deg,
+        color-mix(
+          in srgb,
+          var(--family-color, var(--primary)) 14%,
+          transparent
+        ),
+        transparent 54%
+      ),
       var(--primary-soft);
   }
 
@@ -2084,7 +2128,11 @@
   }
 
   .trend-legend span.coquic-family {
-    border-color: color-mix(in srgb, var(--family-color, var(--primary)) 34%, transparent);
+    border-color: color-mix(
+      in srgb,
+      var(--family-color, var(--primary)) 34%,
+      transparent
+    );
     background: var(--primary-soft);
   }
 

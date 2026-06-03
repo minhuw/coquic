@@ -9,7 +9,10 @@ type MarkdownBlock =
   | { type: 'heading'; depth: number; text: string }
   | { type: 'paragraph'; text: string }
   | { type: 'list'; ordered: boolean; items: string[] }
+  | { type: 'table'; headers: string[]; rows: string[][] }
   | { type: 'code'; language: string; code: string };
+
+type RenderBlock = MarkdownBlock | { type: 'functionCard'; title: string; id: string; blocks: MarkdownBlock[] };
 
 type MarkdownProps = {
   markdown: string;
@@ -19,53 +22,107 @@ type MarkdownProps = {
 
 export async function Markdown({ markdown, currentSlug, skipFirstH1 = false }: MarkdownProps) {
   let skippedH1 = false;
-  const blocks = parseMarkdown(markdown).filter((block) => {
+  const parsedBlocks = parseMarkdown(markdown).filter((block) => {
     if (skipFirstH1 && !skippedH1 && block.type === 'heading' && block.depth === 1) {
       skippedH1 = true;
       return false;
     }
     return true;
   });
+  const blocks = groupFunctionDocumentation(parsedBlocks);
 
   return (
     <div className="docs-markdown">
-      {blocks.map((block, index) => {
-        if (block.type === 'heading') {
-          const id = slugify(block.text);
-          if (block.depth === 1) return <h1 key={index}>{renderInline(block.text, currentSlug)}</h1>;
-          if (block.depth === 2) {
-            return (
-              <h2 id={id} key={index}>
-                {renderInline(block.text, currentSlug)}
-              </h2>
-            );
-          }
-          return (
-            <h3 id={id} key={index}>
-              {renderInline(block.text, currentSlug)}
-            </h3>
-          );
-        }
-
-        if (block.type === 'paragraph') {
-          return <p key={index}>{renderInline(block.text, currentSlug)}</p>;
-        }
-
-        if (block.type === 'list') {
-          const ListTag = block.ordered ? 'ol' : 'ul';
-          return (
-            <ListTag key={index}>
-              {block.items.map((item, itemIndex) => (
-                <li key={itemIndex}>{renderInline(item, currentSlug)}</li>
-              ))}
-            </ListTag>
-          );
-        }
-
-        return <HighlightedCode code={block.code} language={block.language} key={index} />;
-      })}
+      {blocks.map((block, index) => renderBlock(block, index, currentSlug))}
     </div>
   );
+}
+
+function renderBlock(
+  block: RenderBlock,
+  index: number,
+  currentSlug: readonly string[],
+  options: { inFunctionCard?: boolean } = {},
+) {
+  if (block.type === 'functionCard') {
+    return (
+      <section className="docs-function-card" key={index}>
+        <header className="docs-function-card-header">
+          <a className="docs-function-permalink" href={`#${block.id}`} aria-label={`Permalink to ${block.title}`}>
+            #
+          </a>
+          <h3 id={block.id}>{renderInline(block.title, currentSlug)}</h3>
+        </header>
+        <div className="docs-function-card-body">
+          {block.blocks.map((child, childIndex) =>
+            renderBlock(child, childIndex, currentSlug, { inFunctionCard: true }),
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  if (block.type === 'heading') {
+    const id = slugify(block.text);
+    if (block.depth === 1) return <h1 key={index}>{renderInline(block.text, currentSlug)}</h1>;
+    if (block.depth === 2) {
+      return (
+        <h2 id={id} key={index}>
+          {renderInline(block.text, currentSlug)}
+        </h2>
+      );
+    }
+    return (
+      <h3 id={id} key={index}>
+        {renderInline(block.text, currentSlug)}
+      </h3>
+    );
+  }
+
+  if (block.type === 'paragraph') {
+    const isFunctionLabel = options.inFunctionCard && /^(Parameters|Returns|Notes):$/.test(block.text);
+    return (
+      <p className={isFunctionLabel ? 'docs-function-label' : undefined} key={index}>
+        {renderInline(block.text, currentSlug)}
+      </p>
+    );
+  }
+
+  if (block.type === 'list') {
+    const ListTag = block.ordered ? 'ol' : 'ul';
+    return (
+      <ListTag key={index}>
+        {block.items.map((item, itemIndex) => (
+          <li key={itemIndex}>{renderInline(item, currentSlug)}</li>
+        ))}
+      </ListTag>
+    );
+  }
+
+  if (block.type === 'table') {
+    return (
+      <table key={index}>
+        <thead>
+          <tr>
+            {block.headers.map((header, headerIndex) => (
+              <th key={headerIndex}>{renderInline(header, currentSlug)}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {block.rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>
+              {block.headers.map((_, cellIndex) => (
+                <td key={cellIndex}>{renderInline(row[cellIndex] ?? '', currentSlug)}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }
+
+  return <HighlightedCode code={block.code} language={block.language} key={index} />;
 }
 
 async function HighlightedCode({ code, language }: { code: string; language: string }) {
@@ -159,6 +216,20 @@ function parseMarkdown(markdown: string) {
       continue;
     }
 
+    if (isTableStart(lines, index)) {
+      const headers = splitTableRow(trimmed);
+      index += 2;
+
+      const rows: string[][] = [];
+      while (index < lines.length && isTableRow(currentLine())) {
+        rows.push(splitTableRow(currentLine().trim()));
+        index += 1;
+      }
+
+      blocks.push({ type: 'table', headers, rows });
+      continue;
+    }
+
     const paragraph: string[] = [];
     while (index < lines.length && !isBlockStart(currentLine())) {
       paragraph.push(currentLine().trim());
@@ -170,13 +241,85 @@ function parseMarkdown(markdown: string) {
   return blocks;
 }
 
+function groupFunctionDocumentation(blocks: readonly MarkdownBlock[]) {
+  const grouped: RenderBlock[] = [];
+  let inFunctionDocumentation = false;
+  let index = 0;
+
+  while (index < blocks.length) {
+    const block = blocks[index];
+
+    if (block.type === 'heading' && block.depth === 2) {
+      inFunctionDocumentation = block.text === 'Function Documentation';
+      grouped.push(block);
+      index += 1;
+      continue;
+    }
+
+    if (inFunctionDocumentation && block.type === 'heading' && block.depth === 3 && isFunctionHeading(block.text)) {
+      const title = block.text;
+      const cardBlocks: MarkdownBlock[] = [];
+      index += 1;
+
+      while (index < blocks.length) {
+        const next = blocks[index];
+        if (next.type === 'heading' && (next.depth === 2 || next.depth === 3)) break;
+        cardBlocks.push(next);
+        index += 1;
+      }
+
+      grouped.push({
+        type: 'functionCard',
+        title,
+        id: slugify(title),
+        blocks: cardBlocks,
+      });
+      continue;
+    }
+
+    grouped.push(block);
+    index += 1;
+  }
+
+  return grouped;
+}
+
+function isFunctionHeading(text: string) {
+  return /^coquic_[A-Za-z0-9_]+\(\)$/.test(text);
+}
+
 function isBlockStart(line: string) {
   const trimmed = line.trim();
-  return !trimmed || /^```/.test(trimmed) || /^#{1,3}\s+/.test(trimmed) || /^-\s+/.test(trimmed) || /^\d+\.\s+/.test(trimmed);
+  return (
+    !trimmed ||
+    /^```/.test(trimmed) ||
+    /^#{1,3}\s+/.test(trimmed) ||
+    /^-\s+/.test(trimmed) ||
+    /^\d+\.\s+/.test(trimmed)
+  );
 }
 
 function isIndentedContinuation(line: string) {
   return /^\s{2,}\S/.test(line);
+}
+
+function isTableStart(lines: readonly string[], index: number) {
+  const header = lines[index]?.trim() ?? '';
+  const separator = lines[index + 1]?.trim() ?? '';
+  return isTableRow(header) && /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(separator);
+}
+
+function isTableRow(line: string) {
+  return /^\|.*\|$/.test(line.trim());
+}
+
+function splitTableRow(line: string) {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim());
 }
 
 function renderInline(text: string, currentSlug: readonly string[]) {

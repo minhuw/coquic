@@ -13,6 +13,7 @@ nix develop .#quictls -c zig build package -Dtls_backend=quictls -Doptimize=Rele
 The package step installs into `zig-out/`:
 
 - `include/coquic/ffi/core.h`
+- `include/coquic/ffi/http3.h`
 - `lib/libcoquic-boringssl.a` and `lib/libcoquic-boringssl.so`
 - `lib/libcoquic-quictls.a` and `lib/libcoquic-quictls.so`
 - `lib/pkgconfig/coquic-boringssl.pc` or `coquic-quictls.pc`
@@ -58,3 +59,17 @@ do not install the SDK package metadata.
 
 Release packages must include the applicable upstream TLS license and notice
 materials for the pinned BoringSSL or QuicTLS dependency.
+
+## Rust Wrapper
+
+The Rust crate in `bindings/rust/coquic` links against one of these C FFI
+packages through pkg-config by default. Build the backend package first, then
+run Cargo with the package library on the runtime search path:
+
+```sh
+nix develop .#quictls -c zig build package -Dtls_backend=quictls -Doptimize=ReleaseFast
+nix develop -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo test --manifest-path bindings/rust/coquic/Cargo.toml'
+```
+
+Set `COQUIC_TLS_BACKEND=boringssl` to use the BoringSSL package, or
+`COQUIC_PKG_CONFIG_NAME` to override the pkg-config package name.

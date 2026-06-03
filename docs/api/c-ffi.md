@@ -1,14 +1,14 @@
 # C FFI API
 
-The C FFI API is the public C ABI boundary for CoQUIC. It exposes the same
-sans-I/O endpoint model as `coquic::core`, but uses opaque handles, fixed-width
-integer types, tagged effect structs, and explicit result destruction so it can
-be consumed from C and native language bindings.
+The C FFI API is the public C ABI boundary for CoQUIC. It exposes the sans-I/O
+Core, QUIC facade, and HTTP/3 APIs through opaque handles, fixed-width integer
+types, tagged structs, and explicit ownership.
 
-The public header is:
+Use these headers:
 
 ```c
 #include <coquic/ffi/core.h>
+#include <coquic/ffi/http3.h>
 ```
 
 The implementation is packaged by TLS backend:
@@ -25,103 +25,91 @@ The implementation is packaged by TLS backend:
 Do not link both backend packages into one process. They intentionally export
 the same `coquic_*` C symbols.
 
-## ABI Version
+## Common Rules
 
 `COQUIC_FFI_ABI_VERSION` is the compile-time ABI version. Call
 `coquic_ffi_abi_version()` at runtime when a binding needs to verify that the
-loaded library matches the headers it was built against.
+loaded library matches the headers it was built against. The current ABI version
+is `1`.
 
-The current ABI version is `1`.
+All API input structs with a `size` member must be initialized before use. Keep
+`size` at `sizeof(the_struct)` after initialization so future ABI versions can
+append fields while still accepting v1 callers.
 
-## Object Model
+Input buffers use `coquic_bytes_t`. CoQUIC copies input bytes during the call,
+so those buffers only need to live until the function returns.
+
+Output buffers use `coquic_bytes_view_t`. These views are borrowed from the
+owning `coquic_result_t` or HTTP/3 update object. Copy data that must outlive
+that owner.
+
+`coquic_time_us_t` is a monotonic microsecond timestamp supplied by the caller.
+Use one runtime clock consistently for all calls on an endpoint.
+
+## Ownership
 
 `coquic_endpoint_t` owns QUIC endpoint state. Create it with
 `coquic_endpoint_create()` and release it with `coquic_endpoint_destroy()`.
 
-`coquic_result_t` owns the effects returned by an endpoint operation. Every
-successful endpoint or connection operation writes a result pointer to the
-caller-provided `coquic_result_t **`. Release each non-null result with
+`coquic_result_t` owns endpoint and connection effects. Every successful
+endpoint, Core connection, or QUIC facade operation writes a result pointer to
+`coquic_result_t **out_result`. Release each non-null result with
 `coquic_result_destroy()` after reading its effects.
 
-Passing `NULL` to a destroy function is allowed.
+`coquic_http3_client_t` and `coquic_http3_server_t` own HTTP/3 protocol state
+for one QUIC connection. HTTP/3 update objects own emitted QUIC inputs and HTTP
+events; release them with the matching update destroy function.
 
-## Configuration
+Passing `NULL` to destroy functions is allowed.
 
-Initialize configuration structs before use:
+## Status And Errors
 
-```c
-coquic_endpoint_config_t endpoint_config;
-coquic_endpoint_config_init(&endpoint_config);
+Most mutating calls return `coquic_status_t`:
 
-coquic_client_connection_config_t connection_config;
-coquic_client_connection_config_init(&connection_config);
-```
+- `COQUIC_STATUS_OK`: the C call succeeded.
+- `COQUIC_STATUS_INVALID_ARGUMENT`: a required pointer, struct size, enum tag,
+  or index was invalid.
+- `COQUIC_STATUS_OUT_OF_MEMORY`: allocation failed.
+- `COQUIC_STATUS_INTERNAL_ERROR`: an unexpected implementation exception was
+  caught before crossing the C ABI.
 
-Structs that cross the ABI boundary include a `size` field when they are used
-as API inputs. Keep that field at `sizeof(the_struct)` after initialization.
-This lets future versions append fields while still accepting older callers
-whose struct size covers the required v1 fields.
+`COQUIC_STATUS_OK` does not mean the QUIC or HTTP/3 operation completed
+successfully at the protocol layer. Transport-level local errors are reported
+inside `coquic_result_t`; use `coquic_result_has_local_error()` and
+`coquic_result_local_error()`.
 
-## Time
-
-`coquic_time_us_t` is an unsigned microsecond timestamp. Use one monotonic
-runtime clock consistently for all calls on an endpoint. CoQUIC compares these
-values to drive timers; it does not read the system clock through the C API.
-
-Use `coquic_endpoint_next_wakeup()` or `coquic_result_next_wakeup()` to arm the
-runtime timer. When the timer fires, call `coquic_endpoint_timer_expired()`.
-
-## Buffer Ownership
-
-Input buffers use `coquic_bytes_t`. CoQUIC copies input bytes during the API
-call, so the caller only needs those buffers to remain valid until the function
-returns.
-
-Output buffers use `coquic_bytes_view_t`. These are borrowed views into the
-owning `coquic_result_t`. They remain valid only until that result is destroyed.
-Copy any effect bytes, resumption state, NEW_TOKEN token, or packet-inspection
-data that must outlive the result.
-
-Do not free `coquic_bytes_view_t.data`; it is not caller-owned.
+HTTP/3 submit errors are reported with `coquic_http3_error_t`. Set
+`detail_buffer` and `detail_buffer_capacity` before the call when a binding
+wants a copied diagnostic string.
 
 ## Event Loop
 
-The C FFI is still sans-I/O. The caller owns sockets, routing, timers, files,
-threading, and application scheduling.
+The C FFI remains sans-I/O. The caller owns sockets, timers, routing, files,
+threads, and scheduling.
 
 The usual loop is:
 
-1. Create one endpoint with `coquic_endpoint_create()`.
-2. For a client, call `coquic_endpoint_open_connection()`.
-3. Feed inbound UDP datagrams with `coquic_endpoint_input_datagram()`.
-4. Feed timer expiry with `coquic_endpoint_timer_expired()`.
-5. Feed application work with connection functions such as
-   `coquic_connection_send_stream()` and `coquic_connection_close()`.
-6. Iterate returned effects with `coquic_result_effect_count()` and
+1. Create an endpoint with `coquic_endpoint_create()`.
+2. Open a client connection with `coquic_endpoint_open_connection()` or
+   `coquic_quic_connect()`.
+3. Feed inbound UDP datagrams with `coquic_endpoint_input_datagram()` or
+   `coquic_quic_receive_datagram()`.
+4. Feed timer expiry with `coquic_endpoint_timer_expired()` or
+   `coquic_quic_timer_expired()`.
+5. Feed application work with Core connection functions, QUIC facade functions,
+   or HTTP/3-produced `coquic_connection_input_t` values.
+6. Iterate result effects with `coquic_result_effect_count()` and
    `coquic_result_effect_at()`.
 7. Send every `COQUIC_EFFECT_SEND_DATAGRAM` effect through the runtime socket.
 8. Deliver stream, DATAGRAM, lifecycle, 0-RTT, token, and diagnostic effects to
    the application.
 9. Destroy the result.
-10. Re-arm the runtime timer from the endpoint or result wakeup.
+10. Re-arm the runtime timer from `coquic_result_next_wakeup()` or
+    `coquic_endpoint_next_wakeup()`.
 
-`coquic_route_handle_t` is runtime-defined. CoQUIC returns route handles on send
-effects so the caller can send the datagram on the matching socket or path.
-
-## Status And Errors
-
-Most functions return `coquic_status_t`:
-
-- `COQUIC_STATUS_OK`: the C call succeeded.
-- `COQUIC_STATUS_INVALID_ARGUMENT`: a required pointer, size field, or index was
-  invalid.
-- `COQUIC_STATUS_OUT_OF_MEMORY`: allocation failed.
-- `COQUIC_STATUS_INTERNAL_ERROR`: an unexpected implementation exception was
-  caught before it crossed the C ABI.
-
-Transport-level local errors are reported in `coquic_result_t`. Use
-`coquic_result_has_local_error()` and `coquic_result_local_error()` after a
-successful API call.
+If `coquic_result_send_continuation_pending()` or
+`coquic_endpoint_has_send_continuation_pending()` returns non-zero, call back
+into the endpoint without blocking so queued send work can continue.
 
 ## Minimal Smoke Test
 
@@ -154,9 +142,16 @@ target_link_libraries(app PRIVATE CoQUIC::coquic_boringssl)
 
 Use `CoQUIC::coquic_boringssl_static` when a static link is required.
 
+## API Reference
+
+The usage guide intentionally keeps signatures and per-function behavior out of
+the main flow. See the [C FFI Reference](c-ffi-reference.md) for the public
+function list with inputs, outputs, semantics, and important notices.
+
 ## Stability
 
 The C FFI API is intended to become the stable native binding surface. For now,
 treat the ABI version, exported `coquic_*` functions, enum values, and public
-struct layouts in `include/coquic/ffi/core.h` as the compatibility boundary.
-Implementation files under `src/` remain private.
+struct layouts in `include/coquic/ffi/core.h` and `include/coquic/ffi/http3.h`
+as the compatibility boundary. Implementation files under `src/` remain
+private.

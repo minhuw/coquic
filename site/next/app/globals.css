@@ -554,6 +554,57 @@
     @apply mt-3 text-base font-semibold leading-tight text-[var(--ink)];
   }
 
+  .docs-function-card {
+    @apply relative mt-3 grid scroll-mt-24 gap-0 overflow-hidden rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] shadow-none;
+  }
+
+  .docs-function-card::before {
+    content: "";
+    @apply absolute left-0 top-0 h-full w-1 bg-[var(--primary)];
+  }
+
+  .docs-function-card-header {
+    @apply flex min-w-0 items-start gap-2 border-b border-[var(--line)] bg-[var(--code-bg)] py-3 pl-4 pr-3 sm:pl-5 sm:pr-4;
+  }
+
+  .docs-function-card-header h3 {
+    @apply m-0 min-w-0 scroll-mt-24 font-mono text-[15px] font-semibold leading-snug text-[var(--ink)];
+    overflow-wrap: anywhere;
+  }
+
+  .docs-markdown .docs-function-permalink {
+    @apply mt-0.5 shrink-0 rounded-[var(--radius)] px-1.5 py-0.5 font-mono text-xs font-semibold text-[var(--muted)] no-underline opacity-70 transition-colors duration-200 hover:bg-[var(--primary-soft)] hover:text-[var(--primary)] hover:opacity-100 focus-visible:bg-[var(--primary-soft)] focus-visible:text-[var(--primary)] focus-visible:opacity-100;
+    text-decoration: none;
+  }
+
+  .docs-function-card-body {
+    @apply grid gap-3 px-4 py-4 sm:px-5;
+  }
+
+  .docs-function-card-body > :first-child {
+    @apply mt-0;
+  }
+
+  .docs-function-card-body > :last-child {
+    @apply mb-0;
+  }
+
+  .docs-function-card-body .docs-code-block {
+    @apply rounded-[var(--radius)] border-[var(--line-strong)];
+  }
+
+  .docs-function-card-body .docs-code-toolbar {
+    @apply min-h-8 px-3;
+  }
+
+  .docs-function-card-body .docs-code-scroll pre {
+    @apply p-3 text-[12px];
+  }
+
+  .docs-markdown .docs-function-label {
+    @apply mt-1 font-mono text-[12px] font-semibold uppercase leading-tight text-[var(--muted)];
+  }
+
   .docs-markdown p {
     @apply text-[15px] leading-relaxed text-[var(--soft)];
   }

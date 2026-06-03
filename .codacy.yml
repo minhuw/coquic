@@ -29,6 +29,11 @@ engines:
       - "bindings/rust/coquic/src/ffi.rs"
       - "bindings/rust/coquic/src/http3.rs"
       - "bindings/rust/coquic/src/lib.rs"
+  prospector:
+    exclude_paths:
+      - "rag/**"
+      - "scripts/**"
+      - "tests/**"
 
 exclude_paths:
   - ".agents/**"

@@ -48,13 +48,13 @@ TEST(QuicCoreTest,
     connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(2));
 
     ASSERT_FALSE(connection.has_failed());
-    const auto received = connection.take_received_stream_data();
-    ASSERT_TRUE(received.has_value());
-    if (!received.has_value()) {
+    const auto received_stream_data = connection.take_received_stream_data();
+    if (!received_stream_data.has_value()) {
+        FAIL() << "expected received stream data";
         return;
     }
 
-    const auto &received_value = optional_ref_or_terminate(received);
+    const auto &received_value = optional_ref_or_terminate(received_stream_data);
     EXPECT_EQ(received_value.stream_id, 0u);
     EXPECT_EQ(received_value.bytes, coquic::quic::test::bytes_from_string("GET /\r\n"));
     EXPECT_TRUE(received_value.fin);
@@ -182,7 +182,7 @@ TEST(QuicCoreTest, ProcessInboundDatagramIgnoresLaterHandshakePacketFailure) {
         });
     ASSERT_TRUE(first_packet.has_value());
 
-    const auto second_packet = coquic::quic::serialize_protected_datagram(
+    const auto second_protected_packet = coquic::quic::serialize_protected_datagram(
         std::array<coquic::quic::ProtectedPacket, 1>{
             coquic::quic::ProtectedOneRttPacket{
                 .destination_connection_id = connection.config_.source_connection_id,
@@ -200,10 +200,11 @@ TEST(QuicCoreTest, ProcessInboundDatagramIgnoresLaterHandshakePacketFailure) {
                 connection.client_initial_destination_connection_id(),
             .one_rtt_secret = connection.application_space_.read_secret,
         });
-    ASSERT_TRUE(second_packet.has_value());
+    ASSERT_TRUE(second_protected_packet.has_value());
 
     auto datagram = first_packet.value();
-    datagram.insert(datagram.end(), second_packet.value().begin(), second_packet.value().end());
+    datagram.insert(datagram.end(), second_protected_packet.value().begin(),
+                    second_protected_packet.value().end());
 
     connection.process_inbound_datagram(datagram, coquic::quic::test::test_time(1));
 
@@ -239,7 +240,7 @@ TEST(QuicCoreTest, ProcessInboundDatagramIgnoresLaterHandshakeCryptoFailure) {
         });
     ASSERT_TRUE(first_packet.has_value());
 
-    const auto second_packet = coquic::quic::serialize_protected_datagram(
+    const auto second_protected_packet = coquic::quic::serialize_protected_datagram(
         std::array<coquic::quic::ProtectedPacket, 1>{
             coquic::quic::ProtectedHandshakePacket{
                 .version = 1,
@@ -262,10 +263,11 @@ TEST(QuicCoreTest, ProcessInboundDatagramIgnoresLaterHandshakeCryptoFailure) {
                 connection.client_initial_destination_connection_id(),
             .handshake_secret = connection.handshake_space_.read_secret,
         });
-    ASSERT_TRUE(second_packet.has_value());
+    ASSERT_TRUE(second_protected_packet.has_value());
 
     auto datagram = first_packet.value();
-    datagram.insert(datagram.end(), second_packet.value().begin(), second_packet.value().end());
+    datagram.insert(datagram.end(), second_protected_packet.value().begin(),
+                    second_protected_packet.value().end());
 
     connection.process_inbound_datagram(datagram, coquic::quic::test::test_time(1));
 
@@ -774,7 +776,7 @@ TEST(QuicCoreTest, ProcessInboundDatagramQlogPathIgnoresLaterHandshakeCryptoFail
         });
     ASSERT_TRUE(first_packet.has_value());
 
-    const auto second_packet = coquic::quic::serialize_protected_datagram(
+    const auto second_protected_packet = coquic::quic::serialize_protected_datagram(
         std::array<coquic::quic::ProtectedPacket, 1>{
             coquic::quic::ProtectedHandshakePacket{
                 .version = 1,
@@ -794,10 +796,11 @@ TEST(QuicCoreTest, ProcessInboundDatagramQlogPathIgnoresLaterHandshakeCryptoFail
                 connection.client_initial_destination_connection_id(),
             .handshake_secret = connection.handshake_space_.read_secret,
         });
-    ASSERT_TRUE(second_packet.has_value());
+    ASSERT_TRUE(second_protected_packet.has_value());
 
     auto datagram = first_packet.value();
-    datagram.insert(datagram.end(), second_packet.value().begin(), second_packet.value().end());
+    datagram.insert(datagram.end(), second_protected_packet.value().begin(),
+                    second_protected_packet.value().end());
 
     connection.process_inbound_datagram(datagram, coquic::quic::test::test_time(1));
 
@@ -831,10 +834,10 @@ TEST(QuicCoreTest, ProcessInboundDatagramQlogPathTracesOneRttProcessingFailure) 
 
     testing::internal::CaptureStderr();
     connection.process_inbound_datagram(invalid_packet.value(), coquic::quic::test::test_time(1));
-    const auto stderr_output = testing::internal::GetCapturedStderr();
+    const auto trace_stderr_output = testing::internal::GetCapturedStderr();
 
     EXPECT_TRUE(connection.has_failed());
-    EXPECT_NE(stderr_output.find("quic-packet-trace fail scid=5301"), std::string::npos);
+    EXPECT_NE(trace_stderr_output.find("quic-packet-trace fail scid=5301"), std::string::npos);
 }
 
 TEST(QuicCoreTest,
@@ -1104,15 +1107,17 @@ TEST(QuicCoreTest, PacketTraceLogsAppEmptyWhenHandshakePacketFinalizesWithoutApp
 
     testing::internal::CaptureStderr();
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
-    const auto stderr_output = testing::internal::GetCapturedStderr();
+    const auto trace_stderr_output = testing::internal::GetCapturedStderr();
 
     ASSERT_FALSE(datagram.empty());
     EXPECT_FALSE(connection.has_failed());
 
-    const auto packets = decode_sender_datagram(connection, datagram);
-    ASSERT_EQ(packets.size(), 1u);
-    EXPECT_NE(std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.front()), nullptr);
-    EXPECT_NE(stderr_output.find("quic-packet-trace app-empty scid="), std::string::npos);
+    const auto trace_packets = decode_sender_datagram(connection, datagram);
+    if (trace_packets.size() != 1u) {
+        FAIL() << "packet trace datagram did not contain one packet";
+    }
+    EXPECT_NE(std::get_if<coquic::quic::ProtectedHandshakePacket>(&trace_packets.front()), nullptr);
+    EXPECT_NE(trace_stderr_output.find("quic-packet-trace app-empty scid="), std::string::npos);
 }
 
 TEST(QuicCoreTest, PacketTraceFilterMatchesExactSourceConnectionId) {
@@ -1142,10 +1147,10 @@ TEST(QuicCoreTest, PacketTraceFilterMatchesExactSourceConnectionId) {
 
     testing::internal::CaptureStderr();
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
-    const auto stderr_output = testing::internal::GetCapturedStderr();
+    const auto trace_stderr_output = testing::internal::GetCapturedStderr();
 
     ASSERT_FALSE(datagram.empty());
-    EXPECT_NE(stderr_output.find("quic-packet-trace app-empty scid=5301"), std::string::npos);
+    EXPECT_NE(trace_stderr_output.find("quic-packet-trace app-empty scid=5301"), std::string::npos);
 }
 
 TEST(QuicCoreTest, PacketTraceFilterSuppressesNonMatchingSourceConnectionId) {
@@ -1175,10 +1180,10 @@ TEST(QuicCoreTest, PacketTraceFilterSuppressesNonMatchingSourceConnectionId) {
 
     testing::internal::CaptureStderr();
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
-    const auto stderr_output = testing::internal::GetCapturedStderr();
+    const auto trace_stderr_output = testing::internal::GetCapturedStderr();
 
     ASSERT_FALSE(datagram.empty());
-    EXPECT_TRUE(stderr_output.empty());
+    EXPECT_TRUE(trace_stderr_output.empty());
 }
 
 TEST(QuicCoreTest, PacketTraceLogsDiscardFailureReceiveAndSendPaths) {

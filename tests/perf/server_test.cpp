@@ -222,10 +222,12 @@ TEST(QuicPerfServerTest, PerfSendBufferOwnsBufferedDatagramBytesUntilFlush) {
     ASSERT_TRUE(buffer.flush(backend));
     EXPECT_EQ(buffer.size(), 0u);
     ASSERT_EQ(backend.sent_datagrams.size(), 1u);
-    const auto payload = backend.sent_datagrams.front().payload();
-    ASSERT_EQ(payload.size(), 2u);
-    EXPECT_EQ(payload[0], std::byte{0x01});
-    EXPECT_EQ(payload[1], std::byte{0x02});
+    const auto sent_payload = backend.sent_datagrams.front().payload();
+    if (sent_payload.size() != 2u) {
+        FAIL() << "buffered datagram payload had unexpected size";
+    }
+    EXPECT_EQ(sent_payload[0], std::byte{0x01});
+    EXPECT_EQ(sent_payload[1], std::byte{0x02});
 }
 
 TEST(QuicPerfServerTest, PerfSendBufferReportsBufferedDatagramCount) {

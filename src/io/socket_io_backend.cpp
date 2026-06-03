@@ -317,7 +317,7 @@ bool socket_io_backend_has_legacy_recvfrom_override_for_runtime_tests() {
 }
 
 ScopedSocketIoBackendOpsOverride::ScopedSocketIoBackendOpsOverride(
-    SocketIoBackendOpsOverride override_ops)
+    const SocketIoBackendOpsOverride &override_ops)
     : previous_(internal::socket_io_backend_ops_state()) {
     internal::apply_socket_io_backend_ops_override(override_ops);
 }

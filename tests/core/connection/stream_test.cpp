@@ -1792,22 +1792,22 @@ TEST(QuicCoreTest, SelectPtoProbePrefersOutstandingStreamDataOverNewerControlOnl
                                      .bytes_in_flight = 60,
                                  });
 
-    auto probe = connection.select_pto_probe(connection.application_space_);
+    auto stream_probe = connection.select_pto_probe(connection.application_space_);
 
-    if (probe.packet_number != 10u) {
+    if (stream_probe.packet_number != 10u) {
         ADD_FAILURE() << "PTO probe selected the wrong packet number";
     }
-    if (probe.stream_fragments.size() != 1u) {
+    if (stream_probe.stream_fragments.size() != 1u) {
         ADD_FAILURE() << "PTO probe did not carry exactly one stream fragment";
         return;
     }
-    if (probe.stream_fragments.front().stream_id != 0u) {
+    if (stream_probe.stream_fragments.front().stream_id != 0u) {
         ADD_FAILURE() << "PTO probe selected the wrong stream";
     }
-    if (probe.stream_fragments.front().bytes != payload) {
+    if (stream_probe.stream_fragments.front().bytes != payload) {
         ADD_FAILURE() << "PTO probe selected the wrong payload";
     }
-    if (!probe.stream_fragments.front().fin) {
+    if (!stream_probe.stream_fragments.front().fin) {
         ADD_FAILURE() << "PTO probe did not preserve FIN";
     }
 }
@@ -3190,9 +3190,9 @@ TEST(QuicCoreTest, SelectPtoProbeDropsFramesWhoseStreamsNoLongerExist) {
                                                    .has_ping = true,
                                                });
 
-    auto probe = connection.select_pto_probe(packet_space);
+    auto control_frame_probe = connection.select_pto_probe(packet_space);
 
-    auto &probe_packet = probe;
+    auto &probe_packet = control_frame_probe;
     EXPECT_TRUE(probe_packet.reset_stream_frames.empty());
     EXPECT_TRUE(probe_packet.stop_sending_frames.empty());
     EXPECT_TRUE(probe_packet.max_stream_data_frames.empty());

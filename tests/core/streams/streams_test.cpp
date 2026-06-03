@@ -336,13 +336,15 @@ TEST(QuicStreamsTest, NextSendOffsetPrefersFreshDataThenLostRangesWhenRequested)
 
     EXPECT_EQ(state.next_send_offset_for_budget(/*prefer_fresh_data=*/true), sent[0].offset);
 
-    const auto lost_retry = state.take_send_fragments(coquic::quic::StreamSendBudget{
+    const auto lost_retry_fragments = state.take_send_fragments(coquic::quic::StreamSendBudget{
         .packet_bytes = 4,
         .new_bytes = 0,
         .prefer_fresh_data = true,
     });
-    ASSERT_EQ(lost_retry.size(), 1u);
-    EXPECT_EQ(lost_retry[0].offset, sent[0].offset);
+    if (lost_retry_fragments.size() != 1u) {
+        FAIL() << "lost retry did not produce one fragment";
+    }
+    EXPECT_EQ(lost_retry_fragments[0].offset, sent[0].offset);
 
     EXPECT_EQ(state.next_send_offset_for_budget(/*prefer_fresh_data=*/true),
               state.flow_control.highest_sent);
@@ -576,8 +578,8 @@ TEST(QuicStreamsTest, ResetAndStopSendingRemainIdempotentAfterAcknowledgement) {
     const auto stop = stop_state.take_stop_sending_frame();
     ASSERT_TRUE(stop.has_value());
     EXPECT_TRUE(stop_state.has_outstanding_send());
-    const auto stop_frame = stop.value_or(coquic::quic::StopSendingFrame{});
-    stop_state.acknowledge_stop_sending_frame(stop_frame);
+    const auto stop_sending_frame = stop.value_or(coquic::quic::StopSendingFrame{});
+    stop_state.acknowledge_stop_sending_frame(stop_sending_frame);
     EXPECT_FALSE(stop_state.has_pending_send());
     EXPECT_FALSE(stop_state.has_outstanding_send());
     ASSERT_TRUE(stop_state.validate_local_stop_sending(/*application_error_code=*/9).has_value());
@@ -805,9 +807,9 @@ TEST(QuicStreamsTest, PendingSendAndPeerStopCoverBlockedFinAndControlStates) {
     fin_blocked_by_pending_data.send_buffer.append(bytes_from_string("x"));
     fin_blocked_by_pending_data.send_flow_control_committed = 1;
     EXPECT_TRUE(fin_blocked_by_pending_data.has_pending_send());
-    const auto pending_data_fragments =
+    const auto blocked_fin_fragments =
         fin_blocked_by_pending_data.take_send_fragments(/*max_bytes=*/0);
-    EXPECT_TRUE(pending_data_fragments.empty());
+    EXPECT_TRUE(blocked_fin_fragments.empty());
 
     StreamState pending_without_final_size =
         make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
@@ -868,8 +870,9 @@ TEST(QuicStreamsTest, StreamDataBlockedFramesDeduplicateAndClearWhenPeerCreditCa
     EXPECT_TRUE(state.has_pending_send());
     const auto resent = state.take_stream_data_blocked_frame();
     ASSERT_TRUE(resent.has_value());
-    const auto resent_stream_data_blocked = resent.value_or(coquic::quic::StreamDataBlockedFrame{});
-    state.acknowledge_stream_data_blocked_frame(resent_stream_data_blocked);
+    const auto resent_stream_data_blocked_frame =
+        resent.value_or(coquic::quic::StreamDataBlockedFrame{});
+    state.acknowledge_stream_data_blocked_frame(resent_stream_data_blocked_frame);
     EXPECT_FALSE(state.has_outstanding_send());
     EXPECT_EQ(state.flow_control.stream_data_blocked_state, StreamControlFrameState::acknowledged);
     EXPECT_FALSE(state.take_stream_data_blocked_frame().has_value());

@@ -315,7 +315,7 @@ coquic::core::ZeroRttConfig to_cpp(coquic_zero_rtt_config_t config) {
     };
 }
 
-coquic::core::TransportConfig to_cpp(coquic_transport_config_t config) {
+coquic::core::TransportConfig to_cpp(const coquic_transport_config_t &config) {
     return coquic::core::TransportConfig{
         .max_idle_timeout = config.max_idle_timeout,
         .max_udp_payload_size = config.max_udp_payload_size,
@@ -442,6 +442,7 @@ coquic_effect_t from_cpp(const coquic::core::Effect &effect) {
         [](const auto &value) -> coquic_effect_t {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, coquic::core::SendDatagram>) {
+                // Network output borrows datagram bytes from the owning result.
                 return coquic_effect_t{
                     .kind = COQUIC_EFFECT_SEND_DATAGRAM,
                     .as =
@@ -458,6 +459,7 @@ coquic_effect_t from_cpp(const coquic::core::Effect &effect) {
                         },
                 };
             } else if constexpr (std::is_same_v<T, coquic::core::ReceiveStreamData>) {
+                // Application data events expose byte views and stream-final state.
                 return coquic_effect_t{
                     .kind = COQUIC_EFFECT_RECEIVE_STREAM_DATA,
                     .as =
@@ -511,6 +513,7 @@ coquic_effect_t from_cpp(const coquic::core::Effect &effect) {
                         },
                 };
             } else if constexpr (std::is_same_v<T, coquic::core::StateEvent>) {
+                // Lifecycle and state events are value-only notifications.
                 return coquic_effect_t{
                     .kind = COQUIC_EFFECT_STATE_EVENT,
                     .as =
@@ -571,6 +574,7 @@ coquic_effect_t from_cpp(const coquic::core::Effect &effect) {
                         },
                 };
             } else if constexpr (std::is_same_v<T, coquic::core::PacketInspection>) {
+                // Packet inspection mirrors wire metadata without copying packet buffers.
                 return coquic_effect_t{
                     .kind = COQUIC_EFFECT_PACKET_INSPECTION,
                     .as =
@@ -599,6 +603,7 @@ coquic_effect_t from_cpp(const coquic::core::Effect &effect) {
                         },
                 };
             } else if constexpr (std::is_same_v<T, coquic::core::NewTokenAvailable>) {
+                // New-token events publish resumption material as borrowed bytes.
                 return coquic_effect_t{
                     .kind = COQUIC_EFFECT_NEW_TOKEN_AVAILABLE,
                     .as =
@@ -613,14 +618,6 @@ coquic_effect_t from_cpp(const coquic::core::Effect &effect) {
             }
         },
         effect);
-}
-
-coquic_status_t allocate_result(coquic::core::Result result, coquic_result_t **out_result) {
-    if (out_result == nullptr) {
-        return COQUIC_STATUS_INVALID_ARGUMENT;
-    }
-    *out_result = nullptr;
-    return ffi_guard([&] { *out_result = new coquic_result(std::move(result)); });
 }
 
 std::optional<coquic::core::ConnectionHandle>

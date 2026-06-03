@@ -41,7 +41,7 @@ struct SocketIoBackendOpsOverride {
 
 class ScopedSocketIoBackendOpsOverride {
   public:
-    explicit ScopedSocketIoBackendOpsOverride(SocketIoBackendOpsOverride override_ops);
+    explicit ScopedSocketIoBackendOpsOverride(const SocketIoBackendOpsOverride &override_ops);
     ~ScopedSocketIoBackendOpsOverride();
 
     ScopedSocketIoBackendOpsOverride(const ScopedSocketIoBackendOpsOverride &) = delete;

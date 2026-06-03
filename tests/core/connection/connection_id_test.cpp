@@ -991,13 +991,14 @@ TEST(QuicCoreTest, ClientResetsInitialAckHistoryWhenPeerSourceConnectionIdChange
     ASSERT_NE(initial, packets.end());
 
     auto initial_packet = &std::get<coquic::quic::ProtectedInitialPacket>(*initial);
-    auto ack = std::find_if(initial_packet->frames.begin(), initial_packet->frames.end(),
-                            [](const coquic::quic::Frame &frame) {
-                                return std::holds_alternative<coquic::quic::AckFrame>(frame);
-                            });
-    ASSERT_NE(ack, initial_packet->frames.end());
+    auto ack_frame_it =
+        std::find_if(initial_packet->frames.begin(), initial_packet->frames.end(),
+                     [](const coquic::quic::Frame &frame) {
+                         return std::holds_alternative<coquic::quic::AckFrame>(frame);
+                     });
+    ASSERT_NE(ack_frame_it, initial_packet->frames.end());
 
-    const auto &ack_frame = std::get<coquic::quic::AckFrame>(*ack);
+    const auto &ack_frame = std::get<coquic::quic::AckFrame>(*ack_frame_it);
     EXPECT_EQ(ack_frame.largest_acknowledged, 0u);
     EXPECT_EQ(ack_frame.first_ack_range, 0u);
     EXPECT_TRUE(ack_frame.additional_ranges.empty());

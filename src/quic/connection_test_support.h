@@ -227,9 +227,9 @@ std::vector<std::byte> bytes_from_ints_for_tests(std::initializer_list<std::uint
     return bytes;
 }
 
-TrafficSecret
-make_test_traffic_secret(CipherSuite cipher_suite = CipherSuite::tls_aes_128_gcm_sha256,
-                         std::byte fill = std::byte{0x11}) {
+TrafficSecret make_connection_coverage_traffic_secret(
+    CipherSuite cipher_suite = CipherSuite::tls_aes_128_gcm_sha256,
+    std::byte fill = std::byte{0x11}) {
     const std::size_t secret_size = cipher_suite == CipherSuite::tls_aes_256_gcm_sha384 ? 48u : 32u;
     return TrafficSecret{
         .cipher_suite = cipher_suite,
@@ -300,8 +300,11 @@ bool drive_tls_handshake_for_connection_coverage(TlsAdapter &client, TlsAdapter 
             return false;
         }
 
-        client.poll();
-        server.poll();
+        const auto client_poll_result = client.poll();
+        const auto server_poll_result = server.poll();
+        if (!client_poll_result.has_value() || !server_poll_result.has_value()) {
+            return false;
+        }
         if (client.handshake_complete() && server.handshake_complete()) {
             return true;
         }

@@ -2863,10 +2863,8 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
 
         const auto required_inline_chunks =
             static_cast<std::size_t>(!packet.frames.empty()) + (packet.stream_fragments.size() * 2);
-        const bool can_chunk_seal_stream_fragments =
-            !packet.stream_fragments.empty() && payload_size == plaintext_payload_size &&
-            (required_inline_chunks <= kMaxInlineSealPlaintextChunks);
-        if (can_chunk_seal_stream_fragments) {
+        if (!packet.stream_fragments.empty() && payload_size == plaintext_payload_size &&
+            (required_inline_chunks <= kMaxInlineSealPlaintextChunks)) {
             COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(chunk_seal_calls, 1);
             std::array<PlaintextChunk, kMaxInlineSealPlaintextChunks> plaintext_chunks{};
             std::size_t chunk_count = 0;

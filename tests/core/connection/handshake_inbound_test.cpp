@@ -2367,7 +2367,7 @@ TEST(QuicCoreTest, ConnectionProcessInboundReceivedApplicationCoversValidationAn
             coquic::quic::test::test_time(2), /*allow_preconnected_frames=*/false, /*path_id=*/0),
         coquic::quic::CodecErrorCode::invalid_varint);
 
-    const std::array<std::byte, 8> gated_validation_data = make_challenge_data(0x2a);
+    const std::array<std::byte, 8> gated_challenge_data = make_challenge_data(0x2a);
     const auto run_gated_frame = [&](const coquic::quic::ReceivedFrame &frame) {
         coquic::quic::QuicConnection gate_connection(coquic::quic::test::make_client_core_config());
         gate_connection.status_ = coquic::quic::HandshakeStatus::in_progress;
@@ -2406,8 +2406,8 @@ TEST(QuicCoreTest, ConnectionProcessInboundReceivedApplicationCoversValidationAn
                  .maximum_streams = 1,
              },
              coquic::quic::PingFrame{},
-             coquic::quic::PathChallengeFrame{.data = gated_validation_data},
-             coquic::quic::PathResponseFrame{.data = gated_validation_data},
+             coquic::quic::PathChallengeFrame{.data = gated_challenge_data},
+             coquic::quic::PathResponseFrame{.data = gated_challenge_data},
              make_received_stream_frame("x"),
          }) {
         run_gated_frame(frame);
@@ -2428,10 +2428,10 @@ TEST(QuicCoreTest, ConnectionProcessInboundReceivedApplicationCoversValidationAn
     EXPECT_EQ(preconnected_controls.pending_stream_receive_effects_.front().bytes,
               coquic::quic::test::bytes_from_string("late"));
 
-    const std::array<std::byte, 8> preconnected_challenge_data = make_challenge_data(0x6b);
+    const std::array<std::byte, 8> preconnected_path_challenge_data = make_challenge_data(0x6b);
     expect_codec_success(preconnected_controls.process_inbound_received_application(
         std::vector<coquic::quic::ReceivedFrame>{
-            coquic::quic::PathChallengeFrame{.data = preconnected_challenge_data},
+            coquic::quic::PathChallengeFrame{.data = preconnected_path_challenge_data},
         },
         coquic::quic::test::test_time(6), /*allow_preconnected_frames=*/false, /*path_id=*/1));
     ASSERT_TRUE(preconnected_controls.paths_.contains(1));
@@ -2441,11 +2441,11 @@ TEST(QuicCoreTest, ConnectionProcessInboundReceivedApplicationCoversValidationAn
         return;
     }
     const auto &pending_response = *pending_response_opt;
-    EXPECT_EQ(pending_response, preconnected_challenge_data);
+    EXPECT_EQ(pending_response, preconnected_path_challenge_data);
 
     expect_codec_success(preconnected_controls.process_inbound_received_application(
         std::vector<coquic::quic::ReceivedFrame>{
-            coquic::quic::PathResponseFrame{.data = preconnected_challenge_data},
+            coquic::quic::PathResponseFrame{.data = preconnected_path_challenge_data},
         },
         coquic::quic::test::test_time(7), /*allow_preconnected_frames=*/false, /*path_id=*/1));
 
@@ -2655,18 +2655,18 @@ TEST(QuicCoreTest,
     auto &current_path = traced.ensure_path_state(1);
     current_path.validated = false;
     current_path.is_current_send_path = true;
-    const std::array<std::byte, 8> trace_challenge_data = make_challenge_data(0x44);
+    const std::array<std::byte, 8> traced_path_challenge_data = make_challenge_data(0x44);
     auto &inbound_path = traced.ensure_path_state(2);
     inbound_path.validated = true;
-    inbound_path.outstanding_challenge = trace_challenge_data;
+    inbound_path.outstanding_challenge = traced_path_challenge_data;
     inbound_path.challenge_pending = true;
     inbound_path.validation_deadline = coquic::quic::test::test_time(10);
 
     testing::internal::CaptureStderr();
-    const ScopedEnvVar packet_trace("COQUIC_PACKET_TRACE", "1");
+    const ScopedEnvVar packet_trace_guard("COQUIC_PACKET_TRACE", "1");
     expect_codec_success(traced.process_inbound_received_application(
         std::vector<coquic::quic::ReceivedFrame>{
-            coquic::quic::PathResponseFrame{.data = trace_challenge_data},
+            coquic::quic::PathResponseFrame{.data = traced_path_challenge_data},
             make_received_stream_frame("x"),
         },
         coquic::quic::test::test_time(6), /*allow_preconnected_frames=*/false, /*path_id=*/2));
@@ -3515,9 +3515,12 @@ TEST(QuicCoreTest, DrainOutboundDatagramReplaysDeferredProtectedPacketsBeforeFlu
         datagram = connection.drain_outbound_datagram(optional_value_or_terminate(ack_deadline));
     }
     ASSERT_FALSE(datagram.empty());
-    const auto packets = decode_sender_datagram(connection, datagram);
-    ASSERT_EQ(packets.size(), 1u);
-    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    const auto outbound_packets = decode_sender_datagram(connection, datagram);
+    if (outbound_packets.size() != 1u) {
+        FAIL() << "expected one outbound application packet";
+    }
+    const auto *application =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&outbound_packets.front());
     ASSERT_NE(application, nullptr);
 
     bool saw_ack = false;

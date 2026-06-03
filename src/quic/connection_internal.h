@@ -1018,10 +1018,10 @@ inline ConnectionId make_issued_connection_id(std::span<const std::byte> base_co
     }
     absorb_connection_id_seed_byte(state, 0xffu);
     absorb_connection_id_seed_byte(state, static_cast<std::uint8_t>(sequence_number & 0xffu));
-    const auto mixed = mix_connection_id_word(state + sequence_number);
+    const auto mixed_word = mix_connection_id_word(state + sequence_number);
     for (std::size_t i = 0; i < connection_id.size(); ++i) {
         connection_id[i] = static_cast<std::byte>(
-            (mixed >> static_cast<unsigned>((i % sizeof(mixed)) * 8u)) & 0xffu);
+            (mixed_word >> static_cast<unsigned>((i % sizeof(mixed_word)) * 8u)) & 0xffu);
     }
     return connection_id;
 }
@@ -1050,12 +1050,12 @@ inline std::array<std::byte, 16> make_stateless_reset_token(
 
     for (std::size_t i = 0; i < token.size(); ++i) {
         const auto sequence_shift = static_cast<unsigned>((i % sizeof(sequence_number)) * 8u);
-        auto mixed = static_cast<std::uint8_t>((sequence_number >> sequence_shift) & 0xffu);
-        mixed ^= static_cast<std::uint8_t>(0xa5u + static_cast<unsigned>(i * 13u));
+        auto mixed_byte = static_cast<std::uint8_t>((sequence_number >> sequence_shift) & 0xffu);
+        mixed_byte ^= static_cast<std::uint8_t>(0xa5u + static_cast<unsigned>(i * 13u));
         if (!connection_id.empty()) {
-            mixed ^= std::to_integer<std::uint8_t>(connection_id[i % connection_id.size()]);
+            mixed_byte ^= std::to_integer<std::uint8_t>(connection_id[i % connection_id.size()]);
         }
-        token[i] = std::byte{mixed};
+        token[i] = std::byte{mixed_byte};
     }
 
     return token;

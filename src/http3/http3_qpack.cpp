@@ -1526,11 +1526,7 @@ encode_http3_field_section(Http3QpackEncoderContext &encoder, std::uint64_t stre
         }
 
         const auto static_name_index = lookup_static_name(field.name);
-        const auto dynamic_name_absolute_index =
-            find_dynamic_name_absolute_index(encoder.dynamic_table, field.name);
-
-        const auto entry_size = qpack_entry_size(field);
-        if (peer_capacity > 0 && entry_size <= peer_capacity &&
+        if (peer_capacity > 0 && qpack_entry_size(field) <= peer_capacity &&
             can_reference_dynamic_state(encoder, encoder.insert_count + 1, stream_already_blocked,
                                         blocked_stream_count)) {
             const auto dynamic_name_relative_index =
@@ -1569,7 +1565,9 @@ encode_http3_field_section(Http3QpackEncoderContext &encoder, std::uint64_t stre
             continue;
         }
 
-        if (dynamic_name_absolute_index.has_value() &&
+        if (const auto dynamic_name_absolute_index =
+                find_dynamic_name_absolute_index(encoder.dynamic_table, field.name);
+            dynamic_name_absolute_index.has_value() &&
             can_reference_dynamic_state(encoder, dynamic_name_absolute_index.value() + 1,
                                         stream_already_blocked, blocked_stream_count)) {
             append_literal_with_dynamic_name_reference(

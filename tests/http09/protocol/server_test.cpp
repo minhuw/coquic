@@ -111,11 +111,11 @@ QuicCoreResult handshake_ready_result() {
 }
 
 std::vector<QuicCoreSendStreamData>
-send_stream_inputs_from(const QuicHttp09EndpointUpdate &endpoint_update) {
+send_stream_inputs_from(const QuicHttp09EndpointUpdate &server_update) {
     std::vector<QuicCoreSendStreamData> out;
-    for (const auto &input : endpoint_update.core_inputs) {
-        if (const auto *send_input = std::get_if<QuicCoreSendStreamData>(&input)) {
-            out.push_back(*send_input);
+    for (const auto &input : server_update.core_inputs) {
+        if (const auto *send_stream_input = std::get_if<QuicCoreSendStreamData>(&input)) {
+            out.push_back(*send_stream_input);
         }
     }
     return out;

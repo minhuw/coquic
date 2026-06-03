@@ -110,7 +110,6 @@ class QaService:
             classifier_relevance = self._relevance_classifier.classify(question)
         except RelevanceClassifierError as error:
             classifier_failed = True
-            classifier_relevance = RelevanceDecision(True, "classifier_unavailable")
             LOGGER.warning("relevance classifier unavailable; falling back to retrieval gate: %s", error)
         if not classifier_failed and not classifier_relevance.accepted:
             return _not_quic_response()
@@ -222,7 +221,6 @@ class QaService:
             classifier_relevance = self._relevance_classifier.classify(question)
         except RelevanceClassifierError as error:
             classifier_failed = True
-            classifier_relevance = RelevanceDecision(True, "classifier_unavailable")
             LOGGER.warning("relevance classifier unavailable; falling back to retrieval gate: %s", error)
         if not classifier_failed and not classifier_relevance.accepted:
             response = _not_quic_response()

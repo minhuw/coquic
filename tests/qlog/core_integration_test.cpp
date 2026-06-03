@@ -134,13 +134,19 @@ TEST(QuicCoreTest, QlogHandshakeAndStreamTrafficEmitPacketSentAndPacketReceived)
     const auto server_records = coquic::quic::test::qlog_seq_records_from_file(
         coquic::quic::test::only_sqlog_file_in(qlog_root.path() / "server"));
 
-    EXPECT_TRUE(coquic::quic::test::qlog_any_record_contains(client_records,
-                                                             "\"name\":\"quic:packet_sent\""));
-    EXPECT_TRUE(coquic::quic::test::qlog_any_record_contains(server_records,
-                                                             "\"name\":\"quic:packet_received\""));
-    EXPECT_TRUE(coquic::quic::test::qlog_any_record_contains(client_records, "\"datagram_id\":"));
-    EXPECT_TRUE(
-        coquic::quic::test::qlog_any_record_contains(client_records, "\"raw\":{\"length\":"));
+    const bool client_logged_packet_sent = coquic::quic::test::qlog_any_record_contains(
+        client_records, "\"name\":\"quic:packet_sent\"");
+    const bool server_logged_packet_received = coquic::quic::test::qlog_any_record_contains(
+        server_records, "\"name\":\"quic:packet_received\"");
+    const bool client_logged_datagram_id =
+        coquic::quic::test::qlog_any_record_contains(client_records, "\"datagram_id\":");
+    const bool client_logged_raw_length =
+        coquic::quic::test::qlog_any_record_contains(client_records, "\"raw\":{\"length\":");
+
+    EXPECT_TRUE(client_logged_packet_sent);
+    EXPECT_TRUE(server_logged_packet_received);
+    EXPECT_TRUE(client_logged_datagram_id);
+    EXPECT_TRUE(client_logged_raw_length);
 }
 
 TEST(QuicCoreTest, QlogDeferredReplayPreservesDatagramIdAndAddsKeysAvailableTrigger) {
@@ -178,11 +184,16 @@ TEST(QuicCoreTest, QlogDeferredReplayPreservesDatagramIdAndAddsKeysAvailableTrig
 
     const auto records = coquic::quic::test::qlog_seq_records_from_file(
         coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
-    EXPECT_TRUE(
-        coquic::quic::test::qlog_any_record_contains(records, "\"name\":\"quic:packet_received\""));
-    EXPECT_TRUE(coquic::quic::test::qlog_any_record_contains(records, "\"datagram_id\":77"));
-    EXPECT_TRUE(
-        coquic::quic::test::qlog_any_record_contains(records, "\"trigger\":\"keys_available\""));
+    const bool logged_packet_received =
+        coquic::quic::test::qlog_any_record_contains(records, "\"name\":\"quic:packet_received\"");
+    const bool logged_datagram_id =
+        coquic::quic::test::qlog_any_record_contains(records, "\"datagram_id\":77");
+    const bool logged_keys_available =
+        coquic::quic::test::qlog_any_record_contains(records, "\"trigger\":\"keys_available\"");
+
+    EXPECT_TRUE(logged_packet_received);
+    EXPECT_TRUE(logged_datagram_id);
+    EXPECT_TRUE(logged_keys_available);
 }
 
 TEST(QuicCoreTest, SendingWithoutQlogDoesNotCachePacketSnapshots) {
@@ -267,10 +278,13 @@ TEST(QuicCoreTest, QlogPacketLostUsesReorderingAndTimeThresholdTriggers) {
 
     const auto records = coquic::quic::test::qlog_seq_records_from_file(
         coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
-    EXPECT_TRUE(coquic::quic::test::qlog_any_record_contains(
-        records, "\"trigger\":\"reordering_threshold\""));
-    EXPECT_TRUE(
-        coquic::quic::test::qlog_any_record_contains(records, "\"trigger\":\"time_threshold\""));
+    const bool logged_reordering_threshold = coquic::quic::test::qlog_any_record_contains(
+        records, "\"trigger\":\"reordering_threshold\"");
+    const bool logged_time_threshold =
+        coquic::quic::test::qlog_any_record_contains(records, "\"trigger\":\"time_threshold\"");
+
+    EXPECT_TRUE(logged_reordering_threshold);
+    EXPECT_TRUE(logged_time_threshold);
 }
 
 TEST(QuicCoreTest, QlogRecoveryMetricsUpdatedAndPtoProbeTriggerAreEmitted) {
@@ -386,7 +400,9 @@ TEST(QuicCoreTest, ConnectionQlogServerAlpnSelectionEmissionIsIdempotent) {
 
     const auto records = coquic::quic::test::qlog_seq_records_from_file(
         coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
-    EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:alpn_information"), 1u);
+    const auto alpn_event_count =
+        coquic::quic::test::qlog_event_count(records, "quic:alpn_information");
+    EXPECT_EQ(alpn_event_count, 1u);
 }
 
 TEST(QuicCoreTest, ConnectionQlogServerAlpnSelectionSkipsMalformedPeerAlpnList) {
@@ -419,7 +435,9 @@ TEST(QuicCoreTest, ConnectionQlogServerAlpnSelectionSkipsMalformedPeerAlpnList) 
 
     const auto records = coquic::quic::test::qlog_seq_records_from_file(
         coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
-    EXPECT_EQ(coquic::quic::test::qlog_event_count(records, "quic:alpn_information"), 0u);
+    const auto alpn_event_count =
+        coquic::quic::test::qlog_event_count(records, "quic:alpn_information");
+    EXPECT_EQ(alpn_event_count, 0u);
 }
 
 TEST(QuicCoreTest, ConnectionQlogPacketLostReturnsWhenSessionOrSnapshotMissing) {

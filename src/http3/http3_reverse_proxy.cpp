@@ -520,7 +520,7 @@ bool emit_bad_gateway(const std::function<bool(Http3ResponsePart)> &emit) {
     return emit(bad_gateway_part());
 }
 
-bool emit_chunked_proxy_body(std::string &encoded, bool upstream_closed, bool &complete,
+bool emit_chunked_proxy_body(std::string &encoded, bool upstream_closed, bool &body_complete,
                              const std::function<bool(Http3ResponsePart)> &emit) {
     std::vector<std::byte> out;
     while (true) {
@@ -564,7 +564,7 @@ bool emit_chunked_proxy_body(std::string &encoded, bool upstream_closed, bool &c
             if (!out.empty() && !emit(Http3ResponsePart{.body = std::move(out)})) {
                 return true;
             }
-            complete = true;
+            body_complete = true;
             return emit(Http3ResponsePart{.complete = true});
         }
         if (encoded.size() < data_begin + *chunk_size + 2) {
@@ -700,13 +700,13 @@ void stream_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
     std::optional<std::size_t> remaining_content_length;
     std::size_t total_received = 0;
 
-    auto emit_raw_body = [&](std::string_view bytes, bool complete) -> bool {
-        if (bytes.empty() && !complete) {
+    auto emit_raw_body = [&](std::string_view bytes, bool part_complete) -> bool {
+        if (bytes.empty() && !part_complete) {
             return true;
         }
         return emit(Http3ResponsePart{
             .body = string_to_bytes(bytes),
-            .complete = complete,
+            .complete = part_complete,
         });
     };
 
@@ -749,16 +749,17 @@ void stream_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
             chunked = parsed_head.chunked;
             remaining_content_length = parsed_head.content_length;
             auto response_head = response_head_from_proxy_head(parsed_head, head_request);
-            const bool complete = head_request || (!chunked && remaining_content_length == 0u);
+            const bool response_is_complete =
+                head_request || (!chunked && remaining_content_length == 0u);
             if (!emit(Http3ResponsePart{
                     .head = std::move(response_head),
-                    .complete = complete,
+                    .complete = response_is_complete,
                 })) {
                 return;
             }
             emitted_head = true;
             pending.erase(0, header_end + 4);
-            if (complete) {
+            if (response_is_complete) {
                 return;
             }
         }

@@ -81,12 +81,14 @@ TEST(QuicHttp3ConnectionTest, IgnoresUnknownStateEventsBeforeTransportReady) {
 
     const auto ready =
         connection.on_core_result(handshake_ready_result(), coquic::quic::QuicCoreTimePoint{});
-    const auto sends = send_stream_inputs_from(ready);
+    const auto ready_sends = send_stream_inputs_from(ready);
 
-    ASSERT_EQ(sends.size(), 3u);
-    EXPECT_EQ(sends[0].stream_id, 2u);
-    EXPECT_EQ(sends[1].stream_id, 6u);
-    EXPECT_EQ(sends[2].stream_id, 10u);
+    if (ready_sends.size() != 3u) {
+        FAIL() << "handshake ready did not emit control streams";
+    }
+    EXPECT_EQ(ready_sends[0].stream_id, 2u);
+    EXPECT_EQ(ready_sends[1].stream_id, 6u);
+    EXPECT_EQ(ready_sends[2].stream_id, 10u);
 }
 
 TEST(QuicHttp3ConnectionTest, RejectsPeerControlStreamWithoutInitialSettings) {
@@ -555,20 +557,22 @@ TEST(QuicHttp3ConnectionTest, AppliesPeerSettingsAndEmitsQpackDecoderFeedback) {
     EXPECT_EQ(connection.peer_settings().max_field_section_size,
               peer_settings.max_field_section_size);
 
-    const auto qpack_update = connection.on_core_result(
+    const auto qpack_encoder_update = connection.on_core_result(
         receive_result(7, encoder_stream_bytes({
                               0x3f, 0xbd, 0x01, 0x4a, 0x63, 0x75, 0x73, 0x74, 0x6f,
                               0x6d, 0x2d, 0x6b, 0x65, 0x79, 0x0c, 0x63, 0x75, 0x73,
                               0x74, 0x6f, 0x6d, 0x2d, 0x76, 0x61, 0x6c, 0x75, 0x65,
                           })),
         coquic::quic::QuicCoreTimePoint{});
-    EXPECT_FALSE(close_input_from(qpack_update).has_value());
+    EXPECT_FALSE(close_input_from(qpack_encoder_update).has_value());
 
-    const auto sends = send_stream_inputs_from(qpack_update);
-    ASSERT_EQ(sends.size(), 1u);
-    EXPECT_EQ(sends[0].stream_id, 10u);
-    EXPECT_EQ(sends[0].bytes, bytes_from_ints({0x01}));
-    EXPECT_FALSE(sends[0].fin);
+    const auto qpack_feedback_sends = send_stream_inputs_from(qpack_encoder_update);
+    if (qpack_feedback_sends.size() != 1u) {
+        FAIL() << "QPACK update did not emit decoder feedback";
+    }
+    EXPECT_EQ(qpack_feedback_sends[0].stream_id, 10u);
+    EXPECT_EQ(qpack_feedback_sends[0].bytes, bytes_from_ints({0x01}));
+    EXPECT_FALSE(qpack_feedback_sends[0].fin);
 }
 
 TEST(QuicHttp3ConnectionTest, RejectsIncreasingPeerGoawayIdentifier) {
@@ -713,26 +717,28 @@ TEST(QuicHttp3ConnectionTest, BuffersFragmentedPeerQpackEncoderInstructions) {
         receive_result(3, settings_stream_bytes(peer_settings)), coquic::quic::QuicCoreTimePoint{});
     EXPECT_FALSE(close_input_from(settings_update).has_value());
 
-    const auto encoder_bytes = encoder_stream_bytes({
+    const auto encoded_qpack_insert = encoder_stream_bytes({
         0x3f, 0xbd, 0x01, 0x4a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79,
         0x0c, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x76, 0x61, 0x6c, 0x75, 0x65,
     });
-    const auto first_fragment = connection.on_core_result(
-        receive_result(7, std::span<const std::byte>(encoder_bytes).first(8)),
+    const auto first_qpack_fragment = connection.on_core_result(
+        receive_result(7, std::span<const std::byte>(encoded_qpack_insert).first(8)),
         coquic::quic::QuicCoreTimePoint{});
-    EXPECT_FALSE(close_input_from(first_fragment).has_value());
-    EXPECT_TRUE(send_stream_inputs_from(first_fragment).empty());
+    EXPECT_FALSE(close_input_from(first_qpack_fragment).has_value());
+    EXPECT_TRUE(send_stream_inputs_from(first_qpack_fragment).empty());
 
-    const auto second_fragment = connection.on_core_result(
-        receive_result(7, std::span<const std::byte>(encoder_bytes).subspan(8)),
+    const auto second_qpack_fragment = connection.on_core_result(
+        receive_result(7, std::span<const std::byte>(encoded_qpack_insert).subspan(8)),
         coquic::quic::QuicCoreTimePoint{});
-    EXPECT_FALSE(close_input_from(second_fragment).has_value());
+    EXPECT_FALSE(close_input_from(second_qpack_fragment).has_value());
 
-    const auto sends = send_stream_inputs_from(second_fragment);
-    ASSERT_EQ(sends.size(), 1u);
-    EXPECT_EQ(sends[0].stream_id, 10u);
-    EXPECT_EQ(sends[0].bytes, bytes_from_ints({0x01}));
-    EXPECT_FALSE(sends[0].fin);
+    const auto decoder_sends = send_stream_inputs_from(second_qpack_fragment);
+    if (decoder_sends.size() != 1u) {
+        FAIL() << "QPACK encoder insert did not unblock decoder";
+    }
+    EXPECT_EQ(decoder_sends[0].stream_id, 10u);
+    EXPECT_EQ(decoder_sends[0].bytes, bytes_from_ints({0x01}));
+    EXPECT_FALSE(decoder_sends[0].fin);
 }
 
 TEST(QuicHttp3ConnectionTest, OverflowingPeerQpackEncoderInstructionClosesConnection) {

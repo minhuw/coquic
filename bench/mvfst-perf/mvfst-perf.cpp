@@ -267,8 +267,10 @@ Config parseArgs(const std::vector<std::string> &args) {
     return cfg;
 }
 
-quic::TransportSettings transportSettings(const Config &cfg) {
-    quic::TransportSettings settings;
+using MvfstTransportSettings = quic::TransportSettings;
+
+MvfstTransportSettings transportSettings(const Config &cfg) {
+    MvfstTransportSettings settings;
     settings.advertisedInitialConnectionFlowControlWindow = kTransferConnectionWindow;
     settings.advertisedInitialBidiLocalStreamFlowControlWindow = kTransferStreamWindow;
     settings.advertisedInitialBidiRemoteStreamFlowControlWindow = kTransferStreamWindow;
@@ -301,13 +303,13 @@ std::shared_ptr<fizz::server::FizzServerContext> makeServerCtx(const Config &cfg
     }
     auto certManager = std::make_shared<fizz::server::DefaultCertManager>();
     certManager->addCertAndSetDefault(std::move(cert));
-    auto serverCtx = std::make_shared<fizz::server::FizzServerContext>();
-    serverCtx->setFactory(std::make_shared<quic::QuicFizzFactory>());
-    serverCtx->setCertManager(std::move(certManager));
-    serverCtx->setOmitEarlyRecordLayer(true);
-    serverCtx->setClock(std::make_shared<fizz::SystemClock>());
-    serverCtx->setSupportedAlpns({std::string(kApplicationProtocol)});
-    return serverCtx;
+    auto server_ctx = std::make_shared<fizz::server::FizzServerContext>();
+    server_ctx->setFactory(std::make_shared<quic::QuicFizzFactory>());
+    server_ctx->setCertManager(std::move(certManager));
+    server_ctx->setOmitEarlyRecordLayer(true);
+    server_ctx->setClock(std::make_shared<fizz::SystemClock>());
+    server_ctx->setSupportedAlpns({std::string(kApplicationProtocol)});
+    return server_ctx;
 }
 
 std::shared_ptr<quic::ClientHandshakeFactory> makeClientHandshakeCtx() {

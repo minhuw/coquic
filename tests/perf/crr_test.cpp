@@ -41,10 +41,16 @@ TEST(QuicPerfCrrTest, FreshConnectionPerRequestReportsLatency) {
     };
 
     EXPECT_EQ(run_perf_runtime(client), 0);
-    const auto json = read_result_text(json_path);
-    EXPECT_NE(json.find("\"mode\":\"crr\""), std::string::npos);
-    EXPECT_NE(json.find("\"requests_completed\":8"), std::string::npos);
-    EXPECT_NE(json.find("\"connections\":2"), std::string::npos);
+    const auto result_json = read_result_text(json_path);
+    if (result_json.find("\"mode\":\"crr\"") == std::string::npos) {
+        ADD_FAILURE() << "CRR result did not report CRR mode";
+    }
+    if (result_json.find("\"requests_completed\":8") == std::string::npos) {
+        ADD_FAILURE() << "CRR result did not report completed requests";
+    }
+    if (result_json.find("\"connections\":2") == std::string::npos) {
+        ADD_FAILURE() << "CRR result did not report connection count";
+    }
 }
 
 TEST(QuicPerfCrrTest, HonorsParallelConnectionLimit) {
@@ -78,8 +84,10 @@ TEST(QuicPerfCrrTest, HonorsParallelConnectionLimit) {
     };
 
     EXPECT_EQ(run_perf_runtime(client), 0);
-    const auto json = read_result_text(json_path);
-    EXPECT_NE(json.find("\"connections\":3"), std::string::npos);
+    const auto result_json = read_result_text(json_path);
+    if (result_json.find("\"connections\":3") == std::string::npos) {
+        ADD_FAILURE() << "CRR result did not report connection limit";
+    }
 }
 
 TEST(QuicPerfCrrTest, ClientOpenConfigUsesDistinctConnectionIdsBeyond256Connections) {
@@ -146,16 +154,17 @@ TEST(QuicPerfCrrTest, TimedWindowUsesMeasurementOnly) {
     };
 
     EXPECT_EQ(run_perf_runtime(client), 0);
-    const auto json = read_result_text(json_path);
-    const auto warmup_ms = json_u64_field(json, "warmup_ms");
-    const auto elapsed_ms = json_u64_field(json, "elapsed_ms");
-    const auto connections = json_u64_field(json, "connections");
-    const auto requests_completed = json_u64_field(json, "requests_completed");
-    const auto server_bytes_sent = json_u64_field_in_object(json, "server_counters", "bytes_sent");
+    const auto result_json = read_result_text(json_path);
+    const auto warmup_ms = json_u64_field(result_json, "warmup_ms");
+    const auto elapsed_ms = json_u64_field(result_json, "elapsed_ms");
+    const auto connections = json_u64_field(result_json, "connections");
+    const auto requests_completed = json_u64_field(result_json, "requests_completed");
+    const auto server_bytes_sent =
+        json_u64_field_in_object(result_json, "server_counters", "bytes_sent");
     const auto server_bytes_received =
-        json_u64_field_in_object(json, "server_counters", "bytes_received");
+        json_u64_field_in_object(result_json, "server_counters", "bytes_received");
     const auto server_requests_completed =
-        json_u64_field_in_object(json, "server_counters", "requests_completed");
+        json_u64_field_in_object(result_json, "server_counters", "requests_completed");
 
     ASSERT_TRUE(warmup_ms.has_value());
     ASSERT_TRUE(elapsed_ms.has_value());
@@ -173,13 +182,29 @@ TEST(QuicPerfCrrTest, TimedWindowUsesMeasurementOnly) {
     const std::uint64_t server_bytes_received_value = server_bytes_received.value_or(0);
     const std::uint64_t server_requests_completed_value = server_requests_completed.value_or(0);
 
-    EXPECT_EQ(warmup_ms_value, 100u);
-    EXPECT_EQ(connections_value, 6u);
-    EXPECT_GE(elapsed_ms_value, 900u);
-    EXPECT_LE(elapsed_ms_value, 1250u);
-    EXPECT_GT(requests_completed_value, 0u);
-    EXPECT_GT(server_bytes_sent_value, 0u);
-    EXPECT_GT(server_bytes_received_value, 0u);
-    EXPECT_EQ(server_requests_completed_value, requests_completed_value);
+    if (warmup_ms_value != 100u) {
+        ADD_FAILURE() << "unexpected CRR warmup duration";
+    }
+    if (connections_value != 6u) {
+        ADD_FAILURE() << "unexpected CRR connection count";
+    }
+    if (elapsed_ms_value < 900u) {
+        ADD_FAILURE() << "CRR measurement ended too early";
+    }
+    if (elapsed_ms_value > 1250u) {
+        ADD_FAILURE() << "CRR measurement ran too long";
+    }
+    if (requests_completed_value == 0u) {
+        ADD_FAILURE() << "CRR did not complete requests";
+    }
+    if (server_bytes_sent_value == 0u) {
+        ADD_FAILURE() << "CRR server did not send bytes";
+    }
+    if (server_bytes_received_value == 0u) {
+        ADD_FAILURE() << "CRR server did not receive bytes";
+    }
+    if (server_requests_completed_value != requests_completed_value) {
+        ADD_FAILURE() << "server request count did not match client result";
+    }
 }
 } // namespace

@@ -29,10 +29,12 @@ TEST(QuicCoreEndpointTest, ClientOpenCreatesStableHandleAndTagsInitialSendRoute)
     EXPECT_EQ(lifecycle.front().connection, 1u);
     EXPECT_EQ(lifecycle.front().event, coquic::quic::QuicCoreConnectionLifecycle::created);
 
-    const auto sends = send_effects_from(result);
-    ASSERT_FALSE(sends.empty());
-    EXPECT_EQ(sends.front().connection, 1u);
-    EXPECT_EQ(sends.front().route_handle, std::optional<coquic::quic::QuicRouteHandle>{17u});
+    const auto send_effects = send_effects_from(result);
+    if (send_effects.empty()) {
+        FAIL() << "opening connection did not send an Initial datagram";
+    }
+    EXPECT_EQ(send_effects.front().connection, 1u);
+    EXPECT_EQ(send_effects.front().route_handle, std::optional<coquic::quic::QuicRouteHandle>{17u});
 
     ASSERT_TRUE(core.next_wakeup().has_value());
     EXPECT_EQ(core.connection_count(), 1u);

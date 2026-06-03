@@ -77,7 +77,7 @@ testing::AssertionResult full_packet_snapshot_serializes_expected_fields() {
     using coquic::quic::qlog::PacketHeader;
     using coquic::quic::qlog::PacketSnapshot;
 
-    const auto snapshot =
+    const auto packet_snapshot =
         PacketSnapshot{
             .header =
                 PacketHeader{
@@ -139,7 +139,7 @@ testing::AssertionResult full_packet_snapshot_serializes_expected_fields() {
             .datagram_id = 77,
             .trigger = std::string("pto_probe"),
         };
-    const auto snapshot_json = coquic::quic::qlog::serialize_packet_snapshot(snapshot);
+    const auto snapshot_json = coquic::quic::qlog::serialize_packet_snapshot(packet_snapshot);
     return contains_all(snapshot_json,
                         {"\"frame_type\":\"reset_stream\"",
                          "\"frame_type\":\"stop_sending\"",
@@ -237,12 +237,12 @@ testing::AssertionResult alpn_serialization_covers_printable_and_binary_values()
         return testing::AssertionFailure() << "mixed binary ALPN included string_value";
     }
 
-    const auto first_alpn = list_json.find("\"byte_value\":\"6301\"");
-    const auto second_alpn = list_json.find("\"byte_value\":\"6833\"");
-    if (first_alpn == std::string::npos || second_alpn == std::string::npos) {
+    const auto first_alpn_offset = list_json.find("\"byte_value\":\"6301\"");
+    const auto second_alpn_offset = list_json.find("\"byte_value\":\"6833\"");
+    if (first_alpn_offset == std::string::npos || second_alpn_offset == std::string::npos) {
         return testing::AssertionFailure() << "expected ALPN list entries were missing";
     }
-    if (list_json.find("},{", first_alpn) == std::string::npos) {
+    if (list_json.find("},{", first_alpn_offset) == std::string::npos) {
         return testing::AssertionFailure() << "ALPN list entries were not separated";
     }
     return testing::AssertionSuccess();

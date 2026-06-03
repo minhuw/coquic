@@ -11,7 +11,6 @@ import coquic_rag.query.service as query_service_module
 from coquic_rag.cli.main import main as cli_main
 from coquic_rag.config import ProjectPaths
 from coquic_rag.embed.provider import FakeEmbedder
-from coquic_rag.query.service import IndexNotBuiltError, IndexStatus, QueryService
 from coquic_rag.store.qdrant_store import QdrantSectionStore
 
 
@@ -51,7 +50,7 @@ def _build_server(tmp_path: Path):
 
     _build_index(source_dir, state_dir)
 
-    service = QueryService(
+    service = query_service_module.QueryService(
         paths=ProjectPaths(
             repo_root=tmp_path,
             rfc_source=source_dir,
@@ -177,7 +176,7 @@ def test_create_mcp_server_fails_fast_when_index_is_incomplete(
         state_dir=state_dir,
     )
 
-    with pytest.raises(IndexNotBuiltError, match="ready: no"):
+    with pytest.raises(query_service_module.IndexNotBuiltError, match="ready: no"):
         mcp_server_module.create_mcp_server(paths=paths)
 
 
@@ -260,11 +259,13 @@ def test_mcp_main_remote_unreachable_probes_status_once(
 
     probe_count = 0
 
-    def _fake_status(_paths: ProjectPaths, *, collection_name: str) -> IndexStatus:
+    def _fake_status(
+        _paths: ProjectPaths, *, collection_name: str
+    ) -> query_service_module.IndexStatus:
         del collection_name
         nonlocal probe_count
         probe_count += 1
-        return IndexStatus(
+        return query_service_module.IndexStatus(
             source_ok=True,
             artifacts_ok=True,
             qdrant_ok=False,

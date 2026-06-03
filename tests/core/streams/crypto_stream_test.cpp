@@ -39,34 +39,37 @@ constexpr std::size_t send_buffer_state_index(ReliableSendBuffer::SegmentState s
     return static_cast<std::size_t>(state);
 }
 
-ReliableSendBuffer::Segment &insert_segment(ReliableSendBuffer &buffer, std::uint64_t offset,
+ReliableSendBuffer::Segment &insert_segment(ReliableSendBuffer &send_buffer, std::uint64_t offset,
                                             ReliableSendBuffer::SegmentState state,
                                             const std::shared_ptr<std::vector<std::byte>> &storage,
                                             std::uint64_t begin, std::uint64_t end) {
-    auto insert_result = buffer.segments_.emplace(offset, ReliableSendBuffer::Segment{
-                                                              .state = state,
-                                                              .storage = storage,
-                                                              .begin = begin,
-                                                              .end = end,
-                                                          });
+    auto insert_result = send_buffer.segments_.emplace(offset, ReliableSendBuffer::Segment{
+                                                                   .state = state,
+                                                                   .storage = storage,
+                                                                   .begin = begin,
+                                                                   .end = end,
+                                                               });
     if (!insert_result.second) {
         std::abort();
     }
-    buffer.note_segment_inserted(insert_result.first->second);
+    send_buffer.note_segment_inserted(insert_result.first->second);
     return insert_result.first->second;
 }
 
-std::size_t send_buffer_state_count(const ReliableSendBuffer &buffer,
+std::size_t send_buffer_state_count(const ReliableSendBuffer &send_buffer,
                                     ReliableSendBuffer::SegmentState state) {
-    return buffer.segment_state_counts_[send_buffer_state_index(state)];
+    return send_buffer.segment_state_counts_[send_buffer_state_index(state)];
 }
 
-void expect_send_buffer_state_counts(const ReliableSendBuffer &buffer, std::size_t unsent_count,
-                                     std::size_t sent_count, std::size_t lost_count) {
-    EXPECT_EQ(send_buffer_state_count(buffer, ReliableSendBuffer::SegmentState::unsent),
+void expect_send_buffer_state_counts(const ReliableSendBuffer &send_buffer,
+                                     std::size_t unsent_count, std::size_t sent_count,
+                                     std::size_t lost_count) {
+    EXPECT_EQ(send_buffer_state_count(send_buffer, ReliableSendBuffer::SegmentState::unsent),
               unsent_count);
-    EXPECT_EQ(send_buffer_state_count(buffer, ReliableSendBuffer::SegmentState::sent), sent_count);
-    EXPECT_EQ(send_buffer_state_count(buffer, ReliableSendBuffer::SegmentState::lost), lost_count);
+    EXPECT_EQ(send_buffer_state_count(send_buffer, ReliableSendBuffer::SegmentState::sent),
+              sent_count);
+    EXPECT_EQ(send_buffer_state_count(send_buffer, ReliableSendBuffer::SegmentState::lost),
+              lost_count);
 }
 
 TEST(QuicCryptoStreamTest, SendBufferSegmentStateCountsTrackTransitions) {

@@ -4,7 +4,6 @@ import os
 from dataclasses import dataclass, field
 
 import coquic
-from coquic import quic
 
 from . import PerfError
 from .config import Direction, Mode, PerfConfig, server_endpoint_config
@@ -52,7 +51,7 @@ ServerCommand = SendResponseCommand | SendControlCommand
 
 
 async def run_server(config: PerfConfig):
-    endpoint = quic.Endpoint(server_endpoint_config(config))
+    endpoint = coquic.quic.Endpoint(server_endpoint_config(config))
     io = await UdpRuntime.server(config.host, config.port)
     try:
         server = Server(endpoint, io)
@@ -63,7 +62,7 @@ async def run_server(config: PerfConfig):
 
 
 class Server:
-    def __init__(self, endpoint: quic.Endpoint, io: UdpRuntime):
+    def __init__(self, endpoint: coquic.quic.Endpoint, io: UdpRuntime):
         self.endpoint = endpoint
         self.io = io
         self.sessions: dict[int, Session] = {}

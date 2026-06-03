@@ -27,7 +27,7 @@ TEST(QuicHttp09RuntimeTest, ServerDoesNotExitAfterMalformedTraffic) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    const auto server = coquic::http09::Http09RuntimeConfig{
+    const auto server_config = coquic::http09::Http09RuntimeConfig{
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
@@ -36,7 +36,7 @@ TEST(QuicHttp09RuntimeTest, ServerDoesNotExitAfterMalformedTraffic) {
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
-    auto server_process = launch_runtime_server_process(server);
+    auto server_process = launch_runtime_server_process(server_config);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
     const int client_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -48,15 +48,18 @@ TEST(QuicHttp09RuntimeTest, ServerDoesNotExitAfterMalformedTraffic) {
     server_address.sin_port = htons(port);
     ASSERT_EQ(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr), 1);
 
-    const std::array<std::byte, 4> garbage = {
+    const std::array<std::byte, 4> malformed_payload = {
         std::byte{0xde},
         std::byte{0xad},
         std::byte{0xbe},
         std::byte{0xef},
     };
-    ASSERT_GE(::sendto(client_socket.get(), garbage.data(), garbage.size(), 0,
-                       reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address)),
-              0);
+    const auto malformed_send_result =
+        ::sendto(client_socket.get(), malformed_payload.data(), malformed_payload.size(), 0,
+                 reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address));
+    if (malformed_send_result < 0) {
+        FAIL() << "malformed UDP datagram was not sent";
+    }
 
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(1500)).has_value());
 }
@@ -363,10 +366,13 @@ TEST(QuicHttp09RuntimeTest, ServerRespondsToUnsupportedVersionProbeAndStillTrans
     server_address.sin_port = htons(port);
     ASSERT_EQ(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr), 1);
 
-    const auto probe = make_unsupported_version_probe();
-    ASSERT_GE(::sendto(probe_socket.get(), probe.data(), probe.size(), 0,
-                       reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address)),
-              0);
+    const auto unsupported_version_probe = make_unsupported_version_probe();
+    const auto unsupported_version_probe_send_result = ::sendto(
+        probe_socket.get(), unsupported_version_probe.data(), unsupported_version_probe.size(), 0,
+        reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address));
+    if (unsupported_version_probe_send_result < 0) {
+        FAIL() << "unsupported version probe was not sent";
+    }
 
     pollfd descriptor{};
     descriptor.fd = probe_socket.get();
@@ -380,12 +386,16 @@ TEST(QuicHttp09RuntimeTest, ServerRespondsToUnsupportedVersionProbeAndStillTrans
     ASSERT_GT(response_size, 0);
     response.resize(static_cast<std::size_t>(response_size));
 
-    const auto decoded = coquic::quic::deserialize_packet(response, {});
-    ASSERT_TRUE(decoded.has_value());
-    ASSERT_NE(std::get_if<coquic::quic::VersionNegotiationPacket>(&decoded.value().packet),
-              nullptr);
-    const auto &version_negotiation =
-        std::get<coquic::quic::VersionNegotiationPacket>(decoded.value().packet);
+    const auto decoded_packet = coquic::quic::deserialize_packet(response, {});
+    if (!decoded_packet.has_value()) {
+        FAIL() << "version negotiation packet did not decode";
+    }
+    const auto *version_negotiation_packet =
+        std::get_if<coquic::quic::VersionNegotiationPacket>(&decoded_packet.value().packet);
+    if (version_negotiation_packet == nullptr) {
+        FAIL() << "expected version negotiation packet";
+    }
+    const auto &version_negotiation = *version_negotiation_packet;
     EXPECT_EQ(version_negotiation.destination_connection_id, (coquic::quic::ConnectionId{
                                                                  std::byte{0xc1},
                                                                  std::byte{0x01},
@@ -444,11 +454,15 @@ TEST(QuicHttp09RuntimeTest, ServerIgnoresUnsupportedVersionProbeBelowMinimumInit
     server_address.sin_port = htons(port);
     ASSERT_EQ(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr), 1);
 
-    auto probe = make_unsupported_version_probe();
-    probe.resize(64);
-    ASSERT_GE(::sendto(probe_socket.get(), probe.data(), probe.size(), 0,
-                       reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address)),
-              0);
+    auto short_unsupported_version_probe = make_unsupported_version_probe();
+    short_unsupported_version_probe.resize(64);
+    const auto short_probe_send_result =
+        ::sendto(probe_socket.get(), short_unsupported_version_probe.data(),
+                 short_unsupported_version_probe.size(), 0,
+                 reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address));
+    if (short_probe_send_result < 0) {
+        FAIL() << "short unsupported version probe was not sent";
+    }
 
     pollfd descriptor{};
     descriptor.fd = probe_socket.get();
@@ -530,16 +544,21 @@ TEST(QuicHttp09RuntimeTest, ServerFailsWhenVersionNegotiationSendFails) {
     server_address.sin_port = htons(port);
     ASSERT_EQ(::inet_pton(AF_INET, "127.0.0.1", &server_address.sin_addr), 1);
 
-    const auto probe = make_unsupported_version_probe();
-    ASSERT_GE(::sendto(probe_socket.get(), probe.data(), probe.size(), 0,
-                       reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address)),
-              0);
+    const auto unsupported_version_probe = make_unsupported_version_probe();
+    const auto unsupported_version_probe_send_result = ::sendto(
+        probe_socket.get(), unsupported_version_probe.data(), unsupported_version_probe.size(), 0,
+        reinterpret_cast<const sockaddr *>(&server_address), sizeof(server_address));
+    if (unsupported_version_probe_send_result < 0) {
+        FAIL() << "unsupported version probe was not sent";
+    }
 
     const auto status = server_process.wait_for_exit(std::chrono::milliseconds(1000));
     ASSERT_TRUE(status.has_value());
-    const auto exit_status = optional_value_or_terminate(status);
-    ASSERT_TRUE(WIFEXITED(exit_status));
-    EXPECT_EQ(WEXITSTATUS(exit_status), 1);
+    const auto process_exit_status = optional_value_or_terminate(status);
+    if (!WIFEXITED(process_exit_status)) {
+        FAIL() << "version negotiation send failure did not exit normally";
+    }
+    EXPECT_EQ(WEXITSTATUS(process_exit_status), 1);
 }
 
 TEST(QuicHttp09RuntimeTest, TraceEnabledServerDropsMalformedSupportedInitialAndStillTransfersFile) {

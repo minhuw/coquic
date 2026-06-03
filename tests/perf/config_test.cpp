@@ -70,8 +70,9 @@ TEST(QuicPerfConfigTest, ParsesClientRrInvocation) {
     auto config =
         parse_perf_runtime_args(static_cast<int>(std::size(argv)), const_cast<char **>(argv));
 
-    const auto &parsed = require_perf_config_value(config, "client rr invocation should parse");
-    require_perf_config_check(parsed_client_rr_invocation_matches(parsed),
+    const auto &parsed_client_config =
+        require_perf_config_value(config, "client rr invocation should parse");
+    require_perf_config_check(parsed_client_rr_invocation_matches(parsed_client_config),
                               "client rr invocation should populate every option");
 }
 

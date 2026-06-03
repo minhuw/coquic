@@ -94,12 +94,10 @@ bool queue_one_response_chunk(std::uint64_t stream_id, std::ifstream &input,
         return true;
     }
 
-    const bool fin = input.peek() == std::char_traits<char>::eof();
-
     out.emplace_back(QuicCoreSendStreamData{
         .stream_id = stream_id,
         .bytes = std::move(chunk),
-        .fin = fin,
+        .fin = input.peek() == std::char_traits<char>::eof(),
     });
     return true;
 }

@@ -251,8 +251,9 @@ inline int run_http09_runtime_child_process(
 
 class ScopedChildProcess {
   public:
-    explicit ScopedChildProcess(const coquic::http09::Http09RuntimeConfig &config,
-                                coquic::io::test::SocketIoBackendOpsOverride override_ops = {})
+    explicit ScopedChildProcess(
+        const coquic::http09::Http09RuntimeConfig &config,
+        const coquic::io::test::SocketIoBackendOpsOverride &override_ops = {})
         : host_(config.host), port_(config.port),
           stop_requested_(std::make_shared<std::atomic<bool>>(false)),
           future_(std::async(std::launch::async, run_http09_runtime_child_process, config,
@@ -849,7 +850,7 @@ launch_runtime_server_process(const coquic::http09::Http09RuntimeConfig &config)
 
 inline ScopedChildProcess
 launch_runtime_server_process(const coquic::http09::Http09RuntimeConfig &config,
-                              coquic::io::test::SocketIoBackendOpsOverride override_ops) {
+                              const coquic::io::test::SocketIoBackendOpsOverride &override_ops) {
     return ScopedChildProcess(config, override_ops);
 }
 

@@ -496,10 +496,10 @@ QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &fram
         active_peer_connection_id_sequence_ = frame.sequence_number;
     }
 
-    auto active_peer_connection_ids = static_cast<std::size_t>(
-        std::count_if(peer_connection_ids_.begin(), peer_connection_ids_.end(),
-                      [](const auto &entry) { return !entry.second.locally_retired; }));
-    if (active_peer_connection_ids > local_transport_parameters_.active_connection_id_limit) {
+    if (static_cast<std::size_t>(std::count_if(
+            peer_connection_ids_.begin(), peer_connection_ids_.end(), [](const auto &entry) {
+                return !entry.second.locally_retired;
+            })) > local_transport_parameters_.active_connection_id_limit) {
         return CodecResult<bool>::failure(connection_id_limit_error(kFrameTypeNewConnectionId));
     }
 
@@ -546,10 +546,10 @@ CodecResult<bool> QuicConnection::ensure_peer_preferred_address_connection_id() 
     };
     note_endpoint_route_state_changed();
 
-    const auto active_peer_connection_ids = static_cast<std::size_t>(
-        std::count_if(peer_connection_ids_.begin(), peer_connection_ids_.end(),
-                      [](const auto &entry) { return !entry.second.locally_retired; }));
-    if (active_peer_connection_ids > local_transport_parameters_.active_connection_id_limit) {
+    if (static_cast<std::size_t>(std::count_if(
+            peer_connection_ids_.begin(), peer_connection_ids_.end(), [](const auto &entry) {
+                return !entry.second.locally_retired;
+            })) > local_transport_parameters_.active_connection_id_limit) {
         return CodecResult<bool>::failure(connection_id_limit_error(kFrameTypeNewConnectionId));
     }
 

@@ -605,11 +605,11 @@ TEST(QuicProtectedCodecTest, DeserializesReceivedOneRttPacketFromSharedStorageSu
     storage->push_back(std::byte{0xee});
     const auto begin = storage->size();
     storage->insert(storage->end(), encoded.value().begin(), encoded.value().end());
-    auto end = storage->size();
+    auto packet_end = storage->size();
     storage->push_back(std::byte{0xdd});
 
     auto decoded = coquic::quic::deserialize_received_protected_packet(
-        storage, begin, end,
+        storage, begin, packet_end,
         make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
                                          /*secret_size=*/16));
     ASSERT_TRUE(decoded.has_value());

@@ -244,13 +244,13 @@ std::optional<TlsIdentity> generate_demo_server_identity() {
     }
 
     auto certificate_pem = memory_bio_string(certificate_bio.get());
-    auto private_key_pem = memory_bio_string(key_bio.get());
-    if (!certificate_pem.has_value() || !private_key_pem.has_value()) {
+    auto demo_private_key_pem = memory_bio_string(key_bio.get());
+    if (!certificate_pem.has_value() || !demo_private_key_pem.has_value()) {
         return std::nullopt;
     }
     return TlsIdentity{
         .certificate_pem = std::move(*certificate_pem),
-        .private_key_pem = std::move(*private_key_pem),
+        .private_key_pem = std::move(*demo_private_key_pem),
     };
 }
 
@@ -343,44 +343,44 @@ void append_payload(std::vector<std::byte> &payload, std::span<const std::byte> 
     payload.insert(payload.end(), bytes.begin(), bytes.end());
 }
 
-void append_json_string(std::string &json, std::string_view value) {
-    json.push_back('"');
+void append_json_string(std::string &json_output, std::string_view value) {
+    json_output.push_back('"');
     for (const char ch : value) {
         switch (ch) {
         case '"':
-            json += "\\\"";
+            json_output += "\\\"";
             break;
         case '\\':
-            json += "\\\\";
+            json_output += "\\\\";
             break;
         case '\b':
-            json += "\\b";
+            json_output += "\\b";
             break;
         case '\f':
-            json += "\\f";
+            json_output += "\\f";
             break;
         case '\n':
-            json += "\\n";
+            json_output += "\\n";
             break;
         case '\r':
-            json += "\\r";
+            json_output += "\\r";
             break;
         case '\t':
-            json += "\\t";
+            json_output += "\\t";
             break;
         default:
             if (static_cast<unsigned char>(ch) < 0x20) {
-                json += "\\u00";
+                json_output += "\\u00";
                 constexpr char kHex[] = "0123456789abcdef";
-                json.push_back(kHex[(static_cast<unsigned char>(ch) >> 4) & 0x0f]);
-                json.push_back(kHex[static_cast<unsigned char>(ch) & 0x0f]);
+                json_output.push_back(kHex[(static_cast<unsigned char>(ch) >> 4) & 0x0f]);
+                json_output.push_back(kHex[static_cast<unsigned char>(ch) & 0x0f]);
             } else {
-                json.push_back(ch);
+                json_output.push_back(ch);
             }
             break;
         }
     }
-    json.push_back('"');
+    json_output.push_back('"');
 }
 
 std::string hex_bytes(std::span<const std::byte> bytes, std::size_t limit = 64) {

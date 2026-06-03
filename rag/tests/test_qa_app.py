@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from coquic_rag.qa.app import create_app
+import coquic_rag.qa.app as qa_app
 from coquic_rag.qa.filters import RelevanceDecision
 from coquic_rag.qa.filters import QUESTION_GENERATOR_MODEL
 from coquic_rag.qa.filters import SlidingWindowRateLimiter
@@ -102,13 +102,11 @@ def clear_rate_limiter_caches(qa_app) -> None:
 
 
 def test_qa_endpoint_returns_answer_payload(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     qa_app.qa_service.cache_clear()
     clear_rate_limiter_caches(qa_app)
     fake_service = FakeQaService()
     monkeypatch.setattr(qa_app, "qa_service", lambda: fake_service)
-    app = create_app()
+    app = qa_app.create_app()
     client = TestClient(app)
 
     response = client.post(
@@ -138,8 +136,6 @@ def test_qa_endpoint_returns_answer_payload(monkeypatch) -> None:
 
 
 def test_qa_endpoint_enforces_rate_limit(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     qa_app.qa_service.cache_clear()
     clear_rate_limiter_caches(qa_app)
     limiter = SlidingWindowRateLimiter(max_requests=1, window_seconds=60)
@@ -148,8 +144,8 @@ def test_qa_endpoint_enforces_rate_limit(monkeypatch) -> None:
         "rate_limiter",
         lambda: limiter,
     )
-    monkeypatch.setattr(qa_app, "qa_service", lambda: FakeQaService())
-    app = create_app()
+    monkeypatch.setattr(qa_app, "qa_service", FakeQaService)
+    app = qa_app.create_app()
     client = TestClient(app)
 
     first = client.post(
@@ -169,8 +165,6 @@ def test_qa_endpoint_enforces_rate_limit(monkeypatch) -> None:
 
 
 def test_qa_endpoint_limits_same_ip_across_rotated_sessions(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     qa_app.qa_service.cache_clear()
     clear_rate_limiter_caches(qa_app)
     limiter = SlidingWindowRateLimiter(max_requests=1, window_seconds=60)
@@ -179,8 +173,8 @@ def test_qa_endpoint_limits_same_ip_across_rotated_sessions(monkeypatch) -> None
         "qa_ip_rate_limiter",
         lambda: limiter,
     )
-    monkeypatch.setattr(qa_app, "qa_service", lambda: FakeQaService())
-    app = create_app()
+    monkeypatch.setattr(qa_app, "qa_service", FakeQaService)
+    app = qa_app.create_app()
     client = TestClient(app)
 
     first = client.post(
@@ -199,8 +193,6 @@ def test_qa_endpoint_limits_same_ip_across_rotated_sessions(monkeypatch) -> None
 
 
 def test_qa_endpoint_global_deepseek_limit_applies_before_service_call(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     qa_app.qa_service.cache_clear()
     clear_rate_limiter_caches(qa_app)
     limiter = SlidingWindowRateLimiter(max_requests=2, window_seconds=60)
@@ -211,7 +203,7 @@ def test_qa_endpoint_global_deepseek_limit_applies_before_service_call(monkeypat
     )
     fake_service = FakeQaService()
     monkeypatch.setattr(qa_app, "qa_service", lambda: fake_service)
-    app = create_app()
+    app = qa_app.create_app()
     client = TestClient(app)
 
     response = client.post(
@@ -225,13 +217,11 @@ def test_qa_endpoint_global_deepseek_limit_applies_before_service_call(monkeypat
 
 
 def test_qa_stream_endpoint_returns_sse(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     qa_app.qa_service.cache_clear()
     clear_rate_limiter_caches(qa_app)
     fake_service = FakeQaService()
     monkeypatch.setattr(qa_app, "qa_service", lambda: fake_service)
-    app = create_app()
+    app = qa_app.create_app()
     client = TestClient(app)
 
     response = client.post(
@@ -252,12 +242,10 @@ def test_qa_stream_endpoint_returns_sse(monkeypatch) -> None:
 
 
 def test_qa_endpoint_rejects_non_deepseek_answer_model(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     qa_app.qa_service.cache_clear()
     clear_rate_limiter_caches(qa_app)
-    monkeypatch.setattr(qa_app, "qa_service", lambda: FakeQaService())
-    app = create_app()
+    monkeypatch.setattr(qa_app, "qa_service", FakeQaService)
+    app = qa_app.create_app()
     client = TestClient(app)
 
     response = client.post(
@@ -274,8 +262,6 @@ def test_qa_endpoint_rejects_non_deepseek_answer_model(monkeypatch) -> None:
 
 
 def test_health_reports_hardcoded_models_when_old_override_env_is_set(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     qa_app.paths.cache_clear()
     monkeypatch.setenv("OPENROUTER_EMBEDDING_MODEL", "override-embedding")
     monkeypatch.setenv("COQUIC_QDRANT_COLLECTION", "override_collection")
@@ -297,7 +283,7 @@ def test_health_reports_hardcoded_models_when_old_override_env_is_set(monkeypatc
             },
         )(),
     )
-    app = create_app()
+    app = qa_app.create_app()
     client = TestClient(app)
 
     response = client.get("/api/health")
@@ -315,8 +301,6 @@ def test_health_reports_hardcoded_models_when_old_override_env_is_set(monkeypatc
 
 
 def test_default_qa_service_uses_openrouter_embedder_for_search(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     qa_app.qa_service.cache_clear()
     qa_app.paths.cache_clear()
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
@@ -330,14 +314,12 @@ def test_default_qa_service_uses_openrouter_embedder_for_search(monkeypatch) -> 
 
 
 def test_random_question_endpoint_returns_validated_question(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     clear_rate_limiter_caches(qa_app)
     generator = FakeQuestionGenerator()
     classifier = FakeRelevanceClassifier()
     monkeypatch.setattr(qa_app, "question_generator", lambda: generator)
     monkeypatch.setattr(qa_app, "relevance_classifier", lambda: classifier)
-    app = create_app()
+    app = qa_app.create_app()
     client = TestClient(app)
 
     response = client.post(
@@ -352,8 +334,6 @@ def test_random_question_endpoint_returns_validated_question(monkeypatch) -> Non
 
 
 def test_default_random_question_generator_uses_deepseek_v4_pro(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     qa_app.question_generator.cache_clear()
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
 
@@ -365,13 +345,11 @@ def test_default_random_question_generator_uses_deepseek_v4_pro(monkeypatch) -> 
 
 
 def test_random_question_endpoint_rejects_invalid_generated_questions(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     clear_rate_limiter_caches(qa_app)
     monkeypatch.setattr(qa_app, "question_generator", lambda: FakeQuestionGenerator("What is pasta?"))
     classifier = FakeRelevanceClassifier(False)
     monkeypatch.setattr(qa_app, "relevance_classifier", lambda: classifier)
-    app = create_app()
+    app = qa_app.create_app()
     client = TestClient(app)
 
     response = client.post(
@@ -384,8 +362,6 @@ def test_random_question_endpoint_rejects_invalid_generated_questions(monkeypatc
 
 
 def test_random_question_endpoint_enforces_rate_limit(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     clear_rate_limiter_caches(qa_app)
     limiter = SlidingWindowRateLimiter(max_requests=1, window_seconds=60)
     monkeypatch.setattr(
@@ -393,9 +369,9 @@ def test_random_question_endpoint_enforces_rate_limit(monkeypatch) -> None:
         "question_rate_limiter",
         lambda: limiter,
     )
-    monkeypatch.setattr(qa_app, "question_generator", lambda: FakeQuestionGenerator())
-    monkeypatch.setattr(qa_app, "relevance_classifier", lambda: FakeRelevanceClassifier())
-    app = create_app()
+    monkeypatch.setattr(qa_app, "question_generator", FakeQuestionGenerator)
+    monkeypatch.setattr(qa_app, "relevance_classifier", FakeRelevanceClassifier)
+    app = qa_app.create_app()
     client = TestClient(app)
 
     first = client.post(
@@ -412,8 +388,6 @@ def test_random_question_endpoint_enforces_rate_limit(monkeypatch) -> None:
 
 
 def test_random_question_endpoint_limits_same_ip_across_rotated_sessions(monkeypatch) -> None:
-    import coquic_rag.qa.app as qa_app
-
     clear_rate_limiter_caches(qa_app)
     limiter = SlidingWindowRateLimiter(max_requests=1, window_seconds=60)
     monkeypatch.setattr(
@@ -421,9 +395,9 @@ def test_random_question_endpoint_limits_same_ip_across_rotated_sessions(monkeyp
         "question_ip_rate_limiter",
         lambda: limiter,
     )
-    monkeypatch.setattr(qa_app, "question_generator", lambda: FakeQuestionGenerator())
-    monkeypatch.setattr(qa_app, "relevance_classifier", lambda: FakeRelevanceClassifier())
-    app = create_app()
+    monkeypatch.setattr(qa_app, "question_generator", FakeQuestionGenerator)
+    monkeypatch.setattr(qa_app, "relevance_classifier", FakeRelevanceClassifier)
+    app = qa_app.create_app()
     client = TestClient(app)
 
     first = client.post(

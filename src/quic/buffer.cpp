@@ -98,9 +98,10 @@ COQUIC_NO_PROFILE DatagramByteStorageCache &datagram_byte_storage_cache() {
 #endif
 
 std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> output,
-                                                       std::size_t *offset, std::uint64_t value) {
+                                                       std::size_t *offset_ptr,
+                                                       std::uint64_t value) {
     constexpr std::uint64_t kMaxQuicVarInt = 4611686018427387903ull;
-    const auto start_offset = *offset;
+    const auto start_offset = *offset_ptr;
     if (value > kMaxQuicVarInt) {
         return CodecError{
             .code = CodecErrorCode::invalid_varint,
@@ -122,7 +123,7 @@ std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> outp
     }
 
     const auto written = encode_varint_into(output.subspan(start_offset), value).value();
-    *offset += written;
+    *offset_ptr += written;
     return std::nullopt;
 }
 

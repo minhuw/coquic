@@ -64,9 +64,9 @@ coquic::http3::Http3Headers appendix_b2_headers() {
     };
 }
 
-void prime_appendix_b2_decoder(coquic::http3::Http3QpackDecoderContext &decoder) {
+void prime_appendix_b2_decoder(coquic::http3::Http3QpackDecoderContext &qpack_decoder) {
     const auto inserted = coquic::http3::process_http3_qpack_encoder_instructions(
-        decoder, appendix_b2_encoder_instructions());
+        qpack_decoder, appendix_b2_encoder_instructions());
     ASSERT_TRUE(inserted.has_value());
     EXPECT_TRUE(inserted.value().empty());
 }

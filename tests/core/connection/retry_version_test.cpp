@@ -951,12 +951,14 @@ TEST(QuicCoreTest, CompatibleNegotiationServerFirstFlightEmitsV2InitialCrypto) {
 
     auto packets =
         decode_sender_datagram(*server.connection_, server_first_flight_datagrams.front());
-    auto initial_packet = std::find_if(packets.begin(), packets.end(), [](const auto &packet) {
+    auto initial_packet_it = std::find_if(packets.begin(), packets.end(), [](const auto &packet) {
         return std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packet);
     });
-    ASSERT_NE(initial_packet, packets.end());
+    if (initial_packet_it == packets.end()) {
+        FAIL() << "server first flight did not include an Initial packet";
+    }
 
-    const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&*initial_packet);
+    const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&*initial_packet_it);
     ASSERT_NE(initial, nullptr);
     EXPECT_EQ(initial->version, coquic::quic::kQuicVersion2);
     EXPECT_TRUE(std::ranges::any_of(initial->frames, [](const auto &frame) {

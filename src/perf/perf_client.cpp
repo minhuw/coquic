@@ -878,13 +878,12 @@ bool QuicPerfClient::maybe_start_bulk_streams(ConnectionState &connection,
     }
 
     const auto total_bytes = config_.total_bytes.value_or(0);
-    const auto per_stream = total_bytes / config_.streams;
-    const auto remainder = total_bytes % config_.streams;
 
     for (std::size_t index = 0; index < config_.streams; ++index) {
         const auto stream_id = connection.next_stream_id;
         connection.next_stream_id = next_client_perf_stream_id(stream_id);
-        const auto target_bytes = per_stream + (index < remainder ? 1u : 0u);
+        const auto target_bytes =
+            (total_bytes / config_.streams) + (index < (total_bytes % config_.streams) ? 1u : 0u);
 
         auto send_result = core_.advance_endpoint(
             quic::QuicCoreConnectionCommand{

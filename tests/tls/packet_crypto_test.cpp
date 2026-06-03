@@ -613,11 +613,13 @@ TEST(QuicPacketCryptoTest, ExpandTrafficSecretRefreshesCacheWhenHeaderProtection
 
     secret.header_protection_key = hex_bytes("00112233445566778899aabbccddeeff");
 
-    const auto second = coquic::quic::expand_traffic_secret(secret);
-    ASSERT_TRUE(second.has_value());
+    const auto second_expanded_secret = coquic::quic::expand_traffic_secret(secret);
+    if (!second_expanded_secret.has_value()) {
+        FAIL() << "traffic secret did not expand after header protection key changed";
+    }
     ASSERT_TRUE(secret.header_protection_key.has_value());
-    EXPECT_EQ(second.value().hp_key, secret.header_protection_key.value());
-    EXPECT_NE(second.value().hp_key, first.value().hp_key);
+    EXPECT_EQ(second_expanded_secret.value().hp_key, secret.header_protection_key.value());
+    EXPECT_NE(second_expanded_secret.value().hp_key, first.value().hp_key);
 }
 
 TEST(QuicPacketCryptoTest, ExpandTrafficSecretRefreshesCacheWhenSecretChanges) {
@@ -1478,12 +1480,14 @@ TEST(QuicPacketCryptoTest, SealsChunkedPayloadDirectlyIntoCallerOwnedBuffer) {
     };
 
     std::vector<std::byte> ciphertext(expected.value().size());
-    const auto written = coquic::quic::seal_payload_chunks_into(
+    const auto bytes_written = coquic::quic::seal_payload_chunks_into(
         coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
         hex_bytes("c6d98ff3441c3fe1b2182094f69caa2ed4b716b65488960a7a984979fb23e1c8"),
         nonce.value(), hex_bytes("4200bff4"), chunks, ciphertext);
-    ASSERT_TRUE(written.has_value());
-    EXPECT_EQ(written.value(), expected.value().size());
+    if (!bytes_written.has_value()) {
+        FAIL() << "chunked seal did not write ciphertext";
+    }
+    EXPECT_EQ(bytes_written.value(), expected.value().size());
     EXPECT_EQ(ciphertext, expected.value());
 
     const auto opened = coquic::quic::open_payload(

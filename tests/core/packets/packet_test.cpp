@@ -343,10 +343,16 @@ TEST(QuicPacketTest, AllowsPaddingInInitialPacketsAndStreamFramesWithoutLengthAt
         one_rtt_encoded.value(), coquic::quic::DeserializeOptions{
                                      .one_rtt_destination_connection_id_length = 1,
                                  });
-    ASSERT_TRUE(one_rtt_decoded.has_value());
+    if (!one_rtt_decoded.has_value()) {
+        FAIL() << "1-RTT packet did not decode";
+    }
     const auto *one_rtt = std::get_if<OneRttPacket>(&one_rtt_decoded.value().packet);
-    ASSERT_NE(one_rtt, nullptr);
-    ASSERT_EQ(one_rtt->frames.size(), 1u);
+    if (one_rtt == nullptr) {
+        FAIL() << "expected 1-RTT packet";
+    }
+    if (one_rtt->frames.size() != 1u) {
+        FAIL() << "unexpected 1-RTT frame count";
+    }
     const auto *stream = std::get_if<StreamFrame>(&one_rtt->frames.front());
     ASSERT_NE(stream, nullptr);
     EXPECT_FALSE(stream->has_length);
@@ -388,9 +394,13 @@ TEST(QuicPacketTest, AllowsLengthEncodedStreamFrameAtPacketEndAndNonV1LongConnec
     ASSERT_TRUE(initial_encoded.has_value());
 
     const auto initial_decoded = coquic::quic::deserialize_packet(initial_encoded.value(), {});
-    ASSERT_TRUE(initial_decoded.has_value());
+    if (!initial_decoded.has_value()) {
+        FAIL() << "Initial packet did not decode";
+    }
     const auto *initial = std::get_if<InitialPacket>(&initial_decoded.value().packet);
-    ASSERT_NE(initial, nullptr);
+    if (initial == nullptr) {
+        FAIL() << "expected Initial packet";
+    }
     EXPECT_EQ(initial->version, 2u);
     EXPECT_EQ(initial->destination_connection_id.size(), 21u);
     EXPECT_EQ(initial->source_connection_id.size(), 21u);
@@ -616,10 +626,16 @@ TEST(QuicPacketTest, AllowsDatagramFramesInZeroRttAndOneRttPackets) {
         one_rtt_encoded.value(), coquic::quic::DeserializeOptions{
                                      .one_rtt_destination_connection_id_length = 1,
                                  });
-    ASSERT_TRUE(one_rtt_decoded.has_value());
+    if (!one_rtt_decoded.has_value()) {
+        FAIL() << "1-RTT packet did not decode";
+    }
     const auto *one_rtt = std::get_if<OneRttPacket>(&one_rtt_decoded.value().packet);
-    ASSERT_NE(one_rtt, nullptr);
-    ASSERT_EQ(one_rtt->frames.size(), 1u);
+    if (one_rtt == nullptr) {
+        FAIL() << "expected 1-RTT packet";
+    }
+    if (one_rtt->frames.size() != 1u) {
+        FAIL() << "unexpected 1-RTT frame count";
+    }
     const auto *datagram = std::get_if<DatagramFrame>(&one_rtt->frames.front());
     ASSERT_NE(datagram, nullptr);
     EXPECT_FALSE(datagram->has_length);
@@ -869,7 +885,7 @@ TEST(QuicPacketTest, RejectsMalformedZeroRttAndHandshakePackets) {
     zero_rtt.value()[9] = std::byte{0x03};
     expect_packet_decode_error(zero_rtt.value(), {}, CodecErrorCode::packet_length_mismatch);
 
-    auto handshake = coquic::quic::serialize_packet(HandshakePacket{
+    auto serialized_handshake = coquic::quic::serialize_packet(HandshakePacket{
         .version = 1,
         .destination_connection_id = {std::byte{0xaa}},
         .source_connection_id = {std::byte{0xbb}},
@@ -877,9 +893,10 @@ TEST(QuicPacketTest, RejectsMalformedZeroRttAndHandshakePackets) {
         .truncated_packet_number = 1,
         .frames = {PingFrame{}},
     });
-    ASSERT_TRUE(handshake.has_value());
-    handshake.value()[9] = std::byte{0x03};
-    expect_packet_decode_error(handshake.value(), {}, CodecErrorCode::packet_length_mismatch);
+    ASSERT_TRUE(serialized_handshake.has_value());
+    serialized_handshake.value()[9] = std::byte{0x03};
+    expect_packet_decode_error(serialized_handshake.value(), {},
+                               CodecErrorCode::packet_length_mismatch);
     expect_packet_decode_error(
         as_span(std::array<std::byte, 5>{std::byte{0xd0}, std::byte{0x00}, std::byte{0x00},
                                          std::byte{0x00}, std::byte{0x01}}),
@@ -1056,7 +1073,9 @@ TEST(QuicPacketTest, AcceptsGreasedQuicBitWhenEnabled) {
         greased_one_rtt, coquic::quic::DeserializeOptions{
                              .one_rtt_destination_connection_id_length = 1,
                          });
-    ASSERT_FALSE(strict_one_rtt.has_value());
+    if (strict_one_rtt.has_value()) {
+        FAIL() << "strict GREASE QUIC bit decode succeeded";
+    }
     EXPECT_EQ(strict_one_rtt.error().code, CodecErrorCode::invalid_fixed_bit);
 
     const auto decoded_one_rtt = coquic::quic::deserialize_packet(
@@ -1064,7 +1083,9 @@ TEST(QuicPacketTest, AcceptsGreasedQuicBitWhenEnabled) {
                              .one_rtt_destination_connection_id_length = 1,
                              .accept_greased_quic_bit = true,
                          });
-    ASSERT_TRUE(decoded_one_rtt.has_value());
+    if (!decoded_one_rtt.has_value()) {
+        FAIL() << "GREASE QUIC bit 1-RTT packet did not decode";
+    }
     EXPECT_NE(std::get_if<OneRttPacket>(&decoded_one_rtt.value().packet), nullptr);
 }
 

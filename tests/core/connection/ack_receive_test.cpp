@@ -1535,9 +1535,9 @@ TEST(QuicCoreTest, DetectLostPacketsMarksCryptoRangesLostAndKeepsRecoveryStateFo
     EXPECT_TRUE(connection.initial_space_.send_crypto.has_pending_data());
     EXPECT_EQ(connection.initial_space_.recovery.largest_acked_packet_number(),
               std::optional<std::uint64_t>{5});
-    auto initial_packet = &tracked_packet_or_terminate(connection.initial_space_, 0);
-    EXPECT_TRUE(initial_packet->declared_lost);
-    EXPECT_FALSE(initial_packet->in_flight);
+    auto initial_tracked_packet = &tracked_packet_or_terminate(connection.initial_space_, 0);
+    EXPECT_TRUE(initial_tracked_packet->declared_lost);
+    EXPECT_FALSE(initial_tracked_packet->in_flight);
 }
 
 TEST(QuicCoreTest, DetectLostApplicationPacketsRequeuesApplicationCryptoRanges) {

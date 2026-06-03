@@ -788,7 +788,7 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
     }
 
     {
-        g_runtime_low_level_getaddrinfo_calls_for_tests = 0;
+        runtime_low_level_getaddrinfo_calls_for_tests() = 0;
         const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
             Http09RuntimeOpsOverride{
                 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
@@ -799,8 +799,8 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
                 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
                 .getaddrinfo_fn = [](const char *node, const char *service, const addrinfo *hints,
                                      addrinfo **results) -> int {
-                    g_runtime_low_level_getaddrinfo_calls_for_tests += 1;
-                    if (g_runtime_low_level_getaddrinfo_calls_for_tests == 2) {
+                    runtime_low_level_getaddrinfo_calls_for_tests() += 1;
+                    if (runtime_low_level_getaddrinfo_calls_for_tests() == 2) {
                         return EAI_FAIL;
                     }
                     return ::getaddrinfo(node, service, hints, results);
@@ -822,7 +822,7 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
     }
 
     {
-        g_runtime_low_level_bind_calls_for_tests = 0;
+        runtime_low_level_bind_calls_for_tests() = 0;
         const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
             Http09RuntimeOpsOverride{
                 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
@@ -830,8 +830,8 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
                     return ::socket(family, type, protocol);
                 },
                 .bind_fn = [](int, const sockaddr *, socklen_t) -> int {
-                    g_runtime_low_level_bind_calls_for_tests += 1;
-                    if (g_runtime_low_level_bind_calls_for_tests == 2) {
+                    runtime_low_level_bind_calls_for_tests() += 1;
+                    if (runtime_low_level_bind_calls_for_tests() == 2) {
                         errno = EADDRINUSE;
                         return -1;
                     }
@@ -1200,14 +1200,6 @@ std::optional<QuicConnectionHandle> seed_live_backend_response_for_tests(
         .family = AF_INET,
     }));
     step_now += std::chrono::milliseconds(1);
-    const auto request_result = client.advance(
-        QuicCoreSendStreamData{
-            .stream_id = 0,
-            .bytes = bytes_from_string_for_runtime_tests("GET /large.bin\r\n"),
-            .fin = true,
-        },
-        step_now);
-    step_now += std::chrono::milliseconds(1);
     endpoint_map.emplace(*accepted_connection,
                          ServerConnectionEndpointState{
                              .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
@@ -1216,9 +1208,17 @@ std::optional<QuicConnectionHandle> seed_live_backend_response_for_tests(
                          });
     static_cast<void>(process_server_endpoint_core_result_with_backend(
         server_core, transport_state, endpoint_map, config.document_root,
-        relay_send_datagrams_to_endpoint_core_for_tests(request_result, server_core, route_handle,
-                                                        step_now),
+        relay_send_datagrams_to_endpoint_core_for_tests(
+            client.advance(
+                QuicCoreSendStreamData{
+                    .stream_id = 0,
+                    .bytes = bytes_from_string_for_runtime_tests("GET /large.bin\r\n"),
+                    .fin = true,
+                },
+                step_now),
+            server_core, route_handle, step_now),
         route_handle, backend));
+    step_now += std::chrono::milliseconds(1);
     step_now += std::chrono::milliseconds(1);
     static_cast<void>(relay_send_datagrams_to_endpoint_core_for_tests(
         relay_backend_sent_datagrams_to_client_core_for_tests(backend.sent_datagrams, client,
@@ -1269,7 +1269,7 @@ ServerLoopResultForTests collect_server_backend_loop_result_for_tests(
 }
 
 ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests case_id) {
-    auto script = server_loop_case_factories_for_tests[static_cast<std::size_t>(case_id)]();
+    auto script = make_server_loop_case_for_tests(case_id);
     std::size_t current_time_calls = 0;
     std::size_t receive_calls = 0;
     std::size_t wait_calls = 0;
@@ -1331,8 +1331,7 @@ ServerLoopResultForTests run_server_loop_case_for_tests(ServerLoopCaseForTests c
 
 ServerLoopResultForTests
 run_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests case_id) {
-    auto script =
-        server_backend_scheduling_case_factories_for_tests[static_cast<std::size_t>(case_id)]();
+    auto script = make_server_backend_scheduling_case_for_tests(case_id);
     std::size_t current_time_calls = 0;
     std::size_t next_wakeup_calls = 0;
     std::size_t wait_calls = 0;

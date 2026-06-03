@@ -1037,14 +1037,17 @@ TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperReceivesInboundDatagram) {
     ASSERT_GE(sender_fd, 0);
     ScopedFd sender_socket(sender_fd);
 
-    const std::array<std::byte, 3> datagram = {
+    const std::array<std::byte, 3> test_datagram = {
         std::byte{0x01},
         std::byte{0x02},
         std::byte{0x03},
     };
-    ASSERT_GE(::sendto(sender_socket.get(), datagram.data(), datagram.size(), 0,
-                       reinterpret_cast<const sockaddr *>(&bound_address), sizeof(bound_address)),
-              0);
+    const auto send_result =
+        ::sendto(sender_socket.get(), test_datagram.data(), test_datagram.size(), 0,
+                 reinterpret_cast<const sockaddr *>(&bound_address), sizeof(bound_address));
+    if (send_result < 0) {
+        FAIL() << "test datagram was not sent";
+    }
 
     const auto step = coquic::http09::test::wait_for_socket_or_deadline_for_tests(
         receiver_socket.get(), /*idle_timeout_ms=*/100, "client", std::nullopt);
@@ -1055,7 +1058,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeWaitHelperReceivesInboundDatagram) {
     EXPECT_TRUE(wait_step.has_input);
     EXPECT_FALSE(wait_step.input_is_timer_expired);
     EXPECT_TRUE(wait_step.has_source);
-    EXPECT_EQ(wait_step.inbound_datagram_bytes, datagram.size());
+    EXPECT_EQ(wait_step.inbound_datagram_bytes, test_datagram.size());
     EXPECT_GT(wait_step.source_len, 0u);
 }
 

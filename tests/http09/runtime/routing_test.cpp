@@ -227,14 +227,14 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRouteHelperErasesFailedSession)
         make_connected_runtime_server_connection(core_config));
     auto &connection = *server.connection_;
 
-    const auto local_connection_id = connection.config_.source_connection_id;
-    const auto initial_destination_connection_id =
+    const auto server_local_connection_id = connection.config_.source_connection_id;
+    const auto client_initial_destination_connection_id =
         connection.client_initial_destination_connection_id();
-    const auto encoded = coquic::quic::serialize_protected_datagram(
+    const auto encoded_datagram = coquic::quic::serialize_protected_datagram(
         std::array<coquic::quic::ProtectedPacket, 1>{
             coquic::quic::ProtectedOneRttPacket{
                 .key_phase = connection.application_read_key_phase_,
-                .destination_connection_id = local_connection_id,
+                .destination_connection_id = server_local_connection_id,
                 .packet_number_length = 2,
                 .packet_number = 77,
                 .frames =
@@ -248,23 +248,27 @@ TEST(QuicHttp09RuntimeTest, ExistingServerSessionRouteHelperErasesFailedSession)
         },
         coquic::quic::SerializeProtectionContext{
             .local_role = coquic::quic::EndpointRole::client,
-            .client_initial_destination_connection_id = initial_destination_connection_id,
+            .client_initial_destination_connection_id = client_initial_destination_connection_id,
             .one_rtt_secret = connection.application_space_.read_secret,
             .one_rtt_key_phase = connection.application_read_key_phase_,
         });
-    ASSERT_TRUE(encoded.has_value());
+    if (!encoded_datagram.has_value()) {
+        FAIL() << "failed to serialize routed datagram";
+    }
 
     connection.mark_failed();
 
-    const auto peer = make_peer(39968);
-    const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
-    const auto route = coquic::http09::test::route_existing_server_session_datagram_for_tests(
-        server, /*established_socket_fd=*/31, peer, peer_len, local_connection_id,
-        initial_destination_connection_id, /*inbound_socket_fd=*/31, peer, peer_len,
-        encoded.value(), coquic::quic::test::test_time(1));
+    const auto route_peer = make_peer(39968);
+    const auto route_peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
+    const auto route_result =
+        coquic::http09::test::route_existing_server_session_datagram_for_tests(
+            server, /*established_socket_fd=*/31, route_peer, route_peer_len,
+            server_local_connection_id, client_initial_destination_connection_id,
+            /*inbound_socket_fd=*/31, route_peer, route_peer_len, encoded_datagram.value(),
+            coquic::quic::test::test_time(1));
 
-    EXPECT_TRUE(route.processed);
-    EXPECT_TRUE(route.erased);
+    EXPECT_TRUE(route_result.processed);
+    EXPECT_TRUE(route_result.erased);
 }
 
 } // namespace

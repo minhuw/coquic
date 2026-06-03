@@ -247,103 +247,107 @@ make_test_traffic_secret(CipherSuite cipher_suite = CipherSuite::tls_aes_128_gcm
 }
 
 inline QuicConnection make_connected_client_connection() {
-    QuicConnection connection(test::make_client_core_config());
-    connection.started_ = true;
-    connection.status_ = HandshakeStatus::connected;
-    connection.handshake_confirmed_ = true;
-    connection.peer_source_connection_id_ = {std::byte{0xa1}, std::byte{0xb2}};
-    connection.client_initial_destination_connection_id_ =
-        connection.config_.initial_destination_connection_id;
-    connection.application_space_.read_secret =
+    QuicConnection client_connection(test::make_client_core_config());
+    client_connection.started_ = true;
+    client_connection.status_ = HandshakeStatus::connected;
+    client_connection.handshake_confirmed_ = true;
+    client_connection.peer_source_connection_id_ = {std::byte{0xa1}, std::byte{0xb2}};
+    client_connection.client_initial_destination_connection_id_ =
+        client_connection.config_.initial_destination_connection_id;
+    client_connection.application_space_.read_secret =
         make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x21});
-    connection.application_space_.write_secret =
+    client_connection.application_space_.write_secret =
         make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x31});
-    connection.peer_transport_parameters_ = TransportParameters{
-        .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+    client_connection.peer_transport_parameters_ = TransportParameters{
+        .max_udp_payload_size = client_connection.config_.transport.max_udp_payload_size,
         .active_connection_id_limit = 2,
-        .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
-        .max_ack_delay = connection.config_.transport.max_ack_delay,
-        .initial_max_data = connection.config_.transport.initial_max_data,
+        .ack_delay_exponent = client_connection.config_.transport.ack_delay_exponent,
+        .max_ack_delay = client_connection.config_.transport.max_ack_delay,
+        .initial_max_data = client_connection.config_.transport.initial_max_data,
         .initial_max_stream_data_bidi_local =
-            connection.config_.transport.initial_max_stream_data_bidi_local,
+            client_connection.config_.transport.initial_max_stream_data_bidi_local,
         .initial_max_stream_data_bidi_remote =
-            connection.config_.transport.initial_max_stream_data_bidi_remote,
-        .initial_max_stream_data_uni = connection.config_.transport.initial_max_stream_data_uni,
-        .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
-        .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
-        .initial_source_connection_id = connection.peer_source_connection_id_,
-        .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
-        .grease_quic_bit = connection.config_.transport.grease_quic_bit,
+            client_connection.config_.transport.initial_max_stream_data_bidi_remote,
+        .initial_max_stream_data_uni =
+            client_connection.config_.transport.initial_max_stream_data_uni,
+        .initial_max_streams_bidi = client_connection.config_.transport.initial_max_streams_bidi,
+        .initial_max_streams_uni = client_connection.config_.transport.initial_max_streams_uni,
+        .initial_source_connection_id = client_connection.peer_source_connection_id_,
+        .max_datagram_frame_size = client_connection.config_.transport.max_datagram_frame_size,
+        .grease_quic_bit = client_connection.config_.transport.grease_quic_bit,
     };
-    connection.peer_transport_parameters_validated_ = true;
-    connection.initialize_peer_flow_control_from_transport_parameters();
-    connection.last_validated_path_id_ = 0;
-    connection.current_send_path_id_ = 0;
-    auto &path = connection.ensure_path_state(0);
-    path.validated = true;
-    path.is_current_send_path = true;
-    return connection;
+    client_connection.peer_transport_parameters_validated_ = true;
+    client_connection.initialize_peer_flow_control_from_transport_parameters();
+    client_connection.last_validated_path_id_ = 0;
+    client_connection.current_send_path_id_ = 0;
+    auto &client_path = client_connection.ensure_path_state(0);
+    client_path.validated = true;
+    client_path.is_current_send_path = true;
+    return client_connection;
 }
 
 inline QuicConnection make_connected_server_connection() {
-    QuicConnection connection(test::make_server_core_config());
-    connection.started_ = true;
-    connection.status_ = HandshakeStatus::connected;
-    connection.handshake_confirmed_ = true;
-    connection.peer_address_validated_ = true;
-    connection.peer_source_connection_id_ = {std::byte{0xc1}, std::byte{0x01}};
-    connection.client_initial_destination_connection_id_ = {
+    QuicConnection server_connection(test::make_server_core_config());
+    server_connection.started_ = true;
+    server_connection.status_ = HandshakeStatus::connected;
+    server_connection.handshake_confirmed_ = true;
+    server_connection.peer_address_validated_ = true;
+    server_connection.peer_source_connection_id_ = {std::byte{0xc1}, std::byte{0x01}};
+    server_connection.client_initial_destination_connection_id_ = {
         std::byte{0x83}, std::byte{0x94}, std::byte{0xc8}, std::byte{0xf0},
         std::byte{0x3e}, std::byte{0x51}, std::byte{0x57}, std::byte{0x08},
     };
-    connection.local_transport_parameters_ = TransportParameters{
-        .original_destination_connection_id = connection.client_initial_destination_connection_id_,
-        .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+    server_connection.local_transport_parameters_ = TransportParameters{
+        .original_destination_connection_id =
+            server_connection.client_initial_destination_connection_id_,
+        .max_udp_payload_size = server_connection.config_.transport.max_udp_payload_size,
         .active_connection_id_limit = 2,
-        .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
-        .max_ack_delay = connection.config_.transport.max_ack_delay,
-        .initial_max_data = connection.config_.transport.initial_max_data,
+        .ack_delay_exponent = server_connection.config_.transport.ack_delay_exponent,
+        .max_ack_delay = server_connection.config_.transport.max_ack_delay,
+        .initial_max_data = server_connection.config_.transport.initial_max_data,
         .initial_max_stream_data_bidi_local =
-            connection.config_.transport.initial_max_stream_data_bidi_local,
+            server_connection.config_.transport.initial_max_stream_data_bidi_local,
         .initial_max_stream_data_bidi_remote =
-            connection.config_.transport.initial_max_stream_data_bidi_remote,
-        .initial_max_stream_data_uni = connection.config_.transport.initial_max_stream_data_uni,
-        .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
-        .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
-        .initial_source_connection_id = connection.config_.source_connection_id,
-        .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
-        .grease_quic_bit = connection.config_.transport.grease_quic_bit,
+            server_connection.config_.transport.initial_max_stream_data_bidi_remote,
+        .initial_max_stream_data_uni =
+            server_connection.config_.transport.initial_max_stream_data_uni,
+        .initial_max_streams_bidi = server_connection.config_.transport.initial_max_streams_bidi,
+        .initial_max_streams_uni = server_connection.config_.transport.initial_max_streams_uni,
+        .initial_source_connection_id = server_connection.config_.source_connection_id,
+        .max_datagram_frame_size = server_connection.config_.transport.max_datagram_frame_size,
+        .grease_quic_bit = server_connection.config_.transport.grease_quic_bit,
     };
-    connection.initialize_local_flow_control();
-    connection.application_space_.read_secret =
+    server_connection.initialize_local_flow_control();
+    server_connection.application_space_.read_secret =
         make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x21});
-    connection.application_space_.write_secret =
+    server_connection.application_space_.write_secret =
         make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x31});
-    connection.peer_transport_parameters_ = TransportParameters{
-        .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+    server_connection.peer_transport_parameters_ = TransportParameters{
+        .max_udp_payload_size = server_connection.config_.transport.max_udp_payload_size,
         .active_connection_id_limit = 2,
-        .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
-        .max_ack_delay = connection.config_.transport.max_ack_delay,
-        .initial_max_data = connection.config_.transport.initial_max_data,
+        .ack_delay_exponent = server_connection.config_.transport.ack_delay_exponent,
+        .max_ack_delay = server_connection.config_.transport.max_ack_delay,
+        .initial_max_data = server_connection.config_.transport.initial_max_data,
         .initial_max_stream_data_bidi_local =
-            connection.config_.transport.initial_max_stream_data_bidi_local,
+            server_connection.config_.transport.initial_max_stream_data_bidi_local,
         .initial_max_stream_data_bidi_remote =
-            connection.config_.transport.initial_max_stream_data_bidi_remote,
-        .initial_max_stream_data_uni = connection.config_.transport.initial_max_stream_data_uni,
-        .initial_max_streams_bidi = connection.config_.transport.initial_max_streams_bidi,
-        .initial_max_streams_uni = connection.config_.transport.initial_max_streams_uni,
-        .initial_source_connection_id = connection.peer_source_connection_id_,
-        .max_datagram_frame_size = connection.config_.transport.max_datagram_frame_size,
-        .grease_quic_bit = connection.config_.transport.grease_quic_bit,
+            server_connection.config_.transport.initial_max_stream_data_bidi_remote,
+        .initial_max_stream_data_uni =
+            server_connection.config_.transport.initial_max_stream_data_uni,
+        .initial_max_streams_bidi = server_connection.config_.transport.initial_max_streams_bidi,
+        .initial_max_streams_uni = server_connection.config_.transport.initial_max_streams_uni,
+        .initial_source_connection_id = server_connection.peer_source_connection_id_,
+        .max_datagram_frame_size = server_connection.config_.transport.max_datagram_frame_size,
+        .grease_quic_bit = server_connection.config_.transport.grease_quic_bit,
     };
-    connection.peer_transport_parameters_validated_ = true;
-    connection.initialize_peer_flow_control_from_transport_parameters();
-    connection.last_validated_path_id_ = 0;
-    connection.current_send_path_id_ = 0;
-    auto &path = connection.ensure_path_state(0);
-    path.validated = true;
-    path.is_current_send_path = true;
-    return connection;
+    server_connection.peer_transport_parameters_validated_ = true;
+    server_connection.initialize_peer_flow_control_from_transport_parameters();
+    server_connection.last_validated_path_id_ = 0;
+    server_connection.current_send_path_id_ = 0;
+    auto &server_path = server_connection.ensure_path_state(0);
+    server_path.validated = true;
+    server_path.is_current_send_path = true;
+    return server_connection;
 }
 
 inline PreferredAddress make_test_preferred_address() {

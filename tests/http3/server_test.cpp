@@ -279,8 +279,8 @@ std::vector<std::byte> data_frame_bytes(std::string_view payload_text) {
     return frame.has_value() ? frame.value() : std::vector<std::byte>{};
 }
 
-std::string data_frame_payload_text(const std::vector<std::byte> &bytes) {
-    const auto decoded = coquic::http3::parse_http3_frame(bytes);
+std::string data_frame_payload_text(const std::vector<std::byte> &frame_bytes) {
+    const auto decoded = coquic::http3::parse_http3_frame(frame_bytes);
     EXPECT_TRUE(decoded.has_value());
     if (!decoded.has_value()) {
         return {};

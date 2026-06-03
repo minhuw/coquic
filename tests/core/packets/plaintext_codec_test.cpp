@@ -31,12 +31,18 @@ TEST(QuicPlaintextCodecTest, RoundTripsCoalescedLongHeaderDatagram) {
         .frames = {coquic::quic::AckFrame{}},
     });
 
-    auto encoded = coquic::quic::serialize_datagram(packets);
-    ASSERT_TRUE(encoded.has_value());
+    auto encoded_datagram = coquic::quic::serialize_datagram(packets);
+    if (!encoded_datagram.has_value()) {
+        FAIL() << "plaintext datagram did not serialize";
+    }
 
-    auto decoded = coquic::quic::deserialize_datagram(encoded.value());
-    ASSERT_TRUE(decoded.has_value());
-    ASSERT_EQ(decoded.value().size(), 2u);
+    auto decoded_datagram = coquic::quic::deserialize_datagram(encoded_datagram.value());
+    if (!decoded_datagram.has_value()) {
+        FAIL() << "plaintext datagram did not decode";
+    }
+    if (decoded_datagram.value().size() != 2u) {
+        FAIL() << "plaintext datagram did not contain two packets";
+    }
 }
 
 TEST(QuicPlaintextCodecTest, RequiresShortHeaderContextForOneRtt) {

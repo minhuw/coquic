@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import coquic
-from coquic import quic
 
 from . import PerfError
 from .config import Direction, Mode, PerfConfig, client_endpoint_config
@@ -79,7 +78,7 @@ ClientCommand = OpenConnectionCommand | SendStreamCommand | CloseCommand
 
 
 async def run_client(config: PerfConfig):
-    endpoint = quic.Endpoint(client_endpoint_config(config))
+    endpoint = coquic.quic.Endpoint(client_endpoint_config(config))
     io, primary_route, primary_identity = await UdpRuntime.client(config.host, config.port)
     try:
         client = Client(config, endpoint, io, primary_route, primary_identity)
@@ -92,7 +91,7 @@ class Client:
     def __init__(
         self,
         config: PerfConfig,
-        endpoint: quic.Endpoint,
+        endpoint: coquic.quic.Endpoint,
         io: UdpRuntime,
         primary_route: int,
         primary_identity: bytes,
@@ -645,9 +644,9 @@ class Client:
             return 0
         return self.config.connections
 
-    def make_client_config(self, index: int) -> quic.ClientConfig:
+    def make_client_config(self, index: int) -> coquic.quic.ClientConfig:
         sequence = index + 1
-        config = quic.ClientConfig.new(
+        config = coquic.quic.ClientConfig.new(
             make_connection_id(0xC1, sequence),
             make_connection_id(0x83, 0x40 + sequence),
         )

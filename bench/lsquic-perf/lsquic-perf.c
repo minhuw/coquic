@@ -784,7 +784,7 @@ static void client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status statu
     try_open_streams_on_conn(conn_ctx->state, conn_ctx);
 }
 
-static const struct lsquic_stream_if client_stream_if = {
+const struct lsquic_stream_if client_stream_if = {
     .on_new_conn = client_on_new_conn,
     .on_conn_closed = client_on_conn_closed,
     .on_new_stream = client_on_new_stream,
@@ -885,7 +885,7 @@ static void server_on_close(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     free(h);
 }
 
-static const struct lsquic_stream_if server_stream_if = {
+const struct lsquic_stream_if server_stream_if = {
     .on_new_conn = server_on_new_conn,
     .on_conn_closed = server_on_conn_closed,
     .on_new_stream = server_on_new_stream,

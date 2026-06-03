@@ -138,8 +138,8 @@ COQUIC_NO_PROFILE void print_core_profile() {
     }
 
     const auto &c = core_profile_counters();
-    std::cerr << "coquic-core-profile"
-              << " drain_calls=" << c.drain_calls << " drain_datagrams=" << c.drain_datagrams
+    std::cerr << "coquic-core-profile" << " drain_calls=" << c.drain_calls
+              << " drain_datagrams=" << c.drain_datagrams
               << " drain_send_effects=" << c.drain_send_effects << " drain_ns=" << c.drain_ns
               << " drain_emplace_send_ns=" << c.drain_emplace_send_ns
               << " append_result_calls=" << c.append_result_calls
@@ -195,25 +195,26 @@ struct CoreProfileTimer {
 #endif
 #endif
 
-COQUIC_NO_PROFILE std::size_t core_effect_storage_allocation_bytes(std::size_t bytes) {
+COQUIC_NO_PROFILE std::size_t core_effect_storage_allocation_bytes(std::size_t byte_count) {
 #if COQUIC_DISABLE_CORE_EFFECT_STORAGE_CACHE != 0
-    return bytes;
+    return byte_count;
 #else
-    if (bytes == 0 || bytes > kCoreEffectStorageCacheMaxBytes) {
-        return bytes;
+    if (byte_count == 0 || byte_count > kCoreEffectStorageCacheMaxBytes) {
+        return byte_count;
     }
 
-    return ((bytes + kCoreEffectStorageCacheBucketBytes - 1) / kCoreEffectStorageCacheBucketBytes) *
+    return ((byte_count + kCoreEffectStorageCacheBucketBytes - 1) /
+            kCoreEffectStorageCacheBucketBytes) *
            kCoreEffectStorageCacheBucketBytes;
 #endif
 }
 
 #if COQUIC_DISABLE_CORE_EFFECT_STORAGE_CACHE == 0
-COQUIC_NO_PROFILE void *allocate_aligned_storage(std::size_t bytes, std::size_t alignment) {
+COQUIC_NO_PROFILE void *allocate_aligned_storage(std::size_t byte_count, std::size_t alignment) {
     if (alignment > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
-        return ::operator new(bytes, std::align_val_t{alignment});
+        return ::operator new(byte_count, std::align_val_t{alignment});
     }
-    return ::operator new(bytes);
+    return ::operator new(byte_count);
 }
 
 COQUIC_NO_PROFILE void deallocate_aligned_storage(void *pointer, std::size_t alignment) noexcept {
@@ -233,16 +234,16 @@ struct CoreEffectStorageCache {
 
     ~CoreEffectStorageCache() {
         for (std::size_t index = 0; index < used; ++index) {
-            auto &entry = entries[index];
-            if (entry.pointer != nullptr) {
-                deallocate_aligned_storage(entry.pointer, entry.alignment);
+            auto &cache_entry = entries[index];
+            if (cache_entry.pointer != nullptr) {
+                deallocate_aligned_storage(cache_entry.pointer, cache_entry.alignment);
             }
         }
     }
 
-    COQUIC_NO_PROFILE std::optional<void *> take(std::size_t bytes, std::size_t alignment) {
+    COQUIC_NO_PROFILE std::optional<void *> take(std::size_t byte_count, std::size_t alignment) {
         for (std::size_t index = 0; index < used; ++index) {
-            if (entries[index].bytes != bytes || entries[index].alignment != alignment) {
+            if (entries[index].bytes != byte_count || entries[index].alignment != alignment) {
                 continue;
             }
 
@@ -256,14 +257,14 @@ struct CoreEffectStorageCache {
         return std::nullopt;
     }
 
-    COQUIC_NO_PROFILE bool put(void *pointer, std::size_t bytes, std::size_t alignment) {
+    COQUIC_NO_PROFILE bool put(void *pointer, std::size_t byte_count, std::size_t alignment) {
         if (used == entries.size()) {
             return false;
         }
 
         entries[used] = Entry{
             .pointer = pointer,
-            .bytes = bytes,
+            .bytes = byte_count,
             .alignment = alignment,
         };
         ++used;

@@ -190,25 +190,28 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
     record(unfair_stream_order(streams, std::nullopt) == std::vector<std::uint64_t>{4, 8, 12});
 
     auto probe_stream = make_implicit_stream_state(0, EndpointRole::client);
-    const StreamFrameSendMetadata missing_fin_metadata{
-        .stream_id = 0,
-        .offset = 0,
-        .length = 1,
-        .fin = false,
-    };
-    record(!stream_frame_metadata_is_probe_worthy(probe_stream, missing_fin_metadata));
+    record(!stream_frame_metadata_is_probe_worthy(probe_stream, StreamFrameSendMetadata{
+                                                                    .stream_id = 0,
+                                                                    .offset = 0,
+                                                                    .length = 1,
+                                                                    .fin = false,
+                                                                }));
 
-    const StreamFrameSendMetadata fin_metadata{
-        .stream_id = 0,
-        .offset = 0,
-        .length = 1,
-        .fin = true,
-    };
     probe_stream.send_fin_state = StreamSendFinState::acknowledged;
-    record(!stream_frame_metadata_is_probe_worthy(probe_stream, fin_metadata));
+    record(!stream_frame_metadata_is_probe_worthy(probe_stream, StreamFrameSendMetadata{
+                                                                    .stream_id = 0,
+                                                                    .offset = 0,
+                                                                    .length = 1,
+                                                                    .fin = true,
+                                                                }));
     probe_stream.send_fin_state = StreamSendFinState::pending;
     probe_stream.send_final_size = 1;
-    record(stream_frame_metadata_is_probe_worthy(probe_stream, fin_metadata));
+    record(stream_frame_metadata_is_probe_worthy(probe_stream, StreamFrameSendMetadata{
+                                                                   .stream_id = 0,
+                                                                   .offset = 0,
+                                                                   .length = 1,
+                                                                   .fin = true,
+                                                               }));
 
     return ok;
 }

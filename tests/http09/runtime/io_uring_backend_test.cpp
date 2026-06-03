@@ -516,9 +516,9 @@ TEST(IoUringBackendTest, BackendSendManyDelegatesRouteMappedDatagramsToEngine) {
     });
     ASSERT_TRUE(first_route.has_value());
     ASSERT_TRUE(second_route.has_value());
-    const auto first_route_handle =
+    const auto first_io_route_handle =
         coquic::quic::test_support::optional_value_or_terminate(first_route);
-    const auto second_route_handle =
+    const auto second_io_route_handle =
         coquic::quic::test_support::optional_value_or_terminate(second_route);
 
     constexpr std::array<std::byte, 1> kFirstPayload = {
@@ -528,20 +528,22 @@ TEST(IoUringBackendTest, BackendSendManyDelegatesRouteMappedDatagramsToEngine) {
         std::byte{0x62},
         std::byte{0x63},
     };
-    const std::array datagrams{
+    const std::array io_datagrams{
         coquic::io::QuicIoTxDatagram{
-            .route_handle = first_route_handle,
+            .route_handle = first_io_route_handle,
             .bytes_view = kFirstPayload,
             .ecn = QuicEcnCodepoint::not_ect,
         },
         coquic::io::QuicIoTxDatagram{
-            .route_handle = second_route_handle,
+            .route_handle = second_io_route_handle,
             .bytes_view = kSecondPayload,
             .ecn = QuicEcnCodepoint::ect0,
         },
     };
 
-    EXPECT_TRUE(backend->send_many(datagrams));
+    if (!backend->send_many(io_datagrams)) {
+        ADD_FAILURE() << "io_uring backend did not send datagrams";
+    }
     EXPECT_EQ(g_engine_harness.last_send.opcode, IORING_OP_SENDMSG);
     EXPECT_EQ(g_engine_harness.last_send.peer_port, 17445);
     EXPECT_EQ(g_engine_harness.last_send.traffic_class, 0x02);
@@ -1163,13 +1165,15 @@ TEST(IoUringBackendTest, RegisterSocketDelegatesToPollFallbackAfterRecvEinval) {
     ASSERT_TRUE(engine->register_socket(90));
 
     enqueue_completion_for_engine_test(90, -EINVAL);
-    const std::array<int, 1> sockets = {
+    const std::array<int, 1> registered_sockets = {
         90,
     };
-    const auto event = engine->wait(sockets, 5, std::nullopt, "client");
-    ASSERT_TRUE(event.has_value());
-    const auto observed = event.value_or(coquic::io::QuicIoEngineEvent{});
-    EXPECT_EQ(observed.kind, coquic::io::QuicIoEngineEvent::Kind::idle_timeout);
+    const auto wait_event = engine->wait(registered_sockets, 5, std::nullopt, "client");
+    if (!wait_event.has_value()) {
+        FAIL() << "io_uring wait did not return an event";
+    }
+    const auto observed_event = wait_event.value_or(coquic::io::QuicIoEngineEvent{});
+    EXPECT_EQ(observed_event.kind, coquic::io::QuicIoEngineEvent::Kind::idle_timeout);
     EXPECT_TRUE(engine->register_socket(91));
 }
 

@@ -23,16 +23,21 @@ TEST(QuicHttp3ConnectionTest, ClientRolePeerResetEmitsResponseResetEvent) {
     EXPECT_FALSE(
         send_stream_inputs_from(connection.poll(coquic::quic::QuicCoreTimePoint{})).empty());
 
-    auto update = connection.on_core_result(
+    auto reset_update = connection.on_core_result(
         reset_result(0,
                      static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_rejected)),
         coquic::quic::QuicCoreTimePoint{});
 
-    ASSERT_EQ(update.events.size(), 1u);
-    auto *reset = std::get_if<coquic::http3::Http3PeerResponseResetEvent>(&update.events[0]);
-    ASSERT_NE(reset, nullptr);
-    EXPECT_EQ(reset->stream_id, 0u);
-    EXPECT_EQ(reset->application_error_code,
+    if (reset_update.events.size() != 1u) {
+        FAIL() << "peer reset did not emit one event";
+    }
+    auto *peer_reset =
+        std::get_if<coquic::http3::Http3PeerResponseResetEvent>(&reset_update.events[0]);
+    if (peer_reset == nullptr) {
+        FAIL() << "peer reset emitted the wrong event";
+    }
+    EXPECT_EQ(peer_reset->stream_id, 0u);
+    EXPECT_EQ(peer_reset->application_error_code,
               static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_rejected));
 }
 

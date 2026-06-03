@@ -356,10 +356,9 @@ bool connection_pmtud_coverage_for_tests() {
                 .is_pmtu_probe = true,
                 .pmtu_probe_size = 1500,
             });
-        const auto packet_handle =
-            connection.application_space_.recovery.handle_for_packet_number(77);
-        COQUIC_CONNECTION_HOOK_RECORD(packet_handle.has_value());
-        if (packet_handle.has_value()) {
+        if (const auto packet_handle =
+                connection.application_space_.recovery.handle_for_packet_number(77)) {
+            COQUIC_CONNECTION_HOOK_RECORD(packet_handle.has_value());
             const auto packet =
                 connection.retire_acked_packet(connection.application_space_, *packet_handle);
             COQUIC_CONNECTION_HOOK_RECORD(packet.has_value());
@@ -377,6 +376,8 @@ bool connection_pmtud_coverage_for_tests() {
                 COQUIC_CONNECTION_HOOK_RECORD(packet->stream_fragments.empty());
                 COQUIC_CONNECTION_HOOK_RECORD(!packet->has_handshake_done);
             }
+        } else {
+            COQUIC_CONNECTION_HOOK_RECORD(false);
         }
     }
 
@@ -454,7 +455,6 @@ bool connection_pmtud_coverage_for_tests() {
         path.validated = true;
         path.anti_amplification_received_bytes = 0;
 
-        connection.note_pmtu_probe_sent(0, 7, 2048);
         const auto probe_ack_time = QuicCoreTimePoint{} + std::chrono::milliseconds(15);
         connection.note_pmtu_probe_acked(
             SentPacketRecord{
@@ -551,18 +551,17 @@ bool connection_pmtud_coverage_for_tests() {
         send_path.is_current_send_path = true;
         connection.original_version_ = kQuicVersion1;
         connection.current_version_ = kQuicVersion2;
-        connection.initial_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x57});
-        connection.handshake_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x67});
+        connection.initial_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x57});
+        connection.handshake_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x67});
         connection.initial_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
-        const ScopedConnectionDrainTestHook congestion_block_hook(
+        const ScopedConnectionDrainTestHook congestion_block_guard(
             &ConnectionDrainTestHooks::force_duplicate_initial_congestion_blocked);
+        std::ignore = congestion_block_guard;
 
-        const auto duplicate_initial_datagram =
-            connection.drain_outbound_datagram(QuicCoreTimePoint{});
-
-        COQUIC_CONNECTION_HOOK_RECORD(!duplicate_initial_datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !connection.drain_outbound_datagram(QuicCoreTimePoint{}).empty());
         COQUIC_CONNECTION_HOOK_RECORD(connection.initial_space_.next_send_packet_number == 1);
     }
 
@@ -594,18 +593,17 @@ bool connection_pmtud_coverage_for_tests() {
         auto &send_path = connection.ensure_path_state(0);
         send_path.validated = true;
         send_path.is_current_send_path = true;
-        connection.handshake_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x68});
-        connection.application_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x78});
+        connection.handshake_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x68});
+        connection.application_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x78});
         connection.handshake_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
-        const ScopedConnectionDrainTestHook application_block_hook(
+        const ScopedConnectionDrainTestHook application_block_guard(
             &ConnectionDrainTestHooks::force_application_send_congestion_blocked);
+        std::ignore = application_block_guard;
 
-        const auto blocked_application_datagram =
-            connection.drain_outbound_datagram(QuicCoreTimePoint{});
-
-        COQUIC_CONNECTION_HOOK_RECORD(blocked_application_datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.drain_outbound_datagram(QuicCoreTimePoint{}).empty());
         COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.next_send_packet_number == 0);
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
     }
@@ -878,9 +876,8 @@ bool connection_pmtud_coverage_for_tests() {
             .path_id = 0,
         };
 
-        const auto failed_probe_datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
-
-        COQUIC_CONNECTION_HOOK_RECORD(failed_probe_datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.drain_outbound_datagram(QuicCoreTimePoint{}).empty());
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
     }
 
@@ -1039,8 +1036,8 @@ bool connection_pmtud_coverage_for_tests() {
         connection.handshake_confirmed_ = false;
         connection.application_space_.read_secret.reset();
         connection.application_space_.write_secret.reset();
-        connection.zero_rtt_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x71});
+        connection.zero_rtt_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x71});
         COQUIC_CONNECTION_HOOK_RECORD(queue_application_stream_byte(connection));
         const ScopedConnectionDrainCountdownTestHook hook(
             &ConnectionDrainTestHooks::force_candidate_datagram_serialization_failure_countdown, 1);
@@ -1117,8 +1114,8 @@ bool connection_pmtud_coverage_for_tests() {
         auto connection = make_connected_client_connection_for_connection_coverage();
         connection.peer_source_connection_id_ =
             connection.config_.initial_destination_connection_id;
-        connection.initial_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x37});
+        connection.initial_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x37});
         connection.initial_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
         COQUIC_CONNECTION_HOOK_RECORD(queue_application_stream_bytes(connection, 1400));
         const ScopedConnectionDrainDatagramGrowthTestHook growth_hook({0}, {1500});
@@ -1150,8 +1147,8 @@ bool connection_pmtud_coverage_for_tests() {
 
     {
         auto connection = make_connected_client_connection_for_connection_coverage();
-        connection.initial_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x33});
+        connection.initial_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x33});
         connection.initial_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
         COQUIC_CONNECTION_HOOK_RECORD(queue_application_stream_bytes(connection, 1400));
         const ScopedConnectionDrainDatagramGrowthTestHook hook({0}, {1500});
@@ -1165,8 +1162,8 @@ bool connection_pmtud_coverage_for_tests() {
 
     {
         auto connection = make_connected_client_connection_for_connection_coverage();
-        connection.initial_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x34});
+        connection.initial_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x34});
         connection.initial_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
         connection.connection_flow_control_.pending_max_data_frame =
             MaxDataFrame{.maximum_data = 4096};
@@ -1247,8 +1244,8 @@ bool connection_pmtud_coverage_for_tests() {
 
     {
         auto connection = make_connected_client_connection_for_connection_coverage();
-        connection.initial_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x35});
+        connection.initial_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x35});
         connection.initial_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
         record_application_ack_ranges(connection, 700);
         COQUIC_CONNECTION_HOOK_RECORD(queue_application_stream_bytes(connection, 1400));
@@ -1265,8 +1262,8 @@ bool connection_pmtud_coverage_for_tests() {
 
     {
         auto connection = make_connected_client_connection_for_connection_coverage();
-        connection.initial_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x36});
+        connection.initial_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x36});
         connection.initial_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
         record_application_ack_ranges(connection, 700);
         COQUIC_CONNECTION_HOOK_RECORD(queue_application_stream_bytes(connection, 1400));

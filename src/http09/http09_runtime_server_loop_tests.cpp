@@ -1488,20 +1488,18 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
 
     {
         FailingSendBackendForTests backend;
-        const bool route_available = backend
-                                         .ensure_route(io::QuicIoRemote{
-                                             .family = AF_INET,
-                                         })
-                                         .has_value();
-        const bool wait_missing = !backend.wait(std::nullopt).has_value();
-        const bool send_rejected = !backend.send(io::QuicIoTxDatagram{
-            .route_handle = 17,
-            .bytes = {},
-        });
         server_loop_coverage_check(
             coverage_ok,
             "failing send backend helpers return fixed route null waits and failed sends",
-            route_available && wait_missing && send_rejected);
+            backend.ensure_route(io::QuicIoRemote{
+                                     .family = AF_INET,
+                                 })
+                    .has_value() &&
+                !backend.wait(std::nullopt).has_value() &&
+                !backend.send(io::QuicIoTxDatagram{
+                    .route_handle = 17,
+                    .bytes = {},
+                }));
     }
 
     server_loop_coverage_check(coverage_ok, "to_connection_command_input rejects inbound datagrams",
@@ -1715,15 +1713,16 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .fin = true,
             });
             bool observed_send_effects = false;
-            const bool processed = process_server_endpoint_core_result(
-                core, drive_state, connection_endpoints, document_root.path(), request_result,
-                /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in), &observed_send_effects);
-            const bool send_recorded =
-                (g_recorded_sendto_for_tests.calls > 0 || g_recorded_sendmsg_for_tests.calls > 0);
             server_loop_coverage_check(
                 coverage_ok,
                 "process_server_endpoint_core_result advances endpoint-generated stream sends",
-                processed && observed_send_effects && send_recorded);
+                process_server_endpoint_core_result(core, drive_state, connection_endpoints,
+                                                    document_root.path(), request_result,
+                                                    /*fallback_socket_fd=*/77, &peer,
+                                                    sizeof(sockaddr_in), &observed_send_effects) &&
+                    observed_send_effects &&
+                    (g_recorded_sendto_for_tests.calls > 0 ||
+                     g_recorded_sendmsg_for_tests.calls > 0));
         }
 
         {
@@ -1747,14 +1746,13 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                 .bytes = {},
                 .fin = true,
             });
-            const bool processed = process_server_endpoint_core_result(
-                core, drive_state, connection_endpoints, document_root.path(),
-                invalid_request_result,
-                /*fallback_socket_fd=*/77, &peer, sizeof(sockaddr_in));
-            const bool endpoint_erased = !connection_endpoints.contains(connection);
             server_loop_coverage_check(
                 coverage_ok, "process_server_endpoint_core_result closes failed endpoints",
-                processed && endpoint_erased);
+                process_server_endpoint_core_result(core, drive_state, connection_endpoints,
+                                                    document_root.path(), invalid_request_result,
+                                                    /*fallback_socket_fd=*/77, &peer,
+                                                    sizeof(sockaddr_in)) &&
+                    !connection_endpoints.contains(connection));
         }
     }
 
@@ -1977,13 +1975,13 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                              .has_pending_work = initial_update.has_pending_work,
                                          });
             bool made_progress = false;
-            const bool pumped = pump_shared_server_endpoint_work(
-                core, drive_state, connection_endpoints, document_root.path(), made_progress);
-            const bool send_recorded =
-                (g_recorded_sendto_for_tests.calls > 0 || g_recorded_sendmsg_for_tests.calls > 0);
             server_loop_coverage_check(
                 coverage_ok, "pump_shared_server_endpoint_work advances queued response chunks",
-                pumped && made_progress && send_recorded);
+                pump_shared_server_endpoint_work(core, drive_state, connection_endpoints,
+                                                 document_root.path(), made_progress) &&
+                    made_progress &&
+                    (g_recorded_sendto_for_tests.calls > 0 ||
+                     g_recorded_sendmsg_for_tests.calls > 0));
         }
 
         {
@@ -2142,13 +2140,12 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                      });
         EndpointDriveState drive_state;
         bool made_progress = false;
-        const bool route_failure_result = pump_shared_server_endpoint_work(
-            core, drive_state, connection_endpoints, document_root.path(), made_progress);
         server_loop_coverage_check(
             coverage_ok,
             "pump_shared_server_endpoint_work fails when pending connection inputs cannot be "
             "routed",
-            !route_failure_result);
+            !pump_shared_server_endpoint_work(core, drive_state, connection_endpoints,
+                                              document_root.path(), made_progress));
     }
 
     {
@@ -2223,14 +2220,13 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
                                      });
         EndpointDriveState drive_state;
         bool made_progress = false;
-        const bool backend_send_failure_result = pump_shared_server_endpoint_work_with_backend(
-            core, drive_state, connection_endpoints, document_root.path(), failing_backend,
-            made_progress);
         server_loop_coverage_check(
             coverage_ok,
             "pump_shared_server_endpoint_work_with_backend fails when the backend rejects queued "
             "response sends",
-            !backend_send_failure_result);
+            !pump_shared_server_endpoint_work_with_backend(core, drive_state, connection_endpoints,
+                                                           document_root.path(), failing_backend,
+                                                           made_progress));
     }
 
     {

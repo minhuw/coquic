@@ -1122,11 +1122,11 @@ bool connection_key_update_and_probe_coverage_for_tests() {
     {
         auto connection = make_connected_client_connection();
         connection.application_space_.read_secret.reset();
-        connection.next_application_read_secret_ =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0xa1});
+        connection.next_application_read_secret_ = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0xa1});
         connection.next_application_read_secret_source_generation_ = 17;
-        connection.application_space_.read_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0xa0});
+        connection.application_space_.read_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0xa0});
         COQUIC_CONNECTION_HOOK_RECORD(
             connection.make_current_short_header_deserialize_context().has_value());
         COQUIC_CONNECTION_HOOK_RECORD(
@@ -1140,8 +1140,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         COQUIC_CONNECTION_HOOK_RECORD(
             !connection.current_short_header_deserialize_cache_.has_value());
 
-        connection.next_application_read_secret_ =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0xa2});
+        connection.next_application_read_secret_ = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0xa2});
         connection.next_application_read_secret_source_generation_ = 19;
         auto ensured = connection.ensure_next_application_read_secret();
         COQUIC_CONNECTION_HOOK_RECORD(ensured.has_value());
@@ -1677,8 +1677,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.status_ = HandshakeStatus::in_progress;
         connection.client_initial_destination_connection_id_ =
             connection.config_.initial_destination_connection_id;
-        connection.handshake_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x40});
+        connection.handshake_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x40});
         connection.handshake_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x03}});
         connection.track_sent_packet(connection.initial_space_,
                                      SentPacketRecord{
@@ -1703,8 +1703,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.status_ = HandshakeStatus::in_progress;
         connection.client_initial_destination_connection_id_ =
             connection.config_.initial_destination_connection_id;
-        connection.handshake_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+        connection.handshake_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
         connection.handshake_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
         connection.track_sent_packet(connection.handshake_space_,
                                      SentPacketRecord{
@@ -1727,8 +1727,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.status_ = HandshakeStatus::in_progress;
         connection.client_initial_destination_connection_id_ =
             connection.config_.initial_destination_connection_id;
-        connection.handshake_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x47});
+        connection.handshake_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x47});
         connection.handshake_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x04}});
         connection.handshake_space_.pending_probe_packet = SentPacketRecord{
             .packet_number = 4,
@@ -1750,8 +1750,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.status_ = HandshakeStatus::in_progress;
         connection.client_initial_destination_connection_id_ =
             connection.config_.initial_destination_connection_id;
-        connection.handshake_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x42});
+        connection.handshake_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x42});
         connection.handshake_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x02}});
         connection.handshake_space_.received_packets.record_received(
             /*packet_number=*/3, /*ack_eliciting=*/true, QuicCoreTimePoint{});
@@ -1818,8 +1818,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
     for (const auto secret_level :
          {EncryptionLevel::handshake, EncryptionLevel::zero_rtt, EncryptionLevel::application}) {
         auto connection = make_connected_client_connection();
-        connection.handshake_space_.read_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x90});
+        connection.handshake_space_.read_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x90});
         if (secret_level == EncryptionLevel::handshake) {
             connection.handshake_space_.read_secret = TrafficSecret{
                 .cipher_suite = invalid_cipher_suite_for_tests(),
@@ -1839,7 +1839,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
 
         auto datagram = serialize_handshake_ping_datagram(
             connection,
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x90}),
+            make_connection_coverage_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256,
+                                                    std::byte{0x90}),
             40 + static_cast<std::uint64_t>(secret_level));
         COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
         if (!datagram.empty()) {
@@ -1869,8 +1870,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                 .local_role = EndpointRole::server,
                 .client_initial_destination_connection_id =
                     connection.client_initial_destination_connection_id(),
-                .handshake_secret =
-                    make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x43}),
+                .handshake_secret = make_connection_coverage_traffic_secret(
+                    CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x43}),
             });
         COQUIC_CONNECTION_HOOK_RECORD(datagram.has_value());
         if (datagram.has_value()) {
@@ -1903,8 +1904,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                 .local_role = EndpointRole::server,
                 .client_initial_destination_connection_id =
                     connection.client_initial_destination_connection_id(),
-                .handshake_secret =
-                    make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x45}),
+                .handshake_secret = make_connection_coverage_traffic_secret(
+                    CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x45}),
             });
         COQUIC_CONNECTION_HOOK_RECORD(datagram.has_value());
         if (datagram.has_value()) {
@@ -1917,8 +1918,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
 
     {
         auto connection = make_connected_client_connection();
-        connection.handshake_space_.read_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x44});
+        connection.handshake_space_.read_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x44});
 
         const auto first_packet = serialize_protected_datagram(
             std::array<ProtectedPacket, 1>{
@@ -1973,8 +1974,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
 
     {
         auto connection = make_connected_client_connection();
-        connection.handshake_space_.read_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x46});
+        connection.handshake_space_.read_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x46});
         COQUIC_CONNECTION_HOOK_RECORD(enable_qlog_for_connection_coverage(
             connection, "processed-before-deserialize-failure"));
 
@@ -2494,10 +2495,10 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             connection.config_.initial_destination_connection_id;
         connection.initial_packet_space_discarded_ = true;
         connection.handshake_packet_space_discarded_ = true;
-        connection.initial_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x52});
-        connection.handshake_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x62});
+        connection.initial_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x52});
+        connection.handshake_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x62});
         connection.initial_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x01}});
         connection.handshake_space_.send_crypto.append(std::vector<std::byte>{std::byte{0x02}});
         connection.initial_space_.received_packets.record_received(
@@ -2553,10 +2554,10 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             connection.config_.initial_destination_connection_id;
         connection.initial_packet_space_discarded_ = true;
         connection.handshake_packet_space_discarded_ = true;
-        connection.initial_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x54});
-        connection.handshake_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x64});
+        connection.initial_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x54});
+        connection.handshake_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x64});
         connection.track_sent_packet(connection.initial_space_,
                                      SentPacketRecord{
                                          .packet_number = 30,
@@ -2608,8 +2609,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.peer_address_validated_ = true;
         connection.client_initial_destination_connection_id_ =
             connection.config_.initial_destination_connection_id;
-        connection.initial_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x53});
+        connection.initial_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x53});
         connection.initial_space_.received_packets.record_received(
             /*packet_number=*/9, /*ack_eliciting=*/true, QuicCoreTimePoint{});
         connection.initial_space_.pending_probe_packet = SentPacketRecord{
@@ -2753,8 +2754,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.peer_address_validated_ = true;
         connection.client_initial_destination_connection_id_ =
             connection.config_.initial_destination_connection_id;
-        connection.initial_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x55});
+        connection.initial_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x55});
         connection.initial_space_.received_packets.record_received(
             /*packet_number=*/10, /*ack_eliciting=*/true, QuicCoreTimePoint{});
 
@@ -2821,12 +2822,12 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         auto connection = make_connected_client_connection();
         COQUIC_CONNECTION_HOOK_RECORD(
             connection.note_aead_encryption_attempt(0, QuicCoreTimePoint{}));
-        connection.application_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_chacha20_poly1305_sha256, std::byte{0x66});
+        connection.application_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_chacha20_poly1305_sha256, std::byte{0x66});
         COQUIC_CONNECTION_HOOK_RECORD(
             connection.note_aead_encryption_attempt(1, QuicCoreTimePoint{}));
-        connection.application_space_.read_secret =
-            make_test_traffic_secret(CipherSuite::tls_chacha20_poly1305_sha256, std::byte{0x67});
+        connection.application_space_.read_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_chacha20_poly1305_sha256, std::byte{0x67});
         COQUIC_CONNECTION_HOOK_RECORD(connection.note_packet_authentication_failure(
             CodecError{.code = CodecErrorCode::packet_decryption_failed, .offset = 0},
             QuicCoreTimePoint{}));
@@ -2931,8 +2932,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.status_ = HandshakeStatus::in_progress;
         connection.handshake_confirmed_ = false;
         connection.peer_address_validated_ = false;
-        connection.zero_rtt_space_.read_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x68});
+        connection.zero_rtt_space_.read_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x68});
         connection.current_send_path_id_ = 0;
         connection.last_inbound_path_id_ = 7;
         auto &current_path = connection.ensure_path_state(0);
@@ -2957,8 +2958,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.config_.role = EndpointRole::client;
         connection.status_ = HandshakeStatus::connected;
         connection.handshake_confirmed_ = true;
-        connection.zero_rtt_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x6a});
+        connection.zero_rtt_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x6a});
         connection.current_send_path_id_ = 0;
         connection.last_inbound_path_id_ = 8;
         auto &current_path = connection.ensure_path_state(0);
@@ -2984,8 +2985,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.handshake_confirmed_ = false;
         connection.peer_address_validated_ = false;
         connection.peer_transport_parameters_.reset();
-        connection.zero_rtt_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x69});
+        connection.zero_rtt_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x69});
         const auto processed_ack = connection.process_inbound_received_application_ack_only(
             /*packet_number=*/92, /*spin_bit=*/false, ReceivedAckFrame{.largest_acknowledged = 0},
             QuicCoreTimePoint{}, QuicEcnCodepoint::ect1, /*path_id=*/0,
@@ -3120,8 +3121,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection = make_connected_client_connection();
         connection.handshake_packet_space_discarded_ = false;
         connection.handshake_space_.send_crypto = ReliableSendBuffer{};
-        connection.handshake_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0xa2});
+        connection.handshake_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0xa2});
         connection.handshake_space_.pending_probe_packet = SentPacketRecord{
             .packet_number = 10,
             .ack_eliciting = true,

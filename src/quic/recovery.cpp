@@ -389,25 +389,25 @@ RecoveryPacketMetadata resolved_packet_metadata(const PacketSpaceRecovery *recov
         return metadata;
     }
 
-    const auto *packet = recovery->packet_for_handle(handle);
-    if (packet == nullptr) {
+    const auto *packet_record = recovery->packet_for_handle(handle);
+    if (packet_record == nullptr) {
         return metadata;
     }
 
-    metadata.sent_time = packet->sent_time;
-    metadata.ack_eliciting = packet->ack_eliciting;
-    metadata.in_flight = packet->in_flight;
-    metadata.declared_lost = packet->declared_lost;
+    metadata.sent_time = packet_record->sent_time;
+    metadata.ack_eliciting = packet_record->ack_eliciting;
+    metadata.in_flight = packet_record->in_flight;
+    metadata.declared_lost = packet_record->declared_lost;
     return metadata;
 }
 
-RecoveryPacketMetadata packet_metadata(const SentPacketRecord &packet) {
+RecoveryPacketMetadata packet_metadata(const SentPacketRecord &packet_record) {
     return RecoveryPacketMetadata{
-        .packet_number = packet.packet_number,
-        .sent_time = packet.sent_time,
-        .ack_eliciting = packet.ack_eliciting,
-        .in_flight = packet.in_flight,
-        .declared_lost = packet.declared_lost,
+        .packet_number = packet_record.packet_number,
+        .sent_time = packet_record.sent_time,
+        .ack_eliciting = packet_record.ack_eliciting,
+        .in_flight = packet_record.in_flight,
+        .declared_lost = packet_record.declared_lost,
     };
 }
 
@@ -1783,10 +1783,10 @@ void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
     rtt_state.latest_ack_delay_compensated_rtt_sample =
         latest_sample > bounded_ack_delay ? latest_sample - bounded_ack_delay : latest_sample;
 
-    const auto rtt_sample_delta = rtt_state.smoothed_rtt > adjusted_rtt
-                                      ? rtt_state.smoothed_rtt - adjusted_rtt
-                                      : adjusted_rtt - rtt_state.smoothed_rtt;
-    rtt_state.rttvar = (rtt_state.rttvar * 3 + rtt_sample_delta) / 4;
+    rtt_state.rttvar = (rtt_state.rttvar * 3 + (rtt_state.smoothed_rtt > adjusted_rtt
+                                                    ? rtt_state.smoothed_rtt - adjusted_rtt
+                                                    : adjusted_rtt - rtt_state.smoothed_rtt)) /
+                       4;
     rtt_state.smoothed_rtt = (rtt_state.smoothed_rtt * 7 + adjusted_rtt) / 8;
 }
 

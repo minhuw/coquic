@@ -104,7 +104,7 @@ class ScopedEnvVar {
 
 class ScopedFd {
   public:
-    explicit ScopedFd(int socket_fd) : fd_(socket_fd) {
+    explicit ScopedFd(int owned_socket_fd) : fd_(owned_socket_fd) {
     }
 
     ~ScopedFd() {
@@ -358,24 +358,24 @@ class ScriptedIoBackend final : public coquic::io::QuicIoBackend {
 };
 
 std::uint16_t allocate_udp_loopback_port() {
-    const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (socket_fd < 0) {
+    const int udp_socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_socket_fd < 0) {
         return 0;
     }
-    ScopedFd socket_guard(socket_fd);
+    ScopedFd socket_guard(udp_socket_fd);
 
-    sockaddr_in bind_address{};
-    bind_address.sin_family = AF_INET;
-    bind_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    bind_address.sin_port = htons(0);
-    if (::bind(socket_fd, reinterpret_cast<const sockaddr *>(&bind_address),
-               sizeof(bind_address)) != 0) {
+    sockaddr_in udp_bind_address{};
+    udp_bind_address.sin_family = AF_INET;
+    udp_bind_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    udp_bind_address.sin_port = htons(0);
+    if (::bind(udp_socket_fd, reinterpret_cast<const sockaddr *>(&udp_bind_address),
+               sizeof(udp_bind_address)) != 0) {
         return 0;
     }
 
     sockaddr_in bound{};
     socklen_t bound_length = sizeof(bound);
-    if (::getsockname(socket_fd, reinterpret_cast<sockaddr *>(&bound), &bound_length) != 0) {
+    if (::getsockname(udp_socket_fd, reinterpret_cast<sockaddr *>(&bound), &bound_length) != 0) {
         return 0;
     }
 
@@ -383,24 +383,24 @@ std::uint16_t allocate_udp_loopback_port() {
 }
 
 std::uint16_t allocate_tcp_loopback_port() {
-    const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (socket_fd < 0) {
+    const int tcp_socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_socket_fd < 0) {
         return 0;
     }
-    ScopedFd socket_guard(socket_fd);
+    ScopedFd socket_guard(tcp_socket_fd);
 
-    sockaddr_in bind_address{};
-    bind_address.sin_family = AF_INET;
-    bind_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    bind_address.sin_port = htons(0);
-    if (::bind(socket_fd, reinterpret_cast<const sockaddr *>(&bind_address),
-               sizeof(bind_address)) != 0) {
+    sockaddr_in tcp_bind_address{};
+    tcp_bind_address.sin_family = AF_INET;
+    tcp_bind_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    tcp_bind_address.sin_port = htons(0);
+    if (::bind(tcp_socket_fd, reinterpret_cast<const sockaddr *>(&tcp_bind_address),
+               sizeof(tcp_bind_address)) != 0) {
         return 0;
     }
 
     sockaddr_in bound{};
     socklen_t bound_length = sizeof(bound);
-    if (::getsockname(socket_fd, reinterpret_cast<sockaddr *>(&bound), &bound_length) != 0) {
+    if (::getsockname(tcp_socket_fd, reinterpret_cast<sockaddr *>(&bound), &bound_length) != 0) {
         return 0;
     }
 
@@ -408,18 +408,18 @@ std::uint16_t allocate_tcp_loopback_port() {
 }
 
 bool udp_port_is_bound(std::uint16_t port) {
-    const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (socket_fd < 0) {
+    const int udp_socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_socket_fd < 0) {
         return false;
     }
-    ScopedFd socket_guard(socket_fd);
+    ScopedFd socket_guard(udp_socket_fd);
 
-    sockaddr_in bind_address{};
-    bind_address.sin_family = AF_INET;
-    bind_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    bind_address.sin_port = htons(port);
-    if (::bind(socket_fd, reinterpret_cast<const sockaddr *>(&bind_address),
-               sizeof(bind_address)) == 0) {
+    sockaddr_in udp_bind_address{};
+    udp_bind_address.sin_family = AF_INET;
+    udp_bind_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    udp_bind_address.sin_port = htons(port);
+    if (::bind(udp_socket_fd, reinterpret_cast<const sockaddr *>(&udp_bind_address),
+               sizeof(udp_bind_address)) == 0) {
         return false;
     }
 
@@ -427,17 +427,17 @@ bool udp_port_is_bound(std::uint16_t port) {
 }
 
 bool tcp_port_is_accepting(std::uint16_t port) {
-    const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (socket_fd < 0) {
+    const int tcp_socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (tcp_socket_fd < 0) {
         return false;
     }
-    ScopedFd socket_guard(socket_fd);
+    ScopedFd socket_guard(tcp_socket_fd);
 
     sockaddr_in connect_address{};
     connect_address.sin_family = AF_INET;
     connect_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     connect_address.sin_port = htons(port);
-    return ::connect(socket_fd, reinterpret_cast<const sockaddr *>(&connect_address),
+    return ::connect(tcp_socket_fd, reinterpret_cast<const sockaddr *>(&connect_address),
                      sizeof(connect_address)) == 0;
 }
 
@@ -577,11 +577,11 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
     }
     SSL_CTX_set_verify(ctx.get(), SSL_VERIFY_NONE, nullptr);
 
-    const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (socket_fd < 0) {
+    const int https_socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (https_socket_fd < 0) {
         return std::nullopt;
     }
-    ScopedFd socket_guard(socket_fd);
+    ScopedFd socket_guard(https_socket_fd);
 
     sockaddr_in connect_address{};
     connect_address.sin_family = AF_INET;
@@ -589,7 +589,7 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
     if (::inet_pton(AF_INET, std::string(host).c_str(), &connect_address.sin_addr) != 1) {
         return std::nullopt;
     }
-    if (::connect(socket_fd, reinterpret_cast<const sockaddr *>(&connect_address),
+    if (::connect(https_socket_fd, reinterpret_cast<const sockaddr *>(&connect_address),
                   sizeof(connect_address)) != 0) {
         return std::nullopt;
     }
@@ -598,7 +598,7 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
     if (ssl == nullptr) {
         return std::nullopt;
     }
-    SSL_set_fd(ssl.get(), socket_fd);
+    SSL_set_fd(ssl.get(), https_socket_fd);
     SSL_set_tlsext_host_name(ssl.get(), std::string(host).c_str());
     if (SSL_connect(ssl.get()) != 1) {
         return std::nullopt;

@@ -293,8 +293,10 @@ uint64_t CeilDiv(uint64_t numerator, uint64_t denominator) {
     return (numerator + denominator - 1) / denominator;
 }
 
-quic::QuicConfig QuicConfigForPerf() {
-    quic::QuicConfig config;
+using GoogleQuicheConfig = quic::QuicConfig;
+
+GoogleQuicheConfig QuicConfigForPerf() {
+    GoogleQuicheConfig config;
     config.SetInitialSessionFlowControlWindowToSend(kConnectionWindow);
     config.SetInitialStreamFlowControlWindowToSend(kStreamWindow);
     config.SetInitialMaxStreamDataBytesIncomingBidirectionalToSend(kStreamWindow);

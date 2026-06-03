@@ -749,8 +749,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         }
         auto sent_initial_frames = build_initial_frames(sent_initial_crypto_ranges);
         bool initial_ack_eliciting = has_ack_eliciting_frame(sent_initial_frames);
-        const auto initial_ack_largest_acknowledged =
-            largest_acknowledged_by_ack_frame(sent_initial_frames);
         bool initial_has_ping = std::ranges::any_of(sent_initial_frames, [](const Frame &frame) {
             return std::holds_alternative<PingFrame>(frame);
         });
@@ -792,7 +790,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 .crypto_ranges = sent_initial_crypto_ranges,
                 .has_ping = initial_has_ping,
                 .largest_received_packet_number_acked =
-                    initial_ack_eliciting ? initial_ack_largest_acknowledged : std::nullopt,
+                    initial_ack_eliciting ? largest_acknowledged_by_ack_frame(sent_initial_frames)
+                                          : std::nullopt,
             };
             initial_sent_record.path_id = selected_send_path_id.value_or(0);
             initial_sent_record.ecn = outbound_ecn_codepoint_for_path(selected_send_path_id);
@@ -868,8 +867,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                             .declared_lost = false,
                             .crypto_ranges = sent_initial_crypto_ranges,
                             .largest_received_packet_number_acked =
-                                initial_ack_eliciting ? initial_ack_largest_acknowledged
-                                                      : std::nullopt,
+                                initial_ack_eliciting
+                                    ? largest_acknowledged_by_ack_frame(sent_initial_frames)
+                                    : std::nullopt,
                             .path_id = selected_send_path_id.value_or(0),
                             .ecn = outbound_ecn_codepoint_for_path(selected_send_path_id),
                         },
@@ -999,8 +999,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                                    sent_handshake_crypto_ranges.empty() &&
                                        handshake_space_.pending_probe_packet.has_value(),
                                    sent_handshake_probe_crypto_ranges);
-        const auto handshake_ack_largest_acknowledged =
-            largest_acknowledged_by_ack_frame(sent_handshake_frames);
         bool handshake_has_ping =
             std::ranges::any_of(sent_handshake_frames, [](const Frame &frame) {
                 return std::holds_alternative<PingFrame>(frame);
@@ -1046,7 +1044,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             .crypto_ranges = sent_handshake_crypto_ranges,
             .has_ping = handshake_has_ping,
             .largest_received_packet_number_acked =
-                handshake_ack_eliciting ? handshake_ack_largest_acknowledged : std::nullopt,
+                handshake_ack_eliciting ? largest_acknowledged_by_ack_frame(sent_handshake_frames)
+                                        : std::nullopt,
         };
         handshake_sent_record.path_id = selected_send_path_id.value_or(0);
         handshake_sent_record.ecn = outbound_ecn_codepoint_for_path(selected_send_path_id);
@@ -2812,7 +2811,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             const auto application_candidate_crypto_ranges =
                 send_application_close_only ? std::span<const ByteRange>{}
                                             : std::span<const ByteRange>(application_crypto_ranges);
-            const auto application_candidate_crypto_frames =
+            const auto application_crypto_frame_span =
                 send_application_close_only ? std::span<const Frame>{}
                                             : std::span<const Frame>(application_crypto_frames);
             const auto send_application_ack_only =
@@ -2998,7 +2997,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 [&]() -> std::span<const Frame> {
                 if (!application_candidate_frames_valid) {
                     application_candidate_frames = build_application_candidate_frames(
-                        application_candidate_frame_scratch_, application_candidate_crypto_frames,
+                        application_candidate_frame_scratch_, application_crypto_frame_span,
                         include_handshake_done, selected_ack_frame, application_max_data_frame,
                         new_token_frames, new_connection_id_frames, retire_connection_id_frames,
                         application_path_validation_frames, max_stream_data_frames,
@@ -3014,10 +3013,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 [&](const std::optional<OutboundAckHeader> &candidate_ack_frame)
                 -> std::span<const Frame> {
                 return build_application_candidate_frames(
-                    alternate_application_candidate_frame_scratch_,
-                    application_candidate_crypto_frames, include_handshake_done,
-                    candidate_ack_frame, application_max_data_frame, new_token_frames,
-                    new_connection_id_frames, retire_connection_id_frames,
+                    alternate_application_candidate_frame_scratch_, application_crypto_frame_span,
+                    include_handshake_done, candidate_ack_frame, application_max_data_frame,
+                    new_token_frames, new_connection_id_frames, retire_connection_id_frames,
                     application_path_validation_frames, max_stream_data_frames, max_streams_frames,
                     reset_stream_frames, stop_sending_frames, data_blocked_frame,
                     stream_data_blocked_frames, selected_datagram_frame, application_close_frame,
@@ -3031,9 +3029,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
 
                 const auto pacing_bytes = application_stream_pacing_deadline_bytes(
                     minimum_pending_application_datagram_datagram_bytes());
-                const auto send_pacing_deadline = congestion_controller_.next_send_time(
+                const auto application_stream_send_deadline = congestion_controller_.next_send_time(
                     pacing_bytes.value_or(max_outbound_datagram_size));
-                return !send_pacing_deadline.has_value() || now >= *send_pacing_deadline;
+                return !application_stream_send_deadline.has_value() ||
+                       now >= *application_stream_send_deadline;
             };
             bool application_stream_pacing_ready = application_stream_send_pacing_ready();
             if (!application_stream_pacing_ready && send_profile_enabled()) {
@@ -3208,7 +3207,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 return fallback_to_existing_packets_or_ack_only(/*require_due_ack_only=*/true);
             };
             const auto application_candidate_is_ack_eliciting = [&]() {
-                return !application_candidate_crypto_frames.empty() ||
+                return !application_crypto_frame_span.empty() ||
                        application_ack_eliciting_frame_count(
                            new_token_frames, include_handshake_done, application_max_data_frame,
                            new_connection_id_frames, retire_connection_id_frames,
@@ -3562,11 +3561,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 ack_eliciting && !bypass_congestion_window
                     ? congestion_controller_.next_send_time(candidate_datagram_size)
                     : std::nullopt;
-            const bool application_send_congestion_blocked =
-                ack_eliciting && !bypass_congestion_window &&
+            if (ack_eliciting && !bypass_congestion_window &&
                 (connection_drain_test_hooks().force_application_send_congestion_blocked ||
-                 !congestion_controller_.can_send_ack_eliciting(candidate_datagram_size));
-            if (application_send_congestion_blocked) {
+                 !congestion_controller_.can_send_ack_eliciting(candidate_datagram_size))) {
                 note_application_congestion_blocked(candidate_datagram_size);
                 return restore_and_fallback_blocked_application_candidate();
             }

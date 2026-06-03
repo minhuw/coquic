@@ -20,18 +20,18 @@ struct ExpectedLocalError {
     coquic_optional_stream_id_t stream_id = {};
 };
 
-void expect_local_error(const coquic_result_t *result, ExpectedLocalError expected) {
-    ASSERT_NE(result, nullptr);
-    ASSERT_EQ(coquic_result_has_local_error(result), 1);
+void expect_local_error(const coquic_result_t *ffi_result, ExpectedLocalError expected) {
+    ASSERT_NE(ffi_result, nullptr);
+    ASSERT_EQ(coquic_result_has_local_error(ffi_result), 1);
 
-    coquic_local_error_t error{};
-    ASSERT_EQ(coquic_result_local_error(result, &error), COQUIC_STATUS_OK);
-    ASSERT_EQ(error.connection.has_value, 1);
-    EXPECT_EQ(error.connection.value, expected.connection);
-    EXPECT_EQ(error.code, expected.code);
-    EXPECT_EQ(error.stream_id.has_value, expected.stream_id.has_value);
+    coquic_local_error_t local_error{};
+    ASSERT_EQ(coquic_result_local_error(ffi_result, &local_error), COQUIC_STATUS_OK);
+    ASSERT_EQ(local_error.connection.has_value, 1);
+    EXPECT_EQ(local_error.connection.value, expected.connection);
+    EXPECT_EQ(local_error.code, expected.code);
+    EXPECT_EQ(local_error.stream_id.has_value, expected.stream_id.has_value);
     if (expected.stream_id.has_value != 0) {
-        EXPECT_EQ(error.stream_id.value, expected.stream_id.value);
+        EXPECT_EQ(local_error.stream_id.value, expected.stream_id.value);
     }
 }
 

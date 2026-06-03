@@ -97,8 +97,15 @@ struct RecordedRecvMsgForTests {
 };
 
 thread_local RecordedRecvMsgForTests g_recorded_recvmsg_for_tests;
-thread_local int g_runtime_low_level_getaddrinfo_calls_for_tests = 0;
-thread_local int g_runtime_low_level_bind_calls_for_tests = 0;
+int &runtime_low_level_getaddrinfo_calls_for_tests() {
+    static thread_local int calls = 0;
+    return calls;
+}
+
+int &runtime_low_level_bind_calls_for_tests() {
+    static thread_local int calls = 0;
+    return calls;
+}
 
 ssize_t record_sendto_for_tests(int socket_fd, const void *, size_t length, int,
                                 const sockaddr *destination, socklen_t destination_len) {
@@ -590,22 +597,37 @@ ScriptedServerLoopCaseForTests make_blocking_wait_input_then_receive_error_case_
     };
 }
 
-using ServerLoopCaseFactoryForTests = ScriptedServerLoopCaseForTests (*)();
+ScriptedServerLoopCaseForTests make_server_loop_case_for_tests(ServerLoopCaseForTests case_id) {
+    switch (case_id) {
+    case ServerLoopCaseForTests::nonblocking_processed_timers_then_receive_error:
+        return make_nonblocking_processed_timers_then_receive_error_case_for_tests();
+    case ServerLoopCaseForTests::nonblocking_process_datagram_failure:
+        return make_nonblocking_process_datagram_failure_case_for_tests();
+    case ServerLoopCaseForTests::blocking_timer_then_receive_error:
+        return make_blocking_timer_then_receive_error_case_for_tests();
+    case ServerLoopCaseForTests::blocking_processed_timers_then_receive_error:
+        return make_blocking_processed_timers_then_receive_error_case_for_tests();
+    case ServerLoopCaseForTests::blocking_wait_failure:
+        return make_blocking_wait_failure_case_for_tests();
+    case ServerLoopCaseForTests::blocking_wait_failure_with_preferred_socket:
+        return make_blocking_wait_failure_with_preferred_socket_case_for_tests();
+    case ServerLoopCaseForTests::blocking_wait_missing_input:
+        return make_blocking_wait_missing_input_case_for_tests();
+    case ServerLoopCaseForTests::nonblocking_drain_repeats_pending_endpoint_progress:
+        return make_nonblocking_drain_repeats_pending_endpoint_progress_case_for_tests();
+    case ServerLoopCaseForTests::outer_pump_repeats_pending_endpoint_progress:
+        return make_outer_pump_repeats_pending_endpoint_progress_case_for_tests();
+    case ServerLoopCaseForTests::ready_datagram_preempts_next_pending_work_pump:
+        return make_ready_datagram_preempts_next_pending_work_pump_case_for_tests();
+    case ServerLoopCaseForTests::
+        pending_endpoint_without_transport_progress_waits_instead_of_spinning:
+        return make_pending_endpoint_without_transport_progress_waits_instead_of_spinning_case_for_tests();
+    case ServerLoopCaseForTests::blocking_wait_input_then_receive_error:
+        return make_blocking_wait_input_then_receive_error_case_for_tests();
+    }
 
-ServerLoopCaseFactoryForTests server_loop_case_factories_for_tests[] = {
-    &make_nonblocking_processed_timers_then_receive_error_case_for_tests,
-    &make_nonblocking_process_datagram_failure_case_for_tests,
-    &make_blocking_timer_then_receive_error_case_for_tests,
-    &make_blocking_processed_timers_then_receive_error_case_for_tests,
-    &make_blocking_wait_failure_case_for_tests,
-    &make_blocking_wait_failure_with_preferred_socket_case_for_tests,
-    &make_blocking_wait_missing_input_case_for_tests,
-    &make_nonblocking_drain_repeats_pending_endpoint_progress_case_for_tests,
-    &make_outer_pump_repeats_pending_endpoint_progress_case_for_tests,
-    &make_ready_datagram_preempts_next_pending_work_pump_case_for_tests,
-    &make_pending_endpoint_without_transport_progress_waits_instead_of_spinning_case_for_tests,
-    &make_blocking_wait_input_then_receive_error_case_for_tests,
-};
+    return make_nonblocking_processed_timers_then_receive_error_case_for_tests();
+}
 
 ScriptedServerBackendSchedulingCaseForTests
 make_ready_datagram_preempts_repeated_due_timers_case_for_tests() {
@@ -929,21 +951,35 @@ make_deferred_output_waits_until_grace_deadline_case_for_tests() {
     };
 }
 
-using ServerBackendSchedulingCaseFactoryForTests =
-    ScriptedServerBackendSchedulingCaseForTests (*)();
+ScriptedServerBackendSchedulingCaseForTests
+make_server_backend_scheduling_case_for_tests(ServerBackendSchedulingCaseForTests case_id) {
+    switch (case_id) {
+    case ServerBackendSchedulingCaseForTests::ready_datagram_preempts_repeated_due_timers:
+        return make_ready_datagram_preempts_repeated_due_timers_case_for_tests();
+    case ServerBackendSchedulingCaseForTests::ready_datagram_preempts_repeated_pending_work_pumps:
+        return make_ready_datagram_preempts_repeated_pending_work_pumps_case_for_tests();
+    case ServerBackendSchedulingCaseForTests::pending_work_yields_to_wait_after_immediate_poll_miss:
+        return make_pending_work_yields_to_wait_after_immediate_poll_miss_case_for_tests();
+    case ServerBackendSchedulingCaseForTests::
+        elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait:
+        return make_elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait_case_for_tests();
+    case ServerBackendSchedulingCaseForTests::ready_probe_due_timer_failure:
+        return make_ready_probe_due_timer_failure_case_for_tests();
+    case ServerBackendSchedulingCaseForTests::ready_probe_idle_timeout_then_shutdown:
+        return make_ready_probe_idle_timeout_then_shutdown_case_for_tests();
+    case ServerBackendSchedulingCaseForTests::buffered_top_due_idle_timeout_skips_ready_probe:
+        return make_buffered_top_due_idle_timeout_skips_ready_probe_case_for_tests();
+    case ServerBackendSchedulingCaseForTests::ready_probe_rx_datagram_success_then_shutdown:
+        return make_ready_probe_rx_datagram_success_then_shutdown_case_for_tests();
+    case ServerBackendSchedulingCaseForTests::
+        ready_probe_timer_without_wakeup_falls_back_to_main_wait:
+        return make_ready_probe_timer_without_wakeup_falls_back_to_main_wait_case_for_tests();
+    case ServerBackendSchedulingCaseForTests::deferred_output_waits_until_grace_deadline:
+        return make_deferred_output_waits_until_grace_deadline_case_for_tests();
+    }
 
-ServerBackendSchedulingCaseFactoryForTests server_backend_scheduling_case_factories_for_tests[] = {
-    &make_ready_datagram_preempts_repeated_due_timers_case_for_tests,
-    &make_ready_datagram_preempts_repeated_pending_work_pumps_case_for_tests,
-    &make_pending_work_yields_to_wait_after_immediate_poll_miss_case_for_tests,
-    &make_elapsed_wakeup_after_immediate_poll_miss_yields_to_blocking_rx_wait_case_for_tests,
-    &make_ready_probe_due_timer_failure_case_for_tests,
-    &make_ready_probe_idle_timeout_then_shutdown_case_for_tests,
-    &make_buffered_top_due_idle_timeout_skips_ready_probe_case_for_tests,
-    &make_ready_probe_rx_datagram_success_then_shutdown_case_for_tests,
-    &make_ready_probe_timer_without_wakeup_falls_back_to_main_wait_case_for_tests,
-    &make_deferred_output_waits_until_grace_deadline_case_for_tests,
-};
+    return make_ready_datagram_preempts_repeated_due_timers_case_for_tests();
+}
 
 std::vector<std::byte> bytes_from_string_for_runtime_tests(std::string_view text) {
     std::vector<std::byte> bytes;

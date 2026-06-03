@@ -232,10 +232,10 @@ TEST(QuicHttp3ClientTest, SubmitRequestEmitsCompletedResponseAfterFinalFin) {
     EXPECT_FALSE(send_stream_inputs_from(request_update).empty());
 
     const auto response_payload = completed_echo_response_payload();
-    auto response_update = endpoint.on_core_result(receive_result(0, response_payload, true),
-                                                   coquic::quic::QuicCoreTimePoint{});
+    auto echo_response_update = endpoint.on_core_result(receive_result(0, response_payload, true),
+                                                        coquic::quic::QuicCoreTimePoint{});
 
-    EXPECT_TRUE(completed_echo_response_update_matches(response_update));
+    EXPECT_TRUE(completed_echo_response_update_matches(echo_response_update));
 }
 
 TEST(QuicHttp3ClientTest, HeadRequestCollectsHeadersOnlyFinalResponse) {

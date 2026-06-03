@@ -5,6 +5,28 @@
 namespace {
 using namespace coquic::http09::test_support;
 
+void expect_transfer_complete(const InMemoryHttp09TransferResult &result) {
+    if (result.client_complete) {
+        return;
+    }
+
+    ADD_FAILURE() << "steps=" << result.steps << " hit_step_limit=" << result.hit_step_limit
+                  << " client_failed=" << result.client_failed
+                  << " server_failed=" << result.server_failed
+                  << " client_sent_datagrams=" << result.client_sent_datagrams
+                  << " client_sent_bytes=" << result.client_sent_bytes
+                  << " server_sent_datagrams=" << result.server_sent_datagrams
+                  << " server_sent_bytes=" << result.server_sent_bytes
+                  << " client_bytes_in_flight=" << result.client_bytes_in_flight
+                  << " server_bytes_in_flight=" << result.server_bytes_in_flight
+                  << " client_cwnd=" << result.client_congestion_window
+                  << " server_cwnd=" << result.server_congestion_window
+                  << " client_queued_bytes=" << result.client_queued_stream_bytes
+                  << " server_queued_bytes=" << result.server_queued_stream_bytes
+                  << " client_next_wakeup=" << result.client_has_next_wakeup
+                  << " server_next_wakeup=" << result.server_has_next_wakeup;
+}
+
 TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileOverUdpSockets) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir download_root;
@@ -103,21 +125,7 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferLargeFile) {
         .server_config = server,
     });
 
-    EXPECT_TRUE(result.client_complete)
-        << "steps=" << result.steps << " hit_step_limit=" << result.hit_step_limit
-        << " client_failed=" << result.client_failed << " server_failed=" << result.server_failed
-        << " client_sent_datagrams=" << result.client_sent_datagrams
-        << " client_sent_bytes=" << result.client_sent_bytes
-        << " server_sent_datagrams=" << result.server_sent_datagrams
-        << " server_sent_bytes=" << result.server_sent_bytes
-        << " client_bytes_in_flight=" << result.client_bytes_in_flight
-        << " server_bytes_in_flight=" << result.server_bytes_in_flight
-        << " client_cwnd=" << result.client_congestion_window
-        << " server_cwnd=" << result.server_congestion_window
-        << " client_queued_bytes=" << result.client_queued_stream_bytes
-        << " server_queued_bytes=" << result.server_queued_stream_bytes
-        << " client_next_wakeup=" << result.client_has_next_wakeup
-        << " server_next_wakeup=" << result.server_has_next_wakeup;
+    expect_transfer_complete(result);
     EXPECT_FALSE(result.client_failed);
     EXPECT_FALSE(result.server_failed);
     EXPECT_EQ(read_file_bytes(download_root.path() / "large.bin"), large_body);
@@ -156,21 +164,7 @@ TEST(QuicHttp09RuntimeTest,
         .dropped_server_datagrams = {28, 58},
     });
 
-    EXPECT_TRUE(result.client_complete)
-        << "steps=" << result.steps << " hit_step_limit=" << result.hit_step_limit
-        << " client_failed=" << result.client_failed << " server_failed=" << result.server_failed
-        << " client_sent_datagrams=" << result.client_sent_datagrams
-        << " client_sent_bytes=" << result.client_sent_bytes
-        << " server_sent_datagrams=" << result.server_sent_datagrams
-        << " server_sent_bytes=" << result.server_sent_bytes
-        << " client_bytes_in_flight=" << result.client_bytes_in_flight
-        << " server_bytes_in_flight=" << result.server_bytes_in_flight
-        << " client_cwnd=" << result.client_congestion_window
-        << " server_cwnd=" << result.server_congestion_window
-        << " client_queued_bytes=" << result.client_queued_stream_bytes
-        << " server_queued_bytes=" << result.server_queued_stream_bytes
-        << " client_next_wakeup=" << result.client_has_next_wakeup
-        << " server_next_wakeup=" << result.server_has_next_wakeup;
+    expect_transfer_complete(result);
     EXPECT_FALSE(result.client_failed);
     EXPECT_FALSE(result.server_failed);
     EXPECT_EQ(read_file_bytes(download_root.path() / "large.bin"), large_body);
@@ -206,21 +200,7 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferMediumFile) {
         .server_config = server,
     });
 
-    EXPECT_TRUE(result.client_complete)
-        << "steps=" << result.steps << " hit_step_limit=" << result.hit_step_limit
-        << " client_failed=" << result.client_failed << " server_failed=" << result.server_failed
-        << " client_sent_datagrams=" << result.client_sent_datagrams
-        << " client_sent_bytes=" << result.client_sent_bytes
-        << " server_sent_datagrams=" << result.server_sent_datagrams
-        << " server_sent_bytes=" << result.server_sent_bytes
-        << " client_bytes_in_flight=" << result.client_bytes_in_flight
-        << " server_bytes_in_flight=" << result.server_bytes_in_flight
-        << " client_cwnd=" << result.client_congestion_window
-        << " server_cwnd=" << result.server_congestion_window
-        << " client_queued_bytes=" << result.client_queued_stream_bytes
-        << " server_queued_bytes=" << result.server_queued_stream_bytes
-        << " client_next_wakeup=" << result.client_has_next_wakeup
-        << " server_next_wakeup=" << result.server_has_next_wakeup;
+    expect_transfer_complete(result);
     EXPECT_FALSE(result.client_failed);
     EXPECT_FALSE(result.server_failed);
     EXPECT_EQ(read_file_bytes(download_root.path() / "medium.bin"), body);
@@ -267,21 +247,7 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferManyFilesAcrossRefres
         .server_config = server,
     });
 
-    EXPECT_TRUE(result.client_complete)
-        << "steps=" << result.steps << " hit_step_limit=" << result.hit_step_limit
-        << " client_failed=" << result.client_failed << " server_failed=" << result.server_failed
-        << " client_sent_datagrams=" << result.client_sent_datagrams
-        << " client_sent_bytes=" << result.client_sent_bytes
-        << " server_sent_datagrams=" << result.server_sent_datagrams
-        << " server_sent_bytes=" << result.server_sent_bytes
-        << " client_bytes_in_flight=" << result.client_bytes_in_flight
-        << " server_bytes_in_flight=" << result.server_bytes_in_flight
-        << " client_cwnd=" << result.client_congestion_window
-        << " server_cwnd=" << result.server_congestion_window
-        << " client_queued_bytes=" << result.client_queued_stream_bytes
-        << " server_queued_bytes=" << result.server_queued_stream_bytes
-        << " client_next_wakeup=" << result.client_has_next_wakeup
-        << " server_next_wakeup=" << result.server_has_next_wakeup;
+    expect_transfer_complete(result);
     EXPECT_FALSE(result.client_failed);
     EXPECT_FALSE(result.server_failed);
     for (const auto &file_name : file_names) {

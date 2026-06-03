@@ -2379,13 +2379,13 @@ TEST(QuicCongestionTest, BbrUsesAckedPacketAppLimitedStateForBandwidthSample) {
     second_packet.first_sent_time = coquic::quic::test::test_time(1);
     second_packet.tx_in_flight = 2400;
 
-    auto rs = controller.generate_rate_sample(
+    auto rate_sample = controller.generate_rate_sample(
         std::array<SentPacketRecord, 2>{first_packet, second_packet},
         /*app_limited=*/true, coquic::quic::test::test_time(111), coquic::quic::RecoveryRttState{});
 
-    EXPECT_TRUE(rs.has_newly_acked);
-    EXPECT_FALSE(rs.is_app_limited);
-    EXPECT_EQ(rs.prior_delivered, second_packet.delivered);
+    EXPECT_TRUE(rate_sample.has_newly_acked);
+    EXPECT_FALSE(rate_sample.is_app_limited);
+    EXPECT_EQ(rate_sample.prior_delivered, second_packet.delivered);
 }
 
 TEST(QuicCongestionTest, BbrRateSampleUsesNewestPacketNumberForEqualSendTime) {
@@ -4303,10 +4303,10 @@ TEST(QuicCongestionTest, BbrAdditionalInternalCoverageBranches) {
         packet.delivered = 0;
         packet.delivered_time = coquic::quic::test::test_time(20);
         packet.first_sent_time = coquic::quic::test::test_time(20);
-        auto rs = controller.generate_rate_sample(
+        auto rate_sample = controller.generate_rate_sample(
             std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/false,
             coquic::quic::test::test_time(20), coquic::quic::RecoveryRttState{});
-        EXPECT_EQ(rs.delivery_rate_bytes_per_second, 0.0);
+        EXPECT_EQ(rate_sample.delivery_rate_bytes_per_second, 0.0);
     }
 
     {

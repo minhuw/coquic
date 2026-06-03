@@ -292,22 +292,22 @@ TEST(QuicCoreTest, ApplicationPtoPrefersNewestRetransmittablePacketOverOlderCryp
                                      .bytes_in_flight = 200,
                                  });
 
-    auto probe = connection.select_pto_probe(connection.application_space_);
+    auto retransmission_probe = connection.select_pto_probe(connection.application_space_);
 
-    if (probe.packet_number != 11u) {
+    if (retransmission_probe.packet_number != 11u) {
         ADD_FAILURE() << "PTO probe did not choose the newest retransmittable packet";
     }
-    if (probe.stream_fragments.size() != 1u) {
+    if (retransmission_probe.stream_fragments.size() != 1u) {
         ADD_FAILURE() << "PTO probe did not carry the expected stream fragment";
         return;
     }
-    if (probe.stream_fragments.front().stream_id != 0u) {
+    if (retransmission_probe.stream_fragments.front().stream_id != 0u) {
         ADD_FAILURE() << "PTO probe stream id changed";
     }
-    if (probe.stream_fragments.front().bytes != payload) {
+    if (retransmission_probe.stream_fragments.front().bytes != payload) {
         ADD_FAILURE() << "PTO probe stream bytes changed";
     }
-    if (!probe.stream_fragments.front().fin) {
+    if (!retransmission_probe.stream_fragments.front().fin) {
         ADD_FAILURE() << "PTO probe lost the FIN flag";
     }
 }
@@ -370,15 +370,14 @@ TEST(QuicCoreTest, ApplicationPtoDoesNotResendFullyAckedPrefixOfPartiallyOutstan
                                          /*suppress_pto_reset=*/false)
                     .has_value());
 
-    auto probe = connection.select_pto_probe(connection.application_space_);
-    auto &probe_packet = probe;
-    if (!probe_packet.stream_fragments.empty()) {
+    auto fallback_probe = connection.select_pto_probe(connection.application_space_);
+    if (!fallback_probe.stream_fragments.empty()) {
         ADD_FAILURE() << "PTO probe resent an already acknowledged stream prefix";
     }
-    if (!probe_packet.has_ping) {
+    if (!fallback_probe.has_ping) {
         ADD_FAILURE() << "PTO probe did not fall back to a PING";
     }
-    connection.application_space_.pending_probe_packet = probe;
+    connection.application_space_.pending_probe_packet = fallback_probe;
 
     auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1000));
     if (datagram.empty()) {
@@ -981,12 +980,12 @@ TEST(QuicCoreTest, SelectPtoProbeSkipsPacketsThatCannotBeProbed) {
                                                    .has_ping = true,
                                                });
 
-    auto probe = connection.select_pto_probe(packet_space);
+    auto ping_probe = connection.select_pto_probe(packet_space);
 
-    if (probe.packet_number != 2u) {
+    if (ping_probe.packet_number != 2u) {
         ADD_FAILURE() << "PTO probe did not skip non-probeable packets";
     }
-    if (!probe.has_ping) {
+    if (!ping_probe.has_ping) {
         ADD_FAILURE() << "selected PTO probe did not retain PING";
     }
 }

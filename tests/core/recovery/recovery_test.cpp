@@ -742,10 +742,12 @@ TEST(QuicRecoveryTest, AckHistoryCapsSparseTrackedRanges) {
     EXPECT_FALSE(history.should_ignore(1));
     EXPECT_FALSE(history.should_ignore(3));
 
-    const auto ack =
+    const auto built_ack =
         history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(200));
-    ASSERT_TRUE(ack.has_value());
-    auto ack_value = optional_value_or_terminate(ack);
+    if (!built_ack.has_value()) {
+        FAIL() << "ACK history cap did not build an ACK frame";
+    }
+    auto ack_value = optional_value_or_terminate(built_ack);
     EXPECT_EQ(ack_value.additional_ranges.size(), coquic::quic::kMaxTrackedAckRanges - 1);
 }
 
@@ -2765,9 +2767,11 @@ TEST(QuicRecoveryTest, RetireAndTakeRetiredPacketHelpersCoverHandleEdges) {
 
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/7, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(7)));
-    const auto handle = recovery.handle_for_packet_number(7);
-    ASSERT_TRUE(handle.has_value());
-    auto handle_value = optional_value_or_terminate(handle);
+    const auto retired_packet_handle = recovery.handle_for_packet_number(7);
+    if (!retired_packet_handle.has_value()) {
+        FAIL() << "recovery did not return a handle for packet 7";
+    }
+    auto handle_value = optional_value_or_terminate(retired_packet_handle);
     const auto moved = recovery.take_retired_packet_if_present(handle_value);
     ASSERT_TRUE(moved.has_value());
     auto moved_value = optional_value_or_terminate(moved);

@@ -125,8 +125,8 @@ int run_bootstrap_server_guarded(const coquic::http3::Http3BootstrapConfig &conf
 
 class ScopedBootstrapProcess {
   public:
-    explicit ScopedBootstrapProcess(const coquic::http3::Http3BootstrapConfig &config)
-        : host_(config.host), port_(config.port), config_(config),
+    explicit ScopedBootstrapProcess(const coquic::http3::Http3BootstrapConfig &bootstrap_config)
+        : host_(bootstrap_config.host), port_(bootstrap_config.port), config_(bootstrap_config),
           thread_(&ScopedBootstrapProcess::run_server_thread, this) {
         wait_for_startup(std::chrono::seconds{5});
     }
@@ -248,11 +248,12 @@ class ScopedBootstrapProcess {
     bool started_successfully_ = false;
 };
 
-int run_bootstrap_server_guarded(const coquic::http3::Http3BootstrapConfig &config,
+int run_bootstrap_server_guarded(const coquic::http3::Http3BootstrapConfig &bootstrap_config,
                                  const std::atomic<bool> *stop_requested,
                                  std::atomic<bool> *listener_ready) noexcept {
     try {
-        return coquic::http3::run_http3_bootstrap_server(config, stop_requested, listener_ready);
+        return coquic::http3::run_http3_bootstrap_server(bootstrap_config, stop_requested,
+                                                         listener_ready);
     } catch (...) {
         return 1;
     }
@@ -320,7 +321,7 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
         return std::nullopt;
     }
 
-    SimpleHttpsResponse response;
+    SimpleHttpsResponse https_response;
     const auto status_end = response_text.find("\r\n");
     if (status_end == std::string::npos) {
         return std::nullopt;
@@ -330,7 +331,7 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
     if (first_space == std::string::npos) {
         return std::nullopt;
     }
-    response.status_code = std::stoi(status_line.substr(first_space + 1, 3));
+    https_response.status_code = std::stoi(status_line.substr(first_space + 1, 3));
 
     std::size_t line_start = status_end + 2;
     while (line_start < header_end) {
@@ -346,13 +347,13 @@ std::optional<SimpleHttpsResponse> https_request(std::string_view host, std::uin
             while (!value.empty() && value.front() == ' ') {
                 value.erase(value.begin());
             }
-            response.headers.insert_or_assign(name, value);
+            https_response.headers.insert_or_assign(name, value);
         }
         line_start = line_end + 2;
     }
 
-    response.body = response_text.substr(header_end + 4);
-    return response;
+    https_response.body = response_text.substr(header_end + 4);
+    return https_response;
 }
 
 std::string decode_chunked_body(std::string_view encoded) {
@@ -571,8 +572,8 @@ std::optional<std::size_t> parse_size(std::string_view value) {
 
 class ScopedHttpProxyUpstream {
   public:
-    ScopedHttpProxyUpstream(std::uint16_t port, std::string response)
-        : response_(std::move(response)), thread_([this, port] { run(port); }) {
+    ScopedHttpProxyUpstream(std::uint16_t port, std::string upstream_response)
+        : response_(std::move(upstream_response)), thread_([this, port] { run(port); }) {
     }
 
     ~ScopedHttpProxyUpstream() {

@@ -1028,9 +1028,10 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksExposeTraceAndConnectionIdFormatti
     };
     EXPECT_EQ(coquic::http09::test::format_connection_id_hex_for_tests(connection_id), "001fa0ff");
 
-    const auto key = coquic::http09::test::connection_id_key_for_tests(connection_id);
-    EXPECT_EQ(key.size(), connection_id.size());
-    EXPECT_EQ(coquic::http09::test::format_connection_id_key_hex_for_tests(key), "001fa0ff");
+    const auto connection_id_key = coquic::http09::test::connection_id_key_for_tests(connection_id);
+    EXPECT_EQ(connection_id_key.size(), connection_id.size());
+    EXPECT_EQ(coquic::http09::test::format_connection_id_key_hex_for_tests(connection_id_key),
+              "001fa0ff");
     EXPECT_TRUE(coquic::http09::test::connection_id_key_for_tests({}).empty());
 }
 

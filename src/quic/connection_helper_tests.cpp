@@ -1112,14 +1112,14 @@ bool connection_helper_edge_cases_for_tests() {
         CodecResult<std::vector<std::byte>>::success({std::byte{0x01}, std::byte{0x02}});
     const auto empty_packet_payload_datagram =
         CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::empty_packet_payload, 0);
-    const auto failed_serialized_datagram =
-        CodecResult<SerializedProtectedDatagram>::failure(CodecErrorCode::invalid_varint, 0);
     connection_coverage_check(ok, "failed_datagram_reports_zero_size",
                               datagram_size_or_zero(failed_datagram) == 0);
     connection_coverage_check(ok, "successful_datagram_reports_size",
                               datagram_size_or_zero(successful_datagram) == 2);
-    connection_coverage_check(ok, "failed_serialized_datagram_reports_zero_size",
-                              datagram_size_or_zero(failed_serialized_datagram) == 0);
+    connection_coverage_check(
+        ok, "failed_serialized_datagram_reports_zero_size",
+        datagram_size_or_zero(CodecResult<SerializedProtectedDatagram>::failure(
+            CodecErrorCode::invalid_varint, 0)) == 0);
     connection_coverage_check(ok, "successful_serialized_datagram_reports_size",
                               datagram_size_or_zero(successful_serialized_datagram_for_tests()) ==
                                   3);
@@ -1133,8 +1133,10 @@ bool connection_helper_edge_cases_for_tests() {
         ok, "empty_packet_payload_serialized_error_reported",
         is_empty_packet_payload_error(CodecResult<SerializedProtectedDatagram>::failure(
             CodecErrorCode::empty_packet_payload, 0)));
-    connection_coverage_check(ok, "non_empty_packet_payload_serialized_error_not_reported",
-                              !is_empty_packet_payload_error(failed_serialized_datagram));
+    connection_coverage_check(
+        ok, "non_empty_packet_payload_serialized_error_not_reported",
+        !is_empty_packet_payload_error(
+            CodecResult<SerializedProtectedDatagram>::failure(CodecErrorCode::invalid_varint, 0)));
 
     TransportParameters invalid_transport_parameters;
     invalid_transport_parameters.max_udp_payload_size = std::numeric_limits<std::uint64_t>::max();
@@ -1152,16 +1154,17 @@ bool connection_helper_edge_cases_for_tests() {
     connection_coverage_check(ok, "truncated_tls_state_rejected",
                               !decode_resumption_state(truncated_tls_state).has_value());
 
-    const TransportParameters resumption_parameters{
-        .max_udp_payload_size = 1200,
-        .active_connection_id_limit = 8,
-        .initial_source_connection_id = ConnectionId{std::byte{0x01}},
-    };
-
     connection_coverage_check(
         ok, "missing_application_context_rejected",
-        !decode_resumption_state(resumption_state_missing_application_context_for_tests(
-                                     serialize_transport_parameters(resumption_parameters).value()))
+        !decode_resumption_state(
+             resumption_state_missing_application_context_for_tests(
+                 serialize_transport_parameters(
+                     TransportParameters{
+                         .max_udp_payload_size = 1200,
+                         .active_connection_id_limit = 8,
+                         .initial_source_connection_id = ConnectionId{std::byte{0x01}},
+                     })
+                     .value()))
              .has_value());
 
     connection_coverage_check(
@@ -1175,7 +1178,13 @@ bool connection_helper_edge_cases_for_tests() {
              .has_value());
 
     auto trailing_resumption_state =
-        encode_resumption_state({}, kQuicVersion1, "h3", resumption_parameters, {});
+        encode_resumption_state({}, kQuicVersion1, "h3",
+                                TransportParameters{
+                                    .max_udp_payload_size = 1200,
+                                    .active_connection_id_limit = 8,
+                                    .initial_source_connection_id = ConnectionId{std::byte{0x01}},
+                                },
+                                {});
     trailing_resumption_state.push_back(std::byte{0xff});
     connection_coverage_check(ok, "trailing_bytes_rejected",
                               !decode_resumption_state(trailing_resumption_state).has_value());
@@ -1732,46 +1741,49 @@ bool connection_header_packet_space_coverage_for_tests() {
     {
         auto connection = make_connected_client_connection_for_connection_coverage();
         connection.config_.enable_packet_inspection = true;
-        connection.initial_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x71});
-        connection.handshake_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x72});
-        connection.zero_rtt_space_.write_secret =
-            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x73});
-        const std::array<ProtectedPacket, 3> protected_packets{
-            ProtectedPacket{ProtectedInitialPacket{
-                .version = kQuicVersion1,
-                .destination_connection_id = connection.config_.initial_destination_connection_id,
-                .source_connection_id = connection.config_.source_connection_id,
-                .packet_number_length = 2,
-                .packet_number = 1,
-                .frames = {PingFrame{}},
-            }},
-            ProtectedPacket{ProtectedHandshakePacket{
-                .version = kQuicVersion1,
-                .destination_connection_id = connection.config_.initial_destination_connection_id,
-                .source_connection_id = connection.config_.source_connection_id,
-                .packet_number_length = 2,
-                .packet_number = 2,
-                .frames = {PingFrame{}},
-            }},
-            ProtectedPacket{ProtectedZeroRttPacket{
-                .version = kQuicVersion1,
-                .destination_connection_id = connection.config_.initial_destination_connection_id,
-                .source_connection_id = connection.config_.source_connection_id,
-                .packet_number_length = 2,
-                .packet_number = 3,
-                .frames = {PingFrame{}},
-            }},
-        };
+        connection.initial_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x71});
+        connection.handshake_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x72});
+        connection.zero_rtt_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x73});
         const auto datagram = serialize_protected_datagram_with_metadata(
-            protected_packets, SerializeProtectionContext{
-                                   .local_role = connection.config_.role,
-                                   .client_initial_destination_connection_id =
-                                       connection.client_initial_destination_connection_id(),
-                                   .handshake_secret = connection.handshake_space_.write_secret,
-                                   .zero_rtt_secret = connection.zero_rtt_space_.write_secret,
-                               });
+            std::array<ProtectedPacket, 3>{
+                ProtectedPacket{ProtectedInitialPacket{
+                    .version = kQuicVersion1,
+                    .destination_connection_id =
+                        connection.config_.initial_destination_connection_id,
+                    .source_connection_id = connection.config_.source_connection_id,
+                    .packet_number_length = 2,
+                    .packet_number = 1,
+                    .frames = {PingFrame{}},
+                }},
+                ProtectedPacket{ProtectedHandshakePacket{
+                    .version = kQuicVersion1,
+                    .destination_connection_id =
+                        connection.config_.initial_destination_connection_id,
+                    .source_connection_id = connection.config_.source_connection_id,
+                    .packet_number_length = 2,
+                    .packet_number = 2,
+                    .frames = {PingFrame{}},
+                }},
+                ProtectedPacket{ProtectedZeroRttPacket{
+                    .version = kQuicVersion1,
+                    .destination_connection_id =
+                        connection.config_.initial_destination_connection_id,
+                    .source_connection_id = connection.config_.source_connection_id,
+                    .packet_number_length = 2,
+                    .packet_number = 3,
+                    .frames = {PingFrame{}},
+                }},
+            },
+            SerializeProtectionContext{
+                .local_role = connection.config_.role,
+                .client_initial_destination_connection_id =
+                    connection.client_initial_destination_connection_id(),
+                .handshake_secret = connection.handshake_space_.write_secret,
+                .zero_rtt_secret = connection.zero_rtt_space_.write_secret,
+            });
         record(datagram.has_value());
         if (datagram.has_value()) {
             record(connection.queue_outbound_packet_inspections(datagram.value(), 7) == 3);
@@ -1826,9 +1838,7 @@ bool connection_header_packet_space_coverage_for_tests() {
         record(duplicate_result.first != outstanding.end());
         record(outstanding.erase(99) == 0);
 
-        const auto declared_lost_result = declared_lost.emplace(9, packet);
-        record(declared_lost_result.second);
-        record(declared_lost_result.first != declared_lost.end());
+        record(declared_lost.emplace(9, packet).second);
         record(declared_lost.contains(9));
         const auto &declared_lost_packet = declared_lost.at(9);
         record(declared_lost_packet.packet_number == 9);

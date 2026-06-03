@@ -564,6 +564,7 @@ class Endpoint:
         try:
             self.close_handle()
         except Exception:
+            # Destructors cannot report cleanup failures safely.
             pass
 
     def open_connection(self, input: OpenConnection, now: TimeUs) -> QueryResult:

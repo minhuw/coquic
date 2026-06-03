@@ -4,13 +4,13 @@
 
 namespace {
 
-void expect_get_request_head(const coquic::http3::Http3PeerRequestHeadEvent &request_head_event) {
-    EXPECT_EQ(request_head_event.stream_id, 0u);
-    EXPECT_EQ(request_head_event.head.method, "GET");
-    EXPECT_EQ(request_head_event.head.scheme, "https");
-    EXPECT_EQ(request_head_event.head.authority, "example.test");
-    EXPECT_EQ(request_head_event.head.path, "/hello");
-    EXPECT_EQ(request_head_event.head.content_length, std::optional<std::uint64_t>(0u));
+void expect_get_request_head(const coquic::http3::Http3PeerRequestHeadEvent &head_event) {
+    EXPECT_EQ(head_event.stream_id, 0u);
+    EXPECT_EQ(head_event.head.method, "GET");
+    EXPECT_EQ(head_event.head.scheme, "https");
+    EXPECT_EQ(head_event.head.authority, "example.test");
+    EXPECT_EQ(head_event.head.path, "/hello");
+    EXPECT_EQ(head_event.head.content_length, std::optional<std::uint64_t>(0u));
 }
 
 TEST(QuicHttp3ConnectionTest, ServerRoleRequestHeadersEmitPeerRequestHeadEvent) {

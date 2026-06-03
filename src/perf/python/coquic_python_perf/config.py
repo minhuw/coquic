@@ -5,7 +5,6 @@ from enum import Enum
 from pathlib import Path
 
 import coquic
-from coquic import quic
 
 from . import PerfError
 
@@ -137,8 +136,8 @@ def parse_runtime_args(args: list[str]) -> PerfConfig:
     return config
 
 
-def client_endpoint_config(config: PerfConfig) -> quic.EndpointConfig:
-    endpoint = quic.EndpointConfig()
+def client_endpoint_config(config: PerfConfig) -> coquic.quic.EndpointConfig:
+    endpoint = coquic.quic.EndpointConfig()
     endpoint.core.role = coquic.Role.CLIENT
     endpoint.core.verify_peer = config.verify_peer
     endpoint.core.application_protocol = APPLICATION_PROTOCOL
@@ -148,8 +147,8 @@ def client_endpoint_config(config: PerfConfig) -> quic.EndpointConfig:
     return endpoint
 
 
-def server_endpoint_config(config: PerfConfig) -> quic.EndpointConfig:
-    endpoint = quic.EndpointConfig()
+def server_endpoint_config(config: PerfConfig) -> coquic.quic.EndpointConfig:
+    endpoint = coquic.quic.EndpointConfig()
     endpoint.core.role = coquic.Role.SERVER
     endpoint.core.verify_peer = config.verify_peer
     endpoint.core.application_protocol = APPLICATION_PROTOCOL

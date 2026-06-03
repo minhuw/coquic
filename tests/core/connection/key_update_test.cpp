@@ -698,7 +698,7 @@ TEST(QuicCoreTest, LocalKeyUpdateCompletesWhenUpdatedPhasePacketIsAcknowledged) 
     auto updated_phase_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
     ASSERT_FALSE(updated_phase_datagram.empty());
-    const auto updated_phase_packet_number =
+    const auto updated_write_phase_packet_number =
         last_tracked_packet(connection.application_space_).packet_number;
     EXPECT_TRUE(connection.local_key_update_initiated_);
     EXPECT_EQ(connection.application_write_key_phase_, !original_write_key_phase);
@@ -706,7 +706,7 @@ TEST(QuicCoreTest, LocalKeyUpdateCompletesWhenUpdatedPhasePacketIsAcknowledged) 
     auto updated_ack_result = connection.process_inbound_ack(
         connection.application_space_,
         coquic::quic::AckFrame{
-            .largest_acknowledged = updated_phase_packet_number,
+            .largest_acknowledged = updated_write_phase_packet_number,
             .first_ack_range = 0,
         },
         coquic::quic::test::test_time(4), connection.config_.transport.ack_delay_exponent,
@@ -986,7 +986,7 @@ TEST(QuicCoreTest, OldKeyAckOfCurrentKeyUpdatePacketClosesWithKeyUpdateError) {
     auto updated_phase_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
     ASSERT_FALSE(updated_phase_datagram.empty());
-    auto updated_phase_packet_number =
+    auto old_key_acknowledged_packet_number =
         last_tracked_packet(connection.application_space_).packet_number;
     ASSERT_EQ(connection.current_application_write_key_generation_, 1u);
     ASSERT_TRUE(connection.previous_application_read_secret_.has_value());
@@ -1001,7 +1001,7 @@ TEST(QuicCoreTest, OldKeyAckOfCurrentKeyUpdatePacketClosesWithKeyUpdateError) {
                 .frames =
                     {
                         coquic::quic::AckFrame{
-                            .largest_acknowledged = updated_phase_packet_number,
+                            .largest_acknowledged = old_key_acknowledged_packet_number,
                             .first_ack_range = 0,
                         },
                     },
@@ -1296,22 +1296,22 @@ TEST(QuicCoreTest, CompletedLocalKeyUpdateCanBeRequestedAgain) {
     auto first_updated_phase_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
     ASSERT_FALSE(first_updated_phase_datagram.empty());
-    const auto first_updated_phase_packet_number =
+    const auto first_updated_write_phase_packet_number =
         last_tracked_packet(connection.application_space_).packet_number;
     ASSERT_EQ(connection.application_write_key_phase_, !original_write_key_phase);
     ASSERT_TRUE(connection.local_key_update_initiated_);
 
-    ASSERT_TRUE(
-        connection
-            .process_inbound_ack(connection.application_space_,
-                                 coquic::quic::AckFrame{
-                                     .largest_acknowledged = first_updated_phase_packet_number,
-                                     .first_ack_range = 0,
-                                 },
-                                 coquic::quic::test::test_time(4),
-                                 connection.config_.transport.ack_delay_exponent,
-                                 connection.config_.transport.max_ack_delay, false)
-            .has_value());
+    ASSERT_TRUE(connection
+                    .process_inbound_ack(
+                        connection.application_space_,
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = first_updated_write_phase_packet_number,
+                            .first_ack_range = 0,
+                        },
+                        coquic::quic::test::test_time(4),
+                        connection.config_.transport.ack_delay_exponent,
+                        connection.config_.transport.max_ack_delay, false)
+                    .has_value());
     ASSERT_FALSE(connection.local_key_update_initiated_);
 
     connection.request_key_update();
@@ -1323,21 +1323,21 @@ TEST(QuicCoreTest, CompletedLocalKeyUpdateCanBeRequestedAgain) {
     auto second_current_phase_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(5));
     ASSERT_FALSE(second_current_phase_datagram.empty());
-    const auto second_current_phase_packet_number =
+    const auto second_current_write_phase_packet_number =
         last_tracked_packet(connection.application_space_).packet_number;
     EXPECT_EQ(connection.application_write_key_phase_, !original_write_key_phase);
 
-    ASSERT_TRUE(
-        connection
-            .process_inbound_ack(connection.application_space_,
-                                 coquic::quic::AckFrame{
-                                     .largest_acknowledged = second_current_phase_packet_number,
-                                     .first_ack_range = 0,
-                                 },
-                                 coquic::quic::test::test_time(6),
-                                 connection.config_.transport.ack_delay_exponent,
-                                 connection.config_.transport.max_ack_delay, false)
-            .has_value());
+    ASSERT_TRUE(connection
+                    .process_inbound_ack(
+                        connection.application_space_,
+                        coquic::quic::AckFrame{
+                            .largest_acknowledged = second_current_write_phase_packet_number,
+                            .first_ack_range = 0,
+                        },
+                        coquic::quic::test::test_time(6),
+                        connection.config_.transport.ack_delay_exponent,
+                        connection.config_.transport.max_ack_delay, false)
+                    .has_value());
 
     ASSERT_TRUE(connection.queue_stream_send(12, bytes_from_ints({0x64}), false).has_value());
     auto second_updated_phase_datagram =

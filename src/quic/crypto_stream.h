@@ -65,8 +65,8 @@ class ReliableSendBuffer {
             return;
         }
 
-        if (!max_offset.has_value() && consume_ranges_by_extending_previous_sent(
-                                           SegmentState::lost, remaining_bytes, callback)) {
+        if (consume_ranges_by_extending_previous_sent(SegmentState::lost, remaining_bytes,
+                                                      max_offset, callback)) {
             return;
         }
         consume_ranges_by_state(SegmentState::lost, remaining_bytes, max_offset,
@@ -82,8 +82,8 @@ class ReliableSendBuffer {
             return;
         }
 
-        if (!max_offset.has_value() && consume_ranges_by_extending_previous_sent(
-                                           SegmentState::unsent, remaining_bytes, callback)) {
+        if (consume_ranges_by_extending_previous_sent(SegmentState::unsent, remaining_bytes,
+                                                      max_offset, callback)) {
             return;
         }
         consume_ranges_by_state(SegmentState::unsent, remaining_bytes, max_offset,
@@ -129,9 +129,10 @@ class ReliableSendBuffer {
     std::optional<std::uint64_t> first_offset_by_state(SegmentState state) const;
     bool acknowledge_leading_sent_range(std::uint64_t offset, std::uint64_t end);
     template <typename Callback>
-    COQUIC_NO_PROFILE bool consume_ranges_by_extending_previous_sent(SegmentState state,
-                                                                     std::size_t &remaining_bytes,
-                                                                     Callback &&callback) {
+    COQUIC_NO_PROFILE bool
+    consume_ranges_by_extending_previous_sent(SegmentState state, std::size_t &remaining_bytes,
+                                              std::optional<std::uint64_t> max_offset,
+                                              Callback &&callback) {
         const auto segment_length = [](const Segment &segment) {
             return segment.end - segment.begin;
         };
@@ -140,6 +141,9 @@ class ReliableSendBuffer {
             if (it->second.state != state) {
                 ++it;
                 continue;
+            }
+            if (max_offset.has_value() && it->first >= *max_offset) {
+                return true;
             }
             if (it == segments_.begin()) {
                 return false;
@@ -157,7 +161,15 @@ class ReliableSendBuffer {
             }
 
             const auto available_bytes = segment_length(it->second);
-            const auto chunk_size = std::min(remaining_bytes, available_bytes);
+            const auto capped_available_bytes =
+                max_offset.has_value()
+                    ? static_cast<std::size_t>(std::min<std::uint64_t>(
+                          static_cast<std::uint64_t>(available_bytes), *max_offset - it->first))
+                    : available_bytes;
+            if (capped_available_bytes == 0) {
+                return true;
+            }
+            const auto chunk_size = std::min(remaining_bytes, capped_available_bytes);
             callback(ByteRange{
                 .offset = it->first,
                 .bytes =

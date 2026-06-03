@@ -11,6 +11,7 @@
 #include <fstream>
 #endif
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <random>
@@ -100,6 +101,91 @@ constexpr std::size_t kCoreEffectStorageCacheSlots = 128;
 
 static_assert(kStreamStateErrorMap.size() ==
               static_cast<std::size_t>(StreamStateErrorCode::final_size_conflict) + 1);
+
+struct CoreProfileCounters {
+    std::uint64_t drain_calls = 0;
+    std::uint64_t drain_datagrams = 0;
+    std::uint64_t drain_send_effects = 0;
+    std::uint64_t drain_ns = 0;
+    std::uint64_t drain_emplace_send_ns = 0;
+    std::uint64_t append_result_calls = 0;
+    std::uint64_t append_result_effects = 0;
+    std::uint64_t append_result_ns = 0;
+};
+
+constexpr bool kCoquicProfileHooksEnabled = COQUIC_PROFILE_HOOKS != 0;
+
+COQUIC_NO_PROFILE bool core_profile_enabled() {
+    if constexpr (!kCoquicProfileHooksEnabled) {
+        return false;
+    }
+
+    static const bool enabled = [] {
+        const char *value = std::getenv("COQUIC_SEND_PROFILE");
+        return value != nullptr && value[0] != '\0' && std::string_view(value) != "0";
+    }();
+    return enabled;
+}
+
+COQUIC_NO_PROFILE CoreProfileCounters &core_profile_counters() {
+    static CoreProfileCounters counters;
+    return counters;
+}
+
+COQUIC_NO_PROFILE void print_core_profile() {
+    if (!core_profile_enabled()) {
+        return;
+    }
+
+    const auto &c = core_profile_counters();
+    std::cerr << "coquic-core-profile"
+              << " drain_calls=" << c.drain_calls << " drain_datagrams=" << c.drain_datagrams
+              << " drain_send_effects=" << c.drain_send_effects << " drain_ns=" << c.drain_ns
+              << " drain_emplace_send_ns=" << c.drain_emplace_send_ns
+              << " append_result_calls=" << c.append_result_calls
+              << " append_result_effects=" << c.append_result_effects
+              << " append_result_ns=" << c.append_result_ns << '\n';
+}
+
+COQUIC_NO_PROFILE void register_core_profile_printer_once() {
+    if constexpr (!kCoquicProfileHooksEnabled) {
+        return;
+    }
+
+    static const bool registered = [] {
+        std::atexit(print_core_profile);
+        return true;
+    }();
+    static_cast<void>(registered);
+}
+
+struct CoreProfileTimer {
+    std::uint64_t *target = nullptr;
+    QuicCoreTimePoint start{};
+
+    COQUIC_NO_PROFILE explicit CoreProfileTimer(std::uint64_t &counter)
+        : target(kCoquicProfileHooksEnabled && core_profile_enabled() ? &counter : nullptr) {
+        if (target != nullptr) {
+            start = QuicCoreClock::now();
+        }
+    }
+
+    COQUIC_NO_PROFILE ~CoreProfileTimer() {
+        if (target == nullptr) {
+            return;
+        }
+        *target += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(QuicCoreClock::now() - start)
+                .count());
+    }
+};
+
+#if COQUIC_PROFILE_HOOKS
+#define COQUIC_CORE_PROFILE_TIMER(name, counter)                                                   \
+    CoreProfileTimer name(core_profile_counters().counter)
+#else
+#define COQUIC_CORE_PROFILE_TIMER(name, counter) static_cast<void>(0)
+#endif
 
 #if !defined(COQUIC_DISABLE_CORE_EFFECT_STORAGE_CACHE)
 #if defined(__wasm__)
@@ -282,6 +368,11 @@ COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
     const std::optional<QuicRouteHandle> &default_route_handle,
     const std::unordered_map<QuicPathId, QuicRouteHandle> &route_handle_by_path_id,
     QuicConnection &quic_connection, QuicCoreTimePoint now, bool continue_paced_burst = false) {
+    register_core_profile_printer_once();
+    if (core_profile_enabled()) {
+        ++core_profile_counters().drain_calls;
+    }
+    COQUIC_CORE_PROFILE_TIMER(core_drain_timer, drain_ns);
     QuicCoreResult drain_result;
 
     // Drain send-side datagrams first, because each datagram can change pacing state and route
@@ -310,17 +401,26 @@ COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
         const auto route_it = drained_path_id.has_value()
                                   ? route_handle_by_path_id.find(*drained_path_id)
                                   : route_handle_by_path_id.end();
-        drain_result.effects.emplace_back(QuicCoreSendDatagram{
-            .connection = connection_handle,
-            .route_handle = route_it != route_handle_by_path_id.end()
-                                ? std::optional<QuicRouteHandle>(route_it->second)
-                                : default_route_handle,
-            .bytes = std::move(datagram),
-            .ecn = quic_connection.last_drained_ecn_codepoint(),
-            .is_pmtu_probe = quic_connection.last_drained_is_pmtu_probe(),
-            .packet_inspection_datagram_id =
-                quic_connection.last_drained_packet_inspection_datagram_id(),
-        });
+        {
+            COQUIC_CORE_PROFILE_TIMER(core_emplace_timer, drain_emplace_send_ns);
+            drain_result.effects.emplace_back(QuicCoreSendDatagram{
+                .connection = connection_handle,
+                .route_handle = route_it != route_handle_by_path_id.end()
+                                    ? std::optional<QuicRouteHandle>(route_it->second)
+                                    : default_route_handle,
+                .bytes = std::move(datagram),
+                .ecn = quic_connection.last_drained_ecn_codepoint(),
+                .is_pmtu_probe = quic_connection.last_drained_is_pmtu_probe(),
+                .packet_inspection_datagram_id =
+                    quic_connection.last_drained_packet_inspection_datagram_id(),
+            });
+        }
+        if (core_profile_enabled()) {
+            ++core_profile_counters().drain_send_effects;
+        }
+    }
+    if (core_profile_enabled()) {
+        core_profile_counters().drain_datagrams += emitted;
     }
     if (has_send_continuation(emitted, last_drained_allows_send_continuation, quic_connection,
                               now)) {
@@ -443,6 +543,12 @@ COQUIC_NO_PROFILE void append_sequential_result(QuicCoreResult &target, QuicCore
 }
 
 void append_result(QuicCoreResult &target, QuicCoreResult source) {
+    if (core_profile_enabled()) {
+        auto &profile = core_profile_counters();
+        ++profile.append_result_calls;
+        profile.append_result_effects += source.effects.size();
+    }
+    COQUIC_CORE_PROFILE_TIMER(append_result_timer, append_result_ns);
     if (target.effects.empty()) {
         target.effects = std::move(source.effects);
     } else if (!source.effects.empty()) {

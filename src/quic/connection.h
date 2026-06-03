@@ -770,6 +770,8 @@ class QuicConnection {
     CodecResult<bool> reject_optimistic_ack_if_detected(PacketSpaceState &packet_space,
                                                         AckRangeCursor cursor,
                                                         QuicCoreTimePoint now);
+    void maybe_complete_local_key_update_from_ack(const PacketSpaceState &packet_space,
+                                                  const AckApplyResult &ack_result);
     CodecResult<bool> process_new_connection_id_frame(const NewConnectionIdFrame &frame);
     CodecResult<bool> process_retire_connection_id_frame(const RetireConnectionIdFrame &frame);
     CodecResult<bool> ensure_peer_preferred_address_connection_id();
@@ -906,6 +908,7 @@ class QuicConnection {
     void queue_transport_close_for_error(QuicCoreTimePoint now, const CodecError &error,
                                          std::uint64_t frame_type = 0);
     bool note_aead_encryption_attempt(std::size_t packet_count, QuicCoreTimePoint now);
+    void maybe_request_proactive_key_update();
     bool note_packet_authentication_failure(const CodecError &error, QuicCoreTimePoint now);
     bool non_paced_burst_allows_send(bool ack_eliciting, bool bypass_congestion_window,
                                      std::optional<bool> pacing_controlled = std::nullopt) const;

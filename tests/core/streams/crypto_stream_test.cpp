@@ -954,6 +954,49 @@ TEST(QuicCryptoStreamTest, ConsumeUnsentRangesExtendsAdjacentSentPrefixWithoutEx
     EXPECT_TRUE(buffer.has_outstanding_range(0, 6));
 }
 
+TEST(QuicCryptoStreamTest, ConsumeUnsentRangesExtendsAdjacentSentPrefixWithMaxOffset) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+    ASSERT_EQ(buffer.take_unsent_ranges(3).size(), 1u);
+
+    std::size_t remaining = 2;
+    std::vector<coquic::quic::ByteRange> unsent_ranges;
+    buffer.consume_unsent_ranges(remaining, /*max_offset=*/5, [&](coquic::quic::ByteRange range) {
+        unsent_ranges.push_back(std::move(range));
+    });
+
+    ASSERT_EQ(unsent_ranges.size(), 1u);
+    EXPECT_EQ(unsent_ranges.front().offset, 3u);
+    EXPECT_EQ(unsent_ranges.front().bytes, bytes_from_string("de"));
+    EXPECT_EQ(remaining, 0u);
+    ASSERT_EQ(buffer.segments_.size(), 2u);
+    EXPECT_EQ(buffer.segments_.begin()->first, 0u);
+    EXPECT_EQ(buffer.segments_.begin()->second.state, ReliableSendBuffer::SegmentState::sent);
+    EXPECT_EQ(buffer.segments_.begin()->second.end, 5u);
+    auto tail = std::next(buffer.segments_.begin());
+    ASSERT_NE(tail, buffer.segments_.end());
+    EXPECT_EQ(tail->first, 5u);
+    EXPECT_EQ(tail->second.state, ReliableSendBuffer::SegmentState::unsent);
+    EXPECT_EQ(tail->second.begin, 5u);
+    EXPECT_EQ(tail->second.end, 6u);
+    EXPECT_EQ(
+        buffer
+            .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)],
+        1u);
+    EXPECT_EQ(buffer.segment_state_counts_[send_buffer_state_index(
+                  ReliableSendBuffer::SegmentState::unsent)],
+              1u);
+
+    remaining = 8;
+    unsent_ranges.clear();
+    buffer.consume_unsent_ranges(remaining, /*max_offset=*/5, [&](coquic::quic::ByteRange range) {
+        unsent_ranges.push_back(std::move(range));
+    });
+
+    EXPECT_TRUE(unsent_ranges.empty());
+    EXPECT_EQ(remaining, 8u);
+}
+
 TEST(QuicCryptoStreamTest, EmptyStateSpecificRangeReadsReturnNoOffsetsOrRanges) {
     ReliableSendBuffer empty;
     EXPECT_TRUE(empty.take_ranges(/*max_bytes=*/0).empty());

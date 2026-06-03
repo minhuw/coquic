@@ -47,6 +47,34 @@ jobs:
             impl: ngtcp2
             image: ghcr.io/ngtcp2/ngtcp2-interop:latest
             testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
+          - peer: neqo
+            display_name: neqo
+            impl: neqo
+            image: ghcr.io/mozilla/neqo-qns:latest
+            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
+          - peer: mvfst
+            display_name: mvfst
+            impl: mvfst
+            image: ghcr.io/facebook/proxygen/mvfst-interop:latest
+            directions: coquic-server
+            testcases: handshake,transferloss,transfercorruption,blackhole,longrtt,goodput,ipv6
+            coquic_server_testcases: handshake,transferloss,transfercorruption,blackhole,longrtt,goodput,crosstraffic,ipv6
+            coquic_client_testcases: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,blackhole,goodput,ipv6,multiplexing,rebind-port
+          - peer: aioquic
+            display_name: aioquic
+            impl: aioquic
+            image: aiortc/aioquic-qns:latest
+            testcases: handshake,handshakeloss,transfer,transferloss,transfercorruption,blackhole,ipv6,multiplexing,retry,amplificationlimit
+            coquic_server_testcases: handshake,transfer,keyupdate,transferloss,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,amplificationlimit
+            coquic_client_testcases: handshakeloss,transfer,transferloss,transfercorruption,blackhole,ipv6,multiplexing,retry,amplificationlimit,rebind-port,rebind-addr
+          - peer: xquic
+            display_name: xquic
+            impl: xquic
+            image: ghcr.io/alibaba/xquic/xquic-interop:latest
+            directions: coquic-server
+            testcases: handshake,transfer,keyupdate,transferloss,transfercorruption,blackhole,chacha20,longrtt,goodput,ipv6,retry,zerortt,amplificationlimit,rebind-port,rebind-addr
+            coquic_server_testcases: handshake,transfer,keyupdate,transferloss,transfercorruption,blackhole,chacha20,longrtt,goodput,ipv6,retry,zerortt,amplificationlimit
+            coquic_client_testcases: handshake,transfer,keyupdate,transferloss,transfercorruption,blackhole,chacha20,longrtt,goodput,ipv6,retry,zerortt,rebind-port,rebind-addr
           - peer: s2n-quic
             display_name: s2n-quic
             impl: s2n-quic
@@ -97,6 +125,7 @@ jobs:
           INTEROP_COQUIC_CLIENT_TESTCASES: ${{ matrix.coquic_client_testcases || matrix.testcases }}
           INTEROP_PEER_IMPL: ${{ matrix.impl }}
           INTEROP_PEER_IMAGE: ${{ matrix.image }}
+          INTEROP_DIRECTIONS: ${{ matrix.directions || 'both' }}
           COQUIC_CONGESTION_CONTROL: ${{ matrix.congestion_control || '' }}
         run: bash interop/run-official.sh
 
@@ -244,6 +273,10 @@ jobs:
             --result msquic-server=.interop-results/downloaded/interop-results-msquic.json \
             --result quiche-server=.interop-results/downloaded/interop-results-quiche.json \
             --result ngtcp2-server=.interop-results/downloaded/interop-results-ngtcp2.json \
+            --result neqo-server=.interop-results/downloaded/interop-results-neqo.json \
+            --result mvfst-server=.interop-results/downloaded/interop-results-mvfst.json \
+            --result aioquic-server=.interop-results/downloaded/interop-results-aioquic.json \
+            --result xquic-server=.interop-results/downloaded/interop-results-xquic.json \
             --result s2n-quic-server=.interop-results/downloaded/interop-results-s2n-quic.json \
             --result self=.interop-results/downloaded/interop-results-self.json \
             --event-name "${GITHUB_EVENT_NAME}" \

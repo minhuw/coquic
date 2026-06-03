@@ -1,6 +1,7 @@
 #include "src/perf/perf_server.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdlib>
 #include <span>
 #include <string_view>
@@ -17,6 +18,28 @@ std::vector<std::byte> make_payload(std::size_t bytes) {
 bool env_flag_enabled(const char *name) {
     const char *value = std::getenv(name);
     return value != nullptr && value[0] != '\0' && std::string_view(value) != "0";
+}
+
+std::optional<quic::QuicCoreDuration> env_duration_ms(const char *name) {
+    const char *value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0' || std::string_view(value) == "0") {
+        return std::nullopt;
+    }
+
+    std::uint64_t milliseconds = 0;
+    const auto text = std::string_view(value);
+    const auto *begin = text.data();
+    const auto *end = text.data() + text.size();
+    const auto result = std::from_chars(begin, end, milliseconds);
+    if (result.ec != std::errc{} || result.ptr != end) {
+        return std::nullopt;
+    }
+    if (milliseconds >
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / 1000)) {
+        return std::nullopt;
+    }
+    return quic::QuicCoreDuration{
+        static_cast<std::int64_t>(milliseconds * static_cast<std::uint64_t>(1000))};
 }
 
 } // namespace
@@ -76,9 +99,28 @@ int run_perf_server(const QuicPerfConfig &config) {
 }
 
 int QuicPerfServer::run() {
+    const auto profile_exit_after = env_duration_ms("COQUIC_PERF_SERVER_EXIT_AFTER_MS");
+    const auto profile_exit_at =
+        profile_exit_after.has_value()
+            ? std::optional<quic::QuicCoreTimePoint>{quic::QuicCoreClock::now() +
+                                                     *profile_exit_after}
+            : std::nullopt;
+    const auto should_exit_after_profile_duration = [&]() {
+        return profile_exit_at.has_value() && quic::QuicCoreClock::now() >= *profile_exit_at;
+    };
+
     for (;;) {
+        if (should_exit_after_profile_duration()) {
+            (void)flush_pending_sends();
+            return 0;
+        }
         const auto current = quic::QuicCoreClock::now();
         const auto next_wakeup = core_.next_wakeup();
+        const auto effective_next_wakeup =
+            profile_exit_at.has_value() &&
+                    (!next_wakeup.has_value() || *profile_exit_at < *next_wakeup)
+                ? profile_exit_at
+                : next_wakeup;
         if (next_wakeup.has_value() && *next_wakeup <= current) {
             if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, current),
                                current)) {
@@ -93,7 +135,7 @@ int QuicPerfServer::run() {
             continue;
         }
 
-        auto event = backend_->wait(next_wakeup);
+        auto event = backend_->wait(effective_next_wakeup);
         if (!event.has_value()) {
             return 1;
         }

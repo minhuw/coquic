@@ -1027,7 +1027,23 @@ bool QuicConnection::note_aead_encryption_attempt(std::size_t packet_count, Quic
     }
 
     current_application_write_key_encrypted_packets_ += packet_count;
+    maybe_request_proactive_key_update();
     return true;
+}
+
+void QuicConnection::maybe_request_proactive_key_update() {
+    if (local_key_update_requested_ || local_key_update_initiated_ ||
+        !application_space_.write_secret.has_value()) {
+        return;
+    }
+
+    const auto threshold = proactive_key_update_packet_limit_for_cipher_suite(
+        application_space_.write_secret->cipher_suite);
+    if (!threshold.has_value() || current_application_write_key_encrypted_packets_ < *threshold) {
+        return;
+    }
+
+    request_key_update();
 }
 
 bool QuicConnection::note_packet_authentication_failure(const CodecError &error,

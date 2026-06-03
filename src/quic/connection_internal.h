@@ -102,6 +102,7 @@ constexpr std::uint64_t kFrameTypeHandshakeDone = 0x1e;
 constexpr std::uint64_t kFrameTypeDatagram = 0x30;
 constexpr std::uint64_t kPreferredAddressConnectionIdSequence = 1;
 constexpr std::uint64_t kAesGcmConfidentialityLimit = std::uint64_t{1} << 23u;
+constexpr std::uint64_t kProactiveKeyUpdatePacketLimitDivisor = 2;
 constexpr std::uint64_t kAesGcmIntegrityLimit = std::uint64_t{1} << 52u;
 constexpr std::uint64_t kChaCha20Poly1305IntegrityLimit = std::uint64_t{1} << 36u;
 constexpr std::size_t kMaxUnpacedBurstPackets = 10;
@@ -174,6 +175,20 @@ struct SendProfileCounters {
     std::uint64_t serialize_calls = 0;
     std::uint64_t estimate_calls = 0;
     std::uint64_t trim_ack_calls = 0;
+    std::uint64_t application_preflight_attempts = 0;
+    std::uint64_t application_preflight_available = 0;
+    std::uint64_t application_preflight_admitted = 0;
+    std::uint64_t application_candidate_serializations = 0;
+    std::uint64_t application_no_ack_candidate_attempts = 0;
+    std::uint64_t application_no_ack_candidate_used = 0;
+    std::uint64_t application_trim_candidate_calls = 0;
+    std::uint64_t application_trim_candidate_iterations = 0;
+    std::uint64_t application_no_ack_retry_attempts = 0;
+    std::uint64_t application_receive_credit_retry_attempts = 0;
+    std::uint64_t application_close_reason_retry_attempts = 0;
+    std::uint64_t application_write_key_phase_reserializes = 0;
+    std::uint64_t application_fast_serialized_commits = 0;
+    std::uint64_t application_slow_commits = 0;
     std::uint64_t inbound_calls = 0;
     std::uint64_t inbound_packets = 0;
     std::uint64_t bytes = 0;
@@ -189,6 +204,23 @@ struct SendProfileCounters {
     std::uint64_t trim_ack_ns = 0;
     std::uint64_t stream_select_ns = 0;
     std::uint64_t commit_ns = 0;
+    std::uint64_t commit_pmtu_probe_scan_ns = 0;
+    std::uint64_t commit_packet_count_ns = 0;
+    std::uint64_t commit_key_limit_ns = 0;
+    std::uint64_t commit_track_pending_ns = 0;
+    std::uint64_t commit_burst_note_ns = 0;
+    std::uint64_t commit_pto_probe_ns = 0;
+    std::uint64_t commit_handshake_discard_ns = 0;
+    std::uint64_t commit_qlog_ns = 0;
+    std::uint64_t commit_datagram_bookkeeping_ns = 0;
+    std::uint64_t commit_continuation_ns = 0;
+    std::uint64_t commit_inspection_ns = 0;
+    std::uint64_t commit_profile_accounting_ns = 0;
+    std::uint64_t track_sent_congestion_ns = 0;
+    std::uint64_t track_sent_ecn_ns = 0;
+    std::uint64_t track_sent_recovery_ns = 0;
+    std::uint64_t track_sent_profile_ns = 0;
+    std::uint64_t track_sent_qlog_ns = 0;
     std::uint64_t inbound_ns = 0;
     std::uint64_t deserialize_ns = 0;
     std::uint64_t process_packet_ns = 0;
@@ -611,9 +643,41 @@ inline void print_send_profile() {
         << " serialize_calls=" << c.serialize_calls << " serialize_ns=" << c.serialize_ns
         << " estimate_calls=" << c.estimate_calls << " estimate_ns=" << c.estimate_ns
         << " trim_ack_calls=" << c.trim_ack_calls << " trim_ack_ns=" << c.trim_ack_ns
+        << " application_preflight_attempts=" << c.application_preflight_attempts
+        << " application_preflight_available=" << c.application_preflight_available
+        << " application_preflight_admitted=" << c.application_preflight_admitted
+        << " application_candidate_serializations=" << c.application_candidate_serializations
+        << " application_no_ack_candidate_attempts=" << c.application_no_ack_candidate_attempts
+        << " application_no_ack_candidate_used=" << c.application_no_ack_candidate_used
+        << " application_trim_candidate_calls=" << c.application_trim_candidate_calls
+        << " application_trim_candidate_iterations=" << c.application_trim_candidate_iterations
+        << " application_no_ack_retry_attempts=" << c.application_no_ack_retry_attempts
+        << " application_receive_credit_retry_attempts="
+        << c.application_receive_credit_retry_attempts
+        << " application_close_reason_retry_attempts=" << c.application_close_reason_retry_attempts
+        << " application_write_key_phase_reserializes="
+        << c.application_write_key_phase_reserializes
+        << " application_fast_serialized_commits=" << c.application_fast_serialized_commits
+        << " application_slow_commits=" << c.application_slow_commits
         << " stream_select_ns=" << c.stream_select_ns << " commit_ns=" << c.commit_ns
-        << " inbound_ns=" << c.inbound_ns << " deserialize_ns=" << c.deserialize_ns
-        << " process_packet_ns=" << c.process_packet_ns
+        << " commit_pmtu_probe_scan_ns=" << c.commit_pmtu_probe_scan_ns
+        << " commit_packet_count_ns=" << c.commit_packet_count_ns
+        << " commit_key_limit_ns=" << c.commit_key_limit_ns
+        << " commit_track_pending_ns=" << c.commit_track_pending_ns
+        << " commit_burst_note_ns=" << c.commit_burst_note_ns
+        << " commit_pto_probe_ns=" << c.commit_pto_probe_ns
+        << " commit_handshake_discard_ns=" << c.commit_handshake_discard_ns
+        << " commit_qlog_ns=" << c.commit_qlog_ns
+        << " commit_datagram_bookkeeping_ns=" << c.commit_datagram_bookkeeping_ns
+        << " commit_continuation_ns=" << c.commit_continuation_ns
+        << " commit_inspection_ns=" << c.commit_inspection_ns
+        << " commit_profile_accounting_ns=" << c.commit_profile_accounting_ns
+        << " track_sent_congestion_ns=" << c.track_sent_congestion_ns
+        << " track_sent_ecn_ns=" << c.track_sent_ecn_ns
+        << " track_sent_recovery_ns=" << c.track_sent_recovery_ns
+        << " track_sent_profile_ns=" << c.track_sent_profile_ns
+        << " track_sent_qlog_ns=" << c.track_sent_qlog_ns << " inbound_ns=" << c.inbound_ns
+        << " deserialize_ns=" << c.deserialize_ns << " process_packet_ns=" << c.process_packet_ns
         << " outbound_sync_tls_calls=" << c.outbound_sync_tls_calls
         << " outbound_sync_tls_skipped=" << c.outbound_sync_tls_skipped
         << " outbound_sync_tls_ns=" << c.outbound_sync_tls_ns
@@ -2100,6 +2164,15 @@ confidentiality_limit_for_cipher_suite(CipherSuite cipher_suite) {
         return kAesGcmConfidentialityLimit;
     }
     return std::nullopt;
+}
+
+inline std::optional<std::uint64_t>
+proactive_key_update_packet_limit_for_cipher_suite(CipherSuite cipher_suite) {
+    const auto limit = confidentiality_limit_for_cipher_suite(cipher_suite);
+    if (!limit.has_value()) {
+        return std::nullopt;
+    }
+    return *limit / kProactiveKeyUpdatePacketLimitDivisor;
 }
 
 inline std::optional<std::uint64_t> integrity_limit_for_cipher_suite(CipherSuite cipher_suite) {

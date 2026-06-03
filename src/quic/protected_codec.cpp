@@ -61,6 +61,9 @@ struct SerializeProfileCounters {
     std::uint64_t one_rtt_payload_bytes = 0;
     std::uint64_t one_rtt_frames = 0;
     std::uint64_t one_rtt_stream_fragments = 0;
+    std::uint64_t one_rtt_packets_with_stream_fragments = 0;
+    std::uint64_t one_rtt_single_stream_fragment_packets = 0;
+    std::uint64_t one_rtt_multi_stream_fragment_packets = 0;
     std::uint64_t key_lookup_ns = 0;
     std::uint64_t packet_number_ns = 0;
     std::uint64_t nonce_ns = 0;
@@ -142,21 +145,24 @@ COQUIC_NO_PROFILE void print_serialize_profile() {
     }
 
     const auto &c = serialize_profile_counters();
-    std::cerr << "coquic-serialize-profile" << " one_rtt_calls=" << c.one_rtt_calls
-              << " one_rtt_ns=" << c.one_rtt_ns << " one_rtt_bytes=" << c.one_rtt_bytes
-              << " one_rtt_payload_bytes=" << c.one_rtt_payload_bytes
-              << " one_rtt_frames=" << c.one_rtt_frames
-              << " one_rtt_stream_fragments=" << c.one_rtt_stream_fragments
-              << " key_lookup_ns=" << c.key_lookup_ns << " packet_number_ns=" << c.packet_number_ns
-              << " nonce_ns=" << c.nonce_ns << " payload_size_ns=" << c.payload_size_ns
-              << " reserve_resize_ns=" << c.reserve_resize_ns
-              << " header_write_ns=" << c.header_write_ns
-              << " payload_write_ns=" << c.payload_write_ns << " aead_seal_ns=" << c.aead_seal_ns
-              << " short_header_protect_ns=" << c.short_header_protect_ns
-              << " chunk_seal_calls=" << c.chunk_seal_calls << " chunk_seal_ns=" << c.chunk_seal_ns
-              << " chunk_header_write_ns=" << c.chunk_header_write_ns
-              << " chunk_frame_write_ns=" << c.chunk_frame_write_ns
-              << " simple_ack_fast_calls=" << c.simple_ack_fast_calls << '\n';
+    std::cerr
+        << "coquic-serialize-profile" << " one_rtt_calls=" << c.one_rtt_calls
+        << " one_rtt_ns=" << c.one_rtt_ns << " one_rtt_bytes=" << c.one_rtt_bytes
+        << " one_rtt_payload_bytes=" << c.one_rtt_payload_bytes
+        << " one_rtt_frames=" << c.one_rtt_frames
+        << " one_rtt_stream_fragments=" << c.one_rtt_stream_fragments
+        << " one_rtt_packets_with_stream_fragments=" << c.one_rtt_packets_with_stream_fragments
+        << " one_rtt_single_stream_fragment_packets=" << c.one_rtt_single_stream_fragment_packets
+        << " one_rtt_multi_stream_fragment_packets=" << c.one_rtt_multi_stream_fragment_packets
+        << " key_lookup_ns=" << c.key_lookup_ns << " packet_number_ns=" << c.packet_number_ns
+        << " nonce_ns=" << c.nonce_ns << " payload_size_ns=" << c.payload_size_ns
+        << " reserve_resize_ns=" << c.reserve_resize_ns << " header_write_ns=" << c.header_write_ns
+        << " payload_write_ns=" << c.payload_write_ns << " aead_seal_ns=" << c.aead_seal_ns
+        << " short_header_protect_ns=" << c.short_header_protect_ns
+        << " chunk_seal_calls=" << c.chunk_seal_calls << " chunk_seal_ns=" << c.chunk_seal_ns
+        << " chunk_header_write_ns=" << c.chunk_header_write_ns
+        << " chunk_frame_write_ns=" << c.chunk_frame_write_ns
+        << " simple_ack_fast_calls=" << c.simple_ack_fast_calls << '\n';
 }
 
 COQUIC_NO_PROFILE void register_deserialize_profile_printer_once() {
@@ -2529,9 +2535,27 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
     if constexpr (requires { packet.stream_fragments; }) {
         COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_stream_fragments,
                                              packet.stream_fragments.size());
+        COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(
+            one_rtt_packets_with_stream_fragments,
+            static_cast<std::uint64_t>(!packet.stream_fragments.empty()));
+        COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(
+            one_rtt_single_stream_fragment_packets,
+            static_cast<std::uint64_t>(packet.stream_fragments.size() == 1));
+        COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(
+            one_rtt_multi_stream_fragment_packets,
+            static_cast<std::uint64_t>(packet.stream_fragments.size() > 1));
     } else if constexpr (requires { packet.stream_frame_views; }) {
         COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_stream_fragments,
                                              packet.stream_frame_views.size());
+        COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(
+            one_rtt_packets_with_stream_fragments,
+            static_cast<std::uint64_t>(!packet.stream_frame_views.empty()));
+        COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(
+            one_rtt_single_stream_fragment_packets,
+            static_cast<std::uint64_t>(packet.stream_frame_views.size() == 1));
+        COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(
+            one_rtt_multi_stream_fragment_packets,
+            static_cast<std::uint64_t>(packet.stream_frame_views.size() > 1));
     }
 
     const auto *one_rtt_secret = one_rtt_secret_for_context(context);
@@ -2766,6 +2790,77 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
 
     auto payload_bytes = packet_bytes.subspan(payload_offset, plaintext_payload_size);
     if constexpr (requires { packet.stream_fragments; }) {
+        const bool can_contiguous_seal_single_stream_fragment =
+            packet.frames.empty() && packet.stream_fragments.size() == 1 &&
+            payload_size == plaintext_payload_size;
+        if (can_contiguous_seal_single_stream_fragment) {
+            const auto &fragment = packet.stream_fragments.front();
+            std::span<const std::byte> header_bytes;
+            {
+                COQUIC_SERIALIZE_PROFILE_TIMER(payload_timer, payload_write_ns);
+                header_bytes = fragment.stream_frame_header_bytes();
+                if (payload_bytes.size() < header_bytes.size()) {
+                    rollback();
+                    return CodecResult<std::size_t>::failure(CodecErrorCode::truncated_input, 0);
+                }
+                std::memcpy(payload_bytes.data(), header_bytes.data(), header_bytes.size());
+            }
+            if (header_bytes.size() + fragment.bytes.size() != payload_size) {
+                rollback();
+                return CodecResult<std::size_t>::failure(CodecErrorCode::packet_length_mismatch,
+                                                         header_bytes.size() +
+                                                             fragment.bytes.size());
+            }
+
+            const std::array plaintext_chunks{
+                PlaintextChunk{
+                    .bytes = std::span<const std::byte>(payload_bytes).first(header_bytes.size()),
+                },
+                PlaintextChunk{
+                    .bytes = fragment.bytes.span(),
+                },
+            };
+            auto ciphertext = CodecResult<std::size_t>::failure(
+                CodecErrorCode::invalid_packet_protection_state, 0);
+            {
+                COQUIC_SERIALIZE_PROFILE_TIMER(seal_timer, aead_seal_ns);
+                ciphertext = seal_payload_chunks_into(SealPayloadChunksIntoInput{
+                    .cipher_suite = cipher_suite,
+                    .key = keys_ref_ptr->key,
+                    .nonce = nonce,
+                    .associated_data =
+                        std::span<const std::byte>(packet_bytes).first(payload_offset),
+                    .plaintext_chunks = plaintext_chunks,
+                    .ciphertext = packet_bytes.subspan(payload_offset),
+                });
+            }
+            if (!ciphertext.has_value()) {
+                rollback();
+                return CodecResult<std::size_t>::failure(ciphertext.error().code,
+                                                         ciphertext.error().offset);
+            }
+
+            const auto final_packet_size = payload_offset + ciphertext.value();
+            out_datagram.resize(datagram_begin + final_packet_size);
+            auto protected_packet =
+                CodecResult<bool>::failure(CodecErrorCode::header_protection_failed, 0);
+            {
+                COQUIC_SERIALIZE_PROFILE_TIMER(protect_timer, short_header_protect_ns);
+                protected_packet = apply_short_header_protection_in_place(
+                    std::span<std::byte>(out_datagram).subspan(datagram_begin, final_packet_size),
+                    packet_number_span, cipher_suite, *keys_ref_ptr);
+            }
+            if (!protected_packet.has_value()) {
+                rollback();
+                return CodecResult<std::size_t>::failure(protected_packet.error().code,
+                                                         protected_packet.error().offset);
+            }
+
+            COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_bytes, final_packet_size);
+            COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_payload_bytes, payload_size);
+            return CodecResult<std::size_t>::success(final_packet_size);
+        }
+
         const auto required_inline_chunks =
             static_cast<std::size_t>(!packet.frames.empty()) + (packet.stream_fragments.size() * 2);
         const bool can_chunk_seal_stream_fragments =

@@ -19,6 +19,7 @@ make focused source changes, validate with the repository toolchain, and report
 constraints clearly.
 
 ## Tools
+
 | Tool | Purpose |
 | --- | --- |
 | `nix develop -c ...` | Reproducible build, test, format, and lint |
@@ -56,8 +57,6 @@ constraints clearly.
 - Run the main test suite with `zig build test`.
 - Skip `goodput` and `crosstraffic` during daily validation.
 - Reserve `goodput` and `crosstraffic` for full verification.
-- Before broad C++ commits, run the `clang-format` pre-commit hook.
-- Before broad C++ commits, run the `coquic-clang-tidy` pre-commit hook.
 - Use `uv run --project rag ...` for Python RAG project commands.
 - Use `rag/scripts/query-rag` for local QUIC specification lookups.
 - The local RAG project lives under `rag/`.
@@ -67,6 +66,7 @@ constraints clearly.
 - Prefer grounded citations for QUIC protocol questions.
 
 ## Remote CI
+
 - Start from the GitHub Actions URL provided by the user.
 - Use `-R <owner>/<repo>` when the URL points at a fork or another repository.
 
@@ -81,7 +81,6 @@ constraints clearly.
 - Inspect interop logs under `.remote-ci/`.
 - Inspect coverage output under `.remote-ci/`.
 - Inspect benchmark results under `.remote-ci/`.
-- Inspect packaged binaries under `.remote-ci/`.
 - Keep local reproduction outputs for remote CI under `.remote-ci/<run-id>/`.
 - Reproduce failures with the closest documented local command.
 - Include the workflow in final debugging notes.
@@ -92,6 +91,7 @@ constraints clearly.
 - Include the local reproduction command in final debugging notes.
 
 ## Optional
+
 - Generate coverage with `zig build coverage`.
 - Build the RAG index with `rag/scripts/build-index`.
 - Check index readiness with `rag/scripts/query-rag doctor --state-dir .rag`.

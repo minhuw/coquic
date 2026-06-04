@@ -2408,6 +2408,20 @@ simple_outbound_ack_frame_or_null(const ProtectedOneRttPacketFragmentView &packe
     return simple_outbound_ack_frame_or_null<ProtectedOneRttPacketFragmentView>(packet);
 }
 
+template <typename OneRttPacketLike>
+const OutboundAckFrame *single_ack_frame_or_null(const OneRttPacketLike &packet) {
+    if (packet.frames.size() != 1) {
+        return nullptr;
+    }
+
+    const auto *ack = std::get_if<OutboundAckFrame>(&packet.frames.front());
+    if (ack == nullptr || ack->header.largest_acknowledged < ack->header.first_ack_range) {
+        return nullptr;
+    }
+
+    return ack;
+}
+
 CodecResult<std::size_t> simple_outbound_ack_payload_size(const OutboundAckFrame &ack) {
     auto size = std::size_t{1} + encoded_varint_size(ack.header.largest_acknowledged) +
                 encoded_varint_size(ack.header.ack_delay) +
@@ -2725,6 +2739,136 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
         COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_bytes, final_packet_size);
         COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_payload_bytes, payload_size);
         return CodecResult<std::size_t>::success(final_packet_size);
+    }
+
+    if constexpr (requires { packet.stream_fragments; }) {
+        const auto *single_ack = single_ack_frame_or_null(packet);
+        if (single_ack != nullptr && packet.stream_fragments.size() == 1) {
+            const auto measured_ack_payload_size = simple_outbound_ack_payload_size(*single_ack);
+            if (!measured_ack_payload_size.has_value()) {
+                return CodecResult<std::size_t>::failure(measured_ack_payload_size.error().code,
+                                                         measured_ack_payload_size.error().offset);
+            }
+            const auto &fragment = packet.stream_fragments.front();
+            if (fragment.offset > kMaxVarInt - fragment.bytes.size()) {
+                return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint,
+                                                         packet.frames.size());
+            }
+            const auto ack_payload_size = measured_ack_payload_size.value();
+            const auto stream_header_bytes = fragment.stream_frame_header_bytes();
+            const auto payload_size =
+                ack_payload_size + stream_header_bytes.size() + fragment.bytes.size();
+            if (payload_size == std::max(payload_size, minimum_payload_bytes_for_header_sample(
+                                                           packet.packet_number_length))) {
+                COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(simple_ack_fast_calls, 1);
+                auto maximum_packet_size =
+                    payload_offset + payload_size + kPacketProtectionTagLength;
+                std::span<std::byte> packet_bytes;
+                {
+                    COQUIC_SERIALIZE_PROFILE_TIMER(reserve_timer, reserve_resize_ns);
+                    packet_bytes = out_datagram.append_uninitialized_exact(maximum_packet_size);
+                }
+
+                {
+                    COQUIC_SERIALIZE_PROFILE_TIMER(header_timer, header_write_ns);
+                    SpanBufferWriter header_writer(packet_bytes.first(payload_offset));
+                    abort_if(header_writer
+                                 .write_byte(make_short_header_first_byte(
+                                     packet.spin_bit, packet.key_phase, packet.packet_number_length,
+                                     context.grease_quic_bit, context.grease_quic_bit_seed,
+                                     packet.packet_number))
+                                 .has_value());
+                    abort_if(
+                        header_writer.write_bytes(packet.destination_connection_id).has_value());
+                    abort_if(append_packet_number(
+                                 header_writer,
+                                 TruncatedPacketNumberEncoding{
+                                     .packet_number_length = packet.packet_number_length,
+                                     .truncated_packet_number = truncated_packet_number.value(),
+                                 })
+                                 .has_value());
+                }
+
+                auto payload_bytes = packet_bytes.subspan(payload_offset, payload_size);
+                {
+                    COQUIC_SERIALIZE_PROFILE_TIMER(payload_timer, payload_write_ns);
+                    auto ack_written = write_simple_outbound_ack_payload(
+                        payload_bytes.first(ack_payload_size), *single_ack);
+                    if (consume_protected_codec_fault(
+                            test::ProtectedCodecFaultPoint::simple_ack_payload_write_failure)) {
+                        ack_written =
+                            CodecResult<std::size_t>::failure(CodecErrorCode::truncated_input, 0);
+                    }
+                    if (!ack_written.has_value()) {
+                        rollback();
+                        return CodecResult<std::size_t>::failure(ack_written.error().code,
+                                                                 ack_written.error().offset);
+                    }
+                    if (consume_protected_codec_fault(
+                            test::ProtectedCodecFaultPoint::simple_ack_payload_size_mismatch)) {
+                        ack_written = CodecResult<std::size_t>::success(ack_written.value() + 1u);
+                    }
+                    if (ack_written.value() != ack_payload_size) {
+                        rollback();
+                        return CodecResult<std::size_t>::failure(
+                            CodecErrorCode::packet_length_mismatch, ack_written.value());
+                    }
+                    std::memcpy(payload_bytes.data() +
+                                    static_cast<std::ptrdiff_t>(ack_payload_size),
+                                stream_header_bytes.data(), stream_header_bytes.size());
+                }
+
+                const std::array plaintext_chunks{
+                    PlaintextChunk{
+                        .bytes = std::span<const std::byte>(payload_bytes)
+                                     .first(ack_payload_size + stream_header_bytes.size()),
+                    },
+                    PlaintextChunk{
+                        .bytes = fragment.bytes.span(),
+                    },
+                };
+                auto ciphertext = CodecResult<std::size_t>::failure(
+                    CodecErrorCode::invalid_packet_protection_state, 0);
+                {
+                    COQUIC_SERIALIZE_PROFILE_TIMER(seal_timer, aead_seal_ns);
+                    ciphertext = seal_payload_chunks_into(SealPayloadChunksIntoInput{
+                        .cipher_suite = cipher_suite,
+                        .key = keys_ref_ptr->key,
+                        .nonce = nonce,
+                        .associated_data =
+                            std::span<const std::byte>(packet_bytes).first(payload_offset),
+                        .plaintext_chunks = plaintext_chunks,
+                        .ciphertext = packet_bytes.subspan(payload_offset),
+                    });
+                }
+                if (!ciphertext.has_value()) {
+                    rollback();
+                    return CodecResult<std::size_t>::failure(ciphertext.error().code,
+                                                             ciphertext.error().offset);
+                }
+
+                const auto final_packet_size = payload_offset + ciphertext.value();
+                out_datagram.resize(datagram_begin + final_packet_size);
+                auto protected_packet =
+                    CodecResult<bool>::failure(CodecErrorCode::header_protection_failed, 0);
+                {
+                    COQUIC_SERIALIZE_PROFILE_TIMER(protect_timer, short_header_protect_ns);
+                    protected_packet = apply_short_header_protection_in_place(
+                        std::span<std::byte>(out_datagram)
+                            .subspan(datagram_begin, final_packet_size),
+                        packet_number_span, cipher_suite, *keys_ref_ptr);
+                }
+                if (!protected_packet.has_value()) {
+                    rollback();
+                    return CodecResult<std::size_t>::failure(protected_packet.error().code,
+                                                             protected_packet.error().offset);
+                }
+
+                COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_bytes, final_packet_size);
+                COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_payload_bytes, payload_size);
+                return CodecResult<std::size_t>::success(final_packet_size);
+            }
+        }
     }
 
     bool has_stream_payloads = false;

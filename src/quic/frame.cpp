@@ -8,6 +8,10 @@
 
 #include "src/quic/buffer.h"
 
+#ifndef COQUIC_PROFILE_HOOKS
+#define COQUIC_PROFILE_HOOKS 1
+#endif
+
 #if defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #else
@@ -20,6 +24,7 @@ namespace {
 
 constexpr std::uint64_t kMaxVarInt = 4611686018427387903ull;
 constexpr std::uint64_t kMaxStreamsLimit = 1ull << 60;
+constexpr bool kCoquicFrameFaultHooksEnabled = COQUIC_PROFILE_HOOKS != 0;
 
 CodecResult<std::vector<std::byte>> failure_result(CodecErrorCode code, std::size_t offset) {
     return CodecResult<std::vector<std::byte>>::failure(code, offset);
@@ -102,8 +107,10 @@ class ScopedFrameFault {
 };
 
 template <typename Writer> std::optional<CodecError> append_byte(Writer &writer, std::byte value) {
-    if (const auto injected = consume_frame_fault(FrameFaultPoint::append_byte)) {
-        return injected;
+    if constexpr (kCoquicFrameFaultHooksEnabled) {
+        if (const auto injected = consume_frame_fault(FrameFaultPoint::append_byte)) {
+            return injected;
+        }
     }
     if constexpr (std::is_void_v<decltype(writer.write_byte(value))>) {
         writer.write_byte(value);
@@ -115,8 +122,10 @@ template <typename Writer> std::optional<CodecError> append_byte(Writer &writer,
 
 template <typename Writer>
 std::optional<CodecError> append_bytes(Writer &writer, std::span<const std::byte> bytes) {
-    if (const auto injected = consume_frame_fault(FrameFaultPoint::append_bytes)) {
-        return injected;
+    if constexpr (kCoquicFrameFaultHooksEnabled) {
+        if (const auto injected = consume_frame_fault(FrameFaultPoint::append_bytes)) {
+            return injected;
+        }
     }
     if constexpr (std::is_void_v<decltype(writer.write_bytes(bytes))>) {
         writer.write_bytes(bytes);
@@ -128,8 +137,10 @@ std::optional<CodecError> append_bytes(Writer &writer, std::span<const std::byte
 
 template <typename Writer>
 std::optional<CodecError> append_varint(Writer &writer, std::uint64_t value) {
-    if (const auto injected = consume_frame_fault(FrameFaultPoint::append_varint)) {
-        return injected;
+    if constexpr (kCoquicFrameFaultHooksEnabled) {
+        if (const auto injected = consume_frame_fault(FrameFaultPoint::append_varint)) {
+            return injected;
+        }
     }
     auto error = writer.write_varint(value);
     if (error.has_value()) {

@@ -2327,7 +2327,7 @@ void QuicConnection::note_outbound_datagram_bytes(std::size_t bytes,
         }
         auto &path = path_it->second;
         if (should_arm_pmtu_probe_after_send(path.mtu, application_space_.write_secret.has_value(),
-                                             has_pending_application_send())) {
+                                             cached_fresh_sendable_stream_bytes())) {
             path.mtu.next_probe_time = now.value_or(QuicCoreClock::now()) + QuicCoreDuration{10000};
         }
     }

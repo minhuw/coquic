@@ -1500,8 +1500,16 @@ bool connection_pmtud_coverage_for_tests() {
         connection.note_outbound_datagram_bytes(1200, /*path_id=*/0, QuicCoreTimePoint{});
         COQUIC_CONNECTION_HOOK_RECORD(!path.mtu.next_probe_time.has_value());
 
-        const std::array<std::byte, 1> payload{std::byte{0x41}};
-        COQUIC_CONNECTION_HOOK_RECORD(connection.queue_stream_send(0, payload, false).value());
+        const std::array<std::byte, 1> small_payload{std::byte{0x41}};
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.queue_stream_send(0, small_payload, false).value());
+        connection.note_outbound_datagram_bytes(1200, /*path_id=*/0, QuicCoreTimePoint{});
+        COQUIC_CONNECTION_HOOK_RECORD(!path.mtu.next_probe_time.has_value());
+
+        const std::vector<std::byte> large_payload(path.mtu.validated_datagram_size + 1u,
+                                                   std::byte{0x42});
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.queue_stream_send(4, large_payload, false).value());
         connection.note_outbound_datagram_bytes(1200, /*path_id=*/0, QuicCoreTimePoint{});
         COQUIC_CONNECTION_HOOK_RECORD(path.mtu.next_probe_time ==
                                       QuicCoreTimePoint{} + std::chrono::milliseconds(10));

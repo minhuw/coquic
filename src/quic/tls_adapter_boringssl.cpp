@@ -11,6 +11,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -103,6 +104,10 @@ COQUIC_NO_PROFILE bool consume_tls_adapter_fault(TlsAdapterFaultPoint fault_poin
     return true;
 }
 
+bool tls_adapter_fault_armed() {
+    return tls_adapter_fault_state().fault_point.has_value();
+}
+
 CodecError tls_alert_error(uint8_t alert) {
     return CodecError{
         .code = CodecErrorCode::invalid_packet_protection_state,
@@ -189,6 +194,10 @@ COQUIC_NO_PROFILE SSL_CTX *new_ssl_ctx(EndpointRole role) {
     }
 
     return SSL_CTX_new(tls_method_for_role(role));
+}
+
+std::shared_ptr<SSL_CTX> new_ssl_ctx_shared(EndpointRole role) {
+    return std::shared_ptr<SSL_CTX>(new_ssl_ctx(role), &SSL_CTX_free);
 }
 
 CodecResult<CipherSuite>
@@ -377,6 +386,104 @@ COQUIC_NO_PROFILE bool install_identity_failed(SSL_CTX *ctx, X509 *certificate,
 
     return SSL_CTX_use_PrivateKey(ctx, private_key) != 1 || SSL_CTX_check_private_key(ctx) != 1;
 }
+
+std::optional<X509Chain> load_certificate_chain(BIO *cert_bio);
+
+bool load_identity_into_ctx(SSL_CTX *ctx, const TlsAdapterConfig &config) {
+    if (config.role != EndpointRole::server) {
+        return true;
+    }
+    if (!config.identity.has_value()) {
+        return false;
+    }
+
+    BioPtr cert_bio(
+        consume_tls_adapter_fault(TlsAdapterFaultPoint::load_identity_cert_bio)
+            ? nullptr
+            : BIO_new_mem_buf(config.identity->certificate_pem.data(),
+                              static_cast<int>(config.identity->certificate_pem.size())),
+        &BIO_free);
+    if (cert_bio == nullptr) {
+        return false;
+    }
+
+    auto certificate_chain = load_certificate_chain(cert_bio.get());
+    if (!certificate_chain.has_value() || certificate_chain->empty()) {
+        return false;
+    }
+
+    BioPtr key_bio(consume_tls_adapter_fault(TlsAdapterFaultPoint::load_identity_key_bio)
+                       ? nullptr
+                       : BIO_new_mem_buf(config.identity->private_key_pem.data(),
+                                         static_cast<int>(config.identity->private_key_pem.size())),
+                   &BIO_free);
+    if (key_bio == nullptr) {
+        return false;
+    }
+
+    EvpPkeyPtr private_key(PEM_read_bio_PrivateKey(key_bio.get(), nullptr, nullptr, nullptr),
+                           &EVP_PKEY_free);
+    if (private_key == nullptr) {
+        return false;
+    }
+
+    X509 *certificate = certificate_chain->front().get();
+    X509Chain extra_chain;
+    if (certificate_chain->size() > 1) {
+        extra_chain.reserve(certificate_chain->size() - 1);
+        for (std::size_t i = 1; i < certificate_chain->size(); ++i) {
+            extra_chain.push_back(std::move((*certificate_chain)[i]));
+        }
+    }
+
+    return !install_identity_failed(ctx, certificate, extra_chain, private_key.get());
+}
+
+void append_cache_key_bytes(std::string &key, std::string_view bytes) {
+    const auto size = static_cast<std::uint64_t>(bytes.size());
+    for (unsigned shift = 56; shift != 0; shift -= 8) {
+        key.push_back(static_cast<char>((size >> shift) & 0xffu));
+    }
+    key.push_back(static_cast<char>(size & 0xffu));
+    key.append(bytes.data(), bytes.size());
+}
+
+std::string server_context_cache_key(const TlsAdapterConfig &config) {
+    std::string key;
+    key.reserve(64 + config.application_protocol.size() +
+                (config.identity.has_value() ? config.identity->certificate_pem.size() +
+                                                   config.identity->private_key_pem.size()
+                                             : 0));
+    key.push_back(static_cast<char>(config.verify_peer ? 1 : 0));
+    key.push_back(static_cast<char>(config.accept_zero_rtt ? 1 : 0));
+    append_cache_key_bytes(key, config.application_protocol);
+    for (const auto cipher_suite : config.allowed_tls_cipher_suites) {
+        key.push_back(static_cast<char>(static_cast<std::uint8_t>(cipher_suite)));
+    }
+    key.push_back('\0');
+    if (config.identity.has_value()) {
+        append_cache_key_bytes(key, config.identity->certificate_pem);
+        append_cache_key_bytes(key, config.identity->private_key_pem);
+    }
+    return key;
+}
+
+bool shared_server_context_allowed(const TlsAdapterConfig &config) {
+    return config.role == EndpointRole::server && !tls_adapter_fault_armed() &&
+           !COQUIC_TLS_ADAPTER_SINGLE_THREADED_WASM;
+}
+
+#if !COQUIC_TLS_ADAPTER_SINGLE_THREADED_WASM
+struct SharedServerContextCache {
+    std::mutex mutex;
+    std::unordered_map<std::string, std::shared_ptr<SSL_CTX>> contexts;
+};
+
+SharedServerContextCache &shared_server_context_cache() {
+    static SharedServerContextCache cache;
+    return cache;
+}
+#endif
 
 std::optional<X509Chain> load_certificate_chain(BIO *cert_bio) {
     if (cert_bio == nullptr) {
@@ -601,9 +708,10 @@ class TlsAdapter::Impl {
         return impl->on_send_alert(level, alert);
     }
 
-    static int select_application_protocol(SSL *, const uint8_t **out, uint8_t *out_len,
+    static int select_application_protocol(SSL *ssl, const uint8_t **out, uint8_t *out_len,
                                            const uint8_t *in, unsigned in_len, void *arg) {
-        auto *impl = static_cast<Impl *>(arg);
+        auto *impl =
+            ssl != nullptr ? static_cast<Impl *>(SSL_get_app_data(ssl)) : static_cast<Impl *>(arg);
         if (impl != nullptr) {
             impl->peer_offered_application_protocols_ =
                 decode_application_protocol_list(std::span(in, in_len));
@@ -645,59 +753,11 @@ class TlsAdapter::Impl {
 
     void initialize() {
         ERR_clear_error();
-        ctx_.reset(new_ssl_ctx(config_.role));
-        if (ctx_ == nullptr) {
-            sticky_error_ =
-                CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
+        if (!initialize_context()) {
             return;
         }
 
-        if (configure_ctx_failed(ctx_.get(), &kQuicMethod)) {
-            sticky_error_ =
-                CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
-            return;
-        }
-
-        if (tls13_cipher_suites_failed(config_.allowed_tls_cipher_suites)) {
-            sticky_error_ =
-                CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
-            return;
-        }
-
-        SSL_CTX_set_verify(ctx_.get(), config_.verify_peer ? SSL_VERIFY_PEER : SSL_VERIFY_NONE,
-                           nullptr);
-        SSL_CTX_set_keylog_callback(ctx_.get(), &Impl::on_keylog_line);
-        if (verify_paths_init_failed(config_.verify_peer, ctx_.get())) {
-            sticky_error_ =
-                CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
-            return;
-        }
-
-        if (config_.role == EndpointRole::client) {
-            SSL_CTX_set_session_cache_mode(ctx_.get(), SSL_SESS_CACHE_CLIENT);
-        }
-        SSL_CTX_sess_set_new_cb(ctx_.get(), &Impl::on_new_session);
-        if (config_.attempt_zero_rtt || config_.accept_zero_rtt) {
-            SSL_CTX_set_early_data_enabled(ctx_.get(), 1);
-        }
-
-        if (!load_identity()) {
-            sticky_error_ =
-                CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
-            return;
-        }
-
-        if (!application_protocol_valid(config_.application_protocol)) {
-            sticky_error_ =
-                CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
-            return;
-        }
-
-        if (config_.role == EndpointRole::server) {
-            SSL_CTX_set_alpn_select_cb(ctx_.get(), &Impl::select_application_protocol, this);
-        }
-
-        ssl_.reset(new_ssl(ctx_.get()));
+        ssl_.reset(new_ssl(active_ctx()));
         if (ssl_ == nullptr) {
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
@@ -735,7 +795,7 @@ class TlsAdapter::Impl {
         }
 
         if (config_.resumption_state.has_value()) {
-            auto session = deserialize_session_bytes(*config_.resumption_state, ctx_.get());
+            auto session = deserialize_session_bytes(*config_.resumption_state, active_ctx());
             if (session != nullptr && SSL_set_session(ssl_.get(), session.get()) == 1) {
                 resumed_resumption_state_ = *config_.resumption_state;
                 if (config_.attempt_zero_rtt) {
@@ -751,55 +811,106 @@ class TlsAdapter::Impl {
         }
     }
 
-    bool load_identity() {
-        if (config_.role != EndpointRole::server) {
-            return true;
-        }
-        if (!config_.identity.has_value()) {
+    SSL_CTX *active_ctx() const {
+        return shared_ctx_ != nullptr ? shared_ctx_.get() : ctx_.get();
+    }
+
+    void set_invalid_protection_state() {
+        sticky_error_ =
+            CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
+    }
+
+    bool configure_context(SSL_CTX *ctx) {
+        if (configure_ctx_failed(ctx, &kQuicMethod)) {
+            set_invalid_protection_state();
             return false;
         }
 
-        BioPtr cert_bio(
-            consume_tls_adapter_fault(TlsAdapterFaultPoint::load_identity_cert_bio)
-                ? nullptr
-                : BIO_new_mem_buf(config_.identity->certificate_pem.data(),
-                                  static_cast<int>(config_.identity->certificate_pem.size())),
-            &BIO_free);
-        if (cert_bio == nullptr) {
+        if (tls13_cipher_suites_failed(config_.allowed_tls_cipher_suites)) {
+            set_invalid_protection_state();
             return false;
         }
 
-        auto certificate_chain = load_certificate_chain(cert_bio.get());
-        if (!certificate_chain.has_value() || certificate_chain->empty()) {
+        SSL_CTX_set_verify(ctx, config_.verify_peer ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, nullptr);
+        SSL_CTX_set_keylog_callback(ctx, &Impl::on_keylog_line);
+        if (verify_paths_init_failed(config_.verify_peer, ctx)) {
+            set_invalid_protection_state();
             return false;
         }
 
-        BioPtr key_bio(
-            consume_tls_adapter_fault(TlsAdapterFaultPoint::load_identity_key_bio)
-                ? nullptr
-                : BIO_new_mem_buf(config_.identity->private_key_pem.data(),
-                                  static_cast<int>(config_.identity->private_key_pem.size())),
-            &BIO_free);
-        if (key_bio == nullptr) {
+        if (config_.role == EndpointRole::client) {
+            SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_CLIENT);
+        }
+        SSL_CTX_sess_set_new_cb(ctx, &Impl::on_new_session);
+        if (config_.attempt_zero_rtt || config_.accept_zero_rtt) {
+            SSL_CTX_set_early_data_enabled(ctx, 1);
+        }
+
+        if (!load_identity_into_ctx(ctx, config_)) {
+            set_invalid_protection_state();
             return false;
         }
 
-        EvpPkeyPtr private_key(PEM_read_bio_PrivateKey(key_bio.get(), nullptr, nullptr, nullptr),
-                               &EVP_PKEY_free);
-        if (private_key == nullptr) {
+        if (!application_protocol_valid(config_.application_protocol)) {
+            set_invalid_protection_state();
             return false;
         }
 
-        X509 *certificate = certificate_chain->front().get();
-        X509Chain extra_chain;
-        if (certificate_chain->size() > 1) {
-            extra_chain.reserve(certificate_chain->size() - 1);
-            for (std::size_t i = 1; i < certificate_chain->size(); ++i) {
-                extra_chain.push_back(std::move((*certificate_chain)[i]));
+        if (config_.role == EndpointRole::server) {
+            SSL_CTX_set_alpn_select_cb(ctx, &Impl::select_application_protocol, nullptr);
+        }
+
+        return true;
+    }
+
+    bool initialize_unique_context() {
+        ctx_.reset(new_ssl_ctx(config_.role));
+        if (ctx_ == nullptr) {
+            set_invalid_protection_state();
+            return false;
+        }
+        return configure_context(ctx_.get());
+    }
+
+    bool initialize_shared_server_context() {
+#if COQUIC_TLS_ADAPTER_SINGLE_THREADED_WASM
+        return initialize_unique_context();
+#else
+        const auto cache_key = server_context_cache_key(config_);
+        auto &cache = shared_server_context_cache();
+        {
+            std::lock_guard lock(cache.mutex);
+            if (const auto it = cache.contexts.find(cache_key); it != cache.contexts.end()) {
+                shared_ctx_ = it->second;
+                return true;
             }
         }
 
-        return !install_identity_failed(ctx_.get(), certificate, extra_chain, private_key.get());
+        auto created = new_ssl_ctx_shared(config_.role);
+        if (created == nullptr) {
+            set_invalid_protection_state();
+            return false;
+        }
+        if (!configure_context(created.get())) {
+            return false;
+        }
+
+        std::lock_guard lock(cache.mutex);
+        auto [it, _] = cache.contexts.emplace(cache_key, std::move(created));
+        shared_ctx_ = it->second;
+        return true;
+#endif
+    }
+
+    bool initialize_context() {
+        if (shared_server_context_allowed(config_)) {
+            return initialize_shared_server_context();
+        }
+        return initialize_unique_context();
+    }
+
+    bool load_identity() {
+        return load_identity_into_ctx(active_ctx(), config_);
     }
 
     void append_tls_keylog_line(std::string_view line) {
@@ -1017,6 +1128,7 @@ class TlsAdapter::Impl {
 
     TlsAdapterConfig config_;
     std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> ctx_;
+    std::shared_ptr<SSL_CTX> shared_ctx_;
     std::unique_ptr<SSL, decltype(&SSL_free)> ssl_;
     std::array<std::vector<std::byte>, 4> pending_;
     std::vector<AvailableTrafficSecret> available_secrets_;

@@ -3368,9 +3368,10 @@ should_keep_searching_for_pmtu_probe_size(const PathMtuState &mtu, std::size_t n
 
 inline COQUIC_NO_PROFILE bool
 should_arm_pmtu_probe_after_send(const PathMtuState &mtu, bool application_write_secret_available,
-                                 bool pending_application_send) {
-    return mtu.enabled && application_write_secret_available && pending_application_send &&
-           !mtu.next_probe_time.has_value() && !mtu.outstanding_probe_packet_number.has_value() &&
+                                 std::uint64_t pending_stream_bytes) {
+    return mtu.enabled && application_write_secret_available &&
+           pending_stream_bytes > mtu.validated_datagram_size && !mtu.next_probe_time.has_value() &&
+           !mtu.outstanding_probe_packet_number.has_value() &&
            mtu.validated_datagram_size < mtu.probe_ceiling;
 }
 

@@ -1211,6 +1211,94 @@ TEST(QuicProtectedCodecTest, FragmentViewPathUsesChunkedPayloadSealUpdates) {
     EXPECT_EQ(datagram, prefix);
 }
 
+TEST(QuicProtectedCodecTest, AckAndSingleFragmentViewPathUsesChunkedPayloadSealUpdates) {
+    auto packet = make_minimal_one_rtt_packet();
+    packet.frames = {coquic::quic::Frame{coquic::quic::OutboundAckFrame{
+        .header =
+            coquic::quic::OutboundAckHeader{
+                .largest_acknowledged = 12,
+                .ack_delay = 1,
+                .first_ack_range = 2,
+            },
+    }}};
+    auto shared_payload = std::make_shared<std::vector<std::byte>>(std::vector<std::byte>{
+        std::byte{0xaa},
+        std::byte{0xbb},
+        std::byte{0xcc},
+        std::byte{0xdd},
+    });
+    const std::vector<coquic::quic::StreamFrameSendFragment> fragments = {
+        coquic::quic::StreamFrameSendFragment{
+            .stream_id = 4,
+            .offset = 0,
+            .bytes = coquic::quic::SharedBytes(shared_payload, 0, 4),
+            .fin = true,
+        },
+    };
+
+    auto serialize_context = make_one_rtt_serialize_context(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, /*secret_size=*/16);
+    auto packet_view = make_one_rtt_packet_fragment_view(packet, fragments);
+    std::vector<std::byte> datagram;
+
+    auto appended = coquic::quic::append_protected_one_rtt_packet_to_datagram(datagram, packet_view,
+                                                                              serialize_context);
+
+    ASSERT_TRUE(appended.has_value());
+    ASSERT_EQ(datagram.size(), appended.value());
+
+    auto decoded = coquic::quic::deserialize_protected_datagram(
+        datagram,
+        make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256,
+                                         /*secret_size=*/16));
+    ASSERT_TRUE(decoded.has_value());
+    ASSERT_EQ(decoded.value().size(), 1u);
+    const auto *one_rtt =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&decoded.value().front());
+    ASSERT_NE(one_rtt, nullptr);
+    ASSERT_EQ(one_rtt->frames.size(), 2u);
+    const auto *ack = std::get_if<coquic::quic::AckFrame>(&one_rtt->frames[0]);
+    ASSERT_NE(ack, nullptr);
+    EXPECT_EQ(ack->largest_acknowledged, 12u);
+    EXPECT_EQ(ack->ack_delay, 1u);
+    EXPECT_EQ(ack->first_ack_range, 2u);
+    const auto *stream = std::get_if<coquic::quic::StreamFrame>(&one_rtt->frames[1]);
+    ASSERT_NE(stream, nullptr);
+    EXPECT_TRUE(stream->fin);
+    EXPECT_TRUE(stream->has_length);
+    EXPECT_EQ(stream->stream_id, 4u);
+    EXPECT_EQ(stream->offset, std::optional<std::uint64_t>{0u});
+    EXPECT_EQ(stream->stream_data, *shared_payload);
+
+    const std::vector<std::byte> prefix{
+        std::byte{0x44},
+        std::byte{0x55},
+    };
+    {
+        datagram = prefix;
+        const coquic::quic::test::ScopedProtectedCodecFaultInjector injector{
+            coquic::quic::test::ProtectedCodecFaultPoint::simple_ack_payload_write_failure};
+        auto failed = coquic::quic::append_protected_one_rtt_packet_to_datagram(
+            datagram, packet_view, serialize_context);
+
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(failed.error().code, coquic::quic::CodecErrorCode::truncated_input);
+        EXPECT_EQ(datagram, prefix);
+    }
+    {
+        datagram = prefix;
+        const coquic::quic::test::ScopedPacketCryptoFaultInjector injector(
+            coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
+        auto failed = coquic::quic::append_protected_one_rtt_packet_to_datagram(
+            datagram, packet_view, serialize_context);
+
+        ASSERT_FALSE(failed.has_value());
+        EXPECT_EQ(failed.error().code,
+                  coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+        EXPECT_EQ(datagram, prefix);
+    }
+}
+
 TEST(QuicProtectedCodecTest, FragmentViewPathFallsBackWhenHeaderSamplePaddingIsNeeded) {
     auto packet = make_minimal_one_rtt_packet();
     packet.frames.clear();

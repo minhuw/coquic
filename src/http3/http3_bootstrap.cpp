@@ -1317,16 +1317,24 @@ bool bootstrap_internal_coverage_check(bool &ok, bool condition) {
     return condition;
 }
 
-bool bootstrap_listen_socket_failure_hook_works(const Http3BootstrapConfig &config) {
+void bootstrap_check_listen_socket_failure_hook(bool &ok, const Http3BootstrapConfig &config) {
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_listen_socket_failures = 1;
-    return make_listen_socket(config) < 0;
+    const int listen_socket = make_listen_socket(config);
+    ok &= listen_socket < 0;
+    if (listen_socket >= 0) {
+        ::close(listen_socket);
+    }
 }
 
-bool bootstrap_listen_failure_hook_works(const Http3BootstrapConfig &config) {
+void bootstrap_check_listen_failure_hook(bool &ok, const Http3BootstrapConfig &config) {
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_listen_failures = 1;
-    return make_listen_socket(config) < 0;
+    const int listen_socket = make_listen_socket(config);
+    ok &= listen_socket < 0;
+    if (listen_socket >= 0) {
+        ::close(listen_socket);
+    }
 }
 
 bool bootstrap_internal_coverage_for_test() {
@@ -1494,8 +1502,8 @@ bool bootstrap_internal_coverage_for_test() {
     bootstrap_internal_coverage_check(ok, !read_http_request(nullptr).has_value());
 
     // Listening and server-loop paths use forced sockets, poll results, and accept results.
-    bootstrap_internal_coverage_check(ok, bootstrap_listen_socket_failure_hook_works(config));
-    bootstrap_internal_coverage_check(ok, bootstrap_listen_failure_hook_works(config));
+    bootstrap_check_listen_socket_failure_hook(ok, config);
+    bootstrap_check_listen_failure_hook(ok, config);
 
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_poll_results = {

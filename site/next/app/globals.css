@@ -725,6 +725,7 @@
 
   .qa-markdown li {
     @apply min-w-0 pl-1 text-[15px] leading-relaxed text-[var(--soft)];
+
     overflow-wrap: anywhere;
   }
 

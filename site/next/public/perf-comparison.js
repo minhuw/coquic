@@ -20,6 +20,11 @@ const fallbackPerfSnapshot = {
       missing: true,
     },
     {
+      label: "coquic-go",
+      path: "perf-results.json",
+      missing: true,
+    },
+    {
       label: "quic-go",
       path: "perf-results.json",
       missing: true,
@@ -102,6 +107,7 @@ const colors = {
   coquic: "#24b5a6",
   "coquic-rust": "#ce8cff",
   "coquic-python": "#ffd166",
+  "coquic-go": "#70d6ff",
   "quic-go": "#63a6ff",
   quinn: "#e39a3b",
   picoquic: "#f5c451",
@@ -119,8 +125,8 @@ const colors = {
   neqo: "#c59b72",
 };
 
-const implementationOrder = ["coquic", "coquic-rust", "coquic-python", "quic-go", "quinn", "picoquic", "msquic", "quiche", "quicly", "google-quiche", "tquic", "mvfst", "s2n-quic", "xquic", "aioquic", "ngtcp2", "lsquic", "neqo"];
-const coquicFamily = new Set(["coquic", "coquic-rust", "coquic-python"]);
+const implementationOrder = ["coquic", "coquic-rust", "coquic-python", "coquic-go", "quic-go", "quinn", "picoquic", "msquic", "quiche", "quicly", "google-quiche", "tquic", "mvfst", "s2n-quic", "xquic", "aioquic", "ngtcp2", "lsquic", "neqo"];
+const coquicFamily = new Set(["coquic", "coquic-rust", "coquic-python", "coquic-go"]);
 
 const deviconBase = "https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/";
 
@@ -148,6 +154,7 @@ const implementationMeta = {
   coquic: { company: "CoQUIC", companyCode: "CQ", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: githubPage("minhuw", "coquic"), language: "C++", languageCode: "C++", familyLabel: "CoQUIC", surfaceLabel: "C++ core" },
   "coquic-rust": { company: "CoQUIC Rust", companyCode: "CQR", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: "https://github.com/minhuw/coquic/tree/main/src/perf/rust", language: "Rust", languageCode: "Rs", familyLabel: "CoQUIC", surfaceLabel: "Rust facade" },
   "coquic-python": { company: "CoQUIC Python", companyCode: "CQP", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: "https://github.com/minhuw/coquic/tree/main/src/perf/python", language: "Python", languageCode: "Py", familyLabel: "CoQUIC", surfaceLabel: "Python facade" },
+  "coquic-go": { company: "CoQUIC Go", companyCode: "CQG", companyIcon: "./coquic-logo.svg", companyUrl: githubPage("minhuw"), sourceUrl: "https://github.com/minhuw/coquic/tree/main/src/perf/go", language: "Go", languageCode: "Go", familyLabel: "CoQUIC", surfaceLabel: "Go facade" },
   "quic-go": { company: "quic-go", companyCode: "QG", companyIcon: githubAvatar("quic-go"), companyUrl: githubPage("quic-go"), sourceUrl: githubPage("quic-go", "quic-go"), language: "Go", languageCode: "Go" },
   quinn: { company: "Quinn", companyCode: "QN", companyIcon: githubAvatar("quinn-rs"), companyUrl: githubPage("quinn-rs"), sourceUrl: githubPage("quinn-rs", "quinn"), language: "Rust", languageCode: "Rs" },
   picoquic: { company: "Private Octopus", companyCode: "PO", companyIcon: githubAvatar("private-octopus"), companyUrl: githubPage("private-octopus"), sourceUrl: githubPage("private-octopus", "picoquic"), language: "C", languageCode: "C" },

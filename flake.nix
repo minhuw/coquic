@@ -448,6 +448,7 @@
           quiclyPerfClient ? null,
           coquicRustPerfClient ? null,
           coquicPythonPerfClient ? null,
+          coquicGoPerfClient ? null,
           googleQuichePerfClient ? null,
           tquicPerfClient ? null,
           mvfstPerfClient ? null,
@@ -484,6 +485,9 @@
           ''}
           ${lib.optionalString (coquicPythonPerfClient != null) ''
             ln -s ${coquicPythonPerfClient}/bin/coquic-python-perf $out/usr/local/bin/coquic-python-perf
+          ''}
+          ${lib.optionalString (coquicGoPerfClient != null) ''
+            ln -s ${coquicGoPerfClient}/bin/coquic-go-perf $out/usr/local/bin/coquic-go-perf
           ''}
           ${lib.optionalString (googleQuichePerfClient != null) ''
             ln -s ${googleQuichePerfClient}/bin/google-quiche-perf $out/usr/local/bin/google-quiche-perf
@@ -644,6 +648,48 @@
             } \
             --prefix PYTHONPATH : "$out/share/coquic-python:$out/share/coquic-python-perf"
           runHook postInstall
+        '';
+      };
+      coquicGoPerfClient = pkgs.stdenv.mkDerivation {
+        pname = "coquic-go-perf-client";
+        version = "dev";
+        src = projectSrc;
+        nativeBuildInputs = [
+          pkgs.go
+          pkgs.makeWrapper
+        ];
+        buildInputs = [
+          boringsslPackage
+        ];
+        CGO_ENABLED = "1";
+        CGO_LDFLAGS = "-L${boringsslPackage}/lib -lcoquic-boringssl";
+        LD_LIBRARY_PATH = lib.makeLibraryPath [
+          boringsslPackage
+          pkgs.stdenv.cc.cc.lib
+        ];
+        buildPhase = ''
+          runHook preBuild
+          export GOCACHE="$TMPDIR/go-cache"
+          export GOPATH="$TMPDIR/go"
+          export GOFLAGS="-mod=mod"
+          pushd src/perf/go
+          go build -tags boringssl -trimpath -o coquic-go-perf ./cmd/coquic-go-perf
+          popd
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          install -Dm755 src/perf/go/coquic-go-perf "$out/bin/coquic-go-perf"
+          runHook postInstall
+        '';
+        postFixup = ''
+          wrapProgram "$out/bin/coquic-go-perf" \
+            --prefix LD_LIBRARY_PATH : ${
+              lib.makeLibraryPath [
+                boringsslPackage
+                pkgs.stdenv.cc.cc.lib
+              ]
+            }
         '';
       };
       aioquicPerfClient = pkgs.stdenvNoCC.mkDerivation {
@@ -1544,6 +1590,22 @@ EOF
           WorkingDir = "/";
         };
       };
+      boringsslMuslCoquicGoPerfImage = pkgs.dockerTools.buildLayeredImage {
+        name = "coquic-perf-coquic-go";
+        tag = "boringssl-musl";
+        fromImage = simulatorEndpointBase;
+        contents = [
+          (mkPerfEndpointOverlay {
+            name = "coquic-perf-coquic-go-boringssl-musl";
+            coquicPackage = boringsslMuslPerfPackage;
+            inherit coquicGoPerfClient;
+          })
+        ];
+        config = {
+          Entrypoint = [ "/usr/local/bin/coquic-go-perf" ];
+          WorkingDir = "/";
+        };
+      };
       boringsslMuslCoquicPerfImage = pkgs.dockerTools.buildLayeredImage {
         name = "coquic-perf-coquic";
         tag = "boringssl-musl";
@@ -1745,6 +1807,7 @@ EOF
         perf-image-coquic-boringssl-musl = boringsslMuslCoquicPerfImage;
         perf-image-coquic-rust-boringssl-musl = boringsslMuslCoquicRustPerfImage;
         perf-image-coquic-python-boringssl-musl = boringsslMuslCoquicPythonPerfImage;
+        perf-image-coquic-go-boringssl-musl = boringsslMuslCoquicGoPerfImage;
         perf-image-coquic-profile-boringssl-musl = boringsslMuslCoquicProfileImage;
         perf-image-quic-go-quictls-musl = quictlsMuslQuicgoPerfImage;
         perf-image-quinn-quictls-musl = quictlsMuslQuinnPerfImage;
@@ -1764,6 +1827,7 @@ EOF
         quicgo-perf-client = quicgoPerfClient;
         coquic-rust-perf-client = coquicRustPerfClient;
         coquic-python-perf-client = coquicPythonPerfClient;
+        coquic-go-perf-client = coquicGoPerfClient;
         quinn-perf-client = quinnPerfClient;
         picoquic-perf-client = picoquicPerfClient;
         msquic-perf-client = msquicPerfClient;

@@ -541,6 +541,7 @@ coquic_quic_stream_stop_sending(coquic_endpoint_t *endpoint, coquic_connection_h
 COQUIC_FFI_API size_t coquic_endpoint_connection_count(const coquic_endpoint_t *endpoint);
 COQUIC_FFI_API uint8_t
 coquic_endpoint_has_send_continuation_pending(const coquic_endpoint_t *endpoint);
+COQUIC_FFI_API uint8_t coquic_endpoint_has_pending_stream_send(const coquic_endpoint_t *endpoint);
 COQUIC_FFI_API coquic_optional_time_us_t
 coquic_endpoint_next_wakeup(const coquic_endpoint_t *endpoint);
 

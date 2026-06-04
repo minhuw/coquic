@@ -10,6 +10,9 @@
     "coquic-python": {
       "library_version": "${GITHUB_SHA}"
     },
+    "coquic-go": {
+      "library_version": "${GITHUB_SHA}"
+    },
     "quic-go": {
       "library_version": "v0.59.1"
     },

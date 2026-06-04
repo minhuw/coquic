@@ -374,6 +374,7 @@ class Endpoint {
     std::size_t connection_count() const;
     std::vector<ConnectionDiagnostics> connection_diagnostics() const;
     bool has_send_continuation_pending() const;
+    bool has_pending_stream_send() const;
 
   private:
     class Impl;

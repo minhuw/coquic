@@ -586,6 +586,14 @@ bool Endpoint::has_send_continuation_pending() const {
     return impl_->core.has_send_continuation_pending();
 }
 
+bool Endpoint::has_pending_stream_send() const {
+    const auto diagnostics = impl_->core.connection_diagnostics();
+    return std::ranges::any_of(diagnostics, [](const auto &connection) {
+        return std::ranges::any_of(connection.streams,
+                                   [](const auto &stream) { return stream.pending_send; });
+    });
+}
+
 std::vector<SendDatagram> send_datagrams(const Result &result) {
     return effects_of<SendDatagram>(result);
 }

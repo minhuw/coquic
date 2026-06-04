@@ -1215,6 +1215,13 @@ uint8_t coquic_endpoint_has_send_continuation_pending(const coquic_endpoint_t *e
     return static_cast<std::uint8_t>(endpoint->endpoint.has_send_continuation_pending() ? 1 : 0);
 }
 
+uint8_t coquic_endpoint_has_pending_stream_send(const coquic_endpoint_t *endpoint) {
+    if (endpoint == nullptr) {
+        return 0;
+    }
+    return static_cast<std::uint8_t>(endpoint->endpoint.has_pending_stream_send() ? 1 : 0);
+}
+
 coquic_optional_time_us_t coquic_endpoint_next_wakeup(const coquic_endpoint_t *endpoint) {
     if (endpoint == nullptr) {
         return {.has_value = 0, .value = 0};

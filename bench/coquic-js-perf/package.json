@@ -1,0 +1,15 @@
+{
+  "name": "@coquic/coquic-js-perf",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "coquic-js-perf": "./bin/coquic-js-perf.mjs"
+  },
+  "dependencies": {
+    "@coquic/coquic": "file:../../../bindings/javascript"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

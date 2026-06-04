@@ -1,0 +1,17 @@
+{
+  "name": "@coquic/coquic",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Node.js bindings for the CoQUIC C FFI",
+  "exports": {
+    ".": "./index.js"
+  },
+  "scripts": {
+    "build": "node scripts/build-native.mjs",
+    "test": "node test/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

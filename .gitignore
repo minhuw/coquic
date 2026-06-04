@@ -20,6 +20,9 @@ compile_commands.json
 .bench-results/
 bench/*/target/
 bindings/rust/**/target/
+bindings/javascript/build/
+bindings/javascript/node_modules/
+bench/coquic-js-perf/node_modules/
 coverage-html.tar.gz
 perf.data
 site/next/.next/

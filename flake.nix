@@ -449,6 +449,7 @@
           coquicRustPerfClient ? null,
           coquicPythonPerfClient ? null,
           coquicGoPerfClient ? null,
+          coquicJsPerfClient ? null,
           googleQuichePerfClient ? null,
           tquicPerfClient ? null,
           mvfstPerfClient ? null,
@@ -488,6 +489,9 @@
           ''}
           ${lib.optionalString (coquicGoPerfClient != null) ''
             ln -s ${coquicGoPerfClient}/bin/coquic-go-perf $out/usr/local/bin/coquic-go-perf
+          ''}
+          ${lib.optionalString (coquicJsPerfClient != null) ''
+            ln -s ${coquicJsPerfClient}/bin/coquic-js-perf $out/usr/local/bin/coquic-js-perf
           ''}
           ${lib.optionalString (googleQuichePerfClient != null) ''
             ln -s ${googleQuichePerfClient}/bin/google-quiche-perf $out/usr/local/bin/google-quiche-perf
@@ -690,6 +694,65 @@
                 pkgs.stdenv.cc.cc.lib
               ]
             }
+        '';
+      };
+      coquicJsPerfClient = pkgs.stdenv.mkDerivation {
+        pname = "coquic-js-perf-client";
+        version = "dev";
+        src = projectSrc;
+        nativeBuildInputs = [
+          pkgs.makeWrapper
+          pkgs.nodejs
+        ];
+        buildInputs = [
+          boringsslPackage
+        ];
+        COQUIC_TLS_BACKEND = "boringssl";
+        COQUIC_LIB_DIR = "${boringsslPackage}/lib";
+        COQUIC_LIB_NAME = "coquic-boringssl";
+        NODE_INCLUDE_DIR = "${pkgs.nodejs}/include/node";
+        LD_LIBRARY_PATH = lib.makeLibraryPath [
+          boringsslPackage
+          pkgs.stdenv.cc.cc.lib
+        ];
+        buildPhase = ''
+          runHook preBuild
+          npm --prefix bindings/javascript run build
+          runHook postBuild
+        '';
+        installPhase = ''
+          runHook preInstall
+          mkdir -p \
+            "$out/bin" \
+            "$out/share/coquic-js-binding/build/Release" \
+            "$out/share/coquic-js-binding/scripts" \
+            "$out/share/coquic-js-binding/src" \
+            "$out/share/coquic-js-binding" \
+            "$out/share/coquic-js-perf"
+          cp bindings/javascript/package.json "$out/share/coquic-js-binding/package.json"
+          cp bindings/javascript/index.js "$out/share/coquic-js-binding/index.js"
+          cp bindings/javascript/scripts/build-native.mjs \
+            "$out/share/coquic-js-binding/scripts/build-native.mjs"
+          cp bindings/javascript/src/addon.cpp "$out/share/coquic-js-binding/src/addon.cpp"
+          cp bindings/javascript/build/Release/coquic_js.node \
+            "$out/share/coquic-js-binding/build/Release/coquic_js.node"
+          cp -R bench/coquic-js-perf/. "$out/share/coquic-js-perf/"
+          rm -rf \
+            "$out/share/coquic-js-binding/node_modules" \
+            "$out/share/coquic-js-perf/node_modules"
+          mkdir -p "$out/share/coquic-js-perf/node_modules/@coquic"
+          ln -s "$out/share/coquic-js-binding" \
+            "$out/share/coquic-js-perf/node_modules/@coquic/coquic"
+          makeWrapper "${pkgs.nodejs}/bin/node" "$out/bin/coquic-js-perf" \
+            --add-flags "$out/share/coquic-js-perf/bin/coquic-js-perf.mjs" \
+            --set COQUIC_JS_NATIVE_PATH "$out/share/coquic-js-binding/build/Release/coquic_js.node" \
+            --prefix LD_LIBRARY_PATH : ${
+              lib.makeLibraryPath [
+                boringsslPackage
+                pkgs.stdenv.cc.cc.lib
+              ]
+            }
+          runHook postInstall
         '';
       };
       aioquicPerfClient = pkgs.stdenvNoCC.mkDerivation {
@@ -1517,6 +1580,7 @@ EOF
             inherit quinnPerfClient;
             inherit coquicRustPerfClient;
             inherit coquicPythonPerfClient;
+            inherit coquicJsPerfClient;
             inherit picoquicPerfClient;
             inherit msquicPerfClient;
             inherit quichePerfClient;
@@ -1603,6 +1667,22 @@ EOF
         ];
         config = {
           Entrypoint = [ "/usr/local/bin/coquic-go-perf" ];
+          WorkingDir = "/";
+        };
+      };
+      boringsslMuslCoquicJsPerfImage = pkgs.dockerTools.buildLayeredImage {
+        name = "coquic-perf-coquic-js";
+        tag = "boringssl-musl";
+        fromImage = simulatorEndpointBase;
+        contents = [
+          (mkPerfEndpointOverlay {
+            name = "coquic-perf-coquic-js-boringssl-musl";
+            coquicPackage = boringsslMuslPerfPackage;
+            inherit coquicJsPerfClient;
+          })
+        ];
+        config = {
+          Entrypoint = [ "/usr/local/bin/coquic-js-perf" ];
           WorkingDir = "/";
         };
       };
@@ -1722,6 +1802,7 @@ EOF
           llvmPkgs.clang-tools
           pkgs.lldb
           pkgs.mkcert
+          pkgs.nodejs
           boringssl
           pkgs.python3
           pkgs.uv
@@ -1808,6 +1889,7 @@ EOF
         perf-image-coquic-rust-boringssl-musl = boringsslMuslCoquicRustPerfImage;
         perf-image-coquic-python-boringssl-musl = boringsslMuslCoquicPythonPerfImage;
         perf-image-coquic-go-boringssl-musl = boringsslMuslCoquicGoPerfImage;
+        perf-image-coquic-js-boringssl-musl = boringsslMuslCoquicJsPerfImage;
         perf-image-coquic-profile-boringssl-musl = boringsslMuslCoquicProfileImage;
         perf-image-quic-go-quictls-musl = quictlsMuslQuicgoPerfImage;
         perf-image-quinn-quictls-musl = quictlsMuslQuinnPerfImage;
@@ -1828,6 +1910,7 @@ EOF
         coquic-rust-perf-client = coquicRustPerfClient;
         coquic-python-perf-client = coquicPythonPerfClient;
         coquic-go-perf-client = coquicGoPerfClient;
+        coquic-js-perf-client = coquicJsPerfClient;
         quinn-perf-client = quinnPerfClient;
         picoquic-perf-client = picoquicPerfClient;
         msquic-perf-client = msquicPerfClient;

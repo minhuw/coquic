@@ -64,6 +64,13 @@ jobs:
             congestion_controls: newreno cubic bbr copa
             image_attr: perf-image-coquic-go-boringssl-musl
             image_tag: coquic-perf-coquic-go:boringssl-musl
+          - label: coquic-js
+            display_name: CoQUIC JavaScript
+            client_impl: coquic-js
+            server_impl: coquic-js
+            congestion_controls: newreno cubic bbr copa
+            image_attr: perf-image-coquic-js-boringssl-musl
+            image_tag: coquic-perf-coquic-js:boringssl-musl
           - label: quic-go
             display_name: quic-go
             client_impl: quic-go
@@ -285,6 +292,7 @@ jobs:
             --manifest coquic-rust=.bench-results/downloaded/perf-results-coquic-rust.json \
             --manifest coquic-python=.bench-results/downloaded/perf-results-coquic-python.json \
             --manifest coquic-go=.bench-results/downloaded/perf-results-coquic-go.json \
+            --manifest coquic-js=.bench-results/downloaded/perf-results-coquic-js.json \
             --manifest quic-go=.bench-results/downloaded/perf-results-quic-go.json \
             --manifest quinn=.bench-results/downloaded/perf-results-quinn.json \
             --manifest picoquic=.bench-results/downloaded/perf-results-picoquic.json \

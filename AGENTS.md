@@ -1,5 +1,7 @@
 # AGENTS
 
+Last updated: 2026-06-04
+
 ## Identity And Boundaries
 
 - Required: respect existing user changes in the working tree.
@@ -10,10 +12,9 @@
 
 ## Repo Overview
 
-- Default: `coquic` is an experimental QUIC implementation plus a local QUIC RFC
-  (Request for Comments) knowledge base.
-- Default: QUIC historically expands to Quick UDP (User Datagram Protocol)
-  Internet Connections.
+- Default: `coquic` is an experimental QUIC (Quick UDP (User Datagram Protocol)
+  Internet Connections) implementation plus a local QUIC RFC (Request for
+  Comments) knowledge base.
 - Default: RAG (retrieval-augmented generation) means using a search index as
   grounded context for answers.
 - Required: keep the root `README.md` human-facing and minimal.
@@ -53,10 +54,11 @@
 - Required: extract the job ID from `/job/<job-id>` when a job URL is present.
 - Required: use `-R <owner>/<repo>` if the URL points at a fork or another
   repository.
-- Required: save failed run logs under `.remote-ci/<run-id>-failed.log` with
-  `gh run view`.
+- Required: save failed run logs under `.remote-ci/<run-id>-failed.log`.
+- Required: use `gh run view` for failed run logs.
 - Required: save failed job logs under
-  `.remote-ci/<run-id>-job-<job-id>-failed.log` with `gh run view --job`.
+  `.remote-ci/<run-id>-job-<job-id>-failed.log`.
+- Required: use `gh run view --job` for failed job logs.
 - Required: create `.remote-ci/<run-id>` before downloading artifacts.
 - Required: put artifacts under `.remote-ci/<run-id>/artifacts` with
   `gh run download`.

@@ -67,7 +67,7 @@ class UdpRuntime:
     @classmethod
     async def client(cls, host: str, port: int) -> tuple["UdpRuntime", int, bytes]:
         peer = _resolve_remote(host, port)
-        bind_addr = _client_bind_address(peer[0])
+        bind_addr = _client_bind_address(peer)
         loop = asyncio.get_running_loop()
         transport, protocol = await loop.create_datagram_endpoint(
             _DatagramProtocol,
@@ -197,11 +197,19 @@ def address_validation_identity(peer: tuple[str, int]) -> bytes:
     return b"\x06" + address.packed + port.to_bytes(2, "big")
 
 
-def _client_bind_address(peer_host: str) -> str:
-    address = ipaddress.ip_address(peer_host)
+def _client_bind_address(peer: tuple[str, int]) -> str:
+    address = ipaddress.ip_address(peer[0])
     if address.is_loopback:
         return "127.0.0.1" if isinstance(address, ipaddress.IPv4Address) else "::1"
-    return "0.0.0.0" if isinstance(address, ipaddress.IPv4Address) else "::"
+    family = (
+        socket.AF_INET
+        if isinstance(address, ipaddress.IPv4Address)
+        else socket.AF_INET6
+    )
+    with socket.socket(family, socket.SOCK_DGRAM) as probe:
+        probe.connect(peer)
+        local_host = probe.getsockname()[0]
+    return str(ipaddress.ip_address(local_host))
 
 
 def _resolve_remote(host: str, port: int) -> tuple[str, int]:

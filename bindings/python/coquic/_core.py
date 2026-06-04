@@ -36,8 +36,6 @@ class Status(IntEnum):
 class CoquicError(Exception):
     """Base exception raised by the CoQUIC Python bindings."""
 
-    pass
-
 
 class CoquicStatusError(CoquicError):
     def __init__(self, status: Status):
@@ -571,6 +569,7 @@ class Endpoint:
             self._ptr = C.c_void_p()
 
     def __del__(self) -> None:
+        """Release the native endpoint handle during garbage collection."""
         try:
             self.close_handle()
         except Exception as error:

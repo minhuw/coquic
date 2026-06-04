@@ -644,6 +644,7 @@
 
   .docs-markdown a {
     @apply font-medium text-[var(--primary)] underline underline-offset-4 transition-colors duration-200 hover:text-[var(--primary-hover)] hover:decoration-[var(--primary-hover)];
+
     text-decoration-color: color-mix(in srgb, var(--primary) 32%, transparent);
   }
 
@@ -705,6 +706,7 @@
 
   .qa-markdown p {
     @apply min-w-0 text-[15px] leading-relaxed text-[var(--soft)];
+
     overflow-wrap: anywhere;
   }
 
@@ -907,26 +909,26 @@
   }
 
   .packet-lane.s2c .pipe-back {
-    background: rgba(0, 67, 206, 0.26);
+    background: rgb(0 67 206 / 26%);
   }
 
   .packet-lane.s2c .pipe-front {
     background: linear-gradient(
       90deg,
-      rgba(0, 67, 206, 0.74),
-      rgba(0, 67, 206, 0.12)
+      rgb(0 67 206 / 74%),
+      rgb(0 67 206 / 12%)
     );
   }
 
   html[data-theme="dark"] .workbench-page .packet-lane.s2c .pipe-back {
-    background: rgba(182, 210, 255, 0.24);
+    background: rgb(182 210 255 / 24%);
   }
 
   html[data-theme="dark"] .workbench-page .packet-lane.s2c .pipe-front {
     background: linear-gradient(
       90deg,
-      rgba(182, 210, 255, 0.72),
-      rgba(182, 210, 255, 0.14)
+      rgb(182 210 255 / 72%),
+      rgb(182 210 255 / 14%)
     );
   }
 
@@ -1038,7 +1040,7 @@
     border: 1px solid var(--line);
     border-radius: var(--radius);
     background: var(--surface);
-    box-shadow: 0 12px 28px rgba(17, 24, 39, 0.12);
+    box-shadow: 0 12px 28px rgb(17 24 39 / 12%);
     padding: 0.5rem 0.75rem;
     text-align: left;
     font-family: var(--font-mono);
@@ -1142,6 +1144,7 @@
 
   .datagram {
     @apply pointer-events-none absolute z-[2] min-h-10 min-w-[120px] rounded-md border border-dashed border-[rgba(15,98,254,0.32)] shadow-none transition-[border-color,opacity,transform] duration-200;
+
     background: transparent;
   }
 
@@ -1155,6 +1158,7 @@
 
   .packet::before {
     content: "";
+
     @apply size-[6px_18px] rounded-full bg-[var(--client)];
   }
 
@@ -1204,6 +1208,7 @@
 
   .datagram[data-phase="received"] {
     @apply border-[rgba(15,98,254,0.86)];
+
     background: var(--workbench-selected);
   }
 
@@ -1481,6 +1486,7 @@
 
   .modal-backdrop {
     @apply fixed inset-0 z-50 hidden items-center justify-center p-4;
+
     background: var(--modal-backdrop);
   }
 
@@ -1490,6 +1496,7 @@
 
   .packet-modal {
     @apply flex max-h-[88vh] w-full max-w-[980px] flex-col overflow-hidden rounded-[var(--radius)] border border-[var(--line)] bg-[var(--bg)];
+
     box-shadow: 0 24px 90px var(--shadow-modal);
   }
 

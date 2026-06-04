@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Python performance runner support for CoQUIC."""
+
+from __future__ import annotations
 
 
 class PerfError(Exception):

@@ -174,16 +174,12 @@ impl UdpRuntime {
             }
             None => None,
         };
-        let timeout = timer_timeout
-            .map(|timeout| timeout.min(idle_timeout))
-            .unwrap_or(idle_timeout);
+        let timeout = timer_timeout.unwrap_or(idle_timeout);
 
         match time::timeout(timeout, self.recv()).await {
             Ok(Ok(datagram)) => Ok(WaitEvent::Datagram(datagram)),
             Ok(Err(error)) => Err(error.into()),
-            Err(_) if timer_timeout.is_some_and(|timer| timer <= idle_timeout) => {
-                Ok(WaitEvent::Timer)
-            }
+            Err(_) if timer_timeout.is_some() => Ok(WaitEvent::Timer),
             Err(_) => Ok(WaitEvent::Idle),
         }
     }
@@ -332,16 +328,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_reports_idle_when_idle_guard_expires_before_future_timer() {
+    async fn wait_reports_timer_when_future_timer_is_scheduled() {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut runtime = UdpRuntime::new(socket);
         let event = runtime
             .wait(
-                Some(runtime.now_us() + Duration::from_secs(60).as_micros() as u64),
+                Some(runtime.now_us() + Duration::from_millis(10).as_micros() as u64),
                 Duration::from_millis(1),
             )
             .await
             .unwrap();
+
+        assert!(matches!(event, WaitEvent::Timer));
+    }
+
+    #[tokio::test]
+    async fn wait_reports_idle_when_no_timer_is_scheduled() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut runtime = UdpRuntime::new(socket);
+        let event = runtime.wait(None, Duration::from_millis(1)).await.unwrap();
 
         assert!(matches!(event, WaitEvent::Idle));
     }

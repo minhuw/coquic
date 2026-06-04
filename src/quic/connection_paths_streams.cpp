@@ -289,14 +289,14 @@ void QuicConnection::initialize_path_mtu_state(PathState &path) {
 }
 
 void QuicConnection::set_path_default_pmtud_search_ceiling(QuicPathId path_id,
-                                                           std::size_t ceiling) {
+                                                           QuicDefaultPmtudSearchCeiling ceiling) {
     auto &path = ensure_path_state(path_id);
-    if (path.mtu.default_search_ceiling == ceiling) {
+    if (path.mtu.default_search_ceiling == ceiling.value) {
         return;
     }
 
     const auto previous_ceiling = outbound_datagram_size_ceiling_for_path(path_id);
-    path.mtu.default_search_ceiling = ceiling;
+    path.mtu.default_search_ceiling = ceiling.value;
     const auto next_ceiling = outbound_datagram_size_ceiling_for_path(path_id);
     if (path.mtu.probe_ceiling == previous_ceiling) {
         path.mtu.probe_ceiling = next_ceiling;

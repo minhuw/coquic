@@ -488,6 +488,10 @@ struct PathMtuState {
     std::vector<std::size_t> failed_probe_sizes;
 };
 
+struct QuicDefaultPmtudSearchCeiling {
+    std::size_t value = 0;
+};
+
 struct PathState {
     QuicPathId id = 0;
     bool validated = false;
@@ -877,7 +881,8 @@ class QuicConnection {
     std::size_t outbound_datagram_size_ceiling() const;
     std::size_t outbound_datagram_size_ceiling_for_path(std::optional<QuicPathId> path_id) const;
     std::size_t outbound_datagram_size_limit_for_path(std::optional<QuicPathId> path_id) const;
-    void set_path_default_pmtud_search_ceiling(QuicPathId path_id, std::size_t ceiling);
+    void set_path_default_pmtud_search_ceiling(QuicPathId path_id,
+                                               QuicDefaultPmtudSearchCeiling ceiling);
     std::optional<QuicCoreTimePoint> pmtud_deadline() const;
     void initialize_path_mtu_state(PathState &path);
     void maybe_arm_pmtu_probe(QuicCoreTimePoint now);

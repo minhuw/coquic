@@ -2278,7 +2278,9 @@ void QuicCore::remember_path_address_family(ConnectionEntry &entry, QuicPathId p
     }
     if (entry.connection != nullptr) {
         entry.connection->set_path_default_pmtud_search_ceiling(
-            path_id, default_pmtud_search_ceiling_for_route_family(family));
+            path_id, QuicDefaultPmtudSearchCeiling{
+                         .value = default_pmtud_search_ceiling_for_route_family(family),
+                     });
     }
 }
 

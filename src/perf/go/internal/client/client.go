@@ -723,9 +723,11 @@ func (c *Client) closeConnection(connection coquic.ConnectionHandle, reason []by
 func (c *Client) advanceBenchmarkPhase(now coquic.TimeUs) error {
 	c.advanceBenchmarkPhaseSync(now)
 	if c.phase == phaseMeasure && now >= c.measureDeadline {
-		return c.enterDrainPhase(now)
+		if err := c.enterDrainPhase(now); err != nil {
+			return err
+		}
 	}
-	return nil
+	return c.forceCloseTimedBulkDrain(now)
 }
 
 func (c *Client) advanceBenchmarkPhaseSync(now coquic.TimeUs) {
@@ -736,14 +738,39 @@ func (c *Client) advanceBenchmarkPhaseSync(now coquic.TimeUs) {
 		uint64(now-*c.benchmarkStartedAt) >= durationUs(c.config.Warmup) {
 		c.enterMeasurePhase(now)
 	}
-	if c.timedBulkDownloadMode() &&
-		c.phase == phaseDrain &&
-		c.drainDeadline != nil &&
-		now >= *c.drainDeadline {
-		for _, state := range c.connections {
+}
+
+func (c *Client) forceCloseTimedBulkDrain(now coquic.TimeUs) error {
+	if !c.timedBulkDownloadMode() || c.phase != phaseDrain {
+		return nil
+	}
+	if c.drainDeadline == nil || now < *c.drainDeadline {
+		return nil
+	}
+
+	handles := make([]coquic.ConnectionHandle, 0, len(c.connections))
+	for handle := range c.connections {
+		handles = append(handles, handle)
+	}
+	for _, handle := range handles {
+		if state := c.connections[handle]; state != nil {
 			clear(state.activeBulkStreams)
 		}
+		commands, err := c.maybeCloseBulkConnection(handle)
+		if err != nil {
+			return err
+		}
+		for _, command := range commands {
+			result, err := c.executeCommand(command, now)
+			if err != nil {
+				return err
+			}
+			if err := c.handleResult(result, now); err != nil {
+				return err
+			}
+		}
 	}
+	return nil
 }
 
 func (c *Client) maybeStartTimedBenchmark(now coquic.TimeUs) {

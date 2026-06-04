@@ -744,6 +744,7 @@ impl Client<'_> {
         if self.phase == BenchmarkPhase::Measure && now >= self.measure_deadline {
             self.enter_drain_phase(now).await?;
         }
+        self.force_close_timed_bulk_drain(now).await?;
         Ok(())
     }
 
@@ -759,17 +760,31 @@ impl Client<'_> {
         {
             self.enter_measure_phase(now);
         }
-        if self.timed_bulk_download_mode()
-            && self.phase == BenchmarkPhase::Drain
-            && self
-                .drain_deadline
-                .map(|deadline| now >= deadline)
-                .unwrap_or(false)
+    }
+
+    async fn force_close_timed_bulk_drain(&mut self, now: u64) -> Result<()> {
+        if !self.timed_bulk_download_mode() || self.phase != BenchmarkPhase::Drain {
+            return Ok(());
+        }
+        if !self
+            .drain_deadline
+            .map(|deadline| now >= deadline)
+            .unwrap_or(false)
         {
-            for state in self.connections.values_mut() {
+            return Ok(());
+        }
+
+        let handles: Vec<_> = self.connections.keys().copied().collect();
+        for handle in handles {
+            if let Some(state) = self.connections.get_mut(&handle) {
                 state.active_bulk_streams.clear();
             }
+            for command in self.maybe_close_bulk_connection(handle)? {
+                let result = self.execute_command(command, now)?;
+                self.handle_result(result, now).await?;
+            }
         }
+        Ok(())
     }
 
     fn maybe_start_timed_benchmark(&mut self, now: u64) {

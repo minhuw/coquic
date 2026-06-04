@@ -1320,21 +1320,13 @@ bool bootstrap_internal_coverage_check(bool &ok, bool condition) {
 void bootstrap_check_listen_socket_failure_hook(bool &ok, const Http3BootstrapConfig &config) {
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_listen_socket_failures = 1;
-    const int listen_socket = make_listen_socket(config);
-    ok &= listen_socket < 0;
-    if (listen_socket >= 0) {
-        ::close(listen_socket);
-    }
+    bootstrap_internal_coverage_check(ok, run_http3_bootstrap_server(config, nullptr) == 1);
 }
 
 void bootstrap_check_listen_failure_hook(bool &ok, const Http3BootstrapConfig &config) {
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().remaining_listen_failures = 1;
-    const int listen_socket = make_listen_socket(config);
-    ok &= listen_socket < 0;
-    if (listen_socket >= 0) {
-        ::close(listen_socket);
-    }
+    bootstrap_internal_coverage_check(ok, run_http3_bootstrap_server(config, nullptr) == 1);
 }
 
 bool bootstrap_internal_coverage_for_test() {

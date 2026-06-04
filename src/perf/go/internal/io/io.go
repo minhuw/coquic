@@ -190,30 +190,27 @@ func (r *UdpRuntime) Recv() (RxDatagram, error) {
 }
 
 func (r *UdpRuntime) Wait(nextWakeup coquic.TimeUs, hasNextWakeup bool, idleTimeout time.Duration) (WaitEvent, error) {
-	timerTimeout := time.Duration(-1)
 	if hasNextWakeup {
 		now := r.NowUs()
 		if nextWakeup <= now {
 			return WaitEvent{Kind: WaitTimer}, nil
 		}
-		timerTimeout = time.Duration(uint64(nextWakeup-now)) * time.Microsecond
+		return r.waitWithTimeout(
+			time.Duration(uint64(nextWakeup-now))*time.Microsecond,
+			WaitTimer,
+		)
 	}
 
-	timeout := idleTimeout
-	timerWins := false
-	if timerTimeout >= 0 && timerTimeout <= idleTimeout {
-		timeout = timerTimeout
-		timerWins = true
-	}
+	return r.waitWithTimeout(idleTimeout, WaitIdle)
+}
+
+func (r *UdpRuntime) waitWithTimeout(timeout time.Duration, deadlineKind WaitKind) (WaitEvent, error) {
 	if err := r.socket.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		return WaitEvent{}, err
 	}
 	datagram, err := r.Recv()
 	if deadlineErr(err) {
-		if timerWins {
-			return WaitEvent{Kind: WaitTimer}, nil
-		}
-		return WaitEvent{Kind: WaitIdle}, nil
+		return WaitEvent{Kind: deadlineKind}, nil
 	}
 	if err != nil {
 		return WaitEvent{}, err

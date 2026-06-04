@@ -34,7 +34,7 @@ class Status(IntEnum):
 
 
 class CoquicError(Exception):
-    """Base exception raised by the CoQUIC Python bindings."""
+    __slots__ = ()
 
 
 class CoquicStatusError(CoquicError):

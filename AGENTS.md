@@ -7,8 +7,10 @@ conflicts, or the required tool is unavailable in the current environment. When 
 constraint blocks an instruction, state the constraint and use the closest safe
 alternative.
 
-QUIC means Quick UDP (User Datagram Protocol) Internet Connections. RAG means
-retrieval-augmented generation with a search index as grounded context.
+## Glossary
+
+- Quick UDP (User Datagram Protocol) Internet Connections (QUIC).
+- Retrieval-augmented generation (RAG).
 
 ## Identity
 
@@ -17,10 +19,9 @@ make focused source changes, validate with the repository toolchain, and report
 constraints clearly.
 
 ## Tools
-
 | Tool | Purpose |
 | --- | --- |
-| `nix develop -c ...` | Reproducible build, test, format, and lint commands |
+| `nix develop -c ...` | Reproducible build, test, format, and lint |
 | `rg` or `rg --files` | Repository searches |
 | `gh` | GitHub Actions and remote CI inspection |
 | `uv run --project rag ...` | Python RAG project commands |
@@ -34,8 +35,7 @@ constraints clearly.
 - Keep build outputs out of tracked source.
 - Keep agent workflow details in this file.
 - Keep the root `README.md` human-facing and minimal.
-- Use `nix develop -c ...` for local build, test, format, and lint commands that
-  need the reproducible toolchain.
+- Use `nix develop -c ...` for commands that need the reproducible toolchain.
 - Use `gh` for GitHub Actions inspection when debugging remote CI.
 - Store downloaded CI files under `.remote-ci/`.
 - Store generated RAG state under `.rag/`.
@@ -49,30 +49,24 @@ constraints clearly.
 
 ## Standard
 
-- `coquic` is an experimental QUIC (Quick UDP (User Datagram Protocol) Internet
-  Connections) implementation plus a local QUIC RFC (Request for Comments)
-  knowledge base.
+- `coquic` is an experimental QUIC implementation plus a local RFC knowledge
+  base.
 - Prefer `rg` or `rg --files` for repository searches.
 - Build the project with `zig build`.
 - Run the main test suite with `zig build test`.
-- Skip the long-running interop measurement cases `goodput` and `crosstraffic`
-  during daily validation.
-- Reserve `goodput` and `crosstraffic` for full verification runs and CI.
-- Before broad C++ commits, run `pre-commit run clang-format --all-files
-  --show-diff-on-failure`.
-- Before broad C++ commits, run `pre-commit run coquic-clang-tidy --all-files
-  --show-diff-on-failure`.
+- Skip `goodput` and `crosstraffic` during daily validation.
+- Reserve `goodput` and `crosstraffic` for full verification.
+- Before broad C++ commits, run the `clang-format` pre-commit hook.
+- Before broad C++ commits, run the `coquic-clang-tidy` pre-commit hook.
 - Use `uv run --project rag ...` for Python RAG project commands.
 - Use `rag/scripts/query-rag` for local QUIC specification lookups.
 - The local RAG project lives under `rag/`.
 - The repo-local Codex skill for QUIC questions lives under
   `.agents/skills/quic-rag/`.
 - Keep worktrees under `.worktrees/` inside the repo.
-- Prefer grounded citations from the specification corpus or local QUIC RAG when
-  answering QUIC protocol questions.
+- Prefer grounded citations for QUIC protocol questions.
 
 ## Remote CI
-
 - Start from the GitHub Actions URL provided by the user.
 - Use `-R <owner>/<repo>` when the URL points at a fork or another repository.
 
@@ -84,13 +78,12 @@ constraints clearly.
 
 - Extract the run ID from `/actions/runs/<run-id>`.
 - Extract the job ID from `/job/<job-id>` when the URL includes a job.
-- Inspect interop logs in place under `.remote-ci/`.
-- Inspect coverage output in place under `.remote-ci/`.
-- Inspect benchmark results in place under `.remote-ci/`.
-- Inspect packaged binaries in place under `.remote-ci/`.
+- Inspect interop logs under `.remote-ci/`.
+- Inspect coverage output under `.remote-ci/`.
+- Inspect benchmark results under `.remote-ci/`.
+- Inspect packaged binaries under `.remote-ci/`.
 - Keep local reproduction outputs for remote CI under `.remote-ci/<run-id>/`.
-- After identifying the failing job or step, reproduce locally with the closest
-  documented command, usually through `nix develop -c ...`.
+- Reproduce failures with the closest documented local command.
 - Include the workflow in final debugging notes.
 - Include the run ID in final debugging notes.
 - Include the job in final debugging notes.
@@ -99,11 +92,8 @@ constraints clearly.
 - Include the local reproduction command in final debugging notes.
 
 ## Optional
-
 - Generate coverage with `zig build coverage`.
-- Build or rebuild the RAG index with
-  `rag/scripts/build-index --source <source-dir> --state-dir .rag`.
+- Build the RAG index with `rag/scripts/build-index`.
 - Check index readiness with `rag/scripts/query-rag doctor --state-dir .rag`.
-- Query the local QUIC specification knowledge base with
-  `rag/scripts/query-rag search-sections`, `get-section`, or `trace-term`.
+- Query the local QUIC knowledge base with `rag/scripts/query-rag`.
 - When changing `rag/`, run `uv run --project rag pytest rag/tests`.

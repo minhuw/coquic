@@ -5,7 +5,7 @@
 #include <gtest/gtest.h>
 
 #define private public
-#include "src/perf/perf_client.h"
+#include "bench/coquic-perf/perf_client.h"
 #undef private
 #include "tests/support/perf/perf_test_fixtures.h"
 

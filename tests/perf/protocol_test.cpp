@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "src/perf/perf_protocol.h"
+#include "bench/coquic-perf/perf_protocol.h"
 
 namespace {
 using namespace coquic::perf;

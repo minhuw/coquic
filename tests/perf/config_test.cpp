@@ -2,7 +2,7 @@
 
 #include <stdexcept>
 
-#include "src/perf/perf_runtime.h"
+#include "bench/coquic-perf/perf_runtime.h"
 
 namespace {
 using coquic::io::QuicIoBackendKind;

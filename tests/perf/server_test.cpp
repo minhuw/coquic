@@ -8,7 +8,7 @@
 
 #define private public
 #include "src/io/io_backend_test_hooks.h"
-#include "src/perf/perf_server.h"
+#include "bench/coquic-perf/perf_server.h"
 #undef private
 
 namespace {

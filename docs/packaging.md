@@ -65,7 +65,7 @@ materials for the pinned BoringSSL or QuicTLS dependency.
 The `coquic-sys` crate in `bindings/rust/coquic` links against one of these C
 FFI packages through pkg-config by default. The `coquic-rs` crate in
 `bindings/rust/coquic-rs` builds on `coquic-sys`, and the `coquic-rust-perf`
-crate in `src/perf/rust` provides a Tokio UDP perf binary on top of
+crate in `bench/coquic-rust-perf` provides a Tokio UDP perf binary on top of
 `coquic-rs`.
 
 Build the backend package first, then run Cargo with the package library on the
@@ -75,7 +75,7 @@ runtime search path:
 nix develop .#quictls -c zig build package -Dtls_backend=quictls -Doptimize=ReleaseFast
 nix develop -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo test --manifest-path bindings/rust/coquic/Cargo.toml'
 nix develop -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo test --manifest-path bindings/rust/coquic-rs/Cargo.toml'
-nix develop -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo test --manifest-path src/perf/rust/Cargo.toml'
+nix develop -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo test --manifest-path bench/coquic-rust-perf/Cargo.toml'
 ```
 
 Set `COQUIC_TLS_BACKEND=boringssl` to use the BoringSSL package, or

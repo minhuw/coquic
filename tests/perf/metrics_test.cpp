@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "src/perf/perf_metrics.h"
+#include "bench/coquic-perf/perf_metrics.h"
 
 namespace {
 using namespace coquic::perf;

@@ -590,10 +590,10 @@
         pname = "coquic-rust-perf-client";
         version = "dev";
         src = projectSrc;
-        cargoRoot = "src/perf/rust";
-        buildAndTestSubdir = "src/perf/rust";
+        cargoRoot = "bench/coquic-rust-perf";
+        buildAndTestSubdir = "bench/coquic-rust-perf";
         cargoLock = {
-          lockFile = ./src/perf/rust/Cargo.lock;
+          lockFile = ./bench/coquic-rust-perf/Cargo.lock;
         };
         cargoBuildFlags = [
           "--bin"
@@ -635,7 +635,7 @@
           runHook preInstall
           mkdir -p $out/bin $out/share/coquic-python $out/share/coquic-python-perf
           cp -R bindings/python/coquic $out/share/coquic-python/coquic
-          cp -R src/perf/python/coquic_python_perf $out/share/coquic-python-perf/coquic_python_perf
+          cp -R bench/coquic-python-perf/coquic_python_perf $out/share/coquic-python-perf/coquic_python_perf
           makeWrapper "${pkgs.python3}/bin/python" "$out/bin/coquic-python-perf" \
             --add-flags "-m coquic_python_perf" \
             --set COQUIC_LIB_DIR "${boringsslPackage}/lib" \
@@ -672,14 +672,14 @@
           export GOCACHE="$TMPDIR/go-cache"
           export GOPATH="$TMPDIR/go"
           export GOFLAGS="-mod=mod"
-          pushd src/perf/go
+          pushd bench/coquic-go-perf
           go build -tags boringssl -trimpath -o coquic-go-perf ./cmd/coquic-go-perf
           popd
           runHook postBuild
         '';
         installPhase = ''
           runHook preInstall
-          install -Dm755 src/perf/go/coquic-go-perf "$out/bin/coquic-go-perf"
+          install -Dm755 bench/coquic-go-perf/coquic-go-perf "$out/bin/coquic-go-perf"
           runHook postInstall
         '';
         postFixup = ''

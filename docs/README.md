@@ -17,7 +17,7 @@ include/coquic/ public C++ API
 |   Lowest layer: sans-I/O endpoint, typed inputs, typed effects.
 +-- coquic::quic
 |   Transport facade: endpoint, connection, and stream handles over core.
-`-- coquic::http3
++-- coquic::http3
     Application protocol layer: HTTP/3 state that emits QUIC connection inputs.
 ```
 
@@ -29,15 +29,15 @@ Native bindings are separate ABI surfaces built on top of the C++ layers:
 
 ```text
 include/coquic/ffi/ native binding ABI
-`-- C FFI
++-- C FFI
     C ABI wrappers over the sans-I/O Core, QUIC facade, and HTTP/3 APIs.
 bindings/rust/coquic
 |-- coquic-sys
 |   Low-level safe owners and borrowed views over the C FFI.
 |-- coquic-rs
 |   Ergonomic Rust QUIC facade over coquic-sys.
-`-- src/perf/rust
-    Tokio UDP perf runtime over coquic-rs.
+bench/coquic-rust-perf
++-- Tokio UDP perf runtime over coquic-rs.
 ```
 
 ## Contents

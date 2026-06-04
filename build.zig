@@ -311,12 +311,12 @@ fn http3ProtocolSourceFiles() []const []const u8 {
 
 fn perfSourceFiles() []const []const u8 {
     return &.{
-        "src/perf/perf_client.cpp",
-        "src/perf/perf_loop.cpp",
-        "src/perf/perf_metrics.cpp",
-        "src/perf/perf_protocol.cpp",
-        "src/perf/perf_runtime.cpp",
-        "src/perf/perf_server.cpp",
+        "bench/coquic-perf/perf_client.cpp",
+        "bench/coquic-perf/perf_loop.cpp",
+        "bench/coquic-perf/perf_metrics.cpp",
+        "bench/coquic-perf/perf_protocol.cpp",
+        "bench/coquic-perf/perf_runtime.cpp",
+        "bench/coquic-perf/perf_server.cpp",
     };
 }
 
@@ -1236,7 +1236,7 @@ pub fn build(b: *std.Build) void {
     addIncludePath(perf_exe, b.path("include"));
     addCSourceFiles(perf_exe, .{
         .root = b.path("."),
-        .files = &.{"src/main_perf.cpp"},
+        .files = &.{"bench/coquic-perf/main.cpp"},
         .flags = cpp_flags,
     });
     linkLibrary(perf_exe, project_lib);

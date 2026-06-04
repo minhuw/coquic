@@ -8,9 +8,9 @@ The Rust bindings are split into two crates:
 - `coquic-rs` under `bindings/rust/coquic-rs`: ergonomic Rust facade over
   `coquic-sys`. Its `quic` module mirrors the C++ QUIC facade with `Endpoint`,
   `Connection`, `Stream`, and `ConnectResult`.
-- `coquic-rust-perf` under `src/perf/rust`: Tokio UDP perf runtime built on
+- `coquic-rust-perf` under `bench/coquic-rust-perf`: Tokio UDP perf runtime built on
   `coquic-rs`. Its `coquic-rust-perf` binary speaks the same
-  `coquic-perf/1` control protocol as `src/perf`.
+  `coquic-perf/1` control protocol as `bench/coquic-perf`.
 
 The wrapper crates are still sans-I/O. Rust callers own sockets, timers,
 routing, threading, and scheduling. The perf crate is an example runtime that
@@ -29,7 +29,7 @@ Then run the Rust wrapper tests:
 ```sh
 nix develop -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo test --manifest-path bindings/rust/coquic/Cargo.toml'
 nix develop -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo test --manifest-path bindings/rust/coquic-rs/Cargo.toml'
-nix develop -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo test --manifest-path src/perf/rust/Cargo.toml'
+nix develop -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo test --manifest-path bench/coquic-rust-perf/Cargo.toml'
 ```
 
 The `coquic-sys` build script searches the repository-local
@@ -79,11 +79,11 @@ has already been dropped.
 
 ## Tokio Perf Runtime
 
-`coquic-rust-perf` accepts the main `src/perf` options:
+`coquic-rust-perf` accepts the main `bench/coquic-perf` options:
 
 ```sh
-nix develop .#quictls -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo run --manifest-path src/perf/rust/Cargo.toml --bin coquic-rust-perf -- server --host 127.0.0.1 --port 4433'
-nix develop .#quictls -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo run --manifest-path src/perf/rust/Cargo.toml --bin coquic-rust-perf -- client --host 127.0.0.1 --port 4433 --mode bulk --direction download --total-bytes 1048576'
+nix develop .#quictls -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo run --manifest-path bench/coquic-rust-perf/Cargo.toml --bin coquic-rust-perf -- server --host 127.0.0.1 --port 4433'
+nix develop .#quictls -c bash -lc 'LD_LIBRARY_PATH="$PWD/zig-out/lib:$LD_LIBRARY_PATH" cargo run --manifest-path bench/coquic-rust-perf/Cargo.toml --bin coquic-rust-perf -- client --host 127.0.0.1 --port 4433 --mode bulk --direction download --total-bytes 1048576'
 ```
 
 The Tokio runtime maps UDP peer addresses to CoQUIC route handles, feeds

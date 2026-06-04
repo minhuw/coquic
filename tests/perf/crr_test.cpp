@@ -3,7 +3,7 @@
 
 #include <gtest/gtest.h>
 
-#include "src/perf/perf_client.h"
+#include "bench/coquic-perf/perf_client.h"
 #include "tests/support/perf/perf_test_fixtures.h"
 
 namespace {

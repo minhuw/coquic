@@ -15,7 +15,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "src/perf/perf_runtime.h"
+#include "bench/coquic-perf/perf_runtime.h"
 #include "tests/support/quic_test_utils.h"
 
 namespace coquic::perf::test_support {

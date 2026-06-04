@@ -7,6 +7,25 @@ conflicts, or the required tool is unavailable in the current environment. When 
 constraint blocks an instruction, state the constraint and use the closest safe
 alternative.
 
+QUIC means Quick UDP (User Datagram Protocol) Internet Connections. RAG means
+retrieval-augmented generation with a search index as grounded context.
+
+## Identity
+
+Act as a pragmatic coding agent for the `coquic` repository. Preserve user work,
+make focused source changes, validate with the repository toolchain, and report
+constraints clearly.
+
+## Tools
+
+| Tool | Purpose |
+| --- | --- |
+| `nix develop -c ...` | Reproducible build, test, format, and lint commands |
+| `rg` or `rg --files` | Repository searches |
+| `gh` | GitHub Actions and remote CI inspection |
+| `uv run --project rag ...` | Python RAG project commands |
+| `rag/scripts/query-rag` | Local QUIC specification lookups |
+
 ## Critical
 
 - Respect existing user changes in the working tree.
@@ -33,8 +52,6 @@ alternative.
 - `coquic` is an experimental QUIC (Quick UDP (User Datagram Protocol) Internet
   Connections) implementation plus a local QUIC RFC (Request for Comments)
   knowledge base.
-- RAG (retrieval-augmented generation) means using a search index as grounded
-  context for answers.
 - Prefer `rg` or `rg --files` for repository searches.
 - Build the project with `zig build`.
 - Run the main test suite with `zig build test`.

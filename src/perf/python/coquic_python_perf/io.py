@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import ipaddress
 import socket
+import sys
 import time
 from dataclasses import dataclass
 
@@ -12,6 +14,9 @@ from . import PerfError
 
 MAX_UDP_DATAGRAM_SIZE = 64 * 1024
 MAX_BUFFERED_SEND_DATAGRAMS = 4096
+_LINUX_IP_MTU_DISCOVER = 10
+_LINUX_IP_PMTUDISC_PROBE = 3
+_LINUX_IPV6_MTU_DISCOVER = 23
 
 
 @dataclass(slots=True)
@@ -68,10 +73,11 @@ class UdpRuntime:
     async def client(cls, host: str, port: int) -> tuple["UdpRuntime", int, bytes]:
         peer = _resolve_remote(host, port)
         bind_addr = _client_bind_address(peer)
+        sock = _open_udp_socket(bind_addr, 0)
         loop = asyncio.get_running_loop()
         transport, protocol = await loop.create_datagram_endpoint(
             _DatagramProtocol,
-            local_addr=(bind_addr, 0),
+            sock=sock,
         )
         runtime = cls(transport, protocol)
         route = runtime.ensure_route(peer)
@@ -83,9 +89,10 @@ class UdpRuntime:
     @classmethod
     async def server(cls, host: str, port: int) -> "UdpRuntime":
         loop = asyncio.get_running_loop()
+        sock = _open_udp_socket(host, port)
         transport, protocol = await loop.create_datagram_endpoint(
             _DatagramProtocol,
-            local_addr=(host, port),
+            sock=sock,
         )
         return cls(transport, protocol)
 
@@ -218,3 +225,52 @@ def _resolve_remote(host: str, port: int) -> tuple[str, int]:
         raise PerfError("failed to resolve remote address")
     addr = infos[0][4]
     return (addr[0], int(addr[1]))
+
+
+def _open_udp_socket(host: str, port: int) -> socket.socket:
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+    if not infos:
+        raise PerfError("failed to resolve bind address")
+
+    family, _, _, _, sockaddr = infos[0]
+    sock = socket.socket(family, socket.SOCK_DGRAM)
+    try:
+        if family == socket.AF_INET6 and hasattr(socket, "IPV6_V6ONLY"):
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        _configure_no_ip_fragmentation(sock)
+        sock.bind(sockaddr)
+        sock.setblocking(False)
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+def _configure_no_ip_fragmentation(sock: socket.socket) -> None:
+    ip_mtu_discover = getattr(socket, "IP_MTU_DISCOVER", None)
+    ip_pmtudisc_probe = getattr(socket, "IP_PMTUDISC_PROBE", None)
+    ipv6_mtu_discover = getattr(socket, "IPV6_MTU_DISCOVER", None)
+    ipv6_pmtudisc_probe = getattr(socket, "IPV6_PMTUDISC_PROBE", None)
+
+    if sys.platform.startswith("linux"):
+        ip_mtu_discover = ip_mtu_discover or _LINUX_IP_MTU_DISCOVER
+        ip_pmtudisc_probe = ip_pmtudisc_probe or _LINUX_IP_PMTUDISC_PROBE
+        ipv6_mtu_discover = ipv6_mtu_discover or _LINUX_IPV6_MTU_DISCOVER
+        ipv6_pmtudisc_probe = ipv6_pmtudisc_probe or _LINUX_IP_PMTUDISC_PROBE
+
+    if ip_mtu_discover is not None and ip_pmtudisc_probe is not None:
+        _set_socket_option_if_available(sock, socket.IPPROTO_IP, ip_mtu_discover, ip_pmtudisc_probe)
+    if ipv6_mtu_discover is not None and ipv6_pmtudisc_probe is not None:
+        _set_socket_option_if_available(
+            sock, socket.IPPROTO_IPV6, ipv6_mtu_discover, ipv6_pmtudisc_probe
+        )
+
+
+def _set_socket_option_if_available(
+    sock: socket.socket, level: int, option: int, value: int
+) -> None:
+    try:
+        sock.setsockopt(level, option, value)
+    except OSError as error:
+        if error.errno not in (errno.ENOPROTOOPT, errno.EINVAL):
+            raise

@@ -166,6 +166,14 @@ bool connection_pmtud_coverage_for_tests() {
         COQUIC_CONNECTION_HOOK_RECORD(connection.next_pmtu_probe_size(path).has_value());
         COQUIC_CONNECTION_HOOK_RECORD(connection.next_pmtu_probe_size(path).value_or(0) ==
                                       kPmtudIPv4EthernetUdpPayloadSize);
+        connection.config_.transport.pmtud_max_datagram_size = 0;
+        connection.set_path_default_pmtud_search_ceiling(0, kPmtudIPv6EthernetUdpPayloadSize);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.outbound_datagram_size_ceiling_for_path(0) ==
+                                      kPmtudIPv6EthernetUdpPayloadSize);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.next_pmtu_probe_size(path).value_or(0) ==
+                                      kPmtudIPv6EthernetUdpPayloadSize);
+        connection.config_.transport.pmtud_max_datagram_size = 1300;
+        COQUIC_CONNECTION_HOOK_RECORD(connection.outbound_datagram_size_ceiling() == 1300);
         path.mtu.enabled = false;
         COQUIC_CONNECTION_HOOK_RECORD(!connection.next_pmtu_probe_size(path).has_value());
     }

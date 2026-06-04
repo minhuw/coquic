@@ -23,6 +23,7 @@ bootstrap_client_io_backend(const QuicIoBackendBootstrapConfig &config, std::str
         auto backend = std::make_unique<SocketIoBackend>(SocketIoBackendConfig{
             .role_name = config.backend.role_name,
             .idle_timeout_ms = config.backend.idle_timeout_ms,
+            .enable_pmtud_socket_options = config.backend.enable_pmtud_socket_options,
         });
         const auto remote = backend->resolve_remote(host, port);
         if (!remote.has_value()) {
@@ -46,6 +47,7 @@ bootstrap_client_io_backend(const QuicIoBackendBootstrapConfig &config, std::str
         auto backend = make_io_uring_backend(QuicUdpBackendConfig{
             .role_name = config.backend.role_name,
             .idle_timeout_ms = config.backend.idle_timeout_ms,
+            .enable_pmtud_socket_options = config.backend.enable_pmtud_socket_options,
         });
         if (backend == nullptr) {
             std::cerr << "io-" << config.backend.role_name
@@ -83,6 +85,7 @@ bootstrap_server_io_backend(const QuicIoBackendBootstrapConfig &config, std::str
         auto backend = std::make_unique<SocketIoBackend>(SocketIoBackendConfig{
             .role_name = config.backend.role_name,
             .idle_timeout_ms = config.backend.idle_timeout_ms,
+            .enable_pmtud_socket_options = config.backend.enable_pmtud_socket_options,
         });
         for (const auto port : ports) {
             if (!backend->open_listener(host, port)) {
@@ -97,6 +100,7 @@ bootstrap_server_io_backend(const QuicIoBackendBootstrapConfig &config, std::str
         auto backend = make_io_uring_backend(QuicUdpBackendConfig{
             .role_name = config.backend.role_name,
             .idle_timeout_ms = config.backend.idle_timeout_ms,
+            .enable_pmtud_socket_options = config.backend.enable_pmtud_socket_options,
         });
         if (backend == nullptr) {
             std::cerr << "io-" << config.backend.role_name

@@ -14,7 +14,9 @@ import (
 const ApplicationProtocol = "coquic-perf/1"
 
 const (
-	PerfMaxOutboundDatagramSize         = 60 * 1024
+	PerfMaxOutboundDatagramSize         = 1472
+	PerfPMTUDMaxDatagramSize            = 0
+	PerfMinUDPPayloadSize               = 1200
 	PerfTransferConnectionReceiveWindow = 32 * 1024 * 1024
 	PerfTransferStreamReceiveWindow     = 16 * 1024 * 1024
 	PerfAckElicitingThreshold           = 2
@@ -46,47 +48,51 @@ const (
 )
 
 type PerfConfig struct {
-	Role                 Role
-	Mode                 Mode
-	Direction            Direction
-	Host                 string
-	Port                 uint16
-	ServerName           string
-	VerifyPeer           bool
-	CertificateChainPath string
-	PrivateKeyPath       string
-	JSONOut              string
-	RequestBytes         uint64
-	ResponseBytes        uint64
-	Streams              uint64
-	Connections          uint64
-	RequestsInFlight     uint64
-	Requests             *uint64
-	TotalBytes           *uint64
-	Warmup               time.Duration
-	Duration             time.Duration
-	CongestionControl    coquic.CongestionControl
+	Role                    Role
+	Mode                    Mode
+	Direction               Direction
+	Host                    string
+	Port                    uint16
+	ServerName              string
+	VerifyPeer              bool
+	CertificateChainPath    string
+	PrivateKeyPath          string
+	JSONOut                 string
+	RequestBytes            uint64
+	ResponseBytes           uint64
+	Streams                 uint64
+	Connections             uint64
+	RequestsInFlight        uint64
+	Requests                *uint64
+	TotalBytes              *uint64
+	MaxOutboundDatagramSize uint64
+	PMTUDMaxDatagramSize    uint64
+	Warmup                  time.Duration
+	Duration                time.Duration
+	CongestionControl       coquic.CongestionControl
 }
 
 func DefaultPerfConfig() PerfConfig {
 	return PerfConfig{
-		Role:                 RoleServer,
-		Mode:                 ModeBulk,
-		Direction:            DirectionDownload,
-		Host:                 "127.0.0.1",
-		Port:                 4433,
-		ServerName:           "localhost",
-		VerifyPeer:           false,
-		CertificateChainPath: filepath.FromSlash("tests/fixtures/quic-server-cert.pem"),
-		PrivateKeyPath:       filepath.FromSlash("tests/fixtures/quic-server-key.pem"),
-		RequestBytes:         64,
-		ResponseBytes:        64,
-		Streams:              1,
-		Connections:          1,
-		RequestsInFlight:     1,
-		Warmup:               0,
-		Duration:             5 * time.Second,
-		CongestionControl:    coquic.CongestionControlNewReno,
+		Role:                    RoleServer,
+		Mode:                    ModeBulk,
+		Direction:               DirectionDownload,
+		Host:                    "127.0.0.1",
+		Port:                    4433,
+		ServerName:              "localhost",
+		VerifyPeer:              false,
+		CertificateChainPath:    filepath.FromSlash("tests/fixtures/quic-server-cert.pem"),
+		PrivateKeyPath:          filepath.FromSlash("tests/fixtures/quic-server-key.pem"),
+		RequestBytes:            64,
+		ResponseBytes:           64,
+		Streams:                 1,
+		Connections:             1,
+		RequestsInFlight:        1,
+		MaxOutboundDatagramSize: PerfMaxOutboundDatagramSize,
+		PMTUDMaxDatagramSize:    PerfPMTUDMaxDatagramSize,
+		Warmup:                  0,
+		Duration:                5 * time.Second,
+		CongestionControl:       coquic.CongestionControlNewReno,
 	}
 }
 
@@ -193,6 +199,18 @@ func ParseRuntimeArgs(args []string) (PerfConfig, error) {
 				return PerfConfig{}, err
 			}
 			config.TotalBytes = &value
+		case "--max-outbound-datagram-size":
+			value, err := parseSize(value)
+			if err != nil || value < PerfMinUDPPayloadSize {
+				return PerfConfig{}, fmt.Errorf("%s", Usage())
+			}
+			config.MaxOutboundDatagramSize = value
+		case "--pmtud-max-datagram-size":
+			value, err := parseSize(value)
+			if err != nil || (value != 0 && value < PerfMinUDPPayloadSize) {
+				return PerfConfig{}, fmt.Errorf("%s", Usage())
+			}
+			config.PMTUDMaxDatagramSize = value
 		case "--warmup":
 			duration, err := parseDuration(value)
 			if err != nil {
@@ -233,7 +251,7 @@ func ClientEndpointConfig(config PerfConfig) coquic.EndpointConfig {
 	endpoint.Role = coquic.RoleClient
 	endpoint.VerifyPeer = config.VerifyPeer
 	endpoint.ApplicationProtocol = []byte(ApplicationProtocol)
-	endpoint.MaxOutboundDatagramSize = PerfMaxOutboundDatagramSize
+	endpoint.MaxOutboundDatagramSize = int(config.MaxOutboundDatagramSize)
 	endpoint.EmitSharedReceiveStreamData = true
 	applyTransportDefaults(config, &endpoint.Transport)
 	return endpoint
@@ -257,7 +275,7 @@ func ServerEndpointConfig(config PerfConfig) (coquic.EndpointConfig, error) {
 		CertificatePEM: cert,
 		PrivateKeyPEM:  key,
 	}
-	endpoint.MaxOutboundDatagramSize = PerfMaxOutboundDatagramSize
+	endpoint.MaxOutboundDatagramSize = int(config.MaxOutboundDatagramSize)
 	endpoint.EmitSharedReceiveStreamData = true
 	applyTransportDefaults(config, &endpoint.Transport)
 	if endpoint.Transport.InitialMaxStreamsBidi < PerfServerInitialMaxBidiStreams {
@@ -271,6 +289,7 @@ func applyTransportDefaults(config PerfConfig, transport *coquic.TransportConfig
 	transport.EnableHyStartPlusPlus = perfEnableHyStartPlusPlus(config)
 	transport.SendStreamFairness = perfSendStreamFairness(config)
 	transport.AckElicitingThreshold = perfAckElicitingThreshold(config)
+	transport.PMTUDMaxDatagramSize = int(config.PMTUDMaxDatagramSize)
 	transport.InitialMaxData = PerfTransferConnectionReceiveWindow
 	transport.InitialMaxStreamDataBidiLocal = PerfTransferStreamReceiveWindow
 	transport.InitialMaxStreamDataBidiRemote = PerfTransferStreamReceiveWindow
@@ -344,6 +363,7 @@ func Usage() string {
 		"[--response-bytes N] [--streams N] [--connections N] " +
 		"[--requests-in-flight N] [--requests N] [--total-bytes N] " +
 		"[--warmup 250ms|2s] [--duration 250ms|2s] " +
+		"[--max-outbound-datagram-size N] [--pmtud-max-datagram-size N] " +
 		"[--certificate-chain PATH] [--private-key PATH] [--server-name NAME] " +
 		"[--verify-peer] [--json-out PATH]"
 }

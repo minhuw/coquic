@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 coquic-rs = { path = "../../../bindings/rust/coquic-rs" }
+libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.52.3", features = ["macros", "net", "rt", "time", "test-util"] }

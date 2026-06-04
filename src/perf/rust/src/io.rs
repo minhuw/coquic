@@ -3,6 +3,8 @@ use coquic::{EcnCodepoint, Effect, InboundDatagram, QueryResult, RouteHandle, Ti
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time;
@@ -48,7 +50,7 @@ impl UdpRuntime {
         } else {
             "[::]:0"
         };
-        let socket = UdpSocket::bind(bind_addr).await?;
+        let socket = bind_udp_socket(bind_addr).await?;
         let mut runtime = Self::new(socket);
         let route = runtime.ensure_route(peer);
         let identity = runtime
@@ -60,7 +62,7 @@ impl UdpRuntime {
 
     pub async fn server(host: &str, port: u16) -> Result<Self> {
         let bind_addr = format!("{host}:{port}");
-        let socket = UdpSocket::bind(bind_addr).await?;
+        let socket = bind_udp_socket(&bind_addr).await?;
         Ok(Self::new(socket))
     }
 
@@ -200,6 +202,61 @@ impl UdpRuntime {
             .get(&route_handle)
             .map(|route| route.address_validation_identity.as_slice())
     }
+}
+
+async fn bind_udp_socket(addr: &str) -> io::Result<UdpSocket> {
+    let socket = UdpSocket::bind(addr).await?;
+    configure_no_ip_fragmentation(&socket)?;
+    Ok(socket)
+}
+
+#[cfg(target_os = "linux")]
+fn configure_no_ip_fragmentation(socket: &UdpSocket) -> io::Result<()> {
+    let fd = socket.as_raw_fd();
+    let discover = libc::IP_PMTUDISC_PROBE;
+
+    set_socket_option(fd, libc::IPPROTO_IP, libc::IP_MTU_DISCOVER, discover)?;
+    set_socket_option(
+        fd,
+        libc::IPPROTO_IPV6,
+        libc::IPV6_MTU_DISCOVER,
+        libc::IPV6_PMTUDISC_PROBE,
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn set_socket_option(
+    fd: libc::c_int,
+    level: libc::c_int,
+    name: libc::c_int,
+    value: libc::c_int,
+) -> io::Result<()> {
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            name,
+            &value as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&value) as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::ENOPROTOOPT) | Some(libc::EINVAL)
+    ) {
+        return Ok(());
+    }
+    Err(error)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_no_ip_fragmentation(_socket: &UdpSocket) -> io::Result<()> {
+    Ok(())
 }
 
 pub enum WaitEvent {

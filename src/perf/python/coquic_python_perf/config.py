@@ -9,7 +9,9 @@ import coquic
 from . import PerfError
 
 APPLICATION_PROTOCOL = b"coquic-perf/1"
-PERF_MAX_OUTBOUND_DATAGRAM_SIZE = 60 * 1024
+PERF_MAX_OUTBOUND_DATAGRAM_SIZE = 1472
+PERF_PMTUD_MAX_DATAGRAM_SIZE = 0
+PERF_MIN_UDP_PAYLOAD_SIZE = 1200
 PERF_TRANSFER_CONNECTION_RECEIVE_WINDOW = 32 * 1024 * 1024
 PERF_TRANSFER_STREAM_RECEIVE_WINDOW = 16 * 1024 * 1024
 PERF_ACK_ELICITING_THRESHOLD = 2
@@ -53,6 +55,8 @@ class PerfConfig:
     requests_in_flight: int = 1
     requests: int | None = None
     total_bytes: int | None = None
+    max_outbound_datagram_size: int = PERF_MAX_OUTBOUND_DATAGRAM_SIZE
+    pmtud_max_datagram_size: int = PERF_PMTUD_MAX_DATAGRAM_SIZE
     warmup: float = 0.0
     duration: float = 5.0
     congestion_control: coquic.CongestionControl = coquic.CongestionControl.NEWRENO
@@ -114,6 +118,8 @@ def apply_option(config: PerfConfig, arg: str, value: str) -> None:
         "--requests-in-flight": "requests_in_flight",
         "--requests": "requests",
         "--total-bytes": "total_bytes",
+        "--max-outbound-datagram-size": "max_outbound_datagram_size",
+        "--pmtud-max-datagram-size": "pmtud_max_datagram_size",
     }
     if arg == "--port":
         config.port = _parse_size(value)
@@ -134,6 +140,17 @@ def apply_option(config: PerfConfig, arg: str, value: str) -> None:
         config.duration = parse_duration(value)
     elif arg in numeric_options:
         setattr(config, numeric_options[arg], _parse_size(value))
+        if (
+            arg == "--max-outbound-datagram-size"
+            and config.max_outbound_datagram_size < PERF_MIN_UDP_PAYLOAD_SIZE
+        ):
+            raise PerfError(usage())
+        if (
+            arg == "--pmtud-max-datagram-size"
+            and config.pmtud_max_datagram_size != 0
+            and config.pmtud_max_datagram_size < PERF_MIN_UDP_PAYLOAD_SIZE
+        ):
+            raise PerfError(usage())
     elif arg in scalar_options:
         scalar_options[arg]()
     else:
@@ -145,7 +162,7 @@ def client_endpoint_config(config: PerfConfig) -> coquic.quic.EndpointConfig:
     endpoint.core.role = coquic.Role.CLIENT
     endpoint.core.verify_peer = config.verify_peer
     endpoint.core.application_protocol = APPLICATION_PROTOCOL
-    endpoint.core.max_outbound_datagram_size = PERF_MAX_OUTBOUND_DATAGRAM_SIZE
+    endpoint.core.max_outbound_datagram_size = config.max_outbound_datagram_size
     endpoint.core.emit_shared_receive_stream_data = True
     apply_transport_defaults(config, endpoint.core.transport)
     return endpoint
@@ -160,7 +177,7 @@ def server_endpoint_config(config: PerfConfig) -> coquic.quic.EndpointConfig:
         certificate_pem=_read_file(config.certificate_chain_path),
         private_key_pem=_read_file(config.private_key_path),
     )
-    endpoint.core.max_outbound_datagram_size = PERF_MAX_OUTBOUND_DATAGRAM_SIZE
+    endpoint.core.max_outbound_datagram_size = config.max_outbound_datagram_size
     endpoint.core.emit_shared_receive_stream_data = True
     apply_transport_defaults(config, endpoint.core.transport)
     endpoint.core.transport.initial_max_streams_bidi = max(
@@ -177,6 +194,7 @@ def apply_transport_defaults(
     transport.enable_hystart_plus_plus = perf_enable_hystart_plus_plus(config)
     transport.send_stream_fairness = perf_send_stream_fairness(config)
     transport.ack_eliciting_threshold = perf_ack_eliciting_threshold(config)
+    transport.pmtud_max_datagram_size = config.pmtud_max_datagram_size
     transport.initial_max_data = PERF_TRANSFER_CONNECTION_RECEIVE_WINDOW
     transport.initial_max_stream_data_bidi_local = PERF_TRANSFER_STREAM_RECEIVE_WINDOW
     transport.initial_max_stream_data_bidi_remote = PERF_TRANSFER_STREAM_RECEIVE_WINDOW
@@ -275,6 +293,7 @@ def usage() -> str:
         "[--response-bytes N] [--streams N] [--connections N] "
         "[--requests-in-flight N] [--requests N] [--total-bytes N] "
         "[--warmup 250ms|2s] [--duration 250ms|2s] "
+        "[--max-outbound-datagram-size N] [--pmtud-max-datagram-size N] "
         "[--certificate-chain PATH] [--private-key PATH] [--server-name NAME] "
         "[--verify-peer] [--json-out PATH]"
     )

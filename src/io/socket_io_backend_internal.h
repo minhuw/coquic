@@ -141,7 +141,7 @@ std::size_t recvmsg_udp_gro_segment_size_from_control(const msghdr &message);
 
 int preferred_udp_address_family(std::string_view host);
 bool resolve_udp_address(UdpAddressResolutionQuery query, ResolvedUdpAddress &resolved);
-int open_udp_socket(int family);
+int open_udp_socket(int family, bool enable_pmtud_socket_options = true);
 
 bool send_datagram(int fd, std::span<const std::byte> datagram, const sockaddr_storage &peer,
                    socklen_t peer_len, std::string_view role_name, QuicEcnCodepoint ecn,

@@ -35,6 +35,8 @@ struct QuicPerfConfig {
     std::size_t requests_in_flight = 1;
     std::optional<std::size_t> requests;
     std::optional<std::size_t> total_bytes;
+    std::size_t max_outbound_datagram_size = 1472;
+    std::size_t pmtud_max_datagram_size = 0;
     quic::QuicCoreDuration warmup{0};
     quic::QuicCoreDuration duration{5000000};
     quic::QuicCongestionControlAlgorithm congestion_control =

@@ -100,6 +100,7 @@ struct QuicTransportConfig {
     std::uint64_t max_udp_payload_size = 65527;
     bool pmtud_enabled = true;
     std::size_t pmtud_base_datagram_size = 1200;
+    // A value of 0 uses the per-path Ethernet default: 1472 bytes for IPv4 and 1452 for IPv6.
     std::size_t pmtud_max_datagram_size = 0;
     std::uint64_t active_connection_id_limit = 2;
     bool disable_active_migration = false;
@@ -591,6 +592,12 @@ struct QuicCoreResult {
 class QuicConnection;
 class QuicCore;
 
+enum class QuicRouteAddressFamily : std::uint8_t {
+    unknown,
+    ipv4,
+    ipv6,
+};
+
 namespace test {
 bool seed_legacy_route_handle_path_for_tests(QuicCore &core, QuicRouteHandle route_handle,
                                              QuicPathId path_id);
@@ -636,6 +643,7 @@ class QuicCore {
         std::vector<QuicRouteHandle> new_token_issued_routes;
         std::unordered_map<QuicPathId, std::vector<std::byte>>
             address_validation_identity_by_path_id;
+        std::unordered_map<QuicPathId, QuicRouteAddressFamily> address_family_by_path_id;
         QuicPathId next_path_id = 1;
     };
 
@@ -775,6 +783,8 @@ class QuicCore {
     static void
     remember_address_validation_identity(ConnectionEntry &entry, QuicPathId path_id,
                                          std::span<const std::byte> address_validation_identity);
+    static void remember_path_address_family(ConnectionEntry &entry, QuicPathId path_id,
+                                             QuicRouteAddressFamily family);
     QuicPathId remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle,
                                      std::span<const std::byte> address_validation_identity);
     std::optional<QuicPathId>

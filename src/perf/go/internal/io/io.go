@@ -67,6 +67,10 @@ func NewClient(host string, port uint16) (*UdpRuntime, coquic.RouteHandle, []byt
 	if err != nil {
 		return nil, 0, nil, err
 	}
+	if err := configureNoIPFragmentation(socket); err != nil {
+		socket.Close()
+		return nil, 0, nil, err
+	}
 	runtime := newRuntime(socket)
 	route := runtime.EnsureRoute(peer)
 	identity := runtime.AddressValidationIdentity(route)
@@ -84,6 +88,10 @@ func NewServer(host string, port uint16) (*UdpRuntime, error) {
 	}
 	socket, err := net.ListenUDP("udp", addr)
 	if err != nil {
+		return nil, err
+	}
+	if err := configureNoIPFragmentation(socket); err != nil {
+		socket.Close()
 		return nil, err
 	}
 	return newRuntime(socket), nil

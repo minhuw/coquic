@@ -2027,6 +2027,7 @@ TEST(QuicCoreTest, LargeDatagramSchedulingLimitsFreshDataToLeadingBulkStreamsPer
     constexpr std::size_t kLargeDatagramSize = std::size_t{16} * 1024u;
     constexpr std::uint64_t kLargeFlowCredit = std::uint64_t{128} * 1024u;
     connection.config_.transport.pmtud_enabled = false;
+    connection.config_.transport.pmtud_max_datagram_size = kLargeDatagramSize;
     connection.config_.max_outbound_datagram_size = kLargeDatagramSize;
     auto &peer_transport_parameters =
         optional_ref_or_terminate(connection.peer_transport_parameters_);
@@ -2054,6 +2055,7 @@ TEST(QuicCoreTest, BulkStreamDatagramsFillValidatedMtuExactly) {
     for (auto path_udp_payload_size : kPathUdpPayloadSizes) {
         auto connection = make_connected_client_connection();
         connection.config_.transport.pmtud_enabled = false;
+        connection.config_.transport.pmtud_max_datagram_size = path_udp_payload_size;
         connection.config_.max_outbound_datagram_size = path_udp_payload_size;
         auto &peer_transport_parameters =
             optional_ref_or_terminate(connection.peer_transport_parameters_);

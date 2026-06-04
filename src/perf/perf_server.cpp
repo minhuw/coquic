@@ -87,6 +87,7 @@ int run_perf_server(const QuicPerfConfig &config) {
                 io::QuicUdpBackendConfig{
                     .role_name = "perf-server",
                     .idle_timeout_ms = 1000,
+                    .enable_pmtud_socket_options = true,
                 },
         },
         config.host, std::span<const std::uint16_t>(&config.port, 1));

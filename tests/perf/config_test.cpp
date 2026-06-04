@@ -166,7 +166,7 @@ TEST(QuicPerfConfigTest, ParsesAndPropagatesCongestionControlSelection) {
 }
 
 TEST(QuicPerfConfigTest, EndpointConfigUsesPerfOutboundDatagramSize) {
-    constexpr std::size_t kExpectedPerfDatagramSize = std::size_t{60} * 1024u;
+    constexpr std::size_t kExpectedPerfDatagramSize = 1472;
 
     const auto client =
         make_perf_client_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::client});
@@ -175,6 +175,26 @@ TEST(QuicPerfConfigTest, EndpointConfigUsesPerfOutboundDatagramSize) {
 
     EXPECT_EQ(client.max_outbound_datagram_size, kExpectedPerfDatagramSize);
     EXPECT_EQ(server.max_outbound_datagram_size, kExpectedPerfDatagramSize);
+    EXPECT_EQ(client.transport.pmtud_max_datagram_size, 0u);
+    EXPECT_EQ(server.transport.pmtud_max_datagram_size, 0u);
+}
+
+TEST(QuicPerfConfigTest, EndpointConfigUsesConfiguredDatagramSizeCaps) {
+    const auto client = make_perf_client_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::client,
+        .max_outbound_datagram_size = 9000,
+        .pmtud_max_datagram_size = 4096,
+    });
+    const auto server = make_perf_server_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::server,
+        .max_outbound_datagram_size = 9000,
+        .pmtud_max_datagram_size = 4096,
+    });
+
+    EXPECT_EQ(client.max_outbound_datagram_size, 9000u);
+    EXPECT_EQ(server.max_outbound_datagram_size, 9000u);
+    EXPECT_EQ(client.transport.pmtud_max_datagram_size, 4096u);
+    EXPECT_EQ(server.transport.pmtud_max_datagram_size, 4096u);
 }
 
 TEST(QuicPerfConfigTest, EndpointConfigKeepsPmtudEnabledForContainerBenchmarks) {

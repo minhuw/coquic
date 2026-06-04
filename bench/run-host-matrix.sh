@@ -13,6 +13,7 @@ image_tag="${PERF_IMAGE_TAG:-coquic-perf:quictls-musl}"
 server_cpus="${PERF_SERVER_CPUS:-2}"
 client_cpus="${PERF_CLIENT_CPUS:-3}"
 port="${PERF_PORT:-9443}"
+network_mtu="${PERF_NETWORK_MTU:-1500}"
 run_timeout_seconds="${PERF_RUN_TIMEOUT_SECONDS:-120}"
 congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno cubic bbr copa}"
 client_impl="${PERF_CLIENT_IMPL:-coquic}"
@@ -38,6 +39,7 @@ environment overrides:
   PERF_SERVER_CPUS           Docker cpuset for server container (default: 2)
   PERF_CLIENT_CPUS           Docker cpuset for client container (default: 3)
   PERF_PORT                  UDP port for server/client (default: 9443)
+  PERF_NETWORK_MTU           Docker bridge MTU (default: 1500)
   PERF_RUN_TIMEOUT_SECONDS   per-client Docker run timeout (default: 120)
   PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr copa")
   PERF_CLIENT_IMPL           client implementation to run, coquic, coquic-rust, coquic-python, coquic-go, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
@@ -224,7 +226,7 @@ docker load -i "${image_path}" >/dev/null
 docker image inspect "${image_tag}" >/dev/null
 
 network_name="coquic-perf-${preset}-$$"
-docker network create "${network_name}" >/dev/null
+docker network create --opt "com.docker.network.driver.mtu=${network_mtu}" "${network_name}" >/dev/null
 
 {
   echo "topology=docker-bridge-two-containers"
@@ -234,6 +236,7 @@ docker network create "${network_name}" >/dev/null
   echo "server_cpus=${server_cpus}"
   echo "client_cpus=${client_cpus}"
   echo "port=${port}"
+  echo "network_mtu=${network_mtu}"
   echo "run_timeout_seconds=${run_timeout_seconds}"
   echo "congestion_controls=${congestion_controls}"
   echo "client_impl=${client_impl}"

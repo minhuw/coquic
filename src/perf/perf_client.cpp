@@ -356,6 +356,7 @@ int QuicPerfClient::run() {
                 io::QuicUdpBackendConfig{
                     .role_name = "perf-client",
                     .idle_timeout_ms = 1000,
+                    .enable_pmtud_socket_options = true,
                 },
         },
         config_.host, config_.port);

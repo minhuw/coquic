@@ -27,6 +27,7 @@ enum class QuicIoBackendKind : std::uint8_t {
 struct QuicUdpBackendConfig {
     std::string role_name;
     int idle_timeout_ms = 0;
+    bool enable_pmtud_socket_options = true;
 };
 
 struct QuicIoRemote {

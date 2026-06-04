@@ -39,6 +39,9 @@ namespace coquic::quic {
 
 namespace {
 
+constexpr std::size_t kPmtudIPv6EthernetUdpPayloadSize = 1452;
+constexpr std::size_t kPmtudIPv4EthernetUdpPayloadSize = 1472;
+
 template <typename... Ts> struct overloaded : Ts... {
     using Ts::operator()...;
 };
@@ -941,6 +944,29 @@ std::optional<std::uint16_t>
             static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(identity[18])));
     }
     return std::nullopt;
+}
+
+COQUIC_NO_PROFILE QuicRouteAddressFamily
+route_address_family_from_identity(std::span<const std::byte> identity) {
+    if (identity.size() == 7 && identity.front() == std::byte{0x04}) {
+        return QuicRouteAddressFamily::ipv4;
+    }
+    if (identity.size() == 19 && identity.front() == std::byte{0x06}) {
+        return QuicRouteAddressFamily::ipv6;
+    }
+    return QuicRouteAddressFamily::unknown;
+}
+
+COQUIC_NO_PROFILE std::size_t
+default_pmtud_search_ceiling_for_route_family(QuicRouteAddressFamily family) {
+    switch (family) {
+    case QuicRouteAddressFamily::ipv4:
+        return kPmtudIPv4EthernetUdpPayloadSize;
+    case QuicRouteAddressFamily::ipv6:
+    case QuicRouteAddressFamily::unknown:
+        return kPmtudIPv6EthernetUdpPayloadSize;
+    }
+    return kPmtudIPv6EthernetUdpPayloadSize;
 }
 
 QuicAddressValidationIdentityClass COQUIC_NO_PROFILE
@@ -2237,9 +2263,29 @@ void QuicCore::remember_address_validation_identity(
                                         address_validation_identity.end()));
 }
 
+void QuicCore::remember_path_address_family(ConnectionEntry &entry, QuicPathId path_id,
+                                            QuicRouteAddressFamily family) {
+    if (family == QuicRouteAddressFamily::unknown) {
+        return;
+    }
+
+    const auto [it, inserted] = entry.address_family_by_path_id.try_emplace(path_id, family);
+    if (!inserted && it->second == family) {
+        return;
+    }
+    if (!inserted) {
+        it->second = family;
+    }
+    if (entry.connection != nullptr) {
+        entry.connection->set_path_default_pmtud_search_ceiling(
+            path_id, default_pmtud_search_ceiling_for_route_family(family));
+    }
+}
+
 COQUIC_NO_PROFILE QuicPathId
 QuicCore::remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle,
                                 std::span<const std::byte> address_validation_identity) {
+    const auto address_family = route_address_family_from_identity(address_validation_identity);
     if (!entry.default_route_handle.has_value()) {
         entry.default_route_handle = route_handle;
     }
@@ -2247,6 +2293,7 @@ QuicCore::remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_ha
     const auto existing = entry.path_id_by_route_handle.find(route_handle);
     if (existing != entry.path_id_by_route_handle.end()) {
         remember_address_validation_identity(entry, existing->second, address_validation_identity);
+        remember_path_address_family(entry, existing->second, address_family);
         return existing->second;
     }
 
@@ -2259,6 +2306,7 @@ QuicCore::remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_ha
     entry.path_id_by_route_handle.emplace(route_handle, path_id);
     entry.route_handle_by_path_id.emplace(path_id, route_handle);
     remember_address_validation_identity(entry, path_id, address_validation_identity);
+    remember_path_address_family(entry, path_id, address_family);
     return path_id;
 }
 
@@ -3785,6 +3833,9 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             entry.address_validation_identity_by_path_id.emplace(0,
                                                                  open->address_validation_identity);
         }
+        remember_path_address_family(
+            entry, kDefaultPathId,
+            route_address_family_from_identity(open->address_validation_identity));
         entry.connection->start(now);
         refresh_server_connection_routes(entry);
 
@@ -4290,6 +4341,12 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                                     config.reacted_to_version_negotiation = true;
                                     entry.connection = std::make_unique<QuicConnection>(config);
                                     connection = entry.connection.get();
+                                    if (const auto family =
+                                            entry.address_family_by_path_id.find(*path_id);
+                                        family != entry.address_family_by_path_id.end()) {
+                                        remember_path_address_family(entry, *path_id,
+                                                                     family->second);
+                                    }
                                     connection->last_inbound_path_id_ = *path_id;
                                     connection->current_send_path_id_ = path_id;
                                     connection->ensure_path_state(*path_id).is_current_send_path =
@@ -4330,6 +4387,10 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                             config.initial_destination_connection_id = retry->source_connection_id;
                             entry.connection = std::make_unique<QuicConnection>(config);
                             connection = entry.connection.get();
+                            if (const auto family = entry.address_family_by_path_id.find(*path_id);
+                                family != entry.address_family_by_path_id.end()) {
+                                remember_path_address_family(entry, *path_id, family->second);
+                            }
                             connection->initial_space_.next_send_packet_number =
                                 next_initial_send_packet_number;
                             connection->last_inbound_path_id_ = *path_id;

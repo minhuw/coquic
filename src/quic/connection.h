@@ -480,6 +480,7 @@ struct PathMtuState {
     std::size_t base_datagram_size = 1200;
     std::size_t validated_datagram_size = 1200;
     std::size_t probe_ceiling = 1200;
+    std::size_t default_search_ceiling = 0;
     std::size_t search_low = 1200;
     std::optional<std::size_t> outstanding_probe_size;
     std::optional<std::uint64_t> outstanding_probe_packet_number;
@@ -876,6 +877,7 @@ class QuicConnection {
     std::size_t outbound_datagram_size_ceiling() const;
     std::size_t outbound_datagram_size_ceiling_for_path(std::optional<QuicPathId> path_id) const;
     std::size_t outbound_datagram_size_limit_for_path(std::optional<QuicPathId> path_id) const;
+    void set_path_default_pmtud_search_ceiling(QuicPathId path_id, std::size_t ceiling);
     std::optional<QuicCoreTimePoint> pmtud_deadline() const;
     void initialize_path_mtu_state(PathState &path);
     void maybe_arm_pmtu_probe(QuicCoreTimePoint now);

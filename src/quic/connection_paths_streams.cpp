@@ -273,6 +273,8 @@ PathState &QuicConnection::ensure_path_state(QuicPathId path_id) {
 
 void QuicConnection::initialize_path_mtu_state(PathState &path) {
     const auto base = sanitize_pmtud_base(config_.transport.pmtud_base_datagram_size);
+    path.mtu.default_search_ceiling =
+        config_.transport.pmtud_max_datagram_size == 0 ? kPmtudIPv6EthernetUdpPayloadSize : 0;
     const auto ceiling = outbound_datagram_size_ceiling_for_path(path.id);
     path.mtu.enabled = config_.transport.pmtud_enabled;
     path.mtu.viable = true;
@@ -284,6 +286,33 @@ void QuicConnection::initialize_path_mtu_state(PathState &path) {
     path.mtu.outstanding_probe_packet_number.reset();
     path.mtu.next_probe_time = std::nullopt;
     path.mtu.failed_probe_sizes.clear();
+}
+
+void QuicConnection::set_path_default_pmtud_search_ceiling(QuicPathId path_id,
+                                                           std::size_t ceiling) {
+    auto &path = ensure_path_state(path_id);
+    if (path.mtu.default_search_ceiling == ceiling) {
+        return;
+    }
+
+    const auto previous_ceiling = outbound_datagram_size_ceiling_for_path(path_id);
+    path.mtu.default_search_ceiling = ceiling;
+    const auto next_ceiling = outbound_datagram_size_ceiling_for_path(path_id);
+    if (path.mtu.probe_ceiling == previous_ceiling) {
+        path.mtu.probe_ceiling = next_ceiling;
+    } else {
+        path.mtu.probe_ceiling = std::min(path.mtu.probe_ceiling, next_ceiling);
+    }
+    path.mtu.validated_datagram_size =
+        std::min(path.mtu.validated_datagram_size, path.mtu.probe_ceiling);
+    path.mtu.search_low = std::min(path.mtu.search_low, path.mtu.validated_datagram_size);
+    if (should_clear_outstanding_pmtu_probe_after_ceiling(path.mtu)) {
+        clear_outstanding_pmtu_probe(path.mtu);
+    }
+    path.mtu.failed_probe_sizes.erase(
+        std::remove_if(path.mtu.failed_probe_sizes.begin(), path.mtu.failed_probe_sizes.end(),
+                       [&](std::size_t probe_size) { return probe_size > path.mtu.probe_ceiling; }),
+        path.mtu.failed_probe_sizes.end());
 }
 
 void QuicConnection::apply_path_mtu_update(
@@ -2146,6 +2175,12 @@ QuicConnection::outbound_datagram_size_ceiling_for_path(std::optional<QuicPathId
     auto max_datagram_size = config_.max_outbound_datagram_size;
     if (config_.transport.pmtud_max_datagram_size != 0) {
         max_datagram_size = std::min(max_datagram_size, config_.transport.pmtud_max_datagram_size);
+    } else if (path_id.has_value()) {
+        if (const auto path = paths_.find(*path_id);
+            path != paths_.end() && path->second.mtu.default_search_ceiling != 0) {
+            max_datagram_size =
+                std::min(max_datagram_size, path->second.mtu.default_search_ceiling);
+        }
     }
     if (peer_transport_parameters_.has_value()) {
         max_datagram_size = static_cast<std::size_t>(

@@ -108,7 +108,7 @@ configure_ipv4_pmtud_socket_options_if_needed(LinuxSocketDescriptor socket, int 
         return true;
     }
 
-    const int discover = IP_PMTUDISC_DO;
+    const int discover = IP_PMTUDISC_PROBE;
     if (socket_io_backend_ops_state().setsockopt_fn(socket.fd, IPPROTO_IP, IP_MTU_DISCOVER,
                                                     &discover, sizeof(discover)) != 0) {
         return false;
@@ -153,7 +153,7 @@ SocketOptionResult configure_linux_pmtud_socket_options(LinuxSocketDescriptor so
         return SocketOptionResult::failed;
     }
     if (socket_family_is_ipv6(family)) {
-        const int discover = IPV6_PMTUDISC_DO;
+        const int discover = IPV6_PMTUDISC_PROBE;
         if (socket_io_backend_ops_state().setsockopt_fn(socket.fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER,
                                                         &discover, sizeof(discover)) != 0) {
             return SocketOptionResult::failed;
@@ -169,7 +169,7 @@ SocketOptionResult configure_linux_pmtud_socket_options(LinuxSocketDescriptor so
     return SocketOptionResult::configured;
 }
 
-int open_udp_socket(int family) {
+int open_udp_socket(int family, bool enable_pmtud_socket_options) {
     const int fd = socket_io_backend_ops_state().socket_fn(family, SOCK_DGRAM, 0);
     if (fd < 0) {
         return fd;
@@ -196,8 +196,9 @@ int open_udp_socket(int family) {
         errno = option_errno;
         return -1;
     }
-    if (configure_linux_pmtud_socket_options(LinuxSocketDescriptor{.fd = fd}, family) ==
-        SocketOptionResult::failed) {
+    if (enable_pmtud_socket_options &&
+        configure_linux_pmtud_socket_options(LinuxSocketDescriptor{.fd = fd}, family) ==
+            SocketOptionResult::failed) {
         const int option_errno = errno;
         ::close(fd);
         errno = option_errno;
@@ -430,7 +431,8 @@ bool SharedUdpBackendCore::open_listener(std::string_view host, std::uint16_t po
         return false;
     }
 
-    const int socket_fd = internal::open_udp_socket(bind_address.family);
+    const int socket_fd =
+        internal::open_udp_socket(bind_address.family, impl_->config.enable_pmtud_socket_options);
     if (socket_fd < 0) {
         std::cerr << "io-" << impl_->config.role_name
                   << " failed: unable to create UDP socket: " << std::strerror(errno) << '\n';
@@ -474,7 +476,8 @@ std::optional<QuicRouteHandle> SharedUdpBackendCore::ensure_route(const QuicIoRe
 
     int socket_fd = impl_->socket_fd_for_family(route_family);
     if (socket_fd < 0) {
-        socket_fd = internal::open_udp_socket(route_family);
+        socket_fd =
+            internal::open_udp_socket(route_family, impl_->config.enable_pmtud_socket_options);
         if (socket_fd < 0) {
             return std::nullopt;
         }
@@ -718,9 +721,9 @@ COQUIC_NO_PROFILE bool socket_io_backend_configures_linux_ecn_socket_options_for
 #endif
            has_call(IPPROTO_IP, IP_RECVTOS, 1) && has_call(IPPROTO_IPV6, IPV6_RECVTCLASS, 1) &&
 #if defined(__linux__)
-           has_call(IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO) &&
+           has_call(IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_PROBE) &&
            has_call(IPPROTO_IP, IP_RECVERR, 1) &&
-           has_call(IPPROTO_IPV6, IPV6_MTU_DISCOVER, IPV6_PMTUDISC_DO) &&
+           has_call(IPPROTO_IPV6, IPV6_MTU_DISCOVER, IPV6_PMTUDISC_PROBE) &&
            has_call(IPPROTO_IPV6, IPV6_RECVERR, 1);
 #else
            true;

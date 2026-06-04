@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const APPLICATION_PROTOCOL: &[u8] = b"coquic-perf/1";
-pub const PERF_MAX_OUTBOUND_DATAGRAM_SIZE: usize = 60 * 1024;
+pub const PERF_MAX_OUTBOUND_DATAGRAM_SIZE: usize = 1472;
+pub const PERF_PMTUD_MAX_DATAGRAM_SIZE: usize = 0;
+pub const PERF_MIN_UDP_PAYLOAD_SIZE: usize = 1200;
 pub const PERF_TRANSFER_CONNECTION_RECEIVE_WINDOW: u64 = 32 * 1024 * 1024;
 pub const PERF_TRANSFER_STREAM_RECEIVE_WINDOW: u64 = 16 * 1024 * 1024;
 pub const PERF_ACK_ELICITING_THRESHOLD: u64 = 2;
@@ -54,6 +56,8 @@ pub struct PerfConfig {
     pub requests_in_flight: usize,
     pub requests: Option<usize>,
     pub total_bytes: Option<usize>,
+    pub max_outbound_datagram_size: usize,
+    pub pmtud_max_datagram_size: usize,
     pub warmup: Duration,
     pub duration: Duration,
     pub congestion_control: CongestionControl,
@@ -79,6 +83,8 @@ impl Default for PerfConfig {
             requests_in_flight: 1,
             requests: None,
             total_bytes: None,
+            max_outbound_datagram_size: PERF_MAX_OUTBOUND_DATAGRAM_SIZE,
+            pmtud_max_datagram_size: PERF_PMTUD_MAX_DATAGRAM_SIZE,
             warmup: Duration::ZERO,
             duration: Duration::from_secs(5),
             congestion_control: CongestionControl::NewReno,
@@ -141,6 +147,20 @@ pub fn parse_runtime_args(args: impl IntoIterator<Item = String>) -> Result<Perf
             "--requests-in-flight" => config.requests_in_flight = parse_size(value)?,
             "--requests" => config.requests = Some(parse_size(value)?),
             "--total-bytes" => config.total_bytes = Some(parse_size(value)?),
+            "--max-outbound-datagram-size" => {
+                config.max_outbound_datagram_size = parse_size(value)?;
+                if config.max_outbound_datagram_size < PERF_MIN_UDP_PAYLOAD_SIZE {
+                    return Err(PerfError::new(usage()));
+                }
+            }
+            "--pmtud-max-datagram-size" => {
+                config.pmtud_max_datagram_size = parse_size(value)?;
+                if config.pmtud_max_datagram_size != 0
+                    && config.pmtud_max_datagram_size < PERF_MIN_UDP_PAYLOAD_SIZE
+                {
+                    return Err(PerfError::new(usage()));
+                }
+            }
             "--warmup" => config.warmup = parse_duration(value)?,
             "--duration" => config.duration = parse_duration(value)?,
             "--certificate-chain" => config.certificate_chain_path = PathBuf::from(value),
@@ -166,7 +186,7 @@ pub fn client_endpoint_config(config: &PerfConfig) -> coquic::quic::EndpointConf
     endpoint.core.role = QuicRole::Client;
     endpoint.core.verify_peer = config.verify_peer;
     endpoint.core.application_protocol = APPLICATION_PROTOCOL.to_vec();
-    endpoint.core.max_outbound_datagram_size = PERF_MAX_OUTBOUND_DATAGRAM_SIZE;
+    endpoint.core.max_outbound_datagram_size = config.max_outbound_datagram_size;
     endpoint.core.emit_shared_receive_stream_data = true;
     apply_transport_defaults(config, &mut endpoint.core.transport);
     endpoint
@@ -181,7 +201,7 @@ pub fn server_endpoint_config(config: &PerfConfig) -> Result<coquic::quic::Endpo
         certificate_pem: read_file(&config.certificate_chain_path)?,
         private_key_pem: read_file(&config.private_key_path)?,
     });
-    endpoint.core.max_outbound_datagram_size = PERF_MAX_OUTBOUND_DATAGRAM_SIZE;
+    endpoint.core.max_outbound_datagram_size = config.max_outbound_datagram_size;
     endpoint.core.emit_shared_receive_stream_data = true;
     apply_transport_defaults(config, &mut endpoint.core.transport);
     endpoint.core.transport.initial_max_streams_bidi = cmp::max(
@@ -196,6 +216,7 @@ fn apply_transport_defaults(config: &PerfConfig, transport: &mut coquic::Transpo
     transport.enable_hystart_plus_plus = perf_enable_hystart_plus_plus(config);
     transport.send_stream_fairness = perf_send_stream_fairness(config);
     transport.ack_eliciting_threshold = perf_ack_eliciting_threshold(config);
+    transport.pmtud_max_datagram_size = config.pmtud_max_datagram_size;
     transport.initial_max_data = PERF_TRANSFER_CONNECTION_RECEIVE_WINDOW;
     transport.initial_max_stream_data_bidi_local = PERF_TRANSFER_STREAM_RECEIVE_WINDOW;
     transport.initial_max_stream_data_bidi_remote = PERF_TRANSFER_STREAM_RECEIVE_WINDOW;
@@ -314,6 +335,7 @@ fn usage() -> &'static str {
      [--response-bytes N] [--streams N] [--connections N] \
      [--requests-in-flight N] [--requests N] [--total-bytes N] \
      [--warmup 250ms|2s] [--duration 250ms|2s] \
+     [--max-outbound-datagram-size N] [--pmtud-max-datagram-size N] \
      [--certificate-chain PATH] [--private-key PATH] [--server-name NAME] \
      [--verify-peer] [--json-out PATH]"
 }

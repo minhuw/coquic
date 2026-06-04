@@ -13,7 +13,7 @@
 
 namespace coquic::perf {
 namespace {
-constexpr std::size_t kPerfMaxOutboundDatagramSize = std::size_t{60} * 1024u;
+constexpr std::size_t kPerfMinimumUdpPayloadSize = 1200;
 constexpr std::uint64_t kPerfTransferConnectionReceiveWindow = 32ull * 1024ull * 1024ull;
 constexpr std::uint64_t kPerfTransferStreamReceiveWindow = 16ull * 1024ull * 1024ull;
 constexpr std::uint64_t kPerfAckElicitingThreshold = 2;
@@ -26,6 +26,7 @@ constexpr std::string_view kPerfUsageLine =
     "[--direction upload|download] [--request-bytes N] [--response-bytes N] "
     "[--streams N] [--connections N] [--requests-in-flight N] [--requests N] "
     "[--total-bytes N] [--warmup 250ms|2s] [--duration 250ms|2s] "
+    "[--max-outbound-datagram-size N] [--pmtud-max-datagram-size N] "
     "[--certificate-chain PATH] [--private-key PATH] [--server-name NAME] "
     "[--verify-peer] [--json-out PATH]";
 
@@ -305,6 +306,32 @@ std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv) {
             config.total_bytes = parsed;
             continue;
         }
+        if (arg == "--max-outbound-datagram-size") {
+            const auto value = require_value(arg);
+            if (!value.has_value()) {
+                return std::nullopt;
+            }
+            const auto parsed = parse_size_arg(*value);
+            if (!parsed.has_value() || *parsed < kPerfMinimumUdpPayloadSize) {
+                print_usage();
+                return std::nullopt;
+            }
+            config.max_outbound_datagram_size = *parsed;
+            continue;
+        }
+        if (arg == "--pmtud-max-datagram-size") {
+            const auto value = require_value(arg);
+            if (!value.has_value()) {
+                return std::nullopt;
+            }
+            const auto parsed = parse_size_arg(*value);
+            if (!parsed.has_value() || (*parsed != 0 && *parsed < kPerfMinimumUdpPayloadSize)) {
+                print_usage();
+                return std::nullopt;
+            }
+            config.pmtud_max_datagram_size = *parsed;
+            continue;
+        }
         // Warmup and duration accept the same duration suffixes used by perf reports.
         if (arg == "--warmup") {
             const auto value = require_value(arg);
@@ -415,13 +442,14 @@ quic::QuicCoreEndpointConfig make_perf_client_endpoint_config(const QuicPerfConf
         .role = quic::EndpointRole::client,
         .verify_peer = config.verify_peer,
         .application_protocol = "coquic-perf/1",
-        .max_outbound_datagram_size = kPerfMaxOutboundDatagramSize,
+        .max_outbound_datagram_size = config.max_outbound_datagram_size,
     };
     endpoint_config.emit_shared_receive_stream_data = true;
     endpoint_config.transport.congestion_control = config.congestion_control;
     endpoint_config.transport.enable_hystart_plus_plus = perf_enable_hystart_plus_plus(config);
     endpoint_config.transport.send_stream_fairness = perf_send_stream_fairness(config);
     endpoint_config.transport.ack_eliciting_threshold = perf_ack_eliciting_threshold(config);
+    endpoint_config.transport.pmtud_max_datagram_size = config.pmtud_max_datagram_size;
     endpoint_config.transport.initial_max_data = kPerfTransferConnectionReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_local = kPerfTransferStreamReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_remote =
@@ -441,11 +469,12 @@ quic::QuicCoreEndpointConfig make_perf_server_endpoint_config(const QuicPerfConf
             },
     };
     endpoint_config.emit_shared_receive_stream_data = true;
-    endpoint_config.max_outbound_datagram_size = kPerfMaxOutboundDatagramSize;
+    endpoint_config.max_outbound_datagram_size = config.max_outbound_datagram_size;
     endpoint_config.transport.congestion_control = config.congestion_control;
     endpoint_config.transport.enable_hystart_plus_plus = perf_enable_hystart_plus_plus(config);
     endpoint_config.transport.send_stream_fairness = perf_send_stream_fairness(config);
     endpoint_config.transport.ack_eliciting_threshold = perf_ack_eliciting_threshold(config);
+    endpoint_config.transport.pmtud_max_datagram_size = config.pmtud_max_datagram_size;
     endpoint_config.transport.initial_max_data = kPerfTransferConnectionReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_local = kPerfTransferStreamReceiveWindow;
     endpoint_config.transport.initial_max_stream_data_bidi_remote =

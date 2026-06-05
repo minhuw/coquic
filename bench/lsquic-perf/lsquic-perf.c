@@ -851,6 +851,7 @@ static void server_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     ssize_t nr = lsquic_stream_readf(stream, discard_readf, NULL);
     if (nr == 0) {
         lsquic_stream_wantread(stream, 0);
+        lsquic_stream_shutdown(stream, 0);
         lsquic_stream_wantwrite(stream, 1);
     } else if (nr < 0 && errno != EWOULDBLOCK) {
         lsquic_stream_close(stream);

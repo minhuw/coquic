@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -9,7 +10,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <thread>
+#include <sys/uio.h>
 #include <utility>
 #include <vector>
 
@@ -20,24 +21,34 @@
 #include "quiche/quic/core/crypto/proof_source_x509.h"
 #include "quiche/quic/core/crypto/proof_verifier.h"
 #include "quiche/quic/core/crypto/quic_client_session_cache.h"
+#include "quiche/quic/core/quic_crypto_client_stream.h"
+#include "quiche/quic/core/quic_crypto_server_stream_base.h"
+#include "quiche/quic/core/quic_crypto_stream.h"
 #include "quiche/quic/core/io/quic_default_event_loop.h"
+#include "quiche/quic/core/quic_connection.h"
 #include "quiche/quic/core/quic_config.h"
 #include "quiche/quic/core/quic_connection_id.h"
 #include "quiche/quic/core/quic_constants.h"
 #include "quiche/quic/core/quic_default_clock.h"
+#include "quiche/quic/core/quic_default_connection_helper.h"
+#include "quiche/quic/core/quic_dispatcher.h"
 #include "quiche/quic/core/quic_server_id.h"
+#include "quiche/quic/core/quic_session.h"
+#include "quiche/quic/core/quic_stream.h"
 #include "quiche/quic/core/quic_time.h"
+#include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/quic_versions.h"
 #include "quiche/quic/platform/api/quic_default_proof_providers.h"
 #include "quiche/quic/platform/api/quic_ip_address.h"
 #include "quiche/quic/platform/api/quic_logging.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
 #include "quiche/quic/tools/fake_proof_verifier.h"
-#include "quiche/quic/tools/quic_default_client.h"
+#include "quiche/quic/tools/quic_client_base.h"
+#include "quiche/quic/tools/quic_client_default_network_helper.h"
 #include "quiche/quic/tools/quic_memory_cache_backend.h"
 #include "quiche/quic/tools/quic_name_lookup.h"
 #include "quiche/quic/tools/quic_server.h"
-#include "quiche/common/http/http_header_block.h"
+#include "quiche/quic/tools/quic_simple_crypto_server_stream_helper.h"
 #include "quiche/common/platform/api/quiche_reference_counted.h"
 #include "quiche/common/platform/api/quiche_system_event_loop.h"
 
@@ -46,11 +57,14 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using Duration = std::chrono::microseconds;
 
-constexpr char kApplicationProtocol[] = "h3";
+constexpr char kApplicationProtocol[] = "coquic-perf/1";
 constexpr uint64_t kDefaultMaxRunRequests = 4096;
 constexpr uint64_t kConnectionWindow = 32ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kStreamWindow = 16ULL * 1024ULL * 1024ULL;
 constexpr uint32_t kMaxStreams = 1'000'000;
+constexpr size_t kRequestHeaderSize = 16;
+constexpr size_t kWriteChunkSize = 32 * 1024;
+constexpr Duration kDrainTimeout = Duration(2'000'000);
 
 struct OptionalU64 {
     uint64_t value = 0;
@@ -310,7 +324,7 @@ GoogleQuicheConfig QuicConfigForPerf() {
 }
 
 quic::ParsedQuicVersionVector SupportedVersions() {
-    quic::ParsedQuicVersionVector versions = quic::CurrentSupportedVersions();
+    quic::ParsedQuicVersionVector versions = {quic::ParsedQuicVersion::RFCv1()};
     for (const quic::ParsedQuicVersion &version : versions) {
         quic::QuicEnableVersion(version);
     }
@@ -350,7 +364,567 @@ quic::QuicSocketAddress ResolveRemote(const Config &cfg) {
     return addr;
 }
 
-std::unique_ptr<quic::QuicDefaultClient>
+void EncodeU64(std::array<char, kRequestHeaderSize> *header, size_t offset, uint64_t value) {
+    for (size_t i = 0; i < 8; ++i) {
+        (*header)[offset + i] = static_cast<char>((value >> (56 - i * 8)) & 0xff);
+    }
+}
+
+uint64_t DecodeU64(const std::array<char, kRequestHeaderSize> &header, size_t offset) {
+    uint64_t value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        value = (value << 8) | static_cast<unsigned char>(header[offset + i]);
+    }
+    return value;
+}
+
+absl::string_view ZeroChunk(size_t size) {
+    static const std::array<char, kWriteChunkSize> zeros = {};
+    return absl::string_view(zeros.data(), size);
+}
+
+struct StreamCompletion {
+    bool counts = false;
+    uint64_t request_bytes = 0;
+    uint64_t received = 0;
+    Duration latency = Duration::zero();
+};
+
+class PerfClientSession;
+
+class PerfStream : public quic::QuicStream {
+  public:
+    PerfStream(quic::QuicStreamId id, quic::QuicSession *session, bool is_server,
+               PerfClientSession *client_session);
+
+    void StartClientRequest(uint64_t request_bytes, uint64_t response_bytes, bool counts,
+                            Clock::time_point start);
+
+    void OnDataAvailable() override;
+    void OnCanWriteNewData() override;
+    void OnStreamReset(const quic::QuicRstStreamFrame &frame) override;
+
+  private:
+    size_t ConsumeServerBytes(absl::string_view data);
+    size_t ConsumeClientBytes(absl::string_view data);
+    void OnPeerFin();
+    void SendMore();
+    void CompleteClientStream();
+    void FailClientStream(std::string message);
+
+    const bool is_server_;
+    PerfClientSession *client_session_;
+    std::array<char, kRequestHeaderSize> header_ = {};
+    size_t header_len_ = 0;
+    size_t header_sent_ = 0;
+    uint64_t request_bytes_ = 0;
+    uint64_t response_bytes_ = 0;
+    uint64_t request_received_ = 0;
+    uint64_t request_sent_ = 0;
+    uint64_t response_received_ = 0;
+    uint64_t response_sent_ = 0;
+    bool request_fin_sent_ = false;
+    bool request_complete_ = false;
+    bool response_fin_sent_ = false;
+    bool peer_fin_read_ = false;
+    bool client_done_ = false;
+    bool counts_ = false;
+    Clock::time_point start_ = Clock::now();
+};
+
+class PerfSessionBase : public quic::QuicSession {
+  public:
+    PerfSessionBase(quic::QuicConnection *connection, bool owns_connection,
+                    quic::QuicSession::Visitor *owner, const quic::QuicConfig &config,
+                    const quic::ParsedQuicVersionVector &supported_versions)
+        : quic::QuicSession(connection, owner, config, supported_versions,
+                            /*num_expected_unidirectional_static_streams=*/0),
+          owns_connection_(owns_connection) {
+    }
+
+    ~PerfSessionBase() override {
+        if (owns_connection_) {
+            DeleteConnection();
+        }
+    }
+
+    void Initialize() override {
+        crypto_stream_ = CreateCryptoStream();
+        quic::QuicSession::Initialize();
+    }
+
+    std::vector<std::string> GetAlpnsToOffer() const override {
+        return {std::string(kApplicationProtocol)};
+    }
+
+    std::vector<absl::string_view>::const_iterator
+    SelectAlpn(const std::vector<absl::string_view> &alpns) const override {
+        return std::find(alpns.cbegin(), alpns.cend(), absl::string_view(kApplicationProtocol));
+    }
+
+    quic::QuicCryptoStream *GetMutableCryptoStream() override {
+        return crypto_stream_.get();
+    }
+
+    const quic::QuicCryptoStream *GetCryptoStream() const override {
+        return crypto_stream_.get();
+    }
+
+    bool ShouldKeepConnectionAlive() const override {
+        return true;
+    }
+
+  protected:
+    virtual std::unique_ptr<quic::QuicCryptoStream> CreateCryptoStream() = 0;
+
+  private:
+    bool owns_connection_;
+    std::unique_ptr<quic::QuicCryptoStream> crypto_stream_;
+};
+
+class PerfClientSession : public PerfSessionBase,
+                          public quic::QuicCryptoClientStream::ProofHandler {
+  public:
+    PerfClientSession(quic::QuicConnection *connection, quic::QuicSession::Visitor *owner,
+                      const quic::QuicConfig &config,
+                      const quic::ParsedQuicVersionVector &supported_versions,
+                      const quic::QuicServerId &server_id,
+                      quic::QuicCryptoClientConfig *crypto_config)
+        : PerfSessionBase(connection, /*owns_connection=*/true, owner, config, supported_versions),
+          server_id_(server_id), crypto_config_(crypto_config) {
+    }
+
+    void Initialize() override {
+        PerfSessionBase::Initialize();
+        static_cast<quic::QuicCryptoClientStreamBase *>(GetMutableCryptoStream())->CryptoConnect();
+    }
+
+    bool OpenRequest(uint64_t request_bytes, uint64_t response_bytes, bool counts) {
+        if (!CanOpenNextOutgoingBidirectionalStream()) {
+            return false;
+        }
+        quic::QuicStreamId id = GetNextOutgoingBidirectionalStreamId();
+        auto stream = std::make_unique<PerfStream>(id, this, /*is_server=*/false, this);
+        PerfStream *raw = stream.get();
+        ActivateStream(std::move(stream));
+        ++active_requests_;
+        raw->StartClientRequest(request_bytes, response_bytes, counts, Clock::now());
+        return true;
+    }
+
+    void OnStreamComplete(uint64_t request_bytes, uint64_t received, bool counts,
+                          Clock::time_point start) {
+        if (active_requests_ > 0) {
+            --active_requests_;
+        }
+        completed_.push_back({counts, request_bytes, received,
+                              std::chrono::duration_cast<Duration>(Clock::now() - start)});
+    }
+
+    void OnStreamFailed(std::string message) {
+        if (active_requests_ > 0) {
+            --active_requests_;
+        }
+        if (error_message_.empty()) {
+            error_message_ = std::move(message);
+        }
+    }
+
+    std::vector<StreamCompletion> TakeCompletions() {
+        std::vector<StreamCompletion> completed;
+        completed.swap(completed_);
+        return completed;
+    }
+
+    uint64_t active_requests() const {
+        return active_requests_;
+    }
+
+    bool HasActiveRequests() const {
+        return active_requests_ > 0 || GetNumActiveStreams() + num_draining_streams() > 0;
+    }
+
+    const std::string &error_message() const {
+        return error_message_;
+    }
+
+    int GetNumSentClientHellos() const {
+        return static_cast<const quic::QuicCryptoClientStreamBase *>(GetCryptoStream())
+            ->num_sent_client_hellos();
+    }
+
+    bool EarlyDataAccepted() const {
+        return static_cast<const quic::QuicCryptoClientStreamBase *>(GetCryptoStream())
+            ->EarlyDataAccepted();
+    }
+
+    bool ReceivedInchoateReject() const {
+        return static_cast<const quic::QuicCryptoClientStreamBase *>(GetCryptoStream())
+            ->ReceivedInchoateReject();
+    }
+
+    int GetNumReceivedServerConfigUpdates() const {
+        return static_cast<const quic::QuicCryptoClientStreamBase *>(GetCryptoStream())
+            ->num_scup_messages_received();
+    }
+
+    void OnProofValid(const quic::QuicCryptoClientConfig::CachedState &) override {
+    }
+
+    void OnProofVerifyDetailsAvailable(const quic::ProofVerifyDetails &) override {
+    }
+
+    bool OnCertificateRequested(const std::vector<std::string> &) override {
+        return false;
+    }
+
+  protected:
+    std::unique_ptr<quic::QuicCryptoStream> CreateCryptoStream() override {
+        std::unique_ptr<quic::ProofVerifyContext> verify_context;
+        if (crypto_config_->proof_verifier() != nullptr) {
+            verify_context = crypto_config_->proof_verifier()->CreateDefaultContext();
+        }
+        return std::make_unique<quic::QuicCryptoClientStream>(
+            server_id_, this, std::move(verify_context), crypto_config_, this,
+            /*has_application_state=*/false);
+    }
+
+    quic::QuicStream *CreateIncomingStream(quic::QuicStreamId id) override {
+        auto stream = std::make_unique<PerfStream>(id, this, /*is_server=*/false, this);
+        PerfStream *raw = stream.get();
+        ActivateStream(std::move(stream));
+        return raw;
+    }
+
+  private:
+    quic::QuicServerId server_id_;
+    quic::QuicCryptoClientConfig *crypto_config_;
+    uint64_t active_requests_ = 0;
+    std::vector<StreamCompletion> completed_;
+    std::string error_message_;
+};
+
+class PerfServerSession : public PerfSessionBase {
+  public:
+    PerfServerSession(quic::QuicConnection *connection, quic::QuicSession::Visitor *owner,
+                      const quic::QuicConfig &config,
+                      const quic::ParsedQuicVersionVector &supported_versions,
+                      const quic::QuicCryptoServerConfig *crypto_config,
+                      quic::QuicCompressedCertsCache *compressed_certs_cache,
+                      quic::QuicCryptoServerStreamBase::Helper *helper)
+        : PerfSessionBase(connection, /*owns_connection=*/true, owner, config, supported_versions),
+          crypto_config_(crypto_config), compressed_certs_cache_(compressed_certs_cache),
+          helper_(helper) {
+    }
+
+  protected:
+    std::unique_ptr<quic::QuicCryptoStream> CreateCryptoStream() override {
+        return quic::CreateCryptoServerStream(crypto_config_, compressed_certs_cache_, this,
+                                              helper_);
+    }
+
+    quic::QuicStream *CreateIncomingStream(quic::QuicStreamId id) override {
+        auto stream = std::make_unique<PerfStream>(id, this, /*is_server=*/true, nullptr);
+        PerfStream *raw = stream.get();
+        ActivateStream(std::move(stream));
+        return raw;
+    }
+
+  private:
+    const quic::QuicCryptoServerConfig *crypto_config_;
+    quic::QuicCompressedCertsCache *compressed_certs_cache_;
+    quic::QuicCryptoServerStreamBase::Helper *helper_;
+};
+
+PerfStream::PerfStream(quic::QuicStreamId id, quic::QuicSession *session, bool is_server,
+                       PerfClientSession *client_session)
+    : quic::QuicStream(id, session, /*is_static=*/false, quic::BIDIRECTIONAL),
+      is_server_(is_server), client_session_(client_session) {
+}
+
+void PerfStream::StartClientRequest(uint64_t request_bytes, uint64_t response_bytes, bool counts,
+                                    Clock::time_point start) {
+    request_bytes_ = request_bytes;
+    response_bytes_ = response_bytes;
+    counts_ = counts;
+    start_ = start;
+    EncodeU64(&header_, 0, request_bytes_);
+    EncodeU64(&header_, 8, response_bytes_);
+    SendMore();
+}
+
+size_t PerfStream::ConsumeServerBytes(absl::string_view data) {
+    size_t consumed = 0;
+    while (consumed < data.size()) {
+        if (header_len_ < header_.size()) {
+            size_t chunk = std::min(header_.size() - header_len_, data.size() - consumed);
+            std::copy(data.begin() + consumed, data.begin() + consumed + chunk,
+                      header_.begin() + header_len_);
+            header_len_ += chunk;
+            consumed += chunk;
+            if (header_len_ == header_.size()) {
+                request_bytes_ = DecodeU64(header_, 0);
+                response_bytes_ = DecodeU64(header_, 8);
+            }
+            continue;
+        }
+
+        uint64_t remaining = request_bytes_ - request_received_;
+        if (remaining == 0) {
+            Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
+            return data.size();
+        }
+        size_t chunk = static_cast<size_t>(
+            std::min<uint64_t>(remaining, static_cast<uint64_t>(data.size() - consumed)));
+        request_received_ += chunk;
+        consumed += chunk;
+    }
+    return consumed;
+}
+
+size_t PerfStream::ConsumeClientBytes(absl::string_view data) {
+    uint64_t remaining = response_bytes_ - response_received_;
+    if (static_cast<uint64_t>(data.size()) > remaining) {
+        FailClientStream("Google QUICHE stream received more response bytes than requested");
+        Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
+        return data.size();
+    }
+    response_received_ += data.size();
+    return data.size();
+}
+
+void PerfStream::OnDataAvailable() {
+    while (sequencer()->HasBytesToRead()) {
+        iovec region;
+        if (!sequencer()->GetReadableRegion(&region)) {
+            break;
+        }
+        absl::string_view data(static_cast<const char *>(region.iov_base), region.iov_len);
+        size_t consumed = is_server_ ? ConsumeServerBytes(data) : ConsumeClientBytes(data);
+        if (consumed == 0) {
+            break;
+        }
+        sequencer()->MarkConsumed(consumed);
+    }
+
+    if (sequencer()->IsClosed() && !peer_fin_read_) {
+        peer_fin_read_ = true;
+        OnPeerFin();
+        OnFinRead();
+    }
+}
+
+void PerfStream::OnPeerFin() {
+    if (is_server_) {
+        if (header_len_ != header_.size() || request_received_ != request_bytes_) {
+            Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
+            return;
+        }
+        request_complete_ = true;
+        SendMore();
+        return;
+    }
+
+    if (response_received_ != response_bytes_) {
+        FailClientStream("Google QUICHE stream received an unexpected response byte count");
+        Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
+        return;
+    }
+    CompleteClientStream();
+}
+
+void PerfStream::SendMore() {
+    if (is_server_) {
+        while (request_complete_ && !response_fin_sent_ && CanWriteNewData()) {
+            uint64_t remaining = response_bytes_ - response_sent_;
+            size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, kWriteChunkSize));
+            bool fin = chunk == remaining;
+            WriteOrBufferData(ZeroChunk(chunk), fin, nullptr);
+            response_sent_ += chunk;
+            if (fin) {
+                response_fin_sent_ = true;
+            }
+            if (chunk == 0 || !CanWriteNewData()) {
+                break;
+            }
+        }
+        return;
+    }
+
+    while (!request_fin_sent_ && CanWriteNewData()) {
+        if (header_sent_ < header_.size()) {
+            size_t chunk = std::min(header_.size() - header_sent_, kWriteChunkSize);
+            bool fin = header_sent_ + chunk == header_.size() && request_bytes_ == 0;
+            WriteOrBufferData(absl::string_view(header_.data() + header_sent_, chunk), fin,
+                              nullptr);
+            header_sent_ += chunk;
+            if (fin) {
+                request_fin_sent_ = true;
+            }
+            continue;
+        }
+
+        uint64_t remaining = request_bytes_ - request_sent_;
+        size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, kWriteChunkSize));
+        bool fin = chunk == remaining;
+        WriteOrBufferData(ZeroChunk(chunk), fin, nullptr);
+        request_sent_ += chunk;
+        if (fin) {
+            request_fin_sent_ = true;
+        }
+        if (chunk == 0 || !CanWriteNewData()) {
+            break;
+        }
+    }
+}
+
+void PerfStream::OnCanWriteNewData() {
+    SendMore();
+}
+
+void PerfStream::OnStreamReset(const quic::QuicRstStreamFrame &frame) {
+    if (!is_server_) {
+        FailClientStream("Google QUICHE stream was reset");
+    }
+    quic::QuicStream::OnStreamReset(frame);
+}
+
+void PerfStream::CompleteClientStream() {
+    if (client_done_) {
+        return;
+    }
+    client_done_ = true;
+    if (client_session_ != nullptr) {
+        client_session_->OnStreamComplete(request_bytes_, response_received_, counts_, start_);
+    }
+}
+
+void PerfStream::FailClientStream(std::string message) {
+    if (client_done_) {
+        return;
+    }
+    client_done_ = true;
+    if (client_session_ != nullptr) {
+        client_session_->OnStreamFailed(std::move(message));
+    }
+}
+
+class PerfClient : public quic::QuicClientBase {
+  public:
+    PerfClient(quic::QuicSocketAddress server_address, const quic::QuicServerId &server_id,
+               const quic::ParsedQuicVersionVector &supported_versions,
+               const quic::QuicConfig &config, quic::QuicEventLoop *event_loop,
+               std::unique_ptr<quic::ProofVerifier> proof_verifier,
+               std::unique_ptr<quic::SessionCache> session_cache)
+        : quic::QuicClientBase(
+              server_id, supported_versions, config, new quic::QuicDefaultConnectionHelper(),
+              event_loop->CreateAlarmFactory().release(),
+              std::make_unique<quic::QuicClientDefaultNetworkHelper>(event_loop, this),
+              std::move(proof_verifier), std::move(session_cache)) {
+        set_server_address(server_address);
+        crypto_config()->set_alpn(kApplicationProtocol);
+    }
+
+    ~PerfClient() override {
+        ResetSession();
+    }
+
+    PerfClientSession *perf_session() {
+        return static_cast<PerfClientSession *>(session());
+    }
+
+    const PerfClientSession *perf_session() const {
+        return static_cast<const PerfClientSession *>(session());
+    }
+
+    bool EarlyDataAccepted() override {
+        return perf_session() != nullptr && perf_session()->EarlyDataAccepted();
+    }
+
+    bool ReceivedInchoateReject() override {
+        return perf_session() != nullptr && perf_session()->ReceivedInchoateReject();
+    }
+
+  protected:
+    int GetNumSentClientHellosFromSession() override {
+        return perf_session() == nullptr ? 0 : perf_session()->GetNumSentClientHellos();
+    }
+
+    int GetNumReceivedServerConfigUpdatesFromSession() override {
+        return perf_session() == nullptr ? 0 : perf_session()->GetNumReceivedServerConfigUpdates();
+    }
+
+    std::unique_ptr<quic::QuicSession>
+    CreateQuicClientSession(const quic::ParsedQuicVersionVector &supported_versions,
+                            quic::QuicConnection *connection) override {
+        return std::make_unique<PerfClientSession>(connection, this, *config(), supported_versions,
+                                                   server_id(), crypto_config());
+    }
+
+    bool HasActiveRequests() override {
+        return perf_session() != nullptr && perf_session()->HasActiveRequests();
+    }
+};
+
+class PerfDispatcher : public quic::QuicDispatcher {
+  public:
+    PerfDispatcher(const quic::QuicConfig *config,
+                   const quic::QuicCryptoServerConfig *crypto_config,
+                   quic::QuicVersionManager *version_manager,
+                   std::unique_ptr<quic::QuicConnectionHelperInterface> helper,
+                   std::unique_ptr<quic::QuicCryptoServerStreamBase::Helper> session_helper,
+                   std::unique_ptr<quic::QuicAlarmFactory> alarm_factory,
+                   uint8_t expected_server_connection_id_length,
+                   quic::ConnectionIdGeneratorInterface &generator)
+        : quic::QuicDispatcher(config, crypto_config, version_manager, std::move(helper),
+                               std::move(session_helper), std::move(alarm_factory),
+                               expected_server_connection_id_length, generator) {
+    }
+
+  protected:
+    std::unique_ptr<quic::QuicSession>
+    CreateQuicSession(quic::QuicConnectionId connection_id,
+                      const quic::QuicSocketAddress &self_address,
+                      const quic::QuicSocketAddress &peer_address, absl::string_view,
+                      const quic::ParsedQuicVersion &version, const quic::ParsedClientHello &,
+                      quic::ConnectionIdGeneratorInterface &connection_id_generator) override {
+        quic::QuicConnection *connection = new quic::QuicConnection(
+            connection_id, self_address, peer_address, helper(), alarm_factory(), writer(),
+            /*owns_writer=*/false, quic::Perspective::IS_SERVER,
+            quic::ParsedQuicVersionVector{version}, connection_id_generator);
+
+        auto session = std::make_unique<PerfServerSession>(
+            connection, this, config(), GetSupportedVersions(), crypto_config(),
+            compressed_certs_cache(), session_helper());
+        session->Initialize();
+        return session;
+    }
+};
+
+class PerfServer : public quic::QuicServer {
+  public:
+    PerfServer(std::unique_ptr<quic::ProofSource> proof_source,
+               std::unique_ptr<quic::ProofVerifier> proof_verifier, const quic::QuicConfig &config,
+               const quic::QuicCryptoServerConfig::ConfigOptions &crypto_config_options,
+               const quic::ParsedQuicVersionVector &supported_versions,
+               quic::QuicSimpleServerBackend *backend, uint8_t expected_server_connection_id_length)
+        : quic::QuicServer(std::move(proof_source), std::move(proof_verifier), config,
+                           crypto_config_options, supported_versions, backend,
+                           expected_server_connection_id_length) {
+    }
+
+  protected:
+    quic::QuicDispatcher *CreateQuicDispatcher() override {
+        return new PerfDispatcher(&config(), &crypto_config(), version_manager(),
+                                  std::make_unique<quic::QuicDefaultConnectionHelper>(),
+                                  std::make_unique<quic::QuicSimpleCryptoServerStreamHelper>(),
+                                  event_loop()->CreateAlarmFactory(),
+                                  expected_server_connection_id_length(),
+                                  connection_id_generator());
+    }
+};
+
+std::unique_ptr<PerfClient>
 ConnectClient(const Config &cfg, quic::QuicEventLoop *event_loop,
               std::unique_ptr<quic::SessionCache> session_cache = nullptr) {
     std::unique_ptr<quic::ProofVerifier> verifier =
@@ -359,12 +933,9 @@ ConnectClient(const Config &cfg, quic::QuicEventLoop *event_loop,
     if (verifier == nullptr) {
         throw std::runtime_error("google-quiche-perf could not create a peer certificate verifier");
     }
-    auto client = std::make_unique<quic::QuicDefaultClient>(
+    auto client = std::make_unique<PerfClient>(
         ResolveRemote(cfg), quic::QuicServerId(cfg.server_name, cfg.port), SupportedVersions(),
         QuicConfigForPerf(), event_loop, std::move(verifier), std::move(session_cache));
-    client->set_drop_response_body(true);
-    client->set_store_response(true);
-    client->set_max_inbound_header_list_size(128 * 1024);
     client->set_initial_max_packet_length(quic::kDefaultMaxPacketSize);
     if (!client->Initialize()) {
         throw std::runtime_error("failed to initialize Google QUICHE client");
@@ -379,136 +950,225 @@ ConnectClient(const Config &cfg, quic::QuicEventLoop *event_loop,
     return client;
 }
 
-std::string RequestBody(uint64_t request_bytes) {
-    if (request_bytes > 128ULL * 1024ULL * 1024ULL) {
-        throw std::runtime_error("request body is too large for google-quiche-perf");
+void CheckClient(const PerfClient &client) {
+    const PerfClientSession *session = client.perf_session();
+    if (session != nullptr && !session->error_message().empty()) {
+        throw std::runtime_error(session->error_message());
     }
-    return std::string(static_cast<size_t>(request_bytes), 'x');
+    if (!client.connected()) {
+        std::ostringstream error_message;
+        error_message << "Google QUICHE connection failed";
+        if (client.session() != nullptr) {
+            error_message << ": " << quic::QuicErrorCodeToString(client.session()->error()) << " "
+                          << client.session()->error_details();
+        }
+        throw std::runtime_error(error_message.str());
+    }
 }
 
-quiche::HttpHeaderBlock RequestHeaders(const Config &cfg, uint64_t response_bytes, bool has_body) {
-    quiche::HttpHeaderBlock headers;
-    headers[":method"] = has_body ? "POST" : "GET";
-    headers[":scheme"] = "https";
-    headers[":authority"] = absl::StrCat(cfg.server_name, ":", cfg.port);
-    headers[":path"] = absl::StrCat("/", response_bytes);
-    return headers;
+std::vector<StreamCompletion> DriveClient(PerfClient *client) {
+    client->WaitForEvents();
+    CheckClient(*client);
+    return client->perf_session()->TakeCompletions();
 }
 
-void RunRequests(const Config &cfg, uint64_t count, uint64_t response_bytes, uint64_t request_bytes,
-                 Counters *counters, bool counts_latency, bool one_connection_per_request,
-                 quic::QuicEventLoop *event_loop) {
-    count = std::max<uint64_t>(1, std::min<uint64_t>(count, kDefaultMaxRunRequests));
-    auto client = ConnectClient(cfg, event_loop,
-                                one_connection_per_request && count > 1
-                                    ? std::make_unique<quic::QuicClientSessionCache>()
-                                    : nullptr);
-    std::string body = RequestBody(request_bytes);
-    quiche::HttpHeaderBlock headers = RequestHeaders(cfg, response_bytes, !body.empty());
-    uint64_t completed = 0;
-
-    for (uint64_t i = 0; i < count; ++i) {
-        Clock::time_point start = Clock::now();
-        client->SendRequestAndWaitForResponse(headers, body, true);
-        if (!client->connected()) {
-            throw std::runtime_error(
-                absl::StrCat("Google QUICHE request caused connection failure: ",
-                             quic::QuicErrorCodeToString(client->session()->error())));
-        }
-        int code = client->latest_response_code();
-        if (code < 200 || code >= 300) {
-            throw std::runtime_error(
-                absl::StrCat("Google QUICHE request failed with HTTP status ", code));
-        }
-        ++completed;
-        counters->bytes_sent += request_bytes;
-        counters->bytes_received += response_bytes;
+void AddCompletion(const StreamCompletion &completion, Counters *counters, bool count_requests,
+                   bool count_latency) {
+    if (!completion.counts) {
+        return;
+    }
+    counters->bytes_sent += completion.request_bytes;
+    counters->bytes_received += completion.received;
+    if (count_requests) {
         counters->requests_completed += 1;
-        if (counts_latency) {
-            counters->latencies.push_back(
-                std::chrono::duration_cast<Duration>(Clock::now() - start));
-        }
+    }
+    if (count_latency) {
+        counters->latencies.push_back(completion.latency);
+    }
+}
 
-        if (i + 1 < count) {
-            if (one_connection_per_request) {
-                client->Disconnect();
-                if (!client->Initialize()) {
-                    throw std::runtime_error("failed to reinitialize Google QUICHE client");
-                }
-                if (!client->Connect()) {
-                    std::ostringstream error_message;
-                    error_message << "failed to reconnect Google QUICHE client: "
-                                  << quic::QuicErrorCodeToString(client->session()->error()) << " "
-                                  << client->session()->error_details();
-                    throw std::runtime_error(error_message.str());
-                }
-            } else if (completed >= cfg.requests_in_flight) {
-                // QUICHE's HTTP client waits synchronously, so requests-in-flight is a
-                // batch-size signal for parity with the old wrapper.
-            }
+std::vector<StreamCompletion> OpenRequestOrThrow(PerfClient *client, uint64_t request_bytes,
+                                                 uint64_t response_bytes, bool counts) {
+    std::vector<StreamCompletion> completions;
+    while (!client->perf_session()->OpenRequest(request_bytes, response_bytes, counts)) {
+        for (const StreamCompletion &completion : DriveClient(client)) {
+            completions.push_back(completion);
         }
+    }
+    CheckClient(*client);
+    return completions;
+}
+
+void DrainClient(PerfClient *client) {
+    Clock::time_point deadline = Clock::now() + kDrainTimeout;
+    while (client->perf_session()->active_requests() > 0 && Clock::now() < deadline) {
+        (void)DriveClient(client);
     }
 }
 
 void RunBulk(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_loop) {
     uint64_t request_bytes = cfg.request_bytes;
     uint64_t response_bytes = cfg.response_bytes;
-    uint64_t unit = std::max<uint64_t>(1, response_bytes);
     if (cfg.direction == "upload") {
         request_bytes = std::max(cfg.request_bytes, cfg.response_bytes);
         response_bytes = 0;
-        unit = std::max<uint64_t>(1, request_bytes);
     }
 
+    auto client = ConnectClient(cfg, event_loop);
     if (cfg.total_bytes.set) {
-        uint64_t count = std::max<uint64_t>(1, CeilDiv(cfg.total_bytes.value, unit));
-        RunRequests(cfg, count, response_bytes, request_bytes, counters, false, false, event_loop);
+        uint64_t per_stream = cfg.total_bytes.value / cfg.streams;
+        uint64_t remainder = cfg.total_bytes.value % cfg.streams;
+        for (uint64_t i = 0; i < cfg.streams; ++i) {
+            uint64_t target = per_stream + (i < remainder ? 1 : 0);
+            for (const StreamCompletion &completion : OpenRequestOrThrow(
+                     client.get(), cfg.direction == "upload" ? target : request_bytes,
+                     cfg.direction == "upload" ? response_bytes : target, true)) {
+                AddCompletion(completion, counters, false, false);
+            }
+        }
+        while (client->perf_session()->active_requests() > 0) {
+            for (const StreamCompletion &completion : DriveClient(client.get())) {
+                AddCompletion(completion, counters, false, false);
+            }
+        }
         return;
     }
 
-    Clock::time_point deadline = Clock::now() + cfg.duration;
-    while (Clock::now() < deadline) {
-        uint64_t count = std::max<uint64_t>(1, cfg.streams * cfg.connections);
-        Clock::time_point before = Clock::now();
-        RunRequests(cfg, count, response_bytes, request_bytes, counters, false, false, event_loop);
-        if (Clock::now() - before > cfg.duration * 2) {
-            break;
+    Clock::time_point measure_start = Clock::now() + cfg.warmup;
+    Clock::time_point deadline = measure_start + cfg.duration;
+    for (uint64_t i = 0; i < cfg.streams; ++i) {
+        for (const StreamCompletion &completion : OpenRequestOrThrow(
+                 client.get(), request_bytes, response_bytes, Clock::now() >= measure_start)) {
+            AddCompletion(completion, counters, false, false);
         }
     }
+    while (Clock::now() < deadline) {
+        for (const StreamCompletion &completion : DriveClient(client.get())) {
+            AddCompletion(completion, counters, false, false);
+        }
+        while (client->perf_session()->active_requests() < cfg.streams && Clock::now() < deadline) {
+            for (const StreamCompletion &completion : OpenRequestOrThrow(
+                     client.get(), request_bytes, response_bytes, Clock::now() >= measure_start)) {
+                AddCompletion(completion, counters, false, false);
+            }
+        }
+    }
+    DrainClient(client.get());
 }
 
 void RunRr(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_loop) {
-    if (cfg.requests.set) {
-        RunRequests(cfg, cfg.requests.value, cfg.response_bytes, cfg.request_bytes, counters, true,
-                    false, event_loop);
-        return;
+    auto client = ConnectClient(cfg, event_loop);
+    Clock::time_point measure_start = Clock::now() + cfg.warmup;
+    Clock::time_point deadline = measure_start + cfg.duration;
+    uint64_t started = 0;
+    while (client->perf_session()->active_requests() < cfg.requests_in_flight) {
+        for (const StreamCompletion &completion :
+             OpenRequestOrThrow(client.get(), cfg.request_bytes, cfg.response_bytes,
+                                cfg.requests.set || Clock::now() >= measure_start)) {
+            AddCompletion(completion, counters, true, true);
+        }
+        ++started;
+        if (cfg.requests.set && started >= cfg.requests.value) {
+            break;
+        }
     }
 
-    Clock::time_point deadline = Clock::now() + cfg.duration;
-    while (Clock::now() < deadline) {
-        uint64_t count = std::max<uint64_t>(
-            1, std::min<uint64_t>(cfg.requests_in_flight, kDefaultMaxRunRequests));
-        RunRequests(cfg, count, cfg.response_bytes, cfg.request_bytes, counters, true, false,
-                    event_loop);
+    for (;;) {
+        if (cfg.requests.set && started >= cfg.requests.value &&
+            client->perf_session()->active_requests() == 0) {
+            break;
+        }
+        if (!cfg.requests.set && Clock::now() >= deadline) {
+            break;
+        }
+
+        for (const StreamCompletion &completion : DriveClient(client.get())) {
+            AddCompletion(completion, counters, true, true);
+        }
+
+        while (client->perf_session()->active_requests() < cfg.requests_in_flight) {
+            if (cfg.requests.set && started >= cfg.requests.value) {
+                break;
+            }
+            if (!cfg.requests.set && Clock::now() >= deadline) {
+                break;
+            }
+            for (const StreamCompletion &completion :
+                 OpenRequestOrThrow(client.get(), cfg.request_bytes, cfg.response_bytes,
+                                    cfg.requests.set || Clock::now() >= measure_start)) {
+                AddCompletion(completion, counters, true, true);
+            }
+            ++started;
+        }
+    }
+    DrainClient(client.get());
+}
+
+struct CrrClient {
+    std::unique_ptr<PerfClient> client;
+    bool request_opened = false;
+    bool counts = false;
+};
+
+void FillCrrClients(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_loop,
+                    Clock::time_point measure_start, Clock::time_point deadline, uint64_t *started,
+                    std::vector<CrrClient> *clients) {
+    while (clients->size() < cfg.connections) {
+        if (cfg.requests.set && *started >= cfg.requests.value) {
+            break;
+        }
+        if (!cfg.requests.set && Clock::now() >= deadline) {
+            break;
+        }
+        try {
+            std::unique_ptr<quic::SessionCache> session_cache;
+            if (!cfg.requests.set) {
+                session_cache = std::make_unique<quic::QuicClientSessionCache>();
+            }
+            auto client = ConnectClient(cfg, event_loop, std::move(session_cache));
+            bool counts = cfg.requests.set || Clock::now() >= measure_start;
+            clients->push_back({std::move(client), false, counts});
+            ++*started;
+        } catch (const std::exception &) {
+            if (cfg.requests.set) {
+                throw;
+            }
+            counters->skipped_setup_errors += 1;
+        }
     }
 }
 
 void RunCrr(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_loop) {
-    if (cfg.requests.set) {
-        uint64_t remaining = cfg.requests.value;
-        while (remaining > 0) {
-            uint64_t batch = std::min<uint64_t>(remaining, cfg.connections);
-            RunRequests(cfg, batch, cfg.response_bytes, cfg.request_bytes, counters, true, true,
-                        event_loop);
-            remaining -= batch;
-        }
-        return;
-    }
+    Clock::time_point measure_start = Clock::now() + cfg.warmup;
+    Clock::time_point deadline = measure_start + cfg.duration;
+    uint64_t started = 0;
+    std::vector<CrrClient> clients;
+    clients.reserve(
+        static_cast<size_t>(std::min<uint64_t>(cfg.connections, kDefaultMaxRunRequests)));
+    FillCrrClients(cfg, counters, event_loop, measure_start, deadline, &started, &clients);
 
-    Clock::time_point deadline = Clock::now() + cfg.duration;
-    while (Clock::now() < deadline) {
-        RunRequests(cfg, std::max<uint64_t>(1, cfg.connections), cfg.response_bytes,
-                    cfg.request_bytes, counters, true, true, event_loop);
+    while (!clients.empty() || (cfg.requests.set && started < cfg.requests.value) ||
+           (!cfg.requests.set && Clock::now() < deadline)) {
+        size_t index = 0;
+        while (index < clients.size()) {
+            CrrClient &entry = clients[index];
+            if (!entry.request_opened && entry.client->connected()) {
+                for (const StreamCompletion &completion : OpenRequestOrThrow(
+                         entry.client.get(), cfg.request_bytes, cfg.response_bytes, entry.counts)) {
+                    AddCompletion(completion, counters, true, true);
+                }
+                entry.request_opened = true;
+            }
+            for (const StreamCompletion &completion : DriveClient(entry.client.get())) {
+                AddCompletion(completion, counters, true, true);
+            }
+            if (entry.request_opened && entry.client->perf_session()->active_requests() == 0) {
+                clients.erase(clients.begin() + static_cast<std::ptrdiff_t>(index));
+                continue;
+            }
+            ++index;
+        }
+        FillCrrClients(cfg, counters, event_loop, measure_start, deadline, &started, &clients);
     }
 }
 
@@ -536,9 +1196,6 @@ RunSummary RunClient(const Config &cfg) {
     auto event_loop = quic::GetDefaultEventLoop()->Create(quic::QuicDefaultClock::Get());
     Counters counters;
     Clock::time_point start = Clock::now();
-    if (cfg.warmup != Duration::zero() && !cfg.requests.set && !cfg.total_bytes.set) {
-        std::this_thread::sleep_for(cfg.warmup);
-    }
     Clock::time_point measure_start = Clock::now();
     std::string failure;
     try {
@@ -552,8 +1209,13 @@ RunSummary RunClient(const Config &cfg) {
     } catch (const std::exception &ex) {
         failure = ex.what();
     }
-    Duration elapsed = std::chrono::duration_cast<Duration>(
-        Clock::now() - (cfg.requests.set ? start : measure_start));
+    Duration elapsed;
+    if (cfg.requests.set || cfg.total_bytes.set) {
+        elapsed = std::chrono::duration_cast<Duration>(Clock::now() - start);
+    } else {
+        Duration raw_elapsed = std::chrono::duration_cast<Duration>(Clock::now() - measure_start);
+        elapsed = raw_elapsed > cfg.warmup ? raw_elapsed - cfg.warmup : Duration::zero();
+    }
     return MakeSummary(cfg, std::move(counters), elapsed, failure.empty() ? "ok" : "failed",
                        std::move(failure));
 }
@@ -561,10 +1223,9 @@ RunSummary RunClient(const Config &cfg) {
 int RunServer(const Config &cfg) {
     quiche::QuicheSystemEventLoop system_loop("google-quiche-perf-server");
     auto backend = std::make_unique<quic::QuicMemoryCacheBackend>();
-    backend->GenerateDynamicResponses();
-    quic::QuicServer server(LoadProofSource(cfg), nullptr, QuicConfigForPerf(),
-                            quic::QuicCryptoServerConfig::ConfigOptions(), SupportedVersions(),
-                            backend.get(), quic::kQuicDefaultConnectionIdLength);
+    PerfServer server(LoadProofSource(cfg), nullptr, QuicConfigForPerf(),
+                      quic::QuicCryptoServerConfig::ConfigOptions(), SupportedVersions(),
+                      backend.get(), quic::kQuicDefaultConnectionIdLength);
     quic::QuicIpAddress host;
     if (!host.FromString(cfg.host)) {
         host = quic::QuicIpAddress::Any6();

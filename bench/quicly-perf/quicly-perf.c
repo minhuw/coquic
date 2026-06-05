@@ -39,6 +39,7 @@
 #define MAX_BURST_PACKETS 10
 #define TRANSFER_CONNECTION_WINDOW (32U * 1024U * 1024U)
 #define TRANSFER_STREAM_WINDOW (16U * 1024U * 1024U)
+#define DRAIN_TIMEOUT_US 2000000ULL
 
 typedef struct {
     uint64_t value;
@@ -121,6 +122,7 @@ typedef struct {
     counters_t counters;
     uint64_t expected_requests;
     uint64_t completed_requests;
+    uint64_t active_requests;
     uint64_t request_bytes;
     uint64_t response_bytes;
     int counts_latency;
@@ -803,6 +805,9 @@ static void client_count_stream(client_stream_data_t *data) {
     batch->counters.bytes_received += data->response_bytes;
     ++batch->counters.requests_completed;
     ++batch->completed_requests;
+    if (batch->active_requests > 0) {
+        --batch->active_requests;
+    }
     if (data->counts_latency) {
         latency_push(&batch->counters.latencies, now_us() - data->started_at);
     }
@@ -1020,30 +1025,129 @@ static int prep_socket(int fd) {
     return 0;
 }
 
+static int open_request_stream(quicly_conn_t *conn, client_batch_t *batch, int counts) {
+    quicly_stream_t *stream = NULL;
+    quicly_error_t ret = quicly_open_stream(conn, &stream, 0);
+    if (ret != 0) {
+        set_batch_failure(batch, "quicly_open_stream failed");
+        return -1;
+    }
+    client_stream_data_t *data = stream->data;
+    data->batch = batch;
+    data->response_bytes = batch->response_bytes;
+    data->started_at = now_us();
+    data->counts_latency = counts && batch->counts_latency;
+
+    char req[128];
+    int req_len = snprintf(req, sizeof(req), "GET /%" PRIu64 "\r\n", batch->response_bytes);
+    if (req_len < 0 || (size_t)req_len >= sizeof(req) ||
+        quicly_streambuf_egress_write(stream, req, (size_t)req_len) != 0 ||
+        quicly_streambuf_egress_shutdown(stream) != 0) {
+        set_batch_failure(batch, "could not write request stream");
+        return -1;
+    }
+    ++batch->active_requests;
+    return 0;
+}
+
 static int enqueue_requests(quicly_conn_t *conn, client_batch_t *batch, uint64_t count) {
     for (uint64_t i = 0; i != count; ++i) {
-        quicly_stream_t *stream = NULL;
-        quicly_error_t ret = quicly_open_stream(conn, &stream, 0);
-        if (ret != 0) {
-            set_batch_failure(batch, "quicly_open_stream failed");
-            return -1;
-        }
-        client_stream_data_t *data = stream->data;
-        data->batch = batch;
-        data->response_bytes = batch->response_bytes;
-        data->started_at = now_us();
-        data->counts_latency = batch->counts_latency;
-
-        char req[128];
-        int req_len = snprintf(req, sizeof(req), "GET /%" PRIu64 "\r\n", batch->response_bytes);
-        if (req_len < 0 || (size_t)req_len >= sizeof(req) ||
-            quicly_streambuf_egress_write(stream, req, (size_t)req_len) != 0 ||
-            quicly_streambuf_egress_shutdown(stream) != 0) {
-            set_batch_failure(batch, "could not write request stream");
+        if (open_request_stream(conn, batch, batch->counts_latency) != 0) {
             return -1;
         }
     }
     return 0;
+}
+
+static int prepare_client_socket(const config_t *cfg, int *fd, struct sockaddr_storage *sa,
+                                 socklen_t *salen, char *failure_reason,
+                                 size_t failure_reason_len) {
+    if (resolve_address(sa, salen, cfg->host, cfg->port, 0) != 0) {
+        snprintf(failure_reason, failure_reason_len, "could not resolve server");
+        return -1;
+    }
+    *fd = socket(sa->ss_family, SOCK_DGRAM, IPPROTO_UDP);
+    if (*fd == -1) {
+        snprintf(failure_reason, failure_reason_len, "socket failed: %s", strerror(errno));
+        return -1;
+    }
+    if (prep_socket(*fd) != 0) {
+        close(*fd);
+        snprintf(failure_reason, failure_reason_len, "could not prepare socket");
+        return -1;
+    }
+    quicly_address_t local;
+    memset(&local, 0, sizeof(local));
+    local.sa.sa_family = sa->ss_family;
+    if (bind(*fd, &local.sa,
+             local.sa.sa_family == AF_INET ? sizeof(local.sin) : sizeof(local.sin6)) != 0) {
+        close(*fd);
+        snprintf(failure_reason, failure_reason_len, "bind failed: %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+static quicly_conn_t *connect_client(const config_t *cfg, const struct sockaddr_storage *sa,
+                                     char *failure_reason, size_t failure_reason_len) {
+    quicly_context_t *context = quic_context();
+    quicly_cid_plaintext_t *next_cid = next_connection_id();
+    ptls_iovec_t *protocols = negotiated_protocol_list();
+    ptls_handshake_properties_t hs_properties;
+    memset(&hs_properties, 0, sizeof(hs_properties));
+    hs_properties.client.negotiated_protocols.list = protocols;
+    hs_properties.client.negotiated_protocols.count = 1;
+
+    quicly_conn_t *conn = NULL;
+    quicly_error_t ret =
+        quicly_connect(&conn, context, cfg->server_name, (struct sockaddr *)sa, NULL, next_cid,
+                       ptls_iovec_init(NULL, 0), &hs_properties, NULL, NULL);
+    if (ret != 0 || conn == NULL) {
+        snprintf(failure_reason, failure_reason_len, "quicly_connect failed");
+        return NULL;
+    }
+    ++next_cid->master_id;
+    return conn;
+}
+
+static quicly_error_t drive_client_once(int fd, quicly_conn_t *conn, int64_t max_wait_ms) {
+    quicly_context_t *context = quic_context();
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(fd, &readfds);
+    struct timeval tv;
+    int64_t timeout_at = quicly_get_first_timeout(conn);
+    int64_t now_ms = context->now->cb(context->now);
+    long delta = timeout_delta_ms(timeout_at, now_ms, max_wait_ms);
+    tv.tv_sec = delta / 1000;
+    tv.tv_usec = (delta % 1000) * 1000;
+    int sret;
+    do {
+        sret = select(fd + 1, &readfds, NULL, NULL, &tv);
+    } while (sret == -1 && errno == EINTR);
+
+    if (sret > 0 && FD_ISSET(fd, &readfds)) {
+        for (;;) {
+            uint8_t buf[1500];
+            uint8_t ecn;
+            quicly_address_t dest;
+            quicly_address_t src;
+            ssize_t rret = receive_datagram(fd, buf, &dest, &src, &ecn);
+            if (rret <= 0) {
+                break;
+            }
+            size_t off = 0;
+            while (off != (size_t)rret) {
+                quicly_decoded_packet_t packet;
+                if (quicly_decode_packet(context, &packet, buf, (size_t)rret, &off) == SIZE_MAX) {
+                    break;
+                }
+                packet.ecn = ecn;
+                quicly_receive(conn, &dest.sa, &src.sa, &packet);
+            }
+        }
+    }
+    return send_pending(fd, conn);
 }
 
 static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t response_bytes,
@@ -1056,41 +1160,13 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
         count = DEFAULT_MAX_RUN_REQUESTS;
     }
 
-    quicly_context_t *context = quic_context();
-    quicly_cid_plaintext_t *next_cid = next_connection_id();
-    ptls_iovec_t *protocols = negotiated_protocol_list();
-
-    /* Resolve and prepare a short-lived UDP socket for this client batch. */
     struct sockaddr_storage sa;
     socklen_t salen;
-    if (resolve_address(&sa, &salen, cfg->host, cfg->port, 0) != 0) {
-        snprintf(failure_reason, failure_reason_len, "could not resolve server");
+    int fd = -1;
+    if (prepare_client_socket(cfg, &fd, &sa, &salen, failure_reason, failure_reason_len) != 0) {
         return -1;
     }
-    int fd = socket(sa.ss_family, SOCK_DGRAM, IPPROTO_UDP);
-    if (fd == -1) {
-        snprintf(failure_reason, failure_reason_len, "socket failed: %s", strerror(errno));
-        return -1;
-    }
-    if (prep_socket(fd) != 0) {
-        close(fd);
-        snprintf(failure_reason, failure_reason_len, "could not prepare socket");
-        return -1;
-    }
-    quicly_address_t local;
-    memset(&local, 0, sizeof(local));
-    local.sa.sa_family = sa.ss_family;
-    if (bind(fd, &local.sa,
-             local.sa.sa_family == AF_INET ? sizeof(local.sin) : sizeof(local.sin6)) != 0) {
-        close(fd);
-        snprintf(failure_reason, failure_reason_len, "bind failed: %s", strerror(errno));
-        return -1;
-    }
-
-    ptls_handshake_properties_t hs_properties;
-    memset(&hs_properties, 0, sizeof(hs_properties));
-    hs_properties.client.negotiated_protocols.list = protocols;
-    hs_properties.client.negotiated_protocols.count = 1;
+    (void)salen;
 
     /* Streams keep a pointer to this heap batch until quicly destroys their callbacks. */
     client_batch_t *batch = calloc(1, sizeof(*batch));
@@ -1104,17 +1180,12 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
     batch->response_bytes = response_bytes;
     batch->counts_latency = counts_latency;
 
-    quicly_conn_t *conn = NULL;
-    quicly_error_t ret =
-        quicly_connect(&conn, context, cfg->server_name, (struct sockaddr *)&sa, NULL, next_cid,
-                       ptls_iovec_init(NULL, 0), &hs_properties, NULL, NULL);
-    if (ret != 0 || conn == NULL) {
+    quicly_conn_t *conn = connect_client(cfg, &sa, failure_reason, failure_reason_len);
+    if (conn == NULL) {
         free_batch(batch);
         close(fd);
-        snprintf(failure_reason, failure_reason_len, "quicly_connect failed");
         return -1;
     }
-    ++next_cid->master_id;
     if (enqueue_requests(conn, batch, count) != 0) {
         snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
         quicly_free(conn);
@@ -1128,51 +1199,13 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
     int close_called = 0;
     uint64_t hard_deadline = now_us() + 120000000ULL;
     while (conn != NULL) {
-        /* Drive packet I/O and timers until all streams complete or the batch fails. */
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(fd, &readfds);
-        struct timeval tv;
-        int64_t timeout_at = quicly_get_first_timeout(conn);
-        int64_t now_ms = context->now->cb(context->now);
-        long delta = timeout_delta_ms(timeout_at, now_ms, 100);
-        tv.tv_sec = delta / 1000;
-        tv.tv_usec = (delta % 1000) * 1000;
-        int sret;
-        do {
-            sret = select(fd + 1, &readfds, NULL, NULL, &tv);
-        } while (sret == -1 && errno == EINTR);
-
-        if (sret > 0 && FD_ISSET(fd, &readfds)) {
-            for (;;) {
-                uint8_t buf[1500];
-                uint8_t ecn;
-                quicly_address_t dest;
-                quicly_address_t src;
-                ssize_t rret = receive_datagram(fd, buf, &dest, &src, &ecn);
-                if (rret <= 0) {
-                    break;
-                }
-                size_t off = 0;
-                while (off != (size_t)rret) {
-                    quicly_decoded_packet_t packet;
-                    if (quicly_decode_packet(context, &packet, buf, (size_t)rret, &off) ==
-                        SIZE_MAX) {
-                        break;
-                    }
-                    packet.ecn = ecn;
-                    quicly_receive(conn, &dest.sa, &src.sa, &packet);
-                }
-            }
-        }
-
         if (!close_called && batch->completed_requests >= batch->expected_requests &&
             quicly_num_streams(conn) == 0) {
             quicly_close(conn, 0, "");
             close_called = 1;
         }
 
-        ret = send_pending(fd, conn);
+        quicly_error_t ret = drive_client_once(fd, conn, 100);
         if (ret != 0) {
             quicly_free(conn);
             conn = NULL;
@@ -1216,6 +1249,102 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t respo
     return 0;
 }
 
+static int run_timed_bulk_download(const config_t *cfg, uint64_t response_bytes,
+                                   uint64_t request_bytes, counters_t *counters,
+                                   char *failure_reason, size_t failure_reason_len) {
+    struct sockaddr_storage sa;
+    socklen_t salen;
+    int fd = -1;
+    if (prepare_client_socket(cfg, &fd, &sa, &salen, failure_reason, failure_reason_len) != 0) {
+        return -1;
+    }
+    (void)salen;
+
+    client_batch_t *batch = calloc(1, sizeof(*batch));
+    if (batch == NULL) {
+        close(fd);
+        snprintf(failure_reason, failure_reason_len, "out of memory");
+        return -1;
+    }
+    batch->request_bytes = request_bytes;
+    batch->response_bytes = response_bytes;
+    batch->counts_latency = 0;
+
+    quicly_conn_t *conn = connect_client(cfg, &sa, failure_reason, failure_reason_len);
+    if (conn == NULL) {
+        free_batch(batch);
+        close(fd);
+        return -1;
+    }
+
+    uint64_t target_active = cfg->streams * cfg->connections;
+    if (target_active == 0) {
+        target_active = 1;
+    }
+    uint64_t deadline = now_us() + cfg->duration_us;
+    uint64_t drain_deadline = deadline + DRAIN_TIMEOUT_US;
+    while (batch->active_requests < target_active && now_us() < deadline) {
+        if (open_request_stream(conn, batch, 1) != 0) {
+            snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
+            quicly_free(conn);
+            finish_batch(batch, counters);
+            close(fd);
+            return -1;
+        }
+    }
+    send_pending(fd, conn);
+
+    int close_called = 0;
+    while (conn != NULL) {
+        uint64_t now = now_us();
+        if (now < deadline) {
+            while (batch->active_requests < target_active && now_us() < deadline) {
+                if (open_request_stream(conn, batch, 1) != 0) {
+                    snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
+                    quicly_free(conn);
+                    finish_batch(batch, counters);
+                    close(fd);
+                    return -1;
+                }
+            }
+        } else if (!close_called && batch->active_requests == 0 && quicly_num_streams(conn) == 0) {
+            quicly_close(conn, 0, "");
+            close_called = 1;
+        } else if (now > drain_deadline) {
+            quicly_free(conn);
+            conn = NULL;
+            break;
+        }
+
+        quicly_error_t ret = drive_client_once(fd, conn, 100);
+        if (ret != 0) {
+            quicly_free(conn);
+            conn = NULL;
+            if (ret != QUICLY_ERROR_FREE_CONNECTION) {
+                snprintf(failure_reason, failure_reason_len, "quicly_send returned %" PRId64,
+                         (int64_t)ret);
+                finish_batch(batch, counters);
+                close(fd);
+                return -1;
+            }
+        }
+        if (batch->failed) {
+            snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
+            if (conn != NULL) {
+                quicly_close(conn, QUICLY_ERROR_FROM_APPLICATION_ERROR_CODE(1), "perf failure");
+                quicly_free(conn);
+            }
+            finish_batch(batch, counters);
+            close(fd);
+            return -1;
+        }
+    }
+
+    close(fd);
+    finish_batch(batch, counters);
+    return 0;
+}
+
 static int run_bulk(const config_t *cfg, counters_t *counters, char *failure_reason,
                     size_t failure_reason_len) {
     uint64_t request_bytes;
@@ -1239,6 +1368,11 @@ static int run_bulk(const config_t *cfg, counters_t *counters, char *failure_rea
         }
         return run_request_batch(cfg, count, response_bytes, request_bytes, counters, 0,
                                  failure_reason, failure_reason_len);
+    }
+
+    if (is_direction(cfg, "download")) {
+        return run_timed_bulk_download(cfg, response_bytes, request_bytes, counters, failure_reason,
+                                       failure_reason_len);
     }
 
     uint64_t deadline = now_us() + cfg->duration_us;

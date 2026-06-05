@@ -30,6 +30,7 @@ const WRITE_CHUNK_SIZE: usize = 1024;
 const READ_BUF_SIZE: usize = 65_536;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const BATCH_TIMEOUT: Duration = Duration::from_secs(120);
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const SERVER_POLL: Duration = Duration::from_millis(10);
 const DEFAULT_WAIT: Duration = Duration::from_millis(100);
 const ANTI_REPLAY_WINDOW: Duration = Duration::from_secs(10);
@@ -159,6 +160,7 @@ struct ClientStream {
 
 struct ClientBatch {
     target_requests: u64,
+    max_active_requests: Option<u64>,
     started_requests: u64,
     completed_requests: u64,
     shape: RequestShape,
@@ -169,6 +171,7 @@ impl ClientBatch {
     fn new(target_requests: u64, shape: RequestShape) -> Self {
         Self {
             target_requests,
+            max_active_requests: None,
             started_requests: 0,
             completed_requests: 0,
             shape,
@@ -178,6 +181,10 @@ impl ClientBatch {
 
     fn is_done(&self) -> bool {
         self.completed_requests >= self.target_requests
+    }
+
+    fn active_requests(&self) -> u64 {
+        self.started_requests - self.completed_requests
     }
 
     fn handle_events(
@@ -247,6 +254,11 @@ impl ClientBatch {
 
     fn open_streams(&mut self, conn: &mut Connection) -> Result<(), String> {
         while self.started_requests < self.target_requests {
+            if let Some(max_active_requests) = self.max_active_requests {
+                if self.active_requests() >= max_active_requests {
+                    break;
+                }
+            }
             match conn.stream_create(StreamType::BiDi) {
                 Ok(stream_id) => {
                     let mut header = [0; 16];
@@ -814,11 +826,9 @@ async fn drain_client_socket(
     loop {
         match socket.try_recv_from(&mut buf) {
             Ok((read, remote)) => {
-                let dgram =
-                    Datagram::new(remote, local_addr, Tos::default(), buf[..read].to_vec());
+                let dgram = Datagram::new(remote, local_addr, Tos::default(), buf[..read].to_vec());
                 if let Some(timeout) =
-                    handle_process_output(socket, conn.process(Some(dgram), Instant::now()))
-                        .await?
+                    handle_process_output(socket, conn.process(Some(dgram), Instant::now())).await?
                 {
                     next_timeout = Some(timeout);
                 }
@@ -839,8 +849,7 @@ async fn drain_server_socket(
     loop {
         match socket.try_recv_from(&mut buf) {
             Ok((read, remote)) => {
-                let dgram =
-                    Datagram::new(remote, local_addr, Tos::default(), buf[..read].to_vec());
+                let dgram = Datagram::new(remote, local_addr, Tos::default(), buf[..read].to_vec());
                 if let Some(timeout) =
                     handle_process_output(socket, server.process(Some(dgram), Instant::now()))
                         .await?
@@ -938,6 +947,79 @@ async fn run_request_batch(
     }
 }
 
+async fn connect_client(cfg: &Config) -> Result<(UdpSocket, SocketAddr, Connection), String> {
+    init().map_err(|err| format!("neqo NSS init failed: {err}"))?;
+
+    let remote_addr =
+        resolve_remote(&cfg.host, cfg.port).map_err(|err| format!("resolve failed: {err}"))?;
+    let std_socket = StdUdpSocket::bind(bind_addr_for(remote_addr))
+        .map_err(|err| format!("socket bind failed: {err}"))?;
+    std_socket
+        .connect(remote_addr)
+        .map_err(|err| format!("socket connect failed: {err}"))?;
+    std_socket
+        .set_nonblocking(true)
+        .map_err(|err| format!("socket nonblocking failed: {err}"))?;
+    let local_addr = std_socket
+        .local_addr()
+        .map_err(|err| format!("socket local_addr failed: {err}"))?;
+    let socket = UdpSocket::from_std(std_socket)
+        .map_err(|err| format!("tokio socket setup failed: {err}"))?;
+
+    let cid_mgr = Rc::new(RefCell::new(EmptyConnectionIdGenerator::default()));
+    let conn = Connection::new_client(
+        cfg.server_name.clone(),
+        &[APPLICATION_PROTOCOL],
+        cid_mgr,
+        local_addr,
+        remote_addr,
+        connection_params(cfg),
+        Instant::now(),
+    )
+    .map_err(|err| format!("neqo client connection failed: {err}"))?;
+
+    Ok((socket, local_addr, conn))
+}
+
+async fn run_timed_bulk(
+    cfg: &Config,
+    shape: RequestShape,
+    counters: &mut Counters,
+) -> Result<(), String> {
+    let (socket, local_addr, mut conn) = connect_client(cfg).await?;
+    let mut batch = ClientBatch::new(u64::MAX, shape);
+    batch.max_active_requests = Some((cfg.streams * cfg.connections).max(1));
+
+    let started = Instant::now();
+    let deadline = started + cfg.duration;
+    let drain_deadline = deadline + DRAIN_TIMEOUT;
+    while Instant::now() < drain_deadline {
+        if Instant::now() >= deadline {
+            batch.target_requests = batch.started_requests;
+        }
+        batch.handle_events(&mut conn, counters)?;
+        let next_timeout = drain_client_output(&mut conn, &socket)
+            .await
+            .map_err(|err| format!("neqo output failed: {err}"))?;
+        if Instant::now() >= deadline && batch.active_requests() == 0 {
+            break;
+        }
+        if !conn.state().connected() && started.elapsed() > HANDSHAKE_TIMEOUT {
+            return Err("neqo connection handshake timed out".to_string());
+        }
+        wait_socket(&socket, next_timeout)
+            .await
+            .map_err(|err| format!("neqo socket wait failed: {err}"))?;
+        drain_client_socket(&socket, &mut conn, local_addr)
+            .await
+            .map_err(|err| format!("neqo socket read failed: {err}"))?;
+    }
+
+    conn.close(Instant::now(), 0, "done");
+    let _ = drain_client_output(&mut conn, &socket).await;
+    Ok(())
+}
+
 async fn run_bulk(cfg: &Config, counters: &mut Counters) -> Result<(), String> {
     let (request_bytes, response_bytes, unit) = if cfg.direction == "upload" {
         let request_bytes = cfg.request_bytes.max(cfg.response_bytes);
@@ -963,16 +1045,7 @@ async fn run_bulk(cfg: &Config, counters: &mut Counters) -> Result<(), String> {
         return run_request_batch(cfg, count, shape, counters).await;
     }
 
-    let deadline = Instant::now() + cfg.duration;
-    while Instant::now() < deadline {
-        let count = (cfg.streams * cfg.connections).max(1);
-        let before = Instant::now();
-        run_request_batch(cfg, count, shape, counters).await?;
-        if before.elapsed() > cfg.duration * 2 {
-            break;
-        }
-    }
-    Ok(())
+    run_timed_bulk(cfg, shape, counters).await
 }
 
 async fn run_rr(cfg: &Config, counters: &mut Counters) -> Result<(), String> {

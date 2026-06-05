@@ -4380,6 +4380,7 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         }
     }
 
+#if !defined(COQUIC_WASM_NO_FILESYSTEM)
     {
         auto replay_path =
             std::filesystem::temp_directory_path() / "coquic-core-coverage-replay-store.tokens";
@@ -4429,6 +4430,7 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         directory_output.persist_consumed_address_validation_tokens();
         std::filesystem::remove(blocked_replay_path.string() + ".tmp", ignored);
     }
+#endif
 
     {
         QuicCore endpoint(make_client_endpoint_config_for_core_coverage());

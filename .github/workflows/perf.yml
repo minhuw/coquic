@@ -37,8 +37,10 @@ jobs:
         experimental-features = nix-command flakes
         sandbox = false
         build-users-group =
-        max-jobs = 2
-        cores = 2
+        max-jobs = 8
+        cores = 8
+      PERF_SERVER_CPUS: 8
+      PERF_CLIENT_CPUS: 9
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -214,9 +216,12 @@ jobs:
         run: |
           mkdir -p "${HOME}/.config/nix"
           {
-            echo 'max-jobs = 2'
-            echo 'cores = 2'
-          } >> "${HOME}/.config/nix/nix.conf"
+            echo 'experimental-features = nix-command flakes'
+            echo 'sandbox = false'
+            echo 'build-users-group ='
+            echo 'max-jobs = 8'
+            echo 'cores = 8'
+          } > "${HOME}/.config/nix/nix.conf"
 
       # Remove this when GitHub runner gets docker engine >= v28.1.0.
       - if: runner.environment == 'github-hosted'

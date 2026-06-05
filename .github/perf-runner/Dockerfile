@@ -14,8 +14,8 @@ RUN set -eux; \
         'experimental-features = nix-command flakes' \
         'sandbox = false' \
         'build-users-group =' \
-        'max-jobs = 2' \
-        'cores = 2' \
+        'max-jobs = 8' \
+        'cores = 8' \
         > "${home}/.config/nix/nix.conf"; \
     done; \
     chown -R runner:runner /home/runner/.config

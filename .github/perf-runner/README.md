@@ -59,9 +59,9 @@ credentials and does not need benchmark hardware.
 
 - Keep the host dedicated while the perf workflow is running.
 - Prefer a fixed CPU governor such as `performance`.
-- Start the runner container on housekeeping CPUs, for example CPU `0-1`, while
-  the benchmark script keeps using CPU `2` for the server and CPU `3` for the
-  client.
+- Start the runner container on build CPUs, for example CPU `0-7`, while the
+  workflow pins benchmark endpoint containers to separate host CPUs such as CPU
+  `8` for the server and CPU `9` for the client.
 - Keep Docker Engine current on the host. The runner image provides the Docker
   CLI, but the mounted host daemon runs the benchmark containers.
 - Mounting `/var/run/docker.sock` gives jobs effective control of host Docker.

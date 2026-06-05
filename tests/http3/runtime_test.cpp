@@ -633,8 +633,12 @@ class ScopedHttp3Process {
             return;
         }
         ::kill(pid_, SIGTERM);
+        if (wait_for_exit(std::chrono::milliseconds{500}).has_value()) {
+            return;
+        }
+        ::kill(pid_, SIGKILL);
         int status = 0;
-        ::waitpid(pid_, &status, 0);
+        static_cast<void>(::waitpid(pid_, &status, 0));
         pid_ = -1;
     }
 

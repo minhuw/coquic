@@ -496,6 +496,9 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
             &ConnectionDrainTestHooks::force_random_one_in_sixteen_rand_failure);
         static_cast<void>(random_one_in_sixteen());
     }
+    for (int index = 0; index < 128; ++index) {
+        static_cast<void>(random_one_in_sixteen());
+    }
     {
         ScopedConnectionDrainTestHook hook(
             &ConnectionDrainTestHooks::force_grease_quic_bit_seed_rand_failure);
@@ -698,6 +701,10 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
             .packet_number_length = 1, .frames = frames, .stream_fragments = fragments});
         record(!size.has_value());
         record(size.error().code == CodecErrorCode::packet_length_mismatch);
+    }
+    {
+        const std::variant<PingFrame> ping_variant{PingFrame{}};
+        record(!holds_alternative_if_present<DatagramFrame>(ping_variant));
     }
 
     record(!datagram_starts_with_initial_packet(std::span<const std::byte>{},
@@ -941,8 +948,16 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
 
         handshake_space.write_secret = make_connection_coverage_traffic_secret(
             CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x44});
+        record(has_client_handshake_keepalive_space(QuicCoreTimePoint{},
+                                                    /*initial_discarded=*/true,
+                                                    /*handshake_discarded=*/false,
+                                                    handshake_space));
         record(client_handshake_keepalive_packet_space(QuicCoreTimePoint{},
                                                        /*initial_discarded=*/false, initial_space,
+                                                       /*handshake_discarded=*/false,
+                                                       handshake_space) == &handshake_space);
+        record(client_handshake_keepalive_packet_space(QuicCoreTimePoint{},
+                                                       /*initial_discarded=*/true, initial_space,
                                                        /*handshake_discarded=*/false,
                                                        handshake_space) == &handshake_space);
         handshake_space.write_secret.reset();
@@ -1173,6 +1188,13 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
         record(!client_keepalive_has_no_in_flight_packets(
             /*initial_discarded=*/false, initial_space, /*handshake_discarded=*/true,
             handshake_space, application_space));
+        record(!client_keepalive_has_no_in_flight_packets(
+            /*initial_discarded=*/true, initial_space, /*handshake_discarded=*/true,
+            handshake_space, application_space));
+        record(!client_handshake_keepalive_is_eligible(
+            EndpointRole::client, HandshakeStatus::in_progress, /*handshake_confirmed=*/false,
+            QuicCoreTimePoint{}, /*initial_discarded=*/true, initial_space,
+            /*handshake_discarded=*/true, handshake_space, application_space));
         record(!client_receive_keepalive_is_eligible(
             EndpointRole::client, HandshakeStatus::connected, /*handshake_confirmed=*/true,
             QuicCoreTimePoint{}, /*has_receive_interest=*/true, /*initial_discarded=*/false,
@@ -1241,6 +1263,10 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
             /*peer_transport_parameters_validated=*/true, read_secret, write_secret,
             /*resumption_state_emitted=*/false, /*peer_preferred_address_emitted=*/false,
             peer_parameters, /*qlog_session=*/nullptr, short_header));
+        record(!traffic_secret_cache_is_primed(std::nullopt));
+        record(!traffic_secret_cache_is_primed(read_secret));
+        read_secret.cached_packet_protection_keys = PacketProtectionKeys{};
+        record(traffic_secret_cache_is_primed(read_secret));
         record(can_skip_steady_state_receive_sync(
             EndpointRole::client, HandshakeStatus::connected,
             /*peer_transport_parameters_validated=*/true, read_secret, write_secret,
@@ -1257,6 +1283,11 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
             EndpointRole::client, HandshakeStatus::connected,
             /*peer_transport_parameters_validated=*/true, read_secret, write_secret,
             /*resumption_state_emitted=*/true, /*peer_preferred_address_emitted=*/false,
+            peer_parameters, /*qlog_session=*/nullptr, short_header));
+        record(can_skip_steady_state_receive_sync(
+            EndpointRole::client, HandshakeStatus::connected,
+            /*peer_transport_parameters_validated=*/true, read_secret, write_secret,
+            /*resumption_state_emitted=*/true, /*peer_preferred_address_emitted=*/true,
             peer_parameters, /*qlog_session=*/nullptr, short_header));
         record(!can_skip_steady_state_receive_sync(
             EndpointRole::client, HandshakeStatus::connected,
@@ -1317,6 +1348,12 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
         record(client_outbound_tls_sync_can_skip_resumption(
             /*resumption_state_emitted=*/true, /*peer_preferred_address_emitted=*/true,
             peer_parameters));
+        record(client_outbound_tls_sync_can_skip_resumption(
+            /*resumption_state_emitted=*/true, /*peer_preferred_address_emitted=*/false,
+            std::nullopt));
+        record(client_outbound_tls_sync_can_skip_resumption(
+            /*resumption_state_emitted=*/true, /*peer_preferred_address_emitted=*/true,
+            std::nullopt));
         peer_parameters.preferred_address.reset();
         record(client_outbound_tls_sync_can_skip_resumption(
             /*resumption_state_emitted=*/true, /*peer_preferred_address_emitted=*/false,
@@ -1342,6 +1379,29 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
         mtu.validated_datagram_size = 1200;
         mtu.probe_ceiling = 1300;
         record(!pmtud_next_probe_time(mtu, QuicCoreTimePoint{}, QuicCoreDuration{1}).has_value());
+        mtu.enabled = true;
+        mtu.outstanding_probe_packet_number.reset();
+        record(should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+                                                /*pending_stream_bytes=*/1301));
+        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/false,
+                                                 /*pending_stream_bytes=*/1301));
+        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+                                                 /*pending_stream_bytes=*/1200));
+        mtu.next_probe_time = QuicCoreTimePoint{};
+        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+                                                 /*pending_stream_bytes=*/1301));
+        mtu.next_probe_time.reset();
+        mtu.outstanding_probe_packet_number = 8;
+        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+                                                 /*pending_stream_bytes=*/1301));
+        mtu.outstanding_probe_packet_number.reset();
+        mtu.validated_datagram_size = mtu.probe_ceiling;
+        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+                                                 /*pending_stream_bytes=*/1301));
+        mtu.enabled = false;
+        mtu.validated_datagram_size = 1200;
+        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+                                                 /*pending_stream_bytes=*/1301));
     }
     record(should_reset_client_handshake_peer_state_for_source(
         EndpointRole::client, HandshakeStatus::in_progress, /*handshake_confirmed=*/false,

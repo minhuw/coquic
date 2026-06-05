@@ -19,6 +19,14 @@
 #include <variant>
 #include <vector>
 
+#ifndef COQUIC_NO_PROFILE
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+#endif
+
 struct coquic_http3_client {
     explicit coquic_http3_client(const coquic::http3::ClientConfig &config) : client(config) {
     }
@@ -523,7 +531,7 @@ struct coquic_http3_server_update {
 
 namespace coquic::http3::test {
 
-bool http3_ffi_conversion_coverage_for_tests() {
+COQUIC_NO_PROFILE bool http3_ffi_conversion_coverage_for_tests() {
     auto ok = true;
     const auto record = [&ok](bool condition) {
         ok = static_cast<bool>(static_cast<unsigned>(ok) & static_cast<unsigned>(condition));
@@ -540,9 +548,74 @@ bool http3_ffi_conversion_coverage_for_tests() {
         return input.kind == kind;
     };
 
+    coquic_http3_settings_init(nullptr);
+    coquic_http3_client_config_init(nullptr);
+    coquic_http3_server_config_init(nullptr);
+    coquic_http3_client_endpoint_config_init(nullptr);
+    coquic_http3_server_endpoint_config_init(nullptr);
+    record(to_string("value", 5) == "value");
+    record(to_vector(coquic_bytes_t{.data = nullptr, .length = 5}).empty());
+    const auto input_bytes = text("bytes");
+    record(to_vector(coquic_bytes_t{
+                         .data = reinterpret_cast<const std::uint8_t *>(input_bytes.data()),
+                         .length = 0,
+                     })
+               .empty());
+    record(to_vector(bytes_input(input_bytes)).size() == input_bytes.size());
+    record(to_optional(coquic_http3_optional_u64_t{.has_value = 0, .value = 7}) == std::nullopt);
+    record(to_optional(coquic_http3_optional_u64_t{.has_value = 1, .value = 7}) ==
+           std::optional<std::uint64_t>{7});
+    record(from_optional(std::nullopt).has_value == 0);
+    record(from_optional_stream_id(std::nullopt).has_value == 0);
+    record(from_optional_stream_id(std::optional<coquic::core::StreamId>{3}).value == 3);
+    record(from_cpp(coquic::http3::ErrorCode::request_cancelled) ==
+           COQUIC_HTTP3_ERROR_REQUEST_CANCELLED);
+    record(valid_settings(coquic_http3_settings_t{.size = kHttp3SettingsSizeV1}));
+    record(!valid_settings(coquic_http3_settings_t{.size = 0}));
+    record(
+        !valid_request(coquic_http3_request_t{.size = kHttp3RequestSizeV1, .head = {.size = 0}}));
+    {
+        coquic_http3_field_t field{
+            .name = "x",
+            .name_length = 1,
+            .value = "y",
+            .value_length = 1,
+        };
+        auto headers = to_headers(&field, 1);
+        record(headers.size() == 1);
+        record(to_headers(nullptr, 1).empty());
+        record(to_headers(&field, 0).empty());
+        coquic_http3_request_t request{
+            .size = kHttp3RequestSizeV1,
+            .head =
+                {
+                    .size = kHttp3RequestHeadSizeV1,
+                    .method = "GET",
+                    .method_length = 3,
+                    .scheme = "https",
+                    .scheme_length = 5,
+                    .authority = "example.test",
+                    .authority_length = 12,
+                    .path = "/",
+                    .path_length = 1,
+                    .content_length = {.has_value = 1, .value = 5},
+                    .headers = &field,
+                    .headers_count = 1,
+                },
+            .body = bytes_input(input_bytes),
+            .trailers = &field,
+            .trailers_count = 1,
+        };
+        const auto converted = to_cpp(request);
+        record(converted.head.headers.size() == 1);
+        record(converted.trailers.size() == 1);
+        record(converted.head.content_length == std::optional<std::uint64_t>{5});
+    }
+
     coquic::http3::ClientUpdate client_update{
         .quic_inputs =
             {
+                coquic::core::SendStreamData{.stream_id = 2, .bytes = text("stream"), .fin = true},
                 coquic::core::SendDatagramData{.bytes = text("datagram")},
                 coquic::core::ResetStream{.stream_id = 4, .application_error_code = 5},
                 coquic::core::StopSending{.stream_id = 8, .application_error_code = 9},
@@ -564,25 +637,44 @@ bool http3_ffi_conversion_coverage_for_tests() {
         .handled_local_error = true,
     };
     coquic_http3_client_update client_storage(std::move(client_update));
-    record(client_storage.inputs.size() == 7);
-    record(expect_input(client_storage.inputs.at(0), COQUIC_CONNECTION_INPUT_SEND_DATAGRAM));
-    record(client_storage.inputs.at(0).as.send_datagram.bytes.length == 8);
-    record(expect_input(client_storage.inputs.at(1), COQUIC_CONNECTION_INPUT_RESET_STREAM));
-    record(client_storage.inputs.at(1).as.reset_stream.stream_id == 4);
-    record(expect_input(client_storage.inputs.at(2), COQUIC_CONNECTION_INPUT_STOP_SENDING));
-    record(client_storage.inputs.at(2).as.stop_sending.application_error_code == 9);
-    record(expect_input(client_storage.inputs.at(3), COQUIC_CONNECTION_INPUT_CLOSE));
-    record(client_storage.inputs.at(3).as.close.reason_phrase_length == 6);
-    record(expect_input(client_storage.inputs.at(4), COQUIC_CONNECTION_INPUT_REQUEST_KEY_UPDATE));
-    record(expect_input(client_storage.inputs.at(5), COQUIC_CONNECTION_INPUT_REQUEST_MIGRATION));
-    record(client_storage.inputs.at(5).as.request_migration.reason ==
-           COQUIC_MIGRATION_REASON_PREFERRED_ADDRESS);
+    record(client_storage.inputs.size() == 8);
+    record(expect_input(client_storage.inputs.at(0), COQUIC_CONNECTION_INPUT_SEND_STREAM));
+    record(client_storage.inputs.at(0).as.send_stream.fin == 1);
+    record(expect_input(client_storage.inputs.at(1), COQUIC_CONNECTION_INPUT_SEND_DATAGRAM));
+    record(client_storage.inputs.at(1).as.send_datagram.bytes.length == 8);
+    record(expect_input(client_storage.inputs.at(2), COQUIC_CONNECTION_INPUT_RESET_STREAM));
+    record(client_storage.inputs.at(2).as.reset_stream.stream_id == 4);
+    record(expect_input(client_storage.inputs.at(3), COQUIC_CONNECTION_INPUT_STOP_SENDING));
+    record(client_storage.inputs.at(3).as.stop_sending.application_error_code == 9);
+    record(expect_input(client_storage.inputs.at(4), COQUIC_CONNECTION_INPUT_CLOSE));
+    record(client_storage.inputs.at(4).as.close.reason_phrase_length == 6);
+    record(expect_input(client_storage.inputs.at(5), COQUIC_CONNECTION_INPUT_REQUEST_KEY_UPDATE));
     record(expect_input(client_storage.inputs.at(6), COQUIC_CONNECTION_INPUT_REQUEST_MIGRATION));
     record(client_storage.inputs.at(6).as.request_migration.reason ==
+           COQUIC_MIGRATION_REASON_PREFERRED_ADDRESS);
+    record(expect_input(client_storage.inputs.at(7), COQUIC_CONNECTION_INPUT_REQUEST_MIGRATION));
+    record(client_storage.inputs.at(7).as.request_migration.reason ==
            COQUIC_MIGRATION_REASON_ACTIVE);
+    coquic_connection_input_t connection_input{};
+    record(coquic_http3_client_update_connection_input_count(nullptr) == 0);
+    record(coquic_http3_client_update_connection_input_count(&client_storage) == 8);
+    record(coquic_http3_client_update_connection_input_at(nullptr, 0, &connection_input) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_client_update_connection_input_at(&client_storage, 0, nullptr) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_client_update_connection_input_at(&client_storage, 99, &connection_input) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_client_update_connection_input_at(&client_storage, 0, &connection_input) ==
+           COQUIC_STATUS_OK);
+    record(coquic_http3_client_update_response_count(nullptr) == 0);
+    record(coquic_http3_client_update_request_error_count(nullptr) == 0);
     record(coquic_http3_client_update_has_pending_work(&client_storage) == 1);
     record(coquic_http3_client_update_terminal_failure(&client_storage) == 1);
     record(coquic_http3_client_update_handled_local_error(&client_storage) == 1);
+    record(coquic_http3_client_update_has_pending_work(nullptr) == 0);
+    record(coquic_http3_client_update_terminal_failure(nullptr) == 0);
+    record(coquic_http3_client_update_handled_local_error(nullptr) == 0);
+    record(coquic_http3_client_has_failed(nullptr) == 0);
 
     coquic::http3::ServerUpdate server_update{
         .quic_inputs =
@@ -622,13 +714,42 @@ bool http3_ffi_conversion_coverage_for_tests() {
     record(server_storage.request_cancelled.at(0).view.head.content_length.has_value == 1);
     record(server_storage.request_cancelled.at(0).view.head.content_length.value == 0);
     record(server_storage.request_cancelled.at(1).view.has_head == 0);
+    record(coquic_http3_server_update_connection_input_count(nullptr) == 0);
+    record(coquic_http3_server_update_connection_input_count(&server_storage) == 1);
+    record(coquic_http3_server_update_connection_input_at(nullptr, 0, &connection_input) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_server_update_connection_input_at(&server_storage, 0, nullptr) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_server_update_connection_input_at(&server_storage, 99, &connection_input) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_server_update_connection_input_at(&server_storage, 0, &connection_input) ==
+           COQUIC_STATUS_OK);
+    record(coquic_http3_server_update_request_cancelled_count(nullptr) == 0);
+    record(coquic_http3_server_update_request_cancelled_count(&server_storage) == 2);
+    coquic_http3_server_request_cancelled_event_t cancelled_event{};
+    record(coquic_http3_server_update_request_cancelled_at(nullptr, 0, &cancelled_event) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_server_update_request_cancelled_at(&server_storage, 0, nullptr) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_server_update_request_cancelled_at(&server_storage, 99, &cancelled_event) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_server_update_request_cancelled_at(&server_storage, 0, &cancelled_event) ==
+           COQUIC_STATUS_OK);
     record(coquic_http3_server_update_has_pending_work(&server_storage) == 1);
     record(coquic_http3_server_update_terminal_failure(&server_storage) == 1);
     record(coquic_http3_server_update_handled_local_error(&server_storage) == 1);
+    record(coquic_http3_server_update_has_pending_work(nullptr) == 0);
+    record(coquic_http3_server_update_terminal_failure(nullptr) == 0);
+    record(coquic_http3_server_update_handled_local_error(nullptr) == 0);
+    record(coquic_http3_server_has_failed(nullptr) == 0);
 
     char detail_storage[32] = {};
     coquic_http3_error_t detail_error{.detail_buffer = detail_storage,
                                       .detail_buffer_capacity = sizeof(detail_storage)};
+    clear_error(nullptr);
+    detail_error.code = COQUIC_HTTP3_ERROR_INTERNAL_ERROR;
+    clear_error(&detail_error);
+    record(detail_error.code == COQUIC_HTTP3_ERROR_NO_ERROR);
     write_error(coquic::http3::Error{.code = coquic::http3::ErrorCode::internal_error,
                                      .detail = "short",
                                      .stream_id = 7},
@@ -643,6 +764,124 @@ bool http3_ffi_conversion_coverage_for_tests() {
                 &null_detail_error);
     record(null_detail_error.detail_truncated == 1);
     write_error(coquic::http3::Error{.code = coquic::http3::ErrorCode::internal_error}, nullptr);
+
+    char tiny_detail_storage[2] = {};
+    coquic_http3_error_t tiny_detail_error{.detail_buffer = tiny_detail_storage,
+                                           .detail_buffer_capacity = sizeof(tiny_detail_storage)};
+    write_error(
+        coquic::http3::Error{.code = coquic::http3::ErrorCode::internal_error, .detail = "long"},
+        &tiny_detail_error);
+    record(tiny_detail_error.detail_truncated == 1);
+
+    coquic_http3_field_view_t field_views_storage[]{
+        {.name = bytes_view(text("name")), .value = bytes_view(text("value"))},
+    };
+    coquic_http3_response_head_view_t interim_heads[]{
+        {.status = 103, .headers = field_views_storage, .headers_count = 1},
+    };
+    coquic_http3_request_view_t request_view{
+        .head = {.headers = field_views_storage, .headers_count = 1},
+        .trailers = field_views_storage,
+        .trailers_count = 1,
+    };
+    coquic_http3_response_view_t response_view{
+        .interim_heads = interim_heads,
+        .interim_head_count = 1,
+        .head = {.status = 200, .headers = field_views_storage, .headers_count = 1},
+        .trailers = field_views_storage,
+        .trailers_count = 1,
+    };
+    coquic_http3_field_view_t out_field{};
+    coquic_http3_response_head_view_t out_head{};
+    record(coquic_http3_request_view_header_at(nullptr, 0, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_request_view_header_at(&request_view, 0, nullptr) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_request_view_header_at(&request_view, 1, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_request_view_header_at(&request_view, 0, &out_field) == COQUIC_STATUS_OK);
+    record(coquic_http3_request_view_trailer_at(nullptr, 0, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_request_view_trailer_at(&request_view, 0, nullptr) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_request_view_trailer_at(&request_view, 1, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_request_view_trailer_at(&request_view, 0, &out_field) == COQUIC_STATUS_OK);
+    record(coquic_http3_request_head_view_header_at(nullptr, 0, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_request_head_view_header_at(&request_view.head, 0, nullptr) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_request_head_view_header_at(&request_view.head, 1, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_request_head_view_header_at(&request_view.head, 0, &out_field) ==
+           COQUIC_STATUS_OK);
+    record(coquic_http3_response_view_interim_head_at(nullptr, 0, &out_head) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_response_view_interim_head_at(&response_view, 0, nullptr) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_response_view_interim_head_at(&response_view, 1, &out_head) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_response_view_interim_head_at(&response_view, 0, &out_head) ==
+           COQUIC_STATUS_OK);
+    record(coquic_http3_response_view_header_at(nullptr, 0, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_response_view_header_at(&response_view, 0, nullptr) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_response_view_header_at(&response_view, 1, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_response_view_header_at(&response_view, 0, &out_field) == COQUIC_STATUS_OK);
+    record(coquic_http3_response_view_trailer_at(nullptr, 0, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_response_view_trailer_at(&response_view, 0, nullptr) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_response_view_trailer_at(&response_view, 1, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_response_view_trailer_at(&response_view, 0, &out_field) ==
+           COQUIC_STATUS_OK);
+    record(coquic_http3_response_head_view_header_at(nullptr, 0, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_response_head_view_header_at(&response_view.head, 0, nullptr) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_response_head_view_header_at(&response_view.head, 1, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_response_head_view_header_at(&response_view.head, 0, &out_field) ==
+           COQUIC_STATUS_OK);
+    record(coquic_http3_server_request_cancelled_view_trailer_at(nullptr, 0, &out_field) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_server_request_cancelled_view_trailer_at(&cancelled_event, 0, nullptr) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_server_request_cancelled_view_trailer_at(
+               &cancelled_event, 99, &out_field) == COQUIC_STATUS_INVALID_ARGUMENT);
+    record(coquic_http3_server_request_cancelled_view_trailer_at(&cancelled_event, 0, &out_field) ==
+           COQUIC_STATUS_OK);
+    coquic_http3_client_t *client = nullptr;
+    coquic_http3_client_config_t client_config{};
+    record(coquic_http3_client_create(nullptr, &client) == COQUIC_STATUS_INVALID_ARGUMENT);
+    record(client == nullptr);
+    record(coquic_http3_client_create(&client_config, &client) == COQUIC_STATUS_INVALID_ARGUMENT);
+    coquic_http3_server_t *server = nullptr;
+    coquic_http3_server_config_t server_config{};
+    record(coquic_http3_server_create(nullptr, &server) == COQUIC_STATUS_INVALID_ARGUMENT);
+    record(server == nullptr);
+    record(coquic_http3_server_create(&server_config, &server) == COQUIC_STATUS_INVALID_ARGUMENT);
+    coquic_stream_id_t out_stream_id = 9;
+    record(coquic_http3_client_submit_request(nullptr, nullptr, &out_stream_id, nullptr) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(out_stream_id == 0);
+    coquic_http3_client_update_t *client_update_out =
+        reinterpret_cast<coquic_http3_client_update_t *>(0x1);
+    record(coquic_http3_client_on_quic_result(nullptr, nullptr, 0, &client_update_out) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(client_update_out == nullptr);
+    record(coquic_http3_client_poll(nullptr, 0, &client_update_out) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    coquic_http3_server_update_t *server_update_out =
+        reinterpret_cast<coquic_http3_server_update_t *>(0x1);
+    record(coquic_http3_server_on_quic_result(nullptr, nullptr, 0, &server_update_out) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
+    record(server_update_out == nullptr);
+    record(coquic_http3_server_poll(nullptr, 0, &server_update_out) ==
+           COQUIC_STATUS_INVALID_ARGUMENT);
 
     record(to_string(nullptr, 3).empty());
     record(to_string("ignored", 0).empty());

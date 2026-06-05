@@ -2428,7 +2428,15 @@ bool frame_single_varint_writer_fault_coverage_for_tests() {
 
 bool frame_matches_codec_error_branch_coverage_for_tests() {
     const auto error = failure_result(CodecErrorCode::invalid_varint, 7);
-    return (!matches_codec_error(error, CodecErrorCode::truncated_input, 7)) &
+    const auto optional_error = std::optional<CodecError>{
+        CodecError{.code = CodecErrorCode::invalid_varint, .offset = 7},
+    };
+    return matches_optional_codec_error(optional_error, CodecErrorCode::invalid_varint, 7) &
+           (!matches_optional_codec_error(std::nullopt, CodecErrorCode::invalid_varint, 7)) &
+           (!matches_optional_codec_error(optional_error, CodecErrorCode::truncated_input, 7)) &
+           (!matches_optional_codec_error(optional_error, CodecErrorCode::invalid_varint, 8)) &
+           matches_codec_error(error, CodecErrorCode::invalid_varint, 7) &
+           (!matches_codec_error(error, CodecErrorCode::truncated_input, 7)) &
            (!matches_codec_error(error, CodecErrorCode::invalid_varint, 8));
 }
 

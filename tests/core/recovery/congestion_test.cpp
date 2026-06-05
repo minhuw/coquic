@@ -4887,4 +4887,322 @@ TEST(QuicCongestionTest, BbrAdditionalResidualCoverageBranches) {
     }
 }
 
+TEST(QuicCongestionTest, BbrRemainingCoverageBranches) {
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.first_sent_time_ = coquic::quic::test::test_time(1);
+        controller.bytes_in_flight_ = 0;
+        auto packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                       /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                       coquic::quic::test::test_time(2));
+        controller.on_packet_sent(packet);
+        EXPECT_EQ(controller.first_sent_time_, std::optional{coquic::quic::test::test_time(2)});
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::probe_bw_up;
+        controller.pending_probe_bw_down_ = true;
+        controller.on_loss_event(coquic::quic::test::test_time(5),
+                                 coquic::quic::test::test_time(4));
+        EXPECT_EQ(controller.mode_, BbrCongestionController::Mode::probe_bw_down);
+        EXPECT_FALSE(controller.pending_probe_bw_down_);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::probe_bw_cruise;
+        controller.bandwidth_bytes_per_second_ = 12345.0;
+        controller.pacing_rate_bytes_per_second_ = 1.0;
+        controller.app_limited_until_delivered_ = 1;
+        controller.handle_restart_from_idle(coquic::quic::test::test_time(6));
+        EXPECT_TRUE(controller.idle_restart_);
+        EXPECT_DOUBLE_EQ(controller.pacing_rate_bytes_per_second_, 12345.0);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        auto packet = make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                       /*in_flight=*/false, /*bytes_in_flight=*/0,
+                                       coquic::quic::test::test_time(10));
+        auto rs = controller.generate_rate_sample(
+            std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/false,
+            coquic::quic::test::test_time(11), coquic::quic::RecoveryRttState{});
+        EXPECT_FALSE(rs.has_newly_acked);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.total_delivered_ = 2400;
+        controller.bytes_in_flight_ = 2400;
+
+        auto newer = make_sent_packet(/*packet_number=*/5, /*ack_eliciting=*/true,
+                                      /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                      coquic::quic::test::test_time(10));
+        newer.delivered = 1200;
+        newer.delivered_time = coquic::quic::test::test_time(9);
+        newer.first_sent_time = coquic::quic::test::test_time(8);
+        newer.tx_in_flight = 1200;
+
+        auto older_sent_time = make_sent_packet(/*packet_number=*/6, /*ack_eliciting=*/true,
+                                                /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                                coquic::quic::test::test_time(9));
+        older_sent_time.delivered = 0;
+        older_sent_time.delivered_time = coquic::quic::test::test_time(7);
+        older_sent_time.first_sent_time = coquic::quic::test::test_time(6);
+        older_sent_time.tx_in_flight = 1200;
+
+        auto rs = controller.generate_rate_sample(
+            std::array<SentPacketRecord, 2>{newer, older_sent_time}, /*app_limited=*/false,
+            coquic::quic::test::test_time(12), coquic::quic::RecoveryRttState{});
+        EXPECT_EQ(rs.prior_delivered, newer.delivered);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.app_limited_until_delivered_ = 10000;
+        controller.total_delivered_ = 0;
+        controller.bytes_in_flight_ = 1200;
+        auto packet = make_sent_packet(/*packet_number=*/7, /*ack_eliciting=*/true,
+                                       /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                       coquic::quic::test::test_time(20));
+        packet.delivered = 0;
+        packet.delivered_time = coquic::quic::test::test_time(19);
+        packet.first_sent_time = coquic::quic::test::test_time(18);
+        packet.tx_in_flight = 1200;
+        controller.generate_rate_sample(std::array<SentPacketRecord, 1>{packet},
+                                        /*app_limited=*/false, coquic::quic::test::test_time(21),
+                                        coquic::quic::RecoveryRttState{});
+        EXPECT_EQ(controller.app_limited_until_delivered_, 10000u);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.max_bandwidth_bytes_per_second_ = 100.0;
+        controller.update_max_bw(make_rate_sample(/*delivery_rate_bytes_per_second=*/10.0,
+                                                  /*newly_acked=*/0, /*lost=*/0,
+                                                  /*tx_in_flight=*/0, /*prior_delivered=*/0,
+                                                  /*delivered=*/0, std::nullopt,
+                                                  /*is_app_limited=*/true));
+        EXPECT_EQ(controller.max_bandwidth_bytes_per_second_, 100.0);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::drain;
+        controller.loss_round_start_ = true;
+        controller.loss_in_round_ = false;
+        controller.update_congestion_signals(make_rate_sample());
+        EXPECT_FALSE(controller.previous_round_had_loss_);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.round_count_ = 5;
+        controller.extra_acked_round_[0] = 6;
+        controller.full_bw_reached_ = true;
+        controller.bandwidth_bytes_per_second_ = 1.0;
+        controller.congestion_window_ = 1200;
+        controller.update_ack_aggregation(make_rate_sample(/*delivery_rate_bytes_per_second=*/0.0,
+                                                           /*newly_acked=*/1200),
+                                          coquic::quic::test::test_time(1));
+        EXPECT_GE(controller.extra_acked_, 0u);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.full_bw_now_ = true;
+        controller.round_start_ = false;
+        controller.check_full_bw_reached(make_rate_sample(/*delivery_rate_bytes_per_second=*/50.0));
+        EXPECT_TRUE(controller.full_bw_now_);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.full_bw_now_ = false;
+        controller.round_start_ = false;
+        controller.check_full_bw_reached(make_rate_sample(/*delivery_rate_bytes_per_second=*/50.0));
+        EXPECT_FALSE(controller.full_bw_now_);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::startup;
+        controller.loss_round_start_ = true;
+        controller.previous_round_had_loss_ = false;
+        controller.check_startup_high_loss();
+        EXPECT_EQ(controller.mode_, BbrCongestionController::Mode::startup);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::startup;
+        controller.loss_round_start_ = true;
+        controller.previous_round_had_loss_ = true;
+        controller.check_startup_high_loss();
+        EXPECT_EQ(controller.mode_, BbrCongestionController::Mode::startup);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::startup;
+        controller.loss_round_start_ = true;
+        controller.previous_round_had_loss_ = true;
+        controller.recovery_start_time_ = coquic::quic::test::test_time(1);
+        controller.round_count_ = 1;
+        controller.recovery_round_start_ = 1;
+        controller.check_startup_high_loss();
+        EXPECT_EQ(controller.mode_, BbrCongestionController::Mode::startup);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::drain;
+        controller.min_rtt_ = std::chrono::milliseconds{1};
+        controller.bandwidth_bytes_per_second_ = 1000.0;
+        controller.bytes_in_flight_ = 10000;
+        controller.drain_start_round_ = 1;
+        controller.round_count_ = 5;
+        controller.check_drain_done(coquic::quic::test::test_time(8));
+        EXPECT_EQ(controller.mode_, BbrCongestionController::Mode::probe_bw_down);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::drain;
+        controller.min_rtt_ = std::chrono::milliseconds{1};
+        controller.bandwidth_bytes_per_second_ = 1000.0;
+        controller.bytes_in_flight_ = 10000;
+        controller.drain_start_round_ = 1;
+        controller.round_count_ = 2;
+        controller.check_drain_done(coquic::quic::test::test_time(8));
+        EXPECT_EQ(controller.mode_, BbrCongestionController::Mode::drain);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.ack_phase_ = BbrCongestionController::AckPhase::probe_starting;
+        controller.round_start_ = false;
+        controller.adapt_long_term_model(make_rate_sample());
+        EXPECT_EQ(controller.ack_phase_, BbrCongestionController::AckPhase::probe_starting);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.ack_phase_ = BbrCongestionController::AckPhase::probe_stopping;
+        controller.round_start_ = false;
+        controller.adapt_long_term_model(make_rate_sample());
+        EXPECT_EQ(controller.ack_phase_, BbrCongestionController::AckPhase::probe_stopping);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.congestion_window_ = 4800;
+        controller.inflight_longterm_ = 6000;
+        controller.bytes_in_flight_ = 4800;
+        controller.send_quantum_ = 0;
+        controller.probe_inflight_longterm_upward(
+            make_rate_sample(/*delivery_rate_bytes_per_second=*/0.0, /*newly_acked=*/1200));
+        EXPECT_EQ(controller.inflight_longterm_, 6000u);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        BbrCongestionController::RateSample rs;
+        rs.rtt = coquic::quic::QuicCoreDuration::max();
+        controller.update_min_rtt(rs, coquic::quic::test::test_time(1));
+        EXPECT_EQ(controller.probe_rtt_min_delay_,
+                  std::optional{coquic::quic::QuicCoreDuration::max()});
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.probe_rtt_min_delay_ = coquic::quic::QuicCoreDuration::max();
+        controller.probe_rtt_min_stamp_ = coquic::quic::test::test_time(1);
+        BbrCongestionController::RateSample rs;
+        controller.update_min_rtt(rs, coquic::quic::test::test_time(2));
+        EXPECT_EQ(controller.min_rtt_, std::optional{coquic::quic::QuicCoreDuration::max()});
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::probe_rtt;
+        controller.check_probe_rtt(make_rate_sample(), coquic::quic::test::test_time(1));
+        EXPECT_EQ(controller.mode_, BbrCongestionController::Mode::probe_rtt);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::probe_bw_cruise;
+        controller.probe_rtt_expired_ = true;
+        controller.idle_restart_ = true;
+        controller.check_probe_rtt(make_rate_sample(), coquic::quic::test::test_time(1));
+        EXPECT_EQ(controller.mode_, BbrCongestionController::Mode::probe_bw_cruise);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::probe_rtt;
+        controller.bytes_in_flight_ = controller.probe_rtt_cwnd() + 1;
+        controller.handle_probe_rtt(coquic::quic::test::test_time(1));
+        EXPECT_FALSE(controller.probe_rtt_done_stamp_.has_value());
+        EXPECT_FALSE(controller.probe_rtt_round_done_);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::probe_rtt;
+        controller.probe_rtt_done_stamp_ = coquic::quic::test::test_time(3);
+        controller.probe_rtt_round_done_ = true;
+        controller.round_start_ = false;
+        controller.handle_probe_rtt(coquic::quic::test::test_time(2));
+        EXPECT_TRUE(controller.probe_rtt_round_done_);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.bandwidth_bytes_per_second_ = 10.0;
+        controller.full_bw_reached_ = true;
+        controller.pacing_rate_bytes_per_second_ = 100.0;
+        controller.set_pacing_rate_with_gain(/*gain=*/1.0);
+        EXPECT_DOUBLE_EQ(controller.pacing_rate_bytes_per_second_, 10.0);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.loss_in_round_ = true;
+        controller.last_lost_packet_number_ = 5;
+        controller.loss_events_in_round_ = 1;
+        controller.note_loss(make_sent_packet(/*packet_number=*/9, /*ack_eliciting=*/true,
+                                              /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                              coquic::quic::test::test_time(1)));
+        EXPECT_EQ(controller.loss_events_in_round_, 2u);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::drain;
+        controller.undo_state_ = BbrCongestionController::Mode::drain;
+        controller.handle_spurious_loss_detection(coquic::quic::test::test_time(1));
+        EXPECT_EQ(controller.mode_, BbrCongestionController::Mode::drain);
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.mode_ = BbrCongestionController::Mode::probe_bw_refill;
+        EXPECT_TRUE(controller.is_probing_bw());
+    }
+
+    {
+        BbrCongestionController controller(/*max_datagram_size=*/1200);
+        controller.congestion_window_ = 4800;
+        controller.inflight_longterm_ = 6000;
+        controller.bytes_in_flight_ = 4800;
+        controller.send_quantum_ = 0;
+        controller.full_bw_now_ = false;
+        EXPECT_FALSE(controller.is_time_to_go_down(
+            make_rate_sample(/*delivery_rate_bytes_per_second=*/17.0)));
+    }
+}
+
 } // namespace

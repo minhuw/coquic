@@ -2,9 +2,11 @@
 #include "src/quic/connection_internal.h"
 #include "src/quic/connection_test_support.h"
 
+#include <limits>
+
 namespace coquic::quic::test {
 
-bool connection_pmtud_coverage_for_tests() {
+COQUIC_NO_PROFILE bool connection_pmtud_coverage_for_tests() {
     bool ok = true;
 #define COQUIC_STRINGIFY_DETAIL(value) #value
 #define COQUIC_STRINGIFY(value) COQUIC_STRINGIFY_DETAIL(value)
@@ -14,14 +16,18 @@ bool connection_pmtud_coverage_for_tests() {
     const auto make_connected_client_connection =
         make_connected_pmtud_client_connection_for_connection_coverage;
 
-    const auto record_application_ack_ranges = [](QuicConnection &test_connection,
-                                                  std::size_t range_count) {
+    const auto record_packet_space_ack_ranges = [](PacketSpaceState &packet_space,
+                                                   std::size_t range_count) {
         for (std::size_t index = 0; index < range_count; ++index) {
-            test_connection.application_space_.received_packets.record_received(
-                static_cast<std::uint64_t>(index * 2u), /*ack_eliciting=*/true,
-                QuicCoreTimePoint{});
+            packet_space.received_packets.record_received(static_cast<std::uint64_t>(index * 2u),
+                                                          /*ack_eliciting=*/true,
+                                                          QuicCoreTimePoint{});
         }
-        test_connection.application_space_.pending_ack_deadline = QuicCoreTimePoint{};
+        packet_space.pending_ack_deadline = QuicCoreTimePoint{};
+    };
+    const auto record_application_ack_ranges = [&](QuicConnection &test_connection,
+                                                   std::size_t range_count) {
+        record_packet_space_ack_ranges(test_connection.application_space_, range_count);
     };
     const auto queue_application_stream_byte = [](QuicConnection &test_connection,
                                                   std::uint64_t stream_id = 0) {
@@ -57,10 +63,8 @@ bool connection_pmtud_coverage_for_tests() {
     const auto reduce_remaining_congestion_window = [](QuicConnection &test_connection,
                                                        std::size_t remaining_bytes) {
         const auto cwnd = test_connection.congestion_controller_.congestion_window();
-        if (cwnd > remaining_bytes) {
-            test_connection.congestion_controller_.on_packet_sent(cwnd - remaining_bytes,
-                                                                  /*ack_eliciting=*/true);
-        }
+        test_connection.congestion_controller_.on_packet_sent(cwnd - remaining_bytes,
+                                                              /*ack_eliciting=*/true);
     };
     const auto make_path_validation_data = [](std::uint8_t first) {
         return std::array{
@@ -86,9 +90,7 @@ bool connection_pmtud_coverage_for_tests() {
     const auto set_outbound_datagram_limit = [](QuicConnection &test_connection,
                                                 std::size_t limit) {
         test_connection.config_.max_outbound_datagram_size = limit;
-        if (test_connection.peer_transport_parameters_.has_value()) {
-            test_connection.peer_transport_parameters_->max_udp_payload_size = limit;
-        }
+        test_connection.peer_transport_parameters_->max_udp_payload_size = limit;
     };
     const auto set_path_challenge = [&](PathState &path_state, std::uint8_t first) {
         path_state.challenge_pending = true;
@@ -326,17 +328,15 @@ bool connection_pmtud_coverage_for_tests() {
             std::vector<std::byte>{std::byte{0x01}, std::byte{0x02}});
         auto stream_state = connection.get_or_open_send_stream(0);
         COQUIC_CONNECTION_HOOK_RECORD(stream_state.has_value());
-        if (stream_state.has_value()) {
-            auto &stream = *stream_state.value();
-            stream.send_buffer.append(std::vector<std::byte>{std::byte{0x61}, std::byte{0x62}});
-            stream.flow_control.highest_sent = 2;
-            stream.flow_control.peer_max_stream_data = 8;
-        }
+        auto &stream = *stream_state.value();
+        stream.send_buffer.append(std::vector<std::byte>{std::byte{0x61}, std::byte{0x62}});
+        stream.flow_control.highest_sent = 2;
+        stream.flow_control.peer_max_stream_data = 8;
         connection.handshake_done_state_ = StreamControlFrameState::sent;
         connection.connection_flow_control_.pending_max_data_frame =
             MaxDataFrame{.maximum_data = 4096};
         connection.connection_flow_control_.max_data_state = StreamControlFrameState::sent;
-        const auto stream_id = stream_state.has_value() ? stream_state.value()->stream_id : 0;
+        const auto stream_id = stream_state.value()->stream_id;
         connection.track_sent_packet(
             connection.application_space_,
             SentPacketRecord{
@@ -561,12 +561,13 @@ bool connection_pmtud_coverage_for_tests() {
             connection.config_.initial_destination_connection_id;
         connection.peer_source_connection_id_ = {std::byte{0xa9}};
         connection.peer_transport_parameters_ = TransportParameters{
-            .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+            .max_udp_payload_size = kMinimumInitialDatagramSize,
             .active_connection_id_limit = 2,
             .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
             .max_ack_delay = connection.config_.transport.max_ack_delay,
             .initial_source_connection_id = connection.peer_source_connection_id_,
         };
+        connection.config_.max_outbound_datagram_size = kMinimumInitialDatagramSize;
         connection.peer_transport_parameters_validated_ = true;
         connection.last_validated_path_id_ = 0;
         connection.current_send_path_id_ = 0;
@@ -1259,12 +1260,10 @@ bool connection_pmtud_coverage_for_tests() {
         COQUIC_CONNECTION_HOOK_RECORD(queue_application_stream_bytes(connection, 1, true));
         auto *stream = connection.find_stream_state(0);
         COQUIC_CONNECTION_HOOK_RECORD(stream != nullptr);
-        if (stream != nullptr) {
-            stream->send_buffer.acknowledge(0, 1);
-            stream->send_buffer.mark_unsent(0, 1);
-            stream->flow_control.highest_sent = 1;
-            connection.refresh_stream_sendable_byte_caches();
-        }
+        stream->send_buffer.acknowledge(0, 1);
+        stream->send_buffer.mark_unsent(0, 1);
+        stream->flow_control.highest_sent = 1;
+        connection.refresh_stream_sendable_byte_caches();
         const ScopedConnectionDrainDatagramGrowthTestHook hook({0}, {1400});
 
         const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
@@ -1276,9 +1275,7 @@ bool connection_pmtud_coverage_for_tests() {
     {
         auto connection = make_connected_client_connection_for_connection_coverage();
         connection.config_.max_outbound_datagram_size = 8;
-        if (connection.peer_transport_parameters_.has_value()) {
-            connection.peer_transport_parameters_->max_udp_payload_size = 8;
-        }
+        connection.peer_transport_parameters_->max_udp_payload_size = 8;
         constexpr auto large_client_bidi_stream_id = kMaxQuicVarInt - 3u;
         auto stream =
             make_implicit_stream_state(large_client_bidi_stream_id, connection.config_.role);
@@ -1304,6 +1301,157 @@ bool connection_pmtud_coverage_for_tests() {
         const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        auto reset_stream = make_implicit_stream_state(0, connection.config_.role);
+        reset_stream.reset_state = StreamControlFrameState::pending;
+        reset_stream.pending_reset_frame = ResetStreamFrame{
+            .stream_id = reset_stream.stream_id,
+            .application_protocol_error_code = 11,
+            .final_size = 0,
+        };
+        connection.streams_.emplace(reset_stream.stream_id, std::move(reset_stream));
+        auto empty_stream = make_implicit_stream_state(4, connection.config_.role);
+        empty_stream.flow_control.peer_max_stream_data = 4096;
+        connection.streams_.emplace(empty_stream.stream_id, std::move(empty_stream));
+        auto data_stream = make_implicit_stream_state(8, connection.config_.role);
+        data_stream.send_buffer.append(std::vector<std::byte>{std::byte{0x62}});
+        data_stream.send_flow_control_committed = 1;
+        data_stream.flow_control.peer_max_stream_data = 1;
+        data_stream.send_flow_control_limit = 1;
+        connection.streams_.emplace(data_stream.stream_id, std::move(data_stream));
+        connection.connection_flow_control_.peer_max_data = 4096;
+        connection.refresh_stream_sendable_byte_caches();
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.last_application_send_stream_id_ == 8);
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        connection.remaining_pto_probe_datagrams_ = 1;
+        connection.application_space_.pending_probe_packet = SentPacketRecord{
+            .packet_number = 111,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_ping = true,
+            .path_id = 0,
+        };
+        auto reset_stream = make_implicit_stream_state(0, connection.config_.role);
+        reset_stream.reset_state = StreamControlFrameState::sent;
+        connection.streams_.emplace(reset_stream.stream_id, std::move(reset_stream));
+        auto empty_stream = make_implicit_stream_state(4, connection.config_.role);
+        empty_stream.flow_control.peer_max_stream_data = 4096;
+        connection.streams_.emplace(empty_stream.stream_id, std::move(empty_stream));
+        COQUIC_CONNECTION_HOOK_RECORD(queue_application_stream_bytes(connection, 12, false, 8));
+        connection.connection_flow_control_.peer_max_data = 4096;
+        connection.last_application_send_stream_id_ = 0;
+        connection.refresh_stream_sendable_byte_caches();
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !connection.application_space_.pending_probe_packet.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.remaining_pto_probe_datagrams_ == 0);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.last_application_send_stream_id_ == 8);
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        connection.remaining_pto_probe_datagrams_ = 1;
+        connection.application_space_.pending_probe_packet = SentPacketRecord{
+            .packet_number = 113,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_ping = true,
+            .path_id = 0,
+        };
+        set_outbound_datagram_limit(connection, 29);
+        auto stream = make_implicit_stream_state(kMaxQuicVarInt - 3u, connection.config_.role);
+        stream.send_buffer.append(std::vector<std::byte>{std::byte{0x64}});
+        stream.send_flow_control_committed = 1;
+        stream.flow_control.peer_max_stream_data = kMaxQuicVarInt;
+        stream.send_flow_control_limit = kMaxQuicVarInt;
+        connection.streams_.emplace(stream.stream_id, std::move(stream));
+        connection.connection_flow_control_.peer_max_data = kMaxQuicVarInt;
+        connection.refresh_stream_sendable_byte_caches();
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        connection.remaining_pto_probe_datagrams_ = 1;
+        connection.application_space_.pending_probe_packet = SentPacketRecord{
+            .packet_number = 112,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_ping = true,
+            .path_id = 0,
+        };
+        connection.config_.max_outbound_datagram_size = kDefaultInitialPacketNumberLength;
+        connection.peer_transport_parameters_->max_udp_payload_size =
+            kDefaultInitialPacketNumberLength;
+        auto stream = make_implicit_stream_state(kMaxQuicVarInt - 3u, connection.config_.role);
+        stream.send_buffer.append(std::vector<std::byte>{std::byte{0x63}});
+        stream.send_flow_control_committed = 1;
+        stream.flow_control.peer_max_stream_data = 1;
+        stream.send_flow_control_limit = 1;
+        connection.streams_.emplace(stream.stream_id, std::move(stream));
+        connection.connection_flow_control_.peer_max_data = 4096;
+        connection.refresh_stream_sendable_byte_caches();
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        for (std::uint64_t stream_id = 0; stream_id < 20; stream_id += 4) {
+            COQUIC_CONNECTION_HOOK_RECORD(
+                queue_application_stream_bytes(connection, 256, false, stream_id));
+        }
+        connection.config_.max_outbound_datagram_size = 32768;
+        connection.peer_transport_parameters_->max_udp_payload_size = 32768;
+        connection.connection_flow_control_.peer_max_data = 32768;
+        connection.refresh_stream_sendable_byte_caches();
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.last_application_send_stream_id_.has_value());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        connection.config_.max_outbound_datagram_size = 26;
+        connection.peer_transport_parameters_->max_udp_payload_size = 26;
+        auto stream = make_implicit_stream_state(kMaxQuicVarInt - 3u, connection.config_.role);
+        stream.send_final_size = kMaxQuicVarInt;
+        stream.send_fin_state = StreamSendFinState::pending;
+        stream.flow_control.peer_max_stream_data = kMaxQuicVarInt;
+        stream.send_flow_control_limit = kMaxQuicVarInt;
+        connection.streams_.emplace(stream.stream_id, std::move(stream));
+        connection.connection_flow_control_.peer_max_data = kMaxQuicVarInt;
+        connection.refresh_stream_sendable_byte_caches();
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
     }
 
@@ -1419,9 +1567,7 @@ bool connection_pmtud_coverage_for_tests() {
         auto connection = make_connected_client_connection_for_connection_coverage();
         COQUIC_CONNECTION_HOOK_RECORD(queue_application_stream_bytes(connection, 1400));
         connection.config_.max_outbound_datagram_size = 48;
-        if (connection.peer_transport_parameters_.has_value()) {
-            connection.peer_transport_parameters_->max_udp_payload_size = 48;
-        }
+        connection.peer_transport_parameters_->max_udp_payload_size = 48;
         const ScopedConnectionDrainDatagramGrowthTestHook growth_hook({0}, {1500});
         const ScopedConnectionDrainCountdownTestHook trim_hook(
             &ConnectionDrainTestHooks::force_application_trim_candidate_failure_countdown, 0);
@@ -1438,6 +1584,107 @@ bool connection_pmtud_coverage_for_tests() {
         connection.peer_transport_parameters_->max_datagram_frame_size = 1200;
         COQUIC_CONNECTION_HOOK_RECORD(
             connection.queue_datagram_send(bytes_from_ints_for_tests({0xd1, 0xd2})).has_value());
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.pending_datagram_send_queue_.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        COQUIC_CONNECTION_HOOK_RECORD(connection.peer_transport_parameters_.has_value());
+        connection.peer_transport_parameters_.reset();
+        connection.pending_datagram_send_queue_.push_back(
+            SharedBytes(bytes_from_ints_for_tests({0xe1, 0xe2})));
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.pending_datagram_send_queue_.size() == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        COQUIC_CONNECTION_HOOK_RECORD(connection.peer_transport_parameters_.has_value());
+        connection.peer_transport_parameters_->max_datagram_frame_size = 0;
+        connection.pending_datagram_send_queue_.push_back(
+            SharedBytes(bytes_from_ints_for_tests({0xe3, 0xe4})));
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.pending_datagram_send_queue_.size() == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        COQUIC_CONNECTION_HOOK_RECORD(connection.peer_transport_parameters_.has_value());
+        connection.peer_transport_parameters_->max_datagram_frame_size = 2;
+        connection.pending_datagram_send_queue_.push_back(
+            SharedBytes(bytes_from_ints_for_tests({0xe5, 0xe6})));
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.pending_datagram_send_queue_.size() == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        COQUIC_CONNECTION_HOOK_RECORD(connection.peer_transport_parameters_.has_value());
+        connection.config_.max_outbound_datagram_size = 24;
+        connection.peer_transport_parameters_->max_udp_payload_size = 24;
+        connection.peer_transport_parameters_->max_datagram_frame_size = 1200;
+        connection.pending_datagram_send_queue_.push_back(
+            SharedBytes(bytes_from_ints_for_tests({0xe7, 0xe8, 0xe9})));
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.pending_datagram_send_queue_.size() == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        QuicConnection connection(QuicCoreConfig{
+            .role = EndpointRole::server,
+            .source_connection_id = {std::byte{0x61}, std::byte{0x03}},
+            .initial_destination_connection_id = {std::byte{0x91}, std::byte{0x03}},
+            .verify_peer = false,
+            .server_name = "localhost",
+        });
+        connection.started_ = true;
+        connection.status_ = HandshakeStatus::connected;
+        connection.handshake_confirmed_ = true;
+        connection.peer_address_validated_ = true;
+        connection.client_initial_destination_connection_id_ =
+            connection.config_.initial_destination_connection_id;
+        connection.peer_source_connection_id_ = {std::byte{0xab}};
+        connection.application_space_.read_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+        connection.application_space_.write_secret = make_connection_coverage_traffic_secret(
+            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x42});
+        connection.peer_transport_parameters_ = TransportParameters{
+            .max_udp_payload_size = connection.config_.transport.max_udp_payload_size,
+            .active_connection_id_limit = 2,
+            .ack_delay_exponent = connection.config_.transport.ack_delay_exponent,
+            .max_ack_delay = connection.config_.transport.max_ack_delay,
+            .initial_source_connection_id = connection.peer_source_connection_id_,
+            .max_datagram_frame_size = 1200,
+        };
+        connection.peer_transport_parameters_validated_ = true;
+        connection.last_validated_path_id_ = 0;
+        connection.current_send_path_id_ = 0;
+        auto &path = connection.ensure_path_state(0);
+        path.validated = true;
+        path.is_current_send_path = true;
+        connection.pending_datagram_send_queue_.push_back(
+            SharedBytes(bytes_from_ints_for_tests({0xea, 0xeb})));
 
         const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
 
@@ -1883,9 +2130,7 @@ bool connection_pmtud_coverage_for_tests() {
     {
         auto connection = make_connected_client_connection();
         connection.config_.max_outbound_datagram_size = kMaximumDatagramSize;
-        if (connection.peer_transport_parameters_.has_value()) {
-            connection.peer_transport_parameters_->max_udp_payload_size = kMaximumDatagramSize;
-        }
+        connection.peer_transport_parameters_->max_udp_payload_size = kMaximumDatagramSize;
         COQUIC_CONNECTION_HOOK_RECORD(connection
                                           .queue_application_close(LocalApplicationCloseCommand{
                                               .application_error_code = 77,
@@ -1899,6 +2144,139 @@ bool connection_pmtud_coverage_for_tests() {
         COQUIC_CONNECTION_HOOK_RECORD(!connection.pending_application_close_.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(connection.local_application_close_sent_);
         COQUIC_CONNECTION_HOOK_RECORD(connection.close_mode_ == QuicConnectionCloseMode::closing);
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        connection.application_space_.received_packets.record_received(63, /*ack_eliciting=*/true,
+                                                                       QuicCoreTimePoint{});
+        connection.application_space_.pending_ack_deadline = QuicCoreTimePoint{};
+        set_outbound_datagram_limit(connection, 1);
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.application_space_.received_packets.has_ack_to_send());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        connection.config_.transport.send_stream_fairness = true;
+        auto reset_stream = make_implicit_stream_state(0, connection.config_.role);
+        reset_stream.reset_state = StreamControlFrameState::sent;
+        connection.streams_.emplace(reset_stream.stream_id, std::move(reset_stream));
+        auto data_stream = make_implicit_stream_state(4, connection.config_.role);
+        data_stream.send_buffer.append(std::vector<std::byte>{std::byte{0x76}});
+        data_stream.send_flow_control_committed = 1;
+        data_stream.flow_control.peer_max_stream_data = 1;
+        data_stream.send_flow_control_limit = 1;
+        connection.streams_.emplace(data_stream.stream_id, std::move(data_stream));
+        connection.connection_flow_control_.peer_max_data = 4096;
+        connection.remaining_pto_probe_datagrams_ = 1;
+        connection.application_space_.pending_probe_packet = SentPacketRecord{
+            .packet_number = 131,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_ping = true,
+            .path_id = 0,
+        };
+        connection.refresh_stream_sendable_byte_caches();
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.last_application_send_stream_id_ == 4);
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        connection.config_.transport.send_stream_fairness = true;
+        connection.last_application_send_stream_id_ = 0;
+        auto wide_id_stream =
+            make_implicit_stream_state(kMaxQuicVarInt - 3u, connection.config_.role);
+        wide_id_stream.send_buffer.append(std::vector<std::byte>{std::byte{0x77}});
+        wide_id_stream.send_flow_control_committed = 1;
+        wide_id_stream.flow_control.peer_max_stream_data = kMaxQuicVarInt;
+        wide_id_stream.send_flow_control_limit = kMaxQuicVarInt;
+        connection.streams_.emplace(wide_id_stream.stream_id, std::move(wide_id_stream));
+        connection.connection_flow_control_.peer_max_data = kMaxQuicVarInt;
+        auto *inserted_stream = connection.find_stream_state(kMaxQuicVarInt - 3u);
+        COQUIC_CONNECTION_HOOK_RECORD(inserted_stream != nullptr);
+        connection.remaining_pto_probe_datagrams_ = 1;
+        connection.application_space_.pending_probe_packet = SentPacketRecord{
+            .packet_number = 132,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .has_ping = true,
+            .path_id = 0,
+        };
+        set_outbound_datagram_limit(connection, 8);
+        connection.refresh_stream_sendable_byte_caches();
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        auto reset_stream = make_implicit_stream_state(0, connection.config_.role);
+        reset_stream.reset_state = StreamControlFrameState::sent;
+        connection.streams_.emplace(reset_stream.stream_id, std::move(reset_stream));
+        COQUIC_CONNECTION_HOOK_RECORD(queue_application_stream_bytes(connection, 512, false, 4));
+        COQUIC_CONNECTION_HOOK_RECORD(queue_application_stream_bytes(connection, 512, false, 8));
+        connection.connection_flow_control_.peer_max_data = 4096;
+        connection.refresh_stream_sendable_byte_caches();
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        for (std::uint64_t stream_id = 0; stream_id < 12; stream_id += 4) {
+            COQUIC_CONNECTION_HOOK_RECORD(
+                queue_application_stream_bytes(connection, 16384, false, stream_id));
+        }
+        connection.config_.transport.send_stream_fairness = true;
+        set_outbound_datagram_limit(connection, 32768);
+        connection.connection_flow_control_.peer_max_data = 65536;
+        connection.refresh_stream_sendable_byte_caches();
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        connection.application_space_.pending_probe_packet = SentPacketRecord{
+            .packet_number = 133,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .stream_fragments = {},
+            .stream_frame_metadata = {StreamFrameSendMetadata{
+                .stream_id = 44,
+                .offset = 0,
+                .length = 4,
+                .fin = false,
+                .consumes_flow_control = true,
+            }},
+            .path_id = 0,
+        };
+        connection.remaining_pto_probe_datagrams_ = 1;
+
+        const auto datagram = connection.drain_outbound_datagram(QuicCoreTimePoint{});
+
+        COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
     }
 
     {
@@ -2065,11 +2443,19 @@ bool connection_pmtud_coverage_for_tests() {
         stream.flow_control.peer_max_stream_data = kMaxQuicVarInt;
         connection.streams_.emplace(stream.stream_id, std::move(stream));
         connection.config_.max_outbound_datagram_size = 8;
-        if (connection.peer_transport_parameters_.has_value()) {
-            connection.peer_transport_parameters_->max_udp_payload_size = 8;
-        }
+        connection.peer_transport_parameters_->max_udp_payload_size = 8;
         COQUIC_CONNECTION_HOOK_RECORD(
             !connection.minimum_pending_application_stream_datagram_bytes().has_value());
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        connection.config_.max_outbound_datagram_size = kDefaultInitialPacketNumberLength;
+        connection.peer_transport_parameters_->max_udp_payload_size =
+            kDefaultInitialPacketNumberLength;
+        COQUIC_CONNECTION_HOOK_RECORD(connection.application_stream_pacing_deadline_bytes(
+                                          kDefaultInitialPacketNumberLength) ==
+                                      kDefaultInitialPacketNumberLength);
     }
 
     {
@@ -2118,6 +2504,367 @@ bool connection_pmtud_coverage_for_tests() {
 
         path.validated = true;
         COQUIC_CONNECTION_HOOK_RECORD(!connection.anti_amplification_applies(7));
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        QuicConnection::RetiredPeerStreamRange range{
+            .first_index = 1,
+            .last_index = 3,
+            .receive_final_size = 5,
+            .send_final_size = 7,
+            .peer_max_stream_data = 9,
+            .local_receive_window = 11,
+            .advertised_max_stream_data = 13,
+        };
+        connection.retired_peer_bidi_stream_ranges_.emplace(1, range);
+        auto retired_bidi = connection.make_retired_peer_stream_state(5, range);
+        COQUIC_CONNECTION_HOOK_RECORD(retired_bidi.send_fin_state ==
+                                      StreamSendFinState::acknowledged);
+        range.first_index = 2;
+        range.last_index = 2;
+        connection.retired_peer_uni_stream_ranges_.emplace(2, range);
+        auto retired_uni = connection.make_retired_peer_stream_state(11, range);
+        COQUIC_CONNECTION_HOOK_RECORD(retired_uni.send_fin_state == StreamSendFinState::none);
+
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !connection.validate_retired_peer_stream_frame(5, 6, 0, false, kFrameTypeStreamBase)
+                 .has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !connection.validate_retired_peer_stream_frame(5, 4, 0, true, kFrameTypeStreamBase)
+                 .has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.validate_retired_peer_stream_frame(5, 5, 0, true, kFrameTypeStreamBase)
+                .has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !connection.validate_retired_peer_reset_stream_frame(5, 4, kFrameTypeResetStream)
+                 .has_value());
+
+        connection.retired_peer_bidi_stream_ranges_.clear();
+        connection.retired_peer_bidi_stream_ranges_.emplace(1,
+                                                            QuicConnection::RetiredPeerStreamRange{
+                                                                .first_index = 1,
+                                                                .last_index = 1,
+                                                                .receive_final_size = 5,
+                                                                .send_final_size = 7,
+                                                                .peer_max_stream_data = 9,
+                                                                .local_receive_window = 11,
+                                                                .advertised_max_stream_data = 13,
+                                                            });
+        connection.retired_peer_bidi_stream_ranges_.emplace(3,
+                                                            QuicConnection::RetiredPeerStreamRange{
+                                                                .first_index = 3,
+                                                                .last_index = 3,
+                                                                .receive_final_size = 5,
+                                                                .send_final_size = 7,
+                                                                .peer_max_stream_data = 9,
+                                                                .local_receive_window = 11,
+                                                                .advertised_max_stream_data = 13,
+                                                            });
+        auto stream = make_implicit_stream_state(9, connection.config_.role);
+        stream.peer_fin_delivered = true;
+        stream.peer_final_size = 5;
+        stream.send_final_size = 7;
+        stream.flow_control.peer_max_stream_data = 9;
+        stream.flow_control.local_receive_window = 11;
+        stream.flow_control.advertised_max_stream_data = 13;
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_stream_to_peer_range(stream));
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.retired_peer_bidi_stream_ranges_.begin()->second.first_index == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.retired_peer_bidi_stream_ranges_.begin()->second.last_index == 3);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.retired_peer_stream_count() == 4);
+
+        connection.retired_peer_bidi_stream_ranges_.clear();
+        auto mismatch = make_implicit_stream_state(9, connection.config_.role);
+        mismatch.peer_fin_delivered = true;
+        mismatch.peer_final_size = 5;
+        mismatch.send_final_size = 7;
+        mismatch.flow_control.peer_max_stream_data = 9;
+        mismatch.flow_control.local_receive_window = 11;
+        mismatch.flow_control.advertised_max_stream_data = 13;
+        connection.retired_peer_bidi_stream_ranges_.emplace(1,
+                                                            QuicConnection::RetiredPeerStreamRange{
+                                                                .first_index = 1,
+                                                                .last_index = 1,
+                                                                .receive_final_size = 6,
+                                                                .send_final_size = 7,
+                                                                .peer_max_stream_data = 9,
+                                                                .local_receive_window = 11,
+                                                                .advertised_max_stream_data = 13,
+                                                            });
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_stream_to_peer_range(mismatch));
+
+        connection.retired_peer_bidi_stream_ranges_.clear();
+        connection.retired_peer_bidi_stream_ranges_.emplace(1,
+                                                            QuicConnection::RetiredPeerStreamRange{
+                                                                .first_index = 1,
+                                                                .last_index = 1,
+                                                                .receive_final_size = 5,
+                                                                .send_final_size = 8,
+                                                                .peer_max_stream_data = 9,
+                                                                .local_receive_window = 11,
+                                                                .advertised_max_stream_data = 13,
+                                                            });
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_stream_to_peer_range(mismatch));
+
+        connection.retired_peer_bidi_stream_ranges_.clear();
+        connection.retired_peer_bidi_stream_ranges_.emplace(1,
+                                                            QuicConnection::RetiredPeerStreamRange{
+                                                                .first_index = 1,
+                                                                .last_index = 1,
+                                                                .receive_final_size = 5,
+                                                                .send_final_size = 7,
+                                                                .peer_max_stream_data = 10,
+                                                                .local_receive_window = 11,
+                                                                .advertised_max_stream_data = 13,
+                                                            });
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_stream_to_peer_range(mismatch));
+
+        connection.retired_peer_bidi_stream_ranges_.clear();
+        connection.retired_peer_bidi_stream_ranges_.emplace(1,
+                                                            QuicConnection::RetiredPeerStreamRange{
+                                                                .first_index = 1,
+                                                                .last_index = 1,
+                                                                .receive_final_size = 5,
+                                                                .send_final_size = 7,
+                                                                .peer_max_stream_data = 9,
+                                                                .local_receive_window = 12,
+                                                                .advertised_max_stream_data = 13,
+                                                            });
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_stream_to_peer_range(mismatch));
+
+        connection.retired_peer_bidi_stream_ranges_.clear();
+        connection.retired_peer_bidi_stream_ranges_.emplace(1,
+                                                            QuicConnection::RetiredPeerStreamRange{
+                                                                .first_index = 1,
+                                                                .last_index = 1,
+                                                                .receive_final_size = 5,
+                                                                .send_final_size = 7,
+                                                                .peer_max_stream_data = 9,
+                                                                .local_receive_window = 11,
+                                                                .advertised_max_stream_data = 14,
+                                                            });
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_stream_to_peer_range(mismatch));
+
+        connection.retired_peer_bidi_stream_ranges_.clear();
+        connection.retired_peer_bidi_stream_ranges_.emplace(3,
+                                                            QuicConnection::RetiredPeerStreamRange{
+                                                                .first_index = 3,
+                                                                .last_index = 3,
+                                                                .receive_final_size = 6,
+                                                                .send_final_size = 7,
+                                                                .peer_max_stream_data = 9,
+                                                                .local_receive_window = 11,
+                                                                .advertised_max_stream_data = 13,
+                                                            });
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_stream_to_peer_range(mismatch));
+
+        connection.retired_peer_bidi_stream_ranges_.clear();
+        connection.retired_peer_bidi_stream_ranges_.emplace(3,
+                                                            QuicConnection::RetiredPeerStreamRange{
+                                                                .first_index = 3,
+                                                                .last_index = 3,
+                                                                .receive_final_size = 5,
+                                                                .send_final_size = 8,
+                                                                .peer_max_stream_data = 9,
+                                                                .local_receive_window = 11,
+                                                                .advertised_max_stream_data = 13,
+                                                            });
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_stream_to_peer_range(mismatch));
+
+        connection.retired_peer_bidi_stream_ranges_.clear();
+        connection.retired_peer_bidi_stream_ranges_.emplace(3,
+                                                            QuicConnection::RetiredPeerStreamRange{
+                                                                .first_index = 3,
+                                                                .last_index = 3,
+                                                                .receive_final_size = 5,
+                                                                .send_final_size = 7,
+                                                                .peer_max_stream_data = 10,
+                                                                .local_receive_window = 11,
+                                                                .advertised_max_stream_data = 13,
+                                                            });
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_stream_to_peer_range(mismatch));
+
+        connection.retired_peer_bidi_stream_ranges_.clear();
+        connection.retired_peer_bidi_stream_ranges_.emplace(3,
+                                                            QuicConnection::RetiredPeerStreamRange{
+                                                                .first_index = 3,
+                                                                .last_index = 3,
+                                                                .receive_final_size = 5,
+                                                                .send_final_size = 7,
+                                                                .peer_max_stream_data = 9,
+                                                                .local_receive_window = 12,
+                                                                .advertised_max_stream_data = 13,
+                                                            });
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_stream_to_peer_range(mismatch));
+
+        connection.retired_peer_bidi_stream_ranges_.clear();
+        connection.retired_peer_bidi_stream_ranges_.emplace(3,
+                                                            QuicConnection::RetiredPeerStreamRange{
+                                                                .first_index = 3,
+                                                                .last_index = 3,
+                                                                .receive_final_size = 5,
+                                                                .send_final_size = 7,
+                                                                .peer_max_stream_data = 9,
+                                                                .local_receive_window = 11,
+                                                                .advertised_max_stream_data = 14,
+                                                            });
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_stream_to_peer_range(mismatch));
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        const std::array token_a{
+            std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
+            std::byte{0x05}, std::byte{0x06}, std::byte{0x07}, std::byte{0x08},
+            std::byte{0x09}, std::byte{0x0a}, std::byte{0x0b}, std::byte{0x0c},
+            std::byte{0x0d}, std::byte{0x0e}, std::byte{0x0f}, std::byte{0x10}};
+        auto token_b = token_a;
+        token_b[15] = std::byte{0x11};
+
+        connection.current_send_path_id_.reset();
+        connection.respond_to_path_challenge(9, make_path_validation_data(0xb1));
+        COQUIC_CONNECTION_HOOK_RECORD(connection.paths_.at(9).pending_response.has_value());
+
+        connection.current_send_path_id_ = 9;
+        auto &challenge_path = connection.ensure_path_state(9);
+        challenge_path.validated = true;
+        challenge_path.peer_connection_id_sequence = 0;
+        connection.peer_connection_ids_.clear();
+        connection.respond_to_path_challenge(9, make_path_validation_data(0xb2));
+        COQUIC_CONNECTION_HOOK_RECORD(challenge_path.peer_connection_id_sequence == 0);
+
+        connection.peer_connection_ids_[0] = PeerConnectionIdRecord{
+            .sequence_number = 0,
+            .connection_id = {std::byte{0x41}},
+            .stateless_reset_token = token_a,
+        };
+        connection.peer_connection_ids_[2] = PeerConnectionIdRecord{
+            .sequence_number = 2,
+            .connection_id = {std::byte{0x42}},
+            .stateless_reset_token = token_b,
+        };
+        connection.respond_to_path_challenge(9, make_path_validation_data(0xb3));
+        COQUIC_CONNECTION_HOOK_RECORD(challenge_path.peer_connection_id_sequence == 2);
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.pending_retire_connection_id_frames_.empty());
+
+        NewConnectionIdFrame frame{
+            .sequence_number = 7,
+            .retire_prior_to = 0,
+            .connection_id = {std::byte{0x51}},
+            .stateless_reset_token = token_a,
+        };
+        connection.largest_peer_retire_prior_to_ = 8;
+        connection.peer_connection_ids_.clear();
+        connection.active_peer_connection_id_sequence_ = 0;
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.process_new_connection_id_frame(frame).has_value());
+        connection.refresh_peer_connection_id_sequences_after_retirement();
+
+        PreferredAddress preferred{
+            .connection_id = {std::byte{0x61}},
+            .stateless_reset_token = token_a,
+        };
+        auto preferred_connection = make_connected_client_connection_for_connection_coverage();
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !preferred_connection.ensure_peer_preferred_address_connection_id().value());
+        preferred_connection.peer_transport_parameters_->preferred_address = preferred;
+        preferred_connection.peer_connection_ids_[kPreferredAddressConnectionIdSequence] =
+            PeerConnectionIdRecord{
+                .sequence_number = kPreferredAddressConnectionIdSequence,
+                .connection_id = preferred.connection_id,
+                .stateless_reset_token = token_a,
+            };
+        COQUIC_CONNECTION_HOOK_RECORD(
+            preferred_connection.ensure_peer_preferred_address_connection_id().value());
+
+        preferred_connection.peer_connection_ids_[kPreferredAddressConnectionIdSequence]
+            .locally_retired = true;
+        COQUIC_CONNECTION_HOOK_RECORD(
+            preferred_connection.ensure_peer_preferred_address_connection_id().value());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !preferred_connection.peer_connection_ids_[kPreferredAddressConnectionIdSequence]
+                 .locally_retired);
+
+        preferred_connection.peer_connection_ids_.clear();
+        preferred_connection.peer_connection_ids_[3] = PeerConnectionIdRecord{
+            .sequence_number = 3,
+            .connection_id = preferred.connection_id,
+            .stateless_reset_token = token_a,
+        };
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !preferred_connection.ensure_peer_preferred_address_connection_id().has_value());
+
+        preferred_connection.peer_connection_ids_.clear();
+        preferred_connection.local_transport_parameters_.active_connection_id_limit = 0;
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !preferred_connection.ensure_peer_preferred_address_connection_id().has_value());
+
+        auto refresh_connection = make_connected_client_connection_for_connection_coverage();
+        refresh_connection.current_send_path_id_ = 77;
+        refresh_connection.refresh_peer_connection_id_sequences_after_retirement();
+        refresh_connection.current_send_path_id_.reset();
+        refresh_connection.ensure_path_state(6).peer_connection_id_sequence = 0;
+        refresh_connection.refresh_peer_connection_id_sequences_after_retirement();
+    }
+
+    {
+        auto connection = make_connected_client_connection_for_connection_coverage();
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.note_aead_encryption_attempt(0, QuicCoreTimePoint{}));
+        auto without_write_secret = make_connected_client_connection_for_connection_coverage();
+        without_write_secret.application_space_.write_secret.reset();
+        COQUIC_CONNECTION_HOOK_RECORD(
+            without_write_secret.note_aead_encryption_attempt(1, QuicCoreTimePoint{}));
+        connection.local_key_update_requested_ = true;
+        connection.maybe_request_proactive_key_update();
+        COQUIC_CONNECTION_HOOK_RECORD(connection.local_key_update_requested_);
+    }
+
+    {
+        auto config = make_client_core_config_for_connection_coverage();
+        config.role = EndpointRole::server;
+        auto connection = make_connected_client_connection_for_connection_coverage(config);
+        connection.config_.role = EndpointRole::server;
+        connection.status_ = HandshakeStatus::connected;
+        connection.peer_address_validated_ = false;
+        connection.anti_amplification_received_bytes_ = 0;
+        connection.note_inbound_datagram_bytes(9);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.anti_amplification_received_bytes_ == 9);
+
+        connection.status_ = HandshakeStatus::failed;
+        connection.anti_amplification_received_bytes_ = 0;
+        connection.note_inbound_datagram_bytes(9);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.anti_amplification_received_bytes_ == 0);
+
+        connection.status_ = HandshakeStatus::connected;
+        connection.peer_address_validated_ = true;
+        connection.last_inbound_path_id_ = 4;
+        auto &received_path = connection.ensure_path_state(4);
+        received_path.anti_amplification_received_bytes =
+            std::numeric_limits<std::uint64_t>::max() - 1;
+        connection.note_inbound_datagram_bytes(9);
+        COQUIC_CONNECTION_HOOK_RECORD(received_path.anti_amplification_received_bytes ==
+                                      std::numeric_limits<std::uint64_t>::max());
+
+        connection.current_send_path_id_ = 4;
+        received_path.validated = false;
+        received_path.anti_amplification_received_bytes = 0;
+        received_path.anti_amplification_sent_bytes = 0;
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.anti_amplification_applies(4));
+        received_path.anti_amplification_received_bytes = 1;
+        COQUIC_CONNECTION_HOOK_RECORD(connection.anti_amplification_applies(4));
+
+        received_path.pending_response = make_path_validation_data(0xa1);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.anti_amplification_send_budget() == 3);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.anti_amplification_remaining_send_budget() == 3);
+        received_path.anti_amplification_sent_bytes = 5;
+        COQUIC_CONNECTION_HOOK_RECORD(connection.anti_amplification_remaining_send_budget() == 0);
+
+        received_path.anti_amplification_received_bytes = std::numeric_limits<std::uint64_t>::max();
+        COQUIC_CONNECTION_HOOK_RECORD(connection.anti_amplification_send_budget(4) ==
+                                      std::numeric_limits<std::uint64_t>::max());
     }
 
 #undef COQUIC_CONNECTION_HOOK_RECORD

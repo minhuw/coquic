@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -10,7 +11,6 @@
 #include <vector>
 
 #include "tests/support/core/endpoint_test_fixtures.h"
-#include "src/quic/core_test_hooks.h"
 
 namespace {
 using namespace coquic::quic;
@@ -137,6 +137,47 @@ std::filesystem::path make_replay_store_path_for_test(std::string_view name) {
     std::filesystem::remove(path, ignored);
     std::filesystem::create_directories(path.parent_path(), ignored);
     return path;
+}
+
+bool seed_legacy_route_handle_path_for_test(QuicCore &core, QuicRouteHandle route_handle,
+                                            QuicPathId path_id) {
+    auto *entry = core.ensure_legacy_entry();
+    if (entry == nullptr) {
+        return false;
+    }
+
+    if (!entry->default_route_handle.has_value()) {
+        entry->default_route_handle = route_handle;
+    }
+
+    const auto existing_by_handle = entry->path_id_by_route_handle.find(route_handle);
+    if (existing_by_handle != entry->path_id_by_route_handle.end() &&
+        existing_by_handle->second == path_id) {
+        return true;
+    }
+
+    if (path_id == std::numeric_limits<QuicPathId>::max()) {
+        return false;
+    }
+
+    if (existing_by_handle != entry->path_id_by_route_handle.end()) {
+        entry->route_handle_by_path_id.erase(existing_by_handle->second);
+    }
+
+    const auto existing_by_path = entry->route_handle_by_path_id.find(path_id);
+    if (existing_by_path != entry->route_handle_by_path_id.end() &&
+        existing_by_path->second != route_handle) {
+        const auto displaced_route_handle = existing_by_path->second;
+        entry->path_id_by_route_handle.erase(displaced_route_handle);
+        if (entry->default_route_handle == displaced_route_handle) {
+            entry->default_route_handle = route_handle;
+        }
+    }
+
+    entry->path_id_by_route_handle[route_handle] = path_id;
+    entry->route_handle_by_path_id[path_id] = route_handle;
+    entry->next_path_id = std::max(entry->next_path_id, static_cast<QuicPathId>(path_id + 1));
+    return true;
 }
 
 // NOLINTBEGIN(clang-analyzer-cplusplus.NewDeleteLeaks)
@@ -385,18 +426,18 @@ TEST(QuicCoreEndpointInternalTest, RouteRefreshRememberPathAndLegacySeedingCover
     EXPECT_EQ(server_core.remember_inbound_path(path_entry, 13, std::span<const std::byte>{}), 2u);
 
     QuicCore endpoint_core(make_client_endpoint_config());
-    EXPECT_FALSE(coquic::quic::test::seed_legacy_route_handle_path_for_tests(endpoint_core, 7, 0));
+    EXPECT_FALSE(seed_legacy_route_handle_path_for_test(endpoint_core, 7, 0));
 
     QuicCore legacy_core(coquic::quic::test::make_client_core_config());
-    EXPECT_FALSE(coquic::quic::test::seed_legacy_route_handle_path_for_tests(
-        legacy_core, 1, std::numeric_limits<QuicPathId>::max()));
-    ASSERT_TRUE(coquic::quic::test::seed_legacy_route_handle_path_for_tests(legacy_core, 11, 1));
-    ASSERT_TRUE(coquic::quic::test::seed_legacy_route_handle_path_for_tests(legacy_core, 22, 2));
+    EXPECT_FALSE(seed_legacy_route_handle_path_for_test(legacy_core, 1,
+                                                        std::numeric_limits<QuicPathId>::max()));
+    ASSERT_TRUE(seed_legacy_route_handle_path_for_test(legacy_core, 11, 1));
+    ASSERT_TRUE(seed_legacy_route_handle_path_for_test(legacy_core, 22, 2));
 
     auto *legacy_entry = legacy_core.ensure_legacy_entry();
     ASSERT_NE(legacy_entry, nullptr);
     legacy_entry->default_route_handle = 22;
-    ASSERT_TRUE(coquic::quic::test::seed_legacy_route_handle_path_for_tests(legacy_core, 11, 2));
+    ASSERT_TRUE(seed_legacy_route_handle_path_for_test(legacy_core, 11, 2));
     EXPECT_FALSE(legacy_entry->path_id_by_route_handle.contains(22));
     EXPECT_FALSE(legacy_entry->route_handle_by_path_id.contains(1));
     EXPECT_EQ(legacy_entry->default_route_handle, std::optional<QuicRouteHandle>{11u});
@@ -782,7 +823,7 @@ TEST(QuicCoreEndpointInternalTest, LegacyPathMtuUpdateHonorsRouteMapping) {
     QuicCore legacy_core(coquic::quic::test::make_client_core_config());
     *legacy_core.connection_ = make_connected_client_connection();
     legacy_core.connection_->config_.max_outbound_datagram_size = 4096;
-    ASSERT_TRUE(coquic::quic::test::seed_legacy_route_handle_path_for_tests(legacy_core, 17, 0));
+    ASSERT_TRUE(seed_legacy_route_handle_path_for_test(legacy_core, 17, 0));
     auto *entry = legacy_core.ensure_legacy_entry();
     ASSERT_NE(entry, nullptr);
     auto &path = entry->connection->paths_.at(0);

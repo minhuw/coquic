@@ -77,10 +77,6 @@ void QuicConnection::replay_deferred_protected_packets(QuicCoreTimePoint now) {
 }
 
 CodecResult<bool> QuicConnection::sync_tls_state() {
-    if (connection_drain_test_hooks().force_sync_tls_state_failure) {
-        return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
-    }
-
     if (tls_.has_value()) {
         const auto polled = tls_->poll();
         if (!polled.has_value()) {
@@ -2477,9 +2473,6 @@ std::optional<std::size_t> QuicConnection::next_pmtu_probe_size(PathState &path)
     auto next_probe_size =
         next_probe_size_between(path.mtu.validated_datagram_size, path.mtu.probe_ceiling);
     while (should_keep_searching_for_pmtu_probe_size(path.mtu, next_probe_size)) {
-        if (connection_drain_test_hooks().force_next_pmtu_probe_size_zero) {
-            next_probe_size = 0;
-        }
         if (next_probe_size == 0) {
             return std::nullopt;
         }

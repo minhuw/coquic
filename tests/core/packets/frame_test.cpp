@@ -12,7 +12,6 @@
 #include <gtest/gtest.h>
 
 #include "src/quic/frame.h"
-#include "src/quic/frame_test_hooks.h"
 #include "src/quic/recovery.h"
 #include "tests/support/quic_test_utils.h"
 

@@ -317,6 +317,13 @@ make_one_rtt_packet_view(const coquic::quic::ProtectedOneRttPacket &source_packe
     };
 }
 
+coquic::quic::CodecResult<std::size_t> append_one_rtt_packet_to_datagram_for_test(
+    std::vector<std::byte> &datagram, const coquic::quic::ProtectedOneRttPacket &packet,
+    const coquic::quic::SerializeProtectionContext &context) {
+    return coquic::quic::append_protected_one_rtt_packet_to_datagram(
+        datagram, make_one_rtt_packet_view(packet), context);
+}
+
 coquic::quic::ProtectedOneRttPacketFragmentView make_one_rtt_packet_fragment_view(
     const coquic::quic::ProtectedOneRttPacket &source_packet,
     std::span<const coquic::quic::StreamFrameSendFragment> fragments) {
@@ -812,8 +819,7 @@ TEST(QuicProtectedCodecTest, AppendsOneRttPacketIntoExistingDatagramBuffer) {
     };
     auto datagram = prefix;
 
-    auto appended =
-        coquic::quic::test::append_protected_one_rtt_packet_to_datagram(datagram, packet, context);
+    auto appended = append_one_rtt_packet_to_datagram_for_test(datagram, packet, context);
     ASSERT_TRUE(appended.has_value());
     EXPECT_EQ(datagram.size(), prefix.size() + appended.value());
     EXPECT_EQ(std::vector<std::byte>(datagram.begin(),
@@ -1075,8 +1081,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketRollsBackDatagramOnHeaderProtecti
 
     const auto injector = coquic::quic::test::ScopedPacketCryptoFaultInjector(
         coquic::quic::test::PacketCryptoFaultPoint::header_protection_context_new);
-    auto appended =
-        coquic::quic::test::append_protected_one_rtt_packet_to_datagram(datagram, packet, context);
+    auto appended = append_one_rtt_packet_to_datagram_for_test(datagram, packet, context);
 
     ASSERT_FALSE(appended.has_value());
     EXPECT_EQ(datagram, prefix);
@@ -1151,8 +1156,7 @@ TEST(QuicProtectedCodecTest, StreamViewPathUsesSinglePayloadSealUpdate) {
         coquic::quic::test::PacketCryptoFaultPoint::seal_payload_update, 2);
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
-        datagram, packet, serialize_context);
+    auto appended = append_one_rtt_packet_to_datagram_for_test(datagram, packet, serialize_context);
     ASSERT_TRUE(appended.has_value());
     ASSERT_EQ(datagram.size(), appended.value());
 
@@ -1417,7 +1421,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsInvalidStreamViewBounds) {
     };
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
@@ -1444,7 +1448,7 @@ TEST(QuicProtectedCodecTest,
     };
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
@@ -1468,7 +1472,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsStreamViewOffsetOverflow) 
     };
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
@@ -1490,7 +1494,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsMissingStreamViewStorage) 
     };
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
@@ -1512,7 +1516,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketAcceptsZeroLengthStreamViewWithou
     };
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_TRUE(appended.has_value());
@@ -1535,7 +1539,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsStreamViewPastStorageEnd) 
     };
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
@@ -1558,7 +1562,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsStreamViewStreamIdAboveVar
     };
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
@@ -1582,7 +1586,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsInvalidPacketNumberLengthO
     };
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
@@ -1595,7 +1599,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsEmptyPayloadOnStreamViewPa
     packet.stream_frame_views.clear();
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
@@ -1627,7 +1631,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsLengthlessFrameBeforeStrea
     };
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
@@ -1662,7 +1666,7 @@ TEST(QuicProtectedCodecTest,
     };
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
@@ -1696,7 +1700,7 @@ TEST(QuicProtectedCodecTest,
     };
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
@@ -1729,7 +1733,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketRejectsInvalidSerializedFrameBefo
     };
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());
@@ -1754,7 +1758,7 @@ TEST(QuicProtectedCodecTest, AppendOneRttPacketPropagatesHeaderProtectionFaultOn
         coquic::quic::test::PacketCryptoFaultPoint::header_protection_aes_context_new);
 
     std::vector<std::byte> datagram;
-    auto appended = coquic::quic::test::append_protected_one_rtt_packet_to_datagram(
+    auto appended = append_one_rtt_packet_to_datagram_for_test(
         datagram, packet,
         make_one_rtt_serialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 16));
     ASSERT_FALSE(appended.has_value());

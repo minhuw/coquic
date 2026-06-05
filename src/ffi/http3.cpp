@@ -529,8 +529,6 @@ struct coquic_http3_server_update {
     std::vector<StoredServerRequestCancelledEvent> request_cancelled;
 };
 
-namespace coquic::http3::test {} // namespace coquic::http3::test
-
 extern "C" {
 
 void coquic_http3_settings_init(coquic_http3_settings_t *settings) {

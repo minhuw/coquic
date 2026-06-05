@@ -108,46 +108,13 @@ constexpr std::uint64_t kChaCha20Poly1305IntegrityLimit = std::uint64_t{1} << 36
 constexpr std::size_t kMaxUnpacedBurstPackets = 10;
 
 struct ConnectionDrainTestHooks {
-    bool force_quic_core_secret_rand_failure = false;
-    bool force_prf_failure = false;
-    bool force_issued_connection_id_rand_failure = false;
-    bool force_stateless_reset_token_rand_failure = false;
-    bool force_path_challenge_rand_failure = false;
-    bool force_grease_quic_bit_seed_rand_failure = false;
-    bool force_random_one_in_sixteen_rand_failure = false;
-    std::optional<bool> force_random_one_in_sixteen_result;
     bool force_missing_packet_metadata = false;
     bool force_missing_fallback_packet_length = false;
-    bool force_short_prf_output = false;
-    bool force_missing_close_packet_metadata = false;
-    bool force_storage_range_before_storage = false;
-    bool force_storage_range_overflow = false;
-    bool force_next_pmtu_probe_size_zero = false;
-    bool force_application_packet_number_exhausted = false;
-    bool force_duplicate_initial_congestion_blocked = false;
-    bool force_application_send_congestion_blocked = false;
     bool force_aead_confidentiality_limit = false;
     bool force_aead_integrity_limit = false;
-    bool force_no_ack_control_candidate_estimate_failure = false;
-    bool force_no_ack_control_candidate_estimate_size = false;
-    std::size_t forced_no_ack_control_candidate_estimate_size = 0;
-    bool force_no_ack_control_candidate_empty_payload = false;
-    bool force_mark_lost_packet_missing_after_lookup = false;
     bool force_appended_fragment_base_datagram_failure = false;
-    bool force_sync_tls_state_failure = false;
-    int force_replay_deferred_packets_failure_countdown = -1;
     int force_application_candidate_estimate_failure_countdown = -1;
     int force_candidate_datagram_serialization_failure_countdown = -1;
-    int force_ack_only_datagram_serialization_failure_countdown = -1;
-    int force_application_candidate_datagram_extra_bytes_countdown = -1;
-    int force_probe_padding_shortfall_countdown = -1;
-    int force_probe_padding_failure_countdown = -1;
-    int force_probe_no_ack_retry_failure_countdown = -1;
-    int force_application_trim_candidate_failure_countdown = -1;
-    int force_application_trim_candidate_empty_payload_countdown = -1;
-    int force_application_no_ack_candidate_failure_countdown = -1;
-    int force_application_no_ack_retry_failure_countdown = -1;
-    std::size_t force_application_candidate_datagram_extra_bytes = 0;
 };
 
 struct SendProfileCounters {
@@ -331,178 +298,6 @@ inline ConnectionDrainTestHooks &connection_drain_test_hooks() {
     return hooks;
 }
 
-class ScopedConnectionDrainTestHook {
-  public:
-    explicit ScopedConnectionDrainTestHook(bool ConnectionDrainTestHooks::*field) : field_(field) {
-        previous_ = connection_drain_test_hooks().*field_;
-        connection_drain_test_hooks().*field_ = true;
-    }
-
-    ~ScopedConnectionDrainTestHook() {
-        connection_drain_test_hooks().*field_ = previous_;
-    }
-
-    ScopedConnectionDrainTestHook(const ScopedConnectionDrainTestHook &) = delete;
-    ScopedConnectionDrainTestHook &operator=(const ScopedConnectionDrainTestHook &) = delete;
-
-  private:
-    bool ConnectionDrainTestHooks::*field_;
-    bool previous_ = false;
-};
-
-class ScopedConnectionDrainDualTestHook {
-  public:
-    ScopedConnectionDrainDualTestHook(bool ConnectionDrainTestHooks::*first,
-                                      bool ConnectionDrainTestHooks::*second)
-        : first_(first), second_(second) {
-        auto &hooks = connection_drain_test_hooks();
-        previous_first_ = hooks.*first_;
-        previous_second_ = hooks.*second_;
-        hooks.*first_ = true;
-        hooks.*second_ = true;
-    }
-
-    ~ScopedConnectionDrainDualTestHook() {
-        auto &hooks = connection_drain_test_hooks();
-        hooks.*first_ = previous_first_;
-        hooks.*second_ = previous_second_;
-    }
-
-    ScopedConnectionDrainDualTestHook(const ScopedConnectionDrainDualTestHook &) = delete;
-    ScopedConnectionDrainDualTestHook &
-    operator=(const ScopedConnectionDrainDualTestHook &) = delete;
-
-  private:
-    bool ConnectionDrainTestHooks::*first_;
-    bool ConnectionDrainTestHooks::*second_;
-    bool previous_first_ = false;
-    bool previous_second_ = false;
-};
-
-class ScopedConnectionDrainOptionalBoolTestHook {
-  public:
-    explicit ScopedConnectionDrainOptionalBoolTestHook(
-        std::optional<bool> ConnectionDrainTestHooks::*field, bool value)
-        : field_(field) {
-        previous_ = connection_drain_test_hooks().*field_;
-        connection_drain_test_hooks().*field_ = value;
-    }
-
-    ~ScopedConnectionDrainOptionalBoolTestHook() {
-        connection_drain_test_hooks().*field_ = previous_;
-    }
-
-    ScopedConnectionDrainOptionalBoolTestHook(const ScopedConnectionDrainOptionalBoolTestHook &) =
-        delete;
-    ScopedConnectionDrainOptionalBoolTestHook &
-    operator=(const ScopedConnectionDrainOptionalBoolTestHook &) = delete;
-
-  private:
-    std::optional<bool> ConnectionDrainTestHooks::*field_;
-    std::optional<bool> previous_;
-};
-
-class ScopedConnectionDrainCountdownTestHook {
-  public:
-    ScopedConnectionDrainCountdownTestHook(int ConnectionDrainTestHooks::*field, int value)
-        : field_(field) {
-        previous_ = connection_drain_test_hooks().*field_;
-        connection_drain_test_hooks().*field_ = value;
-    }
-
-    ~ScopedConnectionDrainCountdownTestHook() {
-        connection_drain_test_hooks().*field_ = previous_;
-    }
-
-    ScopedConnectionDrainCountdownTestHook(const ScopedConnectionDrainCountdownTestHook &) = delete;
-    ScopedConnectionDrainCountdownTestHook &
-    operator=(const ScopedConnectionDrainCountdownTestHook &) = delete;
-
-  private:
-    int ConnectionDrainTestHooks::*field_;
-    int previous_ = -1;
-};
-
-class ScopedConnectionDrainDatagramGrowthTestHook {
-  public:
-    struct Countdown {
-        int value;
-    };
-
-    struct ExtraBytes {
-        std::size_t value;
-    };
-
-    ScopedConnectionDrainDatagramGrowthTestHook(Countdown countdown, ExtraBytes extra_bytes) {
-        auto &hooks = connection_drain_test_hooks();
-        previous_countdown_ = hooks.force_application_candidate_datagram_extra_bytes_countdown;
-        previous_extra_bytes_ = hooks.force_application_candidate_datagram_extra_bytes;
-        hooks.force_application_candidate_datagram_extra_bytes_countdown = countdown.value;
-        hooks.force_application_candidate_datagram_extra_bytes = extra_bytes.value;
-    }
-
-    ~ScopedConnectionDrainDatagramGrowthTestHook() {
-        auto &hooks = connection_drain_test_hooks();
-        hooks.force_application_candidate_datagram_extra_bytes_countdown = previous_countdown_;
-        hooks.force_application_candidate_datagram_extra_bytes = previous_extra_bytes_;
-    }
-
-    ScopedConnectionDrainDatagramGrowthTestHook(
-        const ScopedConnectionDrainDatagramGrowthTestHook &) = delete;
-    ScopedConnectionDrainDatagramGrowthTestHook &
-    operator=(const ScopedConnectionDrainDatagramGrowthTestHook &) = delete;
-
-  private:
-    int previous_countdown_ = -1;
-    std::size_t previous_extra_bytes_ = 0;
-};
-
-class ScopedConnectionDrainForcedSizeTestHook {
-  public:
-    explicit ScopedConnectionDrainForcedSizeTestHook(std::size_t value) {
-        auto &hooks = connection_drain_test_hooks();
-        previous_enabled_ = hooks.force_no_ack_control_candidate_estimate_size;
-        previous_value_ = hooks.forced_no_ack_control_candidate_estimate_size;
-        hooks.force_no_ack_control_candidate_estimate_size = true;
-        hooks.forced_no_ack_control_candidate_estimate_size = value;
-    }
-
-    ~ScopedConnectionDrainForcedSizeTestHook() {
-        auto &hooks = connection_drain_test_hooks();
-        hooks.force_no_ack_control_candidate_estimate_size = previous_enabled_;
-        hooks.forced_no_ack_control_candidate_estimate_size = previous_value_;
-    }
-
-    ScopedConnectionDrainForcedSizeTestHook(const ScopedConnectionDrainForcedSizeTestHook &) =
-        delete;
-    ScopedConnectionDrainForcedSizeTestHook &
-    operator=(const ScopedConnectionDrainForcedSizeTestHook &) = delete;
-
-  private:
-    bool previous_enabled_ = false;
-    std::size_t previous_value_ = 0;
-};
-
-class ScopedConnectionDrainEmptyNoAckControlEstimateTestHook {
-  public:
-    ScopedConnectionDrainEmptyNoAckControlEstimateTestHook() {
-        previous_ = connection_drain_test_hooks().force_no_ack_control_candidate_empty_payload;
-        connection_drain_test_hooks().force_no_ack_control_candidate_empty_payload = true;
-    }
-
-    ~ScopedConnectionDrainEmptyNoAckControlEstimateTestHook() {
-        connection_drain_test_hooks().force_no_ack_control_candidate_empty_payload = previous_;
-    }
-
-    ScopedConnectionDrainEmptyNoAckControlEstimateTestHook(
-        const ScopedConnectionDrainEmptyNoAckControlEstimateTestHook &) = delete;
-    ScopedConnectionDrainEmptyNoAckControlEstimateTestHook &
-    operator=(const ScopedConnectionDrainEmptyNoAckControlEstimateTestHook &) = delete;
-
-  private:
-    bool previous_ = false;
-};
-
 inline bool consume_connection_drain_countdown(int ConnectionDrainTestHooks::*field) {
     auto &value = connection_drain_test_hooks().*field;
     if (value < 0) {
@@ -516,47 +311,6 @@ inline bool consume_connection_drain_countdown(int ConnectionDrainTestHooks::*fi
     return false;
 }
 
-inline COQUIC_NO_PROFILE void maybe_grow_application_candidate_datagram_for_tests(
-    CodecResult<SerializedProtectedDatagram> &candidate_datagram) {
-    auto &hooks = connection_drain_test_hooks();
-    if (!candidate_datagram.has_value() ||
-        !consume_connection_drain_countdown(
-            &ConnectionDrainTestHooks::
-                force_application_candidate_datagram_extra_bytes_countdown) ||
-        hooks.force_application_candidate_datagram_extra_bytes == 0) {
-        return;
-    }
-
-    candidate_datagram.value().bytes.resize(
-        candidate_datagram.value().bytes.size() +
-            hooks.force_application_candidate_datagram_extra_bytes,
-        std::byte{0});
-}
-
-inline COQUIC_NO_PROFILE void
-maybe_force_pmtu_probe_padding_shortfall_for_tests(std::size_t &probe_padding_length,
-                                                   std::vector<Frame> &frames_with_padding) {
-    if (!consume_connection_drain_countdown(
-            &ConnectionDrainTestHooks::force_probe_padding_shortfall_countdown) ||
-        probe_padding_length == 0) {
-        return;
-    }
-
-    --probe_padding_length;
-    frames_with_padding.back() = PaddingFrame{.length = probe_padding_length};
-}
-
-inline COQUIC_NO_PROFILE void maybe_force_ack_only_datagram_serialization_failure_for_tests(
-    CodecResult<SerializedProtectedDatagram> &ack_only_datagram) {
-    if (!consume_connection_drain_countdown(
-            &ConnectionDrainTestHooks::force_ack_only_datagram_serialization_failure_countdown)) {
-        return;
-    }
-
-    ack_only_datagram = CodecResult<SerializedProtectedDatagram>::failure(
-        CodecErrorCode::packet_length_mismatch, 0);
-}
-
 template <typename SerializePadded>
 inline COQUIC_NO_PROFILE bool retry_padded_pmtu_probe_serialization(
     CodecResult<SerializedProtectedDatagram> &candidate, std::vector<Frame> &frames_with_padding,
@@ -565,11 +319,6 @@ inline COQUIC_NO_PROFILE bool retry_padded_pmtu_probe_serialization(
     CodecResult<SerializedProtectedDatagram> padded;
     for (std::size_t attempt = 0; attempt < 2; ++attempt) {
         padded = serialize_padded();
-        if (consume_connection_drain_countdown(
-                &ConnectionDrainTestHooks::force_probe_padding_failure_countdown)) {
-            padded = CodecResult<SerializedProtectedDatagram>::failure(
-                CodecErrorCode::packet_length_mismatch, 0);
-        }
         if (!padded.has_value()) {
             return false;
         }
@@ -868,16 +617,14 @@ inline void absorb_connection_id_seed_byte(std::uint64_t &state, std::uint8_t by
     state *= 0x100000001b3ULL;
 }
 
-inline COQUIC_NO_PROFILE bool rand_bytes_for_connection(std::span<std::byte> bytes,
-                                                        bool force_failure) {
-    return !force_failure && RAND_bytes(reinterpret_cast<unsigned char *>(bytes.data()),
-                                        static_cast<int>(bytes.size())) == 1;
+inline COQUIC_NO_PROFILE bool rand_bytes_for_connection(std::span<std::byte> bytes) {
+    return RAND_bytes(reinterpret_cast<unsigned char *>(bytes.data()),
+                      static_cast<int>(bytes.size())) == 1;
 }
 
 inline std::array<std::byte, kQuicCoreSecretLength> make_quic_core_secret() {
     std::array<std::byte, kQuicCoreSecretLength> secret{};
-    if (rand_bytes_for_connection(
-            secret, connection_drain_test_hooks().force_quic_core_secret_rand_failure)) {
+    if (rand_bytes_for_connection(secret)) {
         return secret;
     }
 
@@ -905,12 +652,7 @@ inline std::span<const std::byte, kQuicCoreSecretLength> quic_path_challenge_sec
 
 inline COQUIC_NO_PROFILE std::optional<std::array<unsigned char, EVP_MAX_MD_SIZE>>
 compute_hmac_sha256_for_connection(std::span<const std::byte> secret,
-                                   std::span<const unsigned char> input, unsigned int &produced,
-                                   bool force_failure) {
-    if (force_failure) {
-        return std::nullopt;
-    }
-
+                                   std::span<const unsigned char> input, unsigned int &produced) {
     std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
     if (HMAC(EVP_sha256(), reinterpret_cast<const unsigned char *>(secret.data()),
              static_cast<int>(secret.size()), input.data(), input.size(), digest.data(),
@@ -935,26 +677,14 @@ prf_bytes(std::span<const std::byte> secret, // NOLINT(bugprone-easily-swappable
     }
 
     unsigned int produced = 0;
-    const auto digest = compute_hmac_sha256_for_connection(
-        secret, input, produced, connection_drain_test_hooks().force_prf_failure);
+    const auto digest = compute_hmac_sha256_for_connection(secret, input, produced);
     if (!digest.has_value()) {
-        return std::nullopt;
-    }
-    if (connection_drain_test_hooks().force_short_prf_output) {
         return std::nullopt;
     }
     static_assert(Size <= SHA256_DIGEST_LENGTH);
     static_cast<void>(produced);
     std::copy_n(reinterpret_cast<const std::byte *>(digest->data()), output.size(), output.begin());
     return output;
-}
-
-inline COQUIC_NO_PROFILE bool forced_random_one_in_sixteen_result() {
-    const auto &forced = connection_drain_test_hooks().force_random_one_in_sixteen_result;
-    if (!forced.has_value()) {
-        std::abort();
-    }
-    return forced.value();
 }
 
 inline COQUIC_NO_PROFILE bool random_one_in_sixteen_fallback() {
@@ -972,8 +702,7 @@ inline std::uint64_t read_u64_be(std::span<const std::byte, sizeof(std::uint64_t
 
 inline std::uint64_t make_grease_quic_bit_seed() {
     std::array<std::byte, sizeof(std::uint64_t)> seed_bytes{};
-    if (!rand_bytes_for_connection(
-            seed_bytes, connection_drain_test_hooks().force_grease_quic_bit_seed_rand_failure)) {
+    if (!rand_bytes_for_connection(seed_bytes)) {
         std::random_device random_device;
         for (auto &byte : seed_bytes) {
             byte = static_cast<std::byte>(random_device());
@@ -1017,8 +746,7 @@ inline ConnectionId make_issued_connection_id(std::span<const std::byte> base_co
         return connection_id;
     }
 
-    if (rand_bytes_for_connection(
-            connection_id, connection_drain_test_hooks().force_issued_connection_id_rand_failure)) {
+    if (rand_bytes_for_connection(connection_id)) {
         return connection_id;
     }
 
@@ -1054,8 +782,7 @@ inline std::array<std::byte, 16> make_stateless_reset_token(
         return *derived;
     }
 
-    if (rand_bytes_for_connection(
-            token, connection_drain_test_hooks().force_stateless_reset_token_rand_failure)) {
+    if (rand_bytes_for_connection(token)) {
         return token;
     }
 
@@ -1087,8 +814,7 @@ make_path_challenge_data(std::span<const std::byte> local_connection_id, QuicPat
         return *derived;
     }
 
-    if (rand_bytes_for_connection(
-            challenge, connection_drain_test_hooks().force_path_challenge_rand_failure)) {
+    if (rand_bytes_for_connection(challenge)) {
         return challenge;
     }
 
@@ -1113,13 +839,6 @@ inline COQUIC_NO_PROFILE bool random_one_in_sixteen_from_openssl(std::uint8_t va
 }
 
 inline COQUIC_NO_PROFILE bool random_one_in_sixteen() {
-    if (connection_drain_test_hooks().force_random_one_in_sixteen_result.has_value()) {
-        return forced_random_one_in_sixteen_result();
-    }
-    if (connection_drain_test_hooks().force_random_one_in_sixteen_rand_failure) {
-        return random_one_in_sixteen_fallback();
-    }
-
     std::uint8_t value = 0;
     if (RAND_bytes(&value, 1) == 1) {
         return random_one_in_sixteen_from_openssl(value);
@@ -2975,8 +2694,7 @@ packet_number_for_sent_record(const ProtectedPacket &packet) {
 
 inline COQUIC_NO_PROFILE std::size_t
 close_packet_metadata_length_for_tracking(const SerializedProtectedDatagram &candidate) {
-    if (connection_drain_test_hooks().force_missing_close_packet_metadata ||
-        candidate.packet_metadata.empty()) {
+    if (candidate.packet_metadata.empty()) {
         return 0;
     }
     return candidate.packet_metadata.front().length;
@@ -3666,17 +3384,6 @@ inline COQUIC_NO_PROFILE std::optional<std::size_t> prepare_pmtu_probe_packet_fo
     return packet.pmtu_probe_size != 0 ? packet.pmtu_probe_size : packet_length;
 }
 
-inline COQUIC_NO_PROFILE bool duplicate_initial_congestion_is_forced(bool force, bool bypass,
-                                                                     bool has_packets) {
-    return !bypass && force && has_packets;
-}
-
-inline COQUIC_NO_PROFILE bool
-application_send_congestion_is_forced(bool force, bool bypass,
-                                      const PacketSpaceState &application_space) {
-    return !bypass && force && application_space.write_secret.has_value();
-}
-
 struct PacketInspectionDatagramId {
     std::uint64_t value;
 };
@@ -3929,23 +3636,6 @@ no_ack_control_candidate_leaves_stream_budget(std::size_t no_ack_control_candida
     return no_ack_control_candidate_size < congestion_limited_datagram_size &&
            congestion_limited_datagram_size - no_ack_control_candidate_size >=
                minimum_stream_wire_bytes;
-}
-
-inline COQUIC_NO_PROFILE CodecResult<std::size_t>
-maybe_force_no_ack_control_candidate_size_for_tests(
-    CodecResult<std::size_t> no_ack_control_candidate_size) {
-    if (connection_drain_test_hooks().force_no_ack_control_candidate_estimate_failure) {
-        no_ack_control_candidate_size =
-            CodecResult<std::size_t>::failure(CodecErrorCode::packet_length_mismatch, 0);
-    } else if (connection_drain_test_hooks().force_no_ack_control_candidate_empty_payload) {
-        no_ack_control_candidate_size =
-            CodecResult<std::size_t>::failure(CodecErrorCode::empty_packet_payload, 0);
-    }
-    if (connection_drain_test_hooks().force_no_ack_control_candidate_estimate_size) {
-        no_ack_control_candidate_size = CodecResult<std::size_t>::success(
-            connection_drain_test_hooks().forced_no_ack_control_candidate_estimate_size);
-    }
-    return no_ack_control_candidate_size;
 }
 
 inline COQUIC_NO_PROFILE bool maybe_select_sized_no_ack_candidate(

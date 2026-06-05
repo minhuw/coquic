@@ -1,5 +1,4 @@
 #include "src/quic/frame.h"
-#include "src/quic/frame_test_hooks.h"
 
 #include <array>
 #include <limits>

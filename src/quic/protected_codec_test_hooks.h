@@ -3,8 +3,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <vector>
-
 #include "src/quic/protected_codec.h"
 
 namespace coquic::quic::test {
@@ -13,12 +11,7 @@ enum class ProtectedCodecFaultPoint : std::uint8_t {
     remove_long_header_packet_length_mismatch,
     remove_short_header_packet_length_mismatch,
     remove_short_header_plaintext_header_overflow,
-    one_rtt_in_place_short_ciphertext,
-    one_rtt_in_place_plaintext_size_mismatch,
-    one_rtt_in_place_bytes_consumed_mismatch,
     deserialize_plaintext_packet,
-    long_header_frame_payload_varint_overflow,
-    long_header_payload_length_varint_overflow,
     simple_ack_payload_write_failure,
     simple_ack_payload_size_mismatch,
     simple_ack_force_padding_fill,
@@ -38,10 +31,5 @@ class ScopedProtectedCodecFaultInjector {
     std::optional<ProtectedCodecFaultPoint> previous_fault_point_;
     std::size_t previous_occurrence_ = 0;
 };
-
-CodecResult<std::size_t>
-append_protected_one_rtt_packet_to_datagram(std::vector<std::byte> &datagram,
-                                            const ProtectedOneRttPacket &packet,
-                                            const SerializeProtectionContext &context);
 
 } // namespace coquic::quic::test

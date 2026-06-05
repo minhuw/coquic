@@ -8,7 +8,6 @@
 #include <gtest/gtest.h>
 
 #include "src/http3/http3_protocol.h"
-#include "src/http3/http3_protocol_test_hooks.h"
 
 namespace {
 
@@ -937,7 +936,7 @@ TEST(QuicHttp3ProtocolTest, ResponseStatusRejectsEachMalformedDigitPosition) {
     }
 }
 
-TEST(QuicHttp3ProtocolTest, MaxPushIdParserRejectsTrailingBytesAndSyntheticPayloadOverflow) {
+TEST(QuicHttp3ProtocolTest, MaxPushIdParserRejectsTrailingBytes) {
     using coquic::http3::Http3Frame;
     using coquic::http3::Http3MaxPushIdFrame;
     using coquic::quic::CodecErrorCode;
@@ -952,24 +951,6 @@ TEST(QuicHttp3ProtocolTest, MaxPushIdParserRejectsTrailingBytesAndSyntheticPaylo
         Http3Frame{Http3MaxPushIdFrame{.push_id = kTooLargeVarInt}});
     ASSERT_FALSE(invalid_max_push.has_value());
     EXPECT_EQ(invalid_max_push.error().code, CodecErrorCode::invalid_varint);
-
-    const auto synthetic_overflow =
-        coquic::http3::test::serialize_http3_payload_frame_with_synthetic_length_for_tests(
-            /*type=*/0x21u, std::numeric_limits<std::size_t>::max());
-    ASSERT_FALSE(synthetic_overflow.has_value());
-    EXPECT_EQ(synthetic_overflow.error().code, CodecErrorCode::invalid_varint);
-
-    const auto data_overflow =
-        coquic::http3::test::serialize_http3_data_frame_with_synthetic_length_for_tests(
-            std::numeric_limits<std::size_t>::max());
-    ASSERT_FALSE(data_overflow.has_value());
-    EXPECT_EQ(data_overflow.error().code, CodecErrorCode::invalid_varint);
-
-    const auto headers_overflow =
-        coquic::http3::test::serialize_http3_headers_frame_with_synthetic_length_for_tests(
-            std::numeric_limits<std::size_t>::max());
-    ASSERT_FALSE(headers_overflow.has_value());
-    EXPECT_EQ(headers_overflow.error().code, CodecErrorCode::invalid_varint);
 }
 
 } // namespace

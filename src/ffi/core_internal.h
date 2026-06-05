@@ -18,5 +18,3 @@ struct coquic_result {
 
     coquic::core::Result result;
 };
-
-namespace coquic::ffi::test {} // namespace coquic::ffi::test

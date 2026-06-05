@@ -570,13 +570,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
             }
             const auto storage_begin = reinterpret_cast<std::uintptr_t>(storage->data());
             const auto storage_end = storage_begin + storage->size();
-            auto packet_begin_address = reinterpret_cast<std::uintptr_t>(packet_bytes.data());
-            if (connection_drain_test_hooks().force_storage_range_before_storage) {
-                packet_begin_address =
-                    storage_begin - static_cast<std::uintptr_t>(storage_begin != 0);
-            } else if (connection_drain_test_hooks().force_storage_range_overflow) {
-                packet_begin_address = storage_end;
-            }
+            const auto packet_begin_address = reinterpret_cast<std::uintptr_t>(packet_bytes.data());
             if (!packet_bytes_start_inside_storage(packet_begin_address, storage_begin,
                                                    storage_end)) {
                 return std::nullopt;
@@ -769,10 +763,6 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
             ++send_profile_counters().inbound_replay_deferred_calls;
         }
         COQUIC_SEND_PROFILE_TIMER(replay_timer, inbound_replay_deferred_ns);
-        if (consume_connection_drain_countdown(
-                &ConnectionDrainTestHooks::force_replay_deferred_packets_failure_countdown)) {
-            return false;
-        }
         if (deferred_protected_packets_.empty()) {
             return true;
         }

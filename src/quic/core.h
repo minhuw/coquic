@@ -598,11 +598,6 @@ enum class QuicRouteAddressFamily : std::uint8_t {
     ipv6,
 };
 
-namespace test {
-bool seed_legacy_route_handle_path_for_tests(QuicCore &core, QuicRouteHandle route_handle,
-                                             QuicPathId path_id);
-} // namespace test
-
 class QuicCore {
   public:
     explicit QuicCore(QuicCoreEndpointConfig config);
@@ -736,9 +731,6 @@ class QuicCore {
     ConnectionEntry *legacy_entry();
     const ConnectionEntry *legacy_entry() const;
     ConnectionEntry *ensure_legacy_entry();
-    friend bool test::seed_legacy_route_handle_path_for_tests(QuicCore &core,
-                                                              QuicRouteHandle route_handle,
-                                                              QuicPathId path_id);
     void set_legacy_connection(std::unique_ptr<QuicConnection> connection);
     static std::string connection_id_key(std::span<const std::byte> connection_id);
     static std::string

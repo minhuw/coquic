@@ -12,7 +12,6 @@
 #include "src/http09/http09_runtime_test_hooks.h"
 #include "src/io/io_backend_factory.h"
 #include "src/quic/buffer.h"
-#include "src/quic/core_test_hooks.h"
 #include "src/quic/packet.h"
 #include "src/quic/packet_crypto.h"
 #include "src/quic/version.h"
@@ -59,7 +58,6 @@
 namespace coquic::http09 {
 
 using namespace quic;
-using quic::test::seed_legacy_route_handle_path_for_tests;
 
 using io::QuicIoBackend;
 using io::QuicIoEvent;

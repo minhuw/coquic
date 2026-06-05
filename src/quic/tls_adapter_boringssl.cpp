@@ -1502,11 +1502,6 @@ void TlsAdapterTestPeer::set_early_data_attempted(TlsAdapter &adapter, bool atte
     adapter.impl_->early_data_attempted_ = attempted;
 }
 
-void TlsAdapterTestPeer::set_early_data_accepted(TlsAdapter &adapter,
-                                                 std::optional<bool> accepted) {
-    adapter.impl_->early_data_accepted_ = accepted;
-}
-
 void TlsAdapterTestPeer::apply_early_data_status(TlsAdapter &adapter, int early_data_status,
                                                  bool handshake_complete) {
     static_cast<void>(handshake_complete);

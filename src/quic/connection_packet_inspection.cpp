@@ -1,6 +1,5 @@
 #include "src/quic/connection.h"
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -14,11 +13,6 @@
 namespace coquic::quic {
 
 namespace {
-
-std::atomic_bool &force_packet_inspection_missing_plaintext_storage_for_tests() {
-    static std::atomic_bool enabled{false};
-    return enabled;
-}
 
 void maybe_copy_plaintext_payload(auto &inspection, const auto &packet) {
     if constexpr (requires { packet.plaintext_storage; }) {
@@ -67,14 +61,6 @@ void populate_packet_inspection_from_decoded_packet(QuicCorePacketInspection &in
     }
 }
 
-struct PacketInspectionPlaintextStorageResetVisitor {
-    template <typename Packet> void operator()(Packet &packet) const {
-        if constexpr (requires { packet.plaintext_storage; }) {
-            packet.plaintext_storage.reset();
-        }
-    }
-};
-
 } // namespace
 
 std::size_t
@@ -112,10 +98,6 @@ QuicConnection::queue_outbound_packet_inspections(const SerializedProtectedDatag
         if (!decoded.has_value()) {
             continue;
         }
-        if (force_packet_inspection_missing_plaintext_storage_for_tests().load(
-                std::memory_order_relaxed)) {
-            std::visit(PacketInspectionPlaintextStorageResetVisitor{}, decoded.value());
-        }
 
         QuicCorePacketInspection inspection{
             .direction = QuicCorePacketInspectionDirection::outbound,
@@ -136,14 +118,5 @@ QuicConnection::queue_outbound_packet_inspections(const SerializedProtectedDatag
     }
     return pending_packet_inspections_.size() - starting_count;
 }
-
-namespace test {
-
-void connection_set_force_packet_inspection_missing_plaintext_storage_for_tests(bool enabled) {
-    force_packet_inspection_missing_plaintext_storage_for_tests().store(enabled,
-                                                                        std::memory_order_relaxed);
-}
-
-} // namespace test
 
 } // namespace coquic::quic

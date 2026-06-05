@@ -730,8 +730,6 @@ std::optional<coquic::core::ConnectionInput> to_cpp(const coquic_connection_inpu
 
 } // namespace
 
-namespace coquic::ffi::test {} // namespace coquic::ffi::test
-
 extern "C" {
 
 uint32_t coquic_ffi_abi_version(void) {

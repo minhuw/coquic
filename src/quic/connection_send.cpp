@@ -172,16 +172,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         });
     };
     const auto congestion_blocks_datagram = [&](std::size_t bytes, bool skips_congestion_window) {
-        if (duplicate_initial_congestion_is_forced(
-                connection_drain_test_hooks().force_duplicate_initial_congestion_blocked,
-                skips_congestion_window, !packets.empty())) {
-            return true;
-        }
-        if (application_send_congestion_is_forced(
-                connection_drain_test_hooks().force_application_send_congestion_blocked,
-                skips_congestion_window, application_space_)) {
-            return true;
-        }
         if (skips_congestion_window) {
             return false;
         }
@@ -1144,9 +1134,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         maybe_queue_client_ack_only_receive_keepalive_challenge();
         const auto reserve_application_packet_number =
             [&](bool using_one_rtt_packet_protection) -> std::optional<std::uint64_t> {
-            if (connection_drain_test_hooks().force_application_packet_number_exhausted) {
-                return std::nullopt;
-            }
             const auto reserved_packet_number = application_space_.next_send_packet_number;
             if (using_one_rtt_packet_protection) {
                 const auto largest_acked =
@@ -1270,7 +1257,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             };
             auto ack_only_datagram =
                 serialize_candidate_datagram_with_metadata(packets, nullptr, &ack_only_packet);
-            maybe_force_ack_only_datagram_serialization_failure_for_tests(ack_only_datagram);
             if (!ack_only_datagram.has_value()) {
                 return fail_datagram_send(!pending_tracked_packets.empty());
             }
@@ -1911,7 +1897,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 };
                 auto candidate_datagram =
                     serialize_candidate_datagram_with_metadata(packets, nullptr, &candidate_packet);
-                maybe_grow_application_candidate_datagram_for_tests(candidate_datagram);
                 return candidate_datagram;
             }
 
@@ -1925,7 +1910,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                                             outbound_spin_bit_for_path(selected_send_path_id));
             auto candidate_datagram =
                 serialize_candidate_datagram_with_metadata(packets, &candidate_packet);
-            maybe_grow_application_candidate_datagram_for_tests(candidate_datagram);
             if (!candidate_datagram.has_value()) {
                 return candidate_datagram;
             }
@@ -2462,8 +2446,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     include_ping));
                 static_cast<void>(maybe_add_pmtu_probe_padding(padding, frames_with_padding_storage,
                                                                probe_padding_length));
-                maybe_force_pmtu_probe_padding_shortfall_for_tests(probe_padding_length,
-                                                                   frames_with_padding_storage);
 
                 return retry_padded_pmtu_probe_serialization(
                     candidate, frames_with_padding_storage, target_pmtu_probe_size,
@@ -2561,12 +2543,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                         probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
                         probe_packet.data_blocked_frame, probe_packet.stream_data_blocked_frames,
                         probe_stream_fragments, std::nullopt, std::nullopt, include_ping);
-                    if (consume_connection_drain_countdown(
-                            &ConnectionDrainTestHooks::
-                                force_probe_no_ack_retry_failure_countdown)) {
-                        datagram = CodecResult<SerializedProtectedDatagram>::failure(
-                            CodecErrorCode::packet_length_mismatch, 0);
-                    }
                     if (!datagram.has_value()) {
                         return fail_datagram_send(!pending_tracked_packets.empty());
                     }
@@ -2819,7 +2795,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                                                 outbound_spin_bit_for_path(selected_send_path_id));
                 packets.emplace_back(std::move(ack_only_packet));
                 auto ack_only_datagram = serialize_candidate_datagram_with_metadata(packets);
-                maybe_force_ack_only_datagram_serialization_failure_for_tests(ack_only_datagram);
                 if (!ack_only_datagram.has_value()) {
                     restore_ack_path_validation_after_send_failure(ack_only_path_validation_frames);
                     return fail_datagram_send(!pending_tracked_packets.empty());
@@ -3029,9 +3004,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                                 application_close_frame.has_value(),
                                 application_space_.next_send_packet_number,
                                 application_write_key_phase_);
-                        no_ack_control_candidate_size =
-                            maybe_force_no_ack_control_candidate_size_for_tests(
-                                std::move(no_ack_control_candidate_size));
                         if (!no_ack_control_candidate_size.has_value()) {
                             if (no_ack_control_candidate_size.error().code !=
                                 CodecErrorCode::empty_packet_payload) {
@@ -3213,12 +3185,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     alternate_application_candidate_frames(std::nullopt), stream_fragments,
                     application_close_frame.has_value(), application_space_.next_send_packet_number,
                     application_write_key_phase_);
-                if (consume_connection_drain_countdown(
-                        &ConnectionDrainTestHooks::
-                            force_application_no_ack_candidate_failure_countdown)) {
-                    no_ack_candidate = CodecResult<SerializedProtectedDatagram>::failure(
-                        CodecErrorCode::packet_length_mismatch, 0);
-                }
                 if (!no_ack_candidate.has_value()) {
                     if (!is_empty_packet_payload_error(no_ack_candidate)) {
                         return fail_datagram_send(!pending_tracked_packets.empty());
@@ -3284,17 +3250,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                         current_application_candidate_frames(), fragments,
                         application_close_frame.has_value(),
                         application_space_.next_send_packet_number, application_write_key_phase_);
-                    if (consume_connection_drain_countdown(
-                            &ConnectionDrainTestHooks::
-                                force_application_trim_candidate_failure_countdown)) {
-                        datagram = CodecResult<SerializedProtectedDatagram>::failure(
-                            CodecErrorCode::packet_length_mismatch, 0);
-                    } else if (consume_connection_drain_countdown(
-                                   &ConnectionDrainTestHooks::
-                                       force_application_trim_candidate_empty_payload_countdown)) {
-                        datagram = CodecResult<SerializedProtectedDatagram>::failure(
-                            CodecErrorCode::empty_packet_payload, 0);
-                    }
                     if (!datagram.has_value()) {
                         if (is_empty_packet_payload_error(datagram)) {
                             return false;
@@ -3354,13 +3309,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                         current_application_candidate_frames(), stream_fragments,
                         application_close_frame.has_value(),
                         application_space_.next_send_packet_number, application_write_key_phase_);
-                    if (consume_connection_drain_countdown(
-                            &ConnectionDrainTestHooks::
-                                force_application_no_ack_retry_failure_countdown)) {
-                        candidate_application_datagram =
-                            CodecResult<SerializedProtectedDatagram>::failure(
-                                CodecErrorCode::packet_length_mismatch, 0);
-                    }
                     if (should_fail_non_empty_packet_payload_candidate(
                             candidate_application_datagram)) {
                         return fail_datagram_send(!pending_tracked_packets.empty());
@@ -3509,8 +3457,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     ? congestion_controller_.next_send_time(candidate_datagram_size)
                     : std::nullopt;
             if (ack_eliciting && !bypass_congestion_window &&
-                (connection_drain_test_hooks().force_application_send_congestion_blocked ||
-                 !congestion_controller_.can_send_ack_eliciting(candidate_datagram_size))) {
+                !congestion_controller_.can_send_ack_eliciting(candidate_datagram_size)) {
                 note_application_congestion_blocked(candidate_datagram_size);
                 return restore_and_fallback_blocked_application_candidate();
             }

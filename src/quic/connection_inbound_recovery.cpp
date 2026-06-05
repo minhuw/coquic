@@ -1786,9 +1786,6 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
     if (tracked_packet == nullptr) {
         return std::nullopt;
     }
-    if (connection_drain_test_hooks().force_mark_lost_packet_missing_after_lookup) {
-        return std::nullopt;
-    }
 
     auto packet = *tracked_packet;
     if (!packet.new_token_frames.empty()) {

@@ -279,42 +279,6 @@ TEST(QuicCoreTest, PacketInspectionSkipsDisabledMalformedAndUndecodableDatagrams
     EXPECT_FALSE(connection.take_packet_inspection().has_value());
 }
 
-TEST(QuicCoreTest, PacketInspectionSkipsDecodedPacketsWithoutPlaintextStorage) {
-    coquic::quic::test::ScopedConnectionDrainTestHookReset reset_hooks;
-
-    auto connection = make_connected_client_connection();
-    connection.config_.enable_packet_inspection = true;
-    ASSERT_TRUE(connection.peer_source_connection_id_.has_value());
-    const auto &peer_source_connection_id =
-        optional_ref_or_terminate(connection.peer_source_connection_id_);
-    const auto serialized = coquic::quic::serialize_protected_datagram_with_metadata(
-        std::array<coquic::quic::ProtectedPacket, 1>{
-            coquic::quic::ProtectedOneRttPacket{
-                .destination_connection_id = peer_source_connection_id,
-                .packet_number = 5,
-                .frames = {coquic::quic::PingFrame{}},
-            },
-        },
-        coquic::quic::SerializeProtectionContext{
-            .local_role = connection.config_.role,
-            .client_initial_destination_connection_id =
-                connection.client_initial_destination_connection_id(),
-            .one_rtt_secret = connection.application_space_.write_secret,
-        });
-    ASSERT_TRUE(serialized.has_value());
-
-    coquic::quic::test::connection_set_force_packet_inspection_missing_plaintext_storage_for_tests(
-        true);
-    EXPECT_EQ(connection.queue_outbound_packet_inspections(serialized.value(), 10), 1u);
-    coquic::quic::test::connection_set_force_packet_inspection_missing_plaintext_storage_for_tests(
-        false);
-
-    auto inspection = connection.take_packet_inspection();
-    ASSERT_TRUE(inspection.has_value());
-    EXPECT_TRUE(optional_ref_or_terminate(inspection).plaintext_payload.empty());
-    EXPECT_FALSE(connection.take_packet_inspection().has_value());
-}
-
 TEST(QuicCoreTest, PacketInspectionSkipsMalformedMetadataAfterQueuedInspection) {
     auto connection = make_connected_client_connection();
     connection.config_.enable_packet_inspection = true;

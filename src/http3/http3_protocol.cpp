@@ -1,6 +1,4 @@
 #include "src/http3/http3_protocol.h"
-#include "src/http3/http3_protocol_test_hooks.h"
-
 #include <charconv>
 #include <cctype>
 #include <cstdint>
@@ -636,27 +634,3 @@ bool http3_frame_allowed_on_request_stream(const Http3Frame &frame) {
 }
 
 } // namespace coquic::http3
-
-namespace coquic::http3::test {
-
-quic::CodecResult<std::vector<std::byte>>
-serialize_http3_payload_frame_with_synthetic_length_for_tests(std::uint64_t type,
-                                                              std::size_t payload_size) {
-    const std::byte sentinel{0x00};
-    return serialize_http3_payload_frame(type, std::span<const std::byte>(&sentinel, payload_size));
-}
-
-quic::CodecResult<std::vector<std::byte>>
-serialize_http3_data_frame_with_synthetic_length_for_tests(std::size_t payload_size) {
-    const std::byte sentinel{0x00};
-    return serialize_http3_data_payload_frame(std::span<const std::byte>(&sentinel, payload_size));
-}
-
-quic::CodecResult<std::vector<std::byte>>
-serialize_http3_headers_frame_with_synthetic_length_for_tests(std::size_t payload_size) {
-    const std::byte sentinel{0x00};
-    return serialize_http3_headers_payload_frame(
-        std::span<const std::byte>(&sentinel, payload_size));
-}
-
-} // namespace coquic::http3::test

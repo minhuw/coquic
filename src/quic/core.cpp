@@ -2598,9 +2598,7 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         QuicCore legacy(make_client_core_config_for_core_coverage(0x01, 0x41));
         auto *connection = legacy.connection_.get();
         COQUIC_CORE_HOOK_RECORD(connection != nullptr);
-        {
-            COQUIC_CORE_HOOK_RECORD(&*legacy.connection_ == connection);
-        }
+        { COQUIC_CORE_HOOK_RECORD(&*legacy.connection_ == connection); }
 
         QuicCoreResult accepted_only;
         accepted_only.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
@@ -2621,9 +2619,7 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
             legacy.connections_.erase(*handle);
             auto *entry = legacy.ensure_legacy_entry();
             COQUIC_CORE_HOOK_RECORD(entry != nullptr);
-            {
-                COQUIC_CORE_HOOK_RECORD(entry->handle == *handle);
-            }
+            { COQUIC_CORE_HOOK_RECORD(entry->handle == *handle); }
         }
     }
 
@@ -2687,7 +2683,8 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         };
         append_sequential_result(sequential_error_target, std::move(sequential_error_source));
         COQUIC_CORE_HOOK_RECORD(sequential_error_target.local_error.has_value());
-        COQUIC_CORE_HOOK_RECORD(sequential_error_target.local_error->connection == std::optional{14u});
+        COQUIC_CORE_HOOK_RECORD(sequential_error_target.local_error->connection ==
+                                std::optional{14u});
 
         COQUIC_CORE_HOOK_RECORD(wakeup_not_due(std::nullopt, QuicCoreTimePoint{}));
         COQUIC_CORE_HOOK_RECORD(
@@ -3990,9 +3987,7 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         COQUIC_CORE_HOOK_RECORD(result.effects.empty());
         auto entry_it = endpoint.connections_.find(1);
         COQUIC_CORE_HOOK_RECORD(entry_it != endpoint.connections_.end());
-        {
-            COQUIC_CORE_HOOK_RECORD(!entry_it->second.path_id_by_route_handle.contains(20));
-        }
+        { COQUIC_CORE_HOOK_RECORD(!entry_it->second.path_id_by_route_handle.contains(20)); }
     }
 
     {

@@ -330,13 +330,10 @@ COQUIC_NO_PROFILE std::size_t route_lookup_cache_index(int socket_fd, const sock
                peer.ss_family == AF_INET6) {
         const auto &ipv6 = *reinterpret_cast<const sockaddr_in6 *>(&peer);
         mix(static_cast<std::uint64_t>(ipv6.sin6_port));
-        std::uint64_t folded_address = 0;
-        std::memcpy(&folded_address, &ipv6.sin6_addr, sizeof(folded_address));
-        mix(folded_address);
-        std::memcpy(&folded_address,
-                    reinterpret_cast<const std::byte *>(&ipv6.sin6_addr) + sizeof(folded_address),
-                    sizeof(folded_address));
-        mix(folded_address);
+        std::array<std::uint64_t, 2> folded_address{};
+        std::memcpy(folded_address.data(), &ipv6.sin6_addr, sizeof(folded_address));
+        mix(folded_address[0]);
+        mix(folded_address[1]);
     }
     return hash % internal::SocketIoRouteState::kRouteLookupCacheSlots;
 }
@@ -1116,12 +1113,12 @@ bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests() {
     {
         internal::SocketIoRouteState state;
         static_cast<void>(internal::remember_route_handle(state, peer, peer_len, 4));
-        sockaddr_storage different_peer = peer;
-        auto &different_ipv4 = *reinterpret_cast<sockaddr_in *>(&different_peer);
-        different_ipv4.sin_port = htons(4434);
+        sockaddr_storage alternate_peer = peer;
+        auto &alternate_ipv4 = *reinterpret_cast<sockaddr_in *>(&alternate_peer);
+        alternate_ipv4.sin_port = htons(4434);
         ok &= !internal::route_lookup_cache_matches(
             state.route_lookup_cache[internal::route_lookup_cache_index(4, peer, peer_len)], 4,
-            different_peer, peer_len);
+            alternate_peer, peer_len);
     }
 
     return ok;

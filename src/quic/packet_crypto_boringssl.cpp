@@ -684,6 +684,7 @@ serialize_retry_pseudo_packet(const RetryPacket &packet,
 
 CodecResult<std::size_t> seal_cipher_chunks_into(const EVP_CIPHER *packet_cipher,
                                                  const SealCipherChunksRequest &request) {
+    // Prepare one AEAD operation over split plaintext chunks while preserving OpenSSL int limits.
     const auto plaintext_length = total_plaintext_length(request.plaintext_chunks);
     if (!plaintext_length.has_value()) {
         return plaintext_length;

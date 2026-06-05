@@ -369,6 +369,7 @@ ServerUpdate from_internal(::coquic::http3::Http3ServerEndpointUpdate update) {
 namespace test {
 
 COQUIC_NO_PROFILE bool http3_wrapper_conversion_coverage_for_tests() {
+    // Exercise HTTP/3 wrapper conversion paths that are otherwise covered only through public APIs.
     auto ok = true;
     const auto record = [&ok](bool condition) {
         ok = static_cast<bool>(static_cast<unsigned>(ok) & static_cast<unsigned>(condition));

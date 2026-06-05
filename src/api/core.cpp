@@ -522,7 +522,7 @@ ConnectionDiagnostics from_internal(const quic::QuicCoreConnectionDiagnostics &d
     };
 }
 
-bool has_pending_stream_send_diagnostics(
+bool diagnostics_have_pending_stream_send(
     std::span<const quic::QuicCoreConnectionDiagnostics> diagnostics) {
     return std::ranges::any_of(diagnostics, [](const auto &connection) {
         return std::ranges::any_of(connection.streams,
@@ -545,6 +545,8 @@ template <typename T> std::vector<T> effects_of(const Result &result) {
 namespace test {
 
 COQUIC_NO_PROFILE bool core_wrapper_conversion_coverage_for_tests() {
+    // Exercise wrapper/internal conversions and diagnostic helpers without constructing full
+    // endpoints in the public API tests.
     bool ok = true;
     const auto record = [&ok](bool condition) {
         ok = static_cast<bool>(static_cast<unsigned>(ok) & static_cast<unsigned>(condition));
@@ -757,7 +759,7 @@ COQUIC_NO_PROFILE bool core_wrapper_conversion_coverage_for_tests() {
     record(state_events(converted).size() == 2u);
     record(receive_stream_events(converted).size() == 1u);
     record(receive_datagram_events(converted).size() == 1u);
-    record(!has_pending_stream_send_diagnostics({}));
+    record(!diagnostics_have_pending_stream_send({}));
     const std::array no_pending_streams{
         quic::QuicCoreConnectionDiagnostics{
             .handle = 1,
@@ -770,7 +772,7 @@ COQUIC_NO_PROFILE bool core_wrapper_conversion_coverage_for_tests() {
                 },
         },
     };
-    record(!has_pending_stream_send_diagnostics(no_pending_streams));
+    record(!diagnostics_have_pending_stream_send(no_pending_streams));
     const std::array pending_streams{
         quic::QuicCoreConnectionDiagnostics{
             .handle = 2,
@@ -783,7 +785,7 @@ COQUIC_NO_PROFILE bool core_wrapper_conversion_coverage_for_tests() {
                 },
         },
     };
-    record(has_pending_stream_send_diagnostics(pending_streams));
+    record(diagnostics_have_pending_stream_send(pending_streams));
 
     return ok;
 }
@@ -854,7 +856,7 @@ bool Endpoint::has_send_continuation_pending() const {
 
 bool Endpoint::has_pending_stream_send() const {
     const auto diagnostics = impl_->core.connection_diagnostics();
-    return has_pending_stream_send_diagnostics(diagnostics);
+    return diagnostics_have_pending_stream_send(diagnostics);
 }
 
 std::vector<SendDatagram> send_datagrams(const Result &result) {

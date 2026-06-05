@@ -86,12 +86,6 @@ bool timed_rr_drain_connection_complete(bool close_requested, std::size_t outsta
     return close_requested;
 }
 
-std::size_t active_crr_connection_count(std::span<const QuicPerfDrainStateSnapshot> connections) {
-    return static_cast<std::size_t>(
-        std::count_if(connections.begin(), connections.end(),
-                      [](const auto &connection) { return !connection.close_requested; }));
-}
-
 quic::QuicCoreClientConnectionConfig make_client_open_config_for_index(const QuicPerfConfig &config,
                                                                        std::uint64_t index) {
     const auto id = index + 1;
@@ -142,7 +136,9 @@ bool timed_crr_drain_complete_for_test(std::span<const QuicPerfDrainStateSnapsho
 
 std::size_t
 active_crr_connections_for_test(std::span<const QuicPerfDrainStateSnapshot> connections) {
-    return active_crr_connection_count(connections);
+    return static_cast<std::size_t>(
+        std::count_if(connections.begin(), connections.end(),
+                      [](const auto &connection) { return !connection.close_requested; }));
 }
 
 QuicPerfClient::QuicPerfClient(const QuicPerfConfig &config)

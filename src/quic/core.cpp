@@ -281,8 +281,8 @@ struct CoreEffectStorageCache {
 };
 
 COQUIC_NO_PROFILE CoreEffectStorageCache &core_effect_storage_cache() {
-    thread_local CoreEffectStorageCache cache;
-    return cache;
+    thread_local CoreEffectStorageCache storage_cache;
+    return storage_cache;
 }
 #endif
 
@@ -2598,7 +2598,10 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
 #define COQUIC_CORE_STRINGIFY_DETAIL(value) #value
 #define COQUIC_CORE_STRINGIFY(value) COQUIC_CORE_STRINGIFY_DETAIL(value)
 #define COQUIC_CORE_HOOK_RECORD(expr)                                                              \
-    coverage_check(ok, #expr ":" COQUIC_CORE_STRINGIFY(__LINE__), static_cast<bool>(expr))
+    do {                                                                                           \
+        const bool coquic_core_hook_condition = static_cast<bool>(expr);                           \
+        coverage_check(ok, #expr ":" COQUIC_CORE_STRINGIFY(__LINE__), coquic_core_hook_condition); \
+    } while (false)
 
     {
         COQUIC_CORE_HOOK_RECORD(detail::core_effect_storage_cache_coverage_for_tests());
@@ -2802,9 +2805,9 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         COQUIC_CORE_HOOK_RECORD(sequential_empty_target.send_continuation_pending);
         COQUIC_CORE_HOOK_RECORD(sequential_empty_target.local_error.has_value());
 
-        const auto short_replay_key =
+        const auto replay_key_from_short_token =
             address_validation_token_replay_key(make_bytes_for_core_coverage({0x01, 0x02}));
-        COQUIC_CORE_HOOK_RECORD(short_replay_key.size() == 2);
+        coverage_check(ok, "short_replay_key_size", replay_key_from_short_token.size() == 2);
         COQUIC_CORE_HOOK_RECORD(hex_encode_bytes(make_bytes_for_core_coverage({0x0a, 0xff})) ==
                                 "0aff");
         COQUIC_CORE_HOOK_RECORD(hex_decode_to_string("0a") == std::optional<std::string>{"\x0a"});
@@ -2894,9 +2897,11 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         COQUIC_CORE_HOOK_RECORD(read_length_prefixed_bytes(valid_length_prefixed) ==
                                 make_bytes_for_core_coverage({0xbb}));
         BufferReader second_valid_length_prefixed(valid_length_prefixed_bytes);
-        const auto second_prefixed = read_length_prefixed_bytes(second_valid_length_prefixed);
-        COQUIC_CORE_HOOK_RECORD(second_prefixed.has_value());
-        COQUIC_CORE_HOOK_RECORD(second_prefixed == make_bytes_for_core_coverage({0xbb}));
+        const auto repeated_prefixed_payload =
+            read_length_prefixed_bytes(second_valid_length_prefixed);
+        coverage_check(ok, "second_prefixed_has_value", repeated_prefixed_payload.has_value());
+        coverage_check(ok, "second_prefixed_matches_payload",
+                       repeated_prefixed_payload == make_bytes_for_core_coverage({0xbb}));
         COQUIC_CORE_HOOK_RECORD(append_length_prefixed_bytes(valid_prefixed_bytes,
                                                              make_bytes_for_core_coverage({0xcc})));
         COQUIC_CORE_HOOK_RECORD(
@@ -3137,22 +3142,22 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
             make_bytes_for_core_coverage({0x05, 8, 8, 8, 8, 0x1f, 0x90});
         const auto ipv4_link_local_wrong_second =
             make_bytes_for_core_coverage({0x04, 169, 1, 0, 1, 0x1f, 0x90});
-        const auto ipv6_unknown = make_bytes_for_core_coverage({0x06, 0});
-        const auto ipv6_wrong_tag_same_size = make_bytes_for_core_coverage(
+        const auto unknown_ipv6_identity = make_bytes_for_core_coverage({0x06, 0});
+        const auto wrong_tag_same_size_ipv6_identity = make_bytes_for_core_coverage(
             {0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1f, 0x90});
-        const auto ipv6_almost_loopback = make_bytes_for_core_coverage(
+        const auto almost_loopback_ipv6_identity = make_bytes_for_core_coverage(
             {0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0x1f, 0x90});
-        const auto ipv6_fe_global = make_bytes_for_core_coverage(
+        const auto fe_global_ipv6_identity = make_bytes_for_core_coverage(
             {0x06, 0xfe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1f, 0x90});
-        const auto ipv6_loopback = make_bytes_for_core_coverage(
+        const auto loopback_ipv6_identity = make_bytes_for_core_coverage(
             {0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1f, 0x90});
-        const auto ipv6_link_local = make_bytes_for_core_coverage(
+        const auto link_local_ipv6_identity = make_bytes_for_core_coverage(
             {0x06, 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1f, 0x90});
-        const auto ipv6_unique_local = make_bytes_for_core_coverage(
+        const auto unique_local_ipv6_identity = make_bytes_for_core_coverage(
             {0x06, 0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1f, 0x90});
-        const auto ipv6_global = make_bytes_for_core_coverage(
+        const auto global_ipv6_identity = make_bytes_for_core_coverage(
             {0x06, 0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xbb});
-        const auto ipv6_global_blocked_port = make_bytes_for_core_coverage(
+        const auto blocked_port_ipv6_identity = make_bytes_for_core_coverage(
             {0x06, 0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1f, 0x90});
         QuicRequestForgeryPolicyConfig policy;
         policy.reject_link_local_addresses = true;
@@ -3190,44 +3195,53 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         COQUIC_CORE_HOOK_RECORD(
             classify_ipv4_address_validation_identity(ipv4_link_local_wrong_second) ==
             QuicAddressValidationIdentityClass::global);
-        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv6_unknown) ==
-                                QuicAddressValidationIdentityClass::unknown);
-        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv6_loopback) ==
-                                QuicAddressValidationIdentityClass::loopback);
-        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv6_link_local) ==
-                                QuicAddressValidationIdentityClass::link_local);
-        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv6_unique_local) ==
-                                QuicAddressValidationIdentityClass::unique_local);
-        COQUIC_CORE_HOOK_RECORD(classify_address_validation_identity(ipv6_global) ==
-                                QuicAddressValidationIdentityClass::global);
-        COQUIC_CORE_HOOK_RECORD(
-            classify_ipv6_address_validation_identity(ipv6_wrong_tag_same_size) ==
-            QuicAddressValidationIdentityClass::unknown);
-        COQUIC_CORE_HOOK_RECORD(classify_ipv6_address_validation_identity(ipv6_almost_loopback) ==
-                                QuicAddressValidationIdentityClass::global);
-        COQUIC_CORE_HOOK_RECORD(classify_ipv6_address_validation_identity(ipv6_fe_global) ==
-                                QuicAddressValidationIdentityClass::global);
+        coverage_check(ok, "ipv6_unknown_class",
+                       classify_address_validation_identity(unknown_ipv6_identity) ==
+                           QuicAddressValidationIdentityClass::unknown);
+        coverage_check(ok, "ipv6_loopback_class",
+                       classify_address_validation_identity(loopback_ipv6_identity) ==
+                           QuicAddressValidationIdentityClass::loopback);
+        coverage_check(ok, "ipv6_link_local_class",
+                       classify_address_validation_identity(link_local_ipv6_identity) ==
+                           QuicAddressValidationIdentityClass::link_local);
+        coverage_check(ok, "ipv6_unique_local_class",
+                       classify_address_validation_identity(unique_local_ipv6_identity) ==
+                           QuicAddressValidationIdentityClass::unique_local);
+        coverage_check(ok, "ipv6_global_class",
+                       classify_address_validation_identity(global_ipv6_identity) ==
+                           QuicAddressValidationIdentityClass::global);
+        coverage_check(
+            ok, "ipv6_wrong_tag_same_size_class",
+            classify_ipv6_address_validation_identity(wrong_tag_same_size_ipv6_identity) ==
+                QuicAddressValidationIdentityClass::unknown);
+        coverage_check(ok, "ipv6_almost_loopback_class",
+                       classify_ipv6_address_validation_identity(almost_loopback_ipv6_identity) ==
+                           QuicAddressValidationIdentityClass::global);
+        coverage_check(ok, "ipv6_fe_global_class",
+                       classify_ipv6_address_validation_identity(fe_global_ipv6_identity) ==
+                           QuicAddressValidationIdentityClass::global);
         COQUIC_CORE_HOOK_RECORD(!address_identity_allowed_by_request_forgery_policy(
             policy, ipv4_global, ipv4_link_local));
         COQUIC_CORE_HOOK_RECORD(
             !address_identity_allowed_by_request_forgery_policy(policy, ipv4_global, ipv4_private));
         COQUIC_CORE_HOOK_RECORD(!address_identity_allowed_by_request_forgery_policy(
-            policy, ipv4_global, ipv6_unique_local));
+            policy, ipv4_global, unique_local_ipv6_identity));
         COQUIC_CORE_HOOK_RECORD(!address_identity_allowed_by_request_forgery_policy(
             policy, ipv4_global, ipv4_loopback));
-        COQUIC_CORE_HOOK_RECORD(!address_identity_allowed_by_request_forgery_policy(
-            policy, ipv4_global, ipv6_global_blocked_port));
-        COQUIC_CORE_HOOK_RECORD(
-            address_identity_allowed_by_request_forgery_policy(policy, ipv4_global, ipv6_global));
+        coverage_check(ok, "ipv6_global_blocked_port_rejected",
+                       !address_identity_allowed_by_request_forgery_policy(
+                           policy, ipv4_global, blocked_port_ipv6_identity));
+        COQUIC_CORE_HOOK_RECORD(address_identity_allowed_by_request_forgery_policy(
+            policy, ipv4_global, global_ipv6_identity));
         QuicRequestForgeryPolicyConfig allow_policy;
         COQUIC_CORE_HOOK_RECORD(address_identity_allowed_by_request_forgery_policy(
             allow_policy, {}, make_bytes_for_core_coverage({0x01})));
-        COQUIC_CORE_HOOK_RECORD(
-            address_identity_allowed_by_request_forgery_policy(policy, ipv4_private, ipv6_global));
+        COQUIC_CORE_HOOK_RECORD(address_identity_allowed_by_request_forgery_policy(
+            policy, ipv4_private, global_ipv6_identity));
         COQUIC_CORE_HOOK_RECORD(address_validation_identity_udp_port(ipv4_wrong_tag_same_size) ==
                                 std::nullopt);
-        COQUIC_CORE_HOOK_RECORD(address_validation_identity_udp_port(ipv6_wrong_tag_same_size) ==
-                                std::nullopt);
+        COQUIC_CORE_HOOK_RECORD(address_validation_identity_udp_port(
+                                    wrong_tag_same_size_ipv6_identity) == std::nullopt);
         COQUIC_CORE_HOOK_RECORD(
             address_class_is_private_like(QuicAddressValidationIdentityClass::loopback));
         COQUIC_CORE_HOOK_RECORD(
@@ -3244,12 +3258,13 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
             !address_class_is_public_like(QuicAddressValidationIdentityClass::loopback));
         COQUIC_CORE_HOOK_RECORD(route_address_family_from_identity(ipv4_global) ==
                                 QuicRouteAddressFamily::ipv4);
-        COQUIC_CORE_HOOK_RECORD(route_address_family_from_identity(ipv6_global) ==
+        COQUIC_CORE_HOOK_RECORD(route_address_family_from_identity(global_ipv6_identity) ==
                                 QuicRouteAddressFamily::ipv6);
         COQUIC_CORE_HOOK_RECORD(route_address_family_from_identity(ipv4_wrong_tag_same_size) ==
                                 QuicRouteAddressFamily::unknown);
-        COQUIC_CORE_HOOK_RECORD(route_address_family_from_identity(ipv6_wrong_tag_same_size) ==
-                                QuicRouteAddressFamily::unknown);
+        COQUIC_CORE_HOOK_RECORD(
+            route_address_family_from_identity(wrong_tag_same_size_ipv6_identity) ==
+            QuicRouteAddressFamily::unknown);
         COQUIC_CORE_HOOK_RECORD(route_address_family_from_identity({}) ==
                                 QuicRouteAddressFamily::unknown);
         COQUIC_CORE_HOOK_RECORD(
@@ -3309,16 +3324,19 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
 
         auto consumed_metadata = base_metadata;
         consumed_metadata.nonce = make_bytes_for_core_coverage({0x57});
-        const auto consumed_token = seal_address_validation_token(
+        const auto consumed_retry_token = seal_address_validation_token(
             *config.address_validation_token_secret, consumed_metadata);
-        COQUIC_CORE_HOOK_RECORD(consumed_token.has_value());
-        core.mark_address_validation_token_consumed(*consumed_token, consumed_metadata.expires_at);
+        coverage_check(ok, "consumed_retry_token_has_value", consumed_retry_token.has_value());
+        const auto consumed_retry_token_bytes =
+            consumed_retry_token.value_or(std::vector<std::byte>{});
+        core.mark_address_validation_token_consumed(consumed_retry_token_bytes,
+                                                    consumed_metadata.expires_at);
         QuicCore::ParsedEndpointDatagram consumed_parsed{
             .kind = QuicCore::ParsedEndpointDatagram::Kind::supported_initial,
             .destination_connection_id = consumed_metadata.retry_source_connection_id,
             .source_connection_id = make_connection_id_for_core_coverage({0xc1, 0x57}),
             .version = kQuicVersion1,
-            .token = *consumed_token,
+            .token = consumed_retry_token_bytes,
         };
         COQUIC_CORE_HOOK_RECORD(
             !core.take_retry_context(consumed_parsed, 55, QuicCoreTimePoint{}, identity)
@@ -3545,16 +3563,18 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         auto wrong_route_metadata = metadata;
         wrong_route_metadata.route_handle = 45;
         wrong_route_metadata.nonce = make_bytes_for_core_coverage({0x03});
-        const auto wrong_route_token = seal_address_validation_token(
+        const auto new_token_wrong_route = seal_address_validation_token(
             *config.address_validation_token_secret, wrong_route_metadata);
-        COQUIC_CORE_HOOK_RECORD(wrong_route_token.has_value());
+        coverage_check(ok, "new_token_wrong_route_has_value", new_token_wrong_route.has_value());
+        const auto new_token_wrong_route_bytes =
+            new_token_wrong_route.value_or(std::vector<std::byte>{});
         {
             QuicCore::ParsedEndpointDatagram parsed{
                 .kind = QuicCore::ParsedEndpointDatagram::Kind::supported_initial,
                 .destination_connection_id = make_connection_id_for_core_coverage({0x83, 0x36}),
                 .source_connection_id = make_connection_id_for_core_coverage({0xc1, 0x36}),
                 .version = kQuicVersion1,
-                .token = *wrong_route_token,
+                .token = new_token_wrong_route_bytes,
             };
             COQUIC_CORE_HOOK_RECORD(
                 !core.take_new_token_context(parsed, 44, QuicCoreTimePoint{}, identity)
@@ -3563,16 +3583,19 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
 
         auto wrong_identity_metadata = metadata;
         wrong_identity_metadata.nonce = make_bytes_for_core_coverage({0x04});
-        const auto wrong_identity_token = seal_address_validation_token(
+        const auto new_token_wrong_identity = seal_address_validation_token(
             *config.address_validation_token_secret, wrong_identity_metadata);
-        COQUIC_CORE_HOOK_RECORD(wrong_identity_token.has_value());
+        coverage_check(ok, "new_token_wrong_identity_has_value",
+                       new_token_wrong_identity.has_value());
+        const auto new_token_wrong_identity_bytes =
+            new_token_wrong_identity.value_or(std::vector<std::byte>{});
         {
             QuicCore::ParsedEndpointDatagram parsed{
                 .kind = QuicCore::ParsedEndpointDatagram::Kind::supported_initial,
                 .destination_connection_id = make_connection_id_for_core_coverage({0x83, 0x37}),
                 .source_connection_id = make_connection_id_for_core_coverage({0xc1, 0x37}),
                 .version = kQuicVersion1,
-                .token = *wrong_identity_token,
+                .token = new_token_wrong_identity_bytes,
             };
             COQUIC_CORE_HOOK_RECORD(
                 !core.take_new_token_context(
@@ -3583,16 +3606,19 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
 
         auto wrong_version_metadata = metadata;
         wrong_version_metadata.nonce = make_bytes_for_core_coverage({0x05});
-        const auto wrong_version_token = seal_address_validation_token(
+        const auto new_token_wrong_version = seal_address_validation_token(
             *config.address_validation_token_secret, wrong_version_metadata);
-        COQUIC_CORE_HOOK_RECORD(wrong_version_token.has_value());
+        coverage_check(ok, "new_token_wrong_version_has_value",
+                       new_token_wrong_version.has_value());
+        const auto new_token_wrong_version_bytes =
+            new_token_wrong_version.value_or(std::vector<std::byte>{});
         {
             QuicCore::ParsedEndpointDatagram parsed{
                 .kind = QuicCore::ParsedEndpointDatagram::Kind::supported_initial,
                 .destination_connection_id = make_connection_id_for_core_coverage({0x83, 0x38}),
                 .source_connection_id = make_connection_id_for_core_coverage({0xc1, 0x38}),
                 .version = kQuicVersion2,
-                .token = *wrong_version_token,
+                .token = new_token_wrong_version_bytes,
             };
             COQUIC_CORE_HOOK_RECORD(
                 !core.take_new_token_context(parsed, 44, QuicCoreTimePoint{}, identity)
@@ -3601,16 +3627,18 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
 
         auto wrong_kind_metadata = metadata;
         wrong_kind_metadata.kind = kAddressValidationRetryTokenType;
-        const auto wrong_kind_token = seal_address_validation_token(
+        const auto new_token_wrong_kind = seal_address_validation_token(
             *config.address_validation_token_secret, wrong_kind_metadata);
-        COQUIC_CORE_HOOK_RECORD(wrong_kind_token.has_value());
+        coverage_check(ok, "new_token_wrong_kind_has_value", new_token_wrong_kind.has_value());
+        const auto new_token_wrong_kind_bytes =
+            new_token_wrong_kind.value_or(std::vector<std::byte>{});
         {
             QuicCore::ParsedEndpointDatagram parsed{
                 .kind = QuicCore::ParsedEndpointDatagram::Kind::supported_initial,
                 .destination_connection_id = make_connection_id_for_core_coverage({0x83, 0x32}),
                 .source_connection_id = make_connection_id_for_core_coverage({0xc1, 0x32}),
                 .version = kQuicVersion1,
-                .token = *wrong_kind_token,
+                .token = new_token_wrong_kind_bytes,
             };
             COQUIC_CORE_HOOK_RECORD(
                 !core.take_new_token_context(parsed, 44, QuicCoreTimePoint{}, identity)
@@ -3924,9 +3952,11 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
         entry.path_id_by_route_handle.emplace(404, 6);
         COQUIC_CORE_HOOK_RECORD(
             endpoint.effective_address_validation_identity_for_route(entry, 404, {}).empty());
-        const auto proposed_identity = make_bytes_for_core_coverage({0x04, 8, 8, 8, 8, 0x01, 0xbb});
-        COQUIC_CORE_HOOK_RECORD(endpoint.effective_address_validation_identity_for_route(
-                                    entry, 404, proposed_identity) == proposed_identity);
+        const auto candidate_identity =
+            make_bytes_for_core_coverage({0x04, 8, 8, 8, 8, 0x01, 0xbb});
+        coverage_check(ok, "candidate_identity_used_for_route",
+                       endpoint.effective_address_validation_identity_for_route(
+                           entry, 404, candidate_identity) == candidate_identity);
         entry.default_route_handle = 77;
         COQUIC_CORE_HOOK_RECORD(endpoint.route_handle_for_path(entry, std::nullopt) ==
                                 std::optional<QuicRouteHandle>{77});
@@ -4204,13 +4234,15 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
             .version = kQuicVersion1,
         };
         std::vector<std::byte> minimal_short(kMinimumStatelessResetDatagramSize, std::byte{0x40});
-        const auto minimal_reset = server.make_stateless_reset_for_unknown_cid(
+        const auto minimal_stateless_reset = server.make_stateless_reset_for_unknown_cid(
             parsed_short, minimal_short, QuicRouteHandle{32},
             QuicCoreTimePoint{} + std::chrono::milliseconds(2));
-        COQUIC_CORE_HOOK_RECORD(minimal_reset.has_value());
+        coverage_check(ok, "minimal_stateless_reset_has_value",
+                       minimal_stateless_reset.has_value());
         {
-            COQUIC_CORE_HOOK_RECORD(minimal_reset->bytes.size() ==
-                                    kMinimumStatelessResetDatagramSize);
+            coverage_check(ok, "minimal_stateless_reset_size",
+                           minimal_stateless_reset.value_or(QuicCoreSendDatagram{}).bytes.size() ==
+                               kMinimumStatelessResetDatagramSize);
         }
 
         auto unknown_prefix_cid =
@@ -4734,9 +4766,10 @@ COQUIC_NO_PROFILE bool test::core_endpoint_internal_coverage_for_tests() {
             .connection = 1,
             .generation = entry.wakeup_generation,
         });
-        const auto rebuilt_due =
+        const auto rebuilt_due_handles =
             endpoint.due_connection_handles(QuicCoreTimePoint{} + std::chrono::milliseconds(13));
-        COQUIC_CORE_HOOK_RECORD(rebuilt_due == std::vector<QuicConnectionHandle>{1});
+        coverage_check(ok, "rebuilt_due_connection_handles",
+                       rebuilt_due_handles == std::vector<QuicConnectionHandle>{1});
 
         entry.send_continuation_wakeup = QuicCoreTimePoint{} + std::chrono::milliseconds(14);
         endpoint.rebuild_wakeup_cache();
@@ -5549,8 +5582,8 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
     }
 
     QuicCoreResult result;
-    const auto due_handles = due_connection_handles(now);
-    for (const auto handle : due_handles) {
+    const auto due_connection_handles_snapshot = due_connection_handles(now);
+    for (const auto handle : due_connection_handles_snapshot) {
         auto entry_it = connections_.find(handle);
         if (entry_it == connections_.end() || entry_it->second.connection == nullptr) {
             continue;

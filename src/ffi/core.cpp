@@ -733,6 +733,7 @@ std::optional<coquic::core::ConnectionInput> to_cpp(const coquic_connection_inpu
 namespace coquic::ffi::test {
 
 COQUIC_NO_PROFILE bool core_ffi_conversion_coverage_for_tests() {
+    // Exercise FFI boundary conversions with representative v1 structs and edge-case sizes.
     bool ok = true;
     const auto record = [&](bool condition) { ok = ok & condition; };
     constexpr std::array<std::uint8_t, 3> bytes{0x61, 0x62, 0x63};

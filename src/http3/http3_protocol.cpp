@@ -53,7 +53,8 @@ CodecResult<std::uint64_t> read_varint(BufferReader &reader) {
     return CodecResult<std::uint64_t>::success(decoded.value().value);
 }
 
-std::optional<quic::CodecError> write_http3_payload_frame(BufferWriter &writer, std::uint64_t type,
+std::optional<quic::CodecError> write_http3_payload_frame(BufferWriter &frame_writer,
+                                                          std::uint64_t type,
                                                           std::span<const std::byte> payload) {
     const auto encoded_type = encode_varint(type);
     if (!encoded_type.has_value()) {
@@ -65,19 +66,20 @@ std::optional<quic::CodecError> write_http3_payload_frame(BufferWriter &writer, 
         return encoded_length.error();
     }
 
-    writer.write_bytes(encoded_type.value());
-    writer.write_bytes(encoded_length.value());
-    writer.write_bytes(payload);
+    frame_writer.write_bytes(encoded_type.value());
+    frame_writer.write_bytes(encoded_length.value());
+    frame_writer.write_bytes(payload);
     return std::nullopt;
 }
 
 CodecResult<std::vector<std::byte>>
 serialize_http3_payload_frame(std::uint64_t type, std::span<const std::byte> payload) {
-    BufferWriter writer;
-    if (const auto error = write_http3_payload_frame(writer, type, payload); error.has_value()) {
+    BufferWriter frame_writer;
+    if (const auto error = write_http3_payload_frame(frame_writer, type, payload);
+        error.has_value()) {
         return CodecResult<std::vector<std::byte>>::failure(*error);
     }
-    return CodecResult<std::vector<std::byte>>::success(writer.bytes());
+    return CodecResult<std::vector<std::byte>>::success(frame_writer.bytes());
 }
 
 CodecResult<std::vector<std::byte>>

@@ -825,8 +825,8 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
 
         PacketSpaceState handshake_space;
         record(!handshake_packet_space_has_sendable_data(handshake_space, QuicCoreTimePoint{}));
-        handshake_space.write_secret = make_connection_coverage_traffic_secret(
-            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x45});
+        handshake_space.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x45});
         handshake_space.pending_probe_packet = SentPacketRecord{};
         record(handshake_packet_space_has_sendable_data(handshake_space, QuicCoreTimePoint{}));
 
@@ -946,8 +946,8 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
             initial_space, /*handshake_discarded=*/false, handshake_space));
         handshake_space = PacketSpaceState{};
 
-        handshake_space.write_secret = make_connection_coverage_traffic_secret(
-            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x44});
+        handshake_space.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x44});
         record(has_client_handshake_keepalive_space(QuicCoreTimePoint{},
                                                     /*initial_discarded=*/true,
                                                     /*handshake_discarded=*/false,
@@ -1100,13 +1100,13 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
         stream.reset_state = StreamControlFrameState::pending;
         record(!stream_has_lost_send_data_for_state_change(stream));
 
-        const auto now = QuicCoreTimePoint{} + QuicCoreDuration{1};
+        const auto simple_ack_ecn_time = QuicCoreTimePoint{} + QuicCoreDuration{1};
         record(should_use_single_path_simple_stream_ack_ecn(
-            /*single_path_summary=*/true, QuicPathId{3}, now));
+            /*single_path_summary=*/true, QuicPathId{3}, simple_ack_ecn_time));
         record(!should_use_single_path_simple_stream_ack_ecn(
-            /*single_path_summary=*/false, QuicPathId{3}, now));
+            /*single_path_summary=*/false, QuicPathId{3}, simple_ack_ecn_time));
         record(!should_use_single_path_simple_stream_ack_ecn(
-            /*single_path_summary=*/true, std::nullopt, now));
+            /*single_path_summary=*/true, std::nullopt, simple_ack_ecn_time));
         record(!should_use_single_path_simple_stream_ack_ecn(
             /*single_path_summary=*/true, QuicPathId{3}, std::nullopt));
 
@@ -1360,47 +1360,57 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
             peer_parameters));
     }
     {
-        PathMtuState mtu;
-        mtu.outstanding_probe_packet_number = 7;
-        record(should_clear_outstanding_pmtu_probe(mtu, 7));
-        record(!should_clear_outstanding_pmtu_probe(mtu, 8));
-        mtu.outstanding_probe_size = 1300;
-        mtu.probe_ceiling = 1200;
-        record(should_clear_outstanding_pmtu_probe_after_ceiling(mtu));
-        mtu.outstanding_probe_size = 1200;
-        record(!should_clear_outstanding_pmtu_probe_after_ceiling(mtu));
-        mtu.enabled = true;
-        mtu.validated_datagram_size = 1200;
-        mtu.probe_ceiling = 1300;
-        record(pmtud_next_probe_time(mtu, QuicCoreTimePoint{}, QuicCoreDuration{1}).has_value());
-        mtu.validated_datagram_size = 1300;
-        record(!pmtud_next_probe_time(mtu, QuicCoreTimePoint{}, QuicCoreDuration{1}).has_value());
-        mtu.enabled = false;
-        mtu.validated_datagram_size = 1200;
-        mtu.probe_ceiling = 1300;
-        record(!pmtud_next_probe_time(mtu, QuicCoreTimePoint{}, QuicCoreDuration{1}).has_value());
-        mtu.enabled = true;
-        mtu.outstanding_probe_packet_number.reset();
-        record(should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+        PathMtuState mtu_state;
+        mtu_state.outstanding_probe_packet_number = 7;
+        record(should_clear_outstanding_pmtu_probe(mtu_state, 7));
+        record(!should_clear_outstanding_pmtu_probe(mtu_state, 8));
+        mtu_state.outstanding_probe_size = 1300;
+        mtu_state.probe_ceiling = 1200;
+        record(should_clear_outstanding_pmtu_probe_after_ceiling(mtu_state));
+        mtu_state.outstanding_probe_size = 1200;
+        record(!should_clear_outstanding_pmtu_probe_after_ceiling(mtu_state));
+        mtu_state.enabled = true;
+        mtu_state.validated_datagram_size = 1200;
+        mtu_state.probe_ceiling = 1300;
+        record(
+            pmtud_next_probe_time(mtu_state, QuicCoreTimePoint{}, QuicCoreDuration{1}).has_value());
+        mtu_state.validated_datagram_size = 1300;
+        record(!pmtud_next_probe_time(mtu_state, QuicCoreTimePoint{}, QuicCoreDuration{1})
+                    .has_value());
+        mtu_state.enabled = false;
+        mtu_state.validated_datagram_size = 1200;
+        mtu_state.probe_ceiling = 1300;
+        record(!pmtud_next_probe_time(mtu_state, QuicCoreTimePoint{}, QuicCoreDuration{1})
+                    .has_value());
+        mtu_state.enabled = true;
+        mtu_state.outstanding_probe_packet_number.reset();
+        record(should_arm_pmtu_probe_after_send(mtu_state,
+                                                /*application_write_secret_available=*/true,
                                                 /*pending_stream_bytes=*/1301));
-        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/false,
+        record(!should_arm_pmtu_probe_after_send(mtu_state,
+                                                 /*application_write_secret_available=*/false,
                                                  /*pending_stream_bytes=*/1301));
-        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+        record(!should_arm_pmtu_probe_after_send(mtu_state,
+                                                 /*application_write_secret_available=*/true,
                                                  /*pending_stream_bytes=*/1200));
-        mtu.next_probe_time = QuicCoreTimePoint{};
-        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+        mtu_state.next_probe_time = QuicCoreTimePoint{};
+        record(!should_arm_pmtu_probe_after_send(mtu_state,
+                                                 /*application_write_secret_available=*/true,
                                                  /*pending_stream_bytes=*/1301));
-        mtu.next_probe_time.reset();
-        mtu.outstanding_probe_packet_number = 8;
-        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+        mtu_state.next_probe_time.reset();
+        mtu_state.outstanding_probe_packet_number = 8;
+        record(!should_arm_pmtu_probe_after_send(mtu_state,
+                                                 /*application_write_secret_available=*/true,
                                                  /*pending_stream_bytes=*/1301));
-        mtu.outstanding_probe_packet_number.reset();
-        mtu.validated_datagram_size = mtu.probe_ceiling;
-        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+        mtu_state.outstanding_probe_packet_number.reset();
+        mtu_state.validated_datagram_size = mtu_state.probe_ceiling;
+        record(!should_arm_pmtu_probe_after_send(mtu_state,
+                                                 /*application_write_secret_available=*/true,
                                                  /*pending_stream_bytes=*/1301));
-        mtu.enabled = false;
-        mtu.validated_datagram_size = 1200;
-        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+        mtu_state.enabled = false;
+        mtu_state.validated_datagram_size = 1200;
+        record(!should_arm_pmtu_probe_after_send(mtu_state,
+                                                 /*application_write_secret_available=*/true,
                                                  /*pending_stream_bytes=*/1301));
     }
     record(should_reset_client_handshake_peer_state_for_source(
@@ -1434,31 +1444,37 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
             /*allow_pmtu_probe_size=*/true, /*anti_amplification_limited=*/false, pending_probe));
     }
     {
-        PathMtuState mtu;
-        mtu.validated_datagram_size = 1200;
-        remember_pmtud_failed_probe_size(mtu, 1300);
-        record(should_keep_searching_for_pmtu_probe_size(mtu, 1300));
-        record(!should_keep_searching_for_pmtu_probe_size(mtu, 1199));
-        record(!should_keep_searching_for_pmtu_probe_size(mtu, 1250));
-        mtu.enabled = true;
-        mtu.validated_datagram_size = 1200;
-        mtu.probe_ceiling = 1300;
-        record(should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+        PathMtuState mtu_state;
+        mtu_state.validated_datagram_size = 1200;
+        remember_pmtud_failed_probe_size(mtu_state, 1300);
+        record(should_keep_searching_for_pmtu_probe_size(mtu_state, 1300));
+        record(!should_keep_searching_for_pmtu_probe_size(mtu_state, 1199));
+        record(!should_keep_searching_for_pmtu_probe_size(mtu_state, 1250));
+        mtu_state.enabled = true;
+        mtu_state.validated_datagram_size = 1200;
+        mtu_state.probe_ceiling = 1300;
+        record(should_arm_pmtu_probe_after_send(mtu_state,
+                                                /*application_write_secret_available=*/true,
                                                 /*pending_stream_bytes=*/1201));
-        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/false,
+        record(!should_arm_pmtu_probe_after_send(mtu_state,
+                                                 /*application_write_secret_available=*/false,
                                                  /*pending_stream_bytes=*/1201));
-        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+        record(!should_arm_pmtu_probe_after_send(mtu_state,
+                                                 /*application_write_secret_available=*/true,
                                                  /*pending_stream_bytes=*/1200));
-        mtu.next_probe_time = QuicCoreTimePoint{};
-        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+        mtu_state.next_probe_time = QuicCoreTimePoint{};
+        record(!should_arm_pmtu_probe_after_send(mtu_state,
+                                                 /*application_write_secret_available=*/true,
                                                  /*pending_stream_bytes=*/1201));
-        mtu.next_probe_time.reset();
-        mtu.outstanding_probe_packet_number = 1;
-        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+        mtu_state.next_probe_time.reset();
+        mtu_state.outstanding_probe_packet_number = 1;
+        record(!should_arm_pmtu_probe_after_send(mtu_state,
+                                                 /*application_write_secret_available=*/true,
                                                  /*pending_stream_bytes=*/1201));
-        mtu.outstanding_probe_packet_number.reset();
-        mtu.validated_datagram_size = 1300;
-        record(!should_arm_pmtu_probe_after_send(mtu, /*application_write_secret_available=*/true,
+        mtu_state.outstanding_probe_packet_number.reset();
+        mtu_state.validated_datagram_size = 1300;
+        record(!should_arm_pmtu_probe_after_send(mtu_state,
+                                                 /*application_write_secret_available=*/true,
                                                  /*pending_stream_bytes=*/1301));
     }
     {
@@ -1512,12 +1528,12 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
         record(!inbound_packet_storage_range_is_eligible(
             /*allow_in_place_receive_decode=*/true, std::nullopt, HandshakeStatus::connected,
             storage, std::span<const std::byte>{}));
-        const auto begin = reinterpret_cast<std::uintptr_t>(storage->data());
-        const auto end = begin + storage->size();
-        record(packet_bytes_start_inside_storage(begin, begin, end));
-        record(packet_bytes_start_inside_storage(end, begin, end));
-        record(!packet_bytes_start_inside_storage(begin - 1, begin, end));
-        record(!packet_bytes_start_inside_storage(end + 1, begin, end));
+        const auto storage_begin = reinterpret_cast<std::uintptr_t>(storage->data());
+        const auto storage_end = storage_begin + storage->size();
+        record(packet_bytes_start_inside_storage(storage_begin, storage_begin, storage_end));
+        record(packet_bytes_start_inside_storage(storage_end, storage_begin, storage_end));
+        record(!packet_bytes_start_inside_storage(storage_begin - 1, storage_begin, storage_end));
+        record(!packet_bytes_start_inside_storage(storage_end + 1, storage_begin, storage_end));
     }
     record(no_ack_control_candidate_leaves_stream_budget(
         /*no_ack_control_candidate_size=*/18, /*congestion_limited_datagram_size=*/20,
@@ -1539,14 +1555,14 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
                                                       HandshakeStatus::connected, zero_rtt_space));
         record(!can_send_zero_rtt_application_packets(
             EndpointRole::client, HandshakeStatus::in_progress, zero_rtt_space));
-        zero_rtt_space.write_secret = make_connection_coverage_traffic_secret(
-            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x66});
+        zero_rtt_space.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x66});
         record(can_send_zero_rtt_application_packets(EndpointRole::client,
                                                      HandshakeStatus::in_progress, zero_rtt_space));
         record(can_send_application_packets(EndpointRole::client, HandshakeStatus::in_progress,
                                             zero_rtt_space, application_space));
-        application_space.write_secret = make_connection_coverage_traffic_secret(
-            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x67});
+        application_space.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x67});
         record(can_send_application_packets(EndpointRole::server, HandshakeStatus::connected,
                                             PacketSpaceState{}, application_space));
         application_space.write_secret.reset();
@@ -1558,8 +1574,8 @@ COQUIC_NO_PROFILE bool connection_instrumented_helper_coverage_for_tests() {
                                                       application_space));
         record(!application_send_congestion_is_forced(/*force=*/true, /*bypass=*/false,
                                                       application_space));
-        application_space.write_secret = make_connection_coverage_traffic_secret(
-            CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x68});
+        application_space.write_secret =
+            make_test_traffic_secret(CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x68});
         record(application_send_congestion_is_forced(/*force=*/true, /*bypass=*/false,
                                                      application_space));
     }

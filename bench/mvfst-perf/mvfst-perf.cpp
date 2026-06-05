@@ -542,33 +542,35 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
             if (readData.hasError()) {
                 return;
             }
-            auto &state = streams_[id];
+            auto &server_stream_state = streams_[id];
             quic::BufPtr data = std::move(readData->first);
             bool eof = readData->second;
             if (data) {
                 auto range = data->coalesce();
                 const uint8_t *bytes = range.data();
                 size_t len = range.size();
-                if (state.headerLen < sizeof(state.header)) {
-                    size_t take = std::min(sizeof(state.header) - state.headerLen, len);
-                    std::memcpy(state.header + state.headerLen, bytes, take);
-                    state.headerLen += take;
+                if (server_stream_state.headerLen < sizeof(server_stream_state.header)) {
+                    size_t take = std::min(
+                        sizeof(server_stream_state.header) - server_stream_state.headerLen, len);
+                    std::memcpy(server_stream_state.header + server_stream_state.headerLen, bytes,
+                                take);
+                    server_stream_state.headerLen += take;
                     bytes += take;
                     len -= take;
-                    if (state.headerLen == sizeof(state.header)) {
+                    if (server_stream_state.headerLen == sizeof(server_stream_state.header)) {
                         uint64_t req = 0;
                         uint64_t res = 0;
-                        std::memcpy(&req, state.header, sizeof(req));
-                        std::memcpy(&res, state.header + sizeof(req), sizeof(res));
-                        state.requestBytes = ntohll(req);
-                        state.responseBytes = ntohll(res);
+                        std::memcpy(&req, server_stream_state.header, sizeof(req));
+                        std::memcpy(&res, server_stream_state.header + sizeof(req), sizeof(res));
+                        server_stream_state.requestBytes = ntohll(req);
+                        server_stream_state.responseBytes = ntohll(res);
                     }
                 }
-                state.requestReceived += len;
+                server_stream_state.requestReceived += len;
             }
             if (eof) {
-                state.requestFin = true;
-                writeResponse(id, state);
+                server_stream_state.requestFin = true;
+                writeResponse(id, server_stream_state);
                 auto cb = sock_->setReadCallback(id, nullptr);
                 if (cb.hasError()) {
                     std::cerr << "mvfst server unset read callback failed\n";

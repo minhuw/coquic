@@ -502,23 +502,23 @@ const std::vector<HuffmanNode> &hpack_huffman_trie() {
             std::from_chars(line.begin(), line.begin() + separator, bits, 16);
             std::from_chars(line.begin() + separator + 1, line.end(), length, 10);
 
-            int node = 0;
+            int node_index = 0;
             for (int bit_index = static_cast<int>(length) - 1; bit_index >= 0; --bit_index) {
                 const bool bit = ((bits >> bit_index) & 1u) != 0u;
-                int child = bit ? nodes[static_cast<std::size_t>(node)].one
-                                : nodes[static_cast<std::size_t>(node)].zero;
+                int child = bit ? nodes[static_cast<std::size_t>(node_index)].one
+                                : nodes[static_cast<std::size_t>(node_index)].zero;
                 if (child == -1) {
                     child = static_cast<int>(nodes.size());
                     nodes.push_back(HuffmanNode{});
                     if (bit) {
-                        nodes[static_cast<std::size_t>(node)].one = child;
+                        nodes[static_cast<std::size_t>(node_index)].one = child;
                     } else {
-                        nodes[static_cast<std::size_t>(node)].zero = child;
+                        nodes[static_cast<std::size_t>(node_index)].zero = child;
                     }
                 }
-                node = child;
+                node_index = child;
             }
-            nodes[static_cast<std::size_t>(node)].symbol = symbol;
+            nodes[static_cast<std::size_t>(node_index)].symbol = symbol;
         }
 
         return nodes;

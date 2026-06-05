@@ -218,8 +218,9 @@ bool runtime_parser_and_utility_coverage_for_tests() {
                                               },
                                               0) == 0x01234567u);
 
-    const auto routing_destination_connection_id = make_runtime_connection_id(std::byte{0x41}, 1);
-    const auto routing_source_connection_id = make_runtime_connection_id(std::byte{0x42}, 2);
+    const auto sample_routing_destination_connection_id =
+        make_runtime_connection_id(std::byte{0x41}, 1);
+    const auto sample_routing_source_connection_id = make_runtime_connection_id(std::byte{0x42}, 2);
 
     runtime_parser_routing_coverage_check(ok, "empty datagram does not parse",
                                           !parse_server_datagram_for_routing({}).has_value());
@@ -233,8 +234,8 @@ bool runtime_parser_and_utility_coverage_for_tests() {
              .has_value());
     {
         std::vector<std::byte> short_header{std::byte{0x40}};
-        short_header.insert(short_header.end(), routing_destination_connection_id.begin(),
-                            routing_destination_connection_id.end());
+        short_header.insert(short_header.end(), sample_routing_destination_connection_id.begin(),
+                            sample_routing_destination_connection_id.end());
         const auto parsed = parse_server_datagram_for_routing(short_header);
         runtime_parser_routing_coverage_check(ok, "valid short header parses", parsed.has_value());
         runtime_parser_routing_coverage_check(
@@ -261,8 +262,8 @@ bool runtime_parser_and_utility_coverage_for_tests() {
              make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
                  .first_byte = 0xc0u,
                  .version = kVersionNegotiationVersion,
-                 .destination_connection_id = routing_destination_connection_id,
-                 .source_connection_id = routing_source_connection_id,
+                 .destination_connection_id = sample_routing_destination_connection_id,
+                 .source_connection_id = sample_routing_source_connection_id,
              }))
              .has_value());
     runtime_parser_routing_coverage_check(
@@ -286,8 +287,8 @@ bool runtime_parser_and_utility_coverage_for_tests() {
             make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
                 .first_byte = 0xc0u,
                 .version = kUnsupportedVersion,
-                .destination_connection_id = routing_destination_connection_id,
-                .source_connection_id = routing_source_connection_id,
+                .destination_connection_id = sample_routing_destination_connection_id,
+                .source_connection_id = sample_routing_source_connection_id,
             }));
         runtime_parser_routing_coverage_check(ok, "unsupported versions parse as probes",
                                               parsed.has_value());
@@ -302,8 +303,8 @@ bool runtime_parser_and_utility_coverage_for_tests() {
             make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
                 .first_byte = 0xc0u,
                 .version = kQuicVersion1,
-                .destination_connection_id = routing_destination_connection_id,
-                .source_connection_id = routing_source_connection_id,
+                .destination_connection_id = sample_routing_destination_connection_id,
+                .source_connection_id = sample_routing_source_connection_id,
             }));
         runtime_parser_routing_coverage_check(
             ok, "initial headers with truncated token varints are rejected", !parsed.has_value());
@@ -315,8 +316,8 @@ bool runtime_parser_and_utility_coverage_for_tests() {
             make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
                 .first_byte = 0xc0u,
                 .version = kQuicVersion1,
-                .destination_connection_id = routing_destination_connection_id,
-                .source_connection_id = routing_source_connection_id,
+                .destination_connection_id = sample_routing_destination_connection_id,
+                .source_connection_id = sample_routing_source_connection_id,
                 .tail = oversized_token_length,
             }));
         runtime_parser_routing_coverage_check(
@@ -329,8 +330,8 @@ bool runtime_parser_and_utility_coverage_for_tests() {
             make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
                 .first_byte = 0xe0u,
                 .version = kQuicVersion1,
-                .destination_connection_id = routing_destination_connection_id,
-                .source_connection_id = routing_source_connection_id,
+                .destination_connection_id = sample_routing_destination_connection_id,
+                .source_connection_id = sample_routing_source_connection_id,
                 .tail = zero_token_length,
             }));
         runtime_parser_routing_coverage_check(ok, "supported non-initial long headers parse",
@@ -348,8 +349,8 @@ bool runtime_parser_and_utility_coverage_for_tests() {
             make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
                 .first_byte = 0xc0u,
                 .version = kQuicVersion1,
-                .destination_connection_id = routing_destination_connection_id,
-                .source_connection_id = routing_source_connection_id,
+                .destination_connection_id = sample_routing_destination_connection_id,
+                .source_connection_id = sample_routing_source_connection_id,
                 .tail = token,
             }));
         runtime_parser_routing_coverage_check(ok, "supported initial long headers parse",
@@ -366,8 +367,8 @@ bool runtime_parser_and_utility_coverage_for_tests() {
             make_runtime_test_long_header(RuntimeTestLongHeaderSpec{
                 .first_byte = 0xd0u,
                 .version = kQuicVersion2,
-                .destination_connection_id = routing_destination_connection_id,
-                .source_connection_id = routing_source_connection_id,
+                .destination_connection_id = sample_routing_destination_connection_id,
+                .source_connection_id = sample_routing_source_connection_id,
                 .tail = zero_token_length,
             }));
         runtime_parser_routing_coverage_check(ok, "v2 initial long headers parse",

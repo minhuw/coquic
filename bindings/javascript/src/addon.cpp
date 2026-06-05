@@ -3,9 +3,11 @@
 #include <coquic/ffi/core.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -88,8 +90,6 @@ class EndpointWrap {
 struct EndpointHolder {
     std::unique_ptr<EndpointWrap> endpoint;
 };
-
-napi_ref endpoint_constructor_ref = nullptr;
 
 void throw_error(napi_env env, std::string_view message) {
     napi_throw_error(env, nullptr, std::string(message).c_str());
@@ -192,7 +192,8 @@ std::uint64_t number_to_u64(napi_env env, napi_value value, std::uint64_t fallba
     }
     double number = static_cast<double>(fallback);
     napi_get_value_double(env, value, &number);
-    if (number < 0) {
+    if (!std::isfinite(number) || number < 0 ||
+        number > static_cast<double>(std::numeric_limits<std::uint64_t>::max())) {
         return fallback;
     }
     return static_cast<std::uint64_t>(number);
@@ -659,12 +660,13 @@ EndpointHolder *endpoint_holder(napi_env env, napi_callback_info info, std::size
     if (!check(env, napi_unwrap(env, this_value, &data), "failed to unwrap endpoint")) {
         return nullptr;
     }
-    auto *holder = static_cast<EndpointHolder *>(data);
-    if (holder == nullptr || holder->endpoint == nullptr || holder->endpoint->get() == nullptr) {
+    auto *endpoint_holder_value = static_cast<EndpointHolder *>(data);
+    if (endpoint_holder_value == nullptr || endpoint_holder_value->endpoint == nullptr ||
+        endpoint_holder_value->endpoint->get() == nullptr) {
         throw_status(env, COQUIC_STATUS_INVALID_ARGUMENT);
         return nullptr;
     }
-    return holder;
+    return endpoint_holder_value;
 }
 
 napi_value local_error_to_js(napi_env env, const coquic_local_error_t &raw) {
@@ -710,6 +712,7 @@ napi_value packet_inspection_to_js(napi_env env, const coquic_packet_inspection_
 }
 
 napi_value effect_to_js(napi_env env, const coquic_effect_t &raw) {
+    // Convert the tagged FFI union into the corresponding JavaScript object shape.
     napi_value out = make_object(env);
     switch (raw.kind) {
     case COQUIC_EFFECT_SEND_DATAGRAM: {
@@ -907,7 +910,7 @@ napi_value FfiAbiVersion(napi_env env, napi_callback_info) {
     return make_u32(env, coquic_ffi_abi_version());
 }
 
-void finalize_endpoint(napi_env, void *data, void *) {
+void finalize_endpoint_holder(napi_env, void *data, void *) {
     delete static_cast<EndpointHolder *>(data);
 }
 
@@ -936,10 +939,12 @@ napi_value EndpointConstructor(napi_env env, napi_callback_info info) {
         return nullptr;
     }
 
-    auto *holder = new EndpointHolder{std::make_unique<EndpointWrap>(endpoint)};
-    if (!check(env, napi_wrap(env, this_value, holder, finalize_endpoint, nullptr, nullptr),
+    auto *new_endpoint_holder = new EndpointHolder{std::make_unique<EndpointWrap>(endpoint)};
+    if (!check(env,
+               napi_wrap(env, this_value, new_endpoint_holder, finalize_endpoint_holder, nullptr,
+                         nullptr),
                "failed to wrap endpoint")) {
-        delete holder;
+        delete new_endpoint_holder;
         return nullptr;
     }
     return this_value;
@@ -956,9 +961,9 @@ napi_value EndpointClose(napi_env env, napi_callback_info info) {
     if (!check(env, napi_unwrap(env, this_value, &data), "failed to unwrap endpoint")) {
         return nullptr;
     }
-    auto *holder = static_cast<EndpointHolder *>(data);
-    if (holder != nullptr && holder->endpoint != nullptr) {
-        holder->endpoint->close();
+    auto *endpoint_holder_value = static_cast<EndpointHolder *>(data);
+    if (endpoint_holder_value != nullptr && endpoint_holder_value->endpoint != nullptr) {
+        endpoint_holder_value->endpoint->close();
     }
     return undefined(env);
 }
@@ -1149,7 +1154,6 @@ napi_value Init(napi_env env, napi_value exports) {
     napi_value endpoint_constructor = nullptr;
     napi_define_class(env, "Endpoint", NAPI_AUTO_LENGTH, EndpointConstructor, nullptr,
                       std::size(endpoint_methods), endpoint_methods, &endpoint_constructor);
-    napi_create_reference(env, endpoint_constructor, 1, &endpoint_constructor_ref);
     set_named(env, exports, "Endpoint", endpoint_constructor);
 
     set_function(env, exports, "ffiAbiVersion", FfiAbiVersion);

@@ -1389,6 +1389,8 @@ bool bootstrap_internal_coverage_for_test() {
     }
     bootstrap_internal_coverage_check(ok, bootstrap_socket_timeouts_were_set(true, true));
     bootstrap_internal_coverage_check(ok, !bootstrap_socket_timeouts_were_set(true, false));
+
+    // Request parsing covers permissive header forms first, then malformed start lines and bodies.
     bootstrap_internal_coverage_check(
         ok, parse_bootstrap_request("GET / HTTP/1.1\r\nHost: example.test\r\n\r\n").has_value());
     bootstrap_internal_coverage_check(
@@ -1429,6 +1431,8 @@ bool bootstrap_internal_coverage_for_test() {
         !parse_bootstrap_request("POST / HTTP/1.1\r\nContent-Length: 20000\r\n\r\n").has_value());
     bootstrap_internal_coverage_check(
         ok, !parse_bootstrap_request("GET / HTTP/1.1\r\n\r\nbody").has_value());
+
+    // Incremental request buffering exercises complete, incomplete, and invalid read states.
     {
         std::string buffered;
         bootstrap_internal_coverage_check(
@@ -1510,6 +1514,8 @@ bool bootstrap_internal_coverage_for_test() {
                                           "POST / HTTP/1.1\r\nContent-Length: 20000\r\n\r\n") ==
                     HttpRequestReadProgress::invalid);
     }
+
+    // Reverse-proxy response mapping covers method gating, proxy failures, and HEAD bodies.
     {
         const Http3BootstrapConfig reverse_proxy_config{
             .reverse_proxy = Http3ReverseProxyConfig{.host = "127.0.0.1", .port = 9},
@@ -1578,6 +1584,8 @@ bool bootstrap_internal_coverage_for_test() {
         bootstrap_internal_coverage_check(ok, response.content_type == "text/plain");
         bootstrap_internal_coverage_check(ok, response.body.empty());
     }
+
+    // Chunked TLS writes cover empty chunks and forced short-write loops.
     {
         reset_bootstrap_test_hooks();
         bootstrap_internal_coverage_check(
@@ -1589,6 +1597,8 @@ bool bootstrap_internal_coverage_for_test() {
         bootstrap_test_hooks().forced_ssl_write_results = {0};
         bootstrap_internal_coverage_check(ok, !write_bootstrap_chunk(nullptr, body));
     }
+
+    // Streaming proxy scripts cover missing config, method fallback, and forced emit failures.
     {
         reset_bootstrap_test_hooks();
         const std::array<std::byte, 1> body{std::byte{'x'}};
@@ -1625,6 +1635,8 @@ bool bootstrap_internal_coverage_for_test() {
         bootstrap_internal_coverage_check(
             ok, stream_bootstrap_proxy_response(nullptr, proxy_config, request));
     }
+
+    // Streaming HEAD and content-length paths must suppress bodies and surface write errors.
     {
         reset_bootstrap_test_hooks();
         const Http3BootstrapConfig proxy_config{
@@ -1756,6 +1768,7 @@ bool bootstrap_internal_coverage_for_test() {
             ok, stream_bootstrap_proxy_response(nullptr, proxy_config, request));
     }
 
+    // Scoped descriptor move coverage uses pipes so ownership transfer is observable.
     const auto exercise_invalid_destination_move = [&](bool fail_pipe) {
         reset_bootstrap_test_hooks();
         if (fail_pipe) {
@@ -1806,6 +1819,7 @@ bool bootstrap_internal_coverage_for_test() {
     bootstrap_test_hooks().remaining_pipe_failures = 1;
     bootstrap_internal_coverage_check(ok, !bootstrap_scoped_fd_move_constructor_for_test());
 
+    // Move constructor mismatch scripts exercise each expectation guard.
     for (int mismatch = 1; mismatch <= 2; ++mismatch) {
         reset_bootstrap_test_hooks();
         bootstrap_test_hooks().move_constructor_expectation_mismatch_stage = mismatch;
@@ -1820,6 +1834,7 @@ bool bootstrap_internal_coverage_for_test() {
     bootstrap_test_hooks().pipe_call_index_to_fail = 2;
     bootstrap_internal_coverage_check(ok, !bootstrap_scoped_fd_move_assignment_for_test());
 
+    // Move assignment mismatch scripts cover destination/source/peer validation.
     for (int mismatch = 1; mismatch <= 3; ++mismatch) {
         reset_bootstrap_test_hooks();
         bootstrap_test_hooks().move_assignment_expectation_mismatch_index = mismatch;
@@ -1830,6 +1845,7 @@ bool bootstrap_internal_coverage_for_test() {
     bootstrap_test_hooks().remaining_pipe_failures = 1;
     bootstrap_internal_coverage_check(ok, !bootstrap_scoped_fd_self_move_assignment_for_test());
 
+    // Self-move scripts guard the no-op path and expectation mismatches.
     for (int mismatch = 1; mismatch <= 2; ++mismatch) {
         reset_bootstrap_test_hooks();
         bootstrap_test_hooks().self_move_expectation_mismatch_stage = mismatch;
@@ -1913,12 +1929,14 @@ bool bootstrap_internal_coverage_for_test() {
     bootstrap_check_listen_socket_failure_hook(ok, config);
     bootstrap_check_listen_failure_hook(ok, config);
 
+    // Poll failure and hangup cases stop the server loop deterministically.
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_poll_results = {
         ForcedPollResult{.ready = -1, .revents = 0, .error_number = EIO},
     };
     bootstrap_internal_coverage_check(ok, run_http3_bootstrap_server(config, nullptr) == 1);
 
+    // Accept retryable errors are ignored until the scripted poll failure exits the loop.
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_poll_results = {
         ForcedPollResult{.ready = 1, .revents = POLLHUP, .error_number = 0},
@@ -1926,6 +1944,7 @@ bool bootstrap_internal_coverage_for_test() {
     };
     bootstrap_internal_coverage_check(ok, run_http3_bootstrap_server(config, nullptr) == 1);
 
+    // Fatal accept errors propagate as server failures.
     reset_bootstrap_test_hooks();
     bootstrap_test_hooks().forced_poll_results = {
         ForcedPollResult{.ready = 1, .revents = POLLIN, .error_number = 0},

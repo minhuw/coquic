@@ -308,6 +308,7 @@ uint64_t CeilDiv(uint64_t numerator, uint64_t denominator) {
 }
 
 using GoogleQuicheConfig = quic::QuicConfig;
+using GoogleQuicheVersionVector = quic::ParsedQuicVersionVector;
 
 GoogleQuicheConfig QuicConfigForPerf() {
     GoogleQuicheConfig config;
@@ -323,8 +324,8 @@ GoogleQuicheConfig QuicConfigForPerf() {
     return config;
 }
 
-quic::ParsedQuicVersionVector SupportedVersions() {
-    quic::ParsedQuicVersionVector versions = {quic::ParsedQuicVersion::RFCv1()};
+GoogleQuicheVersionVector SupportedVersions() {
+    GoogleQuicheVersionVector versions = {quic::ParsedQuicVersion::RFCv1()};
     for (const quic::ParsedQuicVersion &version : versions) {
         quic::QuicEnableVersion(version);
     }
@@ -505,10 +506,10 @@ class PerfClientSession : public PerfSessionBase,
         }
         quic::QuicStreamId id = GetNextOutgoingBidirectionalStreamId();
         auto stream = std::make_unique<PerfStream>(id, this, /*is_server=*/false, this);
-        PerfStream *raw = stream.get();
+        PerfStream *request_stream = stream.get();
         ActivateStream(std::move(stream));
         ++active_requests_;
-        raw->StartClientRequest(request_bytes, response_bytes, counts, Clock::now());
+        request_stream->StartClientRequest(request_bytes, response_bytes, counts, Clock::now());
         return true;
     }
 
@@ -591,9 +592,9 @@ class PerfClientSession : public PerfSessionBase,
 
     quic::QuicStream *CreateIncomingStream(quic::QuicStreamId id) override {
         auto stream = std::make_unique<PerfStream>(id, this, /*is_server=*/false, this);
-        PerfStream *raw = stream.get();
+        PerfStream *incoming_stream = stream.get();
         ActivateStream(std::move(stream));
-        return raw;
+        return incoming_stream;
     }
 
   private:
@@ -625,9 +626,9 @@ class PerfServerSession : public PerfSessionBase {
 
     quic::QuicStream *CreateIncomingStream(quic::QuicStreamId id) override {
         auto stream = std::make_unique<PerfStream>(id, this, /*is_server=*/true, nullptr);
-        PerfStream *raw = stream.get();
+        PerfStream *incoming_stream = stream.get();
         ActivateStream(std::move(stream));
-        return raw;
+        return incoming_stream;
     }
 
   private:
@@ -738,10 +739,10 @@ void PerfStream::SendMore() {
         while (request_complete_ && !response_fin_sent_ && CanWriteNewData()) {
             uint64_t remaining = response_bytes_ - response_sent_;
             size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, kWriteChunkSize));
-            bool fin = chunk == remaining;
-            WriteOrBufferData(ZeroChunk(chunk), fin, nullptr);
+            bool send_fin = chunk == remaining;
+            WriteOrBufferData(ZeroChunk(chunk), send_fin, nullptr);
             response_sent_ += chunk;
-            if (fin) {
+            if (send_fin) {
                 response_fin_sent_ = true;
             }
             if (chunk == 0 || !CanWriteNewData()) {
@@ -754,11 +755,11 @@ void PerfStream::SendMore() {
     while (!request_fin_sent_ && CanWriteNewData()) {
         if (header_sent_ < header_.size()) {
             size_t chunk = std::min(header_.size() - header_sent_, kWriteChunkSize);
-            bool fin = header_sent_ + chunk == header_.size() && request_bytes_ == 0;
-            WriteOrBufferData(absl::string_view(header_.data() + header_sent_, chunk), fin,
+            bool send_fin = header_sent_ + chunk == header_.size() && request_bytes_ == 0;
+            WriteOrBufferData(absl::string_view(header_.data() + header_sent_, chunk), send_fin,
                               nullptr);
             header_sent_ += chunk;
-            if (fin) {
+            if (send_fin) {
                 request_fin_sent_ = true;
             }
             continue;
@@ -766,10 +767,10 @@ void PerfStream::SendMore() {
 
         uint64_t remaining = request_bytes_ - request_sent_;
         size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, kWriteChunkSize));
-        bool fin = chunk == remaining;
-        WriteOrBufferData(ZeroChunk(chunk), fin, nullptr);
+        bool send_fin = chunk == remaining;
+        WriteOrBufferData(ZeroChunk(chunk), send_fin, nullptr);
         request_sent_ += chunk;
-        if (fin) {
+        if (send_fin) {
             request_fin_sent_ = true;
         }
         if (chunk == 0 || !CanWriteNewData()) {
@@ -1140,15 +1141,15 @@ void FillCrrClients(const Config &cfg, Counters *counters, quic::QuicEventLoop *
 
 void RunCrr(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_loop) {
     Clock::time_point measure_start = Clock::now() + cfg.warmup;
-    Clock::time_point deadline = measure_start + cfg.duration;
+    Clock::time_point run_deadline = measure_start + cfg.duration;
     uint64_t started = 0;
     std::vector<CrrClient> clients;
     clients.reserve(
         static_cast<size_t>(std::min<uint64_t>(cfg.connections, kDefaultMaxRunRequests)));
-    FillCrrClients(cfg, counters, event_loop, measure_start, deadline, &started, &clients);
+    FillCrrClients(cfg, counters, event_loop, measure_start, run_deadline, &started, &clients);
 
     while (!clients.empty() || (cfg.requests.set && started < cfg.requests.value) ||
-           (!cfg.requests.set && Clock::now() < deadline)) {
+           (!cfg.requests.set && Clock::now() < run_deadline)) {
         size_t index = 0;
         while (index < clients.size()) {
             CrrClient &entry = clients[index];
@@ -1168,7 +1169,7 @@ void RunCrr(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_lo
             }
             ++index;
         }
-        FillCrrClients(cfg, counters, event_loop, measure_start, deadline, &started, &clients);
+        FillCrrClients(cfg, counters, event_loop, measure_start, run_deadline, &started, &clients);
     }
 }
 

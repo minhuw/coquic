@@ -532,6 +532,7 @@ struct coquic_http3_server_update {
 namespace coquic::http3::test {
 
 COQUIC_NO_PROFILE bool http3_ffi_conversion_coverage_for_tests() {
+    // Exercise HTTP/3 FFI storage and conversion paths with representative request/response data.
     auto ok = true;
     const auto record = [&ok](bool condition) {
         ok = static_cast<bool>(static_cast<unsigned>(ok) & static_cast<unsigned>(condition));

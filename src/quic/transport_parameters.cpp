@@ -92,7 +92,8 @@ void append_u16_be(std::vector<std::byte> &output, std::uint16_t value) {
     output.push_back(static_cast<std::byte>(value & 0xffu));
 }
 
-template <std::size_t Extent> std::uint32_t read_u32_be(std::span<const std::byte, Extent> bytes) {
+template <std::size_t Extent>
+std::uint32_t read_transport_parameter_u32_be(std::span<const std::byte, Extent> bytes) {
     static_assert(Extent == std::dynamic_extent || Extent == sizeof(std::uint32_t));
     return (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[0])) << 24) |
            (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[1])) << 16) |
@@ -497,13 +498,14 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
             }
 
             VersionInformation version_information{
-                .chosen_version = read_u32_be(std::span<const std::byte, sizeof(std::uint32_t)>{
-                    value.first(sizeof(std::uint32_t))}),
+                .chosen_version = read_transport_parameter_u32_be(
+                    std::span<const std::byte, sizeof(std::uint32_t)>{
+                        value.first(sizeof(std::uint32_t))}),
             };
             for (std::size_t version_offset = sizeof(std::uint32_t); version_offset < value.size();
                  version_offset += sizeof(std::uint32_t)) {
-                version_information.available_versions.push_back(
-                    read_u32_be(std::span<const std::byte, sizeof(std::uint32_t)>{
+                version_information.available_versions.push_back(read_transport_parameter_u32_be(
+                    std::span<const std::byte, sizeof(std::uint32_t)>{
                         value.subspan(version_offset, sizeof(std::uint32_t))}));
             }
             parameters.version_information = std::move(version_information);

@@ -697,25 +697,30 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
     record(is_filtered_response_header("content-length"));
     record(!is_filtered_response_header("x-demo"));
 
-    const auto default_request_text =
-        serialize_proxy_request(Http3ReverseProxyConfig{.host = "upstream.test", .port = 8080},
-                                Http3Request{
-                                    .head =
-                                        {
-                                            .content_length = 0,
-                                            .headers =
-                                                {
-                                                    {"", "ignored"},
-                                                    {":scheme", "https"},
-                                                    {"Accept-Encoding", "gzip"},
-                                                    {"X-Demo", "1"},
-                                                },
-                                        },
-                                });
-    record(default_request_text.find("GET / HTTP/1.1\r\n") != std::string::npos);
-    record(default_request_text.find("Host: upstream.test:8080\r\n") != std::string::npos);
-    record(default_request_text.find("x-demo: 1\r\n") != std::string::npos);
-    record(default_request_text.find("Content-Length: 0\r\n") != std::string::npos);
+    record(serialize_proxy_request(Http3ReverseProxyConfig{.host = "upstream.test", .port = 8080},
+                                   Http3Request{
+                                       .head =
+                                           {
+                                               .content_length = 0,
+                                               .headers =
+                                                   {
+                                                       {"", "ignored"},
+                                                       {":scheme", "https"},
+                                                       {"Accept-Encoding", "gzip"},
+                                                       {"X-Demo", "1"},
+                                                   },
+                                           },
+                                   })
+               .find("GET / HTTP/1.1\r\n") != std::string::npos);
+    record(serialize_proxy_request(Http3ReverseProxyConfig{.host = "upstream.test", .port = 8080},
+                                   Http3Request{})
+               .find("Host: upstream.test:8080\r\n") != std::string::npos);
+    record(serialize_proxy_request(Http3ReverseProxyConfig{.host = "upstream.test", .port = 8080},
+                                   Http3Request{.head = {.headers = {{"X-Demo", "1"}}}})
+               .find("x-demo: 1\r\n") != std::string::npos);
+    record(serialize_proxy_request(Http3ReverseProxyConfig{.host = "upstream.test", .port = 8080},
+                                   Http3Request{.head = {.content_length = 0}})
+               .find("Content-Length: 0\r\n") != std::string::npos);
     record(write_all(-1, "x") == false);
 
     reset_socket_ops_state();
@@ -904,13 +909,11 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                .value_or(ParsedHttpResponse{})
                .body == string_to_bytes("body"));
 
-    const auto gateway = bad_gateway_response();
-    record(gateway.head.status == 502);
-    record(gateway.head.content_length == 0);
-    const auto gateway_part = bad_gateway_part();
-    record(gateway_part.head.has_value());
-    record(gateway_part.head->status == 502);
-    record(gateway_part.complete);
+    record(bad_gateway_response().head.status == 502);
+    record(bad_gateway_response().head.content_length == 0);
+    record(bad_gateway_part().head.has_value());
+    record(bad_gateway_part().head.value_or(Http3ResponseHead{}).status == 502);
+    record(bad_gateway_part().complete);
     record(emit_bad_gateway([](Http3ResponsePart part) {
         bool part_ok = true;
         part_ok = static_cast<bool>(static_cast<unsigned>(part_ok) &
@@ -1073,10 +1076,13 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
         record(!complete);
     }
 
-    const auto parsed_target = parse_http_reverse_proxy_target("http://example.test:8080");
-    record(parsed_target.has_value());
-    record(parsed_target->host == "example.test");
-    record(parsed_target->port == 8080);
+    record(parse_http_reverse_proxy_target("http://example.test:8080").has_value());
+    record(parse_http_reverse_proxy_target("http://example.test:8080")
+               .value_or(Http3ReverseProxyConfig{})
+               .host == "example.test");
+    record(parse_http_reverse_proxy_target("http://example.test:8080")
+               .value_or(Http3ReverseProxyConfig{})
+               .port == 8080);
     record(!parse_http_reverse_proxy_target("https://example.test:8080").has_value());
     record(!parse_http_reverse_proxy_target("http://").has_value());
     record(!parse_http_reverse_proxy_target("http://example.test/path").has_value());
@@ -1096,8 +1102,8 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
     const auto fake_send_ok = [](int, const void *, size_t size, int) -> ssize_t {
         return static_cast<ssize_t>(size);
     };
-    const Http3ReverseProxyConfig kFakeConfig{.host = "127.0.0.1", .port = 9};
-    const Http3Request fake_request{.head = {.method = "GET", .path = "/"}};
+    const Http3ReverseProxyConfig fake_config{.host = "127.0.0.1", .port = 9};
+    const Http3Request fake_proxy_request{.head = {.method = "GET", .path = "/"}};
 
     reset_socket_ops_state();
     {
@@ -1108,10 +1114,11 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
             .send_fn = fake_send_ok,
             .recv_fn = &::recv,
         });
-        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
-            missing_parts.push_back(std::move(part));
-            return true;
-        });
+        stream_http_reverse_proxy_response(fake_config, fake_proxy_request,
+                                           [&](Http3ResponsePart part) {
+                                               missing_parts.push_back(std::move(part));
+                                               return true;
+                                           });
         record(!missing_parts.empty());
         record(missing_parts.front().head.has_value());
         record(missing_parts.front().head->status == 502);
@@ -1125,7 +1132,8 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
             .send_fn = [](int, const void *, size_t, int) -> ssize_t { return 0; },
             .recv_fn = &::recv,
         });
-        record(fetch_http_reverse_proxy_response(kFakeConfig, fake_request).head.status == 502);
+        record(fetch_http_reverse_proxy_response(fake_config, fake_proxy_request).head.status ==
+               502);
     }
 
     reset_socket_ops_state();
@@ -1148,7 +1156,7 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return static_cast<ssize_t>(bytes);
             },
         });
-        const auto response = fetch_http_reverse_proxy_response(kFakeConfig, fake_request);
+        const auto response = fetch_http_reverse_proxy_response(fake_config, fake_proxy_request);
         record(response.head.status == 200);
         record(response.body == string_to_bytes("ok"));
         record(socket_ops_state.recv_calls == 2);
@@ -1166,7 +1174,8 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return -1;
             },
         });
-        record(fetch_http_reverse_proxy_response(kFakeConfig, fake_request).head.status == 502);
+        record(fetch_http_reverse_proxy_response(fake_config, fake_proxy_request).head.status ==
+               502);
     }
 
     reset_socket_ops_state();
@@ -1184,7 +1193,8 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return static_cast<ssize_t>(bytes);
             },
         });
-        record(fetch_http_reverse_proxy_response(kFakeConfig, fake_request).head.status == 502);
+        record(fetch_http_reverse_proxy_response(fake_config, fake_proxy_request).head.status ==
+               502);
     }
 
     reset_socket_ops_state();
@@ -1200,7 +1210,8 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return static_cast<ssize_t>(bytes);
             },
         });
-        record(fetch_http_reverse_proxy_response(kFakeConfig, fake_request).head.status == 502);
+        record(fetch_http_reverse_proxy_response(fake_config, fake_proxy_request).head.status ==
+               502);
     }
 
     reset_socket_ops_state();
@@ -1212,10 +1223,11 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
             .send_fn = [](int, const void *, size_t, int) -> ssize_t { return 0; },
             .recv_fn = &::recv,
         });
-        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
-            parts.push_back(std::move(part));
-            return true;
-        });
+        stream_http_reverse_proxy_response(fake_config, fake_proxy_request,
+                                           [&](Http3ResponsePart part) {
+                                               parts.push_back(std::move(part));
+                                               return true;
+                                           });
         record(!parts.empty());
         record(parts.front().head.value_or(Http3ResponseHead{}).status == 502);
     }
@@ -1236,10 +1248,11 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return static_cast<ssize_t>(bytes);
             },
         });
-        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
-            parts.push_back(std::move(part));
-            return true;
-        });
+        stream_http_reverse_proxy_response(fake_config, fake_proxy_request,
+                                           [&](Http3ResponsePart part) {
+                                               parts.push_back(std::move(part));
+                                               return true;
+                                           });
         record(!parts.empty());
         record(parts.back().head.value_or(Http3ResponseHead{}).status == 502);
     }
@@ -1263,10 +1276,11 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return static_cast<ssize_t>(bytes);
             },
         });
-        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
-            parts.push_back(std::move(part));
-            return true;
-        });
+        stream_http_reverse_proxy_response(fake_config, fake_proxy_request,
+                                           [&](Http3ResponsePart part) {
+                                               parts.push_back(std::move(part));
+                                               return true;
+                                           });
         record(!parts.empty());
         record(parts.back().head.value_or(Http3ResponseHead{}).status == 502);
     }
@@ -1290,10 +1304,11 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return static_cast<ssize_t>(bytes);
             },
         });
-        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
-            parts.push_back(std::move(part));
-            return true;
-        });
+        stream_http_reverse_proxy_response(fake_config, fake_proxy_request,
+                                           [&](Http3ResponsePart part) {
+                                               parts.push_back(std::move(part));
+                                               return true;
+                                           });
         record(!parts.empty());
         record(parts.back().head.value_or(Http3ResponseHead{}).status == 502);
     }
@@ -1318,10 +1333,11 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return static_cast<ssize_t>(bytes);
             },
         });
-        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
-            parts.push_back(std::move(part));
-            return true;
-        });
+        stream_http_reverse_proxy_response(fake_config, fake_proxy_request,
+                                           [&](Http3ResponsePart part) {
+                                               parts.push_back(std::move(part));
+                                               return true;
+                                           });
         record(parts.size() == 1);
         record(parts.front().head.value_or(Http3ResponseHead{}).status == 200);
         record(parts.front().complete);
@@ -1339,10 +1355,11 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return -1;
             },
         });
-        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
-            parts.push_back(std::move(part));
-            return true;
-        });
+        stream_http_reverse_proxy_response(fake_config, fake_proxy_request,
+                                           [&](Http3ResponsePart part) {
+                                               parts.push_back(std::move(part));
+                                               return true;
+                                           });
         record(!parts.empty());
         record(parts.front().head.value_or(Http3ResponseHead{}).status == 502);
     }
@@ -1362,10 +1379,12 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return static_cast<ssize_t>(bytes);
             },
         });
-        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
-            parts.push_back(std::move(part));
-            return part.head.has_value();
-        });
+        stream_http_reverse_proxy_response(fake_config, fake_proxy_request,
+                                           [&](Http3ResponsePart part) {
+                                               const auto keep_streaming = part.head.has_value();
+                                               parts.push_back(std::move(part));
+                                               return keep_streaming;
+                                           });
         record(parts.size() == 2);
         record(parts.back().body == string_to_bytes("body"));
     }
@@ -1385,10 +1404,12 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return static_cast<ssize_t>(bytes);
             },
         });
-        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
-            parts.push_back(std::move(part));
-            return part.head.has_value();
-        });
+        stream_http_reverse_proxy_response(fake_config, fake_proxy_request,
+                                           [&](Http3ResponsePart part) {
+                                               const auto keep_streaming = part.head.has_value();
+                                               parts.push_back(std::move(part));
+                                               return keep_streaming;
+                                           });
         record(parts.size() == 2);
         record(parts.back().body == string_to_bytes("body"));
     }
@@ -1412,10 +1433,11 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return static_cast<ssize_t>(bytes);
             },
         });
-        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
-            parts.push_back(std::move(part));
-            return true;
-        });
+        stream_http_reverse_proxy_response(fake_config, fake_proxy_request,
+                                           [&](Http3ResponsePart part) {
+                                               parts.push_back(std::move(part));
+                                               return true;
+                                           });
         record(parts.size() == 1);
         record(parts.front().head.value_or(Http3ResponseHead{}).status == 200);
         record(!parts.front().complete);
@@ -1440,10 +1462,11 @@ COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
                 return static_cast<ssize_t>(bytes);
             },
         });
-        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
-            parts.push_back(std::move(part));
-            return true;
-        });
+        stream_http_reverse_proxy_response(fake_config, fake_proxy_request,
+                                           [&](Http3ResponsePart part) {
+                                               parts.push_back(std::move(part));
+                                               return true;
+                                           });
         record(parts.size() == 2);
         record(parts.front().head.value_or(Http3ResponseHead{}).status == 200);
         record(parts.back().head.value_or(Http3ResponseHead{}).status == 502);

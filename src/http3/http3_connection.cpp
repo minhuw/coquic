@@ -47,11 +47,7 @@ BufferedInstructionProgress parse_prefixed_integer_progress(std::span<const std:
     }
 
     std::uint64_t shift = 0;
-    while (true) {
-        if (bytes_consumed >= bytes.size()) {
-            return {};
-        }
-
+    while (bytes_consumed < bytes.size()) {
         const auto byte = std::to_integer<std::uint8_t>(bytes[bytes_consumed++]);
         // The HTTP/3/QPACK prefixes used here are 5-8 bits wide, so the 7-bit continuation
         // chunks cannot overflow std::uint64_t before the shift itself reaches 63.
@@ -70,6 +66,7 @@ BufferedInstructionProgress parse_prefixed_integer_progress(std::span<const std:
 
         shift += 7;
     }
+    return {};
 }
 
 BufferedInstructionProgress parse_string_literal_progress(std::span<const std::byte> bytes,

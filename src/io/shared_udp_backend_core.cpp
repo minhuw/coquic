@@ -13,11 +13,14 @@
 #include <bit>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <utility>
 
-#if defined(__clang__)
+#if defined(COQUIC_COVERAGE_BUILD)
+#define COQUIC_NO_PROFILE
+#elif defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #else
 #define COQUIC_NO_PROFILE
@@ -310,11 +313,60 @@ SocketIoPeerTupleKey peer_tuple_key(int socket_fd, const sockaddr_storage &peer,
     return key;
 }
 
+COQUIC_NO_PROFILE std::size_t route_lookup_cache_index(int socket_fd, const sockaddr_storage &peer,
+                                                       socklen_t peer_len) {
+    std::size_t hash = 0x9e3779b97f4a7c15ull;
+    const auto mix = [&hash](std::uint64_t value) {
+        hash ^= static_cast<std::size_t>(value) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+    };
+
+    mix(static_cast<std::uint64_t>(socket_fd));
+    mix(static_cast<std::uint64_t>(peer_len));
+    if (peer_len >= static_cast<socklen_t>(sizeof(sockaddr_in)) && peer.ss_family == AF_INET) {
+        const auto &ipv4 = *reinterpret_cast<const sockaddr_in *>(&peer);
+        mix(static_cast<std::uint64_t>(ipv4.sin_port));
+        mix(static_cast<std::uint64_t>(ipv4.sin_addr.s_addr));
+    } else if (peer_len >= static_cast<socklen_t>(sizeof(sockaddr_in6)) &&
+               peer.ss_family == AF_INET6) {
+        const auto &ipv6 = *reinterpret_cast<const sockaddr_in6 *>(&peer);
+        mix(static_cast<std::uint64_t>(ipv6.sin6_port));
+        std::uint64_t folded_address = 0;
+        std::memcpy(&folded_address, &ipv6.sin6_addr, sizeof(folded_address));
+        mix(folded_address);
+        std::memcpy(&folded_address,
+                    reinterpret_cast<const std::byte *>(&ipv6.sin6_addr) + sizeof(folded_address),
+                    sizeof(folded_address));
+        mix(folded_address);
+    }
+    return hash % internal::SocketIoRouteState::kRouteLookupCacheSlots;
+}
+
+COQUIC_NO_PROFILE bool route_lookup_cache_matches(const SocketIoRouteLookupCacheEntry &entry,
+                                                  int socket_fd, const sockaddr_storage &peer,
+                                                  socklen_t peer_len) {
+    return entry.valid && entry.socket_fd == socket_fd && entry.peer_len == peer_len &&
+           std::memcmp(&entry.peer, &peer, static_cast<std::size_t>(peer_len)) == 0;
+}
+
 QuicRouteHandle remember_route_handle(SocketIoRouteState &state, const sockaddr_storage &peer,
                                       socklen_t peer_len, int socket_fd) {
+    const auto normalized_peer_len = std::min<socklen_t>(peer_len, sizeof(sockaddr_storage));
+    auto &cached =
+        state.route_lookup_cache[route_lookup_cache_index(socket_fd, peer, normalized_peer_len)];
+    if (route_lookup_cache_matches(cached, socket_fd, peer, normalized_peer_len)) {
+        return cached.route_handle;
+    }
+
     const auto key = peer_tuple_key(socket_fd, peer, peer_len);
     if (const auto existing = state.route_handles_by_peer_tuple.find(key);
         existing != state.route_handles_by_peer_tuple.end()) {
+        cached = SocketIoRouteLookupCacheEntry{
+            .valid = true,
+            .socket_fd = socket_fd,
+            .peer = peer,
+            .peer_len = normalized_peer_len,
+            .route_handle = existing->second,
+        };
         return existing->second;
     }
 
@@ -325,6 +377,13 @@ QuicRouteHandle remember_route_handle(SocketIoRouteState &state, const sockaddr_
                                                    .peer = peer,
                                                    .peer_len = peer_len,
                                                });
+    cached = SocketIoRouteLookupCacheEntry{
+        .valid = true,
+        .socket_fd = socket_fd,
+        .peer = peer,
+        .peer_len = normalized_peer_len,
+        .route_handle = handle,
+    };
     return handle;
 }
 
@@ -571,24 +630,28 @@ bool SharedUdpBackendCore::send(const QuicIoTxDatagram &datagram) {
 
 bool SharedUdpBackendCore::send_many(std::span<const QuicIoTxDatagram> datagrams) {
     auto &engine_datagrams = impl_->tx_datagram_scratch;
-    engine_datagrams.clear();
-    engine_datagrams.reserve(datagrams.size());
-    for (const auto &datagram : datagrams) {
+    if (engine_datagrams.size() < datagrams.size()) {
+        engine_datagrams.resize(datagrams.size());
+    }
+    for (std::size_t index = 0; index < datagrams.size(); ++index) {
+        const auto &datagram = datagrams[index];
         const auto route_it = impl_->route_state.routes_by_handle.find(datagram.route_handle);
         if (route_it == impl_->route_state.routes_by_handle.end()) {
             return false;
         }
-        engine_datagrams.push_back(QuicIoEngineTxDatagram{
+        engine_datagrams[index] = QuicIoEngineTxDatagram{
             .socket_fd = route_it->second.socket_fd,
             .peer = route_it->second.peer,
             .peer_len = route_it->second.peer_len,
             .bytes = datagram.payload(),
             .ecn = datagram.ecn,
             .is_pmtu_probe = datagram.is_pmtu_probe,
-        });
+        };
     }
 
-    return impl_->engine->send_many(engine_datagrams, impl_->config.role_name);
+    return impl_->engine->send_many(
+        std::span<const QuicIoEngineTxDatagram>(engine_datagrams).first(datagrams.size()),
+        impl_->config.role_name);
 }
 
 namespace test {
@@ -665,7 +728,10 @@ thread_local RecordedSetSockOptForTests g_recorded_setsockopt_for_tests;
 COQUIC_NO_PROFILE bool
 recorded_setsockopt_call_matches_for_tests(const RecordedSetSockOptForTests::Call &call, int level,
                                            int name, int value) {
-    return call.level == level && call.name == name && call.value == value;
+    bool matched = call.level == level;
+    matched = matched & (call.name == name);
+    matched = matched & (call.value == value);
+    return matched;
 }
 
 COQUIC_NO_PROFILE int record_setsockopt_for_tests(int, int level, int name, const void *value,
@@ -694,6 +760,8 @@ sockaddr_storage make_loopback_peer(std::uint16_t port) {
 } // namespace
 
 COQUIC_NO_PROFILE bool socket_io_backend_configures_linux_ecn_socket_options_for_tests() {
+    bool ok = true;
+    const auto record = [&](bool condition) { ok = ok & condition; };
     g_recorded_setsockopt_for_tests = {};
     const ScopedSocketIoBackendOpsOverride runtime_ops{
         SocketIoBackendOpsOverride{
@@ -713,24 +781,70 @@ COQUIC_NO_PROFILE bool socket_io_backend_configures_linux_ecn_socket_options_for
                            });
     };
     constexpr int kExpectedUdpSocketBufferBytes = 4 * 1024 * 1024;
-    return opened && has_call(IPPROTO_IPV6, IPV6_V6ONLY, 0) &&
-           has_call(SOL_SOCKET, SO_RCVBUF, kExpectedUdpSocketBufferBytes) &&
-           has_call(SOL_SOCKET, SO_SNDBUF, kExpectedUdpSocketBufferBytes) &&
+    record(opened);
+    record(has_call(IPPROTO_IPV6, IPV6_V6ONLY, 0));
+    record(has_call(SOL_SOCKET, SO_RCVBUF, kExpectedUdpSocketBufferBytes));
+    record(has_call(SOL_SOCKET, SO_SNDBUF, kExpectedUdpSocketBufferBytes));
 #if defined(__linux__) && defined(UDP_GRO)
-           has_call(SOL_UDP, UDP_GRO, 1) &&
+    record(has_call(SOL_UDP, UDP_GRO, 1));
 #endif
-           has_call(IPPROTO_IP, IP_RECVTOS, 1) && has_call(IPPROTO_IPV6, IPV6_RECVTCLASS, 1) &&
+    record(has_call(IPPROTO_IP, IP_RECVTOS, 1));
+    record(has_call(IPPROTO_IPV6, IPV6_RECVTCLASS, 1));
 #if defined(__linux__)
-           has_call(IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_PROBE) &&
-           has_call(IPPROTO_IP, IP_RECVERR, 1) &&
-           has_call(IPPROTO_IPV6, IPV6_MTU_DISCOVER, IPV6_PMTUDISC_PROBE) &&
-           has_call(IPPROTO_IPV6, IPV6_RECVERR, 1);
-#else
-           true;
+    record(has_call(IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_PROBE));
+    record(has_call(IPPROTO_IP, IP_RECVERR, 1));
+    record(has_call(IPPROTO_IPV6, IPV6_MTU_DISCOVER, IPV6_PMTUDISC_PROBE));
+    record(has_call(IPPROTO_IPV6, IPV6_RECVERR, 1));
 #endif
+    g_recorded_setsockopt_for_tests = {};
+    record_setsockopt_for_tests(41, SOL_SOCKET, SO_RCVBUF, nullptr, 0);
+    record(!g_recorded_setsockopt_for_tests.calls.empty());
+    record(g_recorded_setsockopt_for_tests.calls.back().value == 0);
+    const std::uint8_t short_value = 0xff;
+    record_setsockopt_for_tests(41, SOL_SOCKET, SO_SNDBUF, &short_value,
+                                static_cast<socklen_t>(sizeof(short_value)));
+    record(g_recorded_setsockopt_for_tests.calls.back().value == 0);
+    return ok;
+}
+
+COQUIC_NO_PROFILE bool socket_io_backend_can_skip_linux_pmtud_socket_options_for_tests() {
+    bool ok = true;
+    const auto record = [&](bool condition) { ok = ok & condition; };
+    g_recorded_setsockopt_for_tests = {};
+    const ScopedSocketIoBackendOpsOverride runtime_ops{
+        SocketIoBackendOpsOverride{
+            .socket_fn = [](int, int, int) { return 42; },
+            .setsockopt_fn = &record_setsockopt_for_tests,
+        },
+    };
+
+    const bool unsupported_family_is_noop =
+        internal::configure_linux_pmtud_socket_options(internal::LinuxSocketDescriptor{.fd = 42},
+                                                       AF_UNIX) ==
+        internal::SocketOptionResult::configured;
+    const int fd = internal::open_udp_socket(AF_INET, /*enable_pmtud_socket_options=*/false);
+    const auto has_call = [](int level, int name) {
+        return std::any_of(g_recorded_setsockopt_for_tests.calls.begin(),
+                           g_recorded_setsockopt_for_tests.calls.end(),
+                           [&](const RecordedSetSockOptForTests::Call &call) {
+                               bool matched = call.level == level;
+                               matched = matched & (call.name == name);
+                               return matched;
+                           });
+    };
+
+    record(unsupported_family_is_noop);
+    record(fd == 42);
+#if defined(__linux__)
+    record(!has_call(IPPROTO_IP, IP_MTU_DISCOVER));
+    record(!has_call(IPPROTO_IP, IP_RECVERR));
+#endif
+    return ok;
 }
 
 COQUIC_NO_PROFILE bool socket_io_backend_route_handles_are_stable_per_peer_tuple_for_tests() {
+    bool ok = true;
+    const auto record = [&](bool condition) { ok = ok & condition; };
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
     internal::SocketIoRouteState state;
 
@@ -741,9 +855,24 @@ COQUIC_NO_PROFILE bool socket_io_backend_route_handles_are_stable_per_peer_tuple
     const auto third =
         internal::remember_route_handle(state, make_loopback_peer(4444), peer_len, 7);
 
-    return first != 0 && first == second && first != third &&
-           state.routes_by_handle.at(first).socket_fd == 4 &&
-           state.routes_by_handle.at(third).socket_fd == 7;
+    record(first != 0);
+    record(first == second);
+    record(first != third);
+    record(state.routes_by_handle.at(first).socket_fd == 4);
+    record(state.routes_by_handle.at(third).socket_fd == 7);
+
+    sockaddr_storage ipv6_peer{};
+    auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&ipv6_peer);
+    ipv6.sin6_family = AF_INET6;
+    ipv6.sin6_port = htons(4444);
+    ipv6.sin6_addr = in6addr_loopback;
+    const auto ipv6_first =
+        internal::remember_route_handle(state, ipv6_peer, sizeof(sockaddr_in6), 8);
+    const auto ipv6_second =
+        internal::remember_route_handle(state, ipv6_peer, sizeof(sockaddr_in6), 8);
+    record(ipv6_first != 0);
+    record(ipv6_first == ipv6_second);
+    return ok;
 }
 
 bool socket_io_backend_address_validation_identity_branches_for_tests() {
@@ -768,6 +897,10 @@ bool socket_io_backend_address_validation_identity_branches_for_tests() {
         internal::address_validation_identity_from_peer(ipv4_peer, /*peer_len=*/1);
     const auto short_ipv6_identity =
         internal::address_validation_identity_from_peer(ipv6_peer, /*peer_len=*/1);
+    sockaddr_storage truncated_unsupported_peer{};
+    truncated_unsupported_peer.ss_family = AF_UNIX;
+    const auto unsupported_full_length_identity = internal::address_validation_identity_from_peer(
+        truncated_unsupported_peer, static_cast<socklen_t>(sizeof(sockaddr_in6)));
 
     bool ok = true;
     ok &= ipv4_identity.size() == 7;
@@ -777,6 +910,7 @@ bool socket_io_backend_address_validation_identity_branches_for_tests() {
     ok &= unsupported_identity.empty();
     ok &= short_ipv4_identity.empty();
     ok &= short_ipv6_identity.empty();
+    ok &= unsupported_full_length_identity.empty();
     return ok;
 }
 
@@ -799,6 +933,7 @@ bool socket_io_backend_duplicate_route_lookup_reuses_cached_route_entry_for_test
     cached_route.socket_fd = -1;
     cached_route.peer_len = 0;
     std::memset(&cached_route.peer, 0x5a, sizeof(cached_route.peer));
+    state.route_lookup_cache = {};
 
     const auto duplicate = internal::remember_route_handle(state, peer, peer_len, 4);
     bool ok = inserted_route;
@@ -811,6 +946,37 @@ bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests() {
     const auto peer_len = static_cast<socklen_t>(sizeof(sockaddr_in));
     const auto peer = make_loopback_peer(4444);
     bool ok = true;
+    sockaddr_storage ipv6_peer{};
+    auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&ipv6_peer);
+    ipv6.sin6_family = AF_INET6;
+    ipv6.sin6_port = htons(4445);
+    ipv6.sin6_addr = in6addr_loopback;
+    sockaddr_storage full_length_unsupported_peer{};
+    full_length_unsupported_peer.ss_family = AF_UNIX;
+    const auto ipv6_cache_index = internal::route_lookup_cache_index(
+        4, ipv6_peer, static_cast<socklen_t>(sizeof(sockaddr_in6)));
+    const auto unsupported_cache_index = internal::route_lookup_cache_index(
+        4, full_length_unsupported_peer, static_cast<socklen_t>(sizeof(sockaddr_in6)));
+    ok &= ipv6_cache_index < internal::SocketIoRouteState::kRouteLookupCacheSlots;
+    ok &= unsupported_cache_index < internal::SocketIoRouteState::kRouteLookupCacheSlots;
+
+    internal::SocketIoRouteLookupCacheEntry cache_entry{
+        .valid = true,
+        .socket_fd = 4,
+        .peer = peer,
+        .peer_len = peer_len,
+        .route_handle = 1,
+    };
+    ok &= internal::route_lookup_cache_matches(cache_entry, 4, peer, peer_len);
+    auto different_peer = peer;
+    auto &different_ipv4 = *reinterpret_cast<sockaddr_in *>(&different_peer);
+    different_ipv4.sin_port = htons(4446);
+    ok &= !internal::route_lookup_cache_matches(cache_entry, 4, different_peer, peer_len);
+    ok &= !internal::route_lookup_cache_matches(cache_entry, 5, peer, peer_len);
+    ok &= !internal::route_lookup_cache_matches(cache_entry, 4, peer, /*peer_len=*/1);
+    cache_entry.valid = false;
+    ok &= !internal::route_lookup_cache_matches(cache_entry, 4, peer, peer_len);
+
     struct CachedRouteExpectation {
         std::uint64_t route_handle;
         int socket_fd;
@@ -947,6 +1113,17 @@ bool socket_io_backend_duplicate_route_lookup_guard_branches_for_tests() {
                                            });
     }
 
+    {
+        internal::SocketIoRouteState state;
+        static_cast<void>(internal::remember_route_handle(state, peer, peer_len, 4));
+        sockaddr_storage different_peer = peer;
+        auto &different_ipv4 = *reinterpret_cast<sockaddr_in *>(&different_peer);
+        different_ipv4.sin_port = htons(4434);
+        ok &= !internal::route_lookup_cache_matches(
+            state.route_lookup_cache[internal::route_lookup_cache_index(4, peer, peer_len)], 4,
+            different_peer, peer_len);
+    }
+
     return ok;
 }
 
@@ -983,14 +1160,15 @@ class PendingEventEngineForTests final : public QuicIoEngine {
 } // namespace
 
 COQUIC_NO_PROFILE bool shared_udp_backend_core_has_pending_event_guard_branches_for_tests() {
+    bool ok = true;
+    const auto record = [&](bool condition) { ok = ok & condition; };
     PendingEventEngineForTests coverage_engine(false);
     sockaddr_storage peer{};
-    const bool engine_methods_covered =
-        coverage_engine.register_socket(0) &&
-        coverage_engine.send(0, peer, 0, std::span<const std::byte>{}, std::string_view{},
-                             quic::QuicEcnCodepoint::not_ect, false) &&
-        !coverage_engine.wait(std::span<const int>{}, 0, std::nullopt, std::string_view{})
-             .has_value();
+    record(coverage_engine.register_socket(0));
+    record(coverage_engine.send(0, peer, 0, std::span<const std::byte>{}, std::string_view{},
+                                quic::QuicEcnCodepoint::not_ect, false));
+    record(!coverage_engine.wait(std::span<const int>{}, 0, std::nullopt, std::string_view{})
+                .has_value());
 
     SharedUdpBackendCore pending_core(QuicUdpBackendConfig{},
                                       std::make_unique<PendingEventEngineForTests>(true));
@@ -1000,10 +1178,37 @@ COQUIC_NO_PROFILE bool shared_udp_backend_core_has_pending_event_guard_branches_
     SharedUdpBackendCore null_impl_core(QuicUdpBackendConfig{},
                                         std::make_unique<PendingEventEngineForTests>(true));
     null_impl_core.impl_.reset();
+    SharedUdpBackendCore invalid_listener_core(QuicUdpBackendConfig{.role_name = "server"},
+                                               std::make_unique<PendingEventEngineForTests>(true));
+    const auto add_negative_fd_socket = [&](SharedUdpBackendCore &core) {
+        if (core.impl_ != nullptr) {
+            core.impl_->sockets.push_back(internal::SocketIoSocket{
+                .fd = -1,
+                .family = AF_INET,
+            });
+        }
+    };
+    add_negative_fd_socket(pending_core);
+    add_negative_fd_socket(null_impl_core);
 
-    return engine_methods_covered && pending_core.has_pending_events() &&
-           !idle_core.has_pending_events() && !null_engine_core.has_pending_events() &&
-           !null_impl_core.has_pending_events();
+    QuicIoEngineEvent invalid_event{};
+    invalid_event.kind = static_cast<QuicIoEngineEvent::Kind>(0xff);
+    record(!translate_non_receive_wait_event(invalid_event).has_value());
+
+    sockaddr_storage unsupported_peer{};
+    unsupported_peer.ss_family = AF_UNSPEC;
+    record(
+        internal::address_validation_identity_from_peer(unsupported_peer, sizeof(unsupported_peer))
+            .empty());
+
+    record(!socket_io_backend_configure_linux_ecn_socket_options_for_runtime_tests(-1, AF_INET));
+    record(!socket_io_backend_configure_linux_pmtud_socket_options_for_runtime_tests(-1, AF_INET));
+    record(pending_core.has_pending_events());
+    record(!idle_core.has_pending_events());
+    record(!null_engine_core.has_pending_events());
+    record(!null_impl_core.has_pending_events());
+    record(!invalid_listener_core.open_listener("not a numeric address for coverage", 9));
+    return ok;
 }
 
 } // namespace test

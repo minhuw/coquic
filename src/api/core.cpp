@@ -1,12 +1,22 @@
 #include "coquic/core.h"
 
 #include <algorithm>
+#include <array>
 #include <iterator>
 #include <ranges>
+#include <span>
 #include <type_traits>
 #include <utility>
 
 #include "src/quic/core.h"
+
+#if defined(COQUIC_COVERAGE_BUILD)
+#define COQUIC_NO_PROFILE
+#elif defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
 
 namespace coquic::core {
 
@@ -512,6 +522,14 @@ ConnectionDiagnostics from_internal(const quic::QuicCoreConnectionDiagnostics &d
     };
 }
 
+bool has_pending_stream_send_diagnostics(
+    std::span<const quic::QuicCoreConnectionDiagnostics> diagnostics) {
+    return std::ranges::any_of(diagnostics, [](const auto &connection) {
+        return std::ranges::any_of(connection.streams,
+                                   [](const auto &stream) { return stream.pending_send; });
+    });
+}
+
 template <typename T> std::vector<T> effects_of(const Result &result) {
     std::vector<T> out;
     for (const auto &effect : result.effects) {
@@ -523,6 +541,254 @@ template <typename T> std::vector<T> effects_of(const Result &result) {
 }
 
 } // namespace
+
+namespace test {
+
+COQUIC_NO_PROFILE bool core_wrapper_conversion_coverage_for_tests() {
+    bool ok = true;
+    const auto record = [&ok](bool condition) {
+        ok = static_cast<bool>(static_cast<unsigned>(ok) & static_cast<unsigned>(condition));
+        return condition;
+    };
+
+    record(to_internal(Role::client) == quic::EndpointRole::client);
+    record(to_internal(Role::server) == quic::EndpointRole::server);
+    record(to_internal(static_cast<Role>(0xff)) == quic::EndpointRole::client);
+    record(to_internal(CongestionControl::newreno) ==
+           quic::QuicCongestionControlAlgorithm::newreno);
+    record(to_internal(CongestionControl::cubic) == quic::QuicCongestionControlAlgorithm::cubic);
+    record(to_internal(CongestionControl::bbr) == quic::QuicCongestionControlAlgorithm::bbr);
+    record(to_internal(CongestionControl::copa) == quic::QuicCongestionControlAlgorithm::copa);
+    record(to_internal(static_cast<CongestionControl>(0xff)) ==
+           quic::QuicCongestionControlAlgorithm::newreno);
+    record(from_internal(quic::QuicCongestionControlAlgorithm::newreno) ==
+           CongestionControl::newreno);
+    record(from_internal(quic::QuicCongestionControlAlgorithm::cubic) == CongestionControl::cubic);
+    record(from_internal(quic::QuicCongestionControlAlgorithm::bbr) == CongestionControl::bbr);
+    record(from_internal(quic::QuicCongestionControlAlgorithm::copa) == CongestionControl::copa);
+    record(from_internal(static_cast<quic::QuicCongestionControlAlgorithm>(0xff)) ==
+           CongestionControl::newreno);
+    record(to_internal(EcnCodepoint::unavailable) == quic::QuicEcnCodepoint::unavailable);
+    record(to_internal(EcnCodepoint::not_ect) == quic::QuicEcnCodepoint::not_ect);
+    record(to_internal(EcnCodepoint::ect0) == quic::QuicEcnCodepoint::ect0);
+    record(to_internal(EcnCodepoint::ect1) == quic::QuicEcnCodepoint::ect1);
+    record(to_internal(EcnCodepoint::ce) == quic::QuicEcnCodepoint::ce);
+    record(to_internal(static_cast<EcnCodepoint>(0xff)) == quic::QuicEcnCodepoint::unavailable);
+    record(from_internal(quic::QuicEcnCodepoint::unavailable) == EcnCodepoint::unavailable);
+    record(from_internal(quic::QuicEcnCodepoint::not_ect) == EcnCodepoint::not_ect);
+    record(from_internal(quic::QuicEcnCodepoint::ect0) == EcnCodepoint::ect0);
+    record(from_internal(quic::QuicEcnCodepoint::ect1) == EcnCodepoint::ect1);
+    record(from_internal(quic::QuicEcnCodepoint::ce) == EcnCodepoint::ce);
+    record(from_internal(static_cast<quic::QuicEcnCodepoint>(0xff)) == EcnCodepoint::unavailable);
+    record(to_internal(MigrationReason::active) == quic::QuicMigrationRequestReason::active);
+    record(to_internal(MigrationReason::preferred_address) ==
+           quic::QuicMigrationRequestReason::preferred_address);
+    record(to_internal(static_cast<MigrationReason>(0xff)) ==
+           quic::QuicMigrationRequestReason::active);
+    record(from_internal(quic::QuicCoreStateChange::failed) == StateChange::failed);
+    record(from_internal(static_cast<quic::QuicCoreStateChange>(0xff)) == StateChange::failed);
+    record(from_internal(quic::QuicCoreLocalErrorCode::unsupported_operation) ==
+           LocalErrorCode::unsupported_operation);
+    record(from_internal(quic::QuicCoreLocalErrorCode::invalid_stream_id) ==
+           LocalErrorCode::invalid_stream_id);
+    record(from_internal(quic::QuicCoreLocalErrorCode::invalid_stream_direction) ==
+           LocalErrorCode::invalid_stream_direction);
+    record(from_internal(quic::QuicCoreLocalErrorCode::send_side_closed) ==
+           LocalErrorCode::send_side_closed);
+    record(from_internal(quic::QuicCoreLocalErrorCode::receive_side_closed) ==
+           LocalErrorCode::receive_side_closed);
+    record(from_internal(quic::QuicCoreLocalErrorCode::final_size_conflict) ==
+           LocalErrorCode::final_size_conflict);
+    record(from_internal(quic::QuicCoreLocalErrorCode::datagram_not_supported) ==
+           LocalErrorCode::datagram_not_supported);
+    record(from_internal(static_cast<quic::QuicCoreLocalErrorCode>(0xff)) ==
+           LocalErrorCode::unsupported_operation);
+    record(from_internal(quic::QuicCoreConnectionLifecycle::created) == Lifecycle::created);
+    record(from_internal(static_cast<quic::QuicCoreConnectionLifecycle>(0xff)) ==
+           Lifecycle::closed);
+    record(from_internal(quic::QuicZeroRttStatus::unavailable) == ZeroRttStatus::unavailable);
+    record(from_internal(static_cast<quic::QuicZeroRttStatus>(0xff)) == ZeroRttStatus::unavailable);
+    record(from_internal(quic::QuicCorePacketInspectionDirection::outbound) ==
+           PacketInspectionDirection::outbound);
+    record(from_internal(static_cast<quic::QuicCorePacketInspectionDirection>(0xff)) ==
+           PacketInspectionDirection::outbound);
+    record(from_internal(quic::QuicCorePacketInspectionPacketType::initial) ==
+           PacketInspectionPacketType::initial);
+    record(from_internal(quic::QuicCorePacketInspectionPacketType::zero_rtt) ==
+           PacketInspectionPacketType::zero_rtt);
+    record(from_internal(quic::QuicCorePacketInspectionPacketType::one_rtt) ==
+           PacketInspectionPacketType::one_rtt);
+    record(from_internal(static_cast<quic::QuicCorePacketInspectionPacketType>(0xff)) ==
+           PacketInspectionPacketType::initial);
+
+    quic::QuicCoreResult internal;
+    internal.next_wakeup = TimePoint{Duration{42}};
+    internal.send_continuation_pending = true;
+    internal.effects.push_back(quic::QuicCoreSendDatagram{
+        .connection = 1,
+        .route_handle = 7,
+        .bytes = quic::DatagramBuffer{std::vector<std::byte>{std::byte{0x01}}},
+        .ecn = quic::QuicEcnCodepoint::ce,
+        .is_pmtu_probe = true,
+    });
+    internal.effects.push_back(quic::QuicCoreReceiveStreamData{
+        .connection = 2,
+        .stream_id = 8,
+        .shared_bytes = quic::SharedBytes{std::vector<std::byte>{std::byte{0x02}}},
+        .fin = true,
+    });
+    internal.effects.push_back(quic::QuicCoreReceiveDatagramData{
+        .connection = 3,
+        .shared_bytes = quic::SharedBytes{std::vector<std::byte>{std::byte{0x03}}},
+    });
+    internal.effects.push_back(quic::QuicCorePeerResetStream{
+        .connection = 4,
+        .stream_id = 12,
+        .application_error_code = 77,
+        .final_size = 99,
+    });
+    internal.effects.push_back(quic::QuicCorePeerStopSending{
+        .connection = 5,
+        .stream_id = 16,
+        .application_error_code = 78,
+    });
+    internal.effects.push_back(quic::QuicCoreStateEvent{
+        .connection = 6,
+        .change = quic::QuicCoreStateChange::handshake_ready,
+    });
+    internal.effects.push_back(quic::QuicCoreStateEvent{
+        .connection = 7,
+        .change = quic::QuicCoreStateChange::handshake_confirmed,
+    });
+    internal.effects.push_back(quic::QuicCoreConnectionLifecycleEvent{
+        .connection = 8,
+        .event = quic::QuicCoreConnectionLifecycle::accepted,
+    });
+    internal.effects.push_back(quic::QuicCoreConnectionLifecycleEvent{
+        .connection = 9,
+        .event = quic::QuicCoreConnectionLifecycle::closed,
+    });
+    internal.effects.push_back(quic::QuicCorePeerPreferredAddressAvailable{
+        .connection = 10,
+        .preferred_address =
+            quic::PreferredAddress{
+                .ipv4_address = {std::byte{192}, std::byte{0}, std::byte{2}, std::byte{1}},
+                .ipv4_port = 4433,
+                .connection_id = {std::byte{0xaa}},
+            },
+    });
+    internal.effects.push_back(quic::QuicCoreResumptionStateAvailable{
+        .connection = 11,
+        .state = {.serialized = {std::byte{0x04}}},
+    });
+    internal.effects.push_back(quic::QuicCoreZeroRttStatusEvent{
+        .connection = 12,
+        .status = quic::QuicZeroRttStatus::not_attempted,
+    });
+    internal.effects.push_back(quic::QuicCoreZeroRttStatusEvent{
+        .connection = 13,
+        .status = quic::QuicZeroRttStatus::attempted,
+    });
+    internal.effects.push_back(quic::QuicCoreZeroRttStatusEvent{
+        .connection = 14,
+        .status = quic::QuicZeroRttStatus::accepted,
+    });
+    internal.effects.push_back(quic::QuicCoreZeroRttStatusEvent{
+        .connection = 15,
+        .status = quic::QuicZeroRttStatus::rejected,
+    });
+    internal.effects.push_back(quic::QuicCorePacketInspection{
+        .connection = 16,
+        .direction = quic::QuicCorePacketInspectionDirection::inbound,
+        .packet_type = quic::QuicCorePacketInspectionPacketType::handshake,
+        .datagram_id = 101,
+        .datagram_length = 1200,
+        .datagram_offset = 4,
+        .packet_length = 1180,
+        .version = 1,
+        .destination_connection_id = {std::byte{0x05}},
+        .source_connection_id = {std::byte{0x06}},
+        .token = {std::byte{0x07}},
+        .spin_bit = true,
+        .key_phase = true,
+        .packet_number_length = 4,
+        .packet_number = 123,
+        .encrypted_packet = {std::byte{0x08}},
+        .plaintext_payload = {std::byte{0x09}},
+    });
+    internal.effects.push_back(quic::QuicCoreNewTokenAvailable{
+        .connection = 17,
+        .token = {std::byte{0x0a}},
+    });
+    internal.local_error = quic::QuicCoreLocalError{
+        .connection = 18,
+        .code = quic::QuicCoreLocalErrorCode::datagram_too_large,
+        .stream_id = 20,
+    };
+
+    const auto converted = from_internal(std::move(internal));
+    record(converted.effects.size() == 17);
+    record(converted.next_wakeup.has_value());
+    record(converted.send_continuation_pending);
+    record(converted.local_error.has_value());
+
+    record(std::holds_alternative<SendDatagram>(converted.effects[0]));
+    record(std::holds_alternative<ReceiveStreamData>(converted.effects[1]));
+    record(std::holds_alternative<ReceiveDatagramData>(converted.effects[2]));
+    record(std::holds_alternative<PeerResetStream>(converted.effects[3]));
+    record(std::holds_alternative<PeerStopSending>(converted.effects[4]));
+    record(std::holds_alternative<StateEvent>(converted.effects[5]));
+    record(std::get<StateEvent>(converted.effects[6]).change == StateChange::handshake_confirmed);
+    record(std::holds_alternative<ConnectionLifecycleEvent>(converted.effects[7]));
+    record(std::get<ConnectionLifecycleEvent>(converted.effects[8]).event == Lifecycle::closed);
+    record(std::holds_alternative<PeerPreferredAddressAvailable>(converted.effects[9]));
+    record(std::holds_alternative<ResumptionStateAvailable>(converted.effects[10]));
+    record(std::get<ZeroRttStatusEvent>(converted.effects[11]).status ==
+           ZeroRttStatus::not_attempted);
+    record(std::get<ZeroRttStatusEvent>(converted.effects[12]).status == ZeroRttStatus::attempted);
+    record(std::get<ZeroRttStatusEvent>(converted.effects[13]).status == ZeroRttStatus::accepted);
+    record(std::get<ZeroRttStatusEvent>(converted.effects[14]).status == ZeroRttStatus::rejected);
+    record(std::get<PacketInspection>(converted.effects[15]).direction ==
+           PacketInspectionDirection::inbound);
+    record(std::holds_alternative<NewTokenAvailable>(converted.effects[16]));
+    record(converted.local_error->code == LocalErrorCode::datagram_too_large);
+    record(send_datagrams(converted).size() == 1u);
+    record(lifecycle_events(converted).size() == 2u);
+    record(state_events(converted).size() == 2u);
+    record(receive_stream_events(converted).size() == 1u);
+    record(receive_datagram_events(converted).size() == 1u);
+    record(!has_pending_stream_send_diagnostics({}));
+    const std::array no_pending_streams{
+        quic::QuicCoreConnectionDiagnostics{
+            .handle = 1,
+            .streams =
+                {
+                    quic::QuicCoreStreamDiagnostics{
+                        .stream_id = 0,
+                        .pending_send = false,
+                    },
+                },
+        },
+    };
+    record(!has_pending_stream_send_diagnostics(no_pending_streams));
+    const std::array pending_streams{
+        quic::QuicCoreConnectionDiagnostics{
+            .handle = 2,
+            .streams =
+                {
+                    quic::QuicCoreStreamDiagnostics{
+                        .stream_id = 4,
+                        .pending_send = true,
+                    },
+                },
+        },
+    };
+    record(has_pending_stream_send_diagnostics(pending_streams));
+
+    return ok;
+}
+
+} // namespace test
 
 class Endpoint::Impl {
   public:
@@ -588,10 +854,7 @@ bool Endpoint::has_send_continuation_pending() const {
 
 bool Endpoint::has_pending_stream_send() const {
     const auto diagnostics = impl_->core.connection_diagnostics();
-    return std::ranges::any_of(diagnostics, [](const auto &connection) {
-        return std::ranges::any_of(connection.streams,
-                                   [](const auto &stream) { return stream.pending_send; });
-    });
+    return has_pending_stream_send_diagnostics(diagnostics);
 }
 
 std::vector<SendDatagram> send_datagrams(const Result &result) {

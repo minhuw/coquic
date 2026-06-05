@@ -20,6 +20,7 @@
       };
       lib = pkgs.lib;
       llvmPkgs = pkgs.llvmPackages_20;
+      coverageLlvmPkgs = pkgs.llvmPackages_21;
       zig = pkgs.zig_0_16;
       ngtcp2TlsPackage = pkgs.openssl;
       staticPkgs = pkgs.pkgsStatic;
@@ -320,9 +321,9 @@
         ${lib.optionalString profile.pkgConfigAllStatic ''
           export PKG_CONFIG_ALL_STATIC=1
         ''}
-        export LLVM_COV="${llvmPkgs.llvm}/bin/llvm-cov"
-        export LLVM_PROFDATA="${llvmPkgs.llvm}/bin/llvm-profdata"
-        export LLVM_PROFILE_RT="${llvmPkgs.compiler-rt}/lib/linux/libclang_rt.profile-x86_64.a"
+        export LLVM_COV="${coverageLlvmPkgs.llvm}/bin/llvm-cov"
+        export LLVM_PROFDATA="${coverageLlvmPkgs.llvm}/bin/llvm-profdata"
+        export LLVM_PROFILE_RT="${coverageLlvmPkgs.compiler-rt}/lib/linux/libclang_rt.profile-x86_64.a"
       '';
       mkZigBuildArgs = profile:
         lib.concatStringsSep " " (
@@ -537,6 +538,7 @@
               pkgs.binutils
               pkgs.curl
               llvmPkgs.llvm
+              coverageLlvmPkgs.llvm
               profile.tlsPackage
               profile.spdlogPackage
               profile.fmtPackage

@@ -28,6 +28,10 @@ Http3Result<std::vector<coquic::quic::QuicCoreSendStreamData>>
 server_submit_response_for_test(bool prepare_request_stream, std::uint64_t stream_id,
                                 const Http3RequestHead &request_head,
                                 const Http3Response &response);
+Http3Result<std::vector<coquic::quic::QuicCoreSendStreamData>>
+server_submit_response_part_for_test(bool prepare_request_stream, std::uint64_t stream_id,
+                                     const Http3RequestHead &request_head,
+                                     const Http3ResponsePart &part, bool final_head_sent);
 
 struct Http3ServerEndpointTestAccess {
     static Http3Connection &connection(Http3ServerEndpoint &endpoint) {
@@ -50,6 +54,13 @@ struct Http3ServerEndpointTestAccess {
     static std::size_t pending_deferred_response_count(Http3ServerEndpoint &endpoint,
                                                        std::uint64_t stream_id) {
         return endpoint.pending_deferred_responses_.count(stream_id);
+    }
+
+    static void add_pending_deferred_response(Http3ServerEndpoint &endpoint,
+                                              std::uint64_t stream_id,
+                                              const Http3RequestHead &head = {}) {
+        endpoint.pending_deferred_responses_.insert_or_assign(
+            stream_id, Http3ServerEndpoint::PendingDeferredResponse{.head = head});
     }
 };
 
@@ -186,6 +197,18 @@ coquic::quic::QuicCoreResult reset_result(std::uint64_t stream_id, std::uint64_t
     coquic::quic::QuicCoreResult core_result;
     core_result.effects.push_back(coquic::quic::QuicCoreEffect{
         coquic::quic::QuicCorePeerResetStream{
+            .stream_id = stream_id,
+            .application_error_code = error_code,
+        },
+    });
+    return core_result;
+}
+
+coquic::quic::QuicCoreResult stop_sending_result(std::uint64_t stream_id,
+                                                 std::uint64_t error_code = 0) {
+    coquic::quic::QuicCoreResult core_result;
+    core_result.effects.push_back(coquic::quic::QuicCoreEffect{
+        coquic::quic::QuicCorePeerStopSending{
             .stream_id = stream_id,
             .application_error_code = error_code,
         },
@@ -1235,6 +1258,178 @@ TEST(QuicHttp3ServerTest, HelperHookSubmitResponseCoversInterimHeadAndFailures) 
     EXPECT_EQ(body_mismatch.error().code, http3::Http3ErrorCode::message_error);
 }
 
+TEST(QuicHttp3ServerTest, HelperHookSubmitResponsePartCoversErrorAndHeadBranches) {
+    const http3::Http3RequestHead get_request{
+        .method = "GET",
+        .scheme = "https",
+        .authority = "example.test",
+        .path = "/stream",
+    };
+
+    auto missing_interim_stream =
+        http3::server_submit_response_part_for_test(false, 0, get_request,
+                                                    http3::Http3ResponsePart{
+                                                        .interim_heads = {{.status = 103}},
+                                                    },
+                                                    false);
+    ASSERT_FALSE(missing_interim_stream.has_value());
+    EXPECT_EQ(missing_interim_stream.error().code, http3::Http3ErrorCode::frame_unexpected);
+
+    auto interim_head =
+        http3::server_submit_response_part_for_test(true, 0, get_request,
+                                                    http3::Http3ResponsePart{
+                                                        .interim_heads = {{.status = 103}},
+                                                    },
+                                                    false);
+    ASSERT_TRUE(interim_head.has_value());
+    ASSERT_EQ(interim_head.value().size(), 1u);
+    EXPECT_FALSE(interim_head.value()[0].fin);
+
+    auto missing_final_head_stream = http3::server_submit_response_part_for_test(
+        false, 0, get_request,
+        http3::Http3ResponsePart{
+            .head = http3::Http3ResponseHead{.status = 200},
+        },
+        false);
+    ASSERT_FALSE(missing_final_head_stream.has_value());
+    EXPECT_EQ(missing_final_head_stream.error().code, http3::Http3ErrorCode::frame_unexpected);
+
+    auto missing_stream_with_presumed_sent_head = http3::server_submit_response_part_for_test(
+        false, 0, get_request, http3::Http3ResponsePart{}, true);
+    ASSERT_FALSE(missing_stream_with_presumed_sent_head.has_value());
+    EXPECT_EQ(missing_stream_with_presumed_sent_head.error().code,
+              http3::Http3ErrorCode::frame_unexpected);
+
+    auto missing_interim_after_final_head_sent =
+        http3::server_submit_response_part_for_test(false, 0, get_request,
+                                                    http3::Http3ResponsePart{
+                                                        .interim_heads = {{.status = 103}},
+                                                    },
+                                                    true);
+    ASSERT_FALSE(missing_interim_after_final_head_sent.has_value());
+    EXPECT_EQ(missing_interim_after_final_head_sent.error().code,
+              http3::Http3ErrorCode::frame_unexpected);
+
+    auto empty_pre_header_part = http3::server_submit_response_part_for_test(
+        true, 0, get_request, http3::Http3ResponsePart{}, false);
+    ASSERT_TRUE(empty_pre_header_part.has_value());
+    EXPECT_TRUE(empty_pre_header_part.value().empty());
+
+    auto duplicate_head = http3::server_submit_response_part_for_test(
+        true, 0, get_request,
+        http3::Http3ResponsePart{
+            .head = http3::Http3ResponseHead{.status = 200},
+        },
+        true);
+    ASSERT_FALSE(duplicate_head.has_value());
+    EXPECT_EQ(duplicate_head.error().code, http3::Http3ErrorCode::frame_unexpected);
+
+    auto data_before_head =
+        http3::server_submit_response_part_for_test(true, 0, get_request,
+                                                    http3::Http3ResponsePart{
+                                                        .body = bytes_from_text("early"),
+                                                    },
+                                                    false);
+    ASSERT_FALSE(data_before_head.has_value());
+    EXPECT_EQ(data_before_head.error().code, http3::Http3ErrorCode::frame_unexpected);
+
+    auto trailers_before_head =
+        http3::server_submit_response_part_for_test(true, 0, get_request,
+                                                    http3::Http3ResponsePart{
+                                                        .trailers = {{"x-end", "1"}},
+                                                    },
+                                                    false);
+    ASSERT_FALSE(trailers_before_head.has_value());
+    EXPECT_EQ(trailers_before_head.error().code, http3::Http3ErrorCode::frame_unexpected);
+
+    auto complete_before_head =
+        http3::server_submit_response_part_for_test(true, 0, get_request,
+                                                    http3::Http3ResponsePart{
+                                                        .complete = true,
+                                                    },
+                                                    false);
+    ASSERT_FALSE(complete_before_head.has_value());
+    EXPECT_EQ(complete_before_head.error().code, http3::Http3ErrorCode::frame_unexpected);
+
+    const http3::Http3RequestHead head_request{
+        .method = "HEAD",
+        .scheme = "https",
+        .authority = "example.test",
+        .path = "/head-stream",
+    };
+    auto completed_head = http3::server_submit_response_part_for_test(true, 0, head_request,
+                                                                      http3::Http3ResponsePart{
+                                                                          .complete = true,
+                                                                      },
+                                                                      true);
+    ASSERT_TRUE(completed_head.has_value());
+    ASSERT_EQ(completed_head.value().size(), 1u);
+    EXPECT_TRUE(completed_head.value()[0].fin);
+
+    auto incomplete_head = http3::server_submit_response_part_for_test(
+        true, 0, head_request, http3::Http3ResponsePart{}, true);
+    ASSERT_TRUE(incomplete_head.has_value());
+    EXPECT_TRUE(incomplete_head.value().empty());
+}
+
+TEST(QuicHttp3ServerTest, HelperHookSubmitResponsePartCoversTrailerAndFinishBranches) {
+    const http3::Http3RequestHead get_request{
+        .method = "GET",
+        .scheme = "https",
+        .authority = "example.test",
+        .path = "/stream",
+    };
+
+    auto body_then_trailers =
+        http3::server_submit_response_part_for_test(true, 0, get_request,
+                                                    http3::Http3ResponsePart{
+                                                        .body = bytes_from_text("chunk"),
+                                                        .trailers = {{"x-end", "1"}},
+                                                        .complete = true,
+                                                    },
+                                                    true);
+    ASSERT_TRUE(body_then_trailers.has_value());
+    ASSERT_EQ(body_then_trailers.value().size(), 2u);
+    EXPECT_EQ(data_frame_payload_text(body_then_trailers.value()[0].bytes), "chunk");
+    EXPECT_FALSE(body_then_trailers.value()[0].fin);
+    EXPECT_TRUE(body_then_trailers.value()[1].fin);
+
+    auto mismatched_body =
+        http3::server_submit_response_part_for_test(true, 0,
+                                                    http3::Http3RequestHead{
+                                                        .method = "GET",
+                                                        .scheme = "https",
+                                                        .authority = "example.test",
+                                                        .path = "/stream",
+                                                        .content_length = 1,
+                                                    },
+                                                    http3::Http3ResponsePart{
+                                                        .body = bytes_from_text("chunk"),
+                                                        .complete = true,
+                                                    },
+                                                    true);
+    ASSERT_FALSE(mismatched_body.has_value());
+    EXPECT_EQ(mismatched_body.error().code, http3::Http3ErrorCode::message_error);
+
+    auto missing_stream_body =
+        http3::server_submit_response_part_for_test(false, 0, get_request,
+                                                    http3::Http3ResponsePart{
+                                                        .body = bytes_from_text("chunk"),
+                                                    },
+                                                    true);
+    ASSERT_FALSE(missing_stream_body.has_value());
+    EXPECT_EQ(missing_stream_body.error().code, http3::Http3ErrorCode::frame_unexpected);
+
+    auto empty_complete = http3::server_submit_response_part_for_test(true, 0, get_request,
+                                                                      http3::Http3ResponsePart{
+                                                                          .complete = true,
+                                                                      },
+                                                                      true);
+    ASSERT_TRUE(empty_complete.has_value());
+    ASSERT_EQ(empty_complete.value().size(), 1u);
+    EXPECT_TRUE(empty_complete.value()[0].fin);
+}
+
 TEST(QuicHttp3ServerTest, LocalErrorFailureIsStickyAndPollReportsFailure) {
     http3::Http3ServerEndpoint endpoint;
 
@@ -1469,17 +1664,14 @@ TEST(QuicHttp3ServerTest, DeferredResponsePartsStreamAcrossPolls) {
 }
 
 TEST(QuicHttp3ServerTest, ResetCancelsPendingDeferredResponse) {
-    bool cancelled = false;
+    std::vector<std::uint64_t> cancelled;
     http3::Http3ServerEndpoint endpoint(http3::Http3ServerConfig{
         .deferred_request_handler = [](std::uint64_t, const http3::Http3Request &) { return true; },
         .deferred_response_handler = [](std::uint64_t) -> std::optional<http3::Http3Response> {
             return std::nullopt;
         },
         .deferred_request_cancel_handler =
-            [&](std::uint64_t stream_id) {
-                EXPECT_EQ(stream_id, 0u);
-                cancelled = true;
-            },
+            [&](std::uint64_t stream_id) { cancelled.push_back(stream_id); },
     });
 
     prime_server_transport(endpoint);
@@ -1500,9 +1692,223 @@ TEST(QuicHttp3ServerTest, ResetCancelsPendingDeferredResponse) {
     const auto reset_update =
         endpoint.on_core_result(reset_result(0, 7), coquic::quic::QuicCoreTimePoint{});
     EXPECT_FALSE(reset_update.terminal_failure);
-    EXPECT_TRUE(cancelled);
+    ASSERT_EQ(cancelled.size(), 1u);
+    EXPECT_EQ(cancelled[0], 0u);
+    EXPECT_TRUE(reset_update.request_cancelled_events.empty());
+    EXPECT_TRUE(send_stream_inputs_from(reset_update).empty());
     EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 0),
               0u);
+}
+
+TEST(QuicHttp3ServerTest, ResetEventCancelsSeededPendingDeferredResponseBeforeRequestLookup) {
+    std::vector<std::uint64_t> cancelled;
+    http3::Http3ServerEndpoint endpoint(http3::Http3ServerConfig{
+        .deferred_request_cancel_handler =
+            [&](std::uint64_t stream_id) { cancelled.push_back(stream_id); },
+    });
+    http3::Http3ServerEndpointTestAccess::add_pending_deferred_response(
+        endpoint, 0,
+        http3::Http3RequestHead{
+            .method = "GET",
+            .scheme = "https",
+            .authority = "example.test",
+            .path = "/deferred",
+        });
+    auto &connection = http3::Http3ServerEndpointTestAccess::connection(endpoint);
+    http3::Http3ConnectionTestAccess::queue_event(
+        connection, http3::Http3PeerRequestResetEvent{.stream_id = 0, .application_error_code = 7});
+
+    auto update =
+        endpoint.on_core_result(coquic::quic::QuicCoreResult{}, coquic::quic::QuicCoreTimePoint{});
+
+    EXPECT_FALSE(update.terminal_failure);
+    ASSERT_EQ(cancelled.size(), 1u);
+    EXPECT_EQ(cancelled[0], 0u);
+    EXPECT_TRUE(update.request_cancelled_events.empty());
+    EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 0),
+              0u);
+}
+
+TEST(QuicHttp3ServerTest, ResetCancelsPendingDeferredResponseWithoutCancelHandler) {
+    http3::Http3ServerEndpoint endpoint(http3::Http3ServerConfig{
+        .deferred_request_handler = [](std::uint64_t, const http3::Http3Request &) { return true; },
+        .deferred_response_handler = [](std::uint64_t) -> std::optional<http3::Http3Response> {
+            return std::nullopt;
+        },
+    });
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        http3::Http3Field{":method", "GET"},
+        http3::Http3Field{":scheme", "https"},
+        http3::Http3Field{":authority", "example.test"},
+        http3::Http3Field{":path", "/deferred"},
+    };
+    const auto completion_update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields), true),
+                                coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(completion_update.terminal_failure);
+    EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 0),
+              1u);
+
+    const auto reset_update =
+        endpoint.on_core_result(reset_result(0, 7), coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(reset_update.terminal_failure);
+    EXPECT_TRUE(reset_update.request_cancelled_events.empty());
+    EXPECT_TRUE(send_stream_inputs_from(reset_update).empty());
+    EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 0),
+              0u);
+}
+
+TEST(QuicHttp3ServerTest, PeerStopSendingCancelsPendingDeferredResponse) {
+    std::vector<std::uint64_t> cancelled;
+    http3::Http3ServerEndpoint endpoint(http3::Http3ServerConfig{
+        .deferred_request_handler = [](std::uint64_t, const http3::Http3Request &) { return true; },
+        .deferred_response_handler = [](std::uint64_t) -> std::optional<http3::Http3Response> {
+            return std::nullopt;
+        },
+        .deferred_request_cancel_handler =
+            [&](std::uint64_t stream_id) { cancelled.push_back(stream_id); },
+    });
+
+    prime_server_transport(endpoint);
+
+    const std::array request_fields{
+        http3::Http3Field{":method", "GET"},
+        http3::Http3Field{":scheme", "https"},
+        http3::Http3Field{":authority", "example.test"},
+        http3::Http3Field{":path", "/deferred"},
+    };
+    const auto completion_update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields), true),
+                                coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(completion_update.terminal_failure);
+    EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 0),
+              1u);
+
+    const auto stop_update =
+        endpoint.on_core_result(stop_sending_result(0, 7), coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(stop_update.terminal_failure);
+    ASSERT_EQ(cancelled.size(), 1u);
+    EXPECT_EQ(cancelled[0], 0u);
+    EXPECT_TRUE(stop_update.request_cancelled_events.empty());
+    EXPECT_TRUE(send_stream_inputs_from(stop_update).empty());
+    EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 0),
+              0u);
+}
+
+TEST(QuicHttp3ServerTest, DeferredResponsePollFailureClearsAndCancelsPendingWork) {
+    std::vector<std::uint64_t> cancelled;
+    http3::Http3ServerEndpoint endpoint(http3::Http3ServerConfig{
+        .deferred_request_handler = [](std::uint64_t, http3::Http3Request) { return true; },
+        .deferred_response_handler =
+            [](std::uint64_t stream_id) -> std::optional<http3::Http3Response> {
+            if (stream_id != 0) {
+                return std::nullopt;
+            }
+            return http3::Http3Response{
+                .head =
+                    {
+                        .status = 200,
+                        .content_length = 1,
+                    },
+                .body = bytes_from_text("too long"),
+            };
+        },
+        .deferred_request_cancel_handler =
+            [&](std::uint64_t stream_id) { cancelled.push_back(stream_id); },
+    });
+
+    prime_server_transport(endpoint);
+
+    const std::array first_fields{
+        http3::Http3Field{":method", "GET"},
+        http3::Http3Field{":scheme", "https"},
+        http3::Http3Field{":authority", "example.test"},
+        http3::Http3Field{":path", "/first"},
+    };
+    const std::array second_fields{
+        http3::Http3Field{":method", "GET"},
+        http3::Http3Field{":scheme", "https"},
+        http3::Http3Field{":authority", "example.test"},
+        http3::Http3Field{":path", "/second"},
+    };
+
+    EXPECT_FALSE(endpoint
+                     .on_core_result(receive_result(0, headers_frame_bytes(0, first_fields), true),
+                                     coquic::quic::QuicCoreTimePoint{})
+                     .terminal_failure);
+    EXPECT_FALSE(endpoint
+                     .on_core_result(receive_result(4, headers_frame_bytes(4, second_fields), true),
+                                     coquic::quic::QuicCoreTimePoint{})
+                     .terminal_failure);
+    EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 0),
+              1u);
+    EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 4),
+              1u);
+
+    const auto update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
+    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_TRUE(endpoint.has_failed());
+    EXPECT_TRUE(http3::Http3ServerEndpointTestAccess::pending_requests_empty(endpoint));
+    EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 0),
+              0u);
+    EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 4),
+              0u);
+    EXPECT_EQ(cancelled.size(), 2u);
+}
+
+TEST(QuicHttp3ServerTest, DeferredResponsePartPollFailureClearsAndCancelsPendingWork) {
+    std::vector<std::uint64_t> cancelled;
+    http3::Http3ServerEndpoint endpoint(http3::Http3ServerConfig{
+        .deferred_request_handler = [](std::uint64_t, http3::Http3Request) { return true; },
+        .deferred_response_part_handler =
+            [](std::uint64_t stream_id) -> std::optional<http3::Http3ResponsePart> {
+            if (stream_id != 0) {
+                return std::nullopt;
+            }
+            return http3::Http3ResponsePart{
+                .body = bytes_from_text("before-head"),
+            };
+        },
+        .deferred_request_cancel_handler =
+            [&](std::uint64_t stream_id) { cancelled.push_back(stream_id); },
+    });
+
+    prime_server_transport(endpoint);
+
+    const std::array first_fields{
+        http3::Http3Field{":method", "GET"},
+        http3::Http3Field{":scheme", "https"},
+        http3::Http3Field{":authority", "example.test"},
+        http3::Http3Field{":path", "/first"},
+    };
+    const std::array second_fields{
+        http3::Http3Field{":method", "GET"},
+        http3::Http3Field{":scheme", "https"},
+        http3::Http3Field{":authority", "example.test"},
+        http3::Http3Field{":path", "/second"},
+    };
+
+    EXPECT_FALSE(endpoint
+                     .on_core_result(receive_result(0, headers_frame_bytes(0, first_fields), true),
+                                     coquic::quic::QuicCoreTimePoint{})
+                     .terminal_failure);
+    EXPECT_FALSE(endpoint
+                     .on_core_result(receive_result(4, headers_frame_bytes(4, second_fields), true),
+                                     coquic::quic::QuicCoreTimePoint{})
+                     .terminal_failure);
+
+    const auto update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
+    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_TRUE(endpoint.has_failed());
+    EXPECT_TRUE(http3::Http3ServerEndpointTestAccess::pending_requests_empty(endpoint));
+    EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 0),
+              0u);
+    EXPECT_EQ(http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 4),
+              0u);
+    EXPECT_EQ(cancelled.size(), 2u);
 }
 
 TEST(QuicHttp3ServerTest, EarlyResponseIgnoresCoalescedBodyTrailersAndCompletion) {
@@ -1799,6 +2205,16 @@ TEST(QuicHttp3ServerTest, HelperHooksCoverRemainingDefaultRouteAndDemoRouteError
     });
     EXPECT_EQ(download_head.head.status, 200);
     EXPECT_EQ(download_head.head.content_length, std::optional<std::uint64_t>{16});
+
+    auto trailing_empty_param = http3::server_default_route_response_for_test(http3::Http3Request{
+        .head =
+            {
+                .method = "GET",
+                .path = "/_coquic/speed/download?bytes=16&",
+            },
+    });
+    EXPECT_EQ(trailing_empty_param.head.status, 200);
+    EXPECT_EQ(trailing_empty_param.head.content_length, std::optional<std::uint64_t>{16});
 
     auto duplicate_bytes_query = http3::server_default_route_response_for_test(http3::Http3Request{
         .head =

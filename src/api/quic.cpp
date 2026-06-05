@@ -7,6 +7,50 @@ namespace coquic::quic {
 
 struct ConnectResult;
 
+namespace {
+
+ConnectionHandle created_connection_handle(const core::Result &result) {
+    for (const auto &event : core::lifecycle_events(result)) {
+        if (event.event == core::Lifecycle::created) {
+            return event.connection;
+        }
+    }
+    return 0;
+}
+
+} // namespace
+
+namespace test {
+
+bool quic_facade_lifecycle_scan_coverage_for_tests() {
+    bool ok = true;
+    const auto record = [&ok](bool condition) {
+        ok = static_cast<bool>(static_cast<unsigned>(ok) & static_cast<unsigned>(condition));
+    };
+
+    core::Result closed_then_created;
+    closed_then_created.effects.push_back(core::ConnectionLifecycleEvent{
+        .connection = 9,
+        .event = core::Lifecycle::closed,
+    });
+    closed_then_created.effects.push_back(core::ConnectionLifecycleEvent{
+        .connection = 10,
+        .event = core::Lifecycle::created,
+    });
+
+    core::Result no_created_event;
+    no_created_event.effects.push_back(core::ConnectionLifecycleEvent{
+        .connection = 11,
+        .event = core::Lifecycle::accepted,
+    });
+
+    record(created_connection_handle(closed_then_created) == 10u);
+    record(created_connection_handle(no_created_event) == 0u);
+    return ok;
+}
+
+} // namespace test
+
 class Endpoint::Impl {
   public:
     explicit Impl(const EndpointConfig &config) : core(config.core) {
@@ -32,13 +76,7 @@ ConnectResult Endpoint::connect(ClientConfig config, TimePoint now) {
     };
     auto result = impl_->core.open_connection(std::move(open), now);
 
-    ConnectionHandle handle = 0;
-    for (const auto &event : core::lifecycle_events(result)) {
-        if (event.event == core::Lifecycle::created) {
-            handle = event.connection;
-            break;
-        }
-    }
+    const auto handle = created_connection_handle(result);
     return ConnectResult{
         .connection = connection(handle),
         .result = std::move(result),

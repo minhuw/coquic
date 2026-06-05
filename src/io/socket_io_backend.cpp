@@ -44,6 +44,7 @@ test::SocketIoBackendOpsOverride make_default_socket_io_backend_ops() {
         .bind_fn = ::bind,
         .poll_fn = ::poll,
         .setsockopt_fn = ::setsockopt,
+        .getsockname_fn = ::getsockname,
         .sendto_fn = ::sendto,
         .sendmsg_fn = ::sendmsg,
         .sendmmsg_fn = &default_sendmmsg,
@@ -74,6 +75,9 @@ void apply_socket_io_backend_ops_override(const test::SocketIoBackendOpsOverride
     }
     if (override_ops.setsockopt_fn != nullptr) {
         ops.setsockopt_fn = override_ops.setsockopt_fn;
+    }
+    if (override_ops.getsockname_fn != nullptr) {
+        ops.getsockname_fn = override_ops.getsockname_fn;
     }
     if (override_ops.sendto_fn != nullptr) {
         ops.sendto_fn = override_ops.sendto_fn;

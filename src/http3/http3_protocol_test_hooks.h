@@ -11,5 +11,9 @@ namespace coquic::http3::test {
 quic::CodecResult<std::vector<std::byte>>
 serialize_http3_payload_frame_with_synthetic_length_for_tests(std::uint64_t type,
                                                               std::size_t payload_size);
+quic::CodecResult<std::vector<std::byte>>
+serialize_http3_data_frame_with_synthetic_length_for_tests(std::size_t payload_size);
+quic::CodecResult<std::vector<std::byte>>
+serialize_http3_headers_frame_with_synthetic_length_for_tests(std::size_t payload_size);
 
 } // namespace coquic::http3::test

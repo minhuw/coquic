@@ -2166,6 +2166,33 @@ TEST(QuicRecoveryTest, LatestInflightAckElicitingPacketRefreshesStaleCache) {
         1u);
 }
 
+TEST(QuicRecoveryTest, RetiringLatestInflightAckElicitingPacketPromotesPreviousLivePacket) {
+    PacketSpaceRecovery recovery;
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(5)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(9)));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/3, /*ack_eliciting=*/false,
+                                             coquic::quic::test::test_time(11)));
+
+    EXPECT_EQ(
+        optional_value_or_terminate(recovery.latest_in_flight_ack_eliciting_packet()).packet_number,
+        2u);
+
+    const auto handle = recovery.handle_for_packet_number(2);
+    ASSERT_TRUE(handle.has_value());
+    auto retired = recovery.take_retired_packet_if_present(optional_value_or_terminate(handle));
+    ASSERT_TRUE(retired.has_value());
+
+    EXPECT_EQ(
+        optional_value_or_terminate(recovery.latest_in_flight_ack_eliciting_packet()).packet_number,
+        1u);
+    EXPECT_EQ(
+        coquic::quic::test::PacketSpaceRecoveryTestPeer::in_flight_ack_eliciting_tracked_count(
+            recovery),
+        1u);
+}
+
 TEST(QuicRecoveryTest, RecoveryTracksEarliestLossPacketAcrossLargestAckAdvance) {
     PacketSpaceRecovery recovery;
     recovery.rtt_state().latest_rtt = std::chrono::milliseconds(10);

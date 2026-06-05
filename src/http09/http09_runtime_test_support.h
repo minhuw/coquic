@@ -3,7 +3,7 @@
 
 #include "src/http09/http09_runtime_internal.h"
 
-#if defined(__clang__)
+#if defined(__clang__) && !defined(COQUIC_COVERAGE_BUILD)
 #pragma clang attribute push(__attribute__((no_profile_instrument_function)), apply_to = function)
 #endif
 
@@ -1224,7 +1224,7 @@ bool runtime_registers_all_server_core_connection_ids_case_for_tests(
 
 } // namespace test
 
-#if defined(__clang__)
+#if defined(__clang__) && !defined(COQUIC_COVERAGE_BUILD)
 #pragma clang attribute pop
 #endif
 

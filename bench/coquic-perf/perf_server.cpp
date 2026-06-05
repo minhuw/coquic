@@ -323,9 +323,9 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                 quic::QuicCoreConnectionCommand{
                     .connection = session.connection,
                     .input =
-                        quic::QuicCoreSendSharedStreamData{
+                        quic::QuicCoreSendStreamData{
                             .stream_id = received.stream_id,
-                            .bytes = cached_download_payload(response_bytes),
+                            .bytes = make_payload(response_bytes),
                             .fin = true,
                         },
                 },

@@ -57,7 +57,7 @@ QuicCoreConnectionDiagnostics QuicConnection::diagnostics(QuicConnectionHandle h
         .active_paths = paths_.size(),
         .current_send_path_id = current_send_path_id_,
         .active_streams = streams_.size(),
-        .retired_streams = retired_streams_.size(),
+        .retired_streams = retired_streams_.size() + retired_peer_stream_count(),
         .initial_space = packet_space_diagnostics(initial_space_),
         .handshake_space = packet_space_diagnostics(handshake_space_),
         .zero_rtt_space = packet_space_diagnostics(zero_rtt_space_),

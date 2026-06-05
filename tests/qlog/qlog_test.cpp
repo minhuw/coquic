@@ -57,6 +57,7 @@ testing::AssertionResult full_packet_snapshot_serializes_expected_fields() {
     using coquic::quic::ConnectionId;
     using coquic::quic::CryptoFrame;
     using coquic::quic::DataBlockedFrame;
+    using coquic::quic::DatagramFrame;
     using coquic::quic::Frame;
     using coquic::quic::HandshakeDoneFrame;
     using coquic::quic::MaxDataFrame;
@@ -99,6 +100,7 @@ testing::AssertionResult full_packet_snapshot_serializes_expected_fields() {
                     StopSendingFrame{.stream_id = 4, .application_protocol_error_code = 5},
                     CryptoFrame{.offset = 6, .crypto_data = qlog_bytes({0xcc, 0xdd})},
                     NewTokenFrame{.token = qlog_bytes({0xee})},
+                    DatagramFrame{.data = qlog_bytes({0xda, 0x7a})},
                     MaxDataFrame{.maximum_data = 7},
                     MaxStreamDataFrame{.stream_id = 8, .maximum_stream_data = 9},
                     MaxStreamsFrame{.stream_type = StreamLimitType::unidirectional,
@@ -145,6 +147,7 @@ testing::AssertionResult full_packet_snapshot_serializes_expected_fields() {
                          "\"frame_type\":\"stop_sending\"",
                          "\"frame_type\":\"crypto\"",
                          "\"frame_type\":\"new_token\"",
+                         "\"frame_type\":\"datagram\",\"length\":2",
                          "\"frame_type\":\"max_data\"",
                          "\"frame_type\":\"max_stream_data\"",
                          "\"frame_type\":\"max_streams\"",

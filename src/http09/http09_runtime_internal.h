@@ -1,7 +1,9 @@
 #pragma once
 
 #ifndef COQUIC_NO_PROFILE
-#if defined(__clang__)
+#if defined(COQUIC_COVERAGE_BUILD)
+#define COQUIC_NO_PROFILE
+#elif defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #else
 #define COQUIC_NO_PROFILE

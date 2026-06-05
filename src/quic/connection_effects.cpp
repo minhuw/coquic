@@ -39,6 +39,7 @@ StreamStateResult<bool> QuicConnection::queue_stop_sending(LocalStopSendingComma
     if (!validated.has_value()) {
         return validated;
     }
+    invalidate_stream_sendability_cache();
 
     return StreamStateResult<bool>::success(true);
 }

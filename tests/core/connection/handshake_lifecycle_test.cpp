@@ -1286,9 +1286,11 @@ TEST(QuicCoreTest, ConnectionHelperMethodsCoverAdditionalPendingSendAndLimitBran
     EXPECT_TRUE(connection.has_pending_application_send());
     stream.flow_control.stream_data_blocked_state = coquic::quic::StreamControlFrameState::none;
     stream.flow_control.pending_stream_data_blocked_frame = std::nullopt;
+    connection.invalidate_stream_sendability_cache();
     EXPECT_FALSE(connection.has_pending_application_send());
     pending_fin.send_final_size = 1;
     pending_fin.flow_control.peer_max_stream_data = 0;
+    connection.invalidate_stream_sendability_cache();
     EXPECT_FALSE(connection.has_pending_application_send());
 
     connection.connection_flow_control_.pending_max_data_frame =

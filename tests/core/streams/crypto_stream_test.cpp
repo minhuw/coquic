@@ -1000,6 +1000,61 @@ TEST(QuicCryptoStreamTest, ConsumeUnsentRangesExtendsAdjacentSentPrefixWithMaxOf
     EXPECT_EQ(remaining, 8u);
 }
 
+TEST(QuicCryptoStreamTest, ConsumeUnsentRangesReturnsWhenMaxOffsetMatchesAdjacentSegmentStart) {
+    ReliableSendBuffer buffer;
+    buffer.append(bytes_from_string("abcdef"));
+    ASSERT_EQ(buffer.take_unsent_ranges(3).size(), 1u);
+
+    std::size_t remaining = 8;
+    std::vector<coquic::quic::ByteRange> unsent_ranges;
+    buffer.consume_unsent_ranges(remaining, /*max_offset=*/3, [&](coquic::quic::ByteRange range) {
+        unsent_ranges.push_back(std::move(range));
+    });
+
+    EXPECT_TRUE(unsent_ranges.empty());
+    EXPECT_EQ(remaining, 8u);
+    ASSERT_EQ(buffer.segments_.size(), 2u);
+    EXPECT_EQ(buffer.segments_.begin()->first, 0u);
+    EXPECT_EQ(std::next(buffer.segments_.begin())->first, 3u);
+}
+
+TEST(QuicCryptoStreamTest, ConsumeUnsentRangesReturnsForZeroLengthAdjacentSegment) {
+    ReliableSendBuffer buffer;
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abc"));
+    buffer.segments_.emplace(0, ReliableSendBuffer::Segment{
+                                    .state = ReliableSendBuffer::SegmentState::sent,
+                                    .storage = storage,
+                                    .begin = 0,
+                                    .end = 3,
+                                });
+    buffer.segments_.emplace(3, ReliableSendBuffer::Segment{
+                                    .state = ReliableSendBuffer::SegmentState::unsent,
+                                    .storage = storage,
+                                    .begin = 3,
+                                    .end = 3,
+                                });
+    buffer.segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::sent)] =
+        1;
+    buffer
+        .segment_state_counts_[send_buffer_state_index(ReliableSendBuffer::SegmentState::unsent)] =
+        1;
+    buffer.next_append_offset_ = 3;
+
+    std::size_t remaining = 8;
+    std::vector<coquic::quic::ByteRange> unsent_ranges;
+    buffer.consume_unsent_ranges(remaining, /*max_offset=*/4, [&](coquic::quic::ByteRange range) {
+        unsent_ranges.push_back(std::move(range));
+    });
+
+    EXPECT_TRUE(unsent_ranges.empty());
+    EXPECT_EQ(remaining, 8u);
+    ASSERT_EQ(buffer.segments_.size(), 2u);
+    const auto unsent = std::next(buffer.segments_.begin());
+    ASSERT_NE(unsent, buffer.segments_.end());
+    EXPECT_EQ(unsent->first, 3u);
+    EXPECT_EQ(unsent->second.begin, 3u);
+}
+
 TEST(QuicCryptoStreamTest, EmptyStateSpecificRangeReadsReturnNoOffsetsOrRanges) {
     ReliableSendBuffer empty;
     EXPECT_TRUE(empty.take_ranges(/*max_bytes=*/0).empty());

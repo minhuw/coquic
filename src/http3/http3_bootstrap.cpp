@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -26,7 +27,9 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#if defined(__clang__)
+#if defined(COQUIC_COVERAGE_BUILD)
+#define COQUIC_NO_PROFILE
+#elif defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #else
 #define COQUIC_NO_PROFILE
@@ -224,6 +227,9 @@ struct BootstrapTestHooks {
     std::size_t forced_ssl_read_index = 0;
     std::vector<int> forced_ssl_write_results;
     std::size_t forced_ssl_write_index = 0;
+    std::optional<Http3Response> forced_fetch_proxy_response;
+    std::optional<std::vector<Http3ResponsePart>> forced_stream_proxy_parts;
+    bool forced_stream_proxy_ignores_emit_result = false;
 };
 
 BootstrapTestHooks &bootstrap_test_hooks() {
@@ -314,6 +320,29 @@ int bootstrap_ssl_write(SSL *ssl, const void *buffer, int buffer_size) {
         return hooks.forced_ssl_write_results[hooks.forced_ssl_write_index++];
     }
     return SSL_write(ssl, buffer, buffer_size);
+}
+
+void bootstrap_stream_http_reverse_proxy_response(
+    const Http3ReverseProxyConfig &config, const Http3Request &request,
+    const std::function<bool(Http3ResponsePart)> &emit) {
+    if (bootstrap_test_hooks().forced_stream_proxy_parts.has_value()) {
+        for (auto part : *bootstrap_test_hooks().forced_stream_proxy_parts) {
+            const bool accepted = emit(std::move(part));
+            if (!accepted && !bootstrap_test_hooks().forced_stream_proxy_ignores_emit_result) {
+                break;
+            }
+        }
+        return;
+    }
+    stream_http_reverse_proxy_response(config, request, emit);
+}
+
+Http3Response bootstrap_fetch_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
+                                                          const Http3Request &request) {
+    if (bootstrap_test_hooks().forced_fetch_proxy_response.has_value()) {
+        return *bootstrap_test_hooks().forced_fetch_proxy_response;
+    }
+    return fetch_http_reverse_proxy_response(config, request);
 }
 
 int bootstrap_poll(pollfd *fds, nfds_t count, int timeout_ms) {
@@ -560,9 +589,6 @@ std::optional<BootstrapRequest> parse_bootstrap_request(std::string_view request
     std::size_t line_begin = request_line_end + 2;
     while (line_begin < header_end) {
         const auto line_end = request_text.find("\r\n", line_begin);
-        if (line_end == std::string_view::npos || line_end > header_end) {
-            return std::nullopt;
-        }
         const auto line = request_text.substr(line_begin, line_end - line_begin);
         const auto colon = line.find(':');
         if (colon != std::string_view::npos && colon != 0) {
@@ -626,6 +652,25 @@ Http3Request make_proxy_request(const BootstrapRequest &request) {
     };
 }
 
+BootstrapResponse make_bootstrap_response_from_proxied_response(const BootstrapRequest &request,
+                                                                Http3Response proxied) {
+    BootstrapResponse response{
+        .status_code = proxied.head.status,
+        .content_length = proxied.body.size(),
+        .body =
+            std::string(reinterpret_cast<const char *>(proxied.body.data()), proxied.body.size()),
+    };
+    for (const auto &header : proxied.head.headers) {
+        if (lowercase_ascii(header.name) == "content-type") {
+            response.content_type = header.value;
+        }
+    }
+    if (request.method == "HEAD") {
+        response.body.clear();
+    }
+    return response;
+}
+
 BootstrapResponse make_bootstrap_response(const Http3BootstrapConfig &config,
                                           const BootstrapRequest &request) {
     const auto reverse_proxy_enabled = config.reverse_proxy.has_value();
@@ -639,22 +684,9 @@ BootstrapResponse make_bootstrap_response(const Http3BootstrapConfig &config,
 
     if (reverse_proxy_enabled) {
         auto proxy_request = make_proxy_request(request);
-        auto proxied = fetch_http_reverse_proxy_response(*config.reverse_proxy, proxy_request);
-        BootstrapResponse response{
-            .status_code = proxied.head.status,
-            .content_length = proxied.body.size(),
-            .body = std::string(reinterpret_cast<const char *>(proxied.body.data()),
-                                proxied.body.size()),
-        };
-        for (const auto &header : proxied.head.headers) {
-            if (lowercase_ascii(header.name) == "content-type") {
-                response.content_type = header.value;
-            }
-        }
-        if (request.method == "HEAD") {
-            response.body.clear();
-        }
-        return response;
+        auto proxied =
+            bootstrap_fetch_http_reverse_proxy_response(*config.reverse_proxy, proxy_request);
+        return make_bootstrap_response_from_proxied_response(request, std::move(proxied));
     }
 
     const auto resolved =
@@ -746,15 +778,9 @@ HttpRequestReadProgress append_http_request_bytes(std::string &request_text,
 
     std::optional<std::uint64_t> content_length;
     std::size_t line_begin = request_text.find("\r\n");
-    if (line_begin == std::string::npos) {
-        return HttpRequestReadProgress::invalid;
-    }
     line_begin += 2;
     while (line_begin < header_end) {
         const auto line_end = request_text.find("\r\n", line_begin);
-        if (line_end == std::string::npos || line_end > header_end) {
-            return HttpRequestReadProgress::invalid;
-        }
         const auto line = std::string_view(request_text).substr(line_begin, line_end - line_begin);
         const auto colon = line.find(':');
         if (colon != std::string_view::npos && colon != 0) {
@@ -924,35 +950,36 @@ bool stream_bootstrap_proxy_response(SSL *ssl, const Http3BootstrapConfig &confi
         return write_bootstrap_response(ssl, config, BootstrapResponse{.status_code = 502});
     }
 
-    stream_http_reverse_proxy_response(*reverse_proxy, proxy_request, [&](Http3ResponsePart part) {
-        if (!ok) {
-            return false;
-        }
-        if (!head_sent) {
-            if (!part.head.has_value()) {
-                ok = false;
-                return false;
-            }
-            chunked_body = request.method != "HEAD" && !part.head->content_length.has_value() &&
-                           !part.complete;
-            ok = write_bootstrap_proxy_head(ssl, config, *part.head, chunked_body);
-            head_sent = ok;
+    bootstrap_stream_http_reverse_proxy_response(
+        *reverse_proxy, proxy_request, [&](Http3ResponsePart part) {
             if (!ok) {
                 return false;
             }
-        }
-        if (request.method != "HEAD") {
-            if (chunked_body) {
-                ok = write_bootstrap_chunk(ssl, part.body);
-            } else if (!part.body.empty()) {
-                ok = write_all_ssl(ssl, part.body);
+            if (!head_sent) {
+                if (!part.head.has_value()) {
+                    ok = false;
+                    return false;
+                }
+                chunked_body = request.method != "HEAD" && !part.head->content_length.has_value() &&
+                               !part.complete;
+                ok = write_bootstrap_proxy_head(ssl, config, *part.head, chunked_body);
+                head_sent = ok;
+                if (!ok) {
+                    return false;
+                }
             }
-        }
-        if (ok && part.complete && chunked_body) {
-            ok = write_all_ssl(ssl, "0\r\n\r\n");
-        }
-        return ok;
-    });
+            if (request.method != "HEAD") {
+                if (chunked_body) {
+                    ok = write_bootstrap_chunk(ssl, part.body);
+                } else if (!part.body.empty()) {
+                    ok = write_all_ssl(ssl, part.body);
+                }
+            }
+            if (ok && part.complete && chunked_body) {
+                ok = write_all_ssl(ssl, "0\r\n\r\n");
+            }
+            return ok;
+        });
 
     if (!head_sent && ok) {
         return write_bootstrap_response(ssl, config, BootstrapResponse{.status_code = 502});
@@ -1288,6 +1315,12 @@ bootstrap_resolve_path_under_root_for_test(const std::filesystem::path &root,
     return resolve_bootstrap_path_under_root(root, request_path);
 }
 
+std::optional<std::filesystem::path>
+bootstrap_resolve_existing_path_under_root_for_test(const std::filesystem::path &root,
+                                                    std::string_view request_path) {
+    return resolve_existing_bootstrap_path_under_root(root, request_path);
+}
+
 std::optional<std::string> bootstrap_read_binary_file_for_test(const std::filesystem::path &path) {
     return read_binary_file(path);
 }
@@ -1339,6 +1372,389 @@ bool bootstrap_internal_coverage_for_test() {
     bootstrap_internal_coverage_check(ok, !is_stop_requested(&stop_requested));
     stop_requested.store(true);
     bootstrap_internal_coverage_check(ok, is_stop_requested(&stop_requested));
+    bootstrap_internal_coverage_check(ok, trim_ascii(" \tvalue \r\n") == "value");
+    bootstrap_internal_coverage_check(ok, trim_ascii(" \t\r\n").empty());
+    bootstrap_internal_coverage_check(ok, !parse_size("123x").has_value());
+    bootstrap_internal_coverage_check(ok, authority_from_headers({}).empty());
+    bootstrap_internal_coverage_check(
+        ok, authority_from_headers({{"X-One", "1"}, {"Host", "example.test"}}) == "example.test");
+    {
+        std::size_t timeout_failures = 1;
+        bootstrap_internal_coverage_check(
+            ok, !bootstrap_timeout_option_is_forced_to_fail(SO_ERROR, timeout_failures));
+        bootstrap_internal_coverage_check(ok, timeout_failures == 1);
+        bootstrap_internal_coverage_check(
+            ok, bootstrap_timeout_option_is_forced_to_fail(SO_SNDTIMEO, timeout_failures));
+        bootstrap_internal_coverage_check(ok, timeout_failures == 0);
+    }
+    bootstrap_internal_coverage_check(ok, bootstrap_socket_timeouts_were_set(true, true));
+    bootstrap_internal_coverage_check(ok, !bootstrap_socket_timeouts_were_set(true, false));
+    bootstrap_internal_coverage_check(
+        ok, parse_bootstrap_request("GET / HTTP/1.1\r\nHost: example.test\r\n\r\n").has_value());
+    bootstrap_internal_coverage_check(
+        ok, parse_bootstrap_request("GET / HTTP/1.1\r\nIgnored-Header\r\n\r\n").has_value());
+    bootstrap_internal_coverage_check(
+        ok, parse_bootstrap_request("GET / HTTP/1.1\r\n: ignored\r\n\r\n").has_value());
+    bootstrap_internal_coverage_check(ok,
+                                      parse_bootstrap_request("GET / HTTP/1.1\r\n"
+                                                              "Header-With-Space : value\r\n\r\n")
+                                          .has_value());
+    bootstrap_internal_coverage_check(
+        ok, parse_bootstrap_request(
+                "POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx")
+                .has_value());
+    bootstrap_internal_coverage_check(
+        ok, !parse_bootstrap_request("GET  HTTP/1.1\r\n\r\n").has_value());
+    bootstrap_internal_coverage_check(
+        ok, !parse_bootstrap_request("GET / HTTP/1.1\r\nHeader: value").has_value());
+    bootstrap_internal_coverage_check(ok,
+                                      !parse_bootstrap_request("GET / HTTP/2\r\n\r\n").has_value());
+    bootstrap_internal_coverage_check(ok,
+                                      !parse_bootstrap_request("GET / HTTP/1.1\r\n").has_value());
+    bootstrap_internal_coverage_check(
+        ok, !parse_bootstrap_request("GET / HTTP/1.1\r\n \t : value\r\n\r\n").has_value());
+    bootstrap_internal_coverage_check(
+        ok,
+        !parse_bootstrap_request("GET / HTTP/1.1\r\nContent-Length: 0\r\n\r\nbody").has_value());
+    bootstrap_internal_coverage_check(
+        ok, !parse_bootstrap_request("POST / HTTP/1.1\r\nContent-Length: x\r\n\r\nx").has_value());
+    bootstrap_internal_coverage_check(
+        ok, !parse_bootstrap_request(
+                 "POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx")
+                 .has_value());
+    bootstrap_internal_coverage_check(
+        ok, !parse_bootstrap_request("POST / HTTP/1.1\r\nContent-Length: 2\r\n\r\nx").has_value());
+    bootstrap_internal_coverage_check(
+        ok,
+        !parse_bootstrap_request("POST / HTTP/1.1\r\nContent-Length: 20000\r\n\r\n").has_value());
+    bootstrap_internal_coverage_check(
+        ok, !parse_bootstrap_request("GET / HTTP/1.1\r\n\r\nbody").has_value());
+    {
+        std::string buffered;
+        bootstrap_internal_coverage_check(
+            ok, append_http_request_bytes(buffered, "GET / HTTP/1.1\r\n\r\nbody") ==
+                    HttpRequestReadProgress::invalid);
+    }
+    {
+        std::string buffered = "GET / HTTP/1.1\r\nHeader: value";
+        bootstrap_internal_coverage_check(ok, append_http_request_bytes(buffered, "\r\n\r\n") ==
+                                                  HttpRequestReadProgress::complete);
+    }
+    {
+        std::string buffered;
+        bootstrap_internal_coverage_check(ok, append_http_request_bytes(buffered, "\r\n") ==
+                                                  HttpRequestReadProgress::incomplete);
+        bootstrap_internal_coverage_check(ok, append_http_request_bytes(buffered, "\r\n") ==
+                                                  HttpRequestReadProgress::complete);
+    }
+    {
+        std::string buffered;
+        bootstrap_internal_coverage_check(ok, append_http_request_bytes(buffered, "\r\n\r\n") ==
+                                                  HttpRequestReadProgress::complete);
+    }
+    {
+        std::string buffered;
+        bootstrap_internal_coverage_check(
+            ok, append_http_request_bytes(buffered, "GET / HTTP/1.1\r\n: ignored\r\n\r\n") ==
+                    HttpRequestReadProgress::complete);
+    }
+    {
+        std::string buffered;
+        bootstrap_internal_coverage_check(
+            ok,
+            append_http_request_bytes(buffered, "POST / HTTP/1.1\r\nContent-Length: x\r\n\r\nx") ==
+                HttpRequestReadProgress::invalid);
+    }
+    {
+        std::string buffered;
+        bootstrap_internal_coverage_check(
+            ok,
+            append_http_request_bytes(
+                buffered, "POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx") ==
+                HttpRequestReadProgress::invalid);
+    }
+    {
+        std::string buffered;
+        bootstrap_internal_coverage_check(
+            ok,
+            append_http_request_bytes(
+                buffered, "POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx") ==
+                HttpRequestReadProgress::complete);
+    }
+    {
+        std::string buffered;
+        bootstrap_internal_coverage_check(
+            ok,
+            append_http_request_bytes(buffered, "POST / HTTP/1.1\r\nContent-Length: 1\r\n\r\nxy") ==
+                HttpRequestReadProgress::invalid);
+    }
+    {
+        std::string buffered;
+        bootstrap_internal_coverage_check(
+            ok,
+            append_http_request_bytes(buffered, "POST / HTTP/1.1\r\nContent-Length: 1\r\n\r\n") ==
+                HttpRequestReadProgress::incomplete);
+        bootstrap_internal_coverage_check(ok, append_http_request_bytes(buffered, "x") ==
+                                                  HttpRequestReadProgress::complete);
+    }
+    {
+        std::string buffered;
+        bootstrap_internal_coverage_check(
+            ok, append_http_request_bytes(buffered, "GET / HTTP/1.1\r\nIgnored-Header\r\n\r\n") ==
+                    HttpRequestReadProgress::complete);
+    }
+    {
+        std::string buffered;
+        bootstrap_internal_coverage_check(
+            ok, append_http_request_bytes(buffered,
+                                          "POST / HTTP/1.1\r\nContent-Length: 20000\r\n\r\n") ==
+                    HttpRequestReadProgress::invalid);
+    }
+    {
+        const Http3BootstrapConfig reverse_proxy_config{
+            .reverse_proxy = Http3ReverseProxyConfig{.host = "127.0.0.1", .port = 9},
+        };
+        const BootstrapRequest put_request{
+            .method = "PUT",
+            .target = "/upload",
+        };
+        const auto response = make_bootstrap_response(reverse_proxy_config, put_request);
+        bootstrap_internal_coverage_check(ok, response.status_code == 405);
+        bootstrap_internal_coverage_check(
+            ok, response.allow == std::optional<std::string>(std::string("GET, HEAD, POST")));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const Http3BootstrapConfig reverse_proxy_config{
+            .reverse_proxy = Http3ReverseProxyConfig{.host = "", .port = 9},
+        };
+        const BootstrapRequest request{
+            .method = "GET",
+            .target = "/proxied",
+        };
+        const auto response = make_bootstrap_response(reverse_proxy_config, request);
+        bootstrap_internal_coverage_check(ok, response.status_code == 502);
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const Http3BootstrapConfig reverse_proxy_config{
+            .reverse_proxy = Http3ReverseProxyConfig{.host = "127.0.0.1", .port = 9},
+        };
+        bootstrap_test_hooks().forced_fetch_proxy_response = Http3Response{
+            .head =
+                {
+                    .status = 201,
+                    .headers = {{"Content-Type", "application/json"}},
+                },
+            .body = std::vector<std::byte>{std::byte{'{'}},
+        };
+        const BootstrapRequest request{
+            .method = "GET",
+            .target = "/proxied",
+        };
+        const auto response = make_bootstrap_response(reverse_proxy_config, request);
+        bootstrap_internal_coverage_check(ok, response.status_code == 201);
+        bootstrap_internal_coverage_check(ok, response.content_length == 1);
+        bootstrap_internal_coverage_check(ok, response.content_type == "application/json");
+        bootstrap_internal_coverage_check(ok, response.body == "{");
+    }
+    {
+        const BootstrapRequest head_request{
+            .method = "HEAD",
+            .target = "/proxied",
+        };
+        const auto response = make_bootstrap_response_from_proxied_response(
+            head_request,
+            Http3Response{
+                .head =
+                    {
+                        .status = 204,
+                        .headers = {{"Content-Type", "text/plain"}, {"x-extra", "ignored"}},
+                    },
+                .body = std::vector<std::byte>{std::byte{'o'}, std::byte{'k'}},
+            });
+        bootstrap_internal_coverage_check(ok, response.status_code == 204);
+        bootstrap_internal_coverage_check(ok, response.content_length == 2);
+        bootstrap_internal_coverage_check(ok, response.content_type == "text/plain");
+        bootstrap_internal_coverage_check(ok, response.body.empty());
+    }
+    {
+        reset_bootstrap_test_hooks();
+        bootstrap_internal_coverage_check(
+            ok, write_bootstrap_chunk(nullptr, std::span<const std::byte>{}));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const std::array<std::byte, 1> body{std::byte{'x'}};
+        bootstrap_test_hooks().forced_ssl_write_results = {0};
+        bootstrap_internal_coverage_check(ok, !write_bootstrap_chunk(nullptr, body));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const std::array<std::byte, 1> body{std::byte{'x'}};
+        bootstrap_test_hooks().forced_ssl_write_results = {4096, 0};
+        bootstrap_internal_coverage_check(ok, !write_bootstrap_chunk(nullptr, body));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const std::array<std::byte, 1> body{std::byte{'x'}};
+        bootstrap_test_hooks().forced_ssl_write_results = {4096, 4096, 0};
+        bootstrap_internal_coverage_check(ok, !write_bootstrap_chunk(nullptr, body));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const Http3BootstrapConfig missing_proxy_config{};
+        const BootstrapRequest request{
+            .method = "GET",
+            .target = "/stream",
+        };
+        bootstrap_test_hooks().forced_ssl_write_results = {4096};
+        bootstrap_internal_coverage_check(
+            ok, stream_bootstrap_proxy_response(nullptr, missing_proxy_config, request));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const Http3BootstrapConfig proxy_config{
+            .reverse_proxy = Http3ReverseProxyConfig{.host = "127.0.0.1", .port = 9},
+        };
+        const BootstrapRequest request{
+            .method = "DELETE",
+            .target = "/stream",
+        };
+        bootstrap_test_hooks().forced_ssl_write_results = {4096};
+        bootstrap_internal_coverage_check(
+            ok, stream_bootstrap_proxy_response(nullptr, proxy_config, request));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const Http3BootstrapConfig proxy_config{
+            .reverse_proxy = Http3ReverseProxyConfig{.host = "127.0.0.1", .port = 9},
+        };
+        const BootstrapRequest request{
+            .method = "GET",
+            .target = "/stream",
+        };
+        bootstrap_test_hooks().forced_stream_proxy_parts = std::vector<Http3ResponsePart>{
+            Http3ResponsePart{.body = std::vector<std::byte>{std::byte{'x'}}},
+            Http3ResponsePart{.body = std::vector<std::byte>{std::byte{'y'}}},
+        };
+        bootstrap_test_hooks().forced_stream_proxy_ignores_emit_result = true;
+        bootstrap_internal_coverage_check(
+            ok, !stream_bootstrap_proxy_response(nullptr, proxy_config, request));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const Http3BootstrapConfig proxy_config{
+            .reverse_proxy = Http3ReverseProxyConfig{.host = "127.0.0.1", .port = 9},
+        };
+        const BootstrapRequest request{
+            .method = "GET",
+            .target = "/stream",
+        };
+        bootstrap_test_hooks().forced_stream_proxy_parts = std::vector<Http3ResponsePart>{
+            Http3ResponsePart{
+                .head = Http3ResponseHead{.status = 200},
+                .complete = false,
+            },
+        };
+        bootstrap_test_hooks().forced_ssl_write_results = {0};
+        bootstrap_internal_coverage_check(
+            ok, !stream_bootstrap_proxy_response(nullptr, proxy_config, request));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const Http3BootstrapConfig proxy_config{
+            .reverse_proxy = Http3ReverseProxyConfig{.host = "127.0.0.1", .port = 9},
+        };
+        const BootstrapRequest request{
+            .method = "GET",
+            .target = "/stream",
+        };
+        bootstrap_test_hooks().forced_stream_proxy_parts = std::vector<Http3ResponsePart>{
+            Http3ResponsePart{
+                .head = Http3ResponseHead{.status = 200},
+                .body = std::vector<std::byte>{std::byte{'h'}, std::byte{'i'}},
+                .complete = false,
+            },
+            Http3ResponsePart{.complete = true},
+        };
+        bootstrap_test_hooks().forced_ssl_write_results = {4096, 4096, 4096, 4096, 4096};
+        bootstrap_internal_coverage_check(
+            ok, stream_bootstrap_proxy_response(nullptr, proxy_config, request));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const Http3BootstrapConfig proxy_config{
+            .reverse_proxy = Http3ReverseProxyConfig{.host = "127.0.0.1", .port = 9},
+        };
+        const BootstrapRequest request{
+            .method = "GET",
+            .target = "/stream",
+        };
+        bootstrap_test_hooks().forced_stream_proxy_parts = std::vector<Http3ResponsePart>{
+            Http3ResponsePart{
+                .head = Http3ResponseHead{.status = 200},
+                .complete = true,
+            },
+        };
+        bootstrap_test_hooks().forced_ssl_write_results = {4096};
+        bootstrap_internal_coverage_check(
+            ok, stream_bootstrap_proxy_response(nullptr, proxy_config, request));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const Http3BootstrapConfig proxy_config{
+            .reverse_proxy = Http3ReverseProxyConfig{.host = "127.0.0.1", .port = 9},
+        };
+        const BootstrapRequest request{
+            .method = "HEAD",
+            .target = "/stream",
+        };
+        bootstrap_test_hooks().forced_stream_proxy_parts = std::vector<Http3ResponsePart>{
+            Http3ResponsePart{
+                .head = Http3ResponseHead{.status = 204},
+                .body = std::vector<std::byte>{std::byte{'i'}, std::byte{'g'}},
+                .complete = true,
+            },
+        };
+        bootstrap_test_hooks().forced_ssl_write_results = {4096};
+        bootstrap_internal_coverage_check(
+            ok, stream_bootstrap_proxy_response(nullptr, proxy_config, request));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const Http3BootstrapConfig proxy_config{
+            .reverse_proxy = Http3ReverseProxyConfig{.host = "127.0.0.1", .port = 9},
+        };
+        const BootstrapRequest request{
+            .method = "GET",
+            .target = "/stream",
+        };
+        bootstrap_test_hooks().forced_stream_proxy_parts = std::vector<Http3ResponsePart>{
+            Http3ResponsePart{
+                .head = Http3ResponseHead{.status = 200, .content_length = 2},
+                .body = std::vector<std::byte>{std::byte{'o'}, std::byte{'k'}},
+                .complete = true,
+            },
+        };
+        bootstrap_test_hooks().forced_ssl_write_results = {4096, 0};
+        bootstrap_internal_coverage_check(
+            ok, !stream_bootstrap_proxy_response(nullptr, proxy_config, request));
+    }
+    {
+        reset_bootstrap_test_hooks();
+        const Http3BootstrapConfig proxy_config{
+            .reverse_proxy = Http3ReverseProxyConfig{.host = "127.0.0.1", .port = 9},
+        };
+        const BootstrapRequest request{
+            .method = "GET",
+            .target = "/stream",
+        };
+        bootstrap_test_hooks().forced_stream_proxy_parts = std::vector<Http3ResponsePart>{};
+        bootstrap_test_hooks().forced_ssl_write_results = {4096};
+        bootstrap_internal_coverage_check(
+            ok, stream_bootstrap_proxy_response(nullptr, proxy_config, request));
+    }
 
     const auto exercise_invalid_destination_move = [&](bool fail_pipe) {
         reset_bootstrap_test_hooks();

@@ -2452,6 +2452,78 @@ bool runtime_additional_internal_coverage_for_tests() {
                                          g_recorded_sendto_for_tests.peer_ports ==
                                              std::vector<std::uint16_t>{0});
 
+    {
+        sockaddr_storage ipv6_peer{};
+        auto &ipv6 = *reinterpret_cast<sockaddr_in6 *>(&ipv6_peer);
+        ipv6.sin6_family = AF_INET6;
+        ipv6.sin6_port = htons(8443);
+
+        g_recorded_sendto_for_tests = {};
+        static_cast<void>(record_sendto_for_tests(
+            /*socket_fd=*/34, nullptr, /*length=*/7, /*flags=*/0,
+            reinterpret_cast<const sockaddr *>(&ipv6_peer), sizeof(sockaddr_in6)));
+        runtime_misc_internal_coverage_check(ok, "ipv6 sendto destination records peer port",
+                                             g_recorded_sendto_for_tests.peer_ports ==
+                                                 std::vector<std::uint16_t>{8443});
+    }
+
+    {
+        std::array<std::byte, 3> payload{
+            std::byte{'a'},
+            std::byte{'b'},
+            std::byte{'c'},
+        };
+        iovec iov{
+            .iov_base = payload.data(),
+            .iov_len = payload.size(),
+        };
+        msghdr message{};
+        message.msg_iov = &iov;
+        message.msg_iovlen = 1;
+
+        g_recorded_sendmsg_for_tests = {};
+        runtime_misc_internal_coverage_check(
+            ok, "sendmsg recorder handles messages without control headers",
+            record_sendmsg_for_tests(/*socket_fd=*/35, &message, /*flags=*/0) == 3 &&
+                g_recorded_sendmsg_for_tests.calls == 1 &&
+                g_recorded_sendmsg_for_tests.level == 0 && g_recorded_sendmsg_for_tests.type == 0);
+    }
+
+    {
+        g_recorded_recvmsg_for_tests = {};
+        g_recorded_recvmsg_for_tests.bytes = {
+            std::byte{0x61},
+            std::byte{0x62},
+        };
+        g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_storage);
+
+        std::array<std::byte, 8> receive_buffer{};
+        iovec iov{
+            .iov_base = receive_buffer.data(),
+            .iov_len = receive_buffer.size(),
+        };
+        msghdr message{};
+        message.msg_iov = &iov;
+        message.msg_iovlen = 1;
+
+        runtime_misc_internal_coverage_check(
+            ok, "recvmsg recorder handles messages without peer or control storage",
+            record_recvmsg_for_tests(/*fd=*/0, &message, /*flags=*/0) == 2 &&
+                receive_buffer[0] == std::byte{0x61} && receive_buffer[1] == std::byte{0x62});
+    }
+
+    {
+        QuicCoreResult combined;
+        QuicCoreResult local_error_step;
+        local_error_step.local_error = QuicCoreLocalError{
+            .code = QuicCoreLocalErrorCode::unsupported_operation,
+            .stream_id = std::nullopt,
+        };
+        append_result_for_runtime_tests(combined, std::move(local_error_step));
+        runtime_misc_internal_coverage_check(ok, "append_result propagates local errors",
+                                             combined.local_error.has_value());
+    }
+
     return ok;
 }
 

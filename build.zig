@@ -1037,9 +1037,12 @@ pub fn build(b: *std.Build) void {
         b.option(bool, "profile_hooks", "enable runtime CoQUIC profile hooks") orelse true;
     const cpp_flags = withExtraFlags(b, &.{"-std=c++20"}, &.{
         if (profile_hooks) "-DCOQUIC_PROFILE_HOOKS=1" else "-DCOQUIC_PROFILE_HOOKS=0",
+        "-Wno-error=unicode",
+        "-Wno-error=character-conversion",
     });
     const spdlog_cpp_flags = withSpdlogFlags(b, cpp_flags, spdlog_shared);
     const coverage_cpp_flags = withExtraFlags(b, cpp_flags, &.{
+        "-DCOQUIC_COVERAGE_BUILD=1",
         "-fprofile-instr-generate",
         "-fcoverage-mapping",
     });

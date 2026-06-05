@@ -103,8 +103,23 @@ struct IoUringEngineHarnessForTests {
 
 thread_local IoUringEngineHarnessForTests g_engine_harness{};
 
+struct IoUringProbeHarnessForTests {
+    int socket_calls = 0;
+    int socket_fail_on_call = 0;
+    bool setsockopt_fails = false;
+    bool bind_fails = false;
+    bool sendto_fails = false;
+    int first_fd = -1;
+};
+
+thread_local IoUringProbeHarnessForTests g_probe_harness{};
+
 void reset_io_uring_engine_harness() {
     g_engine_harness = {};
+}
+
+void reset_io_uring_probe_harness() {
+    g_probe_harness = {};
 }
 
 int fail_io_uring_queue_init(unsigned, io_uring *, unsigned) {
@@ -289,6 +304,59 @@ int queue_init_for_engine_test(unsigned, io_uring *, unsigned) {
     return g_engine_harness.queue_init_rc;
 }
 
+int socket_for_probe_test(int, int, int) {
+    ++g_probe_harness.socket_calls;
+    if (g_probe_harness.socket_fail_on_call == g_probe_harness.socket_calls) {
+        errno = EMFILE;
+        return -1;
+    }
+    const int fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
+    if (g_probe_harness.first_fd < 0) {
+        g_probe_harness.first_fd = fd;
+    }
+    return fd;
+}
+
+int setsockopt_for_probe_test(int, int, int, const void *, socklen_t) {
+    if (g_probe_harness.setsockopt_fails) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+}
+
+int bind_for_probe_test(int, const sockaddr *, socklen_t) {
+    if (g_probe_harness.bind_fails) {
+        errno = EADDRINUSE;
+        return -1;
+    }
+    return 0;
+}
+
+int getsockname_for_probe_test(int, sockaddr *address, socklen_t *address_length) {
+    if (address == nullptr || address_length == nullptr ||
+        *address_length < static_cast<socklen_t>(sizeof(sockaddr_in))) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(address);
+    ipv4 = {};
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(23456);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    *address_length = sizeof(sockaddr_in);
+    return 0;
+}
+
+ssize_t sendto_for_probe_test(int, const void *, size_t length, int, const sockaddr *, socklen_t) {
+    if (g_probe_harness.sendto_fails) {
+        errno = EIO;
+        return -1;
+    }
+    return static_cast<ssize_t>(length);
+}
+
 io_uring_sqe *get_sqe_for_engine_test(io_uring *) {
     if (g_engine_harness.get_sqe_returns_null) {
         return nullptr;
@@ -348,7 +416,9 @@ int wait_cqe_for_engine_test(io_uring *, io_uring_cqe **cqe_ptr) {
     }
 
     g_engine_harness.cqe = {};
-    g_engine_harness.cqe.user_data = completion.user_data;
+    g_engine_harness.cqe.user_data = completion.user_data == 0 && g_probe_harness.first_fd >= 0
+                                         ? static_cast<std::uint64_t>(g_probe_harness.first_fd)
+                                         : completion.user_data;
     g_engine_harness.cqe.res = completion.res;
     *cqe_ptr = &g_engine_harness.cqe;
     return 0;
@@ -377,6 +447,21 @@ coquic::io::test::IoUringBackendOpsOverride io_uring_ops_for_engine_tests() {
         .wait_cqe_timeout_ms_fn = &wait_cqe_timeout_for_engine_test,
         .cqe_seen_fn = &cqe_seen_for_engine_test,
     };
+}
+
+coquic::io::test::SocketIoBackendOpsOverride socket_ops_for_probe_tests() {
+    return coquic::io::test::SocketIoBackendOpsOverride{
+        .socket_fn = &socket_for_probe_test,
+        .bind_fn = &bind_for_probe_test,
+        .setsockopt_fn = &setsockopt_for_probe_test,
+        .getsockname_fn = &getsockname_for_probe_test,
+        .sendto_fn = &sendto_for_probe_test,
+    };
+}
+
+void initialize_probe_engine_for_tests(coquic::io::IoUringIoEngine &engine) {
+    engine.initialized_ = true;
+    engine.healthy_ = true;
 }
 
 bool io_uring_send_returns_when_receive_completion_precedes_send_completion() {
@@ -1340,6 +1425,83 @@ TEST(IoUringBackendTest, EnableReceiveFallbackIsIdempotentAndClearsPendingComple
     engine.enable_receive_fallback();
     EXPECT_EQ(engine.receive_fallback_.get(), first_fallback);
     EXPECT_TRUE(engine.pending_completions_.empty());
+}
+
+TEST(IoUringBackendTest, ProbeRecvmsgSupportRequiresDefaultOpsWhenRequested) {
+    reset_io_uring_engine_harness();
+    reset_io_uring_probe_harness();
+    const coquic::io::test::ScopedIoUringBackendOpsOverride io_uring_ops{
+        io_uring_ops_for_engine_tests()};
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride socket_ops{
+        socket_ops_for_probe_tests()};
+
+    coquic::io::IoUringIoEngine engine;
+    initialize_probe_engine_for_tests(engine);
+    engine.probe_recvmsg_support();
+
+    EXPECT_EQ(g_probe_harness.socket_calls, 0);
+    EXPECT_FALSE(engine.use_poll_receive_);
+}
+
+TEST(IoUringBackendTest, ProbeRecvmsgSupportCoversEarlySocketFailures) {
+    const auto run_probe = [](auto configure) {
+        reset_io_uring_engine_harness();
+        reset_io_uring_probe_harness();
+        configure();
+        const coquic::io::test::ScopedIoUringBackendOpsOverride io_uring_ops{
+            io_uring_ops_for_engine_tests()};
+        const coquic::io::test::ScopedSocketIoBackendOpsOverride socket_ops{
+            socket_ops_for_probe_tests()};
+
+        coquic::io::IoUringIoEngine engine;
+        initialize_probe_engine_for_tests(engine);
+        engine.probe_recvmsg_support(false);
+        EXPECT_FALSE(engine.use_poll_receive_);
+    };
+
+    run_probe([] { g_probe_harness.socket_fail_on_call = 1; });
+    run_probe([] { g_probe_harness.setsockopt_fails = true; });
+    run_probe([] { g_probe_harness.bind_fails = true; });
+    run_probe([] { g_engine_harness.get_sqe_returns_null = true; });
+    run_probe([] { g_engine_harness.submit_rc_for_recv = -EIO; });
+    run_probe([] { g_probe_harness.socket_fail_on_call = 2; });
+    run_probe([] { g_probe_harness.sendto_fails = true; });
+    run_probe([] { g_engine_harness.wait_cqe_rc_when_empty = -EAGAIN; });
+}
+
+TEST(IoUringBackendTest, ProbeRecvmsgSupportCompletesWithoutFallbackForSuccessfulCompletion) {
+    reset_io_uring_engine_harness();
+    reset_io_uring_probe_harness();
+    const coquic::io::test::ScopedIoUringBackendOpsOverride io_uring_ops{
+        io_uring_ops_for_engine_tests()};
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride socket_ops{
+        socket_ops_for_probe_tests()};
+
+    coquic::io::IoUringIoEngine engine;
+    initialize_probe_engine_for_tests(engine);
+    enqueue_completion_for_engine_test(0, 1);
+    engine.probe_recvmsg_support(false);
+
+    ASSERT_GE(g_probe_harness.first_fd, 0);
+    EXPECT_EQ(g_engine_harness.receive_arm_count_by_fd[g_probe_harness.first_fd], 1);
+    EXPECT_FALSE(engine.use_poll_receive_);
+}
+
+TEST(IoUringBackendTest, ProbeRecvmsgSupportEnablesFallbackAfterEinvalCompletion) {
+    reset_io_uring_engine_harness();
+    reset_io_uring_probe_harness();
+    const coquic::io::test::ScopedIoUringBackendOpsOverride io_uring_ops{
+        io_uring_ops_for_engine_tests()};
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride socket_ops{
+        socket_ops_for_probe_tests()};
+
+    coquic::io::IoUringIoEngine engine;
+    initialize_probe_engine_for_tests(engine);
+    enqueue_completion_for_engine_test(0, -EINVAL);
+    engine.probe_recvmsg_support(false);
+
+    EXPECT_TRUE(engine.use_poll_receive_);
+    EXPECT_NE(engine.receive_fallback_, nullptr);
 }
 
 TEST(IoUringBackendTest, InternalCoverageHookExercisesIoUringBackendColdPaths) {

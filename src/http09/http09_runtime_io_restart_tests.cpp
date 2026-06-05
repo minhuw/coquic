@@ -285,6 +285,28 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
     }
 
     {
+        g_recorded_setsockopt_for_tests = {};
+        int option_value = 7;
+        runtime_io_restart_coverage_check(ok, "setsockopt recorder copies full option values",
+                                          record_setsockopt_for_tests(/*fd=*/0, IPPROTO_IP, IP_TOS,
+                                                                      &option_value,
+                                                                      sizeof(option_value)) == 0);
+        runtime_io_restart_coverage_check(
+            ok, "setsockopt recorder handles short option values",
+            record_setsockopt_for_tests(/*fd=*/0, IPPROTO_IPV6, IPV6_RECVTCLASS, &option_value,
+                                        sizeof(option_value) - 1) == 0);
+        runtime_io_restart_coverage_check(
+            ok, "setsockopt recorder handles null option values",
+            record_setsockopt_for_tests(/*fd=*/0, SOL_SOCKET, SO_REUSEADDR, nullptr, 0) == 0);
+        runtime_io_restart_coverage_check(ok,
+                                          "setsockopt recorder stores copied and default values",
+                                          g_recorded_setsockopt_for_tests.calls.size() == 3 &&
+                                              g_recorded_setsockopt_for_tests.calls[0].value == 7 &&
+                                              g_recorded_setsockopt_for_tests.calls[1].value == 0 &&
+                                              g_recorded_setsockopt_for_tests.calls[2].value == 0);
+    }
+
+    {
         const test::ScopedHttp09RuntimeOpsOverride runtime_ops{
             Http09RuntimeOpsOverride{
                 .recvfrom_fn = [](int, void *, size_t, int, sockaddr *, socklen_t *) -> ssize_t {
@@ -296,6 +318,28 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
         runtime_io_restart_coverage_check(
             ok, "recvfrom override is not legacy when recvmsg is also overridden",
             !has_legacy_recvfrom_override());
+    }
+
+    {
+        errno = 0;
+        runtime_io_restart_coverage_check(ok, "recvmsg recorder rejects null messages",
+                                          record_recvmsg_for_tests(/*fd=*/0, nullptr, 0) == -1 &&
+                                              errno == EINVAL);
+
+        msghdr missing_iov{};
+        errno = 0;
+        runtime_io_restart_coverage_check(
+            ok, "recvmsg recorder rejects messages without iov",
+            record_recvmsg_for_tests(/*fd=*/0, &missing_iov, 0) == -1 && errno == EINVAL);
+
+        std::array<iovec, 1> zero_iov{};
+        msghdr zero_iov_count{};
+        zero_iov_count.msg_iov = zero_iov.data();
+        zero_iov_count.msg_iovlen = 0;
+        errno = 0;
+        runtime_io_restart_coverage_check(
+            ok, "recvmsg recorder rejects zero iov count",
+            record_recvmsg_for_tests(/*fd=*/0, &zero_iov_count, 0) == -1 && errno == EINVAL);
     }
 
     sockaddr_storage ipv4_peer{};
@@ -313,6 +357,27 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
         ok, "short ipv6 peer is not treated as ipv4 mapped",
         !is_ipv4_mapped_ipv6_address(short_ipv6_peer,
                                      static_cast<socklen_t>(sizeof(sockaddr_in6) - 1)));
+
+    {
+        QuicIoRemote invalid_remote{};
+        invalid_remote.family = AF_UNSPEC;
+        runtime_io_restart_coverage_check(ok, "invalid remote family has no peer port",
+                                          peer_port_for_remote_for_tests(invalid_remote) == 0);
+
+        QuicIoRemote short_ipv4_remote{};
+        short_ipv4_remote.family = AF_INET;
+        std::memcpy(&short_ipv4_remote.peer, &ipv4_peer, sizeof(ipv4_peer));
+        short_ipv4_remote.peer_len = static_cast<socklen_t>(sizeof(sockaddr_in) - 1);
+        runtime_io_restart_coverage_check(ok, "short ipv4 remote has no peer port",
+                                          peer_port_for_remote_for_tests(short_ipv4_remote) == 0);
+
+        QuicIoRemote short_ipv6_remote{};
+        short_ipv6_remote.family = AF_INET6;
+        std::memcpy(&short_ipv6_remote.peer, &short_ipv6_peer, sizeof(short_ipv6_peer));
+        short_ipv6_remote.peer_len = static_cast<socklen_t>(sizeof(sockaddr_in6) - 1);
+        runtime_io_restart_coverage_check(ok, "short ipv6 remote has no peer port",
+                                          peer_port_for_remote_for_tests(short_ipv6_remote) == 0);
+    }
 
     msghdr truncated_message{};
     truncated_message.msg_flags = MSG_CTRUNC;
@@ -408,6 +473,26 @@ bool runtime_low_level_socket_and_ecn_coverage_for_tests() {
             configure_linux_ecn_socket_options(LinuxSocketDescriptor{.fd = 0}, AF_UNSPEC));
         runtime_io_restart_coverage_check(ok, "unsupported family leaves setsockopt untouched",
                                           g_recorded_setsockopt_for_tests.calls.empty());
+    }
+
+    {
+        ScriptedIoBackendForTests backend;
+        QuicIoRemote remote{};
+        runtime_io_restart_coverage_check(ok, "scripted backend defaults to no route",
+                                          !backend.ensure_route(remote).has_value());
+    }
+
+    {
+        const auto fallback_server_loop_case =
+            make_server_loop_case_for_tests(static_cast<ServerLoopCaseForTests>(255));
+        const auto fallback_backend_case = make_server_backend_scheduling_case_for_tests(
+            static_cast<ServerBackendSchedulingCaseForTests>(255));
+        runtime_io_restart_coverage_check(
+            ok, "invalid server loop coverage case falls back to default script",
+            !fallback_server_loop_case.receive_results.empty());
+        runtime_io_restart_coverage_check(
+            ok, "invalid backend scheduling coverage case falls back to default script",
+            !fallback_backend_case.wait_results.empty());
     }
 
     {

@@ -1563,6 +1563,19 @@ bool runtime_server_endpoint_driver_coverage_for_tests() {
     }
 
     {
+        QuicCore client(make_http09_client_core_config(Http09RuntimeConfig{
+            .mode = Http09RuntimeMode::client,
+        }));
+        QuicCore failing_server = make_failing_server_core_for_tests();
+        QuicCoreTimePoint step_now = now();
+        const auto accepted = drive_live_server_endpoint_handshake_for_tests(
+            client, /*route_handle=*/17, failing_server, step_now);
+        server_loop_coverage_check(coverage_ok,
+                                   "live server handshake helper reports failed handshakes",
+                                   !accepted.has_value() && !client.is_handshake_complete());
+    }
+
+    {
         ScopedRuntimeTempDirForTests document_root;
         document_root.write_file("small.txt", "hello");
         const Http09RuntimeConfig server_config{

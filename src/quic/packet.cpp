@@ -675,13 +675,6 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
                                                                 reader.offset() + payload_offset +
                                                                     decoded.error().offset);
             }
-            if (!frame_allowed_in_packet_type(decoded.value().frame,
-                                              ProtectedPacketType::one_rtt)) {
-                return CodecResult<PacketDecodeResult>::failure(
-                    CodecErrorCode::frame_not_allowed_in_packet_type,
-                    reader.offset() + payload_offset);
-            }
-
             frames.push_back(decoded.value().frame);
             payload_offset += decoded.value().bytes_consumed;
         }

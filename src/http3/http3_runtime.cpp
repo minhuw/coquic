@@ -32,6 +32,14 @@
 #include <variant>
 #include <vector>
 
+#if defined(COQUIC_COVERAGE_BUILD)
+#define COQUIC_NO_PROFILE
+#elif defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+
 namespace coquic::http3 {
 
 bool runtime_misc_internal_coverage_for_test();
@@ -41,6 +49,7 @@ std::uint64_t runtime_connection_handle_effect_coverage_mask_for_test();
 bool runtime_additional_internal_coverage_for_test();
 bool runtime_server_local_error_without_connection_coverage_for_test();
 bool runtime_tail_internal_coverage_for_test();
+bool runtime_streaming_reverse_proxy_dispatcher_coverage_for_test();
 std::optional<io::QuicIoEvent> first_send_datagram_as_rx_event(const quic::QuicCoreResult &result,
                                                                quic::QuicCoreTimePoint now);
 std::optional<io::QuicIoEvent> make_live_initial_rx_event(const Http3RuntimeConfig &client_config,
@@ -56,6 +65,34 @@ int finish_http3_server_run(int runtime_exit_code,
 struct Http3ServerEndpointTestAccess {
     static Http3Connection &connection(Http3ServerEndpoint &endpoint) {
         return endpoint.connection_;
+    }
+
+    static void add_pending_deferred_response(Http3ServerEndpoint &endpoint,
+                                              std::uint64_t stream_id, Http3RequestHead head) {
+        endpoint.pending_deferred_responses_.insert_or_assign(
+            stream_id, Http3ServerEndpoint::PendingDeferredResponse{.head = std::move(head)});
+    }
+
+    static bool start_deferred_request(Http3ServerEndpoint &endpoint, std::uint64_t stream_id,
+                                       Http3Request request) {
+        return endpoint.config_.deferred_request_handler != nullptr &&
+               endpoint.config_.deferred_request_handler(stream_id, std::move(request));
+    }
+
+    static std::optional<Http3ResponsePart>
+    take_deferred_response_part(Http3ServerEndpoint &endpoint, std::uint64_t stream_id) {
+        if (!endpoint.config_.deferred_response_part_handler) {
+            return std::nullopt;
+        }
+        return endpoint.config_.deferred_response_part_handler(stream_id);
+    }
+
+    static bool cancel_deferred_request(Http3ServerEndpoint &endpoint, std::uint64_t stream_id) {
+        if (!endpoint.config_.deferred_request_cancel_handler) {
+            return false;
+        }
+        endpoint.config_.deferred_request_cancel_handler(stream_id);
+        return true;
     }
 };
 
@@ -404,6 +441,11 @@ std::size_t &force_server_polled_submit_failure_count_for_test() {
 }
 
 std::size_t &force_client_initial_submit_failure_count_for_test() {
+    static std::size_t count = 0;
+    return count;
+}
+
+std::size_t &force_streaming_reverse_proxy_thread_failure_count_for_test() {
     static std::size_t count = 0;
     return count;
 }
@@ -1088,6 +1130,11 @@ class StreamingReverseProxyDispatcher {
         }
 
         try {
+            if (consume_forced_count(
+                    force_streaming_reverse_proxy_thread_failure_count_for_test())) {
+                throw std::system_error(
+                    std::make_error_code(std::errc::resource_unavailable_try_again));
+            }
             job_it->second.worker =
                 std::thread([config = config_, request = std::move(request), queue]() mutable {
                     stream_http_reverse_proxy_response(config, request,
@@ -1149,6 +1196,10 @@ class StreamingReverseProxyDispatcher {
             }
         }
         jobs_.clear();
+    }
+
+    COQUIC_NO_PROFILE bool has_job_for_test(std::uint64_t stream_id) const {
+        return jobs_.contains(stream_id);
     }
 
   private:
@@ -1265,6 +1316,96 @@ bool runtime_additional_internal_coverage_check(bool &ok, bool condition, std::s
 bool runtime_tail_internal_coverage_check(bool &ok, bool condition, std::string_view label) {
     ok &= runtime_internal_check(condition, "runtime_tail_internal_coverage_for_test", label);
     return condition;
+}
+
+COQUIC_NO_PROFILE bool streaming_reverse_proxy_dispatcher_coverage_impl_for_test() {
+    bool ok = true;
+    const auto record = [&ok](bool condition) {
+        ok = static_cast<bool>(static_cast<unsigned>(ok) & static_cast<unsigned>(condition));
+        return condition;
+    };
+
+    StreamingReverseProxyDispatcher dispatcher(Http3ReverseProxyConfig{
+        .host = "127.0.0.1",
+        .port = 9,
+    });
+    record(!dispatcher.take_part(100).has_value());
+    dispatcher.cancel(100);
+    dispatcher.cancel_all();
+
+    record(dispatcher.start(1, Http3Request{.head = {.method = "GET", .path = "/"}}));
+    record(dispatcher.start(1, Http3Request{.head = {.method = "GET", .path = "/again"}}));
+
+    std::optional<Http3ResponsePart> part;
+    for (int attempt = 0; attempt < 100 && !part.has_value(); ++attempt) {
+        part = dispatcher.take_part(1);
+        if (!part.has_value()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+    }
+    record(part.has_value());
+    if (part.has_value()) {
+        record(part->head.has_value());
+        if (part->head.has_value()) {
+            record(part->head->status == 502);
+        }
+        record(part->complete);
+    }
+    dispatcher.drain_finished();
+    dispatcher.cancel(1);
+    dispatcher.wait_for_all();
+
+    constexpr std::uint64_t drain_stream_id = 2;
+    record(dispatcher.start(drain_stream_id,
+                            Http3Request{.head = {.method = "GET", .path = "/drain"}}));
+    dispatcher.cancel(drain_stream_id);
+    for (int attempt = 0; attempt < 100 && dispatcher.has_job_for_test(drain_stream_id);
+         ++attempt) {
+        dispatcher.drain_finished();
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    dispatcher.drain_finished();
+    record(!dispatcher.has_job_for_test(drain_stream_id));
+    dispatcher.wait_for_all();
+
+    force_streaming_reverse_proxy_thread_failure_count_for_test() = 1;
+    record(dispatcher.start(3, Http3Request{.head = {.method = "GET", .path = "/forced-failure"}}));
+    const auto forced_failure = dispatcher.take_part(3);
+    record(forced_failure.has_value());
+    if (forced_failure.has_value()) {
+        record(forced_failure->head.has_value());
+        if (forced_failure->head.has_value()) {
+            record(forced_failure->head->status == 503);
+        }
+        record(forced_failure->complete);
+    }
+    dispatcher.wait_for_all();
+
+    std::vector<std::uint64_t> unavailable_streams;
+    unavailable_streams.reserve(StreamingReverseProxyDispatcher::kMaxJobsPerConnection);
+    for (std::uint64_t stream_id = 10;
+         stream_id < 10 + StreamingReverseProxyDispatcher::kMaxJobsPerConnection; ++stream_id) {
+        record(dispatcher.start(stream_id, Http3Request{.head = {.method = "GET", .path = "/"}}));
+        unavailable_streams.push_back(stream_id);
+    }
+    record(dispatcher.start(99, Http3Request{.head = {.method = "GET", .path = "/overflow"}}));
+    const auto unavailable = dispatcher.take_part(99);
+    record(unavailable.has_value());
+    if (unavailable.has_value()) {
+        record(unavailable->head.has_value());
+        if (unavailable->head.has_value()) {
+            record(unavailable->head->status == 503);
+            record(unavailable->head->content_length == 0u);
+        }
+        record(unavailable->complete);
+    }
+    for (const auto stream_id : unavailable_streams) {
+        dispatcher.cancel(stream_id);
+    }
+    dispatcher.cancel_all();
+    dispatcher.wait_for_all();
+
+    return ok;
 }
 
 constexpr std::uint64_t kRuntimeLoopMaskEnsureRoute = 1ull << 0;
@@ -1395,6 +1536,10 @@ class Http3ServerRuntime {
                         : nullptr;
                 endpoints_.try_emplace(lifecycle->connection,
                                        Http3ServerEndpoint(Http3ServerConfig{
+                                           .fallback_request_handler =
+                                               [config = config_](const Http3Request &request) {
+                                                   return runtime_server_response(config, request);
+                                               },
                                            .deferred_request_handler =
                                                streaming_proxy == nullptr
                                                    ? std::function<bool(std::uint64_t, Http3Request)>()
@@ -1410,10 +1555,6 @@ class Http3ServerRuntime {
                                                    : [streaming_proxy](std::uint64_t stream_id) {
                                                          return streaming_proxy->take_part(stream_id);
                                                      },
-                                           .fallback_request_handler =
-                                               [config = config_](const Http3Request &request) {
-                                                   return runtime_server_response(config, request);
-                                               },
                                            .deferred_request_cancel_handler =
                                                streaming_proxy == nullptr
                                                    ? std::function<void(std::uint64_t)>()
@@ -1773,6 +1914,10 @@ class Http3ClientRuntime {
 
 } // namespace
 
+COQUIC_NO_PROFILE bool runtime_streaming_reverse_proxy_dispatcher_coverage_for_test() {
+    return streaming_reverse_proxy_dispatcher_coverage_impl_for_test();
+}
+
 Http3Response runtime_server_response_for_test(const std::filesystem::path &document_root,
                                                const Http3Request &request) {
     return runtime_server_response(
@@ -1911,6 +2056,8 @@ bool runtime_misc_internal_coverage_for_test() {
     }
 
     // Header, backend, authority, and URL parsing paths are exercised together.
+    runtime_misc_internal_coverage_check(ok, !parse_size_arg("12x").has_value(),
+                                         "parse_size_arg rejects trailing junk after digits");
     {
         const auto parsed = parse_header_arg(" X-Test : value \t");
         const auto parsed_header = parsed.value_or(Http3RuntimeHeader{});
@@ -1921,6 +2068,15 @@ bool runtime_misc_internal_coverage_for_test() {
         runtime_misc_internal_coverage_check(ok, parsed_header.value == "value",
                                              "parse_header_arg trims header values");
     }
+    runtime_misc_internal_coverage_check(ok, !parse_header_arg("   : value").has_value(),
+                                         "parse_header_arg rejects whitespace-only names");
+    runtime_misc_internal_coverage_check(ok, !parse_header_arg("x-empty:   ").has_value(),
+                                         "parse_header_arg rejects empty values after trimming");
+    runtime_misc_internal_coverage_check(ok, !parse_header_arg("content-length: 1").has_value(),
+                                         "parse_header_arg rejects content-length headers");
+    runtime_misc_internal_coverage_check(
+        ok, !parse_header_arg("transfer-encoding: chunked").has_value(),
+        "parse_header_arg rejects transfer-encoding headers");
     runtime_misc_internal_coverage_check(
         ok,
         parse_io_backend_arg("socket") ==
@@ -2007,6 +2163,17 @@ bool runtime_misc_internal_coverage_for_test() {
     runtime_misc_internal_coverage_check(
         ok, !resolve_runtime_path_under_root(document_root.path(), "/./payload.txt").has_value(),
         "resolve_runtime_path_under_root rejects raw dot path segments");
+    runtime_misc_internal_coverage_check(ok, document_root.write_file("page.html", "html"),
+                                         "write temp HTML fallback fixture");
+    {
+        const auto fallback =
+            resolve_existing_runtime_path_under_root(document_root.path(), "/page");
+        runtime_misc_internal_coverage_check(ok, fallback.has_value(),
+                                             "resolve_existing_runtime_path_under_root finds HTML");
+        runtime_misc_internal_coverage_check(
+            ok, fallback.value_or(std::filesystem::path{}).filename() == "page.html",
+            "resolve_existing_runtime_path_under_root returns HTML fallback path");
+    }
 
     // MIME mapping covers adjacent HTML suffixes and the WebAssembly special case.
     runtime_misc_internal_coverage_check(
@@ -2232,6 +2399,14 @@ bool runtime_misc_internal_coverage_for_test() {
                                          effect_is_endpoint_relevant(quic::QuicCoreEffect{
                                              quic::QuicCoreReceiveStreamData{.connection = 7}}),
                                          "receive stream effects are endpoint relevant");
+    runtime_misc_internal_coverage_check(ok,
+                                         effect_is_endpoint_relevant(quic::QuicCoreEffect{
+                                             quic::QuicCorePeerResetStream{.connection = 7}}),
+                                         "peer reset effects are endpoint relevant");
+    runtime_misc_internal_coverage_check(ok,
+                                         effect_is_endpoint_relevant(quic::QuicCoreEffect{
+                                             quic::QuicCorePeerStopSending{.connection = 7}}),
+                                         "peer stop sending effects are endpoint relevant");
 
     {
         quic::QuicCoreResult result;
@@ -3005,6 +3180,15 @@ bool runtime_additional_internal_coverage_for_test() {
 
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
+        force_server_due_timer_count_for_test() = 1;
+        Http3ServerRuntime runtime(server_config, server_endpoint_config, std::move(backend));
+        runtime_additional_internal_coverage_check(
+            ok, runtime.run() == 1,
+            "server runtime exits after successfully handling a forced due timer");
+    }
+
+    {
+        auto backend = std::make_unique<RuntimeTestBackend>();
         backend->wait_results.push_back(io::QuicIoEvent{
             .kind = io::QuicIoEvent::Kind::timer_expired,
             .now = now,
@@ -3014,6 +3198,19 @@ bool runtime_additional_internal_coverage_for_test() {
         runtime_additional_internal_coverage_check(
             ok, runtime.run() == 1,
             "server runtime fails when timer events trigger handle_result failures");
+    }
+
+    {
+        auto backend = std::make_unique<RuntimeTestBackend>();
+        backend->wait_results.push_back(io::QuicIoEvent{
+            .kind = io::QuicIoEvent::Kind::timer_expired,
+            .now = now,
+        });
+        backend->wait_results.push_back(std::nullopt);
+        Http3ServerRuntime runtime(server_config, server_endpoint_config, std::move(backend));
+        runtime_additional_internal_coverage_check(
+            ok, runtime.run() == 1,
+            "server runtime continues after timer events that produce no work");
     }
 
     {
@@ -3177,6 +3374,93 @@ bool runtime_additional_internal_coverage_for_test() {
             "server runtime drains synthetic request updates without failing");
     }
 
+    // Reverse-proxy server endpoints install deferred callbacks and affect wait wakeups.
+    {
+        auto proxy_config = server_config;
+        proxy_config.reverse_proxy = Http3ReverseProxyConfig{
+            .host = "127.0.0.1",
+            .port = 9,
+        };
+        auto backend = std::make_unique<RuntimeTestBackend>();
+        Http3ServerRuntime runtime(proxy_config, server_endpoint_config, std::move(backend));
+
+        quic::QuicCoreResult accepted;
+        accepted.effects.push_back(quic::QuicCoreEffect{
+            quic::QuicCoreConnectionLifecycleEvent{
+                .connection = 41,
+                .event = quic::QuicCoreConnectionLifecycle::accepted,
+            },
+        });
+        runtime_additional_internal_coverage_check(
+            ok, runtime.handle_result(accepted, now),
+            "server runtime accepts reverse-proxy connections");
+        runtime_additional_internal_coverage_check(ok, runtime.endpoints_.contains(41),
+                                                   "server runtime stores reverse-proxy endpoints");
+
+        auto &endpoint = runtime.endpoints_[41];
+        runtime_additional_internal_coverage_check(
+            ok,
+            Http3ServerEndpointTestAccess::start_deferred_request(
+                endpoint, 7, Http3Request{.head = {.method = "GET", .path = "/deferred"}}),
+            "reverse-proxy deferred request handler starts work");
+        Http3ServerEndpointTestAccess::add_pending_deferred_response(
+            endpoint, 7, Http3RequestHead{.method = "GET", .path = "/deferred"});
+        runtime_additional_internal_coverage_check(
+            ok, runtime.has_pending_deferred_responses(),
+            "server runtime detects pending deferred responses");
+
+        const auto later_core_wakeup = now + std::chrono::seconds{1};
+        const auto proxy_wakeup = runtime.next_wait_wakeup(now, later_core_wakeup);
+        runtime_additional_internal_coverage_check(
+            ok, proxy_wakeup.has_value() && *proxy_wakeup < later_core_wakeup,
+            "server runtime prefers reverse-proxy poll wakeups before later core wakeups");
+
+        const auto earlier_core_wakeup = now + std::chrono::milliseconds{1};
+        runtime_additional_internal_coverage_check(
+            ok, runtime.next_wait_wakeup(now, earlier_core_wakeup) == earlier_core_wakeup,
+            "server runtime keeps earlier core wakeups before reverse-proxy polling");
+        std::optional<Http3ResponsePart> proxy_part;
+        for (int attempt = 0; attempt < 100 && !proxy_part.has_value(); ++attempt) {
+            proxy_part = Http3ServerEndpointTestAccess::take_deferred_response_part(endpoint, 7);
+            if (!proxy_part.has_value()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            }
+        }
+        runtime_additional_internal_coverage_check(
+            ok, proxy_part.has_value(),
+            "reverse-proxy deferred response part handler returns an unavailable part");
+        runtime_additional_internal_coverage_check(
+            ok, Http3ServerEndpointTestAccess::cancel_deferred_request(endpoint, 7),
+            "reverse-proxy deferred request cancel handler is installed");
+    }
+
+    {
+        Http3ServerEndpoint endpoint;
+        runtime_additional_internal_coverage_check(
+            ok,
+            !Http3ServerEndpointTestAccess::start_deferred_request(
+                endpoint, 1, Http3Request{.head = {.method = "GET", .path = "/"}}),
+            "test access reports absent deferred request handlers");
+        Http3ServerEndpoint rejecting_endpoint(Http3ServerConfig{
+            .deferred_request_handler =
+                [](std::uint64_t, Http3Request) {
+                    return false;
+                },
+        });
+        runtime_additional_internal_coverage_check(
+            ok,
+            !Http3ServerEndpointTestAccess::start_deferred_request(
+                rejecting_endpoint, 2, Http3Request{.head = {.method = "GET", .path = "/"}}),
+            "test access propagates deferred request handler rejection");
+        runtime_additional_internal_coverage_check(
+            ok,
+            !Http3ServerEndpointTestAccess::take_deferred_response_part(endpoint, 1).has_value(),
+            "test access reports absent deferred response part handlers");
+        runtime_additional_internal_coverage_check(
+            ok, !Http3ServerEndpointTestAccess::cancel_deferred_request(endpoint, 1),
+            "test access reports absent deferred cancel handlers");
+    }
+
     // Server command submission and endpoint polling failure paths are forced directly.
     {
         auto backend = std::make_unique<RuntimeTestBackend>();
@@ -3229,6 +3513,56 @@ bool runtime_additional_internal_coverage_for_test() {
                                     },
                                     now),
             "server drain_endpoint fails when a polled update forces submission failure");
+    }
+
+    {
+        auto backend = std::make_unique<RuntimeTestBackend>();
+        Http3ServerRuntime runtime(server_config, server_endpoint_config, std::move(backend));
+        auto &endpoint = runtime.endpoints_[14];
+        auto &connection = Http3ServerEndpointTestAccess::connection(endpoint);
+        Http3ConnectionTestAccess::queue_core_input(connection, quic::QuicCoreCloseConnection{
+                                                                    .application_error_code = 42,
+                                                                });
+        runtime_additional_internal_coverage_check(
+            ok, runtime.poll_endpoints(now),
+            "server poll_endpoints drains queued endpoint core inputs");
+        runtime_additional_internal_coverage_check(
+            ok, !runtime.endpoints_.contains(14),
+            "server poll_endpoints observes endpoint erasure after core-input updates");
+    }
+
+    {
+        auto backend = std::make_unique<RuntimeTestBackend>();
+        Http3ServerRuntime runtime(server_config, server_endpoint_config, std::move(backend));
+        Http3ServerEndpoint failed_endpoint;
+        static_cast<void>(failed_endpoint.on_core_result(
+            quic::QuicCoreResult{
+                .local_error =
+                    quic::QuicCoreLocalError{
+                        .code = quic::QuicCoreLocalErrorCode::unsupported_operation,
+                    },
+            },
+            now));
+        runtime.endpoints_.insert_or_assign(15, std::move(failed_endpoint));
+        runtime_additional_internal_coverage_check(
+            ok, runtime.poll_endpoints(now),
+            "server poll_endpoints continues when polling erases an endpoint");
+        runtime_additional_internal_coverage_check(
+            ok, !runtime.endpoints_.contains(15),
+            "server poll_endpoints observes endpoint erasure after terminal updates");
+    }
+
+    {
+        auto backend = std::make_unique<RuntimeTestBackend>();
+        Http3ServerRuntime runtime(server_config, server_endpoint_config, std::move(backend));
+        auto &endpoint = runtime.endpoints_[16];
+        auto &connection = Http3ServerEndpointTestAccess::connection(endpoint);
+        Http3ConnectionTestAccess::queue_core_input(connection, quic::QuicCoreCloseConnection{
+                                                                    .application_error_code = 24,
+                                                                });
+        force_server_drain_failure_count_for_test() = 1;
+        runtime_additional_internal_coverage_check(
+            ok, !runtime.poll_endpoints(now), "server poll_endpoints propagates drain failures");
     }
 
     {
@@ -3752,6 +4086,37 @@ bool runtime_tail_internal_coverage_for_test() {
                                     },
                                     now),
             "server drain_endpoint propagates polled command submission failures");
+    }
+
+    {
+        const char *duplicate_url_args[] = {"h3-client", "https://example.test/a",
+                                            "https://example.test/b"};
+        runtime_tail_internal_coverage_check(
+            ok,
+            !parse_http3_client_args(static_cast<int>(std::size(duplicate_url_args)),
+                                     const_cast<char **>(duplicate_url_args))
+                 .has_value(),
+            "client parser rejects duplicate URL arguments");
+    }
+
+    {
+        const char *single_dash_args[] = {"h3-client", "-"};
+        runtime_tail_internal_coverage_check(
+            ok,
+            !parse_http3_client_args(static_cast<int>(std::size(single_dash_args)),
+                                     const_cast<char **>(single_dash_args))
+                 .has_value(),
+            "client parser rejects single-dash arguments");
+    }
+
+    {
+        const char *server_bare_arg[] = {"h3-server", "https://example.test/"};
+        runtime_tail_internal_coverage_check(
+            ok,
+            !parse_http3_server_args(static_cast<int>(std::size(server_bare_arg)),
+                                     const_cast<char **>(server_bare_arg))
+                 .has_value(),
+            "server parser rejects bare URL arguments");
     }
 
     return ok;

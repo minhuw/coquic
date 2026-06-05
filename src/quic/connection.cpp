@@ -58,9 +58,9 @@ QuicConnection::QuicConnection(QuicCoreConfig config)
 
 QuicConnection::~QuicConnection() = default;
 
-QuicConnection::QuicConnection(QuicConnection &&) noexcept = default;
+QuicConnection::QuicConnection(QuicConnection &&other) noexcept = default;
 
-QuicConnection &QuicConnection::operator=(QuicConnection &&) noexcept = default;
+QuicConnection &QuicConnection::operator=(QuicConnection &&other) noexcept = default;
 
 void QuicConnection::start() {
     start(QuicCoreTimePoint{});
@@ -74,57 +74,59 @@ void QuicConnection::start(QuicCoreTimePoint now) {
     start_client_if_needed(now);
 }
 
-void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
-                                              QuicCoreTimePoint now, QuicPathId path_id,
-                                              QuicEcnCodepoint ecn) {
+QuicInboundDatagramResult QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
+                                                                   QuicCoreTimePoint now,
+                                                                   QuicPathId path_id,
+                                                                   QuicEcnCodepoint ecn) {
     const auto inbound_datagram_id = next_qlog_inbound_datagram_id(qlog_session_.get());
-    process_inbound_datagram(bytes, now, path_id, ecn, inbound_datagram_id,
-                             /*replay_trigger=*/false, /*count_inbound_bytes=*/true);
+    return process_inbound_datagram(bytes, now, path_id, ecn, inbound_datagram_id,
+                                    /*replay_trigger=*/false, /*count_inbound_bytes=*/true);
 }
 
-void QuicConnection::process_inbound_datagram_owned(std::vector<std::byte> bytes,
-                                                    QuicCoreTimePoint now, QuicPathId path_id,
-                                                    QuicEcnCodepoint ecn) {
+QuicInboundDatagramResult
+QuicConnection::process_inbound_datagram_owned(std::vector<std::byte> bytes, QuicCoreTimePoint now,
+                                               QuicPathId path_id, QuicEcnCodepoint ecn) {
     const auto inbound_datagram_id = next_qlog_inbound_datagram_id(qlog_session_.get());
     auto storage = std::make_shared<std::vector<std::byte>>(std::move(bytes));
     const auto storage_size = storage->size();
-    process_inbound_datagram(std::move(storage), 0, storage_size, now, path_id, ecn,
-                             inbound_datagram_id, /*replay_trigger=*/false,
-                             /*count_inbound_bytes=*/true, /*allow_in_place_receive_decode=*/true);
+    return process_inbound_datagram(std::move(storage), 0, storage_size, now, path_id, ecn,
+                                    inbound_datagram_id, /*replay_trigger=*/false,
+                                    /*count_inbound_bytes=*/true,
+                                    /*allow_in_place_receive_decode=*/true);
 }
 
-void QuicConnection::process_inbound_datagram_shared(
+QuicInboundDatagramResult QuicConnection::process_inbound_datagram_shared(
     std::shared_ptr<std::vector<std::byte>> storage, std::size_t begin, std::size_t end,
     QuicCoreTimePoint now, QuicPathId path_id, QuicEcnCodepoint ecn) {
     const auto inbound_datagram_id = next_qlog_inbound_datagram_id(qlog_session_.get());
-    process_inbound_datagram(std::move(storage), begin, end, now, path_id, ecn, inbound_datagram_id,
-                             /*replay_trigger=*/false,
-                             /*count_inbound_bytes=*/true, /*allow_in_place_receive_decode=*/true);
+    return process_inbound_datagram(std::move(storage), begin, end, now, path_id, ecn,
+                                    inbound_datagram_id,
+                                    /*replay_trigger=*/false,
+                                    /*count_inbound_bytes=*/true,
+                                    /*allow_in_place_receive_decode=*/true);
 }
 
-void QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes,
-                                              QuicCoreTimePoint now, QuicPathId path_id,
-                                              QuicEcnCodepoint ecn,
-                                              std::optional<std::uint32_t> inbound_datagram_id,
-                                              bool replay_trigger, bool count_inbound_bytes) {
+QuicInboundDatagramResult
+QuicConnection::process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now,
+                                         QuicPathId path_id, QuicEcnCodepoint ecn,
+                                         std::optional<std::uint32_t> inbound_datagram_id,
+                                         bool replay_trigger, bool count_inbound_bytes) {
     auto storage = std::make_shared<std::vector<std::byte>>(bytes.begin(), bytes.end());
     const auto storage_size = storage->size();
-    process_inbound_datagram(std::move(storage), 0, storage_size, now, path_id, ecn,
-                             inbound_datagram_id, replay_trigger, count_inbound_bytes,
-                             /*allow_in_place_receive_decode=*/false);
+    return process_inbound_datagram(std::move(storage), 0, storage_size, now, path_id, ecn,
+                                    inbound_datagram_id, replay_trigger, count_inbound_bytes,
+                                    /*allow_in_place_receive_decode=*/false);
 }
 
-void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::byte>> storage,
-                                              std::size_t begin, std::size_t end,
-                                              QuicCoreTimePoint now, QuicPathId path_id,
-                                              QuicEcnCodepoint ecn,
-                                              std::optional<std::uint32_t> inbound_datagram_id,
-                                              bool replay_trigger, bool count_inbound_bytes,
-                                              bool allow_in_place_receive_decode) {
+QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
+    std::shared_ptr<std::vector<std::byte>> storage, std::size_t begin, std::size_t end,
+    QuicCoreTimePoint now, QuicPathId path_id, QuicEcnCodepoint ecn,
+    std::optional<std::uint32_t> inbound_datagram_id, bool replay_trigger, bool count_inbound_bytes,
+    bool allow_in_place_receive_decode) {
+    QuicInboundDatagramResult result;
     if (!storage || begin > end || end > storage->size()) {
-        process_inbound_datagram(std::span<const std::byte>{}, now, path_id, ecn,
-                                 inbound_datagram_id, replay_trigger, count_inbound_bytes);
-        return;
+        return process_inbound_datagram(std::span<const std::byte>{}, now, path_id, ecn,
+                                        inbound_datagram_id, replay_trigger, count_inbound_bytes);
     }
 
     const auto bytes = std::span<const std::byte>(*storage).subspan(begin, end - begin);
@@ -142,7 +144,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
                 closing_close_packet_pending_ = true;
             }
         }
-        return;
+        return result;
     }
     last_inbound_path_id_ = path_id;
     if (!current_send_path_id_.has_value()) {
@@ -167,7 +169,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
         if (config_.role != EndpointRole::server) {
             queue_transport_close_for_error(
                 now, CodecError{.code = CodecErrorCode::unsupported_packet_type, .offset = 0});
-            return;
+            return result;
         }
 
         const auto initial_destination_connection_id =
@@ -176,7 +178,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
             log_codec_failure("peek_client_initial_destination_connection_id",
                               initial_destination_connection_id.error());
             queue_transport_close_for_error(now, initial_destination_connection_id.error());
-            return;
+            return result;
         }
 
         start_server_if_needed(initial_destination_connection_id.value(), now,
@@ -197,7 +199,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
     if (!synced.has_value()) {
         log_codec_failure("sync_tls_state", synced.error());
         queue_transport_close_for_error(now, synced.error());
-        return;
+        return result;
     }
     setup_timer.stop();
 
@@ -500,10 +502,16 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
                 if (!process_decoded_packet(packet)) {
                     return false;
                 }
+                if (!packet_replay_trigger) {
+                    result.processed_any_packet = true;
+                }
             }
         } else {
             if (!process_decoded_packet(packets.value())) {
                 return false;
+            }
+            if (!packet_replay_trigger) {
+                result.processed_any_packet = true;
             }
         }
 
@@ -717,6 +725,9 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
                 queue_transport_close_for_error(now, processed.error());
                 return false;
             }
+            if (!replay_trigger) {
+                result.processed_any_packet = true;
+            }
             return true;
         }
 
@@ -748,6 +759,9 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
             queue_transport_close_for_error(now, synced.error());
             return false;
         }
+        if (!replay_trigger) {
+            result.processed_any_packet = true;
+        }
         return true;
     };
     const auto replay_deferred_packets = [&]() -> bool {
@@ -777,7 +791,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
         return true;
     };
     if (!replay_deferred_packets()) {
-        return;
+        return result;
     }
     if (can_use_single_short_header_datagram_fast_path(receive_sync_state,
                                                        allow_in_place_receive_decode,
@@ -785,7 +799,7 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
         !packet_trace_matches_connection(config_.source_connection_id)) {
         COQUIC_SEND_PROFILE_TIMER(packet_loop_timer, packet_loop_ns);
         static_cast<void>(process_single_short_header_packet_fast_path());
-        return;
+        return result;
     }
     COQUIC_SEND_PROFILE_TIMER(packet_loop_timer, packet_loop_ns);
     while (offset < bytes.size()) {
@@ -808,28 +822,29 @@ void QuicConnection::process_inbound_datagram(std::shared_ptr<std::vector<std::b
                 }
             }
             if (is_discardable_packet_length_error(packet_length.error().code)) {
-                return;
+                return result;
             }
             if (processed_any_packet) {
-                return;
+                return result;
             }
             log_codec_failure("peek_next_packet_length", packet_length.error());
             queue_transport_close_for_error(now, packet_length.error());
-            return;
+            return result;
         }
 
         const auto packet_bytes = bytes.subspan(offset, packet_length.value());
         if (!process_packet_bytes(packet_bytes, /*allow_defer=*/true, path_id, ecn,
                                   inbound_datagram_id, replay_trigger)) {
-            return;
+            return result;
         }
         processed_any_packet = true;
         if (!replay_deferred_packets()) {
-            return;
+            return result;
         }
 
         offset += packet_length.value();
     }
+    return result;
 }
 
 StreamStateResult<bool>

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <type_traits>
 #include <variant>
@@ -19,16 +20,9 @@ std::atomic_bool &force_packet_inspection_missing_plaintext_storage_for_tests() 
     return enabled;
 }
 
-bool received_packet_has_plaintext_storage(const auto &packet) {
-    if constexpr (requires { packet.plaintext_storage; }) {
-        return packet.plaintext_storage != nullptr;
-    }
-    return false;
-}
-
 void maybe_copy_plaintext_payload(auto &inspection, const auto &packet) {
     if constexpr (requires { packet.plaintext_storage; }) {
-        if (received_packet_has_plaintext_storage(packet)) {
+        if (packet.plaintext_storage != nullptr) {
             inspection.plaintext_payload = *packet.plaintext_storage;
         }
     }
@@ -148,6 +142,63 @@ namespace test {
 void connection_set_force_packet_inspection_missing_plaintext_storage_for_tests(bool enabled) {
     force_packet_inspection_missing_plaintext_storage_for_tests().store(enabled,
                                                                         std::memory_order_relaxed);
+}
+
+bool connection_packet_inspection_coverage_for_tests() {
+    bool ok = true;
+    const auto record = [&ok](bool condition) {
+        ok = static_cast<bool>(static_cast<unsigned>(ok) & static_cast<unsigned>(condition));
+    };
+
+    const auto plaintext = std::make_shared<std::vector<std::byte>>(
+        std::vector<std::byte>{std::byte{0x01}, std::byte{0x02}});
+    QuicCorePacketInspection ack_inspection{};
+    populate_packet_inspection_from_decoded_packet(
+        ack_inspection, ReceivedProtectedOneRttAckOnlyPacket{
+                            .spin_bit = true,
+                            .key_phase = true,
+                            .destination_connection_id = {std::byte{0xaa}},
+                            .packet_number_length = 2,
+                            .packet_number = 9,
+                            .plaintext_storage = plaintext,
+                            .ack = ReceivedAckFrame{.largest_acknowledged = 7},
+                        });
+    record(ack_inspection.packet_type == QuicCorePacketInspectionPacketType::one_rtt);
+    record(ack_inspection.spin_bit);
+    record(ack_inspection.key_phase);
+    record(ack_inspection.packet_number_length == 2);
+    record(ack_inspection.packet_number == 9);
+    record(ack_inspection.destination_connection_id == ConnectionId{std::byte{0xaa}});
+    record(ack_inspection.plaintext_payload == *plaintext);
+    record(ack_inspection.frames.size() == 1);
+    record(std::holds_alternative<ReceivedAckFrame>(ack_inspection.frames[0]));
+
+    QuicCorePacketInspection stream_inspection{};
+    populate_packet_inspection_from_decoded_packet(
+        stream_inspection, ReceivedProtectedOneRttStreamPacket{
+                               .destination_connection_id = {std::byte{0xbb}},
+                               .packet_number_length = 1,
+                               .packet_number = 10,
+                               .stream = ReceivedStreamFrame{.stream_id = 3},
+                           });
+    record(stream_inspection.packet_type == QuicCorePacketInspectionPacketType::one_rtt);
+    record(stream_inspection.destination_connection_id == ConnectionId{std::byte{0xbb}});
+    record(stream_inspection.plaintext_payload.empty());
+    record(stream_inspection.frames.size() == 1);
+    record(std::holds_alternative<ReceivedStreamFrame>(stream_inspection.frames[0]));
+
+    struct PacketWithoutPlaintextStorage {
+        std::uint8_t packet_number_length = 0;
+        std::uint64_t packet_number = 0;
+    };
+    QuicCorePacketInspection no_storage_inspection{};
+    populate_packet_inspection_from_decoded_packet(no_storage_inspection,
+                                                   PacketWithoutPlaintextStorage{});
+    record(no_storage_inspection.packet_number_length == 0);
+    record(no_storage_inspection.packet_number == 0);
+    record(no_storage_inspection.frames.empty());
+    record(no_storage_inspection.plaintext_payload.empty());
+    return ok;
 }
 
 } // namespace test

@@ -47,6 +47,9 @@ bool bootstrap_path_has_prefix_for_test(const std::filesystem::path &path,
 std::optional<std::filesystem::path>
 bootstrap_resolve_path_under_root_for_test(const std::filesystem::path &root,
                                            std::string_view request_path);
+std::optional<std::filesystem::path>
+bootstrap_resolve_existing_path_under_root_for_test(const std::filesystem::path &root,
+                                                    std::string_view request_path);
 std::optional<std::string> bootstrap_read_binary_file_for_test(const std::filesystem::path &path);
 std::string bootstrap_content_type_for_path_for_test(const std::filesystem::path &path);
 void bootstrap_set_forced_file_read_failure_path_for_test(const std::filesystem::path &path);
@@ -1239,6 +1242,7 @@ TEST(QuicHttp3BootstrapTest, InvalidHostReturnsFailure) {
 TEST(QuicHttp3BootstrapTest, TestHooksCoverBootstrapPathReadAndContentTypeColdBranches) {
     coquic::quic::test::ScopedTempDir document_root;
     document_root.write_file("legacy.htm", "legacy");
+    document_root.write_file("implicit.html", "implicit");
 
     EXPECT_TRUE(coquic::http3::bootstrap_path_has_prefix_for_test(
         document_root.path() / "legacy.htm", document_root.path()));
@@ -1263,6 +1267,13 @@ TEST(QuicHttp3BootstrapTest, TestHooksCoverBootstrapPathReadAndContentTypeColdBr
         return;
     }
     EXPECT_EQ(*resolved, document_root.path() / "legacy.htm");
+    const auto implicit_html = coquic::http3::bootstrap_resolve_existing_path_under_root_for_test(
+        document_root.path(), "/implicit");
+    if (!implicit_html.has_value()) {
+        FAIL() << "expected implicit .html document path";
+        return;
+    }
+    EXPECT_EQ(*implicit_html, document_root.path() / "implicit.html");
     EXPECT_FALSE(
         coquic::http3::bootstrap_read_binary_file_for_test(document_root.path() / "missing.txt")
             .has_value());

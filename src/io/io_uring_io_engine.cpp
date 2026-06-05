@@ -18,7 +18,9 @@
 
 #include <liburing.h>
 
-#if defined(__clang__)
+#if defined(COQUIC_COVERAGE_BUILD)
+#define COQUIC_NO_PROFILE
+#elif defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #else
 #define COQUIC_NO_PROFILE
@@ -479,18 +481,21 @@ IoUringIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
     };
 }
 
-COQUIC_NO_PROFILE void IoUringIoEngine::probe_recvmsg_support() {
-    if (!internal::using_default_io_uring_backend_ops()) {
+COQUIC_NO_PROFILE void IoUringIoEngine::probe_recvmsg_support(bool require_default_ops) {
+    if (require_default_ops && !internal::using_default_io_uring_backend_ops()) {
         return;
     }
 
-    const int socket_fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
+    const auto &socket_ops = internal::socket_io_backend_ops_state();
+
+    const int socket_fd = socket_ops.socket_fn(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
     if (socket_fd < 0) {
         return;
     }
 
     const int enabled = 1;
-    if (::setsockopt(socket_fd, IPPROTO_IP, IP_RECVTOS, &enabled, sizeof(enabled)) != 0) {
+    if (socket_ops.setsockopt_fn(socket_fd, IPPROTO_IP, IP_RECVTOS, &enabled, sizeof(enabled)) !=
+        0) {
         ::close(socket_fd);
         return;
     }
@@ -499,15 +504,16 @@ COQUIC_NO_PROFILE void IoUringIoEngine::probe_recvmsg_support() {
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons(0);
-    if (::bind(socket_fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0) {
+    if (socket_ops.bind_fn(socket_fd, reinterpret_cast<const sockaddr *>(&address),
+                           sizeof(address)) != 0) {
         ::close(socket_fd);
         return;
     }
 
     sockaddr_in bound_address{};
     socklen_t bound_length = sizeof(bound_address);
-    if (::getsockname(socket_fd, reinterpret_cast<sockaddr *>(&bound_address), &bound_length) !=
-        0) {
+    if (socket_ops.getsockname_fn(socket_fd, reinterpret_cast<sockaddr *>(&bound_address),
+                                  &bound_length) != 0) {
         ::close(socket_fd);
         return;
     }
@@ -520,7 +526,7 @@ COQUIC_NO_PROFILE void IoUringIoEngine::probe_recvmsg_support() {
         return;
     }
 
-    const int sender_fd = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
+    const int sender_fd = socket_ops.socket_fn(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
     if (sender_fd < 0) {
         ::close(socket_fd);
         return;
@@ -530,9 +536,9 @@ COQUIC_NO_PROFILE void IoUringIoEngine::probe_recvmsg_support() {
         std::byte{0x01},
     };
     const auto *payload = reinterpret_cast<const void *>(kProbePayload.data());
-    const auto sent =
-        ::sendto(sender_fd, payload, kProbePayload.size(), 0,
-                 reinterpret_cast<const sockaddr *>(&bound_address), sizeof(bound_address));
+    const auto sent = socket_ops.sendto_fn(sender_fd, payload, kProbePayload.size(), 0,
+                                           reinterpret_cast<const sockaddr *>(&bound_address),
+                                           sizeof(bound_address));
     ::close(sender_fd);
     if (sent < 0) {
         ::close(socket_fd);

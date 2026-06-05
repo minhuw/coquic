@@ -18,6 +18,14 @@
 #include <variant>
 #include <vector>
 
+#ifndef COQUIC_NO_PROFILE
+#if defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+#endif
+
 namespace {
 
 using TimePoint = coquic::core::TimePoint;
@@ -721,6 +729,46 @@ std::optional<coquic::core::ConnectionInput> to_cpp(const coquic_connection_inpu
 }
 
 } // namespace
+
+namespace coquic::ffi::test {
+
+COQUIC_NO_PROFILE bool core_ffi_conversion_coverage_for_tests() {
+    bool ok = true;
+    const auto record = [&](bool condition) { ok = ok & condition; };
+
+    record(from_cpp(coquic::core::CongestionControl::newreno) == COQUIC_CONGESTION_CONTROL_NEWRENO);
+    record(from_cpp(coquic::core::CongestionControl::cubic) == COQUIC_CONGESTION_CONTROL_CUBIC);
+    record(from_cpp(coquic::core::CongestionControl::bbr) == COQUIC_CONGESTION_CONTROL_BBR);
+    record(from_cpp(coquic::core::CongestionControl::copa) == COQUIC_CONGESTION_CONTROL_COPA);
+    record(from_cpp(static_cast<coquic::core::CongestionControl>(99)) ==
+           COQUIC_CONGESTION_CONTROL_NEWRENO);
+    record(from_cpp(static_cast<coquic::core::LocalErrorCode>(99)) ==
+           COQUIC_LOCAL_ERROR_UNSUPPORTED_OPERATION);
+
+    coquic::core::Result result;
+    record(!created_connection_handle(result).has_value());
+    result.effects = {
+        coquic::core::StateEvent{
+            .connection = 3,
+            .change = coquic::core::StateChange::handshake_ready,
+        },
+        coquic::core::ConnectionLifecycleEvent{
+            .connection = 4,
+            .event = coquic::core::Lifecycle::accepted,
+        },
+        coquic::core::ConnectionLifecycleEvent{
+            .connection = 5,
+            .event = coquic::core::Lifecycle::created,
+        },
+    };
+    record(created_connection_handle(result) == std::optional<coquic::core::ConnectionHandle>{5});
+    record(ffi_guard([] { throw std::bad_alloc{}; }) == COQUIC_STATUS_OUT_OF_MEMORY);
+    record(ffi_guard([] { throw 1; }) == COQUIC_STATUS_INTERNAL_ERROR);
+
+    return ok;
+}
+
+} // namespace coquic::ffi::test
 
 extern "C" {
 

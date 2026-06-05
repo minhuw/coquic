@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstddef>
+#include <cstring>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -22,10 +23,19 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#if defined(COQUIC_COVERAGE_BUILD)
+#define COQUIC_NO_PROFILE
+#elif defined(__clang__)
+#define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
+#else
+#define COQUIC_NO_PROFILE
+#endif
+
 namespace coquic::http3 {
 namespace {
 
 constexpr std::size_t kProxyResponseLimitBytes = std::size_t{64} * 1024u * 1024u;
+std::size_t g_proxy_response_limit_bytes = kProxyResponseLimitBytes;
 
 struct ScopedFd {
     explicit ScopedFd(int fd) : fd_(fd) {
@@ -69,6 +79,53 @@ enum class HttpResponseReadState : std::uint8_t {
     incomplete,
     complete,
     invalid,
+};
+
+struct ReverseProxySocketOps {
+    int (*socket_fn)(int, int, int) = &::socket;
+    int (*connect_fn)(int, const sockaddr *, socklen_t) = &::connect;
+    ssize_t (*send_fn)(int, const void *, size_t, int) = &::send;
+    ssize_t (*recv_fn)(int, void *, size_t, int) = &::recv;
+};
+
+ReverseProxySocketOps g_reverse_proxy_socket_ops;
+
+class ScopedReverseProxySocketOpsForTest {
+  public:
+    explicit ScopedReverseProxySocketOpsForTest(ReverseProxySocketOps ops)
+        : previous_(g_reverse_proxy_socket_ops) {
+        g_reverse_proxy_socket_ops = ops;
+    }
+
+    ~ScopedReverseProxySocketOpsForTest() {
+        g_reverse_proxy_socket_ops = previous_;
+    }
+
+    ScopedReverseProxySocketOpsForTest(const ScopedReverseProxySocketOpsForTest &) = delete;
+    ScopedReverseProxySocketOpsForTest &
+    operator=(const ScopedReverseProxySocketOpsForTest &) = delete;
+
+  private:
+    ReverseProxySocketOps previous_;
+};
+
+class ScopedReverseProxyResponseLimitForTest {
+  public:
+    explicit ScopedReverseProxyResponseLimitForTest(std::size_t limit)
+        : previous_(g_proxy_response_limit_bytes) {
+        g_proxy_response_limit_bytes = limit;
+    }
+
+    ~ScopedReverseProxyResponseLimitForTest() {
+        g_proxy_response_limit_bytes = previous_;
+    }
+
+    ScopedReverseProxyResponseLimitForTest(const ScopedReverseProxyResponseLimitForTest &) = delete;
+    ScopedReverseProxyResponseLimitForTest &
+    operator=(const ScopedReverseProxyResponseLimitForTest &) = delete;
+
+  private:
+    std::size_t previous_;
 };
 
 struct HttpResponseFraming {
@@ -192,13 +249,14 @@ std::optional<int> connect_to_upstream(const Http3ReverseProxyConfig &config) {
     std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> results(raw_results, &freeaddrinfo);
 
     for (auto *candidate = results.get(); candidate != nullptr; candidate = candidate->ai_next) {
-        const int fd =
-            ::socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
+        const int fd = g_reverse_proxy_socket_ops.socket_fn(
+            candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
         if (fd < 0) {
             continue;
         }
         ScopedFd guard(fd);
-        if (::connect(fd, candidate->ai_addr, candidate->ai_addrlen) != 0) {
+        if (g_reverse_proxy_socket_ops.connect_fn(fd, candidate->ai_addr, candidate->ai_addrlen) !=
+            0) {
             continue;
         }
         return guard.release();
@@ -212,7 +270,8 @@ bool write_all(int fd, std::string_view bytes) {
         const auto remaining = bytes.size() - written;
         const auto chunk_size = std::min<std::size_t>(
             remaining, static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
-        const auto result = ::send(fd, bytes.data() + written, chunk_size, MSG_NOSIGNAL);
+        const auto result = g_reverse_proxy_socket_ops.send_fn(fd, bytes.data() + written,
+                                                               chunk_size, MSG_NOSIGNAL);
         if (result <= 0) {
             if (result < 0 && errno == EINTR) {
                 continue;
@@ -227,8 +286,8 @@ bool write_all(int fd, std::string_view bytes) {
 std::optional<std::string> read_all(int fd) {
     std::string out;
     std::array<char, 8192> buffer{};
-    while (out.size() <= kProxyResponseLimitBytes) {
-        const auto result = ::recv(fd, buffer.data(), buffer.size(), 0);
+    while (out.size() <= g_proxy_response_limit_bytes) {
+        const auto result = g_reverse_proxy_socket_ops.recv_fn(fd, buffer.data(), buffer.size(), 0);
         if (result == 0) {
             return out;
         }
@@ -246,7 +305,7 @@ std::optional<std::string> read_all(int fd) {
 std::optional<std::vector<std::byte>> decode_chunked_body(std::string_view encoded) {
     std::vector<std::byte> out;
     std::size_t offset = 0;
-    while (true) {
+    while (offset < encoded.size()) {
         const auto line_end = encoded.find("\r\n", offset);
         if (line_end == std::string_view::npos) {
             return std::nullopt;
@@ -277,11 +336,12 @@ std::optional<std::vector<std::byte>> decode_chunked_body(std::string_view encod
         }
         offset += 2;
     }
+    return std::nullopt;
 }
 
 HttpResponseReadState chunked_body_read_state(std::string_view encoded) {
     std::size_t offset = 0;
-    while (true) {
+    while (offset < encoded.size()) {
         const auto line_end = encoded.find("\r\n", offset);
         if (line_end == std::string_view::npos) {
             return HttpResponseReadState::incomplete;
@@ -322,6 +382,7 @@ HttpResponseReadState chunked_body_read_state(std::string_view encoded) {
         }
         offset += 2;
     }
+    return HttpResponseReadState::incomplete;
 }
 
 std::optional<HttpResponseFraming> response_framing(std::string_view headers_text) {
@@ -373,7 +434,10 @@ bool parse_http_response_head(std::string_view headers_text, ParsedHttpResponseH
         return false;
     }
     const auto status = parse_size(status_line.substr(9, 3));
-    if (!status.has_value() || *status > std::numeric_limits<std::uint16_t>::max()) {
+    if (!status.has_value()) {
+        return false;
+    }
+    if (*status > std::numeric_limits<std::uint16_t>::max()) {
         return false;
     }
 
@@ -523,10 +587,10 @@ bool emit_bad_gateway(const std::function<bool(Http3ResponsePart)> &emit) {
 bool emit_chunked_proxy_body(std::string &encoded, bool upstream_closed, bool &body_complete,
                              const std::function<bool(Http3ResponsePart)> &emit) {
     std::vector<std::byte> out;
-    while (true) {
+    while (!encoded.empty()) {
         const auto line_end = encoded.find("\r\n");
         if (line_end == std::string::npos) {
-            if (upstream_closed && !encoded.empty()) {
+            if (upstream_closed) {
                 return false;
             }
             break;
@@ -595,6 +659,799 @@ bool emit_chunked_proxy_body(std::string &encoded, bool upstream_closed, bool &b
 
 } // namespace
 
+COQUIC_NO_PROFILE bool reverse_proxy_internal_coverage_for_test() {
+    bool ok = true;
+    const auto record = [&ok](bool condition) {
+        ok = static_cast<bool>(static_cast<unsigned>(ok) & static_cast<unsigned>(condition));
+        return condition;
+    };
+
+    struct SocketOpsCoverageState {
+        int send_calls = 0;
+        int recv_calls = 0;
+    };
+    static SocketOpsCoverageState socket_ops_state;
+    const auto reset_socket_ops_state = [] {
+        socket_ops_state = {};
+        errno = 0;
+    };
+
+    record(trim_ascii(" \tvalue \r\n") == "value");
+    record(trim_ascii("") == "");
+    record(trim_ascii(" \t\r\n") == "");
+    record(parse_size("ff", 16).value_or(0) == 255);
+    record(!parse_size("12x").has_value());
+    record(!parse_size("").has_value());
+    record(!is_hop_by_hop_header("x-keep"));
+    record(is_hop_by_hop_header("connection"));
+    record(is_hop_by_hop_header("keep-alive"));
+    record(is_hop_by_hop_header("proxy-authenticate"));
+    record(is_hop_by_hop_header("proxy-authorization"));
+    record(is_hop_by_hop_header("te"));
+    record(is_hop_by_hop_header("trailer"));
+    record(is_hop_by_hop_header("transfer-encoding"));
+    record(is_hop_by_hop_header("upgrade"));
+    record(is_filtered_request_header("host"));
+    record(is_filtered_request_header("content-length"));
+    record(is_filtered_request_header("accept-encoding"));
+    record(is_filtered_response_header("content-length"));
+    record(!is_filtered_response_header("x-demo"));
+
+    const auto default_request_text =
+        serialize_proxy_request(Http3ReverseProxyConfig{.host = "upstream.test", .port = 8080},
+                                Http3Request{
+                                    .head =
+                                        {
+                                            .content_length = 0,
+                                            .headers =
+                                                {
+                                                    {"", "ignored"},
+                                                    {":scheme", "https"},
+                                                    {"Accept-Encoding", "gzip"},
+                                                    {"X-Demo", "1"},
+                                                },
+                                        },
+                                });
+    record(default_request_text.find("GET / HTTP/1.1\r\n") != std::string::npos);
+    record(default_request_text.find("Host: upstream.test:8080\r\n") != std::string::npos);
+    record(default_request_text.find("x-demo: 1\r\n") != std::string::npos);
+    record(default_request_text.find("Content-Length: 0\r\n") != std::string::npos);
+    record(write_all(-1, "x") == false);
+
+    reset_socket_ops_state();
+    {
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = [](int, int, int) { return -1; },
+            .connect_fn = &::connect,
+            .send_fn = &::send,
+            .recv_fn = &::recv,
+        });
+        record(!connect_to_upstream(Http3ReverseProxyConfig{.host = "127.0.0.1", .port = 9})
+                    .has_value());
+    }
+
+    reset_socket_ops_state();
+    {
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = &::socket,
+            .connect_fn = &::connect,
+            .send_fn = [](int, const void *, size_t size, int) -> ssize_t {
+                ++socket_ops_state.send_calls;
+                if (socket_ops_state.send_calls == 1) {
+                    errno = EINTR;
+                    return -1;
+                }
+                return static_cast<ssize_t>(size);
+            },
+            .recv_fn = &::recv,
+        });
+        record(write_all(42, "retry"));
+        record(socket_ops_state.send_calls == 2);
+    }
+
+    reset_socket_ops_state();
+    {
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = &::socket,
+            .connect_fn = &::connect,
+            .send_fn = [](int, const void *, size_t, int) -> ssize_t { return 0; },
+            .recv_fn = &::recv,
+        });
+        record(!write_all(42, "blocked"));
+    }
+
+    reset_socket_ops_state();
+    {
+        const ScopedReverseProxyResponseLimitForTest limit(1024);
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = &::socket,
+            .connect_fn = &::connect,
+            .send_fn = &::send,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                ++socket_ops_state.recv_calls;
+                if (socket_ops_state.recv_calls == 1) {
+                    errno = EINTR;
+                    return -1;
+                }
+                if (socket_ops_state.recv_calls == 3) {
+                    return 0;
+                }
+                const std::string_view payload = "retry-read";
+                const auto bytes = std::min(size, payload.size());
+                std::memcpy(buffer, payload.data(), bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        const auto retried = read_all(42);
+        record(retried.value_or("") == "retry-read");
+        record(socket_ops_state.recv_calls == 3);
+    }
+
+    reset_socket_ops_state();
+    {
+        const ScopedReverseProxyResponseLimitForTest limit(1024);
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = &::socket,
+            .connect_fn = &::connect,
+            .send_fn = &::send,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                ++socket_ops_state.recv_calls;
+                const auto bytes =
+                    std::min<std::size_t>(size, g_proxy_response_limit_bytes / 2u + 1u);
+                std::memset(buffer, 'x', bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        record(!read_all(42).has_value());
+    }
+
+    reset_socket_ops_state();
+    {
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = &::socket,
+            .connect_fn = &::connect,
+            .send_fn = &::send,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                ++socket_ops_state.recv_calls;
+                if (socket_ops_state.recv_calls == 2) {
+                    return 0;
+                }
+                constexpr std::string_view kPayload = "abc";
+                const auto bytes = std::min(size, kPayload.size());
+                std::memcpy(buffer, kPayload.data(), bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        record(read_all(42).value_or("") == "abc");
+    }
+    record(!read_all(-1).has_value());
+
+    record(decode_chunked_body("4;name=value\r\ndata\r\n0\r\n\r\n")
+               .value_or(std::vector<std::byte>{}) == string_to_bytes("data"));
+    record(!decode_chunked_body("missing-crlf").has_value());
+    record(!decode_chunked_body("4\r\nda").has_value());
+    record(!decode_chunked_body("z\r\n").has_value());
+    record(!decode_chunked_body("4\r\ndataxx").has_value());
+    record(!decode_chunked_body("4\r\ndata").has_value());
+    record(!decode_chunked_body("").has_value());
+    record(chunked_body_read_state("4") == HttpResponseReadState::incomplete);
+    record(chunked_body_read_state("z\r\n") == HttpResponseReadState::invalid);
+    record(chunked_body_read_state("0\r\n") == HttpResponseReadState::incomplete);
+    record(chunked_body_read_state("0\r\nTrailer: x") == HttpResponseReadState::incomplete);
+    record(chunked_body_read_state("0\r\nTrailer: x\r\n\r\n") == HttpResponseReadState::complete);
+    record(chunked_body_read_state("0;done\r\n\r\n") == HttpResponseReadState::complete);
+    record(chunked_body_read_state("4\r\nda") == HttpResponseReadState::incomplete);
+    record(chunked_body_read_state("4\r\ndata") == HttpResponseReadState::incomplete);
+    record(chunked_body_read_state("4\r\ndataxx") == HttpResponseReadState::invalid);
+    record(chunked_body_read_state("") == HttpResponseReadState::incomplete);
+
+    record(response_framing("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked")
+               .value_or(HttpResponseFraming{})
+               .chunked);
+    record(!response_framing("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip")
+                .value_or(HttpResponseFraming{.chunked = true})
+                .chunked);
+    record(response_framing("HTTP/1.1 200 OK\r\n: ignored").has_value());
+    record(response_framing("HTTP/1.1 200 OK\r\nX-No-Colon").has_value());
+    record(!response_framing("HTTP/1.1 200 OK\r\nContent-Length: bad").has_value());
+    record(response_read_state("HTTP/1.1 200 OK", false) == HttpResponseReadState::incomplete);
+    record(response_read_state("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nda", false) ==
+           HttpResponseReadState::incomplete);
+    record(response_read_state("HTTP/1.1 200 OK\r\nContent-Length: bad\r\n\r\n", false) ==
+           HttpResponseReadState::invalid);
+    record(response_read_state("HTTP/1.1 200 OK\r\n\r\n", true) == HttpResponseReadState::complete);
+    record(response_read_state("HTTP/1.1 200 OK\r\n\r\nbody", false) ==
+           HttpResponseReadState::incomplete);
+
+    ParsedHttpResponseHead parsed_head;
+    record(!parse_http_response_head("HTTP/2 200 OK", parsed_head));
+    record(!parse_http_response_head("HTTP/1.1 20", parsed_head));
+    record(!parse_http_response_head("HTTP/1.1 abc OK", parsed_head));
+    record(parse_http_response_head("HTTP/1.1 700 OK", parsed_head));
+    record(parsed_head.status == 700);
+    record(parse_http_response_head("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip", parsed_head));
+    record(!parsed_head.chunked);
+    record(parse_http_response_head("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked", parsed_head));
+    record(parsed_head.chunked);
+    record(parse_http_response_head("HTTP/1.1 200 OK\r\n: ignored", parsed_head));
+    record(!parse_http_response_head("HTTP/1.1 200 OK\r\nContent-Length: bad", parsed_head));
+    record(parse_http_response_head("HTTP/1.0 201 Created\r\nX-One: 1", parsed_head));
+    record(parsed_head.status == 201);
+    record(parse_http_response_head(
+        "HTTP/1.1 204 No Content\r\n:ignored: value\r\nConnection: close\r\nX-Keep: yes",
+        parsed_head));
+    record(parsed_head.status == 204);
+    record(parsed_head.headers == Http3Headers{{"x-keep", "yes"}});
+
+    record(!parse_http_response("HTTP/1.1 200 OK", false).has_value());
+    record(!parse_http_response("bad\r\n\r\n", false).has_value());
+    record(parse_http_response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbodytail", false)
+               .value_or(ParsedHttpResponse{})
+               .body == string_to_bytes("body"));
+    record(parse_http_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                               "4;ext\r\ndata\r\n0\r\n\r\n",
+                               false)
+               .value_or(ParsedHttpResponse{})
+               .body == string_to_bytes("data"));
+    record(!parse_http_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nz\r\n", false)
+                .has_value());
+    record(
+        !parse_http_response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nda", false).has_value());
+    record(parse_http_response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbody", true)
+               .value_or(ParsedHttpResponse{.body = string_to_bytes("x")})
+               .body.empty());
+    record(parse_http_response("HTTP/1.1 200 OK\r\n\r\nbody", false)
+               .value_or(ParsedHttpResponse{})
+               .body == string_to_bytes("body"));
+
+    const auto gateway = bad_gateway_response();
+    record(gateway.head.status == 502);
+    record(gateway.head.content_length == 0);
+    const auto gateway_part = bad_gateway_part();
+    record(gateway_part.head.has_value());
+    record(gateway_part.head->status == 502);
+    record(gateway_part.complete);
+    record(emit_bad_gateway([](Http3ResponsePart part) {
+        bool part_ok = true;
+        part_ok = static_cast<bool>(static_cast<unsigned>(part_ok) &
+                                    static_cast<unsigned>(part.head.has_value()));
+        part_ok = static_cast<bool>(static_cast<unsigned>(part_ok) &
+                                    static_cast<unsigned>(part.head->status == 502));
+        part_ok = static_cast<bool>(static_cast<unsigned>(part_ok) &
+                                    static_cast<unsigned>(part.complete));
+        return part_ok;
+    }));
+    record(response_head_from_proxy_head(
+               ParsedHttpResponseHead{
+                   .status = 206,
+                   .chunked = false,
+                   .content_length = 9,
+               },
+               false)
+               .content_length == 9);
+    record(!response_head_from_proxy_head(
+                ParsedHttpResponseHead{
+                    .status = 206,
+                    .chunked = true,
+                    .content_length = 9,
+                },
+                false)
+                .content_length.has_value());
+    record(!response_head_from_proxy_head(
+                ParsedHttpResponseHead{
+                    .status = 206,
+                    .chunked = false,
+                    .content_length = 9,
+                },
+                true)
+                .content_length.has_value());
+
+    auto emit_parts = [](std::vector<Http3ResponsePart> &parts) {
+        return [&parts](Http3ResponsePart part) {
+            parts.push_back(std::move(part));
+            return true;
+        };
+    };
+    {
+        std::vector<Http3ResponsePart> parts;
+        std::string encoded = "4;ext\r\ndata\r\n0\r\n\r\n";
+        bool complete = false;
+        record(emit_chunked_proxy_body(encoded, false, complete, emit_parts(parts)));
+        record(complete);
+        record(parts.size() == 2);
+        record(parts.size() >= 2 && parts[0].body == string_to_bytes("data"));
+        record(parts.size() >= 2 && parts[1].complete);
+    }
+    {
+        std::vector<Http3ResponsePart> parts;
+        std::string encoded = "0\r\nTrailer: x\r\n\r\n";
+        bool complete = false;
+        record(emit_chunked_proxy_body(encoded, false, complete, emit_parts(parts)));
+        record(complete);
+        record(parts.size() == 1);
+        record(parts.front().complete);
+    }
+    {
+        std::vector<Http3ResponsePart> parts;
+        std::string encoded = "0\r\n\r\n";
+        bool complete = false;
+        record(emit_chunked_proxy_body(encoded, false, complete, emit_parts(parts)));
+        record(complete);
+        record(parts.size() == 1);
+        record(parts.front().complete);
+    }
+    {
+        std::vector<Http3ResponsePart> parts;
+        std::string encoded = "0\r\nTrailer: x";
+        bool complete = false;
+        record(emit_chunked_proxy_body(encoded, false, complete, emit_parts(parts)));
+        record(!complete);
+        record(parts.empty());
+        record(!emit_chunked_proxy_body(encoded, true, complete, emit_parts(parts)));
+    }
+    {
+        std::vector<Http3ResponsePart> parts;
+        std::string encoded = "4\r\ndata\r\n";
+        bool complete = false;
+        record(emit_chunked_proxy_body(encoded, false, complete, emit_parts(parts)));
+        record(!complete);
+        record(parts.size() == 1);
+        record(parts.front().body == string_to_bytes("data"));
+    }
+    {
+        std::vector<Http3ResponsePart> parts;
+        std::string encoded = "abc";
+        bool complete = false;
+        record(emit_chunked_proxy_body(encoded, false, complete, emit_parts(parts)));
+        record(!complete);
+        record(parts.empty());
+        record(!emit_chunked_proxy_body(encoded, true, complete, emit_parts(parts)));
+    }
+    {
+        std::vector<Http3ResponsePart> parts;
+        std::string encoded;
+        bool complete = false;
+        record(emit_chunked_proxy_body(encoded, true, complete, emit_parts(parts)));
+        record(!complete);
+        record(parts.empty());
+    }
+    {
+        std::vector<Http3ResponsePart> parts;
+        std::string encoded = "z\r\n";
+        bool complete = false;
+        record(!emit_chunked_proxy_body(encoded, false, complete, emit_parts(parts)));
+    }
+    {
+        std::vector<Http3ResponsePart> parts;
+        std::string encoded = "0\r\nT";
+        bool complete = false;
+        record(emit_chunked_proxy_body(encoded, false, complete, emit_parts(parts)));
+        record(!emit_chunked_proxy_body(encoded, true, complete, emit_parts(parts)));
+    }
+    {
+        std::vector<Http3ResponsePart> parts;
+        std::string encoded = "4\r\nda";
+        bool complete = false;
+        record(emit_chunked_proxy_body(encoded, false, complete, emit_parts(parts)));
+        record(!emit_chunked_proxy_body(encoded, true, complete, emit_parts(parts)));
+    }
+    {
+        std::vector<Http3ResponsePart> parts;
+        std::string encoded = "4\r\ndataxx";
+        bool complete = false;
+        record(!emit_chunked_proxy_body(encoded, false, complete, emit_parts(parts)));
+    }
+    {
+        std::string encoded = "2000\r\n" + std::string(8192, 'x') + "\r\n";
+        bool complete = false;
+        bool called = false;
+        record(emit_chunked_proxy_body(encoded, false, complete, [&](Http3ResponsePart part) {
+            called = !part.body.empty();
+            return false;
+        }));
+        record(called);
+    }
+    {
+        std::vector<Http3ResponsePart> parts;
+        std::string encoded = "2000\r\n" + std::string(8192, 'x') + "\r\n0\r\n\r\n";
+        bool complete = false;
+        record(emit_chunked_proxy_body(encoded, false, complete, emit_parts(parts)));
+        record(complete);
+        record(parts.size() == 2);
+        record(parts.size() >= 2 && parts[0].body.size() == 8192);
+        record(parts.size() >= 2 && parts[1].complete);
+    }
+    {
+        std::string encoded = "4\r\ndata\r\n0\r\n\r\n";
+        bool complete = false;
+        bool called = false;
+        record(emit_chunked_proxy_body(encoded, false, complete, [&](Http3ResponsePart part) {
+            called = part.body == string_to_bytes("data");
+            return false;
+        }));
+        record(called);
+        record(!complete);
+    }
+
+    const auto parsed_target = parse_http_reverse_proxy_target("http://example.test:8080");
+    record(parsed_target.has_value());
+    record(parsed_target->host == "example.test");
+    record(parsed_target->port == 8080);
+    record(!parse_http_reverse_proxy_target("https://example.test:8080").has_value());
+    record(!parse_http_reverse_proxy_target("http://").has_value());
+    record(!parse_http_reverse_proxy_target("http://example.test/path").has_value());
+    record(!parse_http_reverse_proxy_target("http://example.test").has_value());
+    record(!parse_http_reverse_proxy_target("http://:8080").has_value());
+    record(!parse_http_reverse_proxy_target("http://example.test:").has_value());
+    record(!parse_http_reverse_proxy_target("http://example.test:notaport").has_value());
+    record(!parse_http_reverse_proxy_target("http://example.test:0").has_value());
+    record(!parse_http_reverse_proxy_target("http://example.test:65536").has_value());
+
+    const auto fake_socket = [](int, int, int) { return ::dup(STDERR_FILENO); };
+    const auto fake_connect = [](int, const sockaddr *, socklen_t) { return 0; };
+    const auto fake_connect_failure = [](int, const sockaddr *, socklen_t) {
+        errno = ECONNREFUSED;
+        return -1;
+    };
+    const auto fake_send_ok = [](int, const void *, size_t size, int) -> ssize_t {
+        return static_cast<ssize_t>(size);
+    };
+    const Http3ReverseProxyConfig kFakeConfig{.host = "127.0.0.1", .port = 9};
+    const Http3Request fake_request{.head = {.method = "GET", .path = "/"}};
+
+    reset_socket_ops_state();
+    {
+        std::vector<Http3ResponsePart> missing_parts;
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect_failure,
+            .send_fn = fake_send_ok,
+            .recv_fn = &::recv,
+        });
+        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
+            missing_parts.push_back(std::move(part));
+            return true;
+        });
+        record(!missing_parts.empty());
+        record(missing_parts.front().head.has_value());
+        record(missing_parts.front().head->status == 502);
+    }
+
+    reset_socket_ops_state();
+    {
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = [](int, const void *, size_t, int) -> ssize_t { return 0; },
+            .recv_fn = &::recv,
+        });
+        record(fetch_http_reverse_proxy_response(kFakeConfig, fake_request).head.status == 502);
+    }
+
+    reset_socket_ops_state();
+    {
+        const ScopedReverseProxyResponseLimitForTest limit(1024);
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                ++socket_ops_state.recv_calls;
+                if (socket_ops_state.recv_calls == 1) {
+                    errno = EINTR;
+                    return -1;
+                }
+                constexpr std::string_view kResponse =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+                const auto bytes = std::min(size, kResponse.size());
+                std::memcpy(buffer, kResponse.data(), bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        const auto response = fetch_http_reverse_proxy_response(kFakeConfig, fake_request);
+        record(response.head.status == 200);
+        record(response.body == string_to_bytes("ok"));
+        record(socket_ops_state.recv_calls == 2);
+    }
+
+    reset_socket_ops_state();
+    {
+        const ScopedReverseProxyResponseLimitForTest limit(1024);
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *, size_t, int) -> ssize_t {
+                errno = EIO;
+                return -1;
+            },
+        });
+        record(fetch_http_reverse_proxy_response(kFakeConfig, fake_request).head.status == 502);
+    }
+
+    reset_socket_ops_state();
+    {
+        const ScopedReverseProxyResponseLimitForTest limit(1024);
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                ++socket_ops_state.recv_calls;
+                const auto bytes =
+                    std::min<std::size_t>(size, g_proxy_response_limit_bytes / 2u + 1u);
+                std::memset(buffer, 'x', bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        record(fetch_http_reverse_proxy_response(kFakeConfig, fake_request).head.status == 502);
+    }
+
+    reset_socket_ops_state();
+    {
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                constexpr std::string_view kResponse = "not an http response\r\n\r\n";
+                const auto bytes = std::min(size, kResponse.size());
+                std::memcpy(buffer, kResponse.data(), bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        record(fetch_http_reverse_proxy_response(kFakeConfig, fake_request).head.status == 502);
+    }
+
+    reset_socket_ops_state();
+    {
+        std::vector<Http3ResponsePart> parts;
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = [](int, const void *, size_t, int) -> ssize_t { return 0; },
+            .recv_fn = &::recv,
+        });
+        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
+            parts.push_back(std::move(part));
+            return true;
+        });
+        record(!parts.empty());
+        record(parts.front().head.value_or(Http3ResponseHead{}).status == 502);
+    }
+
+    reset_socket_ops_state();
+    {
+        std::vector<Http3ResponsePart> parts;
+        const ScopedReverseProxyResponseLimitForTest limit(1024);
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                ++socket_ops_state.recv_calls;
+                const auto bytes =
+                    std::min<std::size_t>(size, g_proxy_response_limit_bytes / 2u + 1u);
+                std::memset(buffer, 'x', bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
+            parts.push_back(std::move(part));
+            return true;
+        });
+        record(!parts.empty());
+        record(parts.back().head.value_or(Http3ResponseHead{}).status == 502);
+    }
+
+    reset_socket_ops_state();
+    {
+        std::vector<Http3ResponsePart> parts;
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                ++socket_ops_state.recv_calls;
+                if (socket_ops_state.recv_calls == 2) {
+                    return 0;
+                }
+                constexpr std::string_view kResponse =
+                    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nda";
+                const auto bytes = std::min(size, kResponse.size());
+                std::memcpy(buffer, kResponse.data(), bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
+            parts.push_back(std::move(part));
+            return true;
+        });
+        record(!parts.empty());
+        record(parts.back().head.value_or(Http3ResponseHead{}).status == 502);
+    }
+
+    reset_socket_ops_state();
+    {
+        std::vector<Http3ResponsePart> parts;
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                ++socket_ops_state.recv_calls;
+                if (socket_ops_state.recv_calls == 2) {
+                    return 0;
+                }
+                constexpr std::string_view kResponse =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nda";
+                const auto bytes = std::min(size, kResponse.size());
+                std::memcpy(buffer, kResponse.data(), bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
+            parts.push_back(std::move(part));
+            return true;
+        });
+        record(!parts.empty());
+        record(parts.back().head.value_or(Http3ResponseHead{}).status == 502);
+    }
+
+    reset_socket_ops_state();
+    {
+        std::vector<Http3ResponsePart> parts;
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                ++socket_ops_state.recv_calls;
+                if (socket_ops_state.recv_calls == 1) {
+                    errno = EINTR;
+                    return -1;
+                }
+                constexpr std::string_view kResponse =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+                const auto bytes = std::min(size, kResponse.size());
+                std::memcpy(buffer, kResponse.data(), bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
+            parts.push_back(std::move(part));
+            return true;
+        });
+        record(parts.size() == 1);
+        record(parts.front().head.value_or(Http3ResponseHead{}).status == 200);
+        record(parts.front().complete);
+    }
+
+    reset_socket_ops_state();
+    {
+        std::vector<Http3ResponsePart> parts;
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *, size_t, int) -> ssize_t {
+                errno = EIO;
+                return -1;
+            },
+        });
+        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
+            parts.push_back(std::move(part));
+            return true;
+        });
+        record(!parts.empty());
+        record(parts.front().head.value_or(Http3ResponseHead{}).status == 502);
+    }
+
+    reset_socket_ops_state();
+    {
+        std::vector<Http3ResponsePart> parts;
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                constexpr std::string_view kResponse =
+                    "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbody";
+                const auto bytes = std::min(size, kResponse.size());
+                std::memcpy(buffer, kResponse.data(), bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
+            parts.push_back(std::move(part));
+            return part.head.has_value();
+        });
+        record(parts.size() == 2);
+        record(parts.back().body == string_to_bytes("body"));
+    }
+
+    reset_socket_ops_state();
+    {
+        std::vector<Http3ResponsePart> parts;
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                constexpr std::string_view kResponse =
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nbody";
+                const auto bytes = std::min(size, kResponse.size());
+                std::memcpy(buffer, kResponse.data(), bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
+            parts.push_back(std::move(part));
+            return part.head.has_value();
+        });
+        record(parts.size() == 2);
+        record(parts.back().body == string_to_bytes("body"));
+    }
+
+    reset_socket_ops_state();
+    {
+        std::vector<Http3ResponsePart> parts;
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                ++socket_ops_state.recv_calls;
+                if (socket_ops_state.recv_calls == 2) {
+                    return 0;
+                }
+                constexpr std::string_view kResponse =
+                    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+                const auto bytes = std::min(size, kResponse.size());
+                std::memcpy(buffer, kResponse.data(), bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
+            parts.push_back(std::move(part));
+            return true;
+        });
+        record(parts.size() == 1);
+        record(parts.front().head.value_or(Http3ResponseHead{}).status == 200);
+        record(!parts.front().complete);
+    }
+
+    reset_socket_ops_state();
+    {
+        std::vector<Http3ResponsePart> parts;
+        const ScopedReverseProxySocketOpsForTest ops(ReverseProxySocketOps{
+            .socket_fn = fake_socket,
+            .connect_fn = fake_connect,
+            .send_fn = fake_send_ok,
+            .recv_fn = [](int, void *buffer, size_t size, int) -> ssize_t {
+                ++socket_ops_state.recv_calls;
+                if (socket_ops_state.recv_calls == 2) {
+                    return 0;
+                }
+                constexpr std::string_view kResponse =
+                    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nabc";
+                const auto bytes = std::min(size, kResponse.size());
+                std::memcpy(buffer, kResponse.data(), bytes);
+                return static_cast<ssize_t>(bytes);
+            },
+        });
+        stream_http_reverse_proxy_response(kFakeConfig, fake_request, [&](Http3ResponsePart part) {
+            parts.push_back(std::move(part));
+            return true;
+        });
+        record(parts.size() == 2);
+        record(parts.front().head.value_or(Http3ResponseHead{}).status == 200);
+        record(parts.back().head.value_or(Http3ResponseHead{}).status == 502);
+    }
+
+    return ok;
+}
+
 std::optional<Http3ReverseProxyConfig> parse_http_reverse_proxy_target(std::string_view target) {
     constexpr std::string_view scheme = "http://";
     if (!target.starts_with(scheme)) {
@@ -635,7 +1492,7 @@ Http3Response fetch_http_reverse_proxy_response(const Http3ReverseProxyConfig &c
     }
     std::string response_text;
     std::array<char, 8192> buffer{};
-    while (response_text.size() <= kProxyResponseLimitBytes) {
+    while (response_text.size() <= g_proxy_response_limit_bytes) {
         const auto state = response_read_state(response_text, head_request);
         if (state == HttpResponseReadState::complete) {
             break;
@@ -644,7 +1501,8 @@ Http3Response fetch_http_reverse_proxy_response(const Http3ReverseProxyConfig &c
             return bad_gateway_response();
         }
 
-        const auto result = ::recv(upstream.get(), buffer.data(), buffer.size(), 0);
+        const auto result =
+            g_reverse_proxy_socket_ops.recv_fn(upstream.get(), buffer.data(), buffer.size(), 0);
         if (result == 0) {
             break;
         }
@@ -656,7 +1514,7 @@ Http3Response fetch_http_reverse_proxy_response(const Http3ReverseProxyConfig &c
         }
         response_text.append(buffer.data(), static_cast<std::size_t>(result));
     }
-    if (response_text.size() > kProxyResponseLimitBytes) {
+    if (response_text.size() > g_proxy_response_limit_bytes) {
         return bad_gateway_response();
     }
     auto parsed = parse_http_response(response_text, head_request);
@@ -701,17 +1559,15 @@ void stream_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
     std::size_t total_received = 0;
 
     auto emit_raw_body = [&](std::string_view bytes, bool part_complete) -> bool {
-        if (bytes.empty() && !part_complete) {
-            return true;
-        }
         return emit(Http3ResponsePart{
             .body = string_to_bytes(bytes),
             .complete = part_complete,
         });
     };
 
-    while (total_received <= kProxyResponseLimitBytes) {
-        const auto result = ::recv(upstream.get(), buffer.data(), buffer.size(), 0);
+    for (;;) {
+        const auto result =
+            g_reverse_proxy_socket_ops.recv_fn(upstream.get(), buffer.data(), buffer.size(), 0);
         if (result < 0) {
             if (errno == EINTR) {
                 continue;
@@ -724,7 +1580,7 @@ void stream_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
         if (result > 0) {
             total_received += static_cast<std::size_t>(result);
             pending.append(buffer.data(), static_cast<std::size_t>(result));
-            if (total_received > kProxyResponseLimitBytes) {
+            if (total_received > g_proxy_response_limit_bytes) {
                 static_cast<void>(emit_bad_gateway(emit));
                 return;
             }
@@ -760,10 +1616,6 @@ void stream_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
             if (head_request || (!chunked && remaining_content_length == 0u)) {
                 return;
             }
-        }
-
-        if (head_request) {
-            return;
         }
 
         if (chunked) {
@@ -814,8 +1666,6 @@ void stream_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
             return;
         }
     }
-
-    static_cast<void>(emit_bad_gateway(emit));
 }
 
 } // namespace coquic::http3

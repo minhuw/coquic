@@ -282,6 +282,8 @@ TEST(QuicCoreTest, PacketInspectionSkipsDisabledMalformedAndUndecodableDatagrams
 TEST(QuicCoreTest, PacketInspectionSkipsDecodedPacketsWithoutPlaintextStorage) {
     coquic::quic::test::ScopedConnectionDrainTestHookReset reset_hooks;
 
+    EXPECT_TRUE(coquic::quic::test::connection_packet_inspection_coverage_for_tests());
+
     auto connection = make_connected_client_connection();
     connection.config_.enable_packet_inspection = true;
     ASSERT_TRUE(connection.peer_source_connection_id_.has_value());

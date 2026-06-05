@@ -470,11 +470,8 @@ std::optional<std::uint64_t> decode_prefixed_integer(quic::BufferReader &reader,
     }
 
     std::uint64_t shift = 0;
-    while (true) {
+    while (reader.remaining() > 0) {
         const auto next = reader.read_byte();
-        if (!next.has_value()) {
-            return std::nullopt;
-        }
         const auto byte = std::to_integer<std::uint8_t>(next.value());
         const auto chunk = static_cast<std::uint64_t>(byte & 0x7fu);
         if (shift >= 63) {
@@ -486,6 +483,7 @@ std::optional<std::uint64_t> decode_prefixed_integer(quic::BufferReader &reader,
         }
         shift += 7;
     }
+    return std::nullopt;
 }
 
 const std::vector<HuffmanNode> &hpack_huffman_trie() {

@@ -521,6 +521,138 @@ struct coquic_http3_server_update {
     std::vector<StoredServerRequestCancelledEvent> request_cancelled;
 };
 
+namespace coquic::http3::test {
+
+bool http3_ffi_conversion_coverage_for_tests() {
+    auto ok = true;
+    const auto record = [&ok](bool condition) {
+        ok = static_cast<bool>(static_cast<unsigned>(ok) & static_cast<unsigned>(condition));
+    };
+
+    const auto text = [](std::string_view value) {
+        return std::vector<std::byte>(reinterpret_cast<const std::byte *>(value.data()),
+                                      reinterpret_cast<const std::byte *>(value.data()) +
+                                          value.size());
+    };
+
+    const auto expect_input = [](const coquic_connection_input_t &input,
+                                 coquic_connection_input_kind_t kind) {
+        return input.kind == kind;
+    };
+
+    coquic::http3::ClientUpdate client_update{
+        .quic_inputs =
+            {
+                coquic::core::SendDatagramData{.bytes = text("datagram")},
+                coquic::core::ResetStream{.stream_id = 4, .application_error_code = 5},
+                coquic::core::StopSending{.stream_id = 8, .application_error_code = 9},
+                coquic::core::CloseConnection{.application_error_code = 10,
+                                              .reason_phrase = "closed"},
+                coquic::core::RequestKeyUpdate{},
+                coquic::core::RequestConnectionMigration{
+                    .route_handle = 11,
+                    .reason = coquic::core::MigrationReason::preferred_address,
+                    .address_validation_identity = text("identity"),
+                },
+                coquic::core::RequestConnectionMigration{
+                    .route_handle = 12,
+                    .reason = coquic::core::MigrationReason::active,
+                },
+            },
+        .has_pending_work = true,
+        .terminal_failure = true,
+        .handled_local_error = true,
+    };
+    coquic_http3_client_update client_storage(std::move(client_update));
+    record(client_storage.inputs.size() == 7);
+    record(expect_input(client_storage.inputs.at(0), COQUIC_CONNECTION_INPUT_SEND_DATAGRAM));
+    record(client_storage.inputs.at(0).as.send_datagram.bytes.length == 8);
+    record(expect_input(client_storage.inputs.at(1), COQUIC_CONNECTION_INPUT_RESET_STREAM));
+    record(client_storage.inputs.at(1).as.reset_stream.stream_id == 4);
+    record(expect_input(client_storage.inputs.at(2), COQUIC_CONNECTION_INPUT_STOP_SENDING));
+    record(client_storage.inputs.at(2).as.stop_sending.application_error_code == 9);
+    record(expect_input(client_storage.inputs.at(3), COQUIC_CONNECTION_INPUT_CLOSE));
+    record(client_storage.inputs.at(3).as.close.reason_phrase_length == 6);
+    record(expect_input(client_storage.inputs.at(4), COQUIC_CONNECTION_INPUT_REQUEST_KEY_UPDATE));
+    record(expect_input(client_storage.inputs.at(5), COQUIC_CONNECTION_INPUT_REQUEST_MIGRATION));
+    record(client_storage.inputs.at(5).as.request_migration.reason ==
+           COQUIC_MIGRATION_REASON_PREFERRED_ADDRESS);
+    record(expect_input(client_storage.inputs.at(6), COQUIC_CONNECTION_INPUT_REQUEST_MIGRATION));
+    record(client_storage.inputs.at(6).as.request_migration.reason ==
+           COQUIC_MIGRATION_REASON_ACTIVE);
+    record(coquic_http3_client_update_has_pending_work(&client_storage) == 1);
+    record(coquic_http3_client_update_terminal_failure(&client_storage) == 1);
+    record(coquic_http3_client_update_handled_local_error(&client_storage) == 1);
+
+    coquic::http3::ServerUpdate server_update{
+        .quic_inputs =
+            {
+                coquic::core::RequestKeyUpdate{},
+            },
+        .request_cancelled =
+            {
+                coquic::http3::ServerRequestCancelledEvent{
+                    .stream_id = 1,
+                    .head =
+                        coquic::http3::RequestHead{
+                            .method = "GET",
+                            .scheme = "https",
+                            .authority = "example.test",
+                            .path = "/has-head",
+                            .content_length = 0,
+                            .headers = {{"x", "y"}},
+                        },
+                    .body = text("body"),
+                    .trailers = {{"done", "1"}},
+                    .application_error_code = 20,
+                },
+                coquic::http3::ServerRequestCancelledEvent{
+                    .stream_id = 2,
+                    .head = std::nullopt,
+                    .application_error_code = 21,
+                },
+            },
+        .has_pending_work = true,
+        .terminal_failure = true,
+        .handled_local_error = true,
+    };
+    coquic_http3_server_update server_storage(std::move(server_update));
+    record(server_storage.request_cancelled.size() == 2);
+    record(server_storage.request_cancelled.at(0).view.has_head == 1);
+    record(server_storage.request_cancelled.at(0).view.head.content_length.has_value == 1);
+    record(server_storage.request_cancelled.at(0).view.head.content_length.value == 0);
+    record(server_storage.request_cancelled.at(1).view.has_head == 0);
+    record(coquic_http3_server_update_has_pending_work(&server_storage) == 1);
+    record(coquic_http3_server_update_terminal_failure(&server_storage) == 1);
+    record(coquic_http3_server_update_handled_local_error(&server_storage) == 1);
+
+    char detail_storage[32] = {};
+    coquic_http3_error_t detail_error{.detail_buffer = detail_storage,
+                                      .detail_buffer_capacity = sizeof(detail_storage)};
+    write_error(coquic::http3::Error{.code = coquic::http3::ErrorCode::internal_error,
+                                     .detail = "short",
+                                     .stream_id = 7},
+                &detail_error);
+    record(detail_error.detail_length == 5);
+    record(detail_error.detail_truncated == 0);
+    record(std::string_view(detail_storage) == "short");
+
+    coquic_http3_error_t null_detail_error{};
+    write_error(coquic::http3::Error{.code = coquic::http3::ErrorCode::internal_error,
+                                     .detail = "missing-buffer"},
+                &null_detail_error);
+    record(null_detail_error.detail_truncated == 1);
+    write_error(coquic::http3::Error{.code = coquic::http3::ErrorCode::internal_error}, nullptr);
+
+    record(to_string(nullptr, 3).empty());
+    record(to_string("ignored", 0).empty());
+    record(from_optional(std::optional<std::uint64_t>{42}).has_value == 1);
+
+    return ok;
+}
+
+} // namespace coquic::http3::test
+
 extern "C" {
 
 void coquic_http3_settings_init(coquic_http3_settings_t *settings) {

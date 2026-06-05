@@ -8,6 +8,7 @@
 #include "src/io/io_backend_test_hooks.h"
 #include "src/io/shared_udp_backend_core.h"
 #include "src/io/socket_io_backend.h"
+#include "src/io/socket_io_backend_internal.h"
 #include "tests/support/core/connection_test_fixtures.h"
 
 namespace {
@@ -186,6 +187,12 @@ void reset_multi_socket_backend_test_trace() {
 
 TEST(SocketIoBackendTest, PublicShellTypesCompileAndConstruct) {
     using namespace coquic::io;
+
+    internal::SocketIoPeerTupleKey first_peer_tuple{};
+    internal::SocketIoPeerTupleKey second_peer_tuple{};
+    EXPECT_EQ(first_peer_tuple, second_peer_tuple);
+    second_peer_tuple.socket_fd = 9;
+    EXPECT_NE(first_peer_tuple, second_peer_tuple);
 
     QuicIoRemote remote{};
     remote.family = AF_INET;
@@ -793,6 +800,11 @@ TEST(SocketIoBackendTest, SharedUdpBackendCoreSendManyMapsRoutesIntoEngineBatch)
 TEST(SocketIoBackendTest, ConfiguresLinuxSocketsForReceivingEcnMetadata) {
     EXPECT_TRUE(
         coquic::io::test::socket_io_backend_configures_linux_ecn_socket_options_for_tests());
+}
+
+TEST(SocketIoBackendTest, CanSkipLinuxPathMtuSocketOptions) {
+    EXPECT_TRUE(
+        coquic::io::test::socket_io_backend_can_skip_linux_pmtud_socket_options_for_tests());
 }
 
 TEST(SocketIoBackendTest, LinuxPathMtuSocketOptionSetupReportsEachFailurePoint) {

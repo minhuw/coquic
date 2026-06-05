@@ -51,6 +51,8 @@ std::uint64_t runtime_connection_handle_effect_coverage_mask_for_test();
 bool runtime_additional_internal_coverage_for_test();
 bool runtime_server_local_error_without_connection_coverage_for_test();
 bool runtime_tail_internal_coverage_for_test();
+bool runtime_streaming_reverse_proxy_dispatcher_coverage_for_test();
+bool reverse_proxy_internal_coverage_for_test();
 void runtime_set_force_bootstrap_guard_failure_for_test(bool enabled);
 void runtime_set_forced_server_endpoint_config_for_test(
     std::optional<coquic::quic::QuicCoreEndpointConfig> endpoint);
@@ -247,6 +249,87 @@ class ScopedHttpProxyUpstream {
 
     std::string response_;
     std::string request_text_;
+    std::atomic<bool> ready_ = false;
+    std::thread thread_;
+};
+
+class ScopedSequentialHttpProxyUpstream {
+  public:
+    ScopedSequentialHttpProxyUpstream(std::uint16_t port, std::vector<std::string> responses)
+        : responses_(std::move(responses)), thread_([this, port] { run(port); }) {
+    }
+
+    ~ScopedSequentialHttpProxyUpstream() {
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+    ScopedSequentialHttpProxyUpstream(const ScopedSequentialHttpProxyUpstream &) = delete;
+    ScopedSequentialHttpProxyUpstream &
+    operator=(const ScopedSequentialHttpProxyUpstream &) = delete;
+
+    bool ready() const {
+        return ready_.load(std::memory_order_acquire);
+    }
+
+  private:
+    void run(std::uint16_t port) {
+        const int listen_socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_socket_fd < 0) {
+            return;
+        }
+        ScopedFd listen_fd(listen_socket_fd);
+
+        const int enable = 1;
+        if (::setsockopt(listen_socket_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) !=
+            0) {
+            return;
+        }
+
+        sockaddr_in listen_address{};
+        listen_address.sin_family = AF_INET;
+        listen_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        listen_address.sin_port = htons(port);
+        if (::bind(listen_socket_fd, reinterpret_cast<const sockaddr *>(&listen_address),
+                   sizeof(listen_address)) != 0) {
+            return;
+        }
+        if (::listen(listen_socket_fd, static_cast<int>(responses_.size())) != 0) {
+            return;
+        }
+        ready_.store(true, std::memory_order_release);
+
+        for (const auto &response : responses_) {
+            const int client_fd = ::accept(listen_socket_fd, nullptr, nullptr);
+            if (client_fd < 0) {
+                return;
+            }
+            ScopedFd client_socket_guard(client_fd);
+
+            std::string request_text;
+            std::array<char, 4096> buffer{};
+            while (request_text.find("\r\n\r\n") == std::string::npos) {
+                const auto received = ::recv(client_fd, buffer.data(), buffer.size(), 0);
+                if (received <= 0) {
+                    break;
+                }
+                request_text.append(buffer.data(), static_cast<std::size_t>(received));
+            }
+
+            std::size_t written = 0;
+            while (written < response.size()) {
+                const auto result = ::send(client_fd, response.data() + written,
+                                           response.size() - written, MSG_NOSIGNAL);
+                if (result <= 0) {
+                    break;
+                }
+                written += static_cast<std::size_t>(result);
+            }
+        }
+    }
+
+    std::vector<std::string> responses_;
     std::atomic<bool> ready_ = false;
     std::thread thread_;
 };
@@ -1534,6 +1617,20 @@ TEST(QuicHttp3RuntimeTest, RuntimeTransferPlansRejectInvalidJobSets) {
         };
         EXPECT_FALSE(coquic::http3::runtime_make_client_transfer_plans_for_test(config, jobs));
     }
+
+    {
+        const std::array jobs{
+            coquic::http3::Http3RuntimeTransferJob{
+                .url = "https://localhost:9443/a",
+                .output_path = "a.bin",
+            },
+            coquic::http3::Http3RuntimeTransferJob{
+                .url = "https://example.test:9443/b",
+                .output_path = "b.bin",
+            },
+        };
+        EXPECT_FALSE(coquic::http3::runtime_make_client_transfer_plans_for_test(config, jobs));
+    }
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeParserDispatchesServerAndClientSubcommands) {
@@ -1673,6 +1770,14 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerCoverageHookHandlesLocalErrorWithoutConn
 
 TEST(QuicHttp3RuntimeTest, RuntimeTailInternalCoverageHookReturnsTrue) {
     EXPECT_TRUE(coquic::http3::runtime_tail_internal_coverage_for_test());
+}
+
+TEST(QuicHttp3RuntimeTest, RuntimeStreamingReverseProxyDispatcherCoverageHookReturnsTrue) {
+    EXPECT_TRUE(coquic::http3::runtime_streaming_reverse_proxy_dispatcher_coverage_for_test());
+}
+
+TEST(QuicHttp3RuntimeTest, ReverseProxyInternalCoverageHookReturnsTrue) {
+    EXPECT_TRUE(coquic::http3::reverse_proxy_internal_coverage_for_test());
 }
 
 TEST(QuicHttp3RuntimeTest, ServerEndpointConfigRejectsUnreadableIdentityFiles) {
@@ -2484,6 +2589,300 @@ TEST(QuicHttp3RuntimeTest, ReverseProxyStreamingEmitsChunkedBodyPartsBeforeCompl
     }
     EXPECT_EQ(streamed_body, "data: one\n\ndata: two\n\n");
     EXPECT_TRUE(saw_complete);
+}
+
+TEST(QuicHttp3RuntimeTest, ReverseProxyStreamingCoversContentLengthCloseAndFailurePaths) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    ScopedSequentialHttpProxyUpstream upstream(
+        port, {
+                  "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                  "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody",
+                  "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose-body",
+                  "bad\r\n\r\n",
+                  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                  "4\r\nda",
+                  "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nhalf",
+                  "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody",
+              });
+    for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    ASSERT_TRUE(upstream.ready());
+
+    const auto config = coquic::http3::Http3ReverseProxyConfig{
+        .host = "127.0.0.1",
+        .port = port,
+    };
+    const auto request = coquic::http3::Http3Request{
+        .head =
+            {
+                .method = "GET",
+                .authority = "demo.test",
+                .path = "/resource",
+            },
+    };
+    auto collect = [&](const coquic::http3::Http3Request &proxy_request) {
+        std::vector<coquic::http3::Http3ResponsePart> parts;
+        coquic::http3::stream_http_reverse_proxy_response(
+            config, proxy_request, [&](coquic::http3::Http3ResponsePart part) {
+                parts.push_back(std::move(part));
+                return true;
+            });
+        return parts;
+    };
+
+    {
+        const auto parts = collect(request);
+        EXPECT_EQ(parts.size(), 1u);
+        if (parts.size() == 1u && parts.front().head.has_value()) {
+            EXPECT_EQ(optional_ref_or_terminate(parts.front().head).status, 204);
+            EXPECT_TRUE(parts.front().complete);
+        } else {
+            ADD_FAILURE() << "expected one complete 204 response part";
+        }
+    }
+    {
+        const auto parts = collect(request);
+        EXPECT_EQ(parts.size(), 2u);
+        if (parts.size() == 2u && parts.front().head.has_value()) {
+            EXPECT_EQ(optional_ref_or_terminate(parts.front().head).content_length, 4u);
+            EXPECT_EQ(parts[1].body, bytes_from_text("body"));
+            EXPECT_TRUE(parts[1].complete);
+        } else {
+            ADD_FAILURE() << "expected head and complete content-length body parts";
+        }
+    }
+    {
+        const auto parts = collect(request);
+        EXPECT_GE(parts.size(), 2u);
+        if (parts.size() >= 2u) {
+            EXPECT_EQ(parts[1].body, bytes_from_text("close-body"));
+            EXPECT_TRUE(parts.back().complete);
+        } else {
+            ADD_FAILURE() << "expected close-delimited body part";
+        }
+    }
+    {
+        const auto parts = collect(request);
+        EXPECT_EQ(parts.size(), 1u);
+        if (parts.size() == 1u && parts.front().head.has_value()) {
+            EXPECT_EQ(optional_ref_or_terminate(parts.front().head).status, 502);
+            EXPECT_TRUE(parts.front().complete);
+        } else {
+            ADD_FAILURE() << "expected bad gateway for malformed response head";
+        }
+    }
+    {
+        const auto parts = collect(request);
+        EXPECT_EQ(parts.size(), 2u);
+        if (parts.size() == 2u && parts.back().head.has_value()) {
+            EXPECT_EQ(optional_ref_or_terminate(parts.back().head).status, 502);
+            EXPECT_TRUE(parts.back().complete);
+        } else {
+            ADD_FAILURE() << "expected head then bad gateway for truncated chunk";
+        }
+    }
+    {
+        const auto parts = collect(request);
+        EXPECT_EQ(parts.size(), 3u);
+        if (parts.size() == 3u && parts.back().head.has_value()) {
+            EXPECT_EQ(parts[1].body, bytes_from_text("half"));
+            EXPECT_EQ(optional_ref_or_terminate(parts.back().head).status, 502);
+            EXPECT_TRUE(parts.back().complete);
+        } else {
+            ADD_FAILURE() << "expected partial body then bad gateway for short content-length";
+        }
+    }
+    {
+        std::vector<coquic::http3::Http3ResponsePart> parts;
+        coquic::http3::stream_http_reverse_proxy_response(
+            config, request, [&](coquic::http3::Http3ResponsePart part) {
+                parts.push_back(std::move(part));
+                return false;
+            });
+        EXPECT_EQ(parts.size(), 1u);
+        if (parts.size() == 1u && parts.front().head.has_value()) {
+            EXPECT_EQ(optional_ref_or_terminate(parts.front().head).status, 200);
+        } else {
+            ADD_FAILURE() << "expected early cancellation after response head";
+        }
+    }
+}
+
+TEST(QuicHttp3RuntimeTest, ReverseProxyFetchReturnsBadGatewayForMalformedUpstreamBodies) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    ScopedSequentialHttpProxyUpstream upstream(
+        port, {
+                  "HTTP/1.1 200 OK\r\nContent-Length: bad\r\nConnection: close\r\n\r\n",
+                  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                  "z\r\n",
+                  "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nhalf",
+                  "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose-body",
+              });
+    for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    ASSERT_TRUE(upstream.ready());
+
+    const auto config = coquic::http3::Http3RuntimeConfig{
+        .reverse_proxy =
+            coquic::http3::Http3ReverseProxyConfig{
+                .host = "127.0.0.1",
+                .port = port,
+            },
+    };
+    const auto request = coquic::http3::Http3Request{
+        .head =
+            {
+                .method = "GET",
+                .path = "/bad-upstream",
+            },
+    };
+
+    auto invalid_length = coquic::http3::runtime_server_response_for_test(config, request);
+    EXPECT_EQ(invalid_length.head.status, 502);
+
+    auto invalid_chunk = coquic::http3::runtime_server_response_for_test(config, request);
+    EXPECT_EQ(invalid_chunk.head.status, 502);
+
+    auto short_content_length = coquic::http3::runtime_server_response_for_test(config, request);
+    EXPECT_EQ(short_content_length.head.status, 502);
+
+    auto close_delimited = coquic::http3::runtime_server_response_for_test(config, request);
+    EXPECT_EQ(close_delimited.head.status, 200);
+    EXPECT_EQ(close_delimited.body, bytes_from_text("close-body"));
+}
+
+TEST(QuicHttp3RuntimeTest, ReverseProxyStreamingCoversAdditionalFailureEdges) {
+    {
+        const auto port = allocate_udp_loopback_port();
+        ASSERT_NE(port, 0);
+
+        std::vector<coquic::http3::Http3ResponsePart> parts;
+        coquic::http3::stream_http_reverse_proxy_response(
+            coquic::http3::Http3ReverseProxyConfig{
+                .host = "127.0.0.1",
+                .port = port,
+            },
+            coquic::http3::Http3Request{.head = {.method = "GET", .path = "/missing"}},
+            [&](coquic::http3::Http3ResponsePart part) {
+                parts.push_back(std::move(part));
+                return true;
+            });
+        ASSERT_EQ(parts.size(), 1u);
+        ASSERT_TRUE(parts.front().head.has_value());
+        EXPECT_EQ(optional_ref_or_terminate(parts.front().head).status, 502);
+        EXPECT_TRUE(parts.front().complete);
+    }
+    {
+        std::vector<coquic::http3::Http3ResponsePart> parts;
+        coquic::http3::stream_http_reverse_proxy_response(
+            coquic::http3::Http3ReverseProxyConfig{
+                .host = "invalid..coquic",
+                .port = 80,
+            },
+            coquic::http3::Http3Request{.head = {.method = "GET", .path = "/missing"}},
+            [&](coquic::http3::Http3ResponsePart part) {
+                parts.push_back(std::move(part));
+                return true;
+            });
+        ASSERT_EQ(parts.size(), 1u);
+        ASSERT_TRUE(parts.front().head.has_value());
+        EXPECT_EQ(optional_ref_or_terminate(parts.front().head).status, 502);
+        EXPECT_TRUE(parts.front().complete);
+    }
+
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const std::string large_chunk(8192, 'x');
+    ScopedSequentialHttpProxyUpstream upstream(
+        port, {
+                  "HTTP/1.1 200 OK\r\nConnection: close\r\npartial-head",
+                  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                  "4\r\ndataxx",
+                  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
+                      std::string("2000\r\n") + large_chunk + "\r\n0\r\n\r\n",
+                  "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+              });
+    for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    ASSERT_TRUE(upstream.ready());
+
+    const auto config = coquic::http3::Http3ReverseProxyConfig{
+        .host = "127.0.0.1",
+        .port = port,
+    };
+    const auto request = coquic::http3::Http3Request{
+        .head =
+            {
+                .method = "GET",
+                .path = "/stream",
+            },
+    };
+    auto collect = [&](const coquic::http3::Http3Request &proxy_request,
+                       const std::function<bool(const coquic::http3::Http3ResponsePart &)> &keep) {
+        std::vector<coquic::http3::Http3ResponsePart> parts;
+        coquic::http3::stream_http_reverse_proxy_response(
+            config, proxy_request, [&](coquic::http3::Http3ResponsePart part) {
+                const bool result = keep(part);
+                parts.push_back(std::move(part));
+                return result;
+            });
+        return parts;
+    };
+
+    {
+        const auto parts = collect(request, [](const auto &) { return true; });
+        EXPECT_EQ(parts.size(), 1u);
+        if (parts.size() == 1u && parts.front().head.has_value()) {
+            EXPECT_EQ(optional_ref_or_terminate(parts.front().head).status, 502);
+        } else {
+            ADD_FAILURE() << "expected one bad gateway part for incomplete headers";
+        }
+    }
+    {
+        const auto parts = collect(request, [](const auto &) { return true; });
+        EXPECT_EQ(parts.size(), 2u);
+        if (parts.size() == 2u && parts.back().head.has_value()) {
+            EXPECT_EQ(optional_ref_or_terminate(parts.back().head).status, 502);
+        } else {
+            ADD_FAILURE() << "expected response head then bad gateway for invalid chunk framing";
+        }
+    }
+    {
+        const auto parts = collect(
+            request, [](const auto &part) { return part.head.has_value() || part.body.empty(); });
+        EXPECT_GE(parts.size(), 2u);
+        if (parts.size() >= 2u && parts.front().head.has_value()) {
+            EXPECT_EQ(optional_ref_or_terminate(parts.front().head).status, 200);
+            EXPECT_EQ(parts[1].body.size(), large_chunk.size());
+        } else {
+            ADD_FAILURE() << "expected response head and a buffered chunk body";
+        }
+    }
+    {
+        const auto head_request = coquic::http3::Http3Request{
+            .head =
+                {
+                    .method = "HEAD",
+                    .path = "/head",
+                },
+        };
+        const auto parts = collect(head_request, [](const auto &) { return true; });
+        EXPECT_EQ(parts.size(), 1u);
+        if (parts.size() == 1u && parts.front().head.has_value()) {
+            EXPECT_EQ(optional_ref_or_terminate(parts.front().head).status, 200);
+            EXPECT_TRUE(parts.front().complete);
+        } else {
+            ADD_FAILURE() << "expected one complete HEAD response part";
+        }
+    }
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCanReverseProxyHeadWithContentLength) {

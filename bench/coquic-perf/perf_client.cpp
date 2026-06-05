@@ -86,6 +86,12 @@ bool timed_rr_drain_connection_complete(bool close_requested, std::size_t outsta
     return close_requested;
 }
 
+std::size_t active_crr_connection_count(std::span<const QuicPerfDrainStateSnapshot> connections) {
+    return static_cast<std::size_t>(
+        std::count_if(connections.begin(), connections.end(),
+                      [](const auto &connection) { return !connection.close_requested; }));
+}
+
 quic::QuicCoreClientConnectionConfig make_client_open_config_for_index(const QuicPerfConfig &config,
                                                                        std::uint64_t index) {
     const auto id = index + 1;
@@ -132,6 +138,11 @@ bool timed_crr_drain_complete_for_test(std::span<const QuicPerfDrainStateSnapsho
         return timed_rr_drain_connection_complete(connection.close_requested,
                                                   connection.outstanding_requests);
     });
+}
+
+std::size_t
+active_crr_connections_for_test(std::span<const QuicPerfDrainStateSnapshot> connections) {
+    return active_crr_connection_count(connections);
 }
 
 QuicPerfClient::QuicPerfClient(const QuicPerfConfig &config)
@@ -413,7 +424,8 @@ int QuicPerfClient::run() {
         if (!flush_pending_sends()) {
             return fail("client pending send flush failed");
         }
-        auto event = backend_->wait(next_wait_wakeup(core_next_wakeup));
+        const auto wait_core_next_wakeup = core_.next_wakeup();
+        auto event = backend_->wait(next_wait_wakeup(wait_core_next_wakeup));
         if (!event.has_value()) {
             return fail("client wait failed");
         }
@@ -427,7 +439,7 @@ int QuicPerfClient::run() {
             return fail("client backend shutdown");
         case io::QuicIoEvent::Kind::timer_expired:
             advance_benchmark_phase(event_handling_time);
-            if (core_next_wakeup.has_value() && *core_next_wakeup <= event->now) {
+            if (wait_core_next_wakeup.has_value() && *wait_core_next_wakeup <= event->now) {
                 if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, event->now),
                                    event_handling_time)) {
                     return fail("client timer event failed");
@@ -1085,6 +1097,12 @@ bool QuicPerfClient::maybe_close_crr_connection(ConnectionState &connection,
     return handle_result(std::move(close_result), now);
 }
 
+std::size_t QuicPerfClient::active_crr_connection_count() const {
+    return static_cast<std::size_t>(
+        std::count_if(connections_.begin(), connections_.end(),
+                      [](const auto &entry) { return !entry.second.close_requested; }));
+}
+
 quic::QuicCoreClientConnectionConfig
 QuicPerfClient::make_client_open_config(std::uint64_t index) const {
     return make_client_open_config_for_index(config_, index);
@@ -1095,7 +1113,7 @@ bool QuicPerfClient::maybe_open_crr_connections(quic::QuicCoreTimePoint now) {
         return true;
     }
 
-    while (connections_.size() < config_.connections &&
+    while (active_crr_connection_count() < config_.connections &&
            (!config_.requests.has_value() || crr_requests_opened_ < *config_.requests)) {
         auto result = core_.advance_endpoint(
             quic::QuicCoreOpenConnection{

@@ -28,6 +28,7 @@ struct SocketIoBackendOpsOverride {
     int (*bind_fn)(int, const sockaddr *, socklen_t) = nullptr;
     int (*poll_fn)(pollfd *, nfds_t, int) = nullptr;
     int (*setsockopt_fn)(int, int, int, const void *, socklen_t) = nullptr;
+    int (*getsockname_fn)(int, sockaddr *, socklen_t *) = nullptr;
     ssize_t (*sendto_fn)(int, const void *, size_t, int, const sockaddr *, socklen_t) = nullptr;
     ssize_t (*sendmsg_fn)(int, const msghdr *, int) = nullptr;
     int (*sendmmsg_fn)(int, struct mmsghdr *, unsigned int, int) = nullptr;
@@ -148,6 +149,7 @@ bool socket_io_backend_wait_retries_after_spurious_readable_poll_for_tests();
 bool socket_io_backend_poll_engine_primes_descriptor_cache_for_tests();
 bool poll_io_engine_restamps_queued_receive_events_for_tests();
 bool socket_io_backend_configures_linux_ecn_socket_options_for_tests();
+bool socket_io_backend_can_skip_linux_pmtud_socket_options_for_tests();
 bool socket_io_backend_sendmsg_uses_outbound_ecn_for_tests();
 bool socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests();
 bool socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests();

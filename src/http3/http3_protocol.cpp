@@ -80,6 +80,26 @@ serialize_http3_payload_frame(std::uint64_t type, std::span<const std::byte> pay
     return CodecResult<std::vector<std::byte>>::success(writer.bytes());
 }
 
+CodecResult<std::vector<std::byte>>
+serialize_http3_data_payload_frame(std::span<const std::byte> payload) {
+    BufferWriter writer;
+    if (const auto error = write_http3_payload_frame(writer, kHttp3FrameTypeData, payload);
+        error.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(*error);
+    }
+    return CodecResult<std::vector<std::byte>>::success(writer.bytes());
+}
+
+CodecResult<std::vector<std::byte>>
+serialize_http3_headers_payload_frame(std::span<const std::byte> field_section) {
+    BufferWriter writer;
+    if (const auto error = write_http3_payload_frame(writer, kHttp3FrameTypeHeaders, field_section);
+        error.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(*error);
+    }
+    return CodecResult<std::vector<std::byte>>::success(writer.bytes());
+}
+
 bool header_name_has_uppercase(std::string_view name) {
     for (const unsigned char ch : name) {
         if (std::isupper(ch) != 0) {
@@ -122,7 +142,8 @@ bool iequals_ascii(std::string_view lhs, std::string_view rhs) {
 Http3Result<std::uint64_t> parse_content_length_value(std::string_view value) {
     std::optional<std::uint64_t> parsed_value;
 
-    while (true) {
+    bool parsing = true;
+    while (parsing) {
         const auto comma = value.find(',');
         const auto token = trim_ows(value.substr(0, comma));
         if (token.empty()) {
@@ -146,9 +167,10 @@ Http3Result<std::uint64_t> parse_content_length_value(std::string_view value) {
         parsed_value = current;
 
         if (comma == std::string_view::npos) {
-            break;
+            parsing = false;
+        } else {
+            value.remove_prefix(comma + 1);
         }
-        value.remove_prefix(comma + 1);
     }
 
     return Http3Result<std::uint64_t>::success(*parsed_value);
@@ -159,23 +181,11 @@ Http3Result<std::uint64_t> parse_content_length_value(std::string_view value) {
 CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &frame) {
     struct FrameSerializer {
         CodecResult<std::vector<std::byte>> operator()(const Http3DataFrame &typed_frame) const {
-            BufferWriter writer;
-            if (const auto error =
-                    write_http3_payload_frame(writer, kHttp3FrameTypeData, typed_frame.payload);
-                error.has_value()) {
-                return CodecResult<std::vector<std::byte>>::failure(*error);
-            }
-            return CodecResult<std::vector<std::byte>>::success(writer.bytes());
+            return serialize_http3_data_payload_frame(typed_frame.payload);
         }
 
         CodecResult<std::vector<std::byte>> operator()(const Http3HeadersFrame &typed_frame) const {
-            BufferWriter writer;
-            if (const auto error = write_http3_payload_frame(writer, kHttp3FrameTypeHeaders,
-                                                             typed_frame.field_section);
-                error.has_value()) {
-                return CodecResult<std::vector<std::byte>>::failure(*error);
-            }
-            return CodecResult<std::vector<std::byte>>::success(writer.bytes());
+            return serialize_http3_headers_payload_frame(typed_frame.field_section);
         }
 
         CodecResult<std::vector<std::byte>>
@@ -632,6 +642,19 @@ serialize_http3_payload_frame_with_synthetic_length_for_tests(std::uint64_t type
                                                               std::size_t payload_size) {
     const std::byte sentinel{0x00};
     return serialize_http3_payload_frame(type, std::span<const std::byte>(&sentinel, payload_size));
+}
+
+quic::CodecResult<std::vector<std::byte>>
+serialize_http3_data_frame_with_synthetic_length_for_tests(std::size_t payload_size) {
+    const std::byte sentinel{0x00};
+    return serialize_http3_data_payload_frame(std::span<const std::byte>(&sentinel, payload_size));
+}
+
+quic::CodecResult<std::vector<std::byte>>
+serialize_http3_headers_frame_with_synthetic_length_for_tests(std::size_t payload_size) {
+    const std::byte sentinel{0x00};
+    return serialize_http3_headers_payload_frame(
+        std::span<const std::byte>(&sentinel, payload_size));
 }
 
 } // namespace coquic::http3::test

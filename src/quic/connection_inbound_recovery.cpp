@@ -16,7 +16,7 @@ CodecResult<ConnectionId> QuicConnection::peek_client_initial_destination_connec
     if ((header_byte & 0x80u) == 0) {
         return CodecResult<ConnectionId>::failure(CodecErrorCode::unsupported_packet_type, 0);
     }
-    if ((header_byte & 0x40u) == 0 && !config_.transport.grease_quic_bit) {
+    if (invalid_fixed_bit_is_rejected(header_byte, config_.transport.grease_quic_bit)) {
         return CodecResult<ConnectionId>::failure(CodecErrorCode::invalid_fixed_bit, 0);
     }
 
@@ -66,12 +66,12 @@ QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const 
 
     const auto header_byte = std::to_integer<std::uint8_t>(first_byte.value());
     if ((header_byte & 0x80u) == 0) {
-        if ((header_byte & 0x40u) == 0 && !config_.transport.grease_quic_bit) {
+        if (invalid_fixed_bit_is_rejected(header_byte, config_.transport.grease_quic_bit)) {
             return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_fixed_bit, 0);
         }
         return CodecResult<std::size_t>::success(bytes.size());
     }
-    if ((header_byte & 0x40u) == 0 && !config_.transport.grease_quic_bit) {
+    if (invalid_fixed_bit_is_rejected(header_byte, config_.transport.grease_quic_bit)) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_fixed_bit, 0);
     }
 
@@ -180,12 +180,9 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                         protected_packet.source_connection_id)) {
                     reset_client_handshake_peer_state_for_new_source_connection_id();
                 }
-                const bool peer_connection_id_route_changed =
-                    peer_connection_ids_.find(0) == peer_connection_ids_.end() ||
-                    peer_connection_ids_.at(0).connection_id !=
-                        protected_packet.source_connection_id ||
-                    peer_connection_ids_.at(0).locally_retired ||
-                    active_peer_connection_id_sequence_ != 0;
+                const bool route_changed = peer_connection_id_route_changed(
+                    peer_connection_ids_, protected_packet.source_connection_id,
+                    active_peer_connection_id_sequence_);
                 peer_source_connection_id_ = protected_packet.source_connection_id;
                 peer_connection_ids_[0] = PeerConnectionIdRecord{
                     .sequence_number = 0,
@@ -193,7 +190,7 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                 };
                 retired_peer_connection_id_sequences_.erase(0);
                 active_peer_connection_id_sequence_ = 0;
-                if (peer_connection_id_route_changed) {
+                if (route_changed) {
                     note_endpoint_route_state_changed();
                 }
                 const auto processed =
@@ -240,12 +237,9 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                         protected_packet.source_connection_id)) {
                     reset_client_handshake_peer_state_for_new_source_connection_id();
                 }
-                const bool peer_connection_id_route_changed =
-                    peer_connection_ids_.find(0) == peer_connection_ids_.end() ||
-                    peer_connection_ids_.at(0).connection_id !=
-                        protected_packet.source_connection_id ||
-                    peer_connection_ids_.at(0).locally_retired ||
-                    active_peer_connection_id_sequence_ != 0;
+                const bool route_changed = peer_connection_id_route_changed(
+                    peer_connection_ids_, protected_packet.source_connection_id,
+                    active_peer_connection_id_sequence_);
                 peer_source_connection_id_ = protected_packet.source_connection_id;
                 peer_connection_ids_[0] = PeerConnectionIdRecord{
                     .sequence_number = 0,
@@ -253,7 +247,7 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                 };
                 retired_peer_connection_id_sequences_.erase(0);
                 active_peer_connection_id_sequence_ = 0;
-                if (peer_connection_id_route_changed) {
+                if (route_changed) {
                     note_endpoint_route_state_changed();
                 }
                 note_authenticated_packet_number(handshake_space_, protected_packet.packet_number);
@@ -399,12 +393,9 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                         protected_packet.source_connection_id)) {
                     reset_client_handshake_peer_state_for_new_source_connection_id();
                 }
-                const bool peer_connection_id_route_changed =
-                    peer_connection_ids_.find(0) == peer_connection_ids_.end() ||
-                    peer_connection_ids_.at(0).connection_id !=
-                        protected_packet.source_connection_id ||
-                    peer_connection_ids_.at(0).locally_retired ||
-                    active_peer_connection_id_sequence_ != 0;
+                const bool route_changed = peer_connection_id_route_changed(
+                    peer_connection_ids_, protected_packet.source_connection_id,
+                    active_peer_connection_id_sequence_);
                 peer_source_connection_id_ = protected_packet.source_connection_id;
                 peer_connection_ids_[0] = PeerConnectionIdRecord{
                     .sequence_number = 0,
@@ -412,7 +403,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 };
                 retired_peer_connection_id_sequences_.erase(0);
                 active_peer_connection_id_sequence_ = 0;
-                if (peer_connection_id_route_changed) {
+                if (route_changed) {
                     note_endpoint_route_state_changed();
                 }
                 const auto processed = process_inbound_received_crypto(
@@ -459,12 +450,9 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                         protected_packet.source_connection_id)) {
                     reset_client_handshake_peer_state_for_new_source_connection_id();
                 }
-                const bool peer_connection_id_route_changed =
-                    peer_connection_ids_.find(0) == peer_connection_ids_.end() ||
-                    peer_connection_ids_.at(0).connection_id !=
-                        protected_packet.source_connection_id ||
-                    peer_connection_ids_.at(0).locally_retired ||
-                    active_peer_connection_id_sequence_ != 0;
+                const bool route_changed = peer_connection_id_route_changed(
+                    peer_connection_ids_, protected_packet.source_connection_id,
+                    active_peer_connection_id_sequence_);
                 peer_source_connection_id_ = protected_packet.source_connection_id;
                 peer_connection_ids_[0] = PeerConnectionIdRecord{
                     .sequence_number = 0,
@@ -472,7 +460,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 };
                 retired_peer_connection_id_sequences_.erase(0);
                 active_peer_connection_id_sequence_ = 0;
-                if (peer_connection_id_route_changed) {
+                if (route_changed) {
                     note_endpoint_route_state_changed();
                 }
                 note_authenticated_packet_number(handshake_space_, protected_packet.packet_number);
@@ -701,8 +689,8 @@ CodecResult<bool> QuicConnection::detect_old_key_ack_of_current_key_phase_packet
                 continue;
             }
             const auto *packet = packet_space.recovery.packet_for_handle(handle);
-            if (packet != nullptr && packet->protection_key_update_generation ==
-                                         current_application_write_key_generation_) {
+            if (acked_current_key_update_generation(packet,
+                                                    current_application_write_key_generation_)) {
                 const auto error = key_update_error();
                 queue_transport_close_for_error(now, error);
                 return CodecResult<bool>::failure(error);
@@ -722,8 +710,8 @@ void QuicConnection::maybe_complete_local_key_update_from_ack(const PacketSpaceS
 
     const auto acked_current_generation_packet = [&](RecoveryPacketHandle handle) {
         const auto *packet = packet_space.recovery.packet_for_handle(handle);
-        return packet != nullptr && packet->protection_key_update_generation ==
-                                        current_application_write_key_generation_;
+        return acked_current_key_update_generation(packet,
+                                                   current_application_write_key_generation_);
     };
 
     if (!std::ranges::any_of(ack_result.acked_packets, acked_current_generation_packet) &&
@@ -953,14 +941,11 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
     acked_packets.reserve(ack_result.acked_packets.size());
     simple_stream_ack_samples.reserve(ack_result.acked_packets.size());
     const auto can_collect_lightweight_simple_stream_ack_samples = [&]() {
-        if (!ack_result.late_acked_packets.empty() || !ack_result.lost_packets.empty() ||
-            config_.role == EndpointRole::client || qlog_session_ != nullptr ||
-            packet_trace_matches_connection(config_.source_connection_id)) {
-            return false;
-        }
-        const auto algorithm = congestion_controller_.algorithm();
-        if (algorithm != QuicCongestionControlAlgorithm::newreno &&
-            algorithm != QuicCongestionControlAlgorithm::cubic) {
+        if (!simple_stream_ack_sample_collection_is_eligible(
+                !ack_result.late_acked_packets.empty(), !ack_result.lost_packets.empty(),
+                config_.role, qlog_session_ != nullptr,
+                packet_trace_matches_connection(config_.source_connection_id),
+                congestion_controller_.algorithm())) {
             return false;
         }
         return std::ranges::all_of(ack_result.acked_packets, [&](const auto handle) {
@@ -1338,7 +1323,7 @@ bool QuicConnection::try_retire_simple_stream_acked_packet(
         maybe_refresh_peer_stream_limit(stream_it->second);
         note_retirement_candidate(metadata.stream_id);
     };
-    if (first_stream_frame_metadata.has_value()) {
+    if (has_ack_stream_metadata_for_retirement(first_stream_frame_metadata)) {
         acknowledge_metadata(*first_stream_frame_metadata);
     }
     for (const auto &metadata : stream_frame_metadata) {
@@ -1367,8 +1352,7 @@ bool QuicConnection::try_ack_simple_congestion_batch(
         return true;
     }
     const auto algorithm = congestion_controller_.algorithm();
-    if (algorithm != QuicCongestionControlAlgorithm::newreno &&
-        algorithm != QuicCongestionControlAlgorithm::cubic) {
+    if (!simple_stream_congestion_batch_algorithm_is_supported(algorithm)) {
         return false;
     }
 
@@ -1380,16 +1364,10 @@ bool QuicConnection::try_ack_simple_congestion_batch(
 
 bool QuicConnection::can_use_simple_stream_ack_fast_path(
     std::span<const SentPacketRecord> acked_packets, bool has_late_acked_packets) const {
-    if (has_late_acked_packets || !acked_packets.empty()) {
-        return false;
-    }
-    if (config_.role == EndpointRole::client || qlog_session_ != nullptr ||
-        packet_trace_matches_connection(config_.source_connection_id)) {
-        return false;
-    }
-    const auto algorithm = congestion_controller_.algorithm();
-    return algorithm == QuicCongestionControlAlgorithm::newreno ||
-           algorithm == QuicCongestionControlAlgorithm::cubic;
+    return simple_stream_ack_fast_path_is_eligible(
+        has_late_acked_packets, !acked_packets.empty(), config_.role, qlog_session_ != nullptr,
+        packet_trace_matches_connection(config_.source_connection_id),
+        congestion_controller_.algorithm());
 }
 
 bool QuicConnection::process_simple_stream_ack_ecn(
@@ -1454,8 +1432,8 @@ bool QuicConnection::process_simple_stream_ack_ecn(
                 ? std::max(*summary.latest_marked_sent_time, packet.sent_time)
                 : packet.sent_time;
     }
-    if (single_path_summary && single_path_id.has_value() &&
-        single_path_latest_marked_sent_time.has_value()) {
+    if (should_use_single_path_simple_stream_ack_ecn(single_path_summary, single_path_id,
+                                                     single_path_latest_marked_sent_time)) {
         return process_single_path_simple_stream_ack_ecn(
             packet_space, *single_path_id, single_path_newly_acked_ect0,
             single_path_newly_acked_ect1, *single_path_latest_marked_sent_time, ecn_counts,
@@ -1486,10 +1464,7 @@ bool QuicConnection::process_simple_stream_ack_ecn(
                                          ? path.ecn.last_peer_counts[packet_space_index]
                                          : AckEcnCounts{};
         const auto &current_counts = *ecn_counts;
-        const bool counts_decreased = current_counts.ect0 < previous_counts.ect0 ||
-                                      current_counts.ect1 < previous_counts.ect1 ||
-                                      current_counts.ecn_ce < previous_counts.ecn_ce;
-        if (counts_decreased) {
+        if (ecn_counts_decreased(current_counts, previous_counts)) {
             disable_ecn_on_path(path_id);
             continue;
         }
@@ -1497,19 +1472,17 @@ bool QuicConnection::process_simple_stream_ack_ecn(
         const auto delta_ect0 = current_counts.ect0 - previous_counts.ect0;
         auto delta_ect1 = current_counts.ect1 - previous_counts.ect1;
         auto delta_ce = current_counts.ecn_ce - previous_counts.ecn_ce;
-        bool missing_ect0_feedback = delta_ect0 + delta_ce < summary.newly_acked_ect0;
-        bool missing_ect1_feedback = delta_ect1 + delta_ce < summary.newly_acked_ect1;
-        bool impossible_ect0_count = current_counts.ect0 > path.ecn.total_sent_ect0;
-        bool impossible_ect1_count = current_counts.ect1 > path.ecn.total_sent_ect1;
-        if (missing_ect0_feedback || missing_ect1_feedback || impossible_ect0_count ||
-            impossible_ect1_count) {
+        if (ecn_feedback_is_invalid(delta_ect0, delta_ect1, delta_ce, summary.newly_acked_ect0,
+                                    summary.newly_acked_ect1, current_counts.ect0,
+                                    current_counts.ect1, path.ecn.total_sent_ect0,
+                                    path.ecn.total_sent_ect1)) {
             disable_ecn_on_path(path_id);
             continue;
         }
 
         path.ecn.last_peer_counts[packet_space_index] = current_counts;
         path.ecn.has_last_peer_counts[packet_space_index] = true;
-        if (path.ecn.state == QuicPathEcnState::probing) {
+        if (should_mark_ecn_probing_path_capable(path.ecn.state)) {
             path.ecn.probing_packets_acked += summary.newly_acked_ect0 + summary.newly_acked_ect1;
             path.ecn.state = QuicPathEcnState::capable;
         }
@@ -1549,10 +1522,7 @@ bool QuicConnection::process_single_path_simple_stream_ack_ecn(
                                      ? path.ecn.last_peer_counts[packet_space_index]
                                      : AckEcnCounts{};
     const auto &current_counts = *ecn_counts;
-    const bool counts_decreased = current_counts.ect0 < previous_counts.ect0 ||
-                                  current_counts.ect1 < previous_counts.ect1 ||
-                                  current_counts.ecn_ce < previous_counts.ecn_ce;
-    if (counts_decreased) {
+    if (ecn_counts_decreased(current_counts, previous_counts)) {
         disable_ecn_on_path(path_id);
         return true;
     }
@@ -1560,12 +1530,9 @@ bool QuicConnection::process_single_path_simple_stream_ack_ecn(
     const auto delta_ect0 = current_counts.ect0 - previous_counts.ect0;
     auto delta_ect1 = current_counts.ect1 - previous_counts.ect1;
     auto delta_ce = current_counts.ecn_ce - previous_counts.ecn_ce;
-    bool missing_ect0_feedback = delta_ect0 + delta_ce < newly_acked_ect0;
-    bool missing_ect1_feedback = delta_ect1 + delta_ce < newly_acked_ect1;
-    bool impossible_ect0_count = current_counts.ect0 > path.ecn.total_sent_ect0;
-    bool impossible_ect1_count = current_counts.ect1 > path.ecn.total_sent_ect1;
-    if (missing_ect0_feedback || missing_ect1_feedback || impossible_ect0_count ||
-        impossible_ect1_count) {
+    if (ecn_feedback_is_invalid(delta_ect0, delta_ect1, delta_ce, newly_acked_ect0,
+                                newly_acked_ect1, current_counts.ect0, current_counts.ect1,
+                                path.ecn.total_sent_ect0, path.ecn.total_sent_ect1)) {
         disable_ecn_on_path(path_id);
         return true;
     }
@@ -1596,7 +1563,7 @@ bool QuicConnection::try_ack_simple_stream_fast_path(
     }
 
     std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-    if (ack_result.largest_acknowledged_was_newly_acked) {
+    if (should_process_simple_stream_ack_ecn(ack_result.largest_acknowledged_was_newly_acked)) {
         static_cast<void>(process_simple_stream_ack_ecn(packet_space, simple_stream_ack_samples,
                                                         ecn_counts, latest_ecn_ce_sent_time));
     }
@@ -1615,7 +1582,7 @@ bool QuicConnection::try_ack_simple_stream_fast_path(
     }
 
     reset_unpaced_ack_eliciting_burst();
-    if (!suppress_pto_reset) {
+    if (should_reset_pto_after_ack(suppress_pto_reset)) {
         pto_count_ = 0;
     }
     maybe_emit_qlog_recovery_metrics(now);
@@ -1629,8 +1596,7 @@ bool QuicConnection::try_ack_simple_congestion_batch(
         return true;
     }
     const auto algorithm = congestion_controller_.algorithm();
-    if (algorithm != QuicCongestionControlAlgorithm::newreno &&
-        algorithm != QuicCongestionControlAlgorithm::cubic) {
+    if (!simple_stream_congestion_batch_algorithm_is_supported(algorithm)) {
         return false;
     }
 
@@ -1687,6 +1653,7 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
         }
 
         stream->second.acknowledge_max_stream_data_frame(frame);
+        invalidate_stream_sendability_cache();
         note_retirement_candidate(frame.stream_id);
     }
     for (const auto &frame : packet.stream_data_blocked_frames) {
@@ -1696,6 +1663,7 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
         }
 
         stream->second.acknowledge_stream_data_blocked_frame(frame);
+        invalidate_stream_sendability_cache();
         note_retirement_candidate(frame.stream_id);
     }
     for_each_stream_frame_metadata(packet, [&](const StreamFrameSendMetadata &metadata) {
@@ -1706,8 +1674,7 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
 
         const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
         auto previous_has_lost_send_data =
-            stream->second.reset_state == StreamControlFrameState::none &&
-            stream->second.send_buffer.has_lost_data();
+            stream_has_lost_send_data_for_state_change(stream->second);
         stream->second.acknowledge_send_metadata(metadata);
         note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
                                        stream->second);
@@ -1722,8 +1689,7 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
 
         const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
         auto previous_has_lost_send_data =
-            stream->second.reset_state == StreamControlFrameState::none &&
-            stream->second.send_buffer.has_lost_data();
+            stream_has_lost_send_data_for_state_change(stream->second);
         stream->second.acknowledge_send_fragment(fragment);
         note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
                                        stream->second);
@@ -1737,6 +1703,7 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
         }
 
         stream->second.acknowledge_reset_frame(frame);
+        invalidate_stream_sendability_cache();
         maybe_refresh_peer_stream_limit(stream->second);
         note_retirement_candidate(frame.stream_id);
     }
@@ -1747,6 +1714,7 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
         }
 
         stream->second.acknowledge_stop_sending_frame(frame);
+        invalidate_stream_sendability_cache();
         note_retirement_candidate(frame.stream_id);
     }
     for (const auto &frame : packet.max_streams_frames) {
@@ -1867,6 +1835,7 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
         }
 
         stream->second.mark_max_stream_data_frame_lost(frame);
+        invalidate_stream_sendability_cache();
     }
     for (const auto &frame : packet.stream_data_blocked_frames) {
         const auto stream = streams_.find(frame.stream_id);
@@ -1875,6 +1844,7 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
         }
 
         stream->second.mark_stream_data_blocked_frame_lost(frame);
+        invalidate_stream_sendability_cache();
     }
     for_each_stream_frame_metadata(packet, [&](const StreamFrameSendMetadata &metadata) {
         const auto stream = streams_.find(metadata.stream_id);
@@ -1884,8 +1854,7 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
 
         const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
         auto previous_has_lost_send_data =
-            stream->second.reset_state == StreamControlFrameState::none &&
-            stream->second.send_buffer.has_lost_data();
+            stream_has_lost_send_data_for_state_change(stream->second);
         stream->second.mark_send_metadata_lost(metadata);
         note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
                                        stream->second);
@@ -1898,8 +1867,7 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
 
         const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
         auto previous_has_lost_send_data =
-            stream->second.reset_state == StreamControlFrameState::none &&
-            stream->second.send_buffer.has_lost_data();
+            stream_has_lost_send_data_for_state_change(stream->second);
         stream->second.mark_send_fragment_lost(fragment);
         note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
                                        stream->second);
@@ -1911,6 +1879,7 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
         }
 
         stream->second.mark_reset_frame_lost(frame);
+        invalidate_stream_sendability_cache();
     }
     for (const auto &frame : packet.stop_sending_frames) {
         const auto stream = streams_.find(frame.stream_id);
@@ -1919,6 +1888,7 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
         }
 
         stream->second.mark_stop_sending_frame_lost(frame);
+        invalidate_stream_sendability_cache();
     }
     if (!packet.new_connection_id_frames.empty()) {
         pending_new_connection_id_frames_.insert(pending_new_connection_id_frames_.begin(),
@@ -2079,6 +2049,15 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 return CodecResult<bool>::failure(frame_encoding_error(kFrameTypeStreamBase));
             }
             const auto stream_offset = stream_frame->offset.value_or(0);
+            const auto retired_stream = validate_retired_peer_stream_frame(
+                stream_frame->stream_id, stream_offset, stream_frame->stream_data.size(),
+                stream_frame->fin, stream_frame_type_for(*stream_frame));
+            if (!retired_stream.has_value()) {
+                return retired_stream;
+            }
+            if (retired_stream.value()) {
+                continue;
+            }
 
             auto stream = get_or_open_receive_stream(stream_frame->stream_id);
             if (!stream.has_value()) {
@@ -2154,11 +2133,8 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
         }
 
         if (const auto *datagram_frame = std::get_if<DatagramFrame>(&frame)) {
-            const bool allow_preconnected_datagram_frame =
-                application_space_.read_secret.has_value() &&
-                status_ == HandshakeStatus::in_progress;
-            if (application_frame_requires_connected_state(
-                    require_connected && !allow_preconnected_datagram_frame, status_)) {
+            if (application_datagram_requires_connected_state(
+                    require_connected, application_space_.read_secret.has_value(), status_)) {
                 return CodecResult<bool>::failure(
                     protocol_violation_error(datagram_frame_type_for(*datagram_frame)));
             }
@@ -2177,6 +2153,14 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
         if (const auto *reset_stream = std::get_if<ResetStreamFrame>(&frame)) {
             if (application_frame_requires_connected_state(require_connected, status_)) {
                 return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeResetStream));
+            }
+            const auto retired_stream = validate_retired_peer_reset_stream_frame(
+                reset_stream->stream_id, reset_stream->final_size, kFrameTypeResetStream);
+            if (!retired_stream.has_value()) {
+                return retired_stream;
+            }
+            if (retired_stream.value()) {
+                continue;
             }
 
             auto stream = get_or_open_receive_stream(reset_stream->stream_id);
@@ -2205,6 +2189,9 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             if (application_frame_requires_connected_state(require_connected, status_)) {
                 return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeStopSending));
             }
+            if (find_retired_peer_stream_range(stop_sending->stream_id) != nullptr) {
+                continue;
+            }
 
             auto stream = get_or_open_send_stream_for_peer_stop(stop_sending->stream_id);
             if (!stream.has_value()) {
@@ -2215,8 +2202,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             const auto previous_fresh_sendable_bytes =
                 fresh_sendable_bytes_for_cache(*stream_state);
             const auto previous_has_lost_send_data =
-                stream_state->reset_state == StreamControlFrameState::none &&
-                stream_state->send_buffer.has_lost_data();
+                stream_has_lost_send_data_for_state_change(*stream_state);
             static_cast<void>(stream_state->note_peer_stop_sending(
                 stop_sending->application_protocol_error_code));
             note_stream_send_state_changed(previous_fresh_sendable_bytes,
@@ -2248,6 +2234,9 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 return CodecResult<bool>::failure(
                     protocol_violation_error(kFrameTypeMaxStreamData));
             }
+            if (find_retired_peer_stream_range(max_stream_data->stream_id) != nullptr) {
+                continue;
+            }
 
             auto stream = get_or_open_send_stream(max_stream_data->stream_id);
             if (!stream.has_value()) {
@@ -2258,8 +2247,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             const auto previous_fresh_sendable_bytes =
                 fresh_sendable_bytes_for_cache(*stream_state);
             const auto previous_has_lost_send_data =
-                stream_state->reset_state == StreamControlFrameState::none &&
-                stream_state->send_buffer.has_lost_data();
+                stream_has_lost_send_data_for_state_change(*stream_state);
             stream_state->note_peer_max_stream_data(max_stream_data->maximum_stream_data);
             note_stream_send_state_changed(previous_fresh_sendable_bytes,
                                            previous_has_lost_send_data, *stream_state);
@@ -2292,6 +2280,9 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             if (application_frame_requires_connected_state(require_connected, status_)) {
                 return CodecResult<bool>::failure(
                     protocol_violation_error(kFrameTypeStreamDataBlocked));
+            }
+            if (find_retired_peer_stream_range(stream_data_blocked->stream_id) != nullptr) {
+                continue;
             }
 
             auto stream = get_or_open_receive_stream(stream_data_blocked->stream_id);
@@ -2548,11 +2539,8 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
         }
 
         if (const auto *datagram_frame = std::get_if<ReceivedDatagramFrame>(&frame)) {
-            const bool allow_preconnected_datagram_frame =
-                application_space_.read_secret.has_value() &&
-                status_ == HandshakeStatus::in_progress;
-            if (application_frame_requires_connected_state(
-                    require_connected && !allow_preconnected_datagram_frame, status_)) {
+            if (application_datagram_requires_connected_state(
+                    require_connected, application_space_.read_secret.has_value(), status_)) {
                 return CodecResult<bool>::failure(
                     protocol_violation_error(datagram_frame_type_for(*datagram_frame)));
             }
@@ -2571,6 +2559,14 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
         if (const auto *reset_stream = std::get_if<ResetStreamFrame>(&frame)) {
             if (application_frame_requires_connected_state(require_connected, status_)) {
                 return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeResetStream));
+            }
+            const auto retired_stream = validate_retired_peer_reset_stream_frame(
+                reset_stream->stream_id, reset_stream->final_size, kFrameTypeResetStream);
+            if (!retired_stream.has_value()) {
+                return retired_stream;
+            }
+            if (retired_stream.value()) {
+                continue;
             }
 
             auto stream = get_or_open_receive_stream(reset_stream->stream_id);
@@ -2599,6 +2595,9 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             if (application_frame_requires_connected_state(require_connected, status_)) {
                 return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeStopSending));
             }
+            if (find_retired_peer_stream_range(stop_sending->stream_id) != nullptr) {
+                continue;
+            }
 
             auto stream = get_or_open_send_stream_for_peer_stop(stop_sending->stream_id);
             if (!stream.has_value()) {
@@ -2609,8 +2608,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             const auto previous_fresh_sendable_bytes =
                 fresh_sendable_bytes_for_cache(*stream_state);
             const auto previous_has_lost_send_data =
-                stream_state->reset_state == StreamControlFrameState::none &&
-                stream_state->send_buffer.has_lost_data();
+                stream_has_lost_send_data_for_state_change(*stream_state);
             static_cast<void>(stream_state->note_peer_stop_sending(
                 stop_sending->application_protocol_error_code));
             note_stream_send_state_changed(previous_fresh_sendable_bytes,
@@ -2642,6 +2640,9 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 return CodecResult<bool>::failure(
                     protocol_violation_error(kFrameTypeMaxStreamData));
             }
+            if (find_retired_peer_stream_range(max_stream_data->stream_id) != nullptr) {
+                continue;
+            }
 
             auto stream = get_or_open_send_stream(max_stream_data->stream_id);
             if (!stream.has_value()) {
@@ -2652,8 +2653,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             const auto previous_fresh_sendable_bytes =
                 fresh_sendable_bytes_for_cache(*stream_state);
             const auto previous_has_lost_send_data =
-                stream_state->reset_state == StreamControlFrameState::none &&
-                stream_state->send_buffer.has_lost_data();
+                stream_has_lost_send_data_for_state_change(*stream_state);
             stream_state->note_peer_max_stream_data(max_stream_data->maximum_stream_data);
             note_stream_send_state_changed(previous_fresh_sendable_bytes,
                                            previous_has_lost_send_data, *stream_state);
@@ -2686,6 +2686,9 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             if (application_frame_requires_connected_state(require_connected, status_)) {
                 return CodecResult<bool>::failure(
                     protocol_violation_error(kFrameTypeStreamDataBlocked));
+            }
+            if (find_retired_peer_stream_range(stream_data_blocked->stream_id) != nullptr) {
+                continue;
             }
 
             auto stream = get_or_open_receive_stream(stream_data_blocked->stream_id);
@@ -2830,6 +2833,15 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
         return CodecResult<bool>::failure(frame_encoding_error(kFrameTypeStreamBase));
     }
     const auto stream_offset = stream_frame.offset.value_or(0);
+    const auto retired_stream = validate_retired_peer_stream_frame(
+        stream_frame.stream_id, stream_offset, stream_frame.stream_data.size(), stream_frame.fin,
+        stream_frame_type_for(stream_frame));
+    if (!retired_stream.has_value()) {
+        return retired_stream;
+    }
+    if (retired_stream.value()) {
+        return CodecResult<bool>::success(true);
+    }
 
     auto stream = get_or_open_receive_stream(stream_frame.stream_id);
     if (!stream.has_value()) {
@@ -2912,7 +2924,8 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_stream_pa
                                                                packet_number)) {
         maybe_switch_to_path(last_inbound_path_id_, /*initiated_locally=*/false, now);
     }
-    if (!paths_.empty() | (last_inbound_path_id_ != 0) | current_send_path_id_.has_value()) {
+    if (should_ensure_inbound_application_path(paths_.empty(), last_inbound_path_id_,
+                                               current_send_path_id_)) {
         ensure_path_state(last_inbound_path_id_);
     }
     note_inbound_application_packet_for_path(last_inbound_path_id_, packet_number);
@@ -2930,8 +2943,10 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_stream_pa
         note_idle_peer_activity(now);
         schedule_application_ack_deadline(application_space_, now,
                                           local_transport_parameters_.max_ack_delay, ecn);
-        if (zero_rtt_space_.read_secret.has_value() || zero_rtt_space_.write_secret.has_value()) {
-            if (config_.role == EndpointRole::server && zero_rtt_space_.read_secret.has_value()) {
+        if (zero_rtt_state_present(zero_rtt_space_.read_secret.has_value(),
+                                   zero_rtt_space_.write_secret.has_value())) {
+            if (should_arm_zero_rtt_discard_deadline_after_application_packet(
+                    config_.role, zero_rtt_space_.read_secret.has_value())) {
                 arm_server_zero_rtt_discard_deadline(now);
             } else {
                 discard_packet_space_state(zero_rtt_space_);
@@ -2949,7 +2964,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_ack_only(
         !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
         maybe_switch_to_path(path_id, /*initiated_locally=*/false, now);
     }
-    if (!paths_.empty() | (path_id != 0) | current_send_path_id_.has_value()) {
+    if (should_ensure_inbound_application_path(paths_.empty(), path_id, current_send_path_id_)) {
         ensure_path_state(path_id);
     }
     note_inbound_application_packet_for_path(path_id, packet_number);
@@ -2975,8 +2990,10 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_ack_only(
                                                         ecn,
                                                         config_.transport.ack_eliciting_threshold);
     note_idle_peer_activity(now);
-    if (zero_rtt_space_.read_secret.has_value() || zero_rtt_space_.write_secret.has_value()) {
-        if (config_.role == EndpointRole::server && zero_rtt_space_.read_secret.has_value()) {
+    if (zero_rtt_state_present(zero_rtt_space_.read_secret.has_value(),
+                               zero_rtt_space_.write_secret.has_value())) {
+        if (should_arm_zero_rtt_discard_deadline_after_application_packet(
+                config_.role, zero_rtt_space_.read_secret.has_value())) {
             arm_server_zero_rtt_discard_deadline(now);
         } else {
             discard_packet_space_state(zero_rtt_space_);

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <optional>
 #include <utility>
@@ -1033,15 +1034,39 @@ TEST(QuicCoreEndpointInternalTest, RouteMaintenanceSkipsForeignOwnersAndMissingI
         .handle = 9,
     };
     erase_entry.active_connection_id_keys = {"owned", "foreign", "missing"};
+    erase_entry.local_stateless_reset_connection_id_keys = {"owned-reset-cid", "foreign-reset-cid",
+                                                            "missing-reset-cid"};
+    erase_entry.peer_stateless_reset_token_keys = {"owned-peer-token", "foreign-peer-token",
+                                                   "missing-peer-token"};
     erase_entry.initial_destination_connection_id_key = "foreign-initial";
     server_core.connection_id_routes_.emplace("owned", erase_entry.handle);
     server_core.connection_id_routes_.emplace("foreign", 77);
     server_core.initial_destination_routes_.emplace("foreign-initial", 77);
+    server_core.local_stateless_reset_tokens_by_cid_.emplace(
+        "owned-reset-cid", QuicCore::LocalStatelessResetTokenRoute{
+                               .owner = erase_entry.handle,
+                           });
+    server_core.local_stateless_reset_tokens_by_cid_.emplace(
+        "foreign-reset-cid", QuicCore::LocalStatelessResetTokenRoute{
+                                 .owner = 77,
+                             });
+    server_core.peer_stateless_reset_tokens_.emplace("owned-peer-token",
+                                                     QuicCore::PeerStatelessResetTokenRoute{
+                                                         .owner = erase_entry.handle,
+                                                     });
+    server_core.peer_stateless_reset_tokens_.emplace("foreign-peer-token",
+                                                     QuicCore::PeerStatelessResetTokenRoute{
+                                                         .owner = 77,
+                                                     });
 
     server_core.erase_endpoint_connection_routes(erase_entry);
     EXPECT_FALSE(server_core.connection_id_routes_.contains("owned"));
     EXPECT_EQ(server_core.connection_id_routes_.at("foreign"), 77u);
     EXPECT_EQ(server_core.initial_destination_routes_.at("foreign-initial"), 77u);
+    EXPECT_FALSE(server_core.local_stateless_reset_tokens_by_cid_.contains("owned-reset-cid"));
+    EXPECT_EQ(server_core.local_stateless_reset_tokens_by_cid_.at("foreign-reset-cid").owner, 77u);
+    EXPECT_FALSE(server_core.peer_stateless_reset_tokens_.contains("owned-peer-token"));
+    EXPECT_EQ(server_core.peer_stateless_reset_tokens_.at("foreign-peer-token").owner, 77u);
 
     QuicCore::ConnectionEntry no_initial_entry{
         .handle = 10,
@@ -1100,6 +1125,45 @@ TEST(QuicCoreEndpointInternalTest, RouteMaintenanceSkipsForeignOwnersAndMissingI
     refresh_missing_initial.active_connection_id_keys = {"missing-refresh-only"};
     server_core.refresh_server_connection_routes(refresh_missing_initial);
     refresh_missing_initial.connection.reset();
+}
+
+TEST(QuicCoreEndpointInternalTest, RetiringRoutesSkipsForeignResetsAndErasesPeerTokens) {
+    auto config = make_server_endpoint_config();
+    config.retain_stateless_reset_tokens_after_connection_close = false;
+    QuicCore server_core(std::move(config));
+
+    QuicCore::ConnectionEntry entry{
+        .handle = 9,
+    };
+    entry.local_stateless_reset_connection_id_keys = {"missing-local-reset", "foreign-local-reset",
+                                                      "owned-local-reset"};
+    entry.peer_stateless_reset_token_keys = {"missing-peer-reset", "foreign-peer-reset",
+                                             "owned-peer-reset"};
+
+    server_core.local_stateless_reset_tokens_by_cid_.emplace(
+        "foreign-local-reset", QuicCore::LocalStatelessResetTokenRoute{
+                                   .owner = 77,
+                               });
+    server_core.local_stateless_reset_tokens_by_cid_.emplace(
+        "owned-local-reset", QuicCore::LocalStatelessResetTokenRoute{
+                                 .owner = entry.handle,
+                             });
+    server_core.peer_stateless_reset_tokens_.emplace("foreign-peer-reset",
+                                                     QuicCore::PeerStatelessResetTokenRoute{
+                                                         .owner = 77,
+                                                     });
+    server_core.peer_stateless_reset_tokens_.emplace("owned-peer-reset",
+                                                     QuicCore::PeerStatelessResetTokenRoute{
+                                                         .owner = entry.handle,
+                                                     });
+
+    server_core.retire_endpoint_connection_routes(entry, coquic::quic::test::test_time(10));
+
+    EXPECT_EQ(server_core.local_stateless_reset_tokens_by_cid_.at("foreign-local-reset").owner,
+              77u);
+    EXPECT_FALSE(server_core.local_stateless_reset_tokens_by_cid_.contains("owned-local-reset"));
+    EXPECT_EQ(server_core.peer_stateless_reset_tokens_.at("foreign-peer-reset").owner, 77u);
+    EXPECT_FALSE(server_core.peer_stateless_reset_tokens_.contains("owned-peer-reset"));
 }
 
 TEST(QuicCoreEndpointInternalTest,
@@ -1260,6 +1324,13 @@ TEST(QuicCoreEndpointInternalTest, NewTokenContextValidatesRouteVersionAndExpiry
     auto validated_context = optional_value_or_terminate(validated);
     EXPECT_EQ(validated_context.token, token);
     EXPECT_TRUE(server.new_tokens_.empty());
+
+    auto truncated = parsed;
+    truncated.token = bytes_from_ints({0x01, 0x02});
+    EXPECT_FALSE(server
+                     .take_new_token_context(truncated, 55, coquic::quic::test::test_time(1),
+                                             std::span<const std::byte>{})
+                     .has_value());
 }
 
 TEST(QuicCoreEndpointInternalTest, SealedRetryTokenSurvivesRestartAndBindsRouteIdentityAndCids) {
@@ -1400,6 +1471,13 @@ TEST(QuicCoreEndpointInternalTest, SealedNewTokenSurvivesRestartAndIsSingleUse) 
         tampered_server
             .take_new_token_context(tampered, 77, coquic::quic::test::test_time(101), identity)
             .has_value());
+
+    auto truncated = parsed;
+    truncated.token.resize(20);
+    EXPECT_FALSE(
+        tampered_server
+            .take_new_token_context(truncated, 77, coquic::quic::test::test_time(101), identity)
+            .has_value());
 }
 
 TEST(QuicCoreEndpointInternalTest, SealedNewTokenCanValidateWithPreviousSecret) {
@@ -1426,6 +1504,16 @@ TEST(QuicCoreEndpointInternalTest, SealedNewTokenCanValidateWithPreviousSecret) 
     };
     EXPECT_TRUE(
         rotated.take_new_token_context(parsed, 9, coquic::quic::test::test_time(21), identity)
+            .has_value());
+
+    auto unbound_token = issuer.make_endpoint_new_token(6, kQuicVersion1, std::nullopt, identity,
+                                                        coquic::quic::test::test_time(20));
+    ASSERT_FALSE(unbound_token.empty());
+    auto unbound_parsed = parsed;
+    unbound_parsed.token = unbound_token;
+    EXPECT_TRUE(
+        rotated
+            .take_new_token_context(unbound_parsed, 10, coquic::quic::test::test_time(21), identity)
             .has_value());
 }
 
@@ -1481,6 +1569,123 @@ TEST(QuicCoreEndpointInternalTest, AddressValidationReplayStoreSurvivesEndpointR
 
     std::error_code ignored;
     std::filesystem::remove(replay_store, ignored);
+}
+
+TEST(QuicCoreEndpointInternalTest, AddressValidationReplayStoreIgnoresMalformedLines) {
+    auto replay_store = make_replay_store_path_for_test("address-validation-replay-malformed");
+    {
+        std::ofstream output(replay_store, std::ios::trunc);
+        ASSERT_TRUE(output.is_open());
+        output << "missing-separator\n";
+        output << "zz 123\n";
+        output << "616263 not-a-number\n";
+        output << " 456\n";
+        output << "616263 789\n";
+    }
+
+    auto config = make_server_endpoint_config();
+    config.address_validation_replay_store_path = replay_store;
+    QuicCore server(std::move(config));
+
+    ASSERT_EQ(server.consumed_address_validation_tokens_.size(), 1u);
+    EXPECT_TRUE(server.consumed_address_validation_tokens_.contains("abc"));
+    EXPECT_EQ(server.consumed_address_validation_tokens_.at("abc"),
+              QuicCoreTimePoint{} + QuicCoreDuration(789));
+
+    std::error_code ignored;
+    std::filesystem::remove(replay_store, ignored);
+}
+
+TEST(QuicCoreEndpointInternalTest, StoredRetryAndNewTokensRejectAlreadyConsumedReplay) {
+    QuicCore server(make_server_endpoint_config());
+    auto identity = bytes_from_ints({0xc0, 0xa8, 0x00, 0x01});
+
+    QuicCore::PendingRetryToken pending_retry{
+        .original_destination_connection_id = bytes_from_ints({0x83, 0x01}),
+        .retry_source_connection_id = bytes_from_ints({0x53, 0x01}),
+        .original_version = kQuicVersion1,
+        .token = bytes_from_ints({0xaa, 0xbb, 0xcc}),
+        .route_handle = 55,
+        .address_validation_identity = identity,
+        .expires_at = coquic::quic::test::test_time(100),
+    };
+    server.retry_tokens_.insert_or_assign(QuicCore::connection_id_key(pending_retry.token),
+                                          pending_retry);
+    server.mark_address_validation_token_consumed(pending_retry.token,
+                                                  coquic::quic::test::test_time(100));
+
+    QuicCore::ParsedEndpointDatagram retry_parsed{
+        .kind = QuicCore::ParsedEndpointDatagram::Kind::supported_initial,
+        .destination_connection_id = pending_retry.retry_source_connection_id,
+        .source_connection_id = bytes_from_ints({0xc1, 0x01}),
+        .version = kQuicVersion1,
+        .token = pending_retry.token,
+    };
+    EXPECT_FALSE(
+        server.take_retry_context(retry_parsed, 55, coquic::quic::test::test_time(1), identity)
+            .has_value());
+    EXPECT_TRUE(server.retry_tokens_.contains(QuicCore::connection_id_key(pending_retry.token)));
+
+    auto new_token = bytes_from_ints({0x4e, 0x11, 0x22});
+    server.new_tokens_.insert_or_assign(QuicCore::connection_id_key(new_token),
+                                        QuicCore::StoredEndpointNewToken{
+                                            .token = new_token,
+                                            .route_handle = 55,
+                                            .address_validation_identity = identity,
+                                            .version = kQuicVersion1,
+                                            .expires_at = coquic::quic::test::test_time(100),
+                                            .used = false,
+                                        });
+    server.mark_address_validation_token_consumed(new_token, coquic::quic::test::test_time(100));
+
+    auto new_token_parsed = retry_parsed;
+    new_token_parsed.destination_connection_id = bytes_from_ints({0x83, 0x02});
+    new_token_parsed.token = new_token;
+    EXPECT_FALSE(server
+                     .take_new_token_context(new_token_parsed, 55, coquic::quic::test::test_time(1),
+                                             identity)
+                     .has_value());
+    EXPECT_TRUE(server.new_tokens_.contains(QuicCore::connection_id_key(new_token)));
+}
+
+TEST(QuicCoreEndpointInternalTest, RouteIdentityHelpersReuseStoredIdentityAndRejectDowngrade) {
+    auto config = make_client_endpoint_config();
+    config.allow_peer_address_change = true;
+    config.request_forgery_policy.reject_address_space_downgrade = true;
+    QuicCore client(std::move(config));
+
+    QuicCore::ConnectionEntry entry{
+        .handle = 7,
+    };
+    entry.connection =
+        std::make_unique<QuicConnection>(coquic::quic::test::make_client_core_config());
+    entry.connection->current_send_path_id_ = 0;
+    entry.path_id_by_route_handle.emplace(17, 0);
+    entry.route_handle_by_path_id.emplace(0, 17);
+    auto public_identity = make_ipv4_identity(198, 51, 100, 7, 4433);
+    entry.address_validation_identity_by_path_id.emplace(0, public_identity);
+
+    EXPECT_EQ(client.effective_address_validation_identity_for_route(entry, 17,
+                                                                     std::span<const std::byte>{}),
+              public_identity);
+    EXPECT_TRUE(client
+                    .effective_address_validation_identity_for_route(entry, 18,
+                                                                     std::span<const std::byte>{})
+                    .empty());
+    auto proposed_identity = make_ipv4_identity(203, 0, 113, 8, 4433);
+    EXPECT_EQ(client.effective_address_validation_identity_for_route(entry, 18, proposed_identity),
+              proposed_identity);
+
+    entry.connection->current_send_path_id_.reset();
+    EXPECT_TRUE(client.current_address_validation_identity(entry).empty());
+    entry.connection->current_send_path_id_ = 9;
+    EXPECT_TRUE(client.current_address_validation_identity(entry).empty());
+    entry.connection->current_send_path_id_ = 0;
+
+    auto rejected_private =
+        client.path_id_for_inbound_route(entry, 29, make_ipv4_identity(192, 168, 0, 10, 4433));
+    EXPECT_FALSE(rejected_private.has_value());
+    EXPECT_FALSE(entry.path_id_by_route_handle.contains(29));
 }
 
 TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeInitialRoutes) {
@@ -1722,10 +1927,24 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetHelpersGenerateAndDetectResets)
     EXPECT_TRUE(std::equal(token.begin(), token.end(),
                            reset_datagram.bytes.end() - static_cast<std::ptrdiff_t>(token.size())));
 
+    std::vector<std::byte> tiny_unknown_short_header(21, std::byte{0xaa});
+    tiny_unknown_short_header.front() = std::byte{0x40};
+    std::copy(connection_id.begin(), connection_id.end(), tiny_unknown_short_header.begin() + 1);
+    auto tiny_parsed = QuicCore::parse_endpoint_datagram(tiny_unknown_short_header);
+    auto tiny_parsed_datagram = optional_value_or_terminate(tiny_parsed);
+    auto tiny_stateless_reset = server.make_stateless_reset_for_unknown_cid(
+        tiny_parsed_datagram, tiny_unknown_short_header, 55, coquic::quic::test::test_time(0));
+    auto tiny_reset_datagram = optional_value_or_terminate(tiny_stateless_reset);
+    EXPECT_EQ(tiny_reset_datagram.bytes.size(), 21u);
+
     QuicCore client(make_client_endpoint_config());
     client.peer_stateless_reset_tokens_.insert_or_assign(QuicCore::stateless_reset_token_key(token),
                                                          QuicCore::PeerStatelessResetTokenRoute{
                                                              .owner = 4,
+                                                         });
+    client.peer_stateless_reset_tokens_.insert_or_assign("short",
+                                                         QuicCore::PeerStatelessResetTokenRoute{
+                                                             .owner = 99,
                                                          });
     EXPECT_EQ(client.detect_stateless_reset(reset_datagram.bytes.span()),
               std::optional<QuicConnectionHandle>{4u});

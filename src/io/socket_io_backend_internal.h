@@ -60,10 +60,21 @@ struct SocketIoPeerTupleKeyHash {
     std::size_t operator()(const SocketIoPeerTupleKey &key) const;
 };
 
+struct SocketIoRouteLookupCacheEntry {
+    bool valid = false;
+    int socket_fd = -1;
+    sockaddr_storage peer{};
+    socklen_t peer_len = 0;
+    QuicRouteHandle route_handle = 0;
+};
+
 struct SocketIoRouteState {
+    static constexpr std::size_t kRouteLookupCacheSlots = 256;
+
     std::unordered_map<SocketIoPeerTupleKey, QuicRouteHandle, SocketIoPeerTupleKeyHash>
         route_handles_by_peer_tuple;
     std::unordered_map<QuicRouteHandle, SocketIoRoute> routes_by_handle;
+    std::array<SocketIoRouteLookupCacheEntry, kRouteLookupCacheSlots> route_lookup_cache{};
     QuicRouteHandle next_route_handle = 1;
 };
 

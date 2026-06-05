@@ -924,6 +924,19 @@ TEST(QuicHttp3ProtocolTest, ResponseContentLengthRejectsMismatchedDuplicateValue
     EXPECT_EQ(response.error().detail, "invalid content-length header");
 }
 
+TEST(QuicHttp3ProtocolTest, ResponseStatusRejectsEachMalformedDigitPosition) {
+    for (const auto status : {"099", "1/0", "1x9", "10x", "0xx", "1xx", "10/"}) {
+        const std::array fields{
+            coquic::http3::Http3Field{":status", status},
+        };
+
+        auto response = coquic::http3::validate_http3_response_headers(fields);
+        ASSERT_FALSE(response.has_value()) << status;
+        EXPECT_EQ(response.error().code, coquic::http3::Http3ErrorCode::message_error);
+        EXPECT_EQ(response.error().detail, "invalid :status");
+    }
+}
+
 TEST(QuicHttp3ProtocolTest, MaxPushIdParserRejectsTrailingBytesAndSyntheticPayloadOverflow) {
     using coquic::http3::Http3Frame;
     using coquic::http3::Http3MaxPushIdFrame;
@@ -945,6 +958,18 @@ TEST(QuicHttp3ProtocolTest, MaxPushIdParserRejectsTrailingBytesAndSyntheticPaylo
             /*type=*/0x21u, std::numeric_limits<std::size_t>::max());
     ASSERT_FALSE(synthetic_overflow.has_value());
     EXPECT_EQ(synthetic_overflow.error().code, CodecErrorCode::invalid_varint);
+
+    const auto data_overflow =
+        coquic::http3::test::serialize_http3_data_frame_with_synthetic_length_for_tests(
+            std::numeric_limits<std::size_t>::max());
+    ASSERT_FALSE(data_overflow.has_value());
+    EXPECT_EQ(data_overflow.error().code, CodecErrorCode::invalid_varint);
+
+    const auto headers_overflow =
+        coquic::http3::test::serialize_http3_headers_frame_with_synthetic_length_for_tests(
+            std::numeric_limits<std::size_t>::max());
+    ASSERT_FALSE(headers_overflow.has_value());
+    EXPECT_EQ(headers_overflow.error().code, CodecErrorCode::invalid_varint);
 }
 
 } // namespace

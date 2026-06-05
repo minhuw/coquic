@@ -79,6 +79,26 @@ struct ReusableAeadContext {
     }
 };
 
+struct HeaderProtectionContextCache {
+    std::array<ReusableCipherContext, 2> slots;
+    std::size_t next_eviction_index = 0;
+
+    std::size_t new_calls() const {
+        std::size_t calls = 0;
+        for (const auto &slot : slots) {
+            calls += slot.new_calls;
+        }
+        return calls;
+    }
+
+    void reset() {
+        for (auto &slot : slots) {
+            slot.reset();
+        }
+        next_eviction_index = 0;
+    }
+};
+
 ReusableCipherContext &seal_cipher_context_cache() {
 #if COQUIC_PACKET_CRYPTO_SINGLE_THREADED_WASM
     static ReusableCipherContext seal_cipher_cache;
@@ -115,11 +135,11 @@ ReusableCipherContext &open_cipher_context_cache() {
     return open_cipher_cache;
 }
 
-ReusableCipherContext &header_protection_context_cache() {
+HeaderProtectionContextCache &header_protection_context_cache() {
 #if COQUIC_PACKET_CRYPTO_SINGLE_THREADED_WASM
-    static ReusableCipherContext header_protection_cache;
+    static HeaderProtectionContextCache header_protection_cache;
 #else
-    static thread_local ReusableCipherContext header_protection_cache;
+    static thread_local HeaderProtectionContextCache header_protection_cache;
 #endif
     return header_protection_cache;
 }
@@ -219,6 +239,32 @@ bool cached_header_protection_configuration_matches(const ReusableCipherContext 
                                                     std::span<const std::byte> key) {
     return cache.cipher == cipher && cache.key.size() == key.size() &&
            std::equal(cache.key.begin(), cache.key.end(), key.begin(), key.end());
+}
+
+ReusableCipherContext &select_header_protection_context(HeaderProtectionContextCache &cache,
+                                                        const EVP_CIPHER *cipher,
+                                                        std::span<const std::byte> key) {
+    for (auto &slot : cache.slots) {
+        if (cached_header_protection_configuration_matches(slot, cipher, key)) {
+            return slot;
+        }
+    }
+    if (test::packet_crypto_fault_injector_active_for_tests()) {
+        for (auto &slot : cache.slots) {
+            if (slot.cipher != nullptr) {
+                return slot;
+            }
+        }
+    }
+    for (auto &slot : cache.slots) {
+        if (slot.cipher == nullptr) {
+            return slot;
+        }
+    }
+
+    auto &slot = cache.slots[cache.next_eviction_index % cache.slots.size()];
+    cache.next_eviction_index = (cache.next_eviction_index + 1) % cache.slots.size();
+    return slot;
 }
 
 bool cached_aes_header_protection_context_ready(bool same_configuration,
@@ -388,7 +434,7 @@ coquic::quic::test::PacketCryptoRuntimeCacheStats runtime_cache_stats_for_tests_
             seal_cipher_context_cache().new_calls + seal_aead_context_cache().new_calls,
         .open_context_new_calls =
             open_aead_context_cache().new_calls + open_cipher_context_cache().new_calls,
-        .header_protection_context_new_calls = header_protection_context_cache().new_calls,
+        .header_protection_context_new_calls = header_protection_context_cache().new_calls(),
         .seal_key_setup_calls =
             seal_cipher_context_cache().key_setup_calls + seal_aead_context_cache().key_setup_calls,
         .open_key_setup_calls =
@@ -1432,14 +1478,14 @@ CodecResult<std::size_t> open_payload_into(const OpenPayloadIntoInput &input) {
                                                  0);
     }
 
-    if (const auto *cipher = packet_cipher_for_suite(input.cipher_suite); cipher != nullptr) {
-        return open_cipher_into(cipher, OpenAeadIntoRequest{
-                                            .key = input.key,
-                                            .nonce = input.nonce,
-                                            .associated_data = input.associated_data,
-                                            .ciphertext = input.ciphertext,
-                                            .plaintext = input.plaintext,
-                                        });
+    if (const auto *aead = packet_aead_for_suite(input.cipher_suite); aead != nullptr) {
+        return open_aead_into(aead, OpenAeadIntoRequest{
+                                        .key = input.key,
+                                        .nonce = input.nonce,
+                                        .associated_data = input.associated_data,
+                                        .ciphertext = input.ciphertext,
+                                        .plaintext = input.plaintext,
+                                    });
     }
 
     if (input.cipher_suite == CipherSuite::tls_chacha20_poly1305_sha256) {
@@ -1513,7 +1559,9 @@ CodecResult<std::size_t> make_header_protection_mask_into(CipherSuite cipher_sui
         &EVP_aes_128_ecb,
         &EVP_aes_256_ecb,
     };
-    auto &header_cache = header_protection_context_cache();
+    auto &header_cache = select_header_protection_context(
+        header_protection_context_cache(),
+        kHeaderProtectionAesCiphers[static_cast<std::size_t>(cipher_suite)](), input.hp_key);
     auto *header_context = prepare_header_protection_aes_context(
         header_cache, kHeaderProtectionAesCiphers[static_cast<std::size_t>(cipher_suite)](),
         input.hp_key);

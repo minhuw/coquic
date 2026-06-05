@@ -3656,6 +3656,171 @@ TEST(QuicCoreTest, TerminalPeerStreamWithPendingOrOutstandingSendIsNotRetired) {
     EXPECT_TRUE(connection.streams_.contains(2));
 }
 
+TEST(QuicCoreTest, RetiredPeerStreamRangeRejectsIneligibleTerminalStates) {
+    auto connection = make_connected_server_connection();
+    const auto make_candidate = [&](std::uint64_t stream_id = 0) {
+        auto stream = coquic::quic::make_implicit_stream_state(stream_id, connection.config_.role);
+        connection.initialize_stream_flow_control(stream);
+        stream.peer_final_size = 32;
+        stream.peer_send_closed = true;
+        stream.peer_fin_delivered = true;
+        stream.receive_flow_control_consumed = 32;
+        stream.highest_received_offset = 32;
+        stream.flow_control.delivered_bytes = 32;
+        stream.send_final_size = 32;
+        stream.send_flow_control_committed = 32;
+        stream.flow_control.highest_sent = 32;
+        stream.send_fin_state = coquic::quic::StreamSendFinState::acknowledged;
+        stream.peer_stream_limit_released = true;
+        return stream;
+    };
+
+    auto local_initiated = make_candidate(1);
+    EXPECT_FALSE(connection.try_retire_stream_to_peer_range(local_initiated));
+
+    auto missing_peer_fin = make_candidate();
+    missing_peer_fin.peer_fin_delivered = false;
+    EXPECT_FALSE(connection.try_retire_stream_to_peer_range(missing_peer_fin));
+
+    auto peer_reset = make_candidate();
+    peer_reset.peer_reset_received = true;
+    EXPECT_FALSE(connection.try_retire_stream_to_peer_range(peer_reset));
+
+    auto missing_peer_final_size = make_candidate();
+    missing_peer_final_size.peer_final_size.reset();
+    EXPECT_FALSE(connection.try_retire_stream_to_peer_range(missing_peer_final_size));
+
+    auto missing_send_final_size = make_candidate();
+    missing_send_final_size.send_final_size.reset();
+    EXPECT_FALSE(connection.try_retire_stream_to_peer_range(missing_send_final_size));
+
+    auto pending_reset = make_candidate();
+    pending_reset.reset_state = coquic::quic::StreamControlFrameState::pending;
+    EXPECT_FALSE(connection.try_retire_stream_to_peer_range(pending_reset));
+
+    auto pending_stop_sending = make_candidate();
+    pending_stop_sending.stop_sending_state = coquic::quic::StreamControlFrameState::pending;
+    EXPECT_FALSE(connection.try_retire_stream_to_peer_range(pending_stop_sending));
+
+    auto pending_max_stream_data = make_candidate();
+    pending_max_stream_data.flow_control.max_stream_data_state =
+        coquic::quic::StreamControlFrameState::pending;
+    EXPECT_FALSE(connection.try_retire_stream_to_peer_range(pending_max_stream_data));
+
+    auto pending_stream_data_blocked = make_candidate();
+    pending_stream_data_blocked.flow_control.stream_data_blocked_state =
+        coquic::quic::StreamControlFrameState::pending;
+    EXPECT_FALSE(connection.try_retire_stream_to_peer_range(pending_stream_data_blocked));
+
+    EXPECT_EQ(connection.retired_peer_stream_count(), 0u);
+}
+
+TEST(QuicCoreTest, TerminalPeerBidirectionalStreamsRetireIntoCompactRanges) {
+    auto connection = make_connected_server_connection();
+    const auto retire_terminal_peer_bidi_stream = [](coquic::quic::QuicConnection &connection,
+                                                     std::uint64_t stream_id) {
+        auto &stream = connection.streams_
+                           .emplace(stream_id, coquic::quic::make_implicit_stream_state(
+                                                   stream_id, connection.config_.role))
+                           .first->second;
+        connection.initialize_stream_flow_control(stream);
+        stream.peer_final_size = 32;
+        stream.peer_send_closed = true;
+        stream.peer_fin_delivered = true;
+        stream.receive_flow_control_consumed = 32;
+        stream.highest_received_offset = 32;
+        stream.flow_control.delivered_bytes = 32;
+        stream.send_final_size = 32;
+        stream.send_flow_control_committed = 32;
+        stream.flow_control.highest_sent = 32;
+        stream.send_fin_state = coquic::quic::StreamSendFinState::acknowledged;
+        stream.peer_stream_limit_released = true;
+
+        connection.maybe_retire_stream(stream_id);
+        EXPECT_FALSE(connection.streams_.contains(stream_id));
+    };
+    for (std::uint64_t stream_id : {0u, 4u}) {
+        retire_terminal_peer_bidi_stream(connection, stream_id);
+    }
+
+    EXPECT_TRUE(connection.retired_streams_.empty());
+    ASSERT_EQ(connection.retired_peer_bidi_stream_ranges_.size(), 1u);
+    EXPECT_EQ(connection.retired_peer_stream_count(), 2u);
+
+    const auto duplicate =
+        connection.validate_retired_peer_stream_frame(/*stream_id=*/0, /*offset=*/0,
+                                                      /*length=*/32, /*fin=*/true, 0x08);
+    ASSERT_TRUE(duplicate.has_value());
+    EXPECT_TRUE(duplicate.value());
+
+    const auto final_size_conflict =
+        connection.validate_retired_peer_stream_frame(/*stream_id=*/0, /*offset=*/0,
+                                                      /*length=*/33, /*fin=*/true, 0x08);
+    EXPECT_FALSE(final_size_conflict.has_value());
+
+    const auto non_fin_size_conflict =
+        connection.validate_retired_peer_stream_frame(/*stream_id=*/0, /*offset=*/33,
+                                                      /*length=*/1, /*fin=*/false, 0x08);
+    EXPECT_FALSE(non_fin_size_conflict.has_value());
+
+    const auto short_fin_size_conflict =
+        connection.validate_retired_peer_stream_frame(/*stream_id=*/0, /*offset=*/0,
+                                                      /*length=*/31, /*fin=*/true, 0x08);
+    EXPECT_FALSE(short_fin_size_conflict.has_value());
+
+    const auto overflow_size_conflict = connection.validate_retired_peer_stream_frame(
+        /*stream_id=*/0, std::numeric_limits<std::uint64_t>::max(), /*length=*/1,
+        /*fin=*/false, 0x08);
+    EXPECT_FALSE(overflow_size_conflict.has_value());
+
+    const auto reset_final_size_match =
+        connection.validate_retired_peer_reset_stream_frame(/*stream_id=*/0,
+                                                            /*final_size=*/32, 0x04);
+    ASSERT_TRUE(reset_final_size_match.has_value());
+    EXPECT_TRUE(reset_final_size_match.value());
+
+    const auto reset_final_size_conflict =
+        connection.validate_retired_peer_reset_stream_frame(/*stream_id=*/0,
+                                                            /*final_size=*/31, 0x04);
+    EXPECT_FALSE(reset_final_size_conflict.has_value());
+
+    const auto unretired_stream =
+        connection.validate_retired_peer_stream_frame(/*stream_id=*/8, /*offset=*/0,
+                                                      /*length=*/0, /*fin=*/false, 0x08);
+    ASSERT_TRUE(unretired_stream.has_value());
+    EXPECT_FALSE(unretired_stream.value());
+
+    const auto unretired_reset =
+        connection.validate_retired_peer_reset_stream_frame(/*stream_id=*/8,
+                                                            /*final_size=*/0, 0x04);
+    ASSERT_TRUE(unretired_reset.has_value());
+    EXPECT_FALSE(unretired_reset.value());
+
+    auto reverse_merge_connection = make_connected_server_connection();
+    retire_terminal_peer_bidi_stream(reverse_merge_connection, 4u);
+    retire_terminal_peer_bidi_stream(reverse_merge_connection, 0u);
+
+    EXPECT_TRUE(reverse_merge_connection.retired_streams_.empty());
+    ASSERT_EQ(reverse_merge_connection.retired_peer_bidi_stream_ranges_.size(), 1u);
+    const auto &reverse_range =
+        reverse_merge_connection.retired_peer_bidi_stream_ranges_.begin()->second;
+    EXPECT_EQ(reverse_range.first_index, 0u);
+    EXPECT_EQ(reverse_range.last_index, 1u);
+
+    auto *retired_scratch = reverse_merge_connection.find_stream_state(0);
+    ASSERT_NE(retired_scratch, nullptr);
+    EXPECT_TRUE(retired_scratch->send_closed);
+    EXPECT_TRUE(retired_scratch->receive_closed);
+    EXPECT_EQ(retired_scratch->flow_control.peer_max_stream_data,
+              reverse_range.peer_max_stream_data);
+
+    const auto &const_reverse_merge_connection = reverse_merge_connection;
+    const auto *const_retired_scratch = const_reverse_merge_connection.find_stream_state(4);
+    ASSERT_NE(const_retired_scratch, nullptr);
+    EXPECT_TRUE(const_retired_scratch->send_closed);
+    EXPECT_TRUE(const_retired_scratch->receive_closed);
+}
+
 TEST(QuicCoreTest, MarkLostPacketRequeuesUnidirectionalMaxStreamsFrame) {
     auto connection = make_connected_server_connection();
     auto maximum_streams = connection.local_stream_limit_state_.advertised_max_streams_uni + 1;

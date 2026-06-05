@@ -101,18 +101,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
 
         last_client_handshake_keepalive_probe_time_ = now;
     };
-    const auto largest_acknowledged_by_ack_frame =
-        [](std::span<const Frame> frames) -> std::optional<std::uint64_t> {
-        for (const auto &frame : frames) {
-            if (const auto *ack = std::get_if<AckFrame>(&frame); ack != nullptr) {
-                return ack->largest_acknowledged;
-            }
-            if (const auto *ack = std::get_if<OutboundAckFrame>(&frame); ack != nullptr) {
-                return ack->header.largest_acknowledged;
-            }
-        }
-        return std::nullopt;
-    };
     auto &pending_tracked_packets = pending_tracked_packet_scratch_;
     pending_tracked_packets.clear();
     if (pending_tracked_packets.capacity() < 4) {
@@ -496,9 +484,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             last_drained_path_id_ = selected_send_path_id;
             last_drained_ecn_codepoint_ = outbound_ecn_codepoint_for_path(selected_send_path_id);
             last_drained_is_pmtu_probe_ = pmtu_probe_datagram;
-            last_drained_allows_send_continuation_ = options.allow_send_continuation &&
-                                                     !options.bypass_burst_limit &&
-                                                     options.unpaced_ack_eliciting_packets != 0;
+            const bool continuation_has_pending_work =
+                options.allow_send_continuation && has_pending_application_send();
+            last_drained_allows_send_continuation_ =
+                send_continuation_allowed(continuation_has_pending_work, options.bypass_burst_limit,
+                                          options.unpaced_ack_eliciting_packets);
         }
         {
             COQUIC_SEND_PROFILE_TIMER(continuation_timer, commit_continuation_ns);
@@ -790,8 +780,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 .crypto_ranges = sent_initial_crypto_ranges,
                 .has_ping = initial_has_ping,
                 .largest_received_packet_number_acked =
-                    initial_ack_eliciting ? largest_acknowledged_by_ack_frame(sent_initial_frames)
-                                          : std::nullopt,
+                    largest_acknowledged_for_ack_eliciting_sent_record(initial_ack_eliciting,
+                                                                       sent_initial_frames),
             };
             initial_sent_record.path_id = selected_send_path_id.value_or(0);
             initial_sent_record.ecn = outbound_ecn_codepoint_for_path(selected_send_path_id);
@@ -867,9 +857,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                             .declared_lost = false,
                             .crypto_ranges = sent_initial_crypto_ranges,
                             .largest_received_packet_number_acked =
-                                initial_ack_eliciting
-                                    ? largest_acknowledged_by_ack_frame(sent_initial_frames)
-                                    : std::nullopt,
+                                largest_acknowledged_for_ack_eliciting_sent_record(
+                                    initial_ack_eliciting, sent_initial_frames),
                             .path_id = selected_send_path_id.value_or(0),
                             .ecn = outbound_ecn_codepoint_for_path(selected_send_path_id),
                         },
@@ -1044,8 +1033,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             .crypto_ranges = sent_handshake_crypto_ranges,
             .has_ping = handshake_has_ping,
             .largest_received_packet_number_acked =
-                handshake_ack_eliciting ? largest_acknowledged_by_ack_frame(sent_handshake_frames)
-                                        : std::nullopt,
+                largest_acknowledged_for_ack_eliciting_sent_record(handshake_ack_eliciting,
+                                                                   sent_handshake_frames),
         };
         handshake_sent_record.path_id = selected_send_path_id.value_or(0);
         handshake_sent_record.ecn = outbound_ecn_codepoint_for_path(selected_send_path_id);
@@ -1220,14 +1209,27 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             return reserved_packet_number;
         };
         const auto try_send_simple_application_ack_only = [&]() -> std::optional<DatagramBuffer> {
-            if (!application_ack_due_now || !base_ack_frame.has_value() || !packets.empty() ||
-                qlog_session_ != nullptr || use_zero_rtt_packet_protection ||
-                !can_send_one_rtt_packets || pending_application_send_after_blocked_queue ||
-                application_space_.pending_probe_packet.has_value() ||
-                !pending_new_token_frames_.empty() || !pending_new_connection_id_frames_.empty() ||
-                !pending_retire_connection_id_frames_.empty() ||
-                !application_crypto_frames.empty() || !current_send_path_id_.has_value() ||
-                has_pending_ack_only_path_validation_frame(paths_, current_send_path_id_)) {
+            if (!can_try_simple_application_ack_only(SimpleApplicationAckOnlyEligibility{
+                    .application_ack_due_now = application_ack_due_now,
+                    .has_base_ack_frame = base_ack_frame.has_value(),
+                    .packets_empty = packets.empty(),
+                    .qlog_enabled = qlog_session_ != nullptr,
+                    .use_zero_rtt_packet_protection = use_zero_rtt_packet_protection,
+                    .can_send_one_rtt_packets = can_send_one_rtt_packets,
+                    .pending_application_send_after_blocked_queue =
+                        pending_application_send_after_blocked_queue,
+                    .application_probe_pending =
+                        application_space_.pending_probe_packet.has_value(),
+                    .has_pending_new_token_frames = !pending_new_token_frames_.empty(),
+                    .has_pending_new_connection_id_frames =
+                        !pending_new_connection_id_frames_.empty(),
+                    .has_pending_retire_connection_id_frames =
+                        !pending_retire_connection_id_frames_.empty(),
+                    .application_crypto_frames_empty = application_crypto_frames.empty(),
+                    .has_current_send_path = current_send_path_id_.has_value(),
+                    .has_pending_ack_only_path_validation_frame =
+                        has_pending_ack_only_path_validation_frame(paths_, current_send_path_id_),
+                })) {
                 return std::nullopt;
             }
 
@@ -1293,10 +1295,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             std::vector<StreamDataBlockedFrame> stream_data_blocked;
         };
         const auto take_pending_stream_control_frames =
-            [](auto &streams, bool defer_receive_credit,
-               bool omit_retransmittable_control) -> PendingStreamControlFrames {
+            [&](auto &streams, bool defer_receive_credit,
+                bool omit_retransmittable_control) -> PendingStreamControlFrames {
             PendingStreamControlFrames control_frames;
             if (defer_receive_credit && omit_retransmittable_control) {
+                return control_frames;
+            }
+            if (stream_sendability_cache_.valid && !stream_sendability_cache_.has_pending_control) {
                 return control_frames;
             }
             for (auto &[stream_id, stream] : streams) {
@@ -1318,6 +1323,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 if (const auto frame = stream.take_stream_data_blocked_frame()) {
                     control_frames.stream_data_blocked.push_back(*frame);
                 }
+            }
+            if (!control_frames.max_stream_data.empty() || !control_frames.reset_stream.empty() ||
+                !control_frames.stop_sending.empty() ||
+                !control_frames.stream_data_blocked.empty()) {
+                invalidate_stream_sendability_cache();
             }
 
             return control_frames;
@@ -1572,6 +1582,84 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 }
             }
 
+            const auto append_selected_stream_fragments =
+                [&](decltype(streams.begin()) selected, bool loss_phase_for_stream,
+                    std::size_t wire_share, std::uint64_t new_byte_share) -> std::size_t {
+                const auto stream_id = selected->first;
+                auto &stream = selected->second;
+
+                const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream);
+                const auto previous_has_lost_send_data =
+                    stream.reset_state == StreamControlFrameState::none &&
+                    stream.send_buffer.has_lost_data();
+                const auto highest_sent_before = stream.flow_control.highest_sent;
+                auto packet_share =
+                    loss_phase_for_stream
+                        ? std::min(
+                              remaining_wire_bytes,
+                              max_stream_frame_payload_for_wire_budget(
+                                  stream_id, stream.next_send_offset_for_budget(false), wire_share))
+                        : std::min(remaining_wire_bytes,
+                                   max_stream_frame_payload_for_wire_budget(
+                                       stream_id, stream.flow_control.highest_sent, wire_share));
+                const auto fin_sendable = stream_fin_sendable(stream);
+                if (packet_share == 0) {
+                    if (fin_only_stream_frame_cannot_fit(fin_sendable,
+                                                         stream.send_final_size.has_value())) {
+                        return 0;
+                    }
+                    const auto fin_only_wire_size =
+                        stream_frame_header_wire_size(stream_id, *stream.send_final_size, 0);
+                    if (fin_only_wire_size > remaining_wire_bytes) {
+                        return 0;
+                    }
+                }
+                const auto fragment_count_before = fragments.size();
+                stream.append_send_fragments(
+                    StreamSendBudget{
+                        .packet_bytes = packet_share,
+                        .new_bytes = new_byte_share,
+                        .prefer_fresh_data = !loss_phase_for_stream,
+                    },
+                    fragments);
+                const auto new_bytes_sent = stream.flow_control.highest_sent - highest_sent_before;
+                connection_flow.highest_sent += new_bytes_sent;
+                remaining_connection_credit -=
+                    std::min<std::uint64_t>(remaining_connection_credit, new_bytes_sent);
+                std::size_t selected_wire_bytes = 0;
+                for (std::size_t index = fragment_count_before; index < fragments.size(); ++index) {
+                    auto &fragment = fragments[index];
+                    const auto fragment_wire_size = fragment.stream_frame_wire_size();
+                    if (selected_wire_bytes + fragment_wire_size <= remaining_wire_bytes) {
+                        selected_wire_bytes += fragment_wire_size;
+                        continue;
+                    }
+
+                    const auto fragment_budget = remaining_wire_bytes - selected_wire_bytes;
+                    trim_or_restore_oversized_stream_fragment(
+                        streams, fragments,
+                        StreamFragmentTrimTarget{
+                            .index = index,
+                            .budget = fragment_budget,
+                        },
+                        StreamFragmentTrimAccounting{
+                            .connection_flow = connection_flow,
+                            .remaining_connection_credit = remaining_connection_credit,
+                            .selected_wire_bytes = selected_wire_bytes,
+                        });
+                    break;
+                }
+                remaining_wire_bytes -= selected_wire_bytes;
+                const bool emitted_fragment = fragments.size() != fragment_count_before;
+                if (emitted_fragment) {
+                    last_stream_id = stream_id;
+                    note_selected_payload_bytes(fragment_count_before);
+                }
+                note_stream_send_state_changed(previous_fresh_sendable_bytes,
+                                               previous_has_lost_send_data, stream);
+                return emitted_fragment ? selected_wire_bytes : 0;
+            };
+
             auto loss_phase = !prefer_fresh_data;
             auto switched_phase = false;
             if (loss_phase && !has_lost_application_stream_data()) {
@@ -1587,93 +1675,34 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 if (!loss_phase && switched_phase &&
                     limit_fresh_streams_for_round(remaining_wire_bytes, streams.size()) == 1) {
                     decltype(streams.begin()) selected = streams.end();
-                    visit_round_robin([&](const auto it) {
-                        auto &stream = it->second;
-                        if (stream.reset_state != StreamControlFrameState::none) {
+                    if (streams.size() == 1) {
+                        auto only = streams.begin();
+                        if (only->second.reset_state == StreamControlFrameState::none &&
+                            (only->second.sendable_bytes() != 0 ||
+                             stream_fin_sendable(only->second))) {
+                            selected = only;
+                        }
+                    } else {
+                        visit_round_robin([&](const auto it) {
+                            auto &stream = it->second;
+                            if (stream.reset_state != StreamControlFrameState::none) {
+                                return true;
+                            }
+                            if (stream.sendable_bytes() != 0 || stream_fin_sendable(stream)) {
+                                selected = it;
+                                return false;
+                            }
                             return true;
-                        }
-                        if (stream.sendable_bytes() != 0 || stream_fin_sendable(stream)) {
-                            selected = it;
-                            return false;
-                        }
-                        return true;
-                    });
+                        });
+                    }
 
                     if (selected == streams.end()) {
                         break;
                     }
 
-                    const auto stream_id = selected->first;
-                    auto &stream = selected->second;
-                    const auto previous_fresh_sendable_bytes =
-                        fresh_sendable_bytes_for_cache(stream);
-                    const auto previous_has_lost_send_data =
-                        stream.reset_state == StreamControlFrameState::none &&
-                        stream.send_buffer.has_lost_data();
-                    const auto highest_sent_before = stream.flow_control.highest_sent;
-                    auto packet_share = std::min(
-                        remaining_wire_bytes,
-                        max_stream_frame_payload_for_wire_budget(
-                            stream_id, stream.flow_control.highest_sent, remaining_wire_bytes));
-                    const auto fin_sendable = stream_fin_sendable(stream);
-                    if (packet_share == 0) {
-                        if (fin_only_stream_frame_cannot_fit(fin_sendable,
-                                                             stream.send_final_size.has_value())) {
-                            break;
-                        }
-                        const auto fin_only_wire_size =
-                            stream_frame_header_wire_size(stream_id, *stream.send_final_size, 0);
-                        if (fin_only_wire_size > remaining_wire_bytes) {
-                            break;
-                        }
-                    }
-
-                    const auto new_byte_share = remaining_connection_credit;
-                    const auto fragment_count_before = fragments.size();
-                    stream.append_send_fragments(
-                        StreamSendBudget{
-                            .packet_bytes = packet_share,
-                            .new_bytes = new_byte_share,
-                            .prefer_fresh_data = true,
-                        },
-                        fragments);
-                    const auto new_bytes_sent =
-                        stream.flow_control.highest_sent - highest_sent_before;
-                    connection_flow.highest_sent += new_bytes_sent;
-                    remaining_connection_credit -= new_bytes_sent;
-                    std::size_t selected_wire_bytes = 0;
-                    for (std::size_t index = fragment_count_before; index < fragments.size();
-                         ++index) {
-                        auto &fragment = fragments[index];
-                        const auto fragment_wire_size = fragment.stream_frame_wire_size();
-                        if (selected_wire_bytes + fragment_wire_size <= remaining_wire_bytes) {
-                            selected_wire_bytes += fragment_wire_size;
-                            continue;
-                        }
-
-                        const auto fragment_budget = remaining_wire_bytes - selected_wire_bytes;
-                        trim_or_restore_oversized_stream_fragment(
-                            streams, fragments,
-                            StreamFragmentTrimTarget{
-                                .index = index,
-                                .budget = fragment_budget,
-                            },
-                            StreamFragmentTrimAccounting{
-                                .connection_flow = connection_flow,
-                                .remaining_connection_credit = remaining_connection_credit,
-                                .selected_wire_bytes = selected_wire_bytes,
-                            });
-                        break;
-                    }
-                    remaining_wire_bytes -= selected_wire_bytes;
-                    const bool emitted_fragment = fragments.size() != fragment_count_before;
-                    if (emitted_fragment) {
-                        last_stream_id = stream_id;
-                        note_selected_payload_bytes(fragment_count_before);
-                    }
-                    note_stream_send_state_changed(previous_fresh_sendable_bytes,
-                                                   previous_has_lost_send_data, stream);
-                    if (!static_cast<bool>(emitted_fragment & (selected_wire_bytes != 0))) {
+                    if (append_selected_stream_fragments(selected, /*loss_phase_for_stream=*/false,
+                                                         remaining_wire_bytes,
+                                                         remaining_connection_credit) == 0) {
                         break;
                     }
                     continue;
@@ -1722,92 +1751,22 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 for (std::size_t stream_index = 0; stream_index < selected_stream_count;
                      ++stream_index) {
                     const auto it = active_streams[stream_index];
-                    const auto stream_id = it->first;
-                    auto &stream = it->second;
-
-                    const auto previous_fresh_sendable_bytes =
-                        fresh_sendable_bytes_for_cache(stream);
-                    const auto previous_has_lost_send_data =
-                        stream.reset_state == StreamControlFrameState::none &&
-                        stream.send_buffer.has_lost_data();
-                    const auto highest_sent_before = stream.flow_control.highest_sent;
                     const auto round_divisor = use_remaining_round_share
                                                    ? selected_stream_count - stream_index
                                                    : selected_stream_count;
                     const auto wire_share =
                         std::max<std::size_t>(1u, remaining_wire_bytes / round_divisor);
-                    auto packet_share =
-                        loss_phase
-                            ? std::min(remaining_wire_bytes,
-                                       max_stream_frame_payload_for_wire_budget(
-                                           stream_id, stream.next_send_offset_for_budget(false),
-                                           wire_share))
-                            : std::min(
-                                  remaining_wire_bytes,
-                                  max_stream_frame_payload_for_wire_budget(
-                                      stream_id, stream.flow_control.highest_sent, wire_share));
-                    const auto fin_sendable = stream_fin_sendable(stream);
-                    if (packet_share == 0) {
-                        if (fin_only_stream_frame_cannot_fit(fin_sendable,
-                                                             stream.send_final_size.has_value())) {
-                            continue;
-                        }
-                        const auto fin_only_wire_size =
-                            stream_frame_header_wire_size(stream_id, *stream.send_final_size, 0);
-                        if (fin_only_wire_size > remaining_wire_bytes) {
-                            continue;
-                        }
-                    }
                     const auto new_byte_share =
                         loss_phase || remaining_connection_credit == 0
                             ? 0
                             : std::max<std::uint64_t>(1,
                                                       remaining_connection_credit / round_divisor);
-                    const auto fragment_count_before = fragments.size();
-                    stream.append_send_fragments(
-                        StreamSendBudget{
-                            .packet_bytes = packet_share,
-                            .new_bytes = new_byte_share,
-                            .prefer_fresh_data = !loss_phase,
-                        },
-                        fragments);
-                    const auto new_bytes_sent =
-                        stream.flow_control.highest_sent - highest_sent_before;
-                    connection_flow.highest_sent += new_bytes_sent;
-                    remaining_connection_credit -= new_bytes_sent;
-                    std::size_t selected_wire_bytes = 0;
-                    for (std::size_t index = fragment_count_before; index < fragments.size();
-                         ++index) {
-                        auto &fragment = fragments[index];
-                        const auto fragment_wire_size = fragment.stream_frame_wire_size();
-                        if (selected_wire_bytes + fragment_wire_size <= remaining_wire_bytes) {
-                            selected_wire_bytes += fragment_wire_size;
-                            continue;
-                        }
-
-                        const auto fragment_budget = remaining_wire_bytes - selected_wire_bytes;
-                        trim_or_restore_oversized_stream_fragment(
-                            streams, fragments,
-                            StreamFragmentTrimTarget{
-                                .index = index,
-                                .budget = fragment_budget,
-                            },
-                            StreamFragmentTrimAccounting{
-                                .connection_flow = connection_flow,
-                                .remaining_connection_credit = remaining_connection_credit,
-                                .selected_wire_bytes = selected_wire_bytes,
-                            });
-                        break;
-                    }
-                    remaining_wire_bytes -= selected_wire_bytes;
-                    if (fragments.size() != fragment_count_before) {
+                    const auto emitted_wire_bytes = append_selected_stream_fragments(
+                        it, loss_phase, wire_share, new_byte_share);
+                    if (emitted_wire_bytes != 0) {
                         emitted_fragment = true;
-                        last_stream_id = stream_id;
-                        note_selected_payload_bytes(fragment_count_before);
+                        wire_bytes_sent_this_round += emitted_wire_bytes;
                     }
-                    note_stream_send_state_changed(previous_fresh_sendable_bytes,
-                                                   previous_has_lost_send_data, stream);
-                    wire_bytes_sent_this_round += selected_wire_bytes;
                     if (remaining_wire_bytes == 0) {
                         break;
                     }
@@ -2150,6 +2109,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 }
                 for (const auto &frame : stop_sending_frames) {
                     streams_.at(frame.stream_id).mark_stop_sending_frame_lost(frame);
+                }
+                if (!max_stream_data_frames.empty() || !stream_data_blocked_frames.empty() ||
+                    !reset_stream_frames.empty() || !stop_sending_frames.empty()) {
+                    invalidate_stream_sendability_cache();
                 }
                 for (const auto &fragment : stream_fragments) {
                     restore_application_fragment(fragment);
@@ -2730,6 +2693,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             for (const auto &frame : fresh_probe_max_stream_data_frames) {
                 static_cast<void>(streams_.at(frame.stream_id).take_max_stream_data_frame());
             }
+            if (!fresh_probe_max_stream_data_frames.empty()) {
+                invalidate_stream_sendability_cache();
+            }
 
             queue_tracked_packet(
                 application_space_,
@@ -2860,8 +2826,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 }
                 maybe_queue_ack_only_path_validation_packet(ack_only_path_validation_frames, [&] {
                     const bool path_validation_ack_eliciting =
-                        ack_only_path_validation_frames.response.has_value() ||
-                        ack_only_path_validation_frames.challenge.has_value();
+                        ack_only_path_validation_is_ack_eliciting(ack_only_path_validation_frames);
                     queue_tracked_packet(
                         application_space_,
                         SentPacketRecord{
@@ -2871,16 +2836,14 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                             .in_flight = path_validation_ack_eliciting,
                             .bytes_in_flight = ack_only_datagram.value().bytes.size(),
                             .largest_received_packet_number_acked =
-                                path_validation_ack_eliciting
-                                    ? std::optional<std::uint64_t>{ack_header.largest_acknowledged}
-                                    : std::nullopt,
+                                ack_largest_for_path_validation_sent_record(
+                                    path_validation_ack_eliciting, ack_header),
                             .path_id = selected_send_path_id.value_or(0),
                             .ecn = outbound_ecn_codepoint_for_path(selected_send_path_id),
                         },
                         ack_only_datagram.value().packet_metadata.back().length);
-                    if (path_validation_ack_eliciting) {
-                        note_idle_ack_eliciting_send(now);
-                    }
+                    maybe_note_path_validation_ack_eliciting_send(
+                        path_validation_ack_eliciting, [&] { note_idle_ack_eliciting_send(now); });
                 });
                 application_space_.received_packets.on_ack_sent();
                 application_space_.pending_ack_deadline = std::nullopt;
@@ -3066,21 +3029,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                                 application_close_frame.has_value(),
                                 application_space_.next_send_packet_number,
                                 application_write_key_phase_);
-                        if (connection_drain_test_hooks()
-                                .force_no_ack_control_candidate_estimate_failure) {
-                            no_ack_control_candidate_size = CodecResult<std::size_t>::failure(
-                                CodecErrorCode::packet_length_mismatch, 0);
-                        } else if (connection_drain_test_hooks()
-                                       .force_no_ack_control_candidate_empty_payload) {
-                            no_ack_control_candidate_size = CodecResult<std::size_t>::failure(
-                                CodecErrorCode::empty_packet_payload, 0);
-                        }
-                        if (connection_drain_test_hooks()
-                                .force_no_ack_control_candidate_estimate_size) {
-                            no_ack_control_candidate_size = CodecResult<std::size_t>::success(
-                                connection_drain_test_hooks()
-                                    .forced_no_ack_control_candidate_estimate_size);
-                        }
+                        no_ack_control_candidate_size =
+                            maybe_force_no_ack_control_candidate_size_for_tests(
+                                std::move(no_ack_control_candidate_size));
                         if (!no_ack_control_candidate_size.has_value()) {
                             if (no_ack_control_candidate_size.error().code !=
                                 CodecErrorCode::empty_packet_payload) {
@@ -3091,15 +3042,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                                 selected_ack_frame, application_stream_budget,
                                 control_candidate_size, no_ack_control_candidate_size));
                             invalidate_application_candidate_frames();
-                        } else if (no_ack_control_candidate_leaves_stream_budget(
-                                       no_ack_control_candidate_size.value(),
-                                       congestion_limited_datagram_size,
-                                       *minimum_stream_wire_bytes)) {
-                            selected_ack_frame = std::nullopt;
+                        } else if (maybe_select_sized_no_ack_candidate(
+                                       congestion_limited_datagram_size, *minimum_stream_wire_bytes,
+                                       selected_ack_frame, application_stream_budget,
+                                       control_candidate_size, no_ack_control_candidate_size)) {
                             invalidate_application_candidate_frames();
-                            application_stream_budget = congestion_limited_datagram_size -
-                                                        no_ack_control_candidate_size.value();
-                            control_candidate_size = no_ack_control_candidate_size;
                         }
                     }
                 }
@@ -3710,16 +3657,15 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 auto committed = commit_serialized_datagram(
                     {}, std::move(candidate_application_datagram.value()),
                     CommitSerializedDatagramOptions{
-                        .one_rtt_encrypted_packets =
-                            has_application_close || !use_zero_rtt_packet_protection
-                                ? std::size_t{1}
-                                : std::size_t{0},
+                        .one_rtt_encrypted_packets = one_rtt_encrypted_packet_count_for_commit(
+                            has_application_close, use_zero_rtt_packet_protection),
                         .unpaced_ack_eliciting_packets = static_cast<std::size_t>(ack_eliciting),
                         .bypass_burst_limit = bypass_congestion_window,
                         .pacing_controlled = send_pacing_deadline.has_value(),
                         .allow_send_continuation = has_stream_fragments,
                     });
-                if (!committed.empty() && selected_datagram_frame.has_value()) {
+                if (should_consume_selected_datagram_frame_after_commit(
+                        committed.empty(), selected_datagram_frame.has_value())) {
                     pending_datagram_send_queue_.pop_front();
                 }
                 return committed;
@@ -3735,7 +3681,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     .pacing_controlled = send_pacing_deadline.has_value(),
                     .allow_send_continuation = has_stream_fragments,
                 });
-            if (!committed.empty() && selected_datagram_frame.has_value()) {
+            if (should_consume_selected_datagram_frame_after_commit(
+                    committed.empty(), selected_datagram_frame.has_value())) {
                 pending_datagram_send_queue_.pop_front();
             }
             return committed;

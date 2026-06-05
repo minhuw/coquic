@@ -87,6 +87,22 @@ bool http09_client_internal_coverage_for_tests() {
         return false;
     }
 
+    QuicHttp09ClientEndpoint exhausted_poll_endpoint(QuicHttp09ClientConfig{
+        .requests = {make_request("/alpha.txt")},
+        .download_root = std::filesystem::path("/downloads"),
+    });
+    exhausted_poll_endpoint.next_request_index_ = exhausted_poll_endpoint.config_.requests.size();
+    exhausted_poll_endpoint.complete_ = false;
+    exhausted_poll_endpoint.pending_open_requests_.push_back(
+        QuicHttp09ClientEndpoint::PendingOpenRequest{
+            .request_index = 0,
+            .stream_id = 0,
+        });
+    if (exhausted_poll_endpoint.poll(coquic::quic::test::test_time()).terminal_success ||
+        exhausted_poll_endpoint.complete_) {
+        return false;
+    }
+
     QuicHttp09ClientEndpoint pending_completion_endpoint(QuicHttp09ClientConfig{
         .requests = {make_request("/alpha.txt")},
         .download_root = std::filesystem::path("/downloads"),

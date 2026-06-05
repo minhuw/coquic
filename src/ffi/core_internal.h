@@ -18,3 +18,9 @@ struct coquic_result {
 
     coquic::core::Result result;
 };
+
+namespace coquic::ffi::test {
+
+bool core_ffi_conversion_coverage_for_tests();
+
+} // namespace coquic::ffi::test

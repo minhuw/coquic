@@ -56,7 +56,7 @@ class IoUringIoEngine final : public QuicIoEngine {
         quic::QuicEcnCodepoint ecn, const sockaddr_storage &peer, socklen_t peer_len) const;
     bool drain_one_completion(Completion &completion);
     void enable_receive_fallback();
-    void probe_recvmsg_support();
+    void probe_recvmsg_support(bool require_default_ops = true);
 
     std::unique_ptr<io_uring> ring_;
     bool initialized_ = false;

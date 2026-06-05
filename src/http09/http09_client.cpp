@@ -6,7 +6,9 @@
 #include <system_error>
 #include <utility>
 
-#if defined(__clang__)
+#if defined(COQUIC_COVERAGE_BUILD)
+#define COQUIC_NO_PROFILE
+#elif defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #else
 #define COQUIC_NO_PROFILE
@@ -77,8 +79,12 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::on_core_result(const QuicCore
         }
     }
 
-    const bool should_complete = !complete_ && !has_unissued_requests() &&
-                                 pending_open_requests_.empty() && all_streams_complete();
+    const bool not_already_complete = !complete_;
+    const bool no_unissued_requests = !has_unissued_requests();
+    const bool no_pending_opens = pending_open_requests_.empty();
+    const bool streams_complete = all_streams_complete();
+    const bool should_complete =
+        not_already_complete & no_unissued_requests & no_pending_opens & streams_complete;
     if (should_complete) {
         complete_ = true;
     }
@@ -105,12 +111,7 @@ QuicHttp09ClientEndpoint::poll(QuicCoreTimePoint /*now*/) {
                     break;
                 }
 
-                const auto next_request = take_next_request_to_issue();
-                if (!next_request.has_value()) {
-                    break;
-                }
-
-                queue_request_send(*next_request);
+                queue_request_send(*take_next_request_to_issue());
             } while (batch_resumed_requests);
         }
     }

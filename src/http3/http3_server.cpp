@@ -737,4 +737,56 @@ server_submit_response_for_test(bool prepare_request_stream, std::uint64_t strea
         send_stream_inputs_for_test(update));
 }
 
+Http3Result<std::vector<quic::QuicCoreSendStreamData>>
+server_submit_response_part_for_test(bool prepare_request_stream, std::uint64_t stream_id,
+                                     const Http3RequestHead &request_head,
+                                     const Http3ResponsePart &part, bool final_head_sent) {
+    Http3Connection connection(Http3ConnectionConfig{
+        .role = Http3ConnectionRole::server,
+    });
+
+    quic::QuicCoreResult handshake_ready;
+    handshake_ready.effects.push_back(quic::QuicCoreEffect{
+        quic::QuicCoreStateEvent{
+            .change = quic::QuicCoreStateChange::handshake_ready,
+        },
+    });
+    static_cast<void>(connection.on_core_result(handshake_ready, quic::QuicCoreTimePoint{}));
+
+    if (prepare_request_stream) {
+        quic::QuicCoreResult request_headers;
+        request_headers.effects.push_back(quic::QuicCoreEffect{
+            quic::QuicCoreReceiveStreamData{
+                .stream_id = stream_id,
+                .bytes = request_headers_frame_for_test(request_head, stream_id),
+                .fin = false,
+            },
+        });
+        static_cast<void>(connection.on_core_result(request_headers, quic::QuicCoreTimePoint{}));
+    }
+    auto head_sent = final_head_sent;
+    if (head_sent) {
+        const auto head_submit = connection.submit_response_head(
+            stream_id, Http3ResponseHead{
+                           .status = 200,
+                           .content_length = request_head.content_length,
+                       });
+        if (!head_submit.has_value()) {
+            return Http3Result<std::vector<quic::QuicCoreSendStreamData>>::failure(
+                head_submit.error());
+        }
+        static_cast<void>(connection.poll(quic::QuicCoreTimePoint{}));
+    }
+
+    const auto submitted =
+        submit_response_part(connection, stream_id, request_head, part, head_sent);
+    if (!submitted.has_value()) {
+        return Http3Result<std::vector<quic::QuicCoreSendStreamData>>::failure(submitted.error());
+    }
+
+    const auto update = connection.poll(quic::QuicCoreTimePoint{});
+    return Http3Result<std::vector<quic::QuicCoreSendStreamData>>::success(
+        send_stream_inputs_for_test(update));
+}
+
 } // namespace coquic::http3

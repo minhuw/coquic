@@ -11,6 +11,7 @@
 #include <memory>
 #include <new>
 #include <optional>
+#include <queue>
 #include <random>
 #include <span>
 #include <string>
@@ -639,6 +640,8 @@ class QuicCore {
         std::optional<std::string> initial_destination_connection_id_key;
         std::uint64_t endpoint_route_generation = 0;
         std::optional<QuicCoreTimePoint> send_continuation_wakeup;
+        mutable std::optional<QuicCoreTimePoint> cached_next_wakeup;
+        mutable std::uint64_t wakeup_generation = 0;
         bool send_continuation_drain = false;
         std::vector<QuicRouteHandle> new_token_issued_routes;
         std::unordered_map<QuicPathId, std::vector<std::byte>>
@@ -696,6 +699,24 @@ class QuicCore {
 
     struct PeerStatelessResetTokenRoute {
         QuicConnectionHandle owner = 0;
+    };
+
+    struct WakeupHeapEntry {
+        QuicCoreTimePoint wakeup;
+        QuicConnectionHandle connection = 0;
+        std::uint64_t generation = 0;
+    };
+
+    struct WakeupHeapEntryLater {
+        bool operator()(const WakeupHeapEntry &left, const WakeupHeapEntry &right) const {
+            if (left.wakeup != right.wakeup) {
+                return left.wakeup > right.wakeup;
+            }
+            if (left.connection != right.connection) {
+                return left.connection > right.connection;
+            }
+            return left.generation > right.generation;
+        }
     };
 
     struct LegacyConnectionView {
@@ -795,9 +816,13 @@ class QuicCore {
     route_handle_for_path(const ConnectionEntry &entry, const std::optional<QuicPathId> &path_id);
     static bool should_run_connection_timeout(const ConnectionEntry &entry, QuicCoreTimePoint now);
     static void maybe_run_connection_timeout(ConnectionEntry &entry, QuicCoreTimePoint now);
-    static void note_send_continuation(ConnectionEntry &entry, const QuicCoreResult &result,
-                                       QuicCoreTimePoint now);
+    void note_send_continuation(ConnectionEntry &entry, const QuicCoreResult &result,
+                                QuicCoreTimePoint now) const;
     static bool take_send_continuation_drain(ConnectionEntry &entry);
+    void rebuild_wakeup_cache() const;
+    void refresh_entry_wakeup(const ConnectionEntry &entry) const;
+    void ensure_wakeup_cache() const;
+    std::vector<QuicConnectionHandle> due_connection_handles(QuicCoreTimePoint now) const;
     QuicCoreResult finalize_endpoint_result(QuicCoreResult result, QuicCoreTimePoint now);
     QuicCoreResult finalize_legacy_result(QuicCoreResult result, QuicCoreTimePoint now);
 
@@ -818,6 +843,9 @@ class QuicCore {
     std::uint64_t next_server_connection_id_sequence_ = 1;
     std::mt19937_64 endpoint_random_;
     LegacyConnectionView connection_;
+    mutable std::priority_queue<WakeupHeapEntry, std::vector<WakeupHeapEntry>, WakeupHeapEntryLater>
+        wakeup_heap_;
+    mutable bool wakeup_cache_initialized_ = false;
 };
 
 } // namespace coquic::quic

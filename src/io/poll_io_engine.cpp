@@ -27,7 +27,9 @@
 #include <string_view>
 #include <vector>
 
-#if defined(__clang__)
+#if defined(COQUIC_COVERAGE_BUILD)
+#define COQUIC_NO_PROFILE
+#elif defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #else
 #define COQUIC_NO_PROFILE
@@ -646,6 +648,12 @@ struct SendmmsgBatchScratch {
     std::vector<sockaddr_storage> peers;
 };
 
+template <typename T> void ensure_scratch_size(std::vector<T> &scratch, std::size_t size) {
+    if (scratch.size() < size) {
+        scratch.resize(size);
+    }
+}
+
 SendmmsgBatchScratch &sendmmsg_batch_scratch() {
     static thread_local SendmmsgBatchScratch scratch;
     return scratch;
@@ -784,8 +792,8 @@ bool send_udp_gso_batch(std::span<const QuicIoEngineTxDatagram> datagrams,
     auto &scratch = sendmmsg_batch_scratch();
     auto &iovecs = scratch.iovecs;
     auto &peers = scratch.peers;
-    iovecs.resize(datagrams.size());
-    peers.resize(datagrams.size());
+    ensure_scratch_size(iovecs, datagrams.size());
+    ensure_scratch_size(peers, 1);
     for (std::size_t index = 0; index < datagrams.size(); ++index) {
         const auto &datagram = datagrams[index];
         iovecs[index] = iovec{
@@ -801,7 +809,7 @@ bool send_udp_gso_batch(std::span<const QuicIoEngineTxDatagram> datagrams,
     gso_send_message.msg_name = reinterpret_cast<sockaddr *>(&peers.front());
     gso_send_message.msg_namelen = datagrams.front().peer_len;
     gso_send_message.msg_iov = iovecs.data();
-    gso_send_message.msg_iovlen = iovecs.size();
+    gso_send_message.msg_iovlen = datagrams.size();
     gso_send_message.msg_control = gso_control_storage.bytes.data();
     gso_send_message.msg_controllen = 0;
 
@@ -882,13 +890,12 @@ bool sendmmsg_batch(std::span<const QuicIoEngineTxDatagram> datagrams, std::stri
     auto &ecn_controls = scratch.ecn_controls;
     auto &peers = scratch.peers;
 
-    iovecs.resize(datagrams.size());
-    send_messages.resize(datagrams.size());
-    peers.resize(datagrams.size());
-    if (is_ect_codepoint(datagrams.front().ecn)) {
-        ecn_controls.resize(datagrams.size());
-    } else {
-        ecn_controls.clear();
+    ensure_scratch_size(iovecs, datagrams.size());
+    ensure_scratch_size(send_messages, datagrams.size());
+    ensure_scratch_size(peers, datagrams.size());
+    const bool has_ecn_control = is_ect_codepoint(datagrams.front().ecn);
+    if (has_ecn_control) {
+        ensure_scratch_size(ecn_controls, datagrams.size());
     }
     for (std::size_t index = 0; index < datagrams.size(); ++index) {
         const auto &datagram = datagrams[index];
@@ -903,16 +910,16 @@ bool sendmmsg_batch(std::span<const QuicIoEngineTxDatagram> datagrams, std::stri
         outbound_message.msg_hdr.msg_namelen = datagram.peer_len;
         outbound_message.msg_hdr.msg_iov = &iovecs[index];
         outbound_message.msg_hdr.msg_iovlen = 1;
-        if (!ecn_controls.empty()) {
+        if (has_ecn_control) {
             set_sendmsg_ecn_control(outbound_message.msg_hdr, ecn_controls[index], datagram.ecn,
                                     datagram.peer, datagram.peer_len);
         }
     }
 
     unsigned sent_message_total = 0;
-    while (sent_message_total < send_messages.size()) {
-        const auto remaining = static_cast<unsigned>(send_messages.size() -
-                                                     static_cast<std::size_t>(sent_message_total));
+    while (sent_message_total < datagrams.size()) {
+        const auto remaining =
+            static_cast<unsigned>(datagrams.size() - static_cast<std::size_t>(sent_message_total));
         int sent_message_count = 0;
         do {
             if (io_profile_enabled()) {
@@ -2484,6 +2491,118 @@ bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_test
                internal::ecn_from_linux_traffic_class(0x03) == QuicEcnCodepoint::ce,
            }),
            "ecn helpers cover every linux traffic class mapping");
+
+    record(all_true({
+               receive_result_storage_allocation_bytes(0) == 0,
+               receive_result_storage_allocation_bytes(1) == kReceiveResultStorageCacheBucketBytes,
+               receive_result_storage_allocation_bytes(kReceiveResultStorageCacheMaxBytes + 1) ==
+                   kReceiveResultStorageCacheMaxBytes + 1,
+           }),
+           "receive result storage allocation size handles zero, cached, and oversized inputs");
+
+    {
+        auto *aligned_storage =
+            allocate_receive_result_storage(/*bytes=*/64, __STDCPP_DEFAULT_NEW_ALIGNMENT__ * 2);
+        deallocate_receive_result_storage(aligned_storage, __STDCPP_DEFAULT_NEW_ALIGNMENT__ * 2);
+        auto *default_aligned_storage =
+            allocate_receive_result_storage(/*bytes=*/64, alignof(char));
+        deallocate_receive_result_storage(default_aligned_storage, alignof(char));
+
+        ReceiveResultAllocator<std::byte> allocator;
+        auto *single_byte = allocator.allocate(1);
+        allocator.deallocate(single_byte, 0);
+        allocator.deallocate(single_byte, 1);
+        auto *reused_byte = allocator.allocate(1);
+        record(reused_byte == single_byte,
+               "receive result allocator reuses cached storage after zero-count deallocate guard");
+        allocator.deallocate(reused_byte, 1);
+        allocator.deallocate(nullptr, 1);
+
+        bool caught_bad_array_length = false;
+        try {
+            ReceiveResultAllocator<std::uint64_t> wide_allocator;
+            static_cast<void>(wide_allocator.allocate(std::numeric_limits<std::size_t>::max()));
+        } catch (const std::bad_array_new_length &) {
+            caught_bad_array_length = true;
+        }
+        record(caught_bad_array_length,
+               "receive result allocator rejects impossible allocation counts");
+    }
+
+    {
+        auto &cache = receive_result_storage_cache();
+        std::vector<ReceiveResultStorageCache::Entry> saved_entries;
+        saved_entries.reserve(cache.used);
+        while (cache.used != 0) {
+            --cache.used;
+            saved_entries.push_back(cache.entries[cache.used]);
+            cache.entries[cache.used] = ReceiveResultStorageCache::Entry{};
+        }
+
+        std::vector<void *> full_cache_storage;
+        full_cache_storage.reserve(cache.entries.size());
+        for (std::size_t index = 0; index < cache.entries.size(); ++index) {
+            full_cache_storage.push_back(allocate_receive_result_storage(
+                kReceiveResultStorageCacheBucketBytes, alignof(std::byte)));
+            record(cache.put(full_cache_storage.back(), kReceiveResultStorageCacheBucketBytes,
+                             alignof(std::byte)),
+                   "receive result storage cache accepts entries until full");
+        }
+        auto *overflow_cached_storage = allocate_receive_result_storage(
+            kReceiveResultStorageCacheBucketBytes, alignof(std::byte));
+        record(!cache.put(overflow_cached_storage, kReceiveResultStorageCacheBucketBytes,
+                          alignof(std::byte)),
+               "receive result storage cache rejects entries when full");
+        deallocate_receive_result_storage(overflow_cached_storage, alignof(std::byte));
+        while (cache.used != 0) {
+            auto *pointer = cache.entries[cache.used - 1].pointer;
+            --cache.used;
+            cache.entries[cache.used] = ReceiveResultStorageCache::Entry{};
+            deallocate_receive_result_storage(pointer, alignof(std::byte));
+        }
+        full_cache_storage.clear();
+        for (auto it = saved_entries.rbegin(); it != saved_entries.rend(); ++it) {
+            if (it->pointer != nullptr && cache.used < cache.entries.size()) {
+                cache.entries[cache.used++] = *it;
+            }
+        }
+
+        ReceiveResultAllocator<std::byte> allocator;
+        auto *oversized = allocator.allocate(kReceiveResultStorageCacheMaxBytes + 1);
+        allocator.deallocate(oversized, kReceiveResultStorageCacheMaxBytes + 1);
+        record(true, "receive result allocator covers full-cache and oversized deallocate paths");
+    }
+
+    {
+        recycle_receive_byte_storage(nullptr);
+        auto *small_storage = new std::vector<std::byte>(1);
+        recycle_receive_byte_storage(small_storage);
+
+        auto &pool = receive_byte_storage_pool();
+        std::vector<std::unique_ptr<std::vector<std::byte>>> saved_entries;
+        saved_entries.reserve(pool.size);
+        while (pool.size != 0) {
+            --pool.size;
+            saved_entries.push_back(std::move(pool.entries[pool.size]));
+        }
+        for (std::size_t index = 0; index < pool.entries.size(); ++index) {
+            pool.entries[index] = std::make_unique<std::vector<std::byte>>(kMaxDatagramBytes);
+        }
+        pool.size = pool.entries.size();
+        auto *overflow_storage = new std::vector<std::byte>(kMaxDatagramBytes);
+        recycle_receive_byte_storage(overflow_storage);
+        for (auto &entry : pool.entries) {
+            entry.reset();
+        }
+        pool.size = 0;
+        for (auto &entry : saved_entries) {
+            if (entry != nullptr && pool.size < pool.entries.size()) {
+                pool.entries[pool.size++] = std::move(entry);
+            }
+        }
+        record(true,
+               "receive byte storage recycle guards cover null, size mismatch, and full pool");
+    }
 
     reset_for_case();
     record(all_true({

@@ -10,6 +10,7 @@
 #include <set>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -32,6 +33,7 @@ bool connection_helper_edge_cases_for_tests();
 bool connection_header_packet_space_coverage_for_tests();
 bool connection_key_update_and_probe_coverage_for_tests();
 bool connection_pmtud_coverage_for_tests();
+bool connection_packet_inspection_coverage_for_tests();
 } // namespace test
 
 enum class HandshakeStatus : std::uint8_t {
@@ -50,6 +52,10 @@ enum class QuicConnectionCloseMode : std::uint8_t {
     none,
     closing,
     draining,
+};
+
+struct QuicInboundDatagramResult {
+    bool processed_any_packet = false;
 };
 
 enum class QuicTransportErrorCode : std::uint64_t { // NOLINT(performance-enum-size)
@@ -524,9 +530,10 @@ class QuicConnection {
 
     void start();
     void start(QuicCoreTimePoint now);
-    void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now,
-                                  QuicPathId path_id = 0,
-                                  QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
+    QuicInboundDatagramResult
+    process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now,
+                             QuicPathId path_id = 0,
+                             QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
     StreamStateResult<bool> queue_stream_send(std::uint64_t stream_id,
                                               std::span<const std::byte> bytes, bool fin);
     StreamStateResult<bool> queue_stream_send_shared(std::uint64_t stream_id, SharedBytes bytes,
@@ -591,6 +598,7 @@ class QuicConnection {
     friend bool test::connection_header_packet_space_coverage_for_tests();
     friend bool test::connection_key_update_and_probe_coverage_for_tests();
     friend bool test::connection_pmtud_coverage_for_tests();
+    friend bool test::connection_packet_inspection_coverage_for_tests();
 
     void start_client_if_needed();
     void start_client_if_needed(QuicCoreTimePoint now);
@@ -610,21 +618,25 @@ class QuicConnection {
     void maybe_emit_qlog_recovery_metrics(QuicCoreTimePoint now);
     void emit_qlog_packet_lost(const SentPacketRecord &packet, std::string_view trigger,
                                QuicCoreTimePoint now);
-    void process_inbound_datagram_owned(std::vector<std::byte> bytes, QuicCoreTimePoint now,
-                                        QuicPathId path_id, QuicEcnCodepoint ecn);
-    void process_inbound_datagram_shared(std::shared_ptr<std::vector<std::byte>> storage,
-                                         std::size_t begin, std::size_t end, QuicCoreTimePoint now,
-                                         QuicPathId path_id, QuicEcnCodepoint ecn);
-    void process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now,
-                                  QuicPathId path_id, QuicEcnCodepoint ecn,
-                                  std::optional<std::uint32_t> inbound_datagram_id,
-                                  bool replay_trigger, bool count_inbound_bytes);
-    void process_inbound_datagram(std::shared_ptr<std::vector<std::byte>> storage,
-                                  std::size_t begin, std::size_t end, QuicCoreTimePoint now,
-                                  QuicPathId path_id, QuicEcnCodepoint ecn,
-                                  std::optional<std::uint32_t> inbound_datagram_id,
-                                  bool replay_trigger, bool count_inbound_bytes,
-                                  bool allow_in_place_receive_decode);
+    QuicInboundDatagramResult process_inbound_datagram_owned(std::vector<std::byte> bytes,
+                                                             QuicCoreTimePoint now,
+                                                             QuicPathId path_id,
+                                                             QuicEcnCodepoint ecn);
+    QuicInboundDatagramResult
+    process_inbound_datagram_shared(std::shared_ptr<std::vector<std::byte>> storage,
+                                    std::size_t begin, std::size_t end, QuicCoreTimePoint now,
+                                    QuicPathId path_id, QuicEcnCodepoint ecn);
+    QuicInboundDatagramResult
+    process_inbound_datagram(std::span<const std::byte> bytes, QuicCoreTimePoint now,
+                             QuicPathId path_id, QuicEcnCodepoint ecn,
+                             std::optional<std::uint32_t> inbound_datagram_id, bool replay_trigger,
+                             bool count_inbound_bytes);
+    QuicInboundDatagramResult
+    process_inbound_datagram(std::shared_ptr<std::vector<std::byte>> storage, std::size_t begin,
+                             std::size_t end, QuicCoreTimePoint now, QuicPathId path_id,
+                             QuicEcnCodepoint ecn, std::optional<std::uint32_t> inbound_datagram_id,
+                             bool replay_trigger, bool count_inbound_bytes,
+                             bool allow_in_place_receive_decode);
     CodecResult<ConnectionId>
     peek_client_initial_destination_connection_id(std::span<const std::byte> bytes) const;
     CodecResult<std::size_t> peek_next_packet_length(std::span<const std::byte> bytes) const;
@@ -805,8 +817,36 @@ class QuicConnection {
     void initialize_stream_flow_control(StreamState &stream) const;
     std::uint64_t initial_stream_send_limit(std::uint64_t stream_id) const;
     std::uint64_t initial_stream_receive_window(std::uint64_t stream_id) const;
+    void invalidate_active_stream_lookup_cache() const;
+    StreamState *find_active_stream_state(std::uint64_t stream_id);
+    StreamState *find_retired_stream_state(std::uint64_t stream_id);
     StreamState *find_stream_state(std::uint64_t stream_id);
     const StreamState *find_stream_state(std::uint64_t stream_id) const;
+    struct RetiredPeerStreamRange {
+        std::uint64_t first_index = 0;
+        std::uint64_t last_index = 0;
+        std::uint64_t receive_final_size = 0;
+        std::uint64_t send_final_size = 0;
+        std::uint64_t peer_max_stream_data = 0;
+        std::uint64_t local_receive_window = 0;
+        std::uint64_t advertised_max_stream_data = 0;
+    };
+    std::map<std::uint64_t, RetiredPeerStreamRange> &
+    retired_peer_stream_ranges(StreamDirection direction);
+    const std::map<std::uint64_t, RetiredPeerStreamRange> &
+    retired_peer_stream_ranges(StreamDirection direction) const;
+    RetiredPeerStreamRange *find_retired_peer_stream_range(std::uint64_t stream_id);
+    const RetiredPeerStreamRange *find_retired_peer_stream_range(std::uint64_t stream_id) const;
+    StreamState make_retired_peer_stream_state(std::uint64_t stream_id,
+                                               const RetiredPeerStreamRange &range) const;
+    CodecResult<bool> validate_retired_peer_stream_frame(std::uint64_t stream_id,
+                                                         std::uint64_t offset, std::size_t length,
+                                                         bool fin, std::uint64_t frame_type) const;
+    CodecResult<bool> validate_retired_peer_reset_stream_frame(std::uint64_t stream_id,
+                                                               std::uint64_t final_size,
+                                                               std::uint64_t frame_type) const;
+    bool try_retire_stream_to_peer_range(const StreamState &stream);
+    std::size_t retired_peer_stream_count() const;
     void maybe_retire_stream(std::uint64_t stream_id);
     StreamStateResult<StreamState *> get_or_open_local_stream(std::uint64_t stream_id);
     StreamStateResult<StreamState *> get_existing_receive_stream(std::uint64_t stream_id);
@@ -823,6 +863,11 @@ class QuicConnection {
     bool has_pending_congestion_controlled_send() const;
     bool has_pending_fresh_application_stream_send() const;
     bool has_pending_application_control_send(bool application_ack_due) const;
+    bool streams_have_pending_application_control_send() const;
+    bool streams_have_sendable_fin() const;
+    bool streams_have_sendable_data() const;
+    void invalidate_stream_sendability_cache() const;
+    void refresh_stream_sendability_cache() const;
     bool has_application_space_sendable_data(bool application_ack_due) const;
     std::optional<std::size_t> minimum_pending_application_stream_wire_bytes() const;
     std::optional<std::size_t> minimum_pending_application_stream_datagram_bytes() const;
@@ -966,7 +1011,27 @@ class QuicConnection {
     std::uint64_t anti_amplification_received_bytes_ = 0;
     std::uint64_t anti_amplification_sent_bytes_ = 0;
     std::map<std::uint64_t, StreamState> streams_;
-    std::map<std::uint64_t, StreamState> retired_streams_;
+    struct ActiveStreamLookupCache {
+        bool valid = false;
+        std::uint64_t stream_id = 0;
+        std::map<std::uint64_t, StreamState>::iterator stream;
+
+        ActiveStreamLookupCache() = default;
+        ActiveStreamLookupCache(ActiveStreamLookupCache &&) noexcept : valid(false), stream_id(0) {
+        }
+        ActiveStreamLookupCache &operator=(ActiveStreamLookupCache &&) noexcept {
+            valid = false;
+            stream_id = 0;
+            return *this;
+        }
+        ActiveStreamLookupCache(const ActiveStreamLookupCache &) = delete;
+        ActiveStreamLookupCache &operator=(const ActiveStreamLookupCache &) = delete;
+    };
+    mutable ActiveStreamLookupCache active_stream_lookup_cache_;
+    std::unordered_map<std::uint64_t, StreamState> retired_streams_;
+    std::map<std::uint64_t, RetiredPeerStreamRange> retired_peer_bidi_stream_ranges_;
+    std::map<std::uint64_t, RetiredPeerStreamRange> retired_peer_uni_stream_ranges_;
+    mutable StreamState retired_peer_stream_lookup_scratch_;
     ConnectionFlowControlState connection_flow_control_;
     StreamOpenLimits stream_open_limits_;
     LocalStreamLimitState local_stream_limit_state_;
@@ -1003,6 +1068,13 @@ class QuicConnection {
     std::uint64_t application_read_secret_generation_ = 0;
     std::optional<std::uint64_t> next_application_read_secret_source_generation_;
     bool next_application_read_key_phase_ = false;
+    struct StreamSendabilityCache {
+        bool valid = false;
+        bool has_pending_control = false;
+        bool has_sendable_data = false;
+        bool has_sendable_fin = false;
+    };
+    mutable StreamSendabilityCache stream_sendability_cache_;
     struct ShortHeaderDeserializeContextCache {
         const TrafficSecret *secret = nullptr;
         std::uint64_t secret_generation = 0;

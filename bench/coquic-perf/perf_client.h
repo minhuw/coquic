@@ -34,6 +34,8 @@ bool timed_bulk_download_drain_complete_for_test(
     std::span<const QuicPerfDrainStateSnapshot> connections);
 bool timed_rr_drain_complete_for_test(std::span<const QuicPerfDrainStateSnapshot> connections);
 bool timed_crr_drain_complete_for_test(std::span<const QuicPerfDrainStateSnapshot> connections);
+std::size_t
+active_crr_connections_for_test(std::span<const QuicPerfDrainStateSnapshot> connections);
 
 class QuicPerfClient {
   public:
@@ -94,6 +96,7 @@ class QuicPerfClient {
     bool maybe_issue_crr_request(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool maybe_close_rr_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool maybe_close_crr_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);
+    std::size_t active_crr_connection_count() const;
     quic::QuicCoreDuration result_elapsed(quic::QuicCoreTimePoint now) const;
     quic::QuicCoreClientConnectionConfig make_client_open_config(std::uint64_t index) const;
     bool maybe_open_crr_connections(quic::QuicCoreTimePoint now);

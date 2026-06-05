@@ -1,6 +1,8 @@
 #include "src/quic/connection.h"
 #include "src/quic/connection_internal.h"
 
+#include <limits>
+
 namespace coquic::quic {
 
 void QuicConnection::install_available_secrets() {
@@ -956,6 +958,7 @@ void QuicConnection::mark_connection_close_frame_sent(const Frame &frame, QuicCo
 
 void QuicConnection::clear_connection_failure_effects() {
     streams_.clear();
+    invalidate_active_stream_lookup_cache();
     active_queued_stream_bytes_ = 0;
     fresh_sendable_stream_bytes_ = 0;
     streams_with_lost_send_data_ = 0;
@@ -1294,14 +1297,39 @@ void QuicConnection::initialize_stream_flow_control(StreamState &stream) const {
     stream.receive_flow_control_limit = stream.flow_control.advertised_max_stream_data;
 }
 
-StreamState *QuicConnection::find_stream_state(std::uint64_t stream_id) {
-    if (auto it = streams_.find(stream_id); it != streams_.end()) {
-        return &it->second;
+void QuicConnection::invalidate_active_stream_lookup_cache() const {
+    active_stream_lookup_cache_.valid = false;
+}
+
+StreamState *QuicConnection::find_active_stream_state(std::uint64_t stream_id) {
+    if (active_stream_lookup_cache_.valid && active_stream_lookup_cache_.stream_id == stream_id) {
+        return &active_stream_lookup_cache_.stream->second;
     }
-    if (auto it = retired_streams_.find(stream_id); it != retired_streams_.end()) {
+    if (auto it = streams_.find(stream_id); it != streams_.end()) {
+        active_stream_lookup_cache_.valid = true;
+        active_stream_lookup_cache_.stream_id = stream_id;
+        active_stream_lookup_cache_.stream = it;
         return &it->second;
     }
     return nullptr;
+}
+
+StreamState *QuicConnection::find_retired_stream_state(std::uint64_t stream_id) {
+    if (auto it = retired_streams_.find(stream_id); it != retired_streams_.end()) {
+        return &it->second;
+    }
+    if (const auto *range = find_retired_peer_stream_range(stream_id); range != nullptr) {
+        retired_peer_stream_lookup_scratch_ = make_retired_peer_stream_state(stream_id, *range);
+        return &retired_peer_stream_lookup_scratch_;
+    }
+    return nullptr;
+}
+
+StreamState *QuicConnection::find_stream_state(std::uint64_t stream_id) {
+    if (auto *stream = find_active_stream_state(stream_id); stream != nullptr) {
+        return stream;
+    }
+    return find_retired_stream_state(stream_id);
 }
 
 const StreamState *QuicConnection::find_stream_state(std::uint64_t stream_id) const {
@@ -1311,7 +1339,178 @@ const StreamState *QuicConnection::find_stream_state(std::uint64_t stream_id) co
     if (auto it = retired_streams_.find(stream_id); it != retired_streams_.end()) {
         return &it->second;
     }
+    if (const auto *range = find_retired_peer_stream_range(stream_id); range != nullptr) {
+        retired_peer_stream_lookup_scratch_ = make_retired_peer_stream_state(stream_id, *range);
+        return &retired_peer_stream_lookup_scratch_;
+    }
     return nullptr;
+}
+
+std::map<std::uint64_t, QuicConnection::RetiredPeerStreamRange> &
+QuicConnection::retired_peer_stream_ranges(StreamDirection direction) {
+    return direction == StreamDirection::bidirectional ? retired_peer_bidi_stream_ranges_
+                                                       : retired_peer_uni_stream_ranges_;
+}
+
+const std::map<std::uint64_t, QuicConnection::RetiredPeerStreamRange> &
+QuicConnection::retired_peer_stream_ranges(StreamDirection direction) const {
+    return direction == StreamDirection::bidirectional ? retired_peer_bidi_stream_ranges_
+                                                       : retired_peer_uni_stream_ranges_;
+}
+
+QuicConnection::RetiredPeerStreamRange *
+QuicConnection::find_retired_peer_stream_range(std::uint64_t stream_id) {
+    const auto id_info = classify_stream_id(stream_id, config_.role);
+    if (id_info.initiator != StreamInitiator::peer) {
+        return nullptr;
+    }
+    auto &ranges = retired_peer_stream_ranges(id_info.direction);
+    const auto stream_index = stream_id >> 2u;
+    auto after = ranges.upper_bound(stream_index);
+    if (after == ranges.begin()) {
+        return nullptr;
+    }
+    auto candidate = std::prev(after);
+    return stream_index <= candidate->second.last_index ? &candidate->second : nullptr;
+}
+
+const QuicConnection::RetiredPeerStreamRange *
+QuicConnection::find_retired_peer_stream_range(std::uint64_t stream_id) const {
+    const auto id_info = classify_stream_id(stream_id, config_.role);
+    if (id_info.initiator != StreamInitiator::peer) {
+        return nullptr;
+    }
+    const auto &ranges = retired_peer_stream_ranges(id_info.direction);
+    const auto stream_index = stream_id >> 2u;
+    auto after = ranges.upper_bound(stream_index);
+    if (after == ranges.begin()) {
+        return nullptr;
+    }
+    auto candidate = std::prev(after);
+    return stream_index <= candidate->second.last_index ? &candidate->second : nullptr;
+}
+
+StreamState
+QuicConnection::make_retired_peer_stream_state(std::uint64_t stream_id,
+                                               const RetiredPeerStreamRange &range) const {
+    auto stream = make_implicit_stream_state(stream_id, config_.role);
+    stream.send_closed = true;
+    stream.receive_closed = true;
+    stream.peer_fin_delivered = true;
+    stream.peer_send_closed = true;
+    stream.peer_final_size = range.receive_final_size;
+    stream.receive_flow_control_consumed = range.receive_final_size;
+    stream.highest_received_offset = range.receive_final_size;
+    stream.flow_control.delivered_bytes = range.receive_final_size;
+    stream.send_final_size = range.send_final_size;
+    stream.send_flow_control_committed = range.send_final_size;
+    stream.flow_control.highest_sent = range.send_final_size;
+    stream.send_fin_state =
+        stream.id_info.local_can_send ? StreamSendFinState::acknowledged : StreamSendFinState::none;
+    stream.flow_control.peer_max_stream_data = range.peer_max_stream_data;
+    stream.flow_control.local_receive_window = range.local_receive_window;
+    stream.flow_control.advertised_max_stream_data = range.advertised_max_stream_data;
+    stream.send_flow_control_limit = range.peer_max_stream_data;
+    stream.receive_flow_control_limit = range.advertised_max_stream_data;
+    stream.peer_stream_limit_released = true;
+    return stream;
+}
+
+CodecResult<bool>
+QuicConnection::validate_retired_peer_stream_frame(std::uint64_t stream_id, std::uint64_t offset,
+                                                   std::size_t length, bool fin,
+                                                   std::uint64_t frame_type) const {
+    const auto *range = find_retired_peer_stream_range(stream_id);
+    if (range == nullptr) {
+        return CodecResult<bool>::success(false);
+    }
+
+    if (offset > std::numeric_limits<std::uint64_t>::max() - static_cast<std::uint64_t>(length)) {
+        return CodecResult<bool>::failure(
+            stream_state_codec_error(StreamStateErrorCode::final_size_conflict, frame_type));
+    }
+    const auto range_end = offset + static_cast<std::uint64_t>(length);
+    if (range_end > range->receive_final_size || (fin && range_end != range->receive_final_size)) {
+        return CodecResult<bool>::failure(
+            stream_state_codec_error(StreamStateErrorCode::final_size_conflict, frame_type));
+    }
+
+    return CodecResult<bool>::success(true);
+}
+
+CodecResult<bool> QuicConnection::validate_retired_peer_reset_stream_frame(
+    std::uint64_t stream_id, std::uint64_t final_size, std::uint64_t frame_type) const {
+    const auto *range = find_retired_peer_stream_range(stream_id);
+    if (range == nullptr) {
+        return CodecResult<bool>::success(false);
+    }
+    if (final_size != range->receive_final_size) {
+        return CodecResult<bool>::failure(
+            stream_state_codec_error(StreamStateErrorCode::final_size_conflict, frame_type));
+    }
+    return CodecResult<bool>::success(true);
+}
+
+bool QuicConnection::try_retire_stream_to_peer_range(const StreamState &stream) {
+    if (stream.id_info.initiator != StreamInitiator::peer) {
+        return false;
+    }
+    if (!stream.peer_fin_delivered || stream.peer_reset_received || !stream.peer_final_size ||
+        !stream.send_final_size || stream.reset_state != StreamControlFrameState::none ||
+        stream.stop_sending_state != StreamControlFrameState::none ||
+        stream.flow_control.max_stream_data_state != StreamControlFrameState::none ||
+        stream.flow_control.stream_data_blocked_state != StreamControlFrameState::none) {
+        return false;
+    }
+
+    const auto stream_index = stream.stream_id >> 2u;
+    RetiredPeerStreamRange merged{
+        .first_index = stream_index,
+        .last_index = stream_index,
+        .receive_final_size = *stream.peer_final_size,
+        .send_final_size = *stream.send_final_size,
+        .peer_max_stream_data = stream.flow_control.peer_max_stream_data,
+        .local_receive_window = stream.flow_control.local_receive_window,
+        .advertised_max_stream_data = stream.flow_control.advertised_max_stream_data,
+    };
+    auto &ranges = retired_peer_stream_ranges(stream.id_info.direction);
+    auto after = ranges.upper_bound(stream_index);
+    if (after != ranges.begin()) {
+        auto previous = std::prev(after);
+        if (previous->second.last_index + 1 == stream_index &&
+            previous->second.receive_final_size == merged.receive_final_size &&
+            previous->second.send_final_size == merged.send_final_size &&
+            previous->second.peer_max_stream_data == merged.peer_max_stream_data &&
+            previous->second.local_receive_window == merged.local_receive_window &&
+            previous->second.advertised_max_stream_data == merged.advertised_max_stream_data) {
+            merged.first_index = previous->second.first_index;
+            ranges.erase(previous);
+        }
+    }
+    if (after != ranges.end() && stream_index + 1 == after->second.first_index &&
+        after->second.receive_final_size == merged.receive_final_size &&
+        after->second.send_final_size == merged.send_final_size &&
+        after->second.peer_max_stream_data == merged.peer_max_stream_data &&
+        after->second.local_receive_window == merged.local_receive_window &&
+        after->second.advertised_max_stream_data == merged.advertised_max_stream_data) {
+        merged.last_index = after->second.last_index;
+        ranges.erase(after);
+    }
+    ranges.emplace(merged.first_index, merged);
+    return true;
+}
+
+std::size_t QuicConnection::retired_peer_stream_count() const {
+    std::size_t count = 0;
+    const auto count_ranges = [&](const auto &ranges) {
+        for (const auto &[first_index, range] : ranges) {
+            static_cast<void>(first_index);
+            count += static_cast<std::size_t>(range.last_index - range.first_index + 1);
+        }
+    };
+    count_ranges(retired_peer_bidi_stream_ranges_);
+    count_ranges(retired_peer_uni_stream_ranges_);
+    return count;
 }
 
 void QuicConnection::maybe_retire_stream(std::uint64_t stream_id) {
@@ -1334,12 +1533,18 @@ void QuicConnection::maybe_retire_stream(std::uint64_t stream_id) {
     }
 
     forget_active_stream_queued_bytes(stream->second);
-    retired_streams_.insert_or_assign(stream_id, std::move(stream->second));
+    if (!try_retire_stream_to_peer_range(stream->second)) {
+        retired_streams_.insert_or_assign(stream_id, std::move(stream->second));
+    }
     streams_.erase(stream);
+    invalidate_active_stream_lookup_cache();
 }
 
 StreamStateResult<StreamState *> QuicConnection::get_or_open_local_stream(std::uint64_t stream_id) {
-    if (auto *existing = find_stream_state(stream_id); existing != nullptr) {
+    if (auto *existing = find_active_stream_state(stream_id); existing != nullptr) {
+        return StreamStateResult<StreamState *>::success(existing);
+    }
+    if (auto *existing = find_retired_stream_state(stream_id); existing != nullptr) {
         return StreamStateResult<StreamState *>::success(existing);
     }
 
@@ -1354,16 +1559,21 @@ StreamStateResult<StreamState *> QuicConnection::get_or_open_local_stream(std::u
                                                          stream_id);
     }
 
-    auto [it, inserted] =
-        streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
-    static_cast<void>(inserted);
+    auto it = streams_.emplace_hint(streams_.end(), stream_id,
+                                    make_implicit_stream_state(stream_id, config_.role));
     initialize_stream_flow_control(it->second);
+    active_stream_lookup_cache_.valid = true;
+    active_stream_lookup_cache_.stream_id = stream_id;
+    active_stream_lookup_cache_.stream = it;
     return StreamStateResult<StreamState *>::success(&it->second);
 }
 
 StreamStateResult<StreamState *>
 QuicConnection::get_existing_receive_stream(std::uint64_t stream_id) {
-    if (auto *existing = find_stream_state(stream_id); existing != nullptr) {
+    if (auto *existing = find_active_stream_state(stream_id); existing != nullptr) {
+        return StreamStateResult<StreamState *>::success(existing);
+    }
+    if (auto *existing = find_retired_stream_state(stream_id); existing != nullptr) {
         return StreamStateResult<StreamState *>::success(existing);
     }
 
@@ -1378,7 +1588,10 @@ QuicConnection::get_existing_receive_stream(std::uint64_t stream_id) {
 }
 
 CodecResult<StreamState *> QuicConnection::get_or_open_receive_stream(std::uint64_t stream_id) {
-    if (auto *existing = find_stream_state(stream_id); existing != nullptr) {
+    if (auto *existing = find_active_stream_state(stream_id); existing != nullptr) {
+        return CodecResult<StreamState *>::success(existing);
+    }
+    if (auto *existing = find_retired_stream_state(stream_id); existing != nullptr) {
         return CodecResult<StreamState *>::success(existing);
     }
 
@@ -1387,10 +1600,12 @@ CodecResult<StreamState *> QuicConnection::get_or_open_receive_stream(std::uint6
         return CodecResult<StreamState *>::failure(stream_state_error(/*frame_type=*/0));
     }
     if (stream_id == kCompatibilityStreamId && id_info.initiator == StreamInitiator::local) {
-        auto [it, inserted] =
-            streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
-        static_cast<void>(inserted);
+        auto it = streams_.emplace_hint(streams_.end(), stream_id,
+                                        make_implicit_stream_state(stream_id, config_.role));
         initialize_stream_flow_control(it->second);
+        active_stream_lookup_cache_.valid = true;
+        active_stream_lookup_cache_.stream_id = stream_id;
+        active_stream_lookup_cache_.stream = it;
         return CodecResult<StreamState *>::success(&it->second);
     }
     if (id_info.initiator != StreamInitiator::peer ||
@@ -1402,15 +1617,20 @@ CodecResult<StreamState *> QuicConnection::get_or_open_receive_stream(std::uint6
         return CodecResult<StreamState *>::failure(stream_limit_error(/*frame_type=*/0));
     }
 
-    auto [it, inserted] =
-        streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
-    static_cast<void>(inserted);
+    auto it = streams_.emplace_hint(streams_.end(), stream_id,
+                                    make_implicit_stream_state(stream_id, config_.role));
     initialize_stream_flow_control(it->second);
+    active_stream_lookup_cache_.valid = true;
+    active_stream_lookup_cache_.stream_id = stream_id;
+    active_stream_lookup_cache_.stream = it;
     return CodecResult<StreamState *>::success(&it->second);
 }
 
 CodecResult<StreamState *> QuicConnection::get_or_open_send_stream(std::uint64_t stream_id) {
-    if (auto *existing = find_stream_state(stream_id); existing != nullptr) {
+    if (auto *existing = find_active_stream_state(stream_id); existing != nullptr) {
+        return CodecResult<StreamState *>::success(existing);
+    }
+    if (auto *existing = find_retired_stream_state(stream_id); existing != nullptr) {
         return CodecResult<StreamState *>::success(existing);
     }
 
@@ -1433,10 +1653,12 @@ CodecResult<StreamState *> QuicConnection::get_or_open_send_stream(std::uint64_t
         return CodecResult<StreamState *>::failure(stream_limit_error(/*frame_type=*/0));
     }
 
-    auto [it, inserted] =
-        streams_.emplace(stream_id, make_implicit_stream_state(stream_id, config_.role));
-    static_cast<void>(inserted);
+    auto it = streams_.emplace_hint(streams_.end(), stream_id,
+                                    make_implicit_stream_state(stream_id, config_.role));
     initialize_stream_flow_control(it->second);
+    active_stream_lookup_cache_.valid = true;
+    active_stream_lookup_cache_.stream_id = stream_id;
+    active_stream_lookup_cache_.stream = it;
     return CodecResult<StreamState *>::success(&it->second);
 }
 
@@ -1513,31 +1735,17 @@ bool QuicConnection::has_pending_application_send() const {
 
     const auto connection_send_credit = saturating_subtract(connection_flow_control_.peer_max_data,
                                                             connection_flow_control_.highest_sent);
-    if (connection_send_credit != 0 && cached_fresh_sendable_stream_bytes() != 0) {
+    if (connection_send_credit != 0 &&
+        (cached_fresh_sendable_stream_bytes() != 0 || streams_have_sendable_data())) {
         return true;
     }
 
-    for (const auto &[stream_id, stream] : streams_) {
-        static_cast<void>(stream_id);
-        const bool has_pending_control_frame =
-            (stream.reset_state == StreamControlFrameState::pending) |
-            (stream.stop_sending_state == StreamControlFrameState::pending) |
-            (stream.flow_control.max_stream_data_state == StreamControlFrameState::pending) |
-            (stream.flow_control.stream_data_blocked_state == StreamControlFrameState::pending);
-        if (has_pending_control_frame) {
-            return true;
-        }
-        if (stream.reset_state != StreamControlFrameState::none) {
-            continue;
-        }
+    if (streams_have_pending_application_control_send()) {
+        return true;
+    }
 
-        const auto fin_sendable = stream_fin_sendable(stream);
-        if (stream.send_buffer.has_lost_data() || fin_sendable) {
-            return true;
-        }
-        if (connection_send_credit != 0 && stream.sendable_bytes() != 0) {
-            return true;
-        }
+    if (has_lost_application_stream_data() || streams_have_sendable_fin()) {
+        return true;
     }
 
     return false;
@@ -1580,25 +1788,12 @@ bool QuicConnection::has_pending_congestion_controlled_send() const {
 bool QuicConnection::has_pending_fresh_application_stream_send() const {
     const auto connection_send_credit = saturating_subtract(connection_flow_control_.peer_max_data,
                                                             connection_flow_control_.highest_sent);
-    if (connection_send_credit != 0 && cached_fresh_sendable_stream_bytes() != 0) {
+    if (connection_send_credit != 0 &&
+        (cached_fresh_sendable_stream_bytes() != 0 || streams_have_sendable_data())) {
         return true;
     }
 
-    for (const auto &[stream_id, stream] : streams_) {
-        static_cast<void>(stream_id);
-        if (stream.reset_state != StreamControlFrameState::none) {
-            continue;
-        }
-
-        if (stream_fin_sendable(stream)) {
-            return true;
-        }
-        if (connection_send_credit != 0 && stream.sendable_bytes() != 0) {
-            return true;
-        }
-    }
-
-    return false;
+    return streams_have_sendable_fin();
 }
 
 bool QuicConnection::has_pending_application_control_send(bool application_ack_due) const {
@@ -1622,17 +1817,55 @@ bool QuicConnection::has_pending_application_control_send(bool application_ack_d
         }
     }
 
+    return streams_have_pending_application_control_send();
+}
+
+bool QuicConnection::streams_have_pending_application_control_send() const {
+    refresh_stream_sendability_cache();
+    return stream_sendability_cache_.has_pending_control;
+}
+
+bool QuicConnection::streams_have_sendable_fin() const {
+    refresh_stream_sendability_cache();
+    return stream_sendability_cache_.has_sendable_fin;
+}
+
+bool QuicConnection::streams_have_sendable_data() const {
+    refresh_stream_sendability_cache();
+    return stream_sendability_cache_.has_sendable_data;
+}
+
+void QuicConnection::invalidate_stream_sendability_cache() const {
+    stream_sendability_cache_.valid = false;
+}
+
+void QuicConnection::refresh_stream_sendability_cache() const {
+    if (stream_sendability_cache_.valid) {
+        return;
+    }
+
+    StreamSendabilityCache cache;
     for (const auto &[stream_id, stream] : streams_) {
         static_cast<void>(stream_id);
         if ((stream.reset_state == StreamControlFrameState::pending) |
             (stream.stop_sending_state == StreamControlFrameState::pending) |
             (stream.flow_control.max_stream_data_state == StreamControlFrameState::pending) |
             (stream.flow_control.stream_data_blocked_state == StreamControlFrameState::pending)) {
-            return true;
+            cache.has_pending_control = true;
+        }
+        if (stream.reset_state == StreamControlFrameState::none && stream_fin_sendable(stream)) {
+            cache.has_sendable_fin = true;
+        }
+        if (stream.reset_state == StreamControlFrameState::none && stream.sendable_bytes() != 0) {
+            cache.has_sendable_data = true;
+        }
+        if (cache.has_pending_control && cache.has_sendable_data && cache.has_sendable_fin) {
+            break;
         }
     }
 
-    return false;
+    cache.valid = true;
+    stream_sendability_cache_ = cache;
 }
 
 std::optional<std::size_t> QuicConnection::minimum_pending_application_stream_wire_bytes() const {
@@ -1819,6 +2052,7 @@ void QuicConnection::refresh_stream_sendable_byte_caches() {
     refresh_active_queued_stream_bytes();
     refresh_fresh_sendable_stream_bytes();
     refresh_stream_lost_send_data_count();
+    invalidate_stream_sendability_cache();
 }
 
 void QuicConnection::note_stream_send_bytes_queued(std::size_t bytes) {
@@ -1868,6 +2102,7 @@ void QuicConnection::note_stream_send_state_changed(std::uint64_t previous_fresh
     const auto current_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream);
     note_stream_fresh_sendable_bytes_delta(previous_fresh_sendable_bytes,
                                            current_fresh_sendable_bytes);
+    invalidate_stream_sendability_cache();
 }
 
 void QuicConnection::note_stream_send_state_changed(std::uint64_t previous_fresh_sendable_bytes,
@@ -1886,6 +2121,7 @@ void QuicConnection::forget_active_stream_queued_bytes(const StreamState &stream
     note_stream_lost_send_data_changed(stream.reset_state == StreamControlFrameState::none &&
                                            stream.send_buffer.has_lost_data(),
                                        StreamState{});
+    invalidate_stream_sendability_cache();
 }
 
 void QuicConnection::maybe_queue_connection_blocked_frame() {
@@ -1906,6 +2142,7 @@ void QuicConnection::maybe_queue_stream_blocked_frame(StreamState &stream) {
     }
 
     stream.queue_stream_data_blocked();
+    invalidate_stream_sendability_cache();
 }
 
 void QuicConnection::maybe_refresh_connection_receive_credit(bool force) {
@@ -1928,6 +2165,7 @@ void QuicConnection::maybe_refresh_stream_receive_credit(StreamState &stream, bo
 
     stream.queue_max_stream_data(stream.flow_control.delivered_bytes +
                                  stream.flow_control.local_receive_window);
+    invalidate_stream_sendability_cache();
 }
 
 void QuicConnection::maybe_refresh_peer_stream_limit(StreamState &stream) {

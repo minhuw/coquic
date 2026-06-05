@@ -79,6 +79,20 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                 std::array<std::byte, 16>{std::byte{static_cast<std::uint8_t>(seed + 2)}},
         };
     };
+    const auto require_current_read_secret = [&ok](const QuicConnection &connection) {
+        const auto secret = connection.application_space_.read_secret;
+        connection_coverage_check(ok, "current_read_secret_has_value", secret.has_value());
+        return secret.value();
+    };
+    const auto require_next_read_secret = [&ok](const TrafficSecret &secret) {
+        const auto next_secret = derive_next_traffic_secret(secret);
+        connection_coverage_check(ok, "next_read_secret_has_value", next_secret.has_value());
+        return next_secret.value();
+    };
+    const auto require_non_empty_datagram = [&ok](std::vector<std::byte> datagram) {
+        connection_coverage_check(ok, "datagram_not_empty", !datagram.empty());
+        return datagram;
+    };
 
     const auto serialize_one_rtt_ack_datagram =
         [](const QuicConnection &ack_connection, const TrafficSecret &secret,
@@ -157,6 +171,35 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         };
 
     {
+        const auto connection = make_fast_path_connection();
+        const auto one_rtt_secret = connection.application_space_.read_secret;
+        COQUIC_CONNECTION_HOOK_RECORD(one_rtt_secret.has_value());
+        {
+            const ScopedPacketCryptoFaultInjector injector(
+                PacketCryptoFaultPoint::seal_context_new);
+            const auto datagram = serialize_one_rtt_ack_datagram(connection, one_rtt_secret.value(),
+                                                                 /*packet_number=*/1);
+            COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        }
+        {
+            const ScopedPacketCryptoFaultInjector injector(
+                PacketCryptoFaultPoint::seal_context_new);
+            const auto datagram =
+                serialize_handshake_ping_datagram(connection, one_rtt_secret.value(),
+                                                  /*packet_number=*/1);
+            COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        }
+        {
+            const ScopedPacketCryptoFaultInjector injector(
+                PacketCryptoFaultPoint::seal_context_new);
+            const auto datagram = serialize_one_rtt_frames_datagram(
+                connection, one_rtt_secret.value(), /*packet_number=*/2,
+                std::vector<Frame>{PingFrame{}});
+            COQUIC_CONNECTION_HOOK_RECORD(datagram.empty());
+        }
+    }
+
+    {
         const auto now = QuicCoreTimePoint{} + std::chrono::milliseconds(123);
         auto connection = make_connected_client_connection();
         connection.handshake_space_.received_packets.record_received(
@@ -172,9 +215,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             }},
             now, QuicEcnCodepoint::ce, /*used_previous_application_read_secret=*/false);
         COQUIC_CONNECTION_HOOK_RECORD(processed.has_value());
-        if (processed.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(processed.value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(processed.value());
         COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.pending_ack_deadline == now);
         COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.force_ack_send);
         COQUIC_CONNECTION_HOOK_RECORD(
@@ -197,9 +238,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             }},
             now, QuicEcnCodepoint::not_ect, /*used_previous_application_read_secret=*/false);
         COQUIC_CONNECTION_HOOK_RECORD(processed.has_value());
-        if (processed.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(processed.value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(processed.value());
         COQUIC_CONNECTION_HOOK_RECORD(
             connection.application_space_.pending_ack_deadline.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(
@@ -220,9 +259,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             }},
             now, QuicEcnCodepoint::ce, /*used_previous_application_read_secret=*/false);
         COQUIC_CONNECTION_HOOK_RECORD(processed.has_value());
-        if (processed.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(processed.value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(processed.value());
         COQUIC_CONNECTION_HOOK_RECORD(connection.application_space_.pending_ack_deadline == now);
         COQUIC_CONNECTION_HOOK_RECORD(connection.application_space_.force_ack_send);
         COQUIC_CONNECTION_HOOK_RECORD(
@@ -245,9 +282,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             }},
             now, QuicEcnCodepoint::ce, /*used_previous_application_read_secret=*/false);
         COQUIC_CONNECTION_HOOK_RECORD(processed.has_value());
-        if (processed.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(processed.value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(processed.value());
         COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.pending_ack_deadline == now);
         COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.force_ack_send);
         COQUIC_CONNECTION_HOOK_RECORD(
@@ -270,9 +305,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             }},
             now, QuicEcnCodepoint::not_ect, /*used_previous_application_read_secret=*/false);
         COQUIC_CONNECTION_HOOK_RECORD(processed.has_value());
-        if (processed.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(processed.value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(processed.value());
         COQUIC_CONNECTION_HOOK_RECORD(
             connection.application_space_.pending_ack_deadline.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(
@@ -293,9 +326,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             }},
             now, QuicEcnCodepoint::ce, /*used_previous_application_read_secret=*/false);
         COQUIC_CONNECTION_HOOK_RECORD(processed.has_value());
-        if (processed.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(processed.value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(processed.value());
         COQUIC_CONNECTION_HOOK_RECORD(
             !connection.application_space_.pending_ack_deadline.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(
@@ -320,9 +351,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             }},
             now, QuicEcnCodepoint::ce, /*used_previous_application_read_secret=*/false);
         COQUIC_CONNECTION_HOOK_RECORD(processed.has_value());
-        if (processed.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(processed.value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(processed.value());
         COQUIC_CONNECTION_HOOK_RECORD(connection.application_space_.pending_ack_deadline == now);
         COQUIC_CONNECTION_HOOK_RECORD(connection.application_space_.force_ack_send);
         COQUIC_CONNECTION_HOOK_RECORD(
@@ -343,9 +372,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             }},
             now, QuicEcnCodepoint::not_ect, /*used_previous_application_read_secret=*/false);
         COQUIC_CONNECTION_HOOK_RECORD(processed.has_value());
-        if (processed.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(processed.value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(processed.value());
         COQUIC_CONNECTION_HOOK_RECORD(
             connection.application_space_.pending_ack_deadline.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(
@@ -599,10 +626,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         };
         const auto cursor = make_ack_range_cursor(ack_frame);
         COQUIC_CONNECTION_HOOK_RECORD(cursor.has_value());
-        if (cursor.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(
-                connection.ack_ranges_include_unsent_packet_number(packet_space, cursor.value()));
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.ack_ranges_include_unsent_packet_number(packet_space, cursor.value()));
         packet_space.recovery.on_packet_sent(SentPacketRecord{
             .packet_number = 8,
             .sent_time = QuicCoreTimePoint{},
@@ -616,10 +641,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         };
         auto tracked_cursor = make_ack_range_cursor(tracked_ack_frame);
         COQUIC_CONNECTION_HOOK_RECORD(tracked_cursor.has_value());
-        if (tracked_cursor.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(!connection.ack_ranges_include_unsent_packet_number(
-                packet_space, tracked_cursor.value()));
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.ack_ranges_include_unsent_packet_number(
+            packet_space, tracked_cursor.value()));
     }
 
     {
@@ -658,18 +681,14 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         reduced.initial_max_data = 1;
         const auto serialized_reduced = serialize_transport_parameters(reduced);
         COQUIC_CONNECTION_HOOK_RECORD(serialized_reduced.has_value());
-        if (serialized_reduced.has_value()) {
-            TlsAdapterTestPeer::set_peer_transport_parameters(*connection.tls_,
-                                                              serialized_reduced.value());
-            TlsAdapterTestPeer::set_early_data_attempted(*connection.tls_, true);
-            TlsAdapterTestPeer::set_early_data_accepted(*connection.tls_, true);
-            const auto validated = connection.validate_peer_transport_parameters_if_ready();
-            COQUIC_CONNECTION_HOOK_RECORD(!validated.has_value());
-            if (!validated.has_value()) {
-                COQUIC_CONNECTION_HOOK_RECORD(validated.error().code ==
-                                              CodecErrorCode::invalid_packet_protection_state);
-            }
-        }
+        TlsAdapterTestPeer::set_peer_transport_parameters(*connection.tls_,
+                                                          serialized_reduced.value());
+        TlsAdapterTestPeer::set_early_data_attempted(*connection.tls_, true);
+        TlsAdapterTestPeer::set_early_data_accepted(*connection.tls_, true);
+        const auto validated = connection.validate_peer_transport_parameters_if_ready();
+        COQUIC_CONNECTION_HOOK_RECORD(!validated.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(validated.error().code ==
+                                      CodecErrorCode::invalid_packet_protection_state);
     }
 
     {
@@ -694,14 +713,12 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         current.initial_max_data = remembered_transport_parameters.initial_max_data + 1;
         const auto serialized_current = serialize_transport_parameters(current);
         COQUIC_CONNECTION_HOOK_RECORD(serialized_current.has_value());
-        if (serialized_current.has_value()) {
-            TlsAdapterTestPeer::set_peer_transport_parameters(*connection.tls_,
-                                                              serialized_current.value());
-            TlsAdapterTestPeer::set_early_data_attempted(*connection.tls_, true);
-            TlsAdapterTestPeer::set_early_data_accepted(*connection.tls_, true);
-            const auto validated = connection.validate_peer_transport_parameters_if_ready();
-            COQUIC_CONNECTION_HOOK_RECORD(validated.has_value());
-        }
+        TlsAdapterTestPeer::set_peer_transport_parameters(*connection.tls_,
+                                                          serialized_current.value());
+        TlsAdapterTestPeer::set_early_data_attempted(*connection.tls_, true);
+        TlsAdapterTestPeer::set_early_data_accepted(*connection.tls_, true);
+        const auto validated = connection.validate_peer_transport_parameters_if_ready();
+        COQUIC_CONNECTION_HOOK_RECORD(validated.has_value());
     }
 
     {
@@ -717,14 +734,12 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         auto current = make_runtime_transport_parameters(connection);
         const auto serialized_current = serialize_transport_parameters(current);
         COQUIC_CONNECTION_HOOK_RECORD(serialized_current.has_value());
-        if (serialized_current.has_value()) {
-            TlsAdapterTestPeer::set_peer_transport_parameters(*connection.tls_,
-                                                              serialized_current.value());
-            TlsAdapterTestPeer::set_early_data_attempted(*connection.tls_, true);
-            TlsAdapterTestPeer::set_early_data_accepted(*connection.tls_, true);
-            const auto validated = connection.validate_peer_transport_parameters_if_ready();
-            COQUIC_CONNECTION_HOOK_RECORD(validated.has_value());
-        }
+        TlsAdapterTestPeer::set_peer_transport_parameters(*connection.tls_,
+                                                          serialized_current.value());
+        TlsAdapterTestPeer::set_early_data_attempted(*connection.tls_, true);
+        TlsAdapterTestPeer::set_early_data_accepted(*connection.tls_, true);
+        const auto validated = connection.validate_peer_transport_parameters_if_ready();
+        COQUIC_CONNECTION_HOOK_RECORD(validated.has_value());
     }
 
     {
@@ -794,11 +809,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                      });
         auto handle = connection.application_space_.recovery.handle_for_packet_number(41);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
-            const auto retired =
-                connection.retire_acked_packet(connection.application_space_, *handle);
-            COQUIC_CONNECTION_HOOK_RECORD(retired.has_value());
-        }
+        const auto retired = connection.retire_acked_packet(connection.application_space_, *handle);
+        COQUIC_CONNECTION_HOOK_RECORD(retired.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(connection.pending_new_connection_id_frames_.empty());
         COQUIC_CONNECTION_HOOK_RECORD(connection.pending_retire_connection_id_frames_.empty());
         COQUIC_CONNECTION_HOOK_RECORD(!connection.peer_connection_ids_.contains(5));
@@ -818,11 +830,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                      });
         auto handle = connection.application_space_.recovery.handle_for_packet_number(450);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
-            const auto retired =
-                connection.retire_acked_packet(connection.application_space_, *handle);
-            COQUIC_CONNECTION_HOOK_RECORD(retired.has_value());
-        }
+        const auto retired = connection.retire_acked_packet(connection.application_space_, *handle);
+        COQUIC_CONNECTION_HOOK_RECORD(retired.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(!connection.peer_connection_ids_.contains(50));
     }
 
@@ -845,11 +854,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                      });
         auto handle = connection.application_space_.recovery.handle_for_packet_number(451);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
-            const auto retired =
-                connection.retire_acked_packet(connection.application_space_, *handle);
-            COQUIC_CONNECTION_HOOK_RECORD(retired.has_value());
-        }
+        const auto retired = connection.retire_acked_packet(connection.application_space_, *handle);
+        COQUIC_CONNECTION_HOOK_RECORD(retired.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(connection.peer_connection_ids_.contains(51));
     }
 
@@ -877,12 +883,10 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                      });
         auto handle = connection.application_space_.recovery.handle_for_packet_number(42);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
-            const auto lost = connection.mark_lost_packet(connection.application_space_, *handle,
-                                                          /*already_marked_in_recovery=*/false,
-                                                          QuicCoreTimePoint{});
-            COQUIC_CONNECTION_HOOK_RECORD(lost.has_value());
-        }
+        const auto lost =
+            connection.mark_lost_packet(connection.application_space_, *handle,
+                                        /*already_marked_in_recovery=*/false, QuicCoreTimePoint{});
+        COQUIC_CONNECTION_HOOK_RECORD(lost.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(connection.pending_new_token_frames_.size() == 1);
         COQUIC_CONNECTION_HOOK_RECORD(connection.pending_new_connection_id_frames_.size() == 1);
         COQUIC_CONNECTION_HOOK_RECORD(connection.pending_retire_connection_id_frames_.size() == 1);
@@ -904,11 +908,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                      });
         auto handle = connection.application_space_.recovery.handle_for_packet_number(440);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
-            const auto retired =
-                connection.retire_acked_packet(connection.application_space_, *handle);
-            COQUIC_CONNECTION_HOOK_RECORD(retired.has_value());
-        }
+        const auto retired = connection.retire_acked_packet(connection.application_space_, *handle);
+        COQUIC_CONNECTION_HOOK_RECORD(retired.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(connection.pending_retire_connection_id_frames_.empty());
     }
 
@@ -926,12 +927,10 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                      });
         auto handle = connection.application_space_.recovery.handle_for_packet_number(441);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
-            const auto lost = connection.mark_lost_packet(connection.application_space_, *handle,
-                                                          /*already_marked_in_recovery=*/false,
-                                                          QuicCoreTimePoint{});
-            COQUIC_CONNECTION_HOOK_RECORD(lost.has_value());
-        }
+        const auto lost =
+            connection.mark_lost_packet(connection.application_space_, *handle,
+                                        /*already_marked_in_recovery=*/false, QuicCoreTimePoint{});
+        COQUIC_CONNECTION_HOOK_RECORD(lost.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(connection.pending_retire_connection_id_frames_.size() == 1);
     }
 
@@ -1521,9 +1520,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         };
         const auto transport_close = connection.connection_close_frame_for_send();
         COQUIC_CONNECTION_HOOK_RECORD(transport_close.has_value());
-        if (transport_close.has_value()) {
-            connection.mark_connection_close_frame_sent(*transport_close, QuicCoreTimePoint{});
-        }
+        connection.mark_connection_close_frame_sent(*transport_close, QuicCoreTimePoint{});
         COQUIC_CONNECTION_HOOK_RECORD(!connection.pending_transport_close_.has_value());
 
         auto closing = make_connected_client_connection();
@@ -1692,9 +1689,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.queue_client_handshake_recovery_probe();
 
         COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.pending_probe_packet.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(
-            connection.handshake_space_.pending_probe_packet.has_value() &&
-            !connection.handshake_space_.pending_probe_packet->force_ack);
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.handshake_space_.pending_probe_packet->force_ack);
     }
 
     {
@@ -1767,9 +1762,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         connection.queue_client_handshake_recovery_probe();
 
         COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.pending_probe_packet.has_value());
-        COQUIC_CONNECTION_HOOK_RECORD(
-            connection.handshake_space_.pending_probe_packet.has_value() &&
-            connection.handshake_space_.pending_probe_packet->force_ack);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.handshake_space_.pending_probe_packet->force_ack);
     }
 
     {
@@ -1800,19 +1793,15 @@ bool connection_key_update_and_probe_coverage_for_tests() {
 
         COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
         COQUIC_CONNECTION_HOOK_RECORD(decoded.has_value());
-        if (decoded.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(decoded.value().size() == 1);
-            const auto *initial = std::get_if<ProtectedInitialPacket>(&decoded.value().front());
-            COQUIC_CONNECTION_HOOK_RECORD(initial != nullptr);
-            if (initial != nullptr) {
-                COQUIC_CONNECTION_HOOK_RECORD(initial->destination_connection_id ==
-                                              server_source_connection_id);
-                COQUIC_CONNECTION_HOOK_RECORD(initial->destination_connection_id !=
-                                              original_initial_destination_connection_id);
-                COQUIC_CONNECTION_HOOK_RECORD(initial->source_connection_id ==
-                                              connection.config_.source_connection_id);
-            }
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(decoded.value().size() == 1);
+        const auto *initial = std::get_if<ProtectedInitialPacket>(&decoded.value().front());
+        COQUIC_CONNECTION_HOOK_RECORD(initial != nullptr);
+        COQUIC_CONNECTION_HOOK_RECORD(initial->destination_connection_id ==
+                                      server_source_connection_id);
+        COQUIC_CONNECTION_HOOK_RECORD(initial->destination_connection_id !=
+                                      original_initial_destination_connection_id);
+        COQUIC_CONNECTION_HOOK_RECORD(initial->source_connection_id ==
+                                      connection.config_.source_connection_id);
     }
 
     for (const auto secret_level :
@@ -1843,9 +1832,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                                                     std::byte{0x90}),
             40 + static_cast<std::uint64_t>(secret_level));
         COQUIC_CONNECTION_HOOK_RECORD(!datagram.empty());
-        if (!datagram.empty()) {
-            connection.process_inbound_datagram(datagram, QuicCoreTimePoint{});
-        }
+        connection.process_inbound_datagram(datagram, QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
     }
@@ -1874,9 +1861,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                     CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x43}),
             });
         COQUIC_CONNECTION_HOOK_RECORD(datagram.has_value());
-        if (datagram.has_value()) {
-            connection.process_inbound_datagram(datagram.value(), QuicCoreTimePoint{});
-        }
+        connection.process_inbound_datagram(datagram.value(), QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
         COQUIC_CONNECTION_HOOK_RECORD(connection.deferred_protected_packets_.empty());
@@ -1908,9 +1893,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                     CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x45}),
             });
         COQUIC_CONNECTION_HOOK_RECORD(datagram.has_value());
-        if (datagram.has_value()) {
-            connection.process_inbound_datagram(datagram.value(), QuicCoreTimePoint{});
-        }
+        connection.process_inbound_datagram(datagram.value(), QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
         COQUIC_CONNECTION_HOOK_RECORD(connection.deferred_protected_packets_.empty());
@@ -1960,12 +1943,9 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             });
         COQUIC_CONNECTION_HOOK_RECORD(first_packet.has_value());
         COQUIC_CONNECTION_HOOK_RECORD(second_packet.has_value());
-        if (first_packet.has_value() && second_packet.has_value()) {
-            auto datagram = first_packet.value();
-            datagram.insert(datagram.end(), second_packet.value().begin(),
-                            second_packet.value().end());
-            connection.process_inbound_datagram(datagram, QuicCoreTimePoint{});
-        }
+        auto datagram = first_packet.value();
+        datagram.insert(datagram.end(), second_packet.value().begin(), second_packet.value().end());
+        connection.process_inbound_datagram(datagram, QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
         COQUIC_CONNECTION_HOOK_RECORD(connection.peer_source_connection_id_ ==
@@ -1997,11 +1977,9 @@ bool connection_key_update_and_probe_coverage_for_tests() {
                 .handshake_secret = connection.handshake_space_.read_secret,
             });
         COQUIC_CONNECTION_HOOK_RECORD(first_packet.has_value());
-        if (first_packet.has_value()) {
-            auto datagram = first_packet.value();
-            datagram.push_back(std::byte{0x40});
-            connection.process_inbound_datagram(datagram, QuicCoreTimePoint{});
-        }
+        auto datagram = first_packet.value();
+        datagram.push_back(std::byte{0x40});
+        connection.process_inbound_datagram(datagram, QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
         COQUIC_CONNECTION_HOOK_RECORD(connection.peer_source_connection_id_ ==
@@ -2021,66 +1999,42 @@ bool connection_key_update_and_probe_coverage_for_tests() {
 
     {
         auto connection = make_fast_path_connection();
-        const auto current_secret = connection.application_space_.read_secret;
-        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
-        if (current_secret.has_value()) {
-            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
-            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
-            if (next_read_secret.has_value()) {
-                connection.application_space_.read_secret->cipher_suite =
-                    invalid_cipher_suite_for_tests();
-                connection.next_application_read_secret_ = next_read_secret.value();
-                connection.next_application_read_secret_source_generation_ =
-                    connection.application_read_secret_generation_;
-                connection.next_application_read_key_phase_ =
-                    !connection.application_read_key_phase_;
-                process_fast_path_datagram(connection, {std::byte{0x40}});
-            }
-        }
+        const auto current_secret = require_current_read_secret(connection);
+        const auto next_read_secret = require_next_read_secret(current_secret);
+        connection.application_space_.read_secret->cipher_suite = invalid_cipher_suite_for_tests();
+        connection.next_application_read_secret_ = next_read_secret;
+        connection.next_application_read_secret_source_generation_ =
+            connection.application_read_secret_generation_;
+        connection.next_application_read_key_phase_ = !connection.application_read_key_phase_;
+        process_fast_path_datagram(connection, {std::byte{0x40}});
 
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
     }
 
     {
         auto connection = make_fast_path_connection();
-        const auto current_secret = connection.application_space_.read_secret;
-        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
-        if (current_secret.has_value()) {
-            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
-            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
-            if (next_read_secret.has_value()) {
-                const auto encoded = serialize_one_rtt_ack_datagram(
-                    connection, next_read_secret.value(), /*packet_number=*/21,
-                    !connection.application_read_key_phase_);
-                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
-                coquic::quic::test::reset_packet_crypto_runtime_caches_for_tests();
-                const coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-                    coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup,
-                    /*occurrence=*/4);
-                process_fast_path_datagram(connection, encoded);
-            }
-        }
+        const auto current_secret = require_current_read_secret(connection);
+        const auto next_read_secret = require_next_read_secret(current_secret);
+        const auto encoded = require_non_empty_datagram(
+            serialize_one_rtt_ack_datagram(connection, next_read_secret, /*packet_number=*/21,
+                                           !connection.application_read_key_phase_));
+        coquic::quic::test::reset_packet_crypto_runtime_caches_for_tests();
+        const coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
+            coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup,
+            /*occurrence=*/4);
+        process_fast_path_datagram(connection, encoded);
 
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
     }
 
     {
         auto connection = make_fast_path_connection();
-        const auto current_secret = connection.application_space_.read_secret;
-        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
-        if (current_secret.has_value()) {
-            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
-            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
-            if (next_read_secret.has_value()) {
-                const auto encoded = serialize_one_rtt_ack_datagram(
-                    connection, next_read_secret.value(), /*packet_number=*/210,
-                    !connection.application_read_key_phase_);
-                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
-                if (!encoded.empty()) {
-                    process_fast_path_datagram(connection, encoded);
-                }
-            }
-        }
+        const auto current_secret = require_current_read_secret(connection);
+        const auto next_read_secret = require_next_read_secret(current_secret);
+        const auto encoded = require_non_empty_datagram(
+            serialize_one_rtt_ack_datagram(connection, next_read_secret, /*packet_number=*/210,
+                                           !connection.application_read_key_phase_));
+        process_fast_path_datagram(connection, encoded);
 
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
         COQUIC_CONNECTION_HOOK_RECORD(connection.application_read_key_phase_);
@@ -2091,12 +2045,9 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         const auto encoded = serialize_one_rtt_ack_datagram(
             connection, *connection.application_space_.read_secret,
             /*packet_number=*/211, connection.application_read_key_phase_);
-        COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
-        if (!encoded.empty()) {
-            auto truncated = encoded;
-            truncated.pop_back();
-            process_fast_path_datagram(connection, truncated);
-        }
+        auto truncated = require_non_empty_datagram(encoded);
+        truncated.pop_back();
+        process_fast_path_datagram(connection, truncated);
 
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
     }
@@ -2108,10 +2059,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         const auto encoded = serialize_one_rtt_ack_datagram(
             connection, *connection.application_space_.read_secret,
             /*packet_number=*/212, connection.application_read_key_phase_);
-        COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
-        if (!encoded.empty()) {
-            process_fast_path_datagram(connection, encoded);
-        }
+        process_fast_path_datagram(connection, require_non_empty_datagram(encoded));
 
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
     }
@@ -2122,10 +2070,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             connection, *connection.application_space_.read_secret, /*packet_number=*/213,
             {CryptoFrame{.offset = 0, .crypto_data = bytes_from_ints_for_tests({0x33})}},
             connection.application_read_key_phase_);
-        COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
-        if (!encoded.empty()) {
-            process_fast_path_datagram(connection, encoded);
-        }
+        process_fast_path_datagram(connection, require_non_empty_datagram(encoded));
 
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
     }
@@ -2136,12 +2081,9 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             connection, *connection.application_space_.read_secret, /*packet_number=*/214,
             {CryptoFrame{.offset = 0, .crypto_data = bytes_from_ints_for_tests({0x34})}},
             connection.application_read_key_phase_);
-        COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
-        if (!encoded.empty()) {
-            const ScopedConnectionDrainTestHook hook(
-                &ConnectionDrainTestHooks::force_sync_tls_state_failure);
-            process_fast_path_datagram(connection, encoded);
-        }
+        const ScopedConnectionDrainTestHook hook(
+            &ConnectionDrainTestHooks::force_sync_tls_state_failure);
+        process_fast_path_datagram(connection, require_non_empty_datagram(encoded));
 
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
     }
@@ -2150,53 +2092,37 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         auto connection = make_connected_client_connection();
         COQUIC_CONNECTION_HOOK_RECORD(
             enable_qlog_for_connection_coverage(connection, "next-context-failure"));
-        auto current_secret = connection.application_space_.read_secret;
-        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
-        if (current_secret.has_value()) {
-            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
-            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
-            if (next_read_secret.has_value()) {
-                connection.application_space_.read_secret->header_protection_key =
-                    next_read_secret.value().header_protection_key;
-                const auto current_ready =
-                    expand_traffic_secret_cached(*connection.application_space_.read_secret);
-                COQUIC_CONNECTION_HOOK_RECORD(current_ready.has_value());
-                const auto encoded = serialize_one_rtt_ack_datagram(
-                    connection, next_read_secret.value(), /*packet_number=*/23,
-                    !connection.application_read_key_phase_);
-                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
-                if (!encoded.empty()) {
-                    coquic::quic::test::reset_packet_crypto_runtime_caches_for_tests();
-                    const coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
-                        coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup,
-                        /*occurrence=*/2);
-                    connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
-                }
-            }
-        }
+        const auto current_secret = require_current_read_secret(connection);
+        const auto next_read_secret = require_next_read_secret(current_secret);
+        connection.application_space_.read_secret->header_protection_key =
+            next_read_secret.header_protection_key;
+        const auto current_ready =
+            expand_traffic_secret_cached(*connection.application_space_.read_secret);
+        COQUIC_CONNECTION_HOOK_RECORD(current_ready.has_value());
+        const auto encoded = require_non_empty_datagram(
+            serialize_one_rtt_ack_datagram(connection, next_read_secret, /*packet_number=*/23,
+                                           !connection.application_read_key_phase_));
+        coquic::quic::test::reset_packet_crypto_runtime_caches_for_tests();
+        const coquic::quic::test::ScopedPacketCryptoFaultInjector fault(
+            coquic::quic::test::PacketCryptoFaultPoint::hkdf_expand_setup,
+            /*occurrence=*/2);
+        connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
     }
 
     {
         auto connection = make_connected_client_connection();
-        const auto current_secret = connection.application_space_.read_secret;
-        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
-        if (current_secret.has_value()) {
-            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
-            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
-            if (next_read_secret.has_value()) {
-                const auto encoded = serialize_one_rtt_ack_datagram(
-                    connection, next_read_secret.value(), /*packet_number=*/22,
-                    !connection.application_read_key_phase_);
-                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
-                connection.application_space_.write_secret = TrafficSecret{
-                    .cipher_suite = invalid_cipher_suite_for_tests(),
-                    .secret = {std::byte{0x01}},
-                };
-                connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
-            }
-        }
+        const auto current_secret = require_current_read_secret(connection);
+        const auto next_read_secret = require_next_read_secret(current_secret);
+        const auto encoded = require_non_empty_datagram(
+            serialize_one_rtt_ack_datagram(connection, next_read_secret, /*packet_number=*/22,
+                                           !connection.application_read_key_phase_));
+        connection.application_space_.write_secret = TrafficSecret{
+            .cipher_suite = invalid_cipher_suite_for_tests(),
+            .secret = {std::byte{0x01}},
+        };
+        connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
     }
@@ -2205,23 +2131,16 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         auto connection = make_connected_client_connection();
         COQUIC_CONNECTION_HOOK_RECORD(
             enable_qlog_for_connection_coverage(connection, "next-write-secret-failure"));
-        const auto current_secret = connection.application_space_.read_secret;
-        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
-        if (current_secret.has_value()) {
-            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
-            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
-            if (next_read_secret.has_value()) {
-                const auto encoded = serialize_one_rtt_ack_datagram(
-                    connection, next_read_secret.value(), /*packet_number=*/24,
-                    !connection.application_read_key_phase_);
-                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
-                connection.application_space_.write_secret = TrafficSecret{
-                    .cipher_suite = invalid_cipher_suite_for_tests(),
-                    .secret = {std::byte{0x01}},
-                };
-                connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
-            }
-        }
+        const auto current_secret = require_current_read_secret(connection);
+        const auto next_read_secret = require_next_read_secret(current_secret);
+        const auto encoded = require_non_empty_datagram(
+            serialize_one_rtt_ack_datagram(connection, next_read_secret, /*packet_number=*/24,
+                                           !connection.application_read_key_phase_));
+        connection.application_space_.write_secret = TrafficSecret{
+            .cipher_suite = invalid_cipher_suite_for_tests(),
+            .secret = {std::byte{0x01}},
+        };
+        connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(connection.has_failed());
     }
@@ -2230,23 +2149,13 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         auto connection = make_connected_client_connection();
         COQUIC_CONNECTION_HOOK_RECORD(
             enable_qlog_for_connection_coverage(connection, "next-key-phase-qlog-retry-failure"));
-        const auto current_secret = connection.application_space_.read_secret;
-        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
-        if (current_secret.has_value()) {
-            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
-            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
-            if (next_read_secret.has_value()) {
-                const auto encoded = serialize_one_rtt_ack_datagram(
-                    connection, next_read_secret.value(), /*packet_number=*/25,
-                    !connection.application_read_key_phase_);
-                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
-                if (!encoded.empty()) {
-                    auto truncated = encoded;
-                    truncated.pop_back();
-                    connection.process_inbound_datagram(truncated, QuicCoreTimePoint{});
-                }
-            }
-        }
+        const auto current_secret = require_current_read_secret(connection);
+        const auto next_read_secret = require_next_read_secret(current_secret);
+        auto truncated = require_non_empty_datagram(
+            serialize_one_rtt_ack_datagram(connection, next_read_secret, /*packet_number=*/25,
+                                           !connection.application_read_key_phase_));
+        truncated.pop_back();
+        connection.process_inbound_datagram(truncated, QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
         COQUIC_CONNECTION_HOOK_RECORD(!connection.application_read_key_phase_);
@@ -2254,23 +2163,14 @@ bool connection_key_update_and_probe_coverage_for_tests() {
 
     {
         auto connection = make_connected_client_connection();
-        const auto current_secret = connection.application_space_.read_secret;
-        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
-        if (current_secret.has_value()) {
-            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
-            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
-            if (next_read_secret.has_value()) {
-                const auto encoded = serialize_one_rtt_ack_datagram(
-                    connection, next_read_secret.value(), /*packet_number=*/26,
-                    !connection.application_read_key_phase_);
-                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
-                connection.local_key_update_initiated_ = true;
-                connection.local_key_update_requested_ = true;
-                if (!encoded.empty()) {
-                    connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
-                }
-            }
-        }
+        const auto current_secret = require_current_read_secret(connection);
+        const auto next_read_secret = require_next_read_secret(current_secret);
+        const auto encoded = require_non_empty_datagram(
+            serialize_one_rtt_ack_datagram(connection, next_read_secret, /*packet_number=*/26,
+                                           !connection.application_read_key_phase_));
+        connection.local_key_update_initiated_ = true;
+        connection.local_key_update_requested_ = true;
+        connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
         COQUIC_CONNECTION_HOOK_RECORD(connection.application_read_key_phase_);
@@ -2281,23 +2181,14 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         auto connection = make_connected_client_connection();
         COQUIC_CONNECTION_HOOK_RECORD(
             enable_qlog_for_connection_coverage(connection, "next-key-phase-qlog-local-initiated"));
-        const auto current_secret = connection.application_space_.read_secret;
-        COQUIC_CONNECTION_HOOK_RECORD(current_secret.has_value());
-        if (current_secret.has_value()) {
-            const auto next_read_secret = derive_next_traffic_secret(current_secret.value());
-            COQUIC_CONNECTION_HOOK_RECORD(next_read_secret.has_value());
-            if (next_read_secret.has_value()) {
-                const auto encoded = serialize_one_rtt_ack_datagram(
-                    connection, next_read_secret.value(), /*packet_number=*/27,
-                    !connection.application_read_key_phase_);
-                COQUIC_CONNECTION_HOOK_RECORD(!encoded.empty());
-                connection.local_key_update_initiated_ = true;
-                connection.local_key_update_requested_ = true;
-                if (!encoded.empty()) {
-                    connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
-                }
-            }
-        }
+        const auto current_secret = require_current_read_secret(connection);
+        const auto next_read_secret = require_next_read_secret(current_secret);
+        const auto encoded = require_non_empty_datagram(
+            serialize_one_rtt_ack_datagram(connection, next_read_secret, /*packet_number=*/27,
+                                           !connection.application_read_key_phase_));
+        connection.local_key_update_initiated_ = true;
+        connection.local_key_update_requested_ = true;
+        connection.process_inbound_datagram(encoded, QuicCoreTimePoint{});
 
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_failed());
         COQUIC_CONNECTION_HOOK_RECORD(connection.application_read_key_phase_);
@@ -2458,13 +2349,11 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         });
         const auto handles = connection.initial_space_.recovery.tracked_packets();
         COQUIC_CONNECTION_HOOK_RECORD(!handles.empty());
-        if (!handles.empty()) {
-            connection.initial_space_.recovery.retire_packet(handles.front());
-            connection.initial_space_.recovery.slots_.front().state =
-                PacketSpaceRecovery::LedgerSlotState::sent;
-            connection.initial_space_.recovery.first_live_slot_ = 0;
-            connection.initial_space_.recovery.last_live_slot_ = 0;
-        }
+        connection.initial_space_.recovery.retire_packet(handles.front());
+        connection.initial_space_.recovery.slots_.front().state =
+            PacketSpaceRecovery::LedgerSlotState::sent;
+        connection.initial_space_.recovery.first_live_slot_ = 0;
+        connection.initial_space_.recovery.last_live_slot_ = 0;
 
         connection.discard_initial_packet_space();
 
@@ -2650,14 +2539,12 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         };
         auto ack_cursor = make_ack_range_cursor(ack_frame);
         COQUIC_CONNECTION_HOOK_RECORD(ack_cursor.has_value());
-        if (ack_cursor.has_value()) {
-            static_cast<void>(connection.process_inbound_ack_cursor(
-                connection.application_space_, ack_cursor.value(), /*largest_acknowledged=*/1,
-                std::chrono::milliseconds{0}, std::nullopt, "[1-1]",
-                QuicCoreTimePoint{} + std::chrono::seconds(5),
-                connection.config_.transport.max_ack_delay,
-                /*suppress_pto_reset=*/false));
-        }
+        static_cast<void>(connection.process_inbound_ack_cursor(
+            connection.application_space_, ack_cursor.value(), /*largest_acknowledged=*/1,
+            std::chrono::milliseconds{0}, std::nullopt, "[1-1]",
+            QuicCoreTimePoint{} + std::chrono::seconds(5),
+            connection.config_.transport.max_ack_delay,
+            /*suppress_pto_reset=*/false));
         const ScopedConnectionDrainTestHook hook(
             &ConnectionDrainTestHooks::force_missing_packet_metadata);
 
@@ -2790,9 +2677,7 @@ bool connection_key_update_and_probe_coverage_for_tests() {
     {
         auto connection = make_connected_client_connection();
         const auto cwnd = connection.congestion_controller_.congestion_window();
-        if (cwnd > 1) {
-            connection.congestion_controller_.on_packet_sent(cwnd - 1, /*ack_eliciting=*/true);
-        }
+        connection.congestion_controller_.on_packet_sent(cwnd - 1, /*ack_eliciting=*/true);
         COQUIC_CONNECTION_HOOK_RECORD(
             !connection.application_stream_pacing_deadline_bytes(std::size_t{2}).has_value());
 
@@ -2845,47 +2730,41 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         COQUIC_CONNECTION_HOOK_RECORD(connection.queue_stream_send(0, payload, true).has_value());
         auto *stream = connection.find_stream_state(0);
         COQUIC_CONNECTION_HOOK_RECORD(stream != nullptr);
-        if (stream != nullptr) {
-            stream->send_buffer.mark_sent(0, 2);
-            stream->send_buffer.mark_lost(0, 2);
-            COQUIC_CONNECTION_HOOK_RECORD(connection.has_pending_application_send());
-            COQUIC_CONNECTION_HOOK_RECORD(
-                connection.minimum_pending_application_stream_wire_bytes().has_value());
-            COQUIC_CONNECTION_HOOK_RECORD(connection.has_pending_fresh_application_stream_send());
-        }
+        stream->send_buffer.mark_sent(0, 2);
+        stream->send_buffer.mark_lost(0, 2);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.has_pending_application_send());
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.minimum_pending_application_stream_wire_bytes().has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.has_pending_fresh_application_stream_send());
     }
 
     {
         auto connection = make_connected_client_connection();
         auto stream = connection.get_or_open_send_stream(0);
         COQUIC_CONNECTION_HOOK_RECORD(stream.has_value());
-        if (stream.has_value()) {
-            stream.value()->send_buffer.append(std::vector<std::byte>{std::byte{0x51}});
-            stream.value()->send_buffer.mark_sent(0, 1);
-            SentPacketRecord packet{
-                .packet_number = 71,
-                .sent_time = QuicCoreTimePoint{},
-                .ack_eliciting = true,
-                .in_flight = true,
-            };
-            packet.first_stream_frame_metadata = StreamFrameSendMetadata{
-                .stream_id = 0,
-                .offset = 0,
-                .length = 1,
-            };
-            packet.bytes_in_flight = 1;
-            connection.track_sent_packet(connection.application_space_, std::move(packet));
-            const auto handles = connection.application_space_.recovery.tracked_packets();
-            std::vector<SentPacketRecord> acked_packets;
-            std::vector<AckedStreamPacketSample> simple_samples;
-            COQUIC_CONNECTION_HOOK_RECORD(!handles.empty());
-            if (!handles.empty()) {
-                COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_simple_stream_acked_packet(
-                    connection.application_space_, handles.front(), acked_packets, simple_samples,
-                    /*use_lightweight_sample=*/false));
-                COQUIC_CONNECTION_HOOK_RECORD(acked_packets.size() == 1);
-            }
-        }
+        stream.value()->send_buffer.append(std::vector<std::byte>{std::byte{0x51}});
+        stream.value()->send_buffer.mark_sent(0, 1);
+        SentPacketRecord packet{
+            .packet_number = 71,
+            .sent_time = QuicCoreTimePoint{},
+            .ack_eliciting = true,
+            .in_flight = true,
+        };
+        packet.first_stream_frame_metadata = StreamFrameSendMetadata{
+            .stream_id = 0,
+            .offset = 0,
+            .length = 1,
+        };
+        packet.bytes_in_flight = 1;
+        connection.track_sent_packet(connection.application_space_, std::move(packet));
+        const auto handles = connection.application_space_.recovery.tracked_packets();
+        std::vector<SentPacketRecord> acked_packets;
+        std::vector<AckedStreamPacketSample> simple_samples;
+        COQUIC_CONNECTION_HOOK_RECORD(!handles.empty());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_simple_stream_acked_packet(
+            connection.application_space_, handles.front(), acked_packets, simple_samples,
+            /*use_lightweight_sample=*/false));
+        COQUIC_CONNECTION_HOOK_RECORD(acked_packets.size() == 1);
     }
 
     {
@@ -3076,31 +2955,27 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         COQUIC_CONNECTION_HOOK_RECORD(connection.queue_stream_send(0, payload, false).has_value());
         auto *stream = connection.find_stream_state(0);
         COQUIC_CONNECTION_HOOK_RECORD(stream != nullptr);
-        if (stream != nullptr) {
-            static_cast<void>(stream->send_buffer.take_ranges(2));
-            stream->send_buffer.mark_lost(0, 2);
-            connection.refresh_stream_sendable_byte_caches();
-            COQUIC_CONNECTION_HOOK_RECORD(connection.streams_with_lost_send_data_ == 1);
-            COQUIC_CONNECTION_HOOK_RECORD(
-                connection.queue_stream_send(0, bytes_from_ints_for_tests({0x93}), false)
-                    .has_value());
-            COQUIC_CONNECTION_HOOK_RECORD(connection.streams_with_lost_send_data_ == 1);
-            COQUIC_CONNECTION_HOOK_RECORD(connection
-                                              .queue_stream_reset(LocalResetCommand{
-                                                  .stream_id = 0,
-                                                  .application_error_code = 7,
-                                              })
-                                              .has_value());
-            COQUIC_CONNECTION_HOOK_RECORD(connection.streams_with_lost_send_data_ == 0);
-        }
+        static_cast<void>(stream->send_buffer.take_ranges(2));
+        stream->send_buffer.mark_lost(0, 2);
+        connection.refresh_stream_sendable_byte_caches();
+        COQUIC_CONNECTION_HOOK_RECORD(connection.streams_with_lost_send_data_ == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.queue_stream_send(0, bytes_from_ints_for_tests({0x93}), false).has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.streams_with_lost_send_data_ == 1);
+        COQUIC_CONNECTION_HOOK_RECORD(connection
+                                          .queue_stream_reset(LocalResetCommand{
+                                              .stream_id = 0,
+                                              .application_error_code = 7,
+                                          })
+                                          .has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(connection.streams_with_lost_send_data_ == 0);
     }
 
     {
         auto connection = make_connected_client_connection();
         connection.config_.max_outbound_datagram_size = 20;
-        if (connection.peer_transport_parameters_.has_value()) {
-            connection.peer_transport_parameters_->max_udp_payload_size = 20;
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(connection.peer_transport_parameters_.has_value());
+        connection.peer_transport_parameters_->max_udp_payload_size = 20;
         COQUIC_CONNECTION_HOOK_RECORD(
             connection.queue_stream_send(0, bytes_from_ints_for_tests({0xa1}), false).has_value());
         COQUIC_CONNECTION_HOOK_RECORD(!connection.has_sendable_datagram(QuicCoreTimePoint{}));
@@ -3185,13 +3060,11 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         const AckFrame ack{.largest_acknowledged = 10};
         const auto cursor = make_ack_range_cursor(ack);
         COQUIC_CONNECTION_HOOK_RECORD(cursor.has_value());
-        if (cursor.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(
-                connection
-                    .detect_old_key_ack_of_current_key_phase_packet(
-                        connection.initial_space_, cursor.value(), QuicCoreTimePoint{})
-                    .has_value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection
+                .detect_old_key_ack_of_current_key_phase_packet(connection.initial_space_,
+                                                                cursor.value(), QuicCoreTimePoint{})
+                .has_value());
 
         connection.track_sent_packet(
             connection.application_space_,
@@ -3207,24 +3080,20 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         AckFrame out_of_range_ack{.largest_acknowledged = 10};
         auto out_of_range_cursor = make_ack_range_cursor(out_of_range_ack);
         COQUIC_CONNECTION_HOOK_RECORD(out_of_range_cursor.has_value());
-        if (out_of_range_cursor.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(connection
-                                              .detect_old_key_ack_of_current_key_phase_packet(
-                                                  connection.application_space_,
-                                                  out_of_range_cursor.value(), QuicCoreTimePoint{})
-                                              .has_value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection
+                .detect_old_key_ack_of_current_key_phase_packet(
+                    connection.application_space_, out_of_range_cursor.value(), QuicCoreTimePoint{})
+                .has_value());
 
         const AckFrame mismatched_ack{.largest_acknowledged = 20};
         auto mismatched_cursor = make_ack_range_cursor(mismatched_ack);
         COQUIC_CONNECTION_HOOK_RECORD(mismatched_cursor.has_value());
-        if (mismatched_cursor.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(connection
-                                              .detect_old_key_ack_of_current_key_phase_packet(
-                                                  connection.application_space_,
-                                                  mismatched_cursor.value(), QuicCoreTimePoint{})
-                                              .has_value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection
+                .detect_old_key_ack_of_current_key_phase_packet(
+                    connection.application_space_, mismatched_cursor.value(), QuicCoreTimePoint{})
+                .has_value());
 
         connection.track_sent_packet(connection.application_space_,
                                      SentPacketRecord{
@@ -3243,6 +3112,55 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             /*ack_delay_exponent=*/0, /*max_ack_delay_ms=*/0,
             /*suppress_pto_reset=*/false, /*used_previous_application_read_secret=*/true);
         COQUIC_CONNECTION_HOOK_RECORD(!failed_ack.has_value());
+    }
+
+    {
+        auto connection = make_connected_client_connection();
+        connection.local_key_update_initiated_ = true;
+        connection.current_write_phase_first_packet_number_ = 23;
+        connection.track_sent_packet(
+            connection.application_space_,
+            SentPacketRecord{
+                .packet_number = 23,
+                .sent_time = QuicCoreTimePoint{},
+                .ack_eliciting = true,
+                .in_flight = true,
+                .bytes_in_flight = 1,
+                .protection_key_update_generation =
+                    connection.current_application_write_key_generation_ + 1,
+            });
+        connection.track_sent_packet(connection.application_space_,
+                                     SentPacketRecord{
+                                         .packet_number = 24,
+                                         .sent_time = QuicCoreTimePoint{},
+                                         .ack_eliciting = true,
+                                         .in_flight = true,
+                                         .bytes_in_flight = 1,
+                                         .protection_key_update_generation =
+                                             connection.current_application_write_key_generation_,
+                                     });
+        auto old_generation_handle =
+            connection.application_space_.recovery.handle_for_packet_number(23);
+        auto current_generation_handle =
+            connection.application_space_.recovery.handle_for_packet_number(24);
+        COQUIC_CONNECTION_HOOK_RECORD(old_generation_handle.has_value());
+        COQUIC_CONNECTION_HOOK_RECORD(current_generation_handle.has_value());
+
+        AckApplyResult old_generation_only;
+        old_generation_only.acked_packets.push_back(*old_generation_handle);
+        connection.maybe_complete_local_key_update_from_ack(connection.application_space_,
+                                                            old_generation_only);
+        COQUIC_CONNECTION_HOOK_RECORD(connection.local_key_update_initiated_);
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.current_write_phase_first_packet_number_.has_value());
+
+        AckApplyResult current_generation_late;
+        current_generation_late.late_acked_packets.push_back(*current_generation_handle);
+        connection.maybe_complete_local_key_update_from_ack(connection.application_space_,
+                                                            current_generation_late);
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.local_key_update_initiated_);
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !connection.current_write_phase_first_packet_number_.has_value());
     }
 
     {
@@ -3377,11 +3295,9 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         std::vector<SentPacketRecord> acked_packets;
         std::vector<AckedStreamPacketSample> simple_samples;
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_simple_stream_acked_packet(
-                connection.application_space_, *handle, acked_packets, simple_samples,
-                /*use_lightweight_sample=*/true));
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_simple_stream_acked_packet(
+            connection.application_space_, *handle, acked_packets, simple_samples,
+            /*use_lightweight_sample=*/true));
         COQUIC_CONNECTION_HOOK_RECORD(simple_samples.size() == 1);
     }
 
@@ -3406,11 +3322,9 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         std::vector<SentPacketRecord> acked_packets;
         std::vector<AckedStreamPacketSample> simple_samples;
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_simple_stream_acked_packet(
-                connection.application_space_, *handle, acked_packets, simple_samples,
-                /*use_lightweight_sample=*/true));
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(connection.try_retire_simple_stream_acked_packet(
+            connection.application_space_, *handle, acked_packets, simple_samples,
+            /*use_lightweight_sample=*/true));
     }
 
     {
@@ -3431,10 +3345,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             });
         auto handle = connection.application_space_.recovery.handle_for_packet_number(77);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(
-                connection.retire_acked_packet(connection.application_space_, *handle).has_value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.retire_acked_packet(connection.application_space_, *handle).has_value());
     }
 
     {
@@ -3468,10 +3380,8 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             });
         auto handle = connection.application_space_.recovery.handle_for_packet_number(75);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(
-                connection.retire_acked_packet(connection.application_space_, *handle).has_value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(
+            connection.retire_acked_packet(connection.application_space_, *handle).has_value());
     }
 
     {
@@ -3505,13 +3415,11 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             });
         auto handle = connection.application_space_.recovery.handle_for_packet_number(76);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(
-                connection
-                    .mark_lost_packet(connection.application_space_, *handle,
-                                      /*already_marked_in_recovery=*/false, QuicCoreTimePoint{})
-                    .has_value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(connection
+                                          .mark_lost_packet(connection.application_space_, *handle,
+                                                            /*already_marked_in_recovery=*/false,
+                                                            QuicCoreTimePoint{})
+                                          .has_value());
     }
 
     {
@@ -3532,13 +3440,11 @@ bool connection_key_update_and_probe_coverage_for_tests() {
             });
         auto handle = connection.application_space_.recovery.handle_for_packet_number(78);
         COQUIC_CONNECTION_HOOK_RECORD(handle.has_value());
-        if (handle.has_value()) {
-            COQUIC_CONNECTION_HOOK_RECORD(
-                connection
-                    .mark_lost_packet(connection.application_space_, *handle,
-                                      /*already_marked_in_recovery=*/false, QuicCoreTimePoint{})
-                    .has_value());
-        }
+        COQUIC_CONNECTION_HOOK_RECORD(connection
+                                          .mark_lost_packet(connection.application_space_, *handle,
+                                                            /*already_marked_in_recovery=*/false,
+                                                            QuicCoreTimePoint{})
+                                          .has_value());
     }
 
     {
@@ -3588,11 +3494,9 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         const auto limit =
             confidentiality_limit_for_cipher_suite(CipherSuite::tls_aes_128_gcm_sha256);
         COQUIC_CONNECTION_HOOK_RECORD(limit.has_value());
-        if (limit.has_value()) {
-            connection.current_application_write_key_encrypted_packets_ = *limit;
-            COQUIC_CONNECTION_HOOK_RECORD(
-                !connection.note_aead_encryption_attempt(1, QuicCoreTimePoint{}));
-        }
+        connection.current_application_write_key_encrypted_packets_ = *limit;
+        COQUIC_CONNECTION_HOOK_RECORD(
+            !connection.note_aead_encryption_attempt(1, QuicCoreTimePoint{}));
     }
 
     {
@@ -3610,12 +3514,10 @@ bool connection_key_update_and_probe_coverage_for_tests() {
         auto connection = make_connected_client_connection();
         const auto limit = integrity_limit_for_cipher_suite(CipherSuite::tls_aes_128_gcm_sha256);
         COQUIC_CONNECTION_HOOK_RECORD(limit.has_value());
-        if (limit.has_value()) {
-            connection.failed_authentication_packets_ = *limit;
-            COQUIC_CONNECTION_HOOK_RECORD(!connection.note_packet_authentication_failure(
-                CodecError{.code = CodecErrorCode::packet_decryption_failed, .offset = 0},
-                QuicCoreTimePoint{}));
-        }
+        connection.failed_authentication_packets_ = *limit;
+        COQUIC_CONNECTION_HOOK_RECORD(!connection.note_packet_authentication_failure(
+            CodecError{.code = CodecErrorCode::packet_decryption_failed, .offset = 0},
+            QuicCoreTimePoint{}));
     }
 
     {

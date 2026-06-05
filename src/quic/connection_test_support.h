@@ -136,16 +136,14 @@ struct ConnectionCoverageTestPeer {
         connection.resumption_state_emitted_ = true;
     }
 
-    static void process_inbound_datagram(QuicConnection &connection,
-                                         std::shared_ptr<std::vector<std::byte>> storage,
-                                         std::size_t begin, std::size_t end, QuicCoreTimePoint now,
-                                         QuicPathId path_id, QuicEcnCodepoint ecn,
-                                         std::optional<std::uint32_t> inbound_datagram_id,
-                                         bool replay_trigger, bool count_inbound_bytes,
-                                         bool allow_in_place_receive_decode) {
-        connection.process_inbound_datagram(std::move(storage), begin, end, now, path_id, ecn,
-                                            inbound_datagram_id, replay_trigger,
-                                            count_inbound_bytes, allow_in_place_receive_decode);
+    static QuicInboundDatagramResult process_inbound_datagram(
+        QuicConnection &connection, std::shared_ptr<std::vector<std::byte>> storage,
+        std::size_t begin, std::size_t end, QuicCoreTimePoint now, QuicPathId path_id,
+        QuicEcnCodepoint ecn, std::optional<std::uint32_t> inbound_datagram_id, bool replay_trigger,
+        bool count_inbound_bytes, bool allow_in_place_receive_decode) {
+        return connection.process_inbound_datagram(
+            std::move(storage), begin, end, now, path_id, ecn, inbound_datagram_id, replay_trigger,
+            count_inbound_bytes, allow_in_place_receive_decode);
     }
 
     static void track_application_sent_packet(QuicConnection &connection, SentPacketRecord packet) {
@@ -170,6 +168,45 @@ struct ConnectionCoverageTestPeer {
         return connection.process_single_path_simple_stream_ack_ecn(
             connection.application_space_, path_id, newly_acked_ect0, newly_acked_ect1,
             latest_marked_sent_time, ecn_counts, latest_ecn_ce_sent_time);
+    }
+
+    static CodecResult<bool> process_inbound_application(QuicConnection &connection,
+                                                         std::span<const Frame> frames,
+                                                         QuicCoreTimePoint now,
+                                                         bool allow_preconnected_frames = false,
+                                                         QuicPathId path_id = 0) {
+        return connection.process_inbound_application(frames, now, allow_preconnected_frames,
+                                                      path_id);
+    }
+
+    static CodecResult<bool> process_inbound_received_application(
+        QuicConnection &connection, std::span<const ReceivedFrame> frames, QuicCoreTimePoint now,
+        bool allow_preconnected_frames = false, QuicPathId path_id = 0) {
+        return connection.process_inbound_received_application(frames, now,
+                                                               allow_preconnected_frames, path_id);
+    }
+
+    static CodecResult<bool>
+    process_inbound_received_application_stream(QuicConnection &connection,
+                                                const ReceivedStreamFrame &stream_frame,
+                                                bool require_connected) {
+        return connection.process_inbound_received_application_stream(stream_frame,
+                                                                      require_connected);
+    }
+
+    static void retire_peer_bidi_range(QuicConnection &connection, std::uint64_t first_index,
+                                       std::uint64_t last_index, std::uint64_t receive_final_size,
+                                       std::uint64_t send_final_size) {
+        connection.retired_peer_bidi_stream_ranges_.emplace(
+            first_index, QuicConnection::RetiredPeerStreamRange{
+                             .first_index = first_index,
+                             .last_index = last_index,
+                             .receive_final_size = receive_final_size,
+                             .send_final_size = send_final_size,
+                             .peer_max_stream_data = send_final_size,
+                             .local_receive_window = receive_final_size,
+                             .advertised_max_stream_data = receive_final_size,
+                         });
     }
 
   private:

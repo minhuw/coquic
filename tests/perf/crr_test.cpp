@@ -123,6 +123,17 @@ TEST(QuicPerfCrrTest, TimedDrainCompletesAfterCloseRequestsDrainOutstandingRespo
     EXPECT_TRUE(timed_crr_drain_complete_for_test(connections));
 }
 
+TEST(QuicPerfCrrTest, CloseRequestedConnectionsDoNotConsumeActiveSlots) {
+    std::array<QuicPerfDrainStateSnapshot, 4> connections{{
+        QuicPerfDrainStateSnapshot{.close_requested = false},
+        QuicPerfDrainStateSnapshot{.close_requested = true},
+        QuicPerfDrainStateSnapshot{.close_requested = false},
+        QuicPerfDrainStateSnapshot{.close_requested = true},
+    }};
+
+    EXPECT_EQ(active_crr_connections_for_test(connections), 2u);
+}
+
 TEST(QuicPerfCrrTest, TimedWindowUsesMeasurementOnly) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);

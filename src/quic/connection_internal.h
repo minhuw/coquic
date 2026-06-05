@@ -48,7 +48,10 @@
 #include "src/quic/qlog/session.h"
 #include "src/quic/tls_adapter_quictls_test_hooks.h"
 
-#if defined(__clang__)
+#if defined(COQUIC_COVERAGE_BUILD)
+#define COQUIC_NO_PROFILE
+#define COQUIC_NOINLINE __attribute__((noinline))
+#elif defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #define COQUIC_NOINLINE __attribute__((noinline))
 #else
@@ -113,6 +116,7 @@ struct ConnectionDrainTestHooks {
     bool force_issued_connection_id_rand_failure = false;
     bool force_stateless_reset_token_rand_failure = false;
     bool force_path_challenge_rand_failure = false;
+    bool force_grease_quic_bit_seed_rand_failure = false;
     bool force_random_one_in_sixteen_rand_failure = false;
     std::optional<bool> force_random_one_in_sixteen_result;
     bool force_missing_packet_metadata = false;
@@ -971,7 +975,8 @@ inline std::uint64_t read_u64_be(std::span<const std::byte, sizeof(std::uint64_t
 
 inline std::uint64_t make_grease_quic_bit_seed() {
     std::array<std::byte, sizeof(std::uint64_t)> seed_bytes{};
-    if (!rand_bytes_for_connection(seed_bytes, /*force_failure=*/false)) {
+    if (!rand_bytes_for_connection(
+            seed_bytes, connection_drain_test_hooks().force_grease_quic_bit_seed_rand_failure)) {
         std::random_device random_device;
         for (auto &byte : seed_bytes) {
             byte = static_cast<std::byte>(random_device());
@@ -1259,6 +1264,35 @@ inline std::string format_ack_ranges(const ReceivedAckFrame &ack) {
     }
     ranges << ']';
     return ranges.str();
+}
+
+inline COQUIC_NO_PROFILE std::optional<std::uint64_t>
+largest_acknowledged_by_ack_frame(std::span<const Frame> frames) {
+    for (const auto &frame : frames) {
+        if (const auto *ack = std::get_if<AckFrame>(&frame); ack != nullptr) {
+            return ack->largest_acknowledged;
+        }
+        if (const auto *ack = std::get_if<OutboundAckFrame>(&frame); ack != nullptr) {
+            return ack->header.largest_acknowledged;
+        }
+    }
+    return std::nullopt;
+}
+
+inline COQUIC_NO_PROFILE std::optional<std::uint64_t>
+largest_acknowledged_for_ack_eliciting_sent_record(bool ack_eliciting,
+                                                   std::span<const Frame> frames) {
+    if (!ack_eliciting) {
+        return std::nullopt;
+    }
+    return largest_acknowledged_by_ack_frame(frames);
+}
+
+inline COQUIC_NO_PROFILE bool send_continuation_allowed(bool continuation_has_pending_work,
+                                                        bool bypass_burst_limit,
+                                                        std::size_t unpaced_ack_eliciting_packets) {
+    return continuation_has_pending_work && !bypass_burst_limit &&
+           unpaced_ack_eliciting_packets != 0;
 }
 
 inline std::size_t packet_stream_frame_count(const SentPacketRecord &packet);
@@ -2097,8 +2131,10 @@ inline bool should_defer_protected_one_rtt_packet(const ReceivedProtectedPacket 
         return should_defer_protected_one_rtt_packet(*ack_only, local_role, status);
     }
     const auto *stream = std::get_if<ReceivedProtectedOneRttStreamPacket>(&packet);
-    return stream != nullptr ? should_defer_protected_one_rtt_packet(*stream, local_role, status)
-                             : false;
+    if (stream != nullptr) {
+        return should_defer_protected_one_rtt_packet(*stream, local_role, status);
+    }
+    return false;
 }
 
 inline std::optional<std::uint64_t>
@@ -2118,7 +2154,10 @@ protected_one_rtt_packet_number_for_trace(const ReceivedProtectedPacket &packet)
         return ack_only->packet_number;
     }
     const auto *stream = std::get_if<ReceivedProtectedOneRttStreamPacket>(&packet);
-    return stream != nullptr ? std::optional<std::uint64_t>(stream->packet_number) : std::nullopt;
+    if (stream != nullptr) {
+        return stream->packet_number;
+    }
+    return std::nullopt;
 }
 
 inline bool packet_can_advance_tls_state(const ProtectedPacket &packet) {
@@ -2321,6 +2360,11 @@ inline bool should_discard_corrupted_long_header_packet(bool short_header_packet
                                     code == CodecErrorCode::unsupported_packet_type);
 }
 
+inline COQUIC_NO_PROFILE bool invalid_fixed_bit_is_rejected(std::uint8_t header_byte,
+                                                            bool grease_quic_bit) {
+    return (header_byte & 0x40u) == 0 && !grease_quic_bit;
+}
+
 inline std::uint64_t saturating_subtract(std::uint64_t limit, std::uint64_t used) {
     return limit - std::min(limit, used);
 }
@@ -2333,6 +2377,30 @@ inline std::uint64_t saturating_add(std::uint64_t lhs, std::uint64_t rhs) {
 inline bool application_frame_requires_connected_state(bool require_connected,
                                                        HandshakeStatus status) {
     return require_connected & (status != HandshakeStatus::connected);
+}
+
+inline COQUIC_NO_PROFILE bool application_datagram_requires_connected_state(
+    bool require_connected, bool application_read_secret_available, HandshakeStatus status) {
+    const bool allow_preconnected_datagram_frame =
+        application_read_secret_available && status == HandshakeStatus::in_progress;
+    return application_frame_requires_connected_state(
+        require_connected && !allow_preconnected_datagram_frame, status);
+}
+
+inline COQUIC_NO_PROFILE bool peer_connection_id_route_changed(
+    const std::map<std::uint64_t, PeerConnectionIdRecord> &peer_connection_ids,
+    const ConnectionId &source_connection_id, std::uint64_t active_peer_connection_id_sequence) {
+    const auto peer = peer_connection_ids.find(0);
+    if (peer == peer_connection_ids.end()) {
+        return true;
+    }
+    if (peer->second.connection_id != source_connection_id) {
+        return true;
+    }
+    if (peer->second.locally_retired) {
+        return true;
+    }
+    return active_peer_connection_id_sequence != 0;
 }
 
 inline bool should_adopt_supported_client_version(EndpointRole role, std::uint32_t packet_version,
@@ -3242,6 +3310,106 @@ inline COQUIC_NO_PROFILE bool client_handshake_recovery_probe_has_other_space_in
            has_in_flight_ack_eliciting_packet(application_space);
 }
 
+inline COQUIC_NO_PROFILE bool simple_stream_ack_sample_collection_is_eligible(
+    bool has_late_acked_packets, bool has_lost_packets, EndpointRole role, bool qlog_enabled,
+    bool packet_trace_enabled, QuicCongestionControlAlgorithm algorithm) {
+    if (has_late_acked_packets || has_lost_packets || role == EndpointRole::client ||
+        qlog_enabled || packet_trace_enabled) {
+        return false;
+    }
+    return algorithm == QuicCongestionControlAlgorithm::newreno ||
+           algorithm == QuicCongestionControlAlgorithm::cubic;
+}
+
+inline COQUIC_NO_PROFILE bool simple_stream_ack_fast_path_is_eligible(
+    bool has_late_acked_packets, bool has_acked_packets, EndpointRole role, bool qlog_enabled,
+    bool packet_trace_enabled, QuicCongestionControlAlgorithm algorithm) {
+    if (has_late_acked_packets || has_acked_packets) {
+        return false;
+    }
+    if (role == EndpointRole::client || qlog_enabled || packet_trace_enabled) {
+        return false;
+    }
+    return algorithm == QuicCongestionControlAlgorithm::newreno ||
+           algorithm == QuicCongestionControlAlgorithm::cubic;
+}
+
+inline COQUIC_NO_PROFILE bool
+simple_stream_congestion_batch_algorithm_is_supported(QuicCongestionControlAlgorithm algorithm) {
+    return algorithm == QuicCongestionControlAlgorithm::newreno ||
+           algorithm == QuicCongestionControlAlgorithm::cubic;
+}
+
+inline COQUIC_NO_PROFILE bool
+acked_current_key_update_generation(const SentPacketRecord *packet,
+                                    std::uint64_t current_application_write_key_generation) {
+    return packet != nullptr &&
+           packet->protection_key_update_generation == current_application_write_key_generation;
+}
+
+inline COQUIC_NO_PROFILE bool
+should_process_simple_stream_ack_ecn(bool largest_acknowledged_was_newly_acked) {
+    return largest_acknowledged_was_newly_acked;
+}
+
+inline COQUIC_NO_PROFILE bool should_reset_pto_after_ack(bool suppress_pto_reset) {
+    return !suppress_pto_reset;
+}
+
+inline COQUIC_NO_PROFILE bool has_ack_stream_metadata_for_retirement(
+    const std::optional<StreamFrameSendMetadata> &first_stream_frame_metadata) {
+    return first_stream_frame_metadata.has_value();
+}
+
+inline COQUIC_NO_PROFILE bool
+stream_has_lost_send_data_for_state_change(const StreamState &stream) {
+    return stream.reset_state == StreamControlFrameState::none &&
+           stream.send_buffer.has_lost_data();
+}
+
+inline COQUIC_NO_PROFILE bool should_use_single_path_simple_stream_ack_ecn(
+    bool single_path_summary, const std::optional<QuicPathId> &single_path_id,
+    const std::optional<QuicCoreTimePoint> &single_path_latest_marked_sent_time) {
+    return single_path_summary && single_path_id.has_value() &&
+           single_path_latest_marked_sent_time.has_value();
+}
+
+inline COQUIC_NO_PROFILE bool ecn_counts_decreased(const AckEcnCounts &current,
+                                                   const AckEcnCounts &previous) {
+    return current.ect0 < previous.ect0 || current.ect1 < previous.ect1 ||
+           current.ecn_ce < previous.ecn_ce;
+}
+
+inline COQUIC_NO_PROFILE bool
+ecn_feedback_is_invalid(std::uint64_t delta_ect0, std::uint64_t delta_ect1, std::uint64_t delta_ce,
+                        std::uint64_t newly_acked_ect0, std::uint64_t newly_acked_ect1,
+                        std::uint64_t current_ect0, std::uint64_t current_ect1,
+                        std::uint64_t total_sent_ect0, std::uint64_t total_sent_ect1) {
+    return delta_ect0 + delta_ce < newly_acked_ect0 || delta_ect1 + delta_ce < newly_acked_ect1 ||
+           current_ect0 > total_sent_ect0 || current_ect1 > total_sent_ect1;
+}
+
+inline COQUIC_NO_PROFILE bool should_mark_ecn_probing_path_capable(QuicPathEcnState state) {
+    return state == QuicPathEcnState::probing;
+}
+
+inline COQUIC_NO_PROFILE bool
+should_ensure_inbound_application_path(bool paths_empty, QuicPathId inbound_path_id,
+                                       const std::optional<QuicPathId> &current_send_path_id) {
+    return !paths_empty | (inbound_path_id != 0) | current_send_path_id.has_value();
+}
+
+inline COQUIC_NO_PROFILE bool zero_rtt_state_present(bool read_secret_available,
+                                                     bool write_secret_available) {
+    return read_secret_available || write_secret_available;
+}
+
+inline COQUIC_NO_PROFILE bool
+should_arm_zero_rtt_discard_deadline_after_application_packet(EndpointRole role,
+                                                              bool zero_rtt_read_secret_available) {
+    return role == EndpointRole::server && zero_rtt_read_secret_available;
+}
+
 inline COQUIC_NO_PROFILE bool
 has_timer_lost_packets_for_profile(bool profile_enabled,
                                    const std::vector<SentPacketRecord> &lost_packets) {
@@ -3427,9 +3595,8 @@ inline COQUIC_NO_PROFILE void record_latest_rtt_sample_for_profile(const Recover
 }
 
 inline COQUIC_NO_PROFILE void
-record_congestion_debug_for_profile(const QuicCongestionController &controller,
-                                    QuicCoreTimePoint now, SendProfileCounters &profile) {
-    const auto metrics = controller.debug_metrics(now);
+record_congestion_debug_metrics_for_profile_for_tests(const QuicCongestionDebugMetrics &metrics,
+                                                      SendProfileCounters &profile) {
     ++profile.cc_debug_samples;
     profile.cc_mode_last = metrics.mode;
     profile.cc_bandwidth_bps_last = metrics.bandwidth_bps;
@@ -3478,6 +3645,12 @@ record_congestion_debug_for_profile(const QuicCongestionController &controller,
     profile.cc_slow_start_samples += static_cast<std::uint64_t>(metrics.slow_start);
     profile.cc_startup_probe_complete_samples +=
         static_cast<std::uint64_t>(metrics.startup_probe_complete);
+}
+
+inline COQUIC_NO_PROFILE void
+record_congestion_debug_for_profile(const QuicCongestionController &controller,
+                                    QuicCoreTimePoint now, SendProfileCounters &profile) {
+    record_congestion_debug_metrics_for_profile_for_tests(controller.debug_metrics(now), profile);
 }
 
 inline COQUIC_NO_PROFILE std::optional<std::size_t> prepare_pmtu_probe_packet_for_tracking(
@@ -3663,6 +3836,24 @@ ack_only_path_validation_is_ack_eliciting(const auto &path_validation_frames) {
            path_validation_frames.challenge.has_value();
 }
 
+inline COQUIC_NO_PROFILE std::optional<std::uint64_t>
+ack_largest_for_path_validation_sent_record(bool path_validation_ack_eliciting,
+                                            const OutboundAckHeader &ack_header) {
+    if (!path_validation_ack_eliciting) {
+        return std::nullopt;
+    }
+    return ack_header.largest_acknowledged;
+}
+
+template <typename NoteIdleAckElicitingSend>
+inline COQUIC_NO_PROFILE void
+maybe_note_path_validation_ack_eliciting_send(bool path_validation_ack_eliciting,
+                                              NoteIdleAckElicitingSend &&note_send) {
+    if (path_validation_ack_eliciting) {
+        note_send();
+    }
+}
+
 inline COQUIC_NO_PROFILE void
 maybe_queue_ack_only_path_validation_packet(const auto &path_validation_frames,
                                             const auto &queue_packet) {
@@ -3742,6 +3933,44 @@ no_ack_control_candidate_leaves_stream_budget(std::size_t no_ack_control_candida
                minimum_stream_wire_bytes;
 }
 
+inline COQUIC_NO_PROFILE CodecResult<std::size_t>
+maybe_force_no_ack_control_candidate_size_for_tests(
+    CodecResult<std::size_t> no_ack_control_candidate_size) {
+    if (connection_drain_test_hooks().force_no_ack_control_candidate_estimate_failure) {
+        no_ack_control_candidate_size =
+            CodecResult<std::size_t>::failure(CodecErrorCode::packet_length_mismatch, 0);
+    } else if (connection_drain_test_hooks().force_no_ack_control_candidate_empty_payload) {
+        no_ack_control_candidate_size =
+            CodecResult<std::size_t>::failure(CodecErrorCode::empty_packet_payload, 0);
+    }
+    if (connection_drain_test_hooks().force_no_ack_control_candidate_estimate_size) {
+        no_ack_control_candidate_size = CodecResult<std::size_t>::success(
+            connection_drain_test_hooks().forced_no_ack_control_candidate_estimate_size);
+    }
+    return no_ack_control_candidate_size;
+}
+
+inline COQUIC_NO_PROFILE bool maybe_select_sized_no_ack_candidate(
+    std::size_t congestion_limited_datagram_size, std::size_t minimum_stream_wire_bytes,
+    std::optional<OutboundAckHeader> &selected_ack_frame, std::size_t &application_stream_budget,
+    CodecResult<std::size_t> &control_candidate_size,
+    const CodecResult<std::size_t> &no_ack_control_candidate_size) {
+    if (!no_ack_control_candidate_size.has_value()) {
+        return false;
+    }
+    if (!no_ack_control_candidate_leaves_stream_budget(no_ack_control_candidate_size.value(),
+                                                       congestion_limited_datagram_size,
+                                                       minimum_stream_wire_bytes)) {
+        return false;
+    }
+
+    selected_ack_frame = std::nullopt;
+    application_stream_budget =
+        congestion_limited_datagram_size - no_ack_control_candidate_size.value();
+    control_candidate_size = no_ack_control_candidate_size;
+    return true;
+}
+
 inline COQUIC_NO_PROFILE bool should_fail_non_empty_packet_payload_candidate(
     const CodecResult<SerializedProtectedDatagram> &candidate) {
     return !candidate.has_value() && !is_empty_packet_payload_error(candidate);
@@ -3762,6 +3991,83 @@ inline COQUIC_NO_PROFILE bool use_fast_serialized_one_rtt_commit_for_packet(
     bool use_zero_rtt_packet_protection, bool has_application_close) {
     return role == EndpointRole::server && packets_empty && qlog_session == nullptr &&
            !use_zero_rtt_packet_protection && !has_application_close;
+}
+
+struct SimpleApplicationAckOnlyEligibility {
+    bool application_ack_due_now = false;
+    bool has_base_ack_frame = false;
+    bool packets_empty = false;
+    bool qlog_enabled = false;
+    bool use_zero_rtt_packet_protection = false;
+    bool can_send_one_rtt_packets = false;
+    bool pending_application_send_after_blocked_queue = false;
+    bool application_probe_pending = false;
+    bool has_pending_new_token_frames = false;
+    bool has_pending_new_connection_id_frames = false;
+    bool has_pending_retire_connection_id_frames = false;
+    bool application_crypto_frames_empty = false;
+    bool has_current_send_path = false;
+    bool has_pending_ack_only_path_validation_frame = false;
+};
+
+inline COQUIC_NO_PROFILE bool
+can_try_simple_application_ack_only(const SimpleApplicationAckOnlyEligibility &eligibility) {
+    if (!eligibility.application_ack_due_now) {
+        return false;
+    }
+    if (!eligibility.has_base_ack_frame) {
+        return false;
+    }
+    if (!eligibility.packets_empty) {
+        return false;
+    }
+    if (eligibility.qlog_enabled) {
+        return false;
+    }
+    if (eligibility.use_zero_rtt_packet_protection) {
+        return false;
+    }
+    if (!eligibility.can_send_one_rtt_packets) {
+        return false;
+    }
+    if (eligibility.pending_application_send_after_blocked_queue) {
+        return false;
+    }
+    if (eligibility.application_probe_pending) {
+        return false;
+    }
+    if (eligibility.has_pending_new_token_frames) {
+        return false;
+    }
+    if (eligibility.has_pending_new_connection_id_frames) {
+        return false;
+    }
+    if (eligibility.has_pending_retire_connection_id_frames) {
+        return false;
+    }
+    if (!eligibility.application_crypto_frames_empty) {
+        return false;
+    }
+    if (!eligibility.has_current_send_path) {
+        return false;
+    }
+    if (eligibility.has_pending_ack_only_path_validation_frame) {
+        return false;
+    }
+    return true;
+}
+
+inline COQUIC_NO_PROFILE std::size_t
+one_rtt_encrypted_packet_count_for_commit(bool has_application_close,
+                                          bool use_zero_rtt_packet_protection) {
+    return has_application_close || !use_zero_rtt_packet_protection ? std::size_t{1}
+                                                                    : std::size_t{0};
+}
+
+inline COQUIC_NO_PROFILE bool
+should_consume_selected_datagram_frame_after_commit(bool committed_empty,
+                                                    bool selected_datagram_frame_has_value) {
+    return !committed_empty && selected_datagram_frame_has_value;
 }
 
 inline void remember_pmtud_failed_probe_size(PathMtuState &mtu, std::size_t probe_size) {

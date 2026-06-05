@@ -391,6 +391,8 @@ class PacketSpaceRecovery {
     std::size_t previous_live_slot(std::size_t slot_index) const;
     std::size_t next_live_slot(std::size_t slot_index) const;
     void unlink_live_slot(std::size_t slot_index);
+    void note_live_slot_sent_time_order(std::size_t slot_index);
+    void note_live_packet_removed_from_tracking(std::size_t slot_index);
     std::size_t newest_live_slot_at_or_below(std::uint64_t packet_number) const;
     SentPacketLedgerSlot *slot_for_packet_number(std::uint64_t packet_number);
     const SentPacketLedgerSlot *slot_for_packet_number(std::uint64_t packet_number) const;
@@ -432,6 +434,7 @@ class PacketSpaceRecovery {
     std::optional<std::uint64_t> largest_acked_packet_number_;
     std::size_t first_live_slot_ = kInvalidLedgerSlotIndex;
     std::size_t last_live_slot_ = kInvalidLedgerSlotIndex;
+    bool live_sent_times_monotonic_ = true;
     std::size_t next_loss_candidate_slot_ = 0;
     std::size_t next_packet_threshold_loss_slot_ = 0;
     std::uint64_t packet_reordering_threshold_ = kPacketThreshold;

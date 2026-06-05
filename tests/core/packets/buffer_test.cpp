@@ -305,6 +305,24 @@ TEST(QuicBufferTest, DatagramBufferAppendUninitializedExtendsWritableTail) {
     EXPECT_TRUE(std::equal(expected.begin(), expected.end(), buffer.begin(), buffer.end()));
 }
 
+TEST(QuicBufferTest, DatagramByteStorageAllocationHandlesZeroAndNullInputs) {
+    using coquic::quic::detail::allocate_datagram_byte_storage;
+    using coquic::quic::detail::deallocate_datagram_byte_storage;
+
+    EXPECT_EQ(allocate_datagram_byte_storage(0), nullptr);
+    deallocate_datagram_byte_storage(nullptr, 16);
+
+    auto *allocated = allocate_datagram_byte_storage(1);
+    ASSERT_NE(allocated, nullptr);
+    deallocate_datagram_byte_storage(allocated, 0);
+    deallocate_datagram_byte_storage(allocated, 1);
+
+    constexpr std::size_t larger_than_cache = 64u * 1024u + 1u;
+    auto *uncached = allocate_datagram_byte_storage(larger_than_cache);
+    ASSERT_NE(uncached, nullptr);
+    deallocate_datagram_byte_storage(uncached, larger_than_cache);
+}
+
 TEST(QuicBufferTest, DatagramBufferConstructsFromInitializerList) {
     const coquic::quic::DatagramBuffer buffer{
         std::byte{0xaa},

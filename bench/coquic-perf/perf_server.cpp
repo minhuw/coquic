@@ -319,13 +319,14 @@ bool QuicPerfServer::handle_stream_data(Session &session,
             !session.start->total_bytes.has_value() && received.fin) {
             // Unbounded bulk download replies with the configured payload on each finished stream.
             const auto response_bytes = static_cast<std::size_t>(session.start->response_bytes);
+            auto response_payload = cached_download_payload(response_bytes);
             auto send_result = core_.advance_endpoint(
                 quic::QuicCoreConnectionCommand{
                     .connection = session.connection,
                     .input =
-                        quic::QuicCoreSendStreamData{
+                        quic::QuicCoreSendSharedStreamData{
                             .stream_id = received.stream_id,
-                            .bytes = make_payload(response_bytes),
+                            .bytes = std::move(response_payload),
                             .fin = true,
                         },
                 },

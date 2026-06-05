@@ -612,6 +612,9 @@ class ScopedHttp3Process {
     ScopedHttp3Process &operator=(const ScopedHttp3Process &) = delete;
 
     std::optional<int> wait_for_exit(std::chrono::milliseconds timeout) {
+        if (pid_ <= 0) {
+            return std::nullopt;
+        }
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
             int status = 0;
@@ -623,6 +626,15 @@ class ScopedHttp3Process {
                 }
                 return std::nullopt;
             }
+            if (waited < 0) {
+                if (errno == ECHILD) {
+                    pid_ = -1;
+                    return std::nullopt;
+                }
+                if (errno == EINTR) {
+                    continue;
+                }
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }
         return std::nullopt;
@@ -633,13 +645,23 @@ class ScopedHttp3Process {
             return;
         }
         ::kill(pid_, SIGTERM);
-        if (wait_for_exit(std::chrono::milliseconds{500}).has_value()) {
+        if (wait_for_exit(std::chrono::milliseconds{500}).has_value() || pid_ <= 0) {
             return;
         }
         ::kill(pid_, SIGKILL);
-        int status = 0;
-        static_cast<void>(::waitpid(pid_, &status, 0));
-        pid_ = -1;
+        while (true) {
+            int status = 0;
+            const pid_t waited = ::waitpid(pid_, &status, 0);
+            if (waited == pid_ || (waited < 0 && errno == ECHILD)) {
+                pid_ = -1;
+                return;
+            }
+            if (waited < 0 && errno == EINTR) {
+                continue;
+            }
+            pid_ = -1;
+            return;
+        }
     }
 
   private:

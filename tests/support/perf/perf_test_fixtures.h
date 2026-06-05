@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -79,6 +80,9 @@ class ScopedPerfProcess {
     ScopedPerfProcess &operator=(const ScopedPerfProcess &) = delete;
 
     std::optional<int> wait_for_exit(std::chrono::milliseconds timeout) {
+        if (pid_ <= 0) {
+            return std::nullopt;
+        }
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
             int status = 0;
@@ -89,6 +93,15 @@ class ScopedPerfProcess {
                     return WEXITSTATUS(status);
                 }
                 return std::nullopt;
+            }
+            if (waited < 0) {
+                if (errno == ECHILD) {
+                    pid_ = -1;
+                    return std::nullopt;
+                }
+                if (errno == EINTR) {
+                    continue;
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }

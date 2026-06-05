@@ -146,6 +146,9 @@ class ScopedHttp3Process {
     ScopedHttp3Process &operator=(const ScopedHttp3Process &) = delete;
 
     std::optional<int> wait_for_exit(std::chrono::milliseconds timeout) {
+        if (pid_ <= 0) {
+            return std::nullopt;
+        }
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
             int status = 0;
@@ -156,6 +159,15 @@ class ScopedHttp3Process {
                     return WEXITSTATUS(status);
                 }
                 return std::nullopt;
+            }
+            if (waited < 0) {
+                if (errno == ECHILD) {
+                    pid_ = -1;
+                    return std::nullopt;
+                }
+                if (errno == EINTR) {
+                    continue;
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds{10});
         }

@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -25,6 +26,7 @@
 #define DEFAULT_MAX_RUN_REQUESTS 4096ULL
 #define TRANSFER_CONNECTION_WINDOW (32U * 1024U * 1024U)
 #define TRANSFER_STREAM_WINDOW (16U * 1024U * 1024U)
+#define TRANSFER_MAX_STREAMS 10000000U
 #define WRITE_CHUNK_SIZE 32768U
 
 static int debug_enabled(void) {
@@ -114,6 +116,7 @@ typedef struct client_state client_state_t;
 struct lsquic_conn_ctx {
     client_state_t *state;
     lsquic_conn_t *conn;
+    struct service_port *sport;
     uint64_t active_streams;
     int ready;
     int closing;
@@ -123,7 +126,7 @@ struct lsquic_conn_ctx {
 struct lsquic_stream_ctx {
     client_state_t *state;
     struct lsquic_conn_ctx *conn_ctx;
-    uint8_t header[8];
+    uint8_t header[16];
     size_t header_sent;
     uint64_t request_bytes;
     uint64_t response_bytes;
@@ -132,11 +135,16 @@ struct lsquic_stream_ctx {
     uint64_t started_at;
     int counts_latency;
     int completed;
-    union {
+    struct {
+        uint8_t header[16];
+        size_t header_read;
+        uint64_t request_bytes;
+        uint64_t response_bytes;
+        uint64_t request_read;
         uint64_t response_left;
-        uint8_t header_buf[8];
+        int request_fin;
+        int ready_to_send;
     } server;
-    size_t server_header_read;
 };
 
 struct client_state {
@@ -144,6 +152,9 @@ struct client_state {
     struct prog prog;
     struct sport_head sports;
     struct event *deadline_timer;
+    struct service_port **client_sports;
+    int *client_sport_busy;
+    uint64_t client_sport_count;
     struct lsquic_conn_ctx *conns;
     counters_t counters;
     uint64_t target_requests;
@@ -451,13 +462,23 @@ static uint64_t ceil_div(uint64_t numerator, uint64_t denominator) {
     return numerator / denominator + (numerator % denominator != 0);
 }
 
+static uint64_t inflight_limit(const config_t *cfg);
+
 static void apply_lsquic_settings(struct prog *prog, const config_t *cfg) {
     prog->prog_settings.es_init_max_data = TRANSFER_CONNECTION_WINDOW;
     prog->prog_settings.es_init_max_stream_data_bidi_local = TRANSFER_STREAM_WINDOW;
     prog->prog_settings.es_init_max_stream_data_bidi_remote = TRANSFER_STREAM_WINDOW;
+    uint64_t stream_limit = inflight_limit(cfg);
+    if (stream_limit < 100) {
+        stream_limit = 100;
+    }
+    if (stream_limit > UINT_MAX) {
+        stream_limit = UINT_MAX;
+    }
     prog->prog_settings.es_init_max_streams_bidi =
-        (unsigned)(cfg->streams > 100 ? cfg->streams : 100);
-    prog->prog_settings.es_max_streams_in = (unsigned)(cfg->streams > 100 ? cfg->streams : 100);
+        stream_limit > TRANSFER_MAX_STREAMS ? (unsigned)stream_limit : TRANSFER_MAX_STREAMS;
+    prog->prog_settings.es_max_streams_in =
+        stream_limit > TRANSFER_MAX_STREAMS ? (unsigned)stream_limit : TRANSFER_MAX_STREAMS;
     if (cfg->disable_pmtud) {
         prog->prog_settings.es_dplpmtud = 0;
     }
@@ -554,15 +575,105 @@ static void try_open_streams(client_state_t *state) {
     }
 }
 
+static int add_client_sport(client_state_t *state, uint64_t index, const char *service) {
+    struct service_port *sport;
+    if (index == 0) {
+        sport = TAILQ_FIRST(&state->sports);
+    } else {
+        sport = sport_new(service, &state->prog);
+        if (!sport) {
+            return -1;
+        }
+        sport->sp_flags = state->prog.prog_dummy_sport.sp_flags;
+        sport->sp_sndbuf = state->prog.prog_dummy_sport.sp_sndbuf;
+        sport->sp_rcvbuf = state->prog.prog_dummy_sport.sp_rcvbuf;
+        TAILQ_INSERT_TAIL(&state->sports, sport, next_sport);
+        if (sport_init_client(sport, state->prog.prog_engine, prog_eb(&state->prog)) != 0) {
+            TAILQ_REMOVE(&state->sports, sport, next_sport);
+            sport_destroy(sport);
+            return -1;
+        }
+    }
+    if (!sport) {
+        return -1;
+    }
+    state->client_sports[index] = sport;
+    return 0;
+}
+
+static int init_client_sports(client_state_t *state, const char *service) {
+    state->client_sport_count = state->cfg.connections ? state->cfg.connections : 1;
+    state->client_sports = calloc((size_t)state->client_sport_count, sizeof(*state->client_sports));
+    state->client_sport_busy =
+        calloc((size_t)state->client_sport_count, sizeof(*state->client_sport_busy));
+    if (!state->client_sports || !state->client_sport_busy) {
+        return -1;
+    }
+    for (uint64_t i = 0; i < state->client_sport_count; ++i) {
+        if (add_client_sport(state, i, service) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void cleanup_client_sports(client_state_t *state) {
+    free(state->client_sports);
+    free(state->client_sport_busy);
+    state->client_sports = NULL;
+    state->client_sport_busy = NULL;
+    state->client_sport_count = 0;
+}
+
+static uint64_t client_sport_index(const client_state_t *state, const struct service_port *sport) {
+    for (uint64_t i = 0; i < state->client_sport_count; ++i) {
+        if (state->client_sports[i] == sport) {
+            return i;
+        }
+    }
+    return state->client_sport_count;
+}
+
+static struct service_port *next_available_client_sport(client_state_t *state) {
+    for (uint64_t i = 0; i < state->client_sport_count; ++i) {
+        if (!state->client_sport_busy[i]) {
+            state->client_sport_busy[i] = 1;
+            return state->client_sports[i];
+        }
+    }
+    return NULL;
+}
+
+static void release_client_sport(client_state_t *state, const struct service_port *sport) {
+    uint64_t index = client_sport_index(state, sport);
+    if (index < state->client_sport_count) {
+        state->client_sport_busy[index] = 0;
+    }
+}
+
 static int start_client_connection(client_state_t *state) {
-    ++state->pending_conns;
+    struct service_port *sport = next_available_client_sport(state);
+    if (!sport) {
+        set_failure(state, "no available lsquic client port");
+        return -1;
+    }
     DEBUG_LOG("start connection pending=%" PRIu64 " active=%" PRIu64 "\n", state->pending_conns,
               state->active_conns);
-    if (prog_connect(&state->prog, NULL, 0) != 0) {
-        --state->pending_conns;
+    ++state->pending_conns;
+    if (lsquic_engine_connect(state->prog.prog_engine, N_LSQVER,
+                              (struct sockaddr *)&sport->sp_local_addr,
+                              (struct sockaddr *)&sport->sas, sport, NULL,
+                              state->prog.prog_hostname ? state->prog.prog_hostname : NULL,
+                              state->prog.prog_max_packet_size, NULL, 0, sport->sp_token_buf,
+                              sport->sp_token_sz) == NULL) {
+        if (state->pending_conns > 0) {
+            --state->pending_conns;
+        }
+        release_client_sport(state, sport);
         set_failure(state, "could not connect");
         return -1;
     }
+    prog_process_conns(&state->prog);
     return 0;
 }
 
@@ -612,6 +723,7 @@ static lsquic_conn_ctx_t *client_on_new_conn(void *stream_if_ctx, lsquic_conn_t 
     }
     conn_ctx->state = state;
     conn_ctx->conn = conn;
+    conn_ctx->sport = lsquic_conn_get_peer_ctx(conn, NULL);
     conn_ctx->next = state->conns;
     state->conns = conn_ctx;
     ++state->active_conns;
@@ -635,6 +747,7 @@ static void client_on_conn_closed(lsquic_conn_t *conn) {
     if (state->active_conns > 0) {
         --state->active_conns;
     }
+    release_client_sport(state, conn_ctx->sport);
     lsquic_conn_set_ctx(conn, NULL);
     free(conn_ctx);
     maybe_finish_client(state);
@@ -667,8 +780,10 @@ static lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, lsquic_str
     stream_ctx->response_bytes = scenario_response_bytes(&state->cfg);
     stream_ctx->counts_latency = !is_mode(&state->cfg, "bulk");
     stream_ctx->started_at = now_us();
+    uint64_t be_request = encode_be64(stream_ctx->request_bytes);
     uint64_t be_response = encode_be64(stream_ctx->response_bytes);
-    memcpy(stream_ctx->header, &be_response, sizeof(stream_ctx->header));
+    memcpy(stream_ctx->header, &be_request, sizeof(be_request));
+    memcpy(stream_ctx->header + sizeof(be_request), &be_response, sizeof(be_response));
     ++state->started_requests;
     ++state->active_streams;
     if (conn_ctx) {
@@ -817,25 +932,33 @@ static lsquic_stream_ctx_t *server_on_new_stream(void *stream_if_ctx, lsquic_str
 }
 
 static size_t discard_readf(void *user_data, const unsigned char *buf, size_t count, int fin) {
-    (void)user_data;
+    struct lsquic_stream_ctx *stream_ctx = user_data;
     (void)buf;
-    (void)fin;
+    stream_ctx->server.request_read += count;
+    if (fin) {
+        stream_ctx->server.request_fin = 1;
+    }
     return count;
 }
 
 static void server_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     struct lsquic_stream_ctx *stream_ctx = h;
     DEBUG_LOG("server read stream=%" PRIu64 " header=%zu left=%" PRIu64 "\n",
-              (uint64_t)lsquic_stream_id(stream), stream_ctx->server_header_read,
+              (uint64_t)lsquic_stream_id(stream), stream_ctx->server.header_read,
               stream_ctx->server.response_left);
-    while (stream_ctx->server_header_read < sizeof(stream_ctx->server.header_buf)) {
-        size_t need = sizeof(stream_ctx->server.header_buf) - stream_ctx->server_header_read;
+    while (stream_ctx->server.header_read < sizeof(stream_ctx->server.header)) {
+        size_t need = sizeof(stream_ctx->server.header) - stream_ctx->server.header_read;
         ssize_t nr = lsquic_stream_read(
-            stream, stream_ctx->server.header_buf + stream_ctx->server_header_read, need);
+            stream, stream_ctx->server.header + stream_ctx->server.header_read, need);
         if (nr > 0) {
-            stream_ctx->server_header_read += (size_t)nr;
-            if (stream_ctx->server_header_read == sizeof(stream_ctx->server.header_buf)) {
-                stream_ctx->server.response_left = decode_be64(stream_ctx->server.header_buf);
+            stream_ctx->server.header_read += (size_t)nr;
+            if (stream_ctx->server.header_read == sizeof(stream_ctx->server.header)) {
+                stream_ctx->server.request_bytes = decode_be64(stream_ctx->server.header);
+                stream_ctx->server.response_bytes = decode_be64(stream_ctx->server.header + 8);
+                stream_ctx->server.response_left = stream_ctx->server.response_bytes;
+                if (stream_ctx->server.request_bytes == 0) {
+                    stream_ctx->server.ready_to_send = 1;
+                }
             }
         } else if (nr == 0) {
             lsquic_conn_abort(lsquic_stream_conn(stream));
@@ -848,8 +971,13 @@ static void server_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
         }
     }
 
-    ssize_t nr = lsquic_stream_readf(stream, discard_readf, NULL);
-    if (nr == 0) {
+    ssize_t nr = lsquic_stream_readf(stream, discard_readf, stream_ctx);
+    if ((nr >= 0 && stream_ctx->server.request_fin &&
+         stream_ctx->server.request_read >= stream_ctx->server.request_bytes) ||
+        (nr == 0 && stream_ctx->server.request_read >= stream_ctx->server.request_bytes)) {
+        stream_ctx->server.ready_to_send = 1;
+    }
+    if (stream_ctx->server.ready_to_send) {
         lsquic_stream_wantread(stream, 0);
         lsquic_stream_shutdown(stream, 0);
         lsquic_stream_wantwrite(stream, 1);
@@ -1103,6 +1231,13 @@ static run_summary_t run_client(const config_t *cfg) {
         prog_cleanup(&state.prog);
         return make_summary(cfg, &state.counters, 0, "failed", state.failure_reason);
     }
+    if (init_client_sports(&state, service) != 0) {
+        set_failure(&state, "could not prepare lsquic client ports");
+        prog_stop(&state.prog);
+        prog_cleanup(&state.prog);
+        cleanup_client_sports(&state);
+        return make_summary(cfg, &state.counters, 0, "failed", state.failure_reason);
+    }
 
     state.measure_start_us = now_us();
     state.deadline_us = state.measure_start_us + cfg->duration_us;
@@ -1126,11 +1261,15 @@ static run_summary_t run_client(const config_t *cfg) {
         prog_run(&state.prog);
     }
     uint64_t elapsed_us = now_us() - state.measure_start_us;
+    if (!state.bounded && !state.failed) {
+        elapsed_us = cfg->duration_us;
+    }
     if (state.deadline_timer) {
         event_del(state.deadline_timer);
         event_free(state.deadline_timer);
     }
     prog_cleanup(&state.prog);
+    cleanup_client_sports(&state);
     const char *status = state.failed ? "failed" : "ok";
     run_summary_t summary = make_summary(cfg, &state.counters, (int64_t)duration_millis(elapsed_us),
                                          status, state.failed ? state.failure_reason : NULL);

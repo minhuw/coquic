@@ -265,7 +265,8 @@ for congestion_control in "${congestion_control_list[@]}"; do
     read -r backend mode direction request_bytes response_bytes limit streams connections inflight warmup duration <<<"${run}"
     effective_connections="${connections}"
     effective_inflight="${inflight}"
-    if [ "${client_impl}" = 'lsquic' ] && [ "${server_impl}" = 'lsquic' ] && [ "${mode}" != 'bulk' ]; then
+    if { [ "${client_impl}" = 'ngtcp2' ] || [ "${client_impl}" = 'neqo' ] || [ "${client_impl}" = 'quicly' ]; } \
+      && [ "${client_impl}" = "${server_impl}" ] && [ "${mode}" = 'rr' ]; then
       effective_connections=1
       effective_inflight=$((inflight * connections))
     fi

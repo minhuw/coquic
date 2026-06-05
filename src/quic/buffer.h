@@ -18,7 +18,6 @@ namespace detail {
 
 std::byte *allocate_datagram_byte_storage(std::size_t count);
 void deallocate_datagram_byte_storage(std::byte *pointer, std::size_t count) noexcept;
-bool datagram_byte_storage_cache_coverage_for_tests();
 
 } // namespace detail
 

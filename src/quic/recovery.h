@@ -24,7 +24,6 @@ namespace coquic::quic {
 namespace test {
 struct ReceivedPacketHistoryTestPeer;
 struct PacketSpaceRecoveryTestPeer;
-bool connection_key_update_and_probe_coverage_for_tests();
 } // namespace test
 
 inline constexpr std::uint64_t kPacketThreshold = 3;
@@ -444,7 +443,6 @@ class PacketSpaceRecovery {
     SentPacketsView sent_packets_{};
 
     friend struct test::PacketSpaceRecoveryTestPeer;
-    friend bool test::connection_key_update_and_probe_coverage_for_tests();
 };
 
 bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest_acked);

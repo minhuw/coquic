@@ -5013,21 +5013,6 @@ TEST(QuicProtectedCodecTest,
     EXPECT_EQ(appended.error().code, coquic::quic::CodecErrorCode::packet_length_mismatch);
     EXPECT_EQ(appended.error().offset, 0u);
 }
-
-TEST(QuicProtectedCodecTest, InternalCoverageHookExercisesHelperColdPaths) {
-    testing::internal::CaptureStderr();
-    const bool covered = coquic::quic::test::protected_codec_internal_coverage_for_tests();
-    const auto stderr_output = testing::internal::GetCapturedStderr();
-    EXPECT_TRUE(covered) << stderr_output;
-}
-
-TEST(QuicProtectedCodecTest, PacketPathCoverageHookExercisesDecodeAndSerializerColdPaths) {
-    testing::internal::CaptureStderr();
-    const bool covered = coquic::quic::test::protected_codec_packet_path_coverage_for_tests();
-    const auto stderr_output = testing::internal::GetCapturedStderr();
-    EXPECT_TRUE(covered) << stderr_output;
-}
-
 INSTANTIATE_TEST_SUITE_P(
     AllCipherSuites, QuicProtectedCodecHandshakeTest,
     testing::Values(

@@ -172,6 +172,14 @@ fn appendSourceFiles(files: *StringList, source_files: []const []const u8) void 
     files.appendSlice(source_files) catch @panic("oom");
 }
 
+fn concatSlices(b: *std.Build, slices: []const []const []const u8) []const []const u8 {
+    var out = StringList.init(b.allocator);
+    for (slices) |slice| {
+        out.appendSlice(slice) catch @panic("oom");
+    }
+    return out.toOwnedSlice() catch @panic("oom");
+}
+
 fn quicProductionSourceFiles() []const []const u8 {
     return &.{
         "src/quic/buffer.cpp",
@@ -208,15 +216,6 @@ fn quicProductionSourceFiles() []const []const u8 {
     };
 }
 
-fn quicTestHookSourceFiles() []const []const u8 {
-    return &.{
-        "src/quic/connection_helper_tests.cpp",
-        "src/quic/connection_internal_helper_tests.cpp",
-        "src/quic/connection_key_update_tests.cpp",
-        "src/quic/connection_pmtud_tests.cpp",
-        "src/quic/protected_codec_test_hooks.cpp",
-    };
-}
 
 fn quicSourceFiles() []const []const u8 {
     return &.{
@@ -231,13 +230,9 @@ fn quicSourceFiles() []const []const u8 {
         "src/quic/connection_diagnostics.cpp",
         "src/quic/connection_effects.cpp",
         "src/quic/connection_flow_control.cpp",
-        "src/quic/connection_helper_tests.cpp",
         "src/quic/connection_inbound_recovery.cpp",
-        "src/quic/connection_internal_helper_tests.cpp",
-        "src/quic/connection_key_update_tests.cpp",
         "src/quic/connection_packet_inspection.cpp",
         "src/quic/connection_paths_streams.cpp",
-        "src/quic/connection_pmtud_tests.cpp",
         "src/quic/connection_qlog.cpp",
         "src/quic/connection_send.cpp",
         "src/quic/connection_timers.cpp",
@@ -248,7 +243,6 @@ fn quicSourceFiles() []const []const u8 {
         "src/quic/packet_number.cpp",
         "src/quic/plaintext_codec.cpp",
         "src/quic/protected_codec.cpp",
-        "src/quic/protected_codec_test_hooks.cpp",
         "src/quic/qlog/json.cpp",
         "src/quic/qlog/session.cpp",
         "src/quic/qlog/sink.cpp",
@@ -275,10 +269,6 @@ fn http09SourceFiles() []const []const u8 {
         "src/http09/http09.cpp",
         "src/http09/http09_client.cpp",
         "src/http09/http09_runtime.cpp",
-        "src/http09/http09_runtime_io_restart_tests.cpp",
-        "src/http09/http09_runtime_parser_routing_tests.cpp",
-        "src/http09/http09_runtime_server_loop_tests.cpp",
-        "src/http09/http09_runtime_test_hooks.cpp",
         "src/http09/http09_server.cpp",
     };
 }
@@ -307,6 +297,20 @@ fn http3ProtocolSourceFiles() []const []const u8 {
         "src/http3/http3_server.cpp",
     };
 }
+
+fn coreTestSupportSourceFiles() []const []const u8 {
+    return &.{
+        "src/quic/connection_test_hooks.cpp",
+        "src/quic/protected_codec_test_hooks.cpp",
+    };
+}
+
+fn http09TestSupportSourceFiles() []const []const u8 {
+    return &.{
+        "src/http09/http09_runtime_test_hooks.cpp",
+    };
+}
+
 
 fn perfSourceFiles() []const []const u8 {
     return &.{
@@ -615,13 +619,9 @@ fn wasmQuicSourceFiles() []const []const u8 {
         "src/quic/connection_diagnostics.cpp",
         "src/quic/connection_effects.cpp",
         "src/quic/connection_flow_control.cpp",
-        "src/quic/connection_helper_tests.cpp",
         "src/quic/connection_inbound_recovery.cpp",
-        "src/quic/connection_internal_helper_tests.cpp",
-        "src/quic/connection_key_update_tests.cpp",
         "src/quic/connection_packet_inspection.cpp",
         "src/quic/connection_paths_streams.cpp",
-        "src/quic/connection_pmtud_tests.cpp",
         "src/quic/connection_qlog.cpp",
         "src/quic/connection_send.cpp",
         "src/quic/connection_timers.cpp",
@@ -633,7 +633,6 @@ fn wasmQuicSourceFiles() []const []const u8 {
         "src/quic/packet_number.cpp",
         "src/quic/plaintext_codec.cpp",
         "src/quic/protected_codec.cpp",
-        "src/quic/protected_codec_test_hooks.cpp",
         "src/quic/qlog/json.cpp",
         "src/quic/qlog/session.cpp",
         "src/quic/qlog/sink.cpp",
@@ -1059,7 +1058,6 @@ pub fn build(b: *std.Build) void {
     });
     const spdlog_cpp_flags = withSpdlogFlags(b, cpp_flags, spdlog_shared);
     const coverage_cpp_flags = withExtraFlags(b, cpp_flags, &.{
-        "-DCOQUIC_COVERAGE_BUILD=1",
         "-fprofile-instr-generate",
         "-fcoverage-mapping",
     });
@@ -1302,7 +1300,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         core_test_files,
-        &.{},
+        coreTestSupportSourceFiles(),
     );
     const http09_tests = addTestBinary(
         b,
@@ -1314,7 +1312,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         http09_test_files,
-        &.{},
+        http09TestSupportSourceFiles(),
     );
     const http3_tests = addTestBinary(
         b,
@@ -1353,7 +1351,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         qlog_test_files,
-        &.{},
+        coreTestSupportSourceFiles(),
     );
     const tls_tests = addTestBinary(
         b,
@@ -1365,7 +1363,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         tls_test_files,
-        &.{},
+        coreTestSupportSourceFiles(),
     );
     const perf_tests = addTestBinary(
         b,
@@ -1480,7 +1478,11 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         coverage_test_file_list.toOwnedSlice() catch @panic("oom"),
-        coverage_extra_sources,
+        concatSlices(b, &.{
+            coverage_extra_sources,
+            coreTestSupportSourceFiles(),
+            http09TestSupportSourceFiles(),
+        }),
     );
     linkTlsBackend(b, coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(coverage_tests);

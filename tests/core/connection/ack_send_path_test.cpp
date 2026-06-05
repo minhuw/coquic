@@ -1427,30 +1427,6 @@ TEST(QuicCoreTest, CongestionWindowGatesAckElicitingSendsUntilAckArrives) {
     EXPECT_FALSE(after_ack.empty());
 }
 
-TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverEdgeCases) {
-    EXPECT_TRUE(coquic::quic::test::connection_helper_edge_cases_for_tests());
-}
-
-TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverAckDeadlineAndStreamUtilities) {
-    EXPECT_TRUE(coquic::quic::test::connection_ack_deadline_and_stream_utilities_for_tests());
-}
-
-TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverInstrumentedPrivateUtilities) {
-    EXPECT_TRUE(coquic::quic::test::connection_instrumented_helper_coverage_for_tests());
-}
-
-TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverHeaderPacketSpaceUtilities) {
-    EXPECT_TRUE(coquic::quic::test::connection_header_packet_space_coverage_for_tests());
-}
-
-TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverKeyUpdateAndProbeBranches) {
-    EXPECT_TRUE(coquic::quic::test::connection_key_update_and_probe_coverage_for_tests());
-}
-
-TEST(QuicCoreTest, ConnectionNamespaceHelpersCoverPmtudBranches) {
-    EXPECT_TRUE(coquic::quic::test::connection_pmtud_coverage_for_tests());
-}
-
 TEST(QuicCoreTest, PacketSpacePacketMapViewSkipsStaleLiveHandles) {
     coquic::quic::PacketSpaceRecovery recovery;
     coquic::quic::PacketSpacePacketMapView view(

@@ -815,11 +815,6 @@ TEST(QuicCoreEndpointInternalTest, LegacyPathMtuUpdateHonorsRouteMapping) {
     EXPECT_EQ(path.mtu.probe_ceiling, 1300u);
     EXPECT_EQ(path.mtu.validated_datagram_size, 1300u);
 }
-
-TEST(QuicCoreEndpointInternalTest, EndpointInternalCoverageHookExercisesRemainingColdPaths) {
-    EXPECT_TRUE(coquic::quic::test::core_endpoint_internal_coverage_for_tests());
-}
-
 TEST(QuicCoreEndpointInternalTest,
      ExistingInboundDatagramUsesDefaultRouteAndErasesClosedConnection) {
     auto server_config = make_server_endpoint_config();

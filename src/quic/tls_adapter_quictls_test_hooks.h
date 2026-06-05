@@ -138,7 +138,6 @@ class TlsAdapterTestPeer {
     static void set_early_data_accepted(TlsAdapter &adapter, std::optional<bool> accepted);
     static void apply_early_data_status(TlsAdapter &adapter, int early_data_status,
                                         bool handshake_complete);
-    static bool internal_coverage_for_tests();
 };
 
 } // namespace coquic::quic::test

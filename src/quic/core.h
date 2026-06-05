@@ -43,7 +43,6 @@ void *allocate_core_effect_storage(CoreEffectStorageBytes bytes,
                                    CoreEffectStorageAlignment alignment);
 void deallocate_core_effect_storage(void *pointer, CoreEffectStorageBytes bytes,
                                     CoreEffectStorageAlignment alignment) noexcept;
-bool core_effect_storage_cache_coverage_for_tests();
 } // namespace detail
 
 template <typename T> class CoreEffectAllocator {
@@ -602,7 +601,6 @@ enum class QuicRouteAddressFamily : std::uint8_t {
 namespace test {
 bool seed_legacy_route_handle_path_for_tests(QuicCore &core, QuicRouteHandle route_handle,
                                              QuicPathId path_id);
-bool core_endpoint_internal_coverage_for_tests();
 } // namespace test
 
 class QuicCore {
@@ -741,7 +739,6 @@ class QuicCore {
     friend bool test::seed_legacy_route_handle_path_for_tests(QuicCore &core,
                                                               QuicRouteHandle route_handle,
                                                               QuicPathId path_id);
-    friend bool test::core_endpoint_internal_coverage_for_tests();
     void set_legacy_connection(std::unique_ptr<QuicConnection> connection);
     static std::string connection_id_key(std::span<const std::byte> connection_id);
     static std::string

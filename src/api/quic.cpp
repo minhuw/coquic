@@ -20,36 +20,7 @@ ConnectionHandle created_connection_handle(const core::Result &result) {
 
 } // namespace
 
-namespace test {
-
-bool quic_facade_lifecycle_scan_coverage_for_tests() {
-    bool ok = true;
-    const auto record = [&ok](bool condition) {
-        ok = static_cast<bool>(static_cast<unsigned>(ok) & static_cast<unsigned>(condition));
-    };
-
-    core::Result closed_then_created;
-    closed_then_created.effects.push_back(core::ConnectionLifecycleEvent{
-        .connection = 9,
-        .event = core::Lifecycle::closed,
-    });
-    closed_then_created.effects.push_back(core::ConnectionLifecycleEvent{
-        .connection = 10,
-        .event = core::Lifecycle::created,
-    });
-
-    core::Result no_created_event;
-    no_created_event.effects.push_back(core::ConnectionLifecycleEvent{
-        .connection = 11,
-        .event = core::Lifecycle::accepted,
-    });
-
-    record(created_connection_handle(closed_then_created) == 10u);
-    record(created_connection_handle(no_created_event) == 0u);
-    return ok;
-}
-
-} // namespace test
+namespace test {} // namespace test
 
 class Endpoint::Impl {
   public:

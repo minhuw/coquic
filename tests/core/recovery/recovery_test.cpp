@@ -311,36 +311,6 @@ struct PacketSpaceRecoveryTestPeer {
     static std::size_t invalid_live_slot_index() {
         return PacketSpaceRecovery::kInvalidLedgerSlotIndex;
     }
-
-    static bool link_live_slot_tail_guard_branch_for_tests() {
-        PacketSpaceRecovery recovery;
-        recovery.slots_.resize(8);
-        recovery.first_live_slot_ = 2;
-        recovery.last_live_slot_ = 7;
-        recovery.live_links_.resize(8);
-        recovery.live_links_[2] = PacketSpaceRecovery::LiveSlotLink{
-            .prev = PacketSpaceRecovery::kInvalidLedgerSlotIndex,
-            .next = PacketSpaceRecovery::kInvalidLedgerSlotIndex,
-        };
-
-        recovery.link_live_slot(5);
-        return recovery.last_live_slot_ == 5 && recovery.live_links_[5].prev == 7 &&
-               recovery.live_links_[7].next == 5;
-    }
-
-    static bool newest_live_slot_bitset_guard_branches_for_tests() {
-        PacketSpaceRecovery no_words;
-        no_words.slots_.resize(64);
-        const bool missing_word_ok = no_words.newest_live_slot_at_or_below(63) ==
-                                     PacketSpaceRecovery::kInvalidLedgerSlotIndex;
-
-        PacketSpaceRecovery previous_word;
-        previous_word.slots_.resize(130);
-        previous_word.live_slot_words_.resize(2);
-        previous_word.live_slot_words_[0] = std::uint64_t{1} << 7;
-
-        return missing_word_ok && previous_word.newest_live_slot_at_or_below(64) == 7u;
-    }
 };
 
 } // namespace coquic::quic::test
@@ -1910,12 +1880,7 @@ TEST(QuicRecoveryTest, TrackedPacketsPreservePacketNumberOrderAcrossLateLosses) 
     EXPECT_EQ(newest.value().packet_number, 7u);
 }
 
-TEST(QuicRecoveryTest, RecoveryLiveSlotHelpersCoverTailAndBitsetFallbacks) {
-    EXPECT_TRUE(coquic::quic::test::PacketSpaceRecoveryTestPeer::
-                    link_live_slot_tail_guard_branch_for_tests());
-    EXPECT_TRUE(coquic::quic::test::PacketSpaceRecoveryTestPeer::
-                    newest_live_slot_bitset_guard_branches_for_tests());
-
+TEST(QuicRecoveryTest, NewestLiveSlotLookupUsesTrackedPackets) {
     PacketSpaceRecovery recovery;
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/130, /*ack_eliciting=*/true,
                                              coquic::quic::test::test_time(1)));

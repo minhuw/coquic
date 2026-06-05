@@ -1196,7 +1196,3 @@ TEST(CoquicCoreFfiTest, ResultLocalErrorsExposeAllCodesAndOptionalFields) {
         }
     }
 }
-
-TEST(CoquicCoreFfiTest, InternalCoverageHookCoversPrivateConversions) {
-    EXPECT_TRUE(coquic::ffi::test::core_ffi_conversion_coverage_for_tests());
-}

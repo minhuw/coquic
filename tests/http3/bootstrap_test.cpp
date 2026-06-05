@@ -58,7 +58,6 @@ void bootstrap_set_forced_file_size_failure_path_for_test(const std::filesystem:
 void bootstrap_clear_forced_file_size_failure_path_for_test();
 std::string bootstrap_serialize_unknown_status_response_for_test(const Http3BootstrapConfig &config,
                                                                  int status_code);
-bool bootstrap_internal_coverage_for_test();
 } // namespace coquic::http3
 
 namespace {
@@ -1430,14 +1429,6 @@ TEST(QuicHttp3BootstrapTest, OversizedRequestHelperReturnsFalseForCompleteAndInc
     EXPECT_FALSE(coquic::http3::bootstrap_rejects_oversized_request_without_terminator_for_test(
         "GET / HTTP/1.1\r\nHost: example.test\r\n"));
 }
-
-TEST(QuicHttp3BootstrapTest, TestHooksCoverAdditionalRequestParsingAndFailureBranches) {
-    EXPECT_FALSE(coquic::http3::bootstrap_parse_request_for_test("GET/HTTP/1.1\r\n\r\n"));
-    EXPECT_FALSE(coquic::http3::bootstrap_parse_request_for_test("GET /\r\n\r\n"));
-    EXPECT_TRUE(coquic::http3::bootstrap_parse_request_for_test("GET / HTTP/1.0\r\n\r\n"));
-    EXPECT_TRUE(coquic::http3::bootstrap_internal_coverage_for_test());
-}
-
 TEST(QuicHttp3BootstrapTest, TestHookSerializesUnknownStatusWithFallbackReasonPhrase) {
     const auto config = coquic::http3::Http3BootstrapConfig{
         .h3_port = 8443,

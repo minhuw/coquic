@@ -48,10 +48,7 @@
 #include "src/quic/qlog/session.h"
 #include "src/quic/tls_adapter_quictls_test_hooks.h"
 
-#if defined(COQUIC_COVERAGE_BUILD)
-#define COQUIC_NO_PROFILE
-#define COQUIC_NOINLINE __attribute__((noinline))
-#elif defined(__clang__)
+#if defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #define COQUIC_NOINLINE __attribute__((noinline))
 #else

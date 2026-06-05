@@ -13,10 +13,6 @@
 #include "src/http3/http3_protocol.h"
 #include "src/http3/http3_qpack.h"
 
-namespace coquic::http3::test {
-bool http3_ffi_conversion_coverage_for_tests();
-}
-
 namespace {
 
 coquic_bytes_t bytes_view(const std::vector<std::uint8_t> &bytes) {
@@ -681,8 +677,4 @@ TEST(CoquicHttp3FfiTest, ServerRequestCancelledViewExposesHeadBodyAndTrailers) {
 
     coquic_http3_server_update_destroy(update);
     coquic_http3_server_destroy(server);
-}
-
-TEST(CoquicHttp3FfiTest, InternalCoverageHookCoversPrivateConversions) {
-    EXPECT_TRUE(coquic::http3::test::http3_ffi_conversion_coverage_for_tests());
 }

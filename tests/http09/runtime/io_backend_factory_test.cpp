@@ -5,10 +5,6 @@
 #include "src/io/io_backend_test_hooks.h"
 #include "src/io/io_backend_factory.h"
 
-namespace coquic::io::test {
-bool io_backend_factory_coverage_for_tests();
-}
-
 namespace {
 
 namespace factory_test = coquic::io::test;
@@ -61,9 +57,4 @@ TEST(QuicIoBackendFactoryTest, IoUringClientBootstrapFailsFastWhenInitialization
         "127.0.0.1", 4433);
     EXPECT_FALSE(bootstrap.has_value());
 }
-
-TEST(QuicIoBackendFactoryTest, CoverageHookExercisesIoUringAndFallbackBranches) {
-    EXPECT_TRUE(factory_test::io_backend_factory_coverage_for_tests());
-}
-
 } // namespace

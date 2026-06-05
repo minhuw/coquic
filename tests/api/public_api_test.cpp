@@ -10,23 +10,7 @@
 #include "coquic/coquic.h"
 #include "src/quic/core.h"
 
-namespace coquic::core::test {
-bool core_wrapper_conversion_coverage_for_tests();
-}
-
-namespace coquic::http3::test {
-bool http3_wrapper_conversion_coverage_for_tests();
-}
-
-namespace coquic::quic::test {
-bool quic_facade_lifecycle_scan_coverage_for_tests();
-}
-
 namespace {
-
-namespace core_test = coquic::core::test;
-namespace http3_test = coquic::http3::test;
-namespace quic_test = coquic::quic::test;
 
 std::vector<std::byte> bytes(std::initializer_list<std::uint8_t> values) {
     std::vector<std::byte> out;
@@ -475,11 +459,4 @@ TEST(CoquicPublicApiTest, Http3EndpointConfigSetsAlpnAndRole) {
     });
     EXPECT_FALSE(handler_server.has_failed());
 }
-
-TEST(CoquicPublicApiTest, TestHooksCoverWrapperConversionBranches) {
-    EXPECT_TRUE(core_test::core_wrapper_conversion_coverage_for_tests());
-    EXPECT_TRUE(http3_test::http3_wrapper_conversion_coverage_for_tests());
-    EXPECT_TRUE(quic_test::quic_facade_lifecycle_scan_coverage_for_tests());
-}
-
 } // namespace

@@ -26,16 +26,6 @@
 
 namespace coquic::quic {
 
-namespace test {
-struct ConnectionCoverageTestPeer;
-bool core_endpoint_internal_coverage_for_tests();
-bool connection_helper_edge_cases_for_tests();
-bool connection_header_packet_space_coverage_for_tests();
-bool connection_key_update_and_probe_coverage_for_tests();
-bool connection_pmtud_coverage_for_tests();
-bool connection_packet_inspection_coverage_for_tests();
-} // namespace test
-
 enum class HandshakeStatus : std::uint8_t {
     idle,
     in_progress,
@@ -592,14 +582,6 @@ class QuicConnection {
     };
 
     friend class QuicCore;
-    friend struct test::ConnectionCoverageTestPeer;
-    friend bool test::core_endpoint_internal_coverage_for_tests();
-    friend bool test::connection_helper_edge_cases_for_tests();
-    friend bool test::connection_header_packet_space_coverage_for_tests();
-    friend bool test::connection_key_update_and_probe_coverage_for_tests();
-    friend bool test::connection_pmtud_coverage_for_tests();
-    friend bool test::connection_packet_inspection_coverage_for_tests();
-
     void start_client_if_needed();
     void start_client_if_needed(QuicCoreTimePoint now);
     void start_server_if_needed(const ConnectionId &client_initial_destination_connection_id,

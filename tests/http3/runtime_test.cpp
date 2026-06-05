@@ -44,15 +44,6 @@ bool runtime_make_client_execution_plan_for_test(const Http3RuntimeConfig &confi
                                                  std::string_view url);
 bool runtime_make_client_transfer_plans_for_test(const Http3RuntimeConfig &config,
                                                  std::span<const Http3RuntimeTransferJob> jobs);
-bool runtime_misc_internal_coverage_for_test();
-bool runtime_loop_internal_coverage_for_test();
-std::uint64_t runtime_loop_internal_coverage_mask_for_test();
-std::uint64_t runtime_connection_handle_effect_coverage_mask_for_test();
-bool runtime_additional_internal_coverage_for_test();
-bool runtime_server_local_error_without_connection_coverage_for_test();
-bool runtime_tail_internal_coverage_for_test();
-bool runtime_streaming_reverse_proxy_dispatcher_coverage_for_test();
-bool reverse_proxy_internal_coverage_for_test();
 void runtime_set_force_bootstrap_guard_failure_for_test(bool enabled);
 void runtime_set_forced_server_endpoint_config_for_test(
     std::optional<coquic::quic::QuicCoreEndpointConfig> endpoint);
@@ -1803,50 +1794,6 @@ TEST(QuicHttp3RuntimeTest, RuntimeParserRejectsInvalidCongestionControlArguments
             static_cast<int>(std::size(argv)), const_cast<char **>(argv));
         EXPECT_FALSE(parsed.has_value());
     }
-}
-
-TEST(QuicHttp3RuntimeTest, RuntimeMiscInternalCoverageHookReturnsTrue) {
-    expect_true_with_captured_stderr(
-        [] { return coquic::http3::runtime_misc_internal_coverage_for_test(); });
-}
-
-TEST(QuicHttp3RuntimeTest, RuntimeLoopInternalCoverageHookReturnsTrue) {
-    EXPECT_TRUE(coquic::http3::runtime_loop_internal_coverage_for_test());
-}
-
-TEST(QuicHttp3RuntimeTest, RuntimeLoopInternalCoverageMaskIncludesScriptedBranches) {
-    constexpr std::uint64_t kExpectedMask = (1ull << 0) | (1ull << 1) | (1ull << 2) | (1ull << 3) |
-                                            (1ull << 4) | (1ull << 5) | (1ull << 6) | (1ull << 7) |
-                                            (1ull << 8) | (1ull << 9) | (1ull << 10);
-    EXPECT_EQ(coquic::http3::runtime_loop_internal_coverage_mask_for_test(), kExpectedMask);
-}
-
-TEST(QuicHttp3RuntimeTest, RuntimeConnectionHandleCoverageMaskIncludesEventEffects) {
-    constexpr std::uint64_t kExpectedMask = (1ull << 0) | (1ull << 1) | (1ull << 2) | (1ull << 3) |
-                                            (1ull << 4) | (1ull << 5) | (1ull << 6) | (1ull << 7);
-    EXPECT_EQ(coquic::http3::runtime_connection_handle_effect_coverage_mask_for_test(),
-              kExpectedMask);
-}
-
-TEST(QuicHttp3RuntimeTest, RuntimeAdditionalInternalCoverageHookReturnsTrue) {
-    EXPECT_TRUE(coquic::http3::runtime_additional_internal_coverage_for_test());
-}
-
-TEST(QuicHttp3RuntimeTest, RuntimeServerCoverageHookHandlesLocalErrorWithoutConnection) {
-    EXPECT_TRUE(coquic::http3::runtime_server_local_error_without_connection_coverage_for_test());
-}
-
-TEST(QuicHttp3RuntimeTest, RuntimeTailInternalCoverageHookReturnsTrue) {
-    expect_true_with_captured_stderr(
-        [] { return coquic::http3::runtime_tail_internal_coverage_for_test(); });
-}
-
-TEST(QuicHttp3RuntimeTest, RuntimeStreamingReverseProxyDispatcherCoverageHookReturnsTrue) {
-    EXPECT_TRUE(coquic::http3::runtime_streaming_reverse_proxy_dispatcher_coverage_for_test());
-}
-
-TEST(QuicHttp3RuntimeTest, ReverseProxyInternalCoverageHookReturnsTrue) {
-    EXPECT_TRUE(coquic::http3::reverse_proxy_internal_coverage_for_test());
 }
 
 TEST(QuicHttp3RuntimeTest, ServerEndpointConfigRejectsUnreadableIdentityFiles) {

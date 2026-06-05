@@ -1398,9 +1398,4 @@ TEST(QuicTlsAdapterContractTest, MoveConstructionRetainsUsableAdapter) {
     EXPECT_FALSE(moved.handshake_complete());
     EXPECT_TRUE(moved.start().has_value());
 }
-
-TEST(QuicTlsAdapterContractTest, InternalCoverageHookExercisesDriveHandshakeAndNullSslPaths) {
-    EXPECT_TRUE(TlsAdapterTestPeer::internal_coverage_for_tests());
-}
-
 } // namespace

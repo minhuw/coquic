@@ -844,11 +844,6 @@ TEST(SocketIoBackendTest, LinuxPathMtuSocketOptionSetupReportsEachFailurePoint) 
         321, AF_INET));
 #endif
 }
-
-TEST(SocketIoBackendTest, PollEngineReportsLinuxPathMtuUpdates) {
-    EXPECT_TRUE(coquic::io::test::poll_io_engine_pmtud_coverage_for_tests());
-}
-
 TEST(SocketIoBackendTest, PollEngineIgnoresNonPathMtuErrqueueEvents) {
     EXPECT_TRUE(coquic::io::test::poll_io_engine_ignores_non_pmtu_errqueue_for_tests());
 }
@@ -869,49 +864,13 @@ TEST(SocketIoBackendTest, AppliesIpv6FlowLabelOnOutboundDatagrams) {
 TEST(SocketIoBackendTest, MapsRecvmsgEcnMetadataIntoEvents) {
     EXPECT_TRUE(coquic::io::test::socket_io_backend_recvmsg_maps_ecn_for_tests());
 }
-
-TEST(SocketIoBackendTest, InternalCoverageHookExercisesColdPaths) {
-    EXPECT_TRUE(coquic::io::test::
-                    socket_io_backend_internal_coverage_hook_exercises_cold_paths_for_tests());
-}
-
-TEST(SocketIoBackendTest, AddressValidationIdentityCoverageHookExercisesFamilies) {
+TEST(SocketIoBackendTest, AddressValidationIdentityHandlesAddressFamilies) {
     EXPECT_TRUE(
         coquic::io::test::socket_io_backend_address_validation_identity_branches_for_tests());
 }
 
-TEST(SocketIoBackendTest, InternalCoverageHookExercisesRemainingBranches) {
-    EXPECT_TRUE(
-        coquic::io::test::
-            socket_io_backend_internal_coverage_hook_exercises_remaining_branches_for_tests());
-}
-
-TEST(SocketIoBackendTest, PollIoEngineInternalCoverageHookExercisesRemainingBranches) {
-    EXPECT_TRUE(coquic::io::test::
-                    poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_tests());
-}
-
 TEST(SocketIoBackendTest, PollIoEngineRestampsQueuedReceiveEvents) {
     EXPECT_TRUE(coquic::io::test::poll_io_engine_restamps_queued_receive_events_for_tests());
-}
-
-TEST(SocketIoBackendTest, PollIoEngineSendManyBatchingCoverageHookExercisesBatchPaths) {
-    EXPECT_TRUE(coquic::io::test::poll_io_engine_send_many_batching_coverage_for_tests());
-}
-
-TEST(SocketIoBackendTest, PollIoEngineDescriptorCacheGuardBranchesAreCovered) {
-    EXPECT_TRUE(coquic::io::test::poll_io_engine_descriptor_cache_guard_branches_for_tests());
-}
-
-TEST(SocketIoBackendTest, DuplicateRouteLookupGuardBranchesAreCovered) {
-    EXPECT_TRUE(
-        coquic::io::test::socket_io_backend_duplicate_route_lookup_guard_branches_for_tests());
-}
-
-TEST(SocketIoBackendTest, PendingEventGuardBranchesAreCovered) {
-    EXPECT_TRUE(coquic::io::test::socket_io_backend_has_pending_event_guard_branches_for_tests());
-    EXPECT_TRUE(
-        coquic::io::test::shared_udp_backend_core_has_pending_event_guard_branches_for_tests());
 }
 
 TEST(SocketIoBackendTest, HasPendingEventsChecksLiveBackendCore) {

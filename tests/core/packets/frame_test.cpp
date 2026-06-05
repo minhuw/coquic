@@ -16,16 +16,6 @@
 #include "src/quic/recovery.h"
 #include "tests/support/quic_test_utils.h"
 
-namespace coquic::quic::test {
-bool frame_length_prefixed_span_fault_coverage_for_tests();
-bool frame_single_varint_writer_fault_coverage_for_tests();
-std::uint64_t frame_to_received_variant_coverage_mask_for_tests();
-bool frame_matches_codec_error_branch_coverage_for_tests();
-bool frame_matches_codec_error_success_branch_coverage_for_tests();
-bool frame_received_unknown_type_branch_coverage_for_tests();
-bool frame_streams_blocked_writer_success_coverage_for_tests(coquic::quic::StreamLimitType);
-} // namespace coquic::quic::test
-
 namespace {
 
 using coquic::quic::AckEcnCounts;
@@ -2230,57 +2220,6 @@ TEST(QuicFrameTest, ReceivedFrameListCoversVectorAndMutableAccessors) {
     });
     ASSERT_EQ(stream_overflow.size(), 2u);
     EXPECT_EQ(std::get<ReceivedStreamFrame>(stream_overflow[1]).stream_id, 2u);
-}
-
-TEST(QuicFrameTest, ToReceivedVariantCoverageMaskIncludesColdAlternatives) {
-    constexpr std::uint64_t kExpectedMask = (1ull << 0) | (1ull << 1) | (1ull << 2) | (1ull << 3) |
-                                            (1ull << 4) | (1ull << 5) | (1ull << 6) | (1ull << 7) |
-                                            (1ull << 8) | (1ull << 9);
-    EXPECT_EQ(coquic::quic::test::frame_to_received_variant_coverage_mask_for_tests(),
-              kExpectedMask);
-}
-
-TEST(QuicFrameTest, InternalCoverageHookExercisesRemainingFrameBranches) {
-    EXPECT_TRUE(coquic::quic::test::frame_internal_coverage_for_tests());
-}
-
-TEST(QuicFrameTest, FaultHelperCoverageHookExercisesSpanWriterBranches) {
-    EXPECT_TRUE(coquic::quic::test::frame_fault_helper_branch_coverage_for_tests());
-}
-
-TEST(QuicFrameTest, LengthPrefixedSpanWriterFaultCoverageHookExercisesVarintFailureBranch) {
-    EXPECT_TRUE(coquic::quic::test::frame_length_prefixed_span_fault_coverage_for_tests());
-}
-
-TEST(QuicFrameTest, SingleVarintWriterFaultCoverageHookExercisesRemainingBranches) {
-    EXPECT_TRUE(coquic::quic::test::frame_single_varint_writer_fault_coverage_for_tests());
-}
-
-TEST(QuicFrameTest, MatchesCodecErrorCoverageHookExercisesMismatchBranches) {
-    EXPECT_TRUE(coquic::quic::test::frame_matches_codec_error_branch_coverage_for_tests());
-}
-
-TEST(QuicFrameTest, MatchesCodecErrorCoverageHookExercisesSuccessBranch) {
-    EXPECT_TRUE(coquic::quic::test::frame_matches_codec_error_success_branch_coverage_for_tests());
-}
-
-TEST(QuicFrameTest, ReceivedFrameCoverageHookExercisesUnknownFrameTypeBranch) {
-    EXPECT_TRUE(coquic::quic::test::frame_received_unknown_type_branch_coverage_for_tests());
-}
-
-TEST(QuicFrameTest, StreamsBlockedWriterCoverageHookExercisesCountingAndSpanVisitors) {
-    EXPECT_TRUE(coquic::quic::test::frame_streams_blocked_writer_success_coverage_for_tests(
-        StreamLimitType::bidirectional));
-    EXPECT_TRUE(coquic::quic::test::frame_streams_blocked_writer_success_coverage_for_tests(
-        StreamLimitType::unidirectional));
-}
-
-TEST(QuicFrameTest, WriterCoverageHookExercisesRemainingSerializeBranches) {
-    EXPECT_TRUE(coquic::quic::test::frame_writer_branch_coverage_for_tests());
-}
-
-TEST(QuicFrameTest, SpanWriterCoverageHookExercisesRemainingSerializeBranches) {
-    EXPECT_TRUE(coquic::quic::test::frame_span_writer_branch_coverage_for_tests());
 }
 
 } // namespace

@@ -4,12 +4,6 @@
 
 namespace coquic::quic::test {
 
-bool connection_helper_edge_cases_for_tests();
-bool connection_ack_deadline_and_stream_utilities_for_tests();
-bool connection_instrumented_helper_coverage_for_tests();
-bool connection_header_packet_space_coverage_for_tests();
-bool connection_key_update_and_probe_coverage_for_tests();
-bool connection_pmtud_coverage_for_tests();
 void connection_set_force_quic_core_secret_rand_failure_for_tests(bool enabled);
 void connection_set_force_prf_failure_for_tests(bool enabled);
 void connection_set_force_issued_connection_id_rand_failure_for_tests(bool enabled);

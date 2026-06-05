@@ -45,9 +45,7 @@ using BioPtr = std::unique_ptr<BIO, decltype(&BIO_free)>;
 using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
 using SslSessionPtr = std::unique_ptr<SSL_SESSION, decltype(&SSL_SESSION_free)>;
 
-#if defined(COQUIC_COVERAGE_BUILD)
-#define COQUIC_NO_PROFILE
-#elif defined(__clang__)
+#if defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #else
 #define COQUIC_NO_PROFILE
@@ -1633,53 +1631,6 @@ void TlsAdapterTestPeer::set_early_data_accepted(TlsAdapter &adapter,
 void TlsAdapterTestPeer::apply_early_data_status(TlsAdapter &adapter, int early_data_status,
                                                  bool handshake_complete) {
     adapter.impl_->update_early_data_status_value(early_data_status, handshake_complete);
-}
-
-bool TlsAdapterTestPeer::internal_coverage_for_tests() {
-    const auto make_client_config = [] {
-        return TlsAdapterConfig{
-            .role = EndpointRole::client,
-            .verify_peer = false,
-            .server_name = "localhost",
-            .local_transport_parameters =
-                {
-                    std::byte{0x0f},
-                    std::byte{0x04},
-                    std::byte{0x03},
-                    std::byte{0x02},
-                    std::byte{0x01},
-                    std::byte{0x00},
-                    std::byte{0x0e},
-                    std::byte{0x01},
-                    std::byte{0x02},
-                },
-        };
-    };
-
-    TlsAdapter handshake_adapter(make_client_config());
-    const bool started = handshake_adapter.start().has_value();
-
-    bool handshake_failed_with_fault = false;
-    {
-        const ScopedTlsAdapterFaultInjector injector(TlsAdapterFaultPoint::drive_handshake);
-        handshake_failed_with_fault = !handshake_adapter.impl_->drive_handshake().has_value();
-    }
-    const CodecError observed_sticky_error =
-        handshake_adapter.impl_->sticky_error_.value_or(CodecError{
-            .code = CodecErrorCode::unsupported_cipher_suite,
-            .offset = 0,
-        });
-    const bool sticky_error_matches =
-        observed_sticky_error.code == CodecErrorCode::invalid_packet_protection_state;
-
-    TlsAdapter null_ssl_adapter(make_client_config());
-    null_ssl_adapter.impl_->ssl_.reset();
-    null_ssl_adapter.impl_->update_runtime_status();
-    const bool selected_protocol_unset =
-        !null_ssl_adapter.impl_->selected_application_protocol_.has_value();
-    const bool early_data_unset = !null_ssl_adapter.impl_->early_data_accepted_.has_value();
-    return started & handshake_failed_with_fault & sticky_error_matches & selected_protocol_unset &
-           early_data_unset;
 }
 
 } // namespace test

@@ -2156,7 +2156,7 @@ TEST(QuicCongestionTest, CopaTargetRttAndVelocityBranchesAreCovered) {
     EXPECT_EQ(controller.congestion_window(), controller.minimum_window());
 }
 
-TEST(QuicCongestionTest, CopaResidualCoverageBranches) {
+TEST(QuicCongestionTest, CopaResidualBranches) {
     CopaCongestionController controller(/*max_datagram_size=*/1200);
 
     auto packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
@@ -4272,7 +4272,7 @@ TEST(QuicCongestionTest, BbrBoundsMathAndWrapperSelfAssignmentBranches) {
     EXPECT_EQ(static_cast<std::size_t>(null_metric), 0u);
 }
 
-TEST(QuicCongestionTest, BbrAdditionalInternalCoverageBranches) {
+TEST(QuicCongestionTest, BbrAdditionalInternalBranches) {
     {
         BbrCongestionController controller(/*max_datagram_size=*/1200);
         EXPECT_FALSE(controller.next_send_time(/*bytes=*/0).has_value());
@@ -4475,7 +4475,7 @@ TEST(QuicCongestionTest, BbrAdditionalInternalCoverageBranches) {
     }
 }
 
-TEST(QuicCongestionTest, BbrAdditionalResidualCoverageBranches) {
+TEST(QuicCongestionTest, BbrAdditionalResidualBranches) {
     {
         BbrCongestionController controller(/*max_datagram_size=*/1200);
         controller.congestion_window_ = 1200;
@@ -4887,7 +4887,7 @@ TEST(QuicCongestionTest, BbrAdditionalResidualCoverageBranches) {
     }
 }
 
-TEST(QuicCongestionTest, BbrRemainingCoverageBranches) {
+TEST(QuicCongestionTest, BbrRemainingBranches) {
     {
         BbrCongestionController controller(/*max_datagram_size=*/1200);
         controller.first_sent_time_ = coquic::quic::test::test_time(1);

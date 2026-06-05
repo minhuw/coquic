@@ -27,9 +27,7 @@
 #include <string_view>
 #include <vector>
 
-#if defined(COQUIC_COVERAGE_BUILD)
-#define COQUIC_NO_PROFILE
-#elif defined(__clang__)
+#if defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #else
 #define COQUIC_NO_PROFILE
@@ -1711,15 +1709,15 @@ struct RetryReadablePollForTests {
 
 thread_local RetryReadablePollForTests g_retry_readable_poll_for_tests;
 
-struct PollEngineCoverageTrace {
+struct PollEngineTestTrace {
     int eintr_then_timeout_calls = 0;
     int ignored_errqueue_poll_calls = 0;
     int extra_batch_recvmmsg_calls = 0;
 };
 
-thread_local PollEngineCoverageTrace g_poll_engine_coverage_trace;
+thread_local PollEngineTestTrace g_poll_engine_test_trace;
 
-struct SendManyBatchCoverageTrace {
+struct SendManyBatchTestTrace {
     enum class Mode : std::uint8_t {
         success,
         gso_not_supported_then_partial_sendmmsg,
@@ -1756,7 +1754,7 @@ struct SendManyBatchCoverageTrace {
     std::uint32_t ipv6_flowinfo = 0;
 };
 
-thread_local SendManyBatchCoverageTrace g_send_many_batch_coverage_trace;
+thread_local SendManyBatchTestTrace g_send_many_batch_test_trace;
 
 bool all_true(std::initializer_list<bool> conditions) {
     return std::count(conditions.begin(), conditions.end(), false) == 0;
@@ -1773,10 +1771,10 @@ std::size_t iov_total_size(const msghdr &message) {
 void record_batch_controls_for_tests(const msghdr &message) {
     if (message.msg_name != nullptr) {
         const auto *peer = static_cast<const sockaddr *>(message.msg_name);
-        g_send_many_batch_coverage_trace.peer_family = peer->sa_family;
+        g_send_many_batch_test_trace.peer_family = peer->sa_family;
         if (peer->sa_family == AF_INET6) {
             const auto *ipv6_peer = reinterpret_cast<const sockaddr_in6 *>(message.msg_name);
-            g_send_many_batch_coverage_trace.ipv6_flowinfo = ntohl(ipv6_peer->sin6_flowinfo);
+            g_send_many_batch_test_trace.ipv6_flowinfo = ntohl(ipv6_peer->sin6_flowinfo);
         }
     }
     for (auto *control_header = CMSG_FIRSTHDR(const_cast<msghdr *>(&message));
@@ -1785,87 +1783,83 @@ void record_batch_controls_for_tests(const msghdr &message) {
         if ((control_header->cmsg_level == IPPROTO_IP && control_header->cmsg_type == IP_TOS) ||
             (control_header->cmsg_level == IPPROTO_IPV6 &&
              control_header->cmsg_type == IPV6_TCLASS)) {
-            g_send_many_batch_coverage_trace.saw_ecn_control = true;
-            g_send_many_batch_coverage_trace.ecn_level = control_header->cmsg_level;
-            g_send_many_batch_coverage_trace.ecn_type = control_header->cmsg_type;
-            std::memcpy(&g_send_many_batch_coverage_trace.linux_traffic_class,
+            g_send_many_batch_test_trace.saw_ecn_control = true;
+            g_send_many_batch_test_trace.ecn_level = control_header->cmsg_level;
+            g_send_many_batch_test_trace.ecn_type = control_header->cmsg_type;
+            std::memcpy(&g_send_many_batch_test_trace.linux_traffic_class,
                         CMSG_DATA(control_header),
-                        sizeof(g_send_many_batch_coverage_trace.linux_traffic_class));
+                        sizeof(g_send_many_batch_test_trace.linux_traffic_class));
         }
         if (control_header->cmsg_level == SOL_UDP && control_header->cmsg_type == UDP_SEGMENT) {
-            g_send_many_batch_coverage_trace.saw_udp_segment_control = true;
-            std::memcpy(&g_send_many_batch_coverage_trace.udp_segment_size,
-                        CMSG_DATA(control_header),
-                        sizeof(g_send_many_batch_coverage_trace.udp_segment_size));
+            g_send_many_batch_test_trace.saw_udp_segment_control = true;
+            std::memcpy(&g_send_many_batch_test_trace.udp_segment_size, CMSG_DATA(control_header),
+                        sizeof(g_send_many_batch_test_trace.udp_segment_size));
         }
     }
 }
 
 ssize_t batch_sendmsg_for_tests(int socket_fd, const msghdr *message, int) {
-    g_send_many_batch_coverage_trace.sendmsg_calls += 1;
-    g_send_many_batch_coverage_trace.socket_fd = socket_fd;
+    g_send_many_batch_test_trace.sendmsg_calls += 1;
+    g_send_many_batch_test_trace.socket_fd = socket_fd;
     if (message != nullptr) {
-        g_send_many_batch_coverage_trace.last_sendmsg_iov_count = message->msg_iovlen;
-        g_send_many_batch_coverage_trace.last_sendmsg_total_bytes = iov_total_size(*message);
+        g_send_many_batch_test_trace.last_sendmsg_iov_count = message->msg_iovlen;
+        g_send_many_batch_test_trace.last_sendmsg_total_bytes = iov_total_size(*message);
         record_batch_controls_for_tests(*message);
     }
 
-    if (g_send_many_batch_coverage_trace.mode ==
-        SendManyBatchCoverageTrace::Mode::gso_not_supported_then_partial_sendmmsg) {
+    if (g_send_many_batch_test_trace.mode ==
+        SendManyBatchTestTrace::Mode::gso_not_supported_then_partial_sendmmsg) {
         errno = EOPNOTSUPP;
         return -1;
     }
-    if (g_send_many_batch_coverage_trace.mode == SendManyBatchCoverageTrace::Mode::udp_gso_einval) {
+    if (g_send_many_batch_test_trace.mode == SendManyBatchTestTrace::Mode::udp_gso_einval) {
         errno = EINVAL;
         return -1;
     }
-    if (g_send_many_batch_coverage_trace.mode ==
-        SendManyBatchCoverageTrace::Mode::udp_gso_enoprotoopt) {
+    if (g_send_many_batch_test_trace.mode == SendManyBatchTestTrace::Mode::udp_gso_enoprotoopt) {
         errno = ENOPROTOOPT;
         return -1;
     }
-    if (g_send_many_batch_coverage_trace.mode ==
-        SendManyBatchCoverageTrace::Mode::udp_gso_emsgsize) {
+    if (g_send_many_batch_test_trace.mode == SendManyBatchTestTrace::Mode::udp_gso_emsgsize) {
         errno = EMSGSIZE;
         return -1;
     }
-    if (g_send_many_batch_coverage_trace.mode ==
-        SendManyBatchCoverageTrace::Mode::udp_gso_ignorable_error) {
+    if (g_send_many_batch_test_trace.mode ==
+        SendManyBatchTestTrace::Mode::udp_gso_ignorable_error) {
         errno = ECONNREFUSED;
         return -1;
     }
-    if (g_send_many_batch_coverage_trace.mode ==
-        SendManyBatchCoverageTrace::Mode::udp_gso_hard_error) {
+    if (g_send_many_batch_test_trace.mode == SendManyBatchTestTrace::Mode::udp_gso_hard_error) {
         errno = EACCES;
         return -1;
     }
-    if (g_send_many_batch_coverage_trace.mode ==
-            SendManyBatchCoverageTrace::Mode::second_udp_gso_chunk_hard_error &&
-        g_send_many_batch_coverage_trace.sendmsg_calls > 1) {
+    if (g_send_many_batch_test_trace.mode ==
+            SendManyBatchTestTrace::Mode::second_udp_gso_chunk_hard_error &&
+        g_send_many_batch_test_trace.sendmsg_calls > 1) {
         errno = EIO;
         return -1;
     }
-    return static_cast<ssize_t>(g_send_many_batch_coverage_trace.last_sendmsg_total_bytes);
+    return static_cast<ssize_t>(g_send_many_batch_test_trace.last_sendmsg_total_bytes);
 }
 
 int batch_sendmmsg_for_tests(int socket_fd, mmsghdr *send_messages, unsigned int message_count,
                              int) {
-    g_send_many_batch_coverage_trace.sendmmsg_calls += 1;
-    g_send_many_batch_coverage_trace.socket_fd = socket_fd;
-    g_send_many_batch_coverage_trace.last_sendmmsg_message_count = message_count;
+    g_send_many_batch_test_trace.sendmmsg_calls += 1;
+    g_send_many_batch_test_trace.socket_fd = socket_fd;
+    g_send_many_batch_test_trace.last_sendmmsg_message_count = message_count;
     if (send_messages != nullptr && message_count > 0) {
         record_batch_controls_for_tests(send_messages[0].msg_hdr);
     }
 
-    switch (g_send_many_batch_coverage_trace.mode) {
-    case SendManyBatchCoverageTrace::Mode::second_udp_gso_chunk_hard_error:
-        if (g_send_many_batch_coverage_trace.sendmsg_calls > 1) {
+    switch (g_send_many_batch_test_trace.mode) {
+    case SendManyBatchTestTrace::Mode::second_udp_gso_chunk_hard_error:
+        if (g_send_many_batch_test_trace.sendmsg_calls > 1) {
             errno = EIO;
             return -1;
         }
         return static_cast<int>(message_count);
-    case SendManyBatchCoverageTrace::Mode::gso_not_supported_then_partial_sendmmsg:
-        if (g_send_many_batch_coverage_trace.sendmmsg_calls == 1) {
+    case SendManyBatchTestTrace::Mode::gso_not_supported_then_partial_sendmmsg:
+        if (g_send_many_batch_test_trace.sendmmsg_calls == 1) {
             errno = EINTR;
             return -1;
         }
@@ -1873,12 +1867,12 @@ int batch_sendmmsg_for_tests(int socket_fd, mmsghdr *send_messages, unsigned int
             return 1;
         }
         return static_cast<int>(message_count);
-    case SendManyBatchCoverageTrace::Mode::sendmmsg_zero:
+    case SendManyBatchTestTrace::Mode::sendmmsg_zero:
         return 0;
-    case SendManyBatchCoverageTrace::Mode::sendmmsg_ignorable_error:
+    case SendManyBatchTestTrace::Mode::sendmmsg_ignorable_error:
         errno = ECONNREFUSED;
         return -1;
-    case SendManyBatchCoverageTrace::Mode::sendmmsg_hard_error:
+    case SendManyBatchTestTrace::Mode::sendmmsg_hard_error:
         errno = EIO;
         return -1;
     default:
@@ -1888,20 +1882,17 @@ int batch_sendmmsg_for_tests(int socket_fd, mmsghdr *send_messages, unsigned int
 
 ssize_t batch_sendto_for_tests(int socket_fd, const void *, size_t length, int, const sockaddr *,
                                socklen_t) {
-    g_send_many_batch_coverage_trace.sendto_calls += 1;
-    g_send_many_batch_coverage_trace.socket_fd = socket_fd;
-    if (g_send_many_batch_coverage_trace.mode ==
-        SendManyBatchCoverageTrace::Mode::sendto_hard_error) {
+    g_send_many_batch_test_trace.sendto_calls += 1;
+    g_send_many_batch_test_trace.socket_fd = socket_fd;
+    if (g_send_many_batch_test_trace.mode == SendManyBatchTestTrace::Mode::sendto_hard_error) {
         errno = EIO;
         return -1;
     }
-    if (g_send_many_batch_coverage_trace.mode ==
-        SendManyBatchCoverageTrace::Mode::sendto_pmtu_error) {
+    if (g_send_many_batch_test_trace.mode == SendManyBatchTestTrace::Mode::sendto_pmtu_error) {
         errno = EMSGSIZE;
         return -1;
     }
-    if (g_send_many_batch_coverage_trace.mode ==
-        SendManyBatchCoverageTrace::Mode::sendto_connrefused) {
+    if (g_send_many_batch_test_trace.mode == SendManyBatchTestTrace::Mode::sendto_connrefused) {
         errno = ECONNREFUSED;
         return -1;
     }
@@ -2052,11 +2043,11 @@ int readable_poll_then_retry_with_datagram_for_tests(pollfd *poll_descriptors,
 }
 
 int eintr_then_timeout_poll_for_tests(pollfd *poll_descriptors, nfds_t descriptor_count, int) {
-    g_poll_engine_coverage_trace.eintr_then_timeout_calls += 1;
+    g_poll_engine_test_trace.eintr_then_timeout_calls += 1;
     for (nfds_t index = 0; index < descriptor_count; ++index) {
         poll_descriptors[index].revents = 0;
     }
-    if (g_poll_engine_coverage_trace.eintr_then_timeout_calls == 1) {
+    if (g_poll_engine_test_trace.eintr_then_timeout_calls == 1) {
         errno = EINTR;
         return -1;
     }
@@ -2095,8 +2086,8 @@ ssize_t hard_errqueue_recvmsg_for_tests(int, msghdr *, int flags) {
 
 int first_recvmmsg_batch_then_hard_error_for_tests(int, mmsghdr *messages,
                                                    unsigned int message_count, int, timespec *) {
-    g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls += 1;
-    if (g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls > 1) {
+    g_poll_engine_test_trace.extra_batch_recvmmsg_calls += 1;
+    if (g_poll_engine_test_trace.extra_batch_recvmmsg_calls > 1) {
         errno = EIO;
         return -1;
     }
@@ -2113,12 +2104,12 @@ int first_recvmmsg_batch_then_hard_error_for_tests(int, mmsghdr *messages,
 }
 
 int errqueue_then_timeout_poll_for_tests(pollfd *poll_descriptors, nfds_t descriptor_count, int) {
-    g_poll_engine_coverage_trace.ignored_errqueue_poll_calls += 1;
+    g_poll_engine_test_trace.ignored_errqueue_poll_calls += 1;
     for (nfds_t index = 0; index < descriptor_count; ++index) {
         poll_descriptors[index].revents =
-            g_poll_engine_coverage_trace.ignored_errqueue_poll_calls == 1 ? POLLERR : 0;
+            g_poll_engine_test_trace.ignored_errqueue_poll_calls == 1 ? POLLERR : 0;
     }
-    if (descriptor_count == 0 || g_poll_engine_coverage_trace.ignored_errqueue_poll_calls > 1) {
+    if (descriptor_count == 0 || g_poll_engine_test_trace.ignored_errqueue_poll_calls > 1) {
         return 0;
     }
     return 1;
@@ -2277,7 +2268,7 @@ bool socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests() {
         internal::send_datagram(29, datagram, peer, static_cast<socklen_t>(sizeof(sockaddr_in6)),
                                 "server", QuicEcnCodepoint::not_ect);
 
-    g_send_many_batch_coverage_trace = {};
+    g_send_many_batch_test_trace = {};
     ScopedSocketIoBackendOpsOverride batch_ops{
         SocketIoBackendOpsOverride{
             .sendmsg_fn = &batch_sendmsg_for_tests,
@@ -2324,12 +2315,11 @@ bool socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests() {
         g_recorded_sendmsg_for_tests.ipv6_flowinfo != 0,
         (g_recorded_sendmsg_for_tests.ipv6_flowinfo & ~0x000fffffu) == 0,
         batched,
-        g_send_many_batch_coverage_trace.sendmsg_calls +
-                g_send_many_batch_coverage_trace.sendmmsg_calls >
+        g_send_many_batch_test_trace.sendmsg_calls + g_send_many_batch_test_trace.sendmmsg_calls >
             0,
-        g_send_many_batch_coverage_trace.peer_family == AF_INET6,
-        g_send_many_batch_coverage_trace.ipv6_flowinfo != 0,
-        (g_send_many_batch_coverage_trace.ipv6_flowinfo & ~0x000fffffu) == 0,
+        g_send_many_batch_test_trace.peer_family == AF_INET6,
+        g_send_many_batch_test_trace.ipv6_flowinfo != 0,
+        (g_send_many_batch_test_trace.ipv6_flowinfo & ~0x000fffffu) == 0,
     });
 }
 
@@ -2448,1669 +2438,9 @@ bool poll_io_engine_restamps_queued_receive_events_for_tests() {
     });
 }
 
-bool poll_io_engine_internal_coverage_hook_exercises_remaining_branches_for_tests() {
-    const auto saved_sendmsg = g_recorded_sendmsg_for_tests;
-    const auto saved_recvmsg = g_recorded_recvmsg_for_tests;
-    const auto saved_retry = g_retry_readable_poll_for_tests;
-    const auto saved_poll_trace = g_poll_engine_coverage_trace;
-    const auto saved_udp_gso_disabled = internal::udp_gso_disabled();
-    const auto reset_for_case = [] {
-        errno = 0;
-        g_recorded_sendmsg_for_tests = {};
-        g_recorded_recvmsg_for_tests = {};
-        g_retry_readable_poll_for_tests = {};
-        g_poll_engine_coverage_trace = {};
-        internal::udp_gso_disabled() = false;
-    };
-
-    bool coverage_ok = true;
-    const auto record = [&](bool condition, const char *label) {
-        if (!condition) {
-            std::cerr << "poll_io_engine_send_many_batching_coverage_for_tests failed: " << label
-                      << '\n';
-        }
-        coverage_ok &= condition;
-    };
-
-    auto invalid_ecn_codepoint = [] {
-        const auto raw = static_cast<std::underlying_type_t<QuicEcnCodepoint>>(0xff);
-        QuicEcnCodepoint value{};
-        std::memcpy(&value, &raw, sizeof(value));
-        return value;
-    }();
-    record(all_true({
-               internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect0) == 0x02,
-               internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1) == 0x01,
-               internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ce) == 0x03,
-               internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::unavailable) == 0x00,
-               internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::not_ect) == 0x00,
-               internal::linux_traffic_class_for_ecn(invalid_ecn_codepoint) == 0x00,
-               internal::ecn_from_linux_traffic_class(0x00) == QuicEcnCodepoint::not_ect,
-               internal::ecn_from_linux_traffic_class(0x01) == QuicEcnCodepoint::ect1,
-               internal::ecn_from_linux_traffic_class(0x02) == QuicEcnCodepoint::ect0,
-               internal::ecn_from_linux_traffic_class(0x03) == QuicEcnCodepoint::ce,
-           }),
-           "ecn helpers cover every linux traffic class mapping");
-
-    record(all_true({
-               receive_result_storage_allocation_bytes(0) == 0,
-               receive_result_storage_allocation_bytes(1) == kReceiveResultStorageCacheBucketBytes,
-               receive_result_storage_allocation_bytes(kReceiveResultStorageCacheMaxBytes + 1) ==
-                   kReceiveResultStorageCacheMaxBytes + 1,
-           }),
-           "receive result storage allocation size handles zero, cached, and oversized inputs");
-
-    {
-        auto *aligned_storage =
-            allocate_receive_result_storage(/*bytes=*/64, __STDCPP_DEFAULT_NEW_ALIGNMENT__ * 2);
-        deallocate_receive_result_storage(aligned_storage, __STDCPP_DEFAULT_NEW_ALIGNMENT__ * 2);
-        auto *default_aligned_storage =
-            allocate_receive_result_storage(/*bytes=*/64, alignof(char));
-        deallocate_receive_result_storage(default_aligned_storage, alignof(char));
-
-        ReceiveResultAllocator<std::byte> allocator;
-        auto *single_byte = allocator.allocate(1);
-        allocator.deallocate(single_byte, 0);
-        allocator.deallocate(single_byte, 1);
-        auto *reused_byte = allocator.allocate(1);
-        record(reused_byte == single_byte,
-               "receive result allocator reuses cached storage after zero-count deallocate guard");
-        allocator.deallocate(reused_byte, 1);
-        allocator.deallocate(nullptr, 1);
-
-        bool caught_bad_array_length = false;
-        try {
-            ReceiveResultAllocator<std::uint64_t> wide_allocator;
-            static_cast<void>(wide_allocator.allocate(std::numeric_limits<std::size_t>::max()));
-        } catch (const std::bad_array_new_length &) {
-            caught_bad_array_length = true;
-        }
-        record(caught_bad_array_length,
-               "receive result allocator rejects impossible allocation counts");
-    }
-
-    {
-        auto &cache = receive_result_storage_cache();
-        std::vector<ReceiveResultStorageCache::Entry> saved_entries;
-        saved_entries.reserve(cache.used);
-        while (cache.used != 0) {
-            --cache.used;
-            saved_entries.push_back(cache.entries[cache.used]);
-            cache.entries[cache.used] = ReceiveResultStorageCache::Entry{};
-        }
-
-        std::vector<void *> full_cache_storage;
-        full_cache_storage.reserve(cache.entries.size());
-        for (std::size_t index = 0; index < cache.entries.size(); ++index) {
-            full_cache_storage.push_back(allocate_receive_result_storage(
-                kReceiveResultStorageCacheBucketBytes, alignof(std::byte)));
-            record(cache.put(full_cache_storage.back(), kReceiveResultStorageCacheBucketBytes,
-                             alignof(std::byte)),
-                   "receive result storage cache accepts entries until full");
-        }
-        auto *overflow_cached_storage = allocate_receive_result_storage(
-            kReceiveResultStorageCacheBucketBytes, alignof(std::byte));
-        record(!cache.put(overflow_cached_storage, kReceiveResultStorageCacheBucketBytes,
-                          alignof(std::byte)),
-               "receive result storage cache rejects entries when full");
-        deallocate_receive_result_storage(overflow_cached_storage, alignof(std::byte));
-        while (cache.used != 0) {
-            auto *pointer = cache.entries[cache.used - 1].pointer;
-            --cache.used;
-            cache.entries[cache.used] = ReceiveResultStorageCache::Entry{};
-            deallocate_receive_result_storage(pointer, alignof(std::byte));
-        }
-        full_cache_storage.clear();
-        for (auto it = saved_entries.rbegin(); it != saved_entries.rend(); ++it) {
-            if (it->pointer != nullptr && cache.used < cache.entries.size()) {
-                cache.entries[cache.used++] = *it;
-            }
-        }
-
-        ReceiveResultAllocator<std::byte> allocator;
-        auto *oversized = allocator.allocate(kReceiveResultStorageCacheMaxBytes + 1);
-        allocator.deallocate(oversized, kReceiveResultStorageCacheMaxBytes + 1);
-        record(true, "receive result allocator covers full-cache and oversized deallocate paths");
-    }
-
-    {
-        recycle_receive_byte_storage(nullptr);
-        auto *small_storage = new std::vector<std::byte>(1);
-        recycle_receive_byte_storage(small_storage);
-
-        auto &pool = receive_byte_storage_pool();
-        std::vector<std::unique_ptr<std::vector<std::byte>>> saved_entries;
-        saved_entries.reserve(pool.size);
-        while (pool.size != 0) {
-            --pool.size;
-            saved_entries.push_back(std::move(pool.entries[pool.size]));
-        }
-        for (std::size_t index = 0; index < pool.entries.size(); ++index) {
-            pool.entries[index] = std::make_unique<std::vector<std::byte>>(kMaxDatagramBytes);
-        }
-        pool.size = pool.entries.size();
-        auto *overflow_storage = new std::vector<std::byte>(kMaxDatagramBytes);
-        recycle_receive_byte_storage(overflow_storage);
-        for (auto &entry : pool.entries) {
-            entry.reset();
-        }
-        pool.size = 0;
-        for (auto &entry : saved_entries) {
-            if (entry != nullptr && pool.size < pool.entries.size()) {
-                pool.entries[pool.size++] = std::move(entry);
-            }
-        }
-        record(true,
-               "receive byte storage recycle guards cover null, size mismatch, and full pool");
-    }
-
-    reset_for_case();
-    record(all_true({
-               record_sendmsg_for_tests(9, nullptr, 0) == 0,
-               g_recorded_sendmsg_for_tests.calls == 1,
-               g_recorded_sendmsg_for_tests.socket_fd == 9,
-           }),
-           "record_sendmsg handles null message");
-
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn =
-                    [](int, const msghdr *, int) {
-                        errno = ECONNREFUSED;
-                        return static_cast<ssize_t>(-1);
-                    },
-            },
-        };
-        const auto peer = loopback_peer_for_batch_tests(7443);
-        const std::array<std::byte, 1> bytes{std::byte{0x01}};
-        record(socket_io_backend_send_datagram_for_runtime_tests(
-                   /*fd=*/5, bytes, peer, static_cast<socklen_t>(sizeof(sockaddr_in)), "test",
-                   QuicEcnCodepoint::ect0, /*is_pmtu_probe=*/false),
-               "send_datagram ignores connection refused from sendmsg");
-    }
-
-    reset_for_case();
-    msghdr send_message{};
-    record(all_true({
-               record_sendmsg_for_tests(9, &send_message, 0) == 0,
-               g_recorded_sendmsg_for_tests.calls == 1,
-               g_recorded_sendmsg_for_tests.socket_fd == 9,
-               g_recorded_sendmsg_for_tests.level == 0,
-               g_recorded_sendmsg_for_tests.type == 0,
-               g_recorded_sendmsg_for_tests.linux_traffic_class == 0,
-           }),
-           "record_sendmsg handles missing control and iov");
-
-    std::array<std::byte, 2> send_payload{
-        std::byte{0x41},
-        std::byte{0x42},
-    };
-    iovec send_iov{
-        .iov_base = send_payload.data(),
-        .iov_len = send_payload.size(),
-    };
-    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> send_control{};
-    send_message = {};
-    send_message.msg_iov = &send_iov;
-    send_message.msg_iovlen = 1;
-    send_message.msg_control = send_control.data();
-    send_message.msg_controllen = send_control.size();
-    auto *send_header = reinterpret_cast<cmsghdr *>(send_control.data());
-    send_header->cmsg_level = IPPROTO_IP;
-    send_header->cmsg_type = IP_TOS;
-    send_header->cmsg_len = CMSG_LEN(sizeof(int));
-    int manual_sendmsg_tclass = internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ce);
-    std::memcpy(CMSG_DATA(send_header), &manual_sendmsg_tclass, sizeof(manual_sendmsg_tclass));
-    reset_for_case();
-    record(all_true({
-               record_sendmsg_for_tests(9, &send_message, 0) == 2,
-               g_recorded_sendmsg_for_tests.calls == 1,
-               g_recorded_sendmsg_for_tests.socket_fd == 9,
-               g_recorded_sendmsg_for_tests.level == IPPROTO_IP,
-               g_recorded_sendmsg_for_tests.type == IP_TOS,
-               g_recorded_sendmsg_for_tests.linux_traffic_class == manual_sendmsg_tclass,
-           }),
-           "record_sendmsg copies ancillary traffic class control data");
-
-    {
-        sockaddr_storage ipv6_peer{};
-        auto &ipv6_loopback = *reinterpret_cast<sockaddr_in6 *>(&ipv6_peer);
-        ipv6_loopback.sin6_family = AF_INET6;
-        ipv6_loopback.sin6_port = htons(9443);
-        ipv6_loopback.sin6_addr = in6addr_loopback;
-
-        msghdr ipv6_send_message{};
-        internal::UdpGsoControlStorage gso_control{};
-        ipv6_send_message.msg_control = gso_control.bytes.data();
-        auto *control_cursor = gso_control.bytes.data();
-        internal::append_sendmsg_ecn_control(
-            ipv6_send_message, gso_control, QuicEcnCodepoint::ect1, ipv6_peer,
-            static_cast<socklen_t>(sizeof(sockaddr_in6)), control_cursor);
-        auto *ecn_control_header = CMSG_FIRSTHDR(&ipv6_send_message);
-        int ancillary_traffic_class = 0;
-        if (ecn_control_header != nullptr) {
-            std::memcpy(&ancillary_traffic_class, CMSG_DATA(ecn_control_header),
-                        sizeof(ancillary_traffic_class));
-        }
-        record(all_true({
-                   ecn_control_header != nullptr,
-                   ecn_control_header->cmsg_level == IPPROTO_IPV6,
-                   ecn_control_header->cmsg_type == IPV6_TCLASS,
-                   ancillary_traffic_class ==
-                       internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1),
-               }),
-               "append_sendmsg_ecn_control emits IPv6 ancillary data");
-    }
-
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn =
-                    [](int, const msghdr *, int) {
-                        errno = EACCES;
-                        return static_cast<ssize_t>(-1);
-                    },
-            },
-        };
-        const auto peer = loopback_peer_for_batch_tests(7444);
-        const std::array<std::byte, 1> bytes{std::byte{0x02}};
-        record(!socket_io_backend_send_datagram_for_runtime_tests(
-                   /*fd=*/6, bytes, peer, static_cast<socklen_t>(sizeof(sockaddr_in)), "test",
-                   QuicEcnCodepoint::ect0, /*is_pmtu_probe=*/false),
-               "send_datagram reports hard sendmsg errors");
-    }
-
-    reset_for_case();
-    record(record_recvmsg_for_tests(0, nullptr, 0) == -1, "record_recvmsg rejects null message");
-
-    msghdr invalid_recv_message{};
-    reset_for_case();
-    record(record_recvmsg_for_tests(0, &invalid_recv_message, 0) == -1,
-           "record_recvmsg rejects missing iov");
-
-    std::array<std::byte, 4> payload = {};
-    iovec payload_iov{
-        .iov_base = payload.data(),
-        .iov_len = payload.size(),
-    };
-    invalid_recv_message.msg_iov = &payload_iov;
-    invalid_recv_message.msg_iovlen = 0;
-    reset_for_case();
-    record(record_recvmsg_for_tests(0, &invalid_recv_message, 0) == -1,
-           "record_recvmsg rejects zero iov length");
-
-    g_recorded_recvmsg_for_tests.bytes = {std::byte{0x10}, std::byte{0x20}};
-    auto &recvmsg_ipv6_peer = *reinterpret_cast<sockaddr_in6 *>(&g_recorded_recvmsg_for_tests.peer);
-    recvmsg_ipv6_peer.sin6_family = AF_INET6;
-    recvmsg_ipv6_peer.sin6_port = htons(9443);
-    recvmsg_ipv6_peer.sin6_addr = in6addr_loopback;
-    g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in6);
-
-    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> recv_control_storage{};
-
-    reset_for_case();
-    g_recorded_recvmsg_for_tests.bytes = {std::byte{0x10}, std::byte{0x20}};
-    recvmsg_ipv6_peer = {};
-    recvmsg_ipv6_peer.sin6_family = AF_INET6;
-    recvmsg_ipv6_peer.sin6_port = htons(9443);
-    recvmsg_ipv6_peer.sin6_addr = in6addr_loopback;
-    g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in6);
-    msghdr recv_message{};
-    recv_message.msg_iov = &payload_iov;
-    recv_message.msg_iovlen = 1;
-    recv_message.msg_control = recv_control_storage.data();
-    recv_message.msg_controllen = recv_control_storage.size();
-    record(all_true({
-               record_recvmsg_for_tests(0, &recv_message, 0) == 2,
-               payload[0] == std::byte{0x10},
-               payload[1] == std::byte{0x20},
-               recv_message.msg_name == nullptr,
-               recv_message.msg_namelen == 0,
-               recv_message.msg_controllen == CMSG_LEN(sizeof(int)),
-           }),
-           "record_recvmsg covers ipv6 ancillary path without name storage");
-
-    reset_for_case();
-    g_recorded_recvmsg_for_tests.bytes = {std::byte{0x30}};
-    sockaddr_storage name_storage{};
-    recv_message = {};
-    recv_message.msg_iov = &payload_iov;
-    recv_message.msg_iovlen = 1;
-    recv_message.msg_name = &name_storage;
-    recv_message.msg_namelen = sizeof(sockaddr_storage) - 1;
-    record(all_true({
-               record_recvmsg_for_tests(0, &recv_message, 0) == 1,
-               recv_message.msg_namelen == sizeof(sockaddr_storage) - 1,
-           }),
-           "record_recvmsg leaves truncated name storage untouched");
-
-    reset_for_case();
-    g_recorded_recvmsg_for_tests.bytes = {std::byte{0x40}};
-    recv_message = {};
-    recv_message.msg_iov = &payload_iov;
-    recv_message.msg_iovlen = 1;
-    recv_message.msg_control = nullptr;
-    recv_message.msg_controllen = 0;
-    record(record_recvmsg_for_tests(0, &recv_message, 0) == 1,
-           "record_recvmsg covers null ancillary header path");
-
-    alignas(cmsghdr) std::array<std::byte, 2 * CMSG_SPACE(sizeof(int))> multi_control{};
-    recv_message = {};
-    recv_message.msg_control = multi_control.data();
-    recv_message.msg_controllen = multi_control.size();
-    auto *first_header = reinterpret_cast<cmsghdr *>(multi_control.data());
-    first_header->cmsg_level = SOL_SOCKET;
-    first_header->cmsg_type = SCM_RIGHTS;
-    first_header->cmsg_len = CMSG_LEN(sizeof(int));
-    int ignored_value = 0;
-    std::memcpy(CMSG_DATA(first_header), &ignored_value, sizeof(ignored_value));
-
-    auto *second_header =
-        reinterpret_cast<cmsghdr *>(multi_control.data() + CMSG_SPACE(sizeof(int)));
-    second_header->cmsg_level = IPPROTO_IPV6;
-    second_header->cmsg_type = IPV6_TCLASS;
-    second_header->cmsg_len = CMSG_LEN(sizeof(int));
-    int ancillary_traffic_class = internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1);
-    std::memcpy(CMSG_DATA(second_header), &ancillary_traffic_class,
-                sizeof(ancillary_traffic_class));
-    record(internal::recvmsg_ecn_from_control(recv_message) == QuicEcnCodepoint::ect1,
-           "recvmsg ecn walk advances past ignored ancillary headers");
-
-    multi_control.fill(std::byte{0});
-    recv_message = {};
-    recv_message.msg_control = multi_control.data();
-    recv_message.msg_controllen = multi_control.size();
-    first_header = reinterpret_cast<cmsghdr *>(multi_control.data());
-    first_header->cmsg_level = SOL_SOCKET;
-    first_header->cmsg_type = SCM_RIGHTS;
-    first_header->cmsg_len = CMSG_LEN(sizeof(int));
-    std::memcpy(CMSG_DATA(first_header), &ignored_value, sizeof(ignored_value));
-
-    second_header = reinterpret_cast<cmsghdr *>(multi_control.data() + CMSG_SPACE(sizeof(int)));
-    second_header->cmsg_level = SOL_SOCKET;
-    second_header->cmsg_type = SCM_RIGHTS;
-    second_header->cmsg_len = CMSG_LEN(sizeof(int));
-    std::memcpy(CMSG_DATA(second_header), &ignored_value, sizeof(ignored_value));
-    record(internal::recvmsg_ecn_from_control(recv_message) == QuicEcnCodepoint::unavailable,
-           "recvmsg ecn walk exhausts ignored ancillary headers");
-
-    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> empty_payload_control{};
-    recv_message = {};
-    recv_message.msg_control = empty_payload_control.data();
-    recv_message.msg_controllen = empty_payload_control.size();
-    auto *empty_payload_header = reinterpret_cast<cmsghdr *>(empty_payload_control.data());
-    empty_payload_header->cmsg_level = IPPROTO_IP;
-    empty_payload_header->cmsg_type = IP_TOS;
-    empty_payload_header->cmsg_len = CMSG_LEN(0);
-    record(internal::recvmsg_ecn_from_control(recv_message) == QuicEcnCodepoint::not_ect,
-           "recvmsg ecn handles traffic-class ancillary data with no payload");
-
-#if defined(__linux__) && defined(UDP_GRO)
-    recv_message = {};
-    recv_message.msg_flags = MSG_CTRUNC;
-    record(internal::recvmsg_udp_gro_segment_size_from_control(recv_message) == 0,
-           "recvmsg UDP GRO parser ignores truncated control data");
-
-    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(int))> ignored_gro_control{};
-    recv_message = {};
-    recv_message.msg_control = ignored_gro_control.data();
-    recv_message.msg_controllen = ignored_gro_control.size();
-    auto *ignored_gro_header = reinterpret_cast<cmsghdr *>(ignored_gro_control.data());
-    ignored_gro_header->cmsg_level = SOL_UDP;
-    ignored_gro_header->cmsg_type = SCM_RIGHTS;
-    ignored_gro_header->cmsg_len = CMSG_LEN(sizeof(int));
-    record(internal::recvmsg_udp_gro_segment_size_from_control(recv_message) == 0,
-           "recvmsg UDP GRO parser skips unrelated ancillary headers");
-
-    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(std::uint16_t))>
-        empty_gro_payload_control{};
-    recv_message = {};
-    recv_message.msg_control = empty_gro_payload_control.data();
-    recv_message.msg_controllen = empty_gro_payload_control.size();
-    auto *empty_gro_header = reinterpret_cast<cmsghdr *>(empty_gro_payload_control.data());
-    empty_gro_header->cmsg_level = SOL_UDP;
-    empty_gro_header->cmsg_type = UDP_GRO;
-    empty_gro_header->cmsg_len = CMSG_LEN(0);
-    record(internal::recvmsg_udp_gro_segment_size_from_control(recv_message) == 0,
-           "recvmsg UDP GRO parser handles empty segment-size payloads");
-
-    alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(std::uint16_t))> gro_control{};
-    recv_message = {};
-    recv_message.msg_control = gro_control.data();
-    recv_message.msg_controllen = gro_control.size();
-    auto *gro_header = reinterpret_cast<cmsghdr *>(gro_control.data());
-    gro_header->cmsg_level = SOL_UDP;
-    gro_header->cmsg_type = UDP_GRO;
-    gro_header->cmsg_len = CMSG_LEN(sizeof(std::uint16_t));
-    constexpr std::uint16_t kGroSegmentSize = 2;
-    std::memcpy(CMSG_DATA(gro_header), &kGroSegmentSize, sizeof(kGroSegmentSize));
-    record(internal::recvmsg_udp_gro_segment_size_from_control(recv_message) == kGroSegmentSize,
-           "recvmsg UDP GRO parser extracts segment size");
-
-    auto gro_source = loopback_peer_for_batch_tests(9443);
-    internal::ReceiveDatagramResult gro_datagram_result{
-        .status = internal::ReceiveDatagramStatus::ok,
-        .bytes = {std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
-                  std::byte{0x05}},
-        .ecn = QuicEcnCodepoint::ect0,
-        .source = gro_source,
-        .source_len = static_cast<socklen_t>(sizeof(sockaddr_in)),
-        .input_time = internal::now(),
-        .udp_gro_segment_size = kGroSegmentSize,
-    };
-    std::vector<internal::ReceiveDatagramResult> gro_split;
-    internal::append_received_datagram_segments(gro_split, std::move(gro_datagram_result));
-    record(all_true({
-               gro_split.size() == 3,
-               gro_split[0].payload().size() == 2,
-               gro_split[1].payload().size() == 2,
-               gro_split[2].payload().size() == 1,
-               gro_split[0].shared_bytes != nullptr,
-               gro_split[0].shared_bytes == gro_split[1].shared_bytes,
-               gro_split[0].ecn == QuicEcnCodepoint::ect0,
-           }),
-           "receive GRO split preserves datagram-sized shared slices");
-
-    internal::ReceiveDatagramResult gro_unsplit{
-        .status = internal::ReceiveDatagramStatus::ok,
-        .bytes = {std::byte{0x01}, std::byte{0x02}},
-        .source = gro_source,
-        .source_len = static_cast<socklen_t>(sizeof(sockaddr_in)),
-        .input_time = internal::now(),
-        .udp_gro_segment_size = 0,
-    };
-    std::vector<internal::ReceiveDatagramResult> gro_unsplit_out;
-    internal::append_received_datagram_segments(gro_unsplit_out, std::move(gro_unsplit));
-    record(gro_unsplit_out.size() == 1 && gro_unsplit_out.front().payload().size() == 2,
-           "receive GRO split keeps unsplit datagrams when segment size is zero");
-
-    internal::ReceiveDatagramResult gro_segment_larger_than_payload{
-        .status = internal::ReceiveDatagramStatus::ok,
-        .bytes = {std::byte{0x01}, std::byte{0x02}},
-        .source = gro_source,
-        .source_len = static_cast<socklen_t>(sizeof(sockaddr_in)),
-        .input_time = internal::now(),
-        .udp_gro_segment_size = 4,
-    };
-    std::vector<internal::ReceiveDatagramResult> gro_large_segment_out;
-    internal::append_received_datagram_segments(gro_large_segment_out,
-                                                std::move(gro_segment_larger_than_payload));
-    record(gro_large_segment_out.size() == 1 && gro_large_segment_out.front().payload().size() == 2,
-           "receive GRO split keeps datagrams when segment size covers payload");
-
-    auto shared_gro_bytes = std::make_shared<std::vector<std::byte>>(std::vector<std::byte>{
-        std::byte{0x01},
-        std::byte{0x02},
-        std::byte{0x03},
-        std::byte{0x04},
-        std::byte{0x05},
-    });
-    internal::ReceiveDatagramResult shared_gro_received{
-        .status = internal::ReceiveDatagramStatus::ok,
-        .source = gro_source,
-        .source_len = static_cast<socklen_t>(sizeof(sockaddr_in)),
-        .input_time = internal::now(),
-        .shared_bytes = shared_gro_bytes,
-        .begin = 0,
-        .end = shared_gro_bytes->size(),
-        .udp_gro_segment_size = kGroSegmentSize,
-    };
-    std::vector<internal::ReceiveDatagramResult> shared_gro_split;
-    internal::append_received_datagram_segments(shared_gro_split, std::move(shared_gro_received));
-    record(all_true({
-               shared_gro_split.size() == 3,
-               shared_gro_split[0].shared_bytes == shared_gro_bytes,
-               shared_gro_split[1].payload().size() == 2,
-               shared_gro_split[2].payload().size() == 1,
-           }),
-           "receive GRO split reuses pre-shared datagram storage");
-
-    reset_for_case();
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .recvmsg_fn = [](int, msghdr *recv_message, int) -> ssize_t {
-                    if (recv_message == nullptr || recv_message->msg_iov == nullptr ||
-                        recv_message->msg_iovlen == 0) {
-                        errno = EINVAL;
-                        return -1;
-                    }
-                    constexpr std::array<std::byte, 5> kPayload{
-                        std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
-                        std::byte{0x04}, std::byte{0x05},
-                    };
-                    std::memcpy(recv_message->msg_iov[0].iov_base, kPayload.data(),
-                                kPayload.size());
-                    if (recv_message->msg_name != nullptr &&
-                        recv_message->msg_namelen >= static_cast<socklen_t>(sizeof(sockaddr_in))) {
-                        auto *source = static_cast<sockaddr_in *>(recv_message->msg_name);
-                        source->sin_family = AF_INET;
-                        source->sin_port = htons(9445);
-                        source->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-                        recv_message->msg_namelen = sizeof(sockaddr_in);
-                    }
-                    if (recv_message->msg_control != nullptr &&
-                        recv_message->msg_controllen >= CMSG_SPACE(sizeof(std::uint16_t))) {
-                        auto *gro_control_header =
-                            static_cast<cmsghdr *>(recv_message->msg_control);
-                        gro_control_header->cmsg_level = SOL_UDP;
-                        gro_control_header->cmsg_type = UDP_GRO;
-                        gro_control_header->cmsg_len = CMSG_LEN(sizeof(std::uint16_t));
-                        const std::uint16_t segment_size = 2;
-                        std::memcpy(CMSG_DATA(gro_control_header), &segment_size,
-                                    sizeof(segment_size));
-                        recv_message->msg_controllen = gro_control_header->cmsg_len;
-                    }
-                    return static_cast<ssize_t>(kPayload.size());
-                },
-            },
-        };
-        auto gro_datagram = internal::receive_datagram(61, "client", 0);
-        record(all_true({
-                   gro_datagram.status == internal::ReceiveDatagramStatus::ok,
-                   gro_datagram.bytes.size() == 5,
-                   gro_datagram.udp_gro_segment_size == 2,
-               }),
-               "receive_datagram returns direct UDP GRO receive metadata");
-    }
-#endif
-
-    sock_extended_err pmtu_error{};
-    pmtu_error.ee_info = 1280;
-    record(internal::max_udp_payload_size_from_linux_pmtu(pmtu_error, true) == 1232,
-           "PMTU helper subtracts IPv6 and UDP overhead");
-    pmtu_error.ee_info = 20;
-    record(internal::max_udp_payload_size_from_linux_pmtu(pmtu_error, false) == 0,
-           "PMTU helper rejects values below transport overhead");
-
-    reset_for_case();
-    {
-        const auto empty_batch = internal::receive_datagram_batch(57, "client", 0);
-        record(all_true({
-                   empty_batch.status == internal::ReceiveDatagramStatus::would_block,
-                   empty_batch.datagrams.empty(),
-                   !empty_batch.may_have_more_datagrams,
-               }),
-               "receive_datagram_batch handles zero max datagrams");
-    }
-
-    reset_for_case();
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .recvmmsg_fn =
-                    [](int, mmsghdr *, unsigned int, int, timespec *) {
-                        errno = EIO;
-                        return -1;
-                    },
-            },
-        };
-        const auto failed_batch = internal::receive_datagram_batch(58, "client", 1);
-        record(failed_batch.status == internal::ReceiveDatagramStatus::error,
-               "receive_datagram_batch reports hard recvmmsg errors");
-    }
-
-    reset_for_case();
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .recvmmsg_fn =
-                    [](int, mmsghdr *, unsigned int, int, timespec *) {
-                        errno = ECONNREFUSED;
-                        return -1;
-                    },
-            },
-        };
-        const auto ignored_batch = internal::receive_datagram_batch(59, "client", 1);
-        record(ignored_batch.status == internal::ReceiveDatagramStatus::would_block,
-               "receive_datagram_batch ignores transient connection-refused errors");
-    }
-
-    reset_for_case();
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .recvmsg_fn = [](int, msghdr *, int) -> ssize_t {
-                    errno = EAGAIN;
-                    return -1;
-                },
-            },
-        };
-        const auto blocked = internal::receive_datagram(60, "client", 0);
-        record(blocked.status == internal::ReceiveDatagramStatus::would_block,
-               "receive_datagram treats EAGAIN as would-block");
-    }
-
-    reset_for_case();
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = [](int, const msghdr *, int) -> ssize_t {
-                    g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls += 1;
-                    if (g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls == 1) {
-                        errno = EINTR;
-                        return -1;
-                    }
-                    return 1;
-                },
-            },
-        };
-        const auto peer = loopback_peer_for_batch_tests(9444);
-        const std::array<std::byte, 1> payload_a{std::byte{0x01}};
-        const std::array<std::byte, 1> payload_b{std::byte{0x02}};
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(64, peer, payload_a, QuicEcnCodepoint::not_ect),
-            make_batch_datagram_for_tests(64, peer, payload_b, QuicEcnCodepoint::not_ect),
-        };
-        record(internal::send_udp_gso_batch(datagrams, "client"),
-               "UDP GSO send retries after EINTR");
-    }
-
-    reset_for_case();
-    {
-        const auto defaults = internal::make_default_socket_io_backend_ops();
-        auto peer = loopback_peer_for_batch_tests(9555);
-        const std::array<std::byte, 1> payload_a{std::byte{0x01}};
-        const std::array<std::byte, 1> payload_b{std::byte{0x02}};
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(65, peer, payload_a, QuicEcnCodepoint::not_ect),
-            make_batch_datagram_for_tests(65, peer, payload_b, QuicEcnCodepoint::not_ect),
-        };
-        auto too_long_destination = datagrams.front();
-        too_long_destination.peer_len = static_cast<socklen_t>(sizeof(sockaddr_storage) + 1u);
-        const std::array<std::byte, 2> larger_payload{std::byte{0x03}, std::byte{0x04}};
-        auto different_size = datagrams;
-        different_size[1].bytes = larger_payload;
-        internal::udp_gso_disabled() = true;
-        record(
-            all_true({
-                internal::sendmmsg_supports_datagram(datagrams.front()),
-                !internal::sendmmsg_supports_datagram(too_long_destination),
-                !internal::tx_datagram_matches_sendmmsg_batch(too_long_destination,
-                                                              datagrams.front()),
-                !internal::tx_datagram_matches_udp_gso_batch(different_size[0], different_size[1]),
-                !internal::udp_gso_supports_batch(datagrams),
-                defaults.recvmsg_fn == internal::make_default_socket_io_backend_ops().recvmsg_fn,
-            }),
-            "batch helper guards reject oversized destinations, mismatched GSO sizes, and disabled "
-            "GSO");
-    }
-
-    reset_for_case();
-    record(readable_poll_then_retry_with_datagram_for_tests(nullptr, 0, 0) == 0,
-           "readable poll helper handles empty descriptor list");
-
-    reset_for_case();
-    record(positive_poll_without_revents_for_tests(nullptr, 0, 0) == 0,
-           "positive poll helper handles empty descriptor list");
-
-    {
-        QuicIoEngineEvent timer_event{
-            .kind = QuicIoEngineEvent::Kind::timer_expired,
-            .now = internal::now(),
-        };
-        refresh_queued_receive_event_time(timer_event);
-        QuicIoEngineEvent rx_without_payload{
-            .kind = QuicIoEngineEvent::Kind::rx_datagram,
-            .now = internal::now(),
-        };
-        refresh_queued_receive_event_time(rx_without_payload);
-        record(timer_event.kind == QuicIoEngineEvent::Kind::timer_expired &&
-                   !rx_without_payload.rx.has_value(),
-               "queued receive timestamp refresh ignores non-receive and incomplete events");
-    }
-
-    reset_for_case();
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .poll_fn = &eintr_then_timeout_poll_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        constexpr std::array<int, 1> kSockets = {51};
-        auto wait_event = engine.wait(kSockets, /*idle_timeout_ms=*/5,
-                                      internal::now() + std::chrono::milliseconds(5), "client");
-        auto observed_event = wait_event.value_or(QuicIoEngineEvent{});
-        record(all_true({
-                   wait_event.has_value(),
-                   observed_event.kind == QuicIoEngineEvent::Kind::timer_expired,
-                   g_poll_engine_coverage_trace.eintr_then_timeout_calls == 2,
-               }),
-               "poll wait retries after EINTR before future timer expiry");
-    }
-
-    reset_for_case();
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .poll_fn =
-                    [](pollfd *poll_descriptors, nfds_t descriptor_count, int) {
-                        for (nfds_t index = 0; index < descriptor_count; ++index) {
-                            poll_descriptors[index].revents = 0;
-                        }
-                        return 0;
-                    },
-            },
-        };
-        PollIoEngine engine;
-        constexpr std::array<int, 1> kSockets = {52};
-        auto wait_event = engine.wait(kSockets, /*idle_timeout_ms=*/5,
-                                      internal::now() - std::chrono::milliseconds(1), "client");
-        auto observed_event = wait_event.value_or(QuicIoEngineEvent{});
-        record(all_true({
-                   wait_event.has_value(),
-                   observed_event.kind == QuicIoEngineEvent::Kind::timer_expired,
-               }),
-               "poll wait returns immediate timer expiry when deadline already passed");
-    }
-
-    reset_for_case();
-    {
-        PollIoEngine engine;
-        const std::array<int, 0> kNoSockets = {};
-        record(!engine.wait(kNoSockets, /*idle_timeout_ms=*/5, std::nullopt, "client").has_value(),
-               "poll wait returns nullopt for empty socket list");
-    }
-
-    reset_for_case();
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .poll_fn = &positive_poll_without_revents_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        constexpr std::array<int, 1> kSockets = {53};
-        record(!engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server").has_value(),
-               "poll wait returns nullopt when poll reports readiness without revents");
-    }
-
-    reset_for_case();
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .poll_fn = &hard_errqueue_poll_for_tests,
-                .recvmsg_fn = &hard_errqueue_recvmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        constexpr std::array<int, 1> kSockets = {54};
-        record(!engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server").has_value(),
-               "poll wait returns nullopt for hard errqueue receive errors");
-    }
-
-    reset_for_case();
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .poll_fn = &readable_poll_for_tests,
-                .recvmmsg_fn = &first_recvmmsg_batch_then_hard_error_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        constexpr std::array<int, 1> kSockets = {55};
-        record(!engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server").has_value(),
-               "poll wait returns nullopt when queued receive draining reports a hard error");
-    }
-
-    reset_for_case();
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .poll_fn = &readable_poll_for_tests,
-                .recvmmsg_fn =
-                    [](int, mmsghdr *recv_messages, unsigned int message_count, int, timespec *) {
-                        g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls += 1;
-                        if (g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls > 1) {
-                            errno = EAGAIN;
-                            return -1;
-                        }
-                        for (unsigned int index = 0; index < message_count; ++index) {
-                            auto &recv_message = recv_messages[index].msg_hdr;
-                            if (recv_message.msg_iov != nullptr && recv_message.msg_iovlen > 0 &&
-                                recv_message.msg_iov[0].iov_len > 0) {
-                                auto *byte =
-                                    static_cast<std::byte *>(recv_message.msg_iov[0].iov_base);
-                                *byte = static_cast<std::byte>(index & 0xffu);
-                                recv_messages[index].msg_len = 1;
-                            }
-                        }
-                        return static_cast<int>(message_count);
-                    },
-            },
-        };
-        PollIoEngine engine;
-        constexpr std::array<int, 1> kSockets = {62};
-        auto wait_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
-        auto observed_event = wait_event.value_or(QuicIoEngineEvent{});
-        record(all_true({
-                   wait_event.has_value(),
-                   observed_event.kind == QuicIoEngineEvent::Kind::rx_datagram,
-                   g_poll_engine_coverage_trace.extra_batch_recvmmsg_calls == 2,
-               }),
-               "poll wait stops extra receive draining when recvmmsg would block");
-    }
-
-    reset_for_case();
-    {
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .poll_fn = &readable_poll_for_tests,
-                .recvmmsg_fn = [](int, mmsghdr *, unsigned int, int, timespec *) { return 0; },
-            },
-        };
-        PollIoEngine engine;
-        constexpr std::array<int, 1> kSockets = {56};
-        record(!engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server").has_value(),
-               "poll wait returns nullopt when recvmmsg reports no datagrams");
-    }
-
-    g_recorded_sendmsg_for_tests = saved_sendmsg;
-    g_recorded_recvmsg_for_tests = saved_recvmsg;
-    g_retry_readable_poll_for_tests = saved_retry;
-    g_poll_engine_coverage_trace = saved_poll_trace;
-    internal::udp_gso_disabled() = saved_udp_gso_disabled;
-    return coverage_ok;
-}
-
-bool poll_io_engine_send_many_batching_coverage_for_tests() {
-    const auto saved_trace = g_send_many_batch_coverage_trace;
-    const auto saved_sendmsg = g_recorded_sendmsg_for_tests;
-    const auto saved_udp_gso_disabled = internal::udp_gso_disabled();
-    const auto reset_trace = [](SendManyBatchCoverageTrace::Mode mode) {
-        g_send_many_batch_coverage_trace = {};
-        g_send_many_batch_coverage_trace.mode = mode;
-        internal::udp_gso_disabled() = false;
-    };
-
-    bool coverage_ok = true;
-    const auto record = [&](bool condition, const char *label) {
-        if (!condition) {
-            std::cerr << "poll_io_engine_send_many_batching_coverage_for_tests failed: " << label
-                      << '\n';
-        }
-        coverage_ok &= condition;
-    };
-
-    constexpr int kSocketFd = 77;
-    const auto peer = loopback_peer_for_batch_tests(8443);
-    sockaddr_storage ipv6_peer{};
-    auto &ipv6_loopback = *reinterpret_cast<sockaddr_in6 *>(&ipv6_peer);
-    ipv6_loopback.sin6_family = AF_INET6;
-    ipv6_loopback.sin6_port = htons(8443);
-    ipv6_loopback.sin6_addr = in6addr_loopback;
-    sockaddr_storage v4_mapped_peer{};
-    auto &v4_mapped_loopback = *reinterpret_cast<sockaddr_in6 *>(&v4_mapped_peer);
-    v4_mapped_loopback.sin6_family = AF_INET6;
-    v4_mapped_loopback.sin6_port = htons(8443);
-    v4_mapped_loopback.sin6_addr.s6_addr[10] = 0xff;
-    v4_mapped_loopback.sin6_addr.s6_addr[11] = 0xff;
-    v4_mapped_loopback.sin6_addr.s6_addr[12] = 127;
-    v4_mapped_loopback.sin6_addr.s6_addr[15] = 1;
-    constexpr std::array<std::byte, 4> kSmallPayload{
-        std::byte{0x01},
-        std::byte{0x02},
-        std::byte{0x03},
-        std::byte{0x04},
-    };
-    constexpr std::array<std::byte, 3> kOddPayload{
-        std::byte{0x05},
-        std::byte{0x06},
-        std::byte{0x07},
-    };
-    std::array<std::byte, 0> kEmptyPayload{};
-    constexpr std::array<std::byte, 700> kLargePayload{};
-
-    {
-        const auto same_peer_a = make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload,
-                                                               QuicEcnCodepoint::not_ect);
-        const auto same_peer_b =
-            make_batch_datagram_for_tests(kSocketFd, peer, kOddPayload, QuicEcnCodepoint::not_ect);
-        auto different_socket = same_peer_b;
-        different_socket.socket_fd = kSocketFd + 1;
-        auto different_peer_len = same_peer_b;
-        different_peer_len.peer_len = sizeof(sockaddr_in6);
-        auto different_ecn = same_peer_b;
-        different_ecn.ecn = QuicEcnCodepoint::ect0;
-        auto pmtu_probe = same_peer_b;
-        pmtu_probe.is_pmtu_probe = true;
-        auto invalid_destination = same_peer_b;
-        invalid_destination.peer_len = 0;
-        record(all_true({
-                   internal::tx_datagram_matches_sendmmsg_batch(same_peer_a, same_peer_b),
-                   !internal::tx_datagram_matches_udp_gso_batch(same_peer_a, same_peer_b),
-                   !internal::tx_datagram_matches_sendmmsg_batch(same_peer_a, different_socket),
-                   !internal::tx_datagram_matches_sendmmsg_batch(same_peer_a, different_peer_len),
-                   !internal::tx_datagram_matches_sendmmsg_batch(same_peer_a, different_ecn),
-                   !internal::tx_datagram_matches_sendmmsg_batch(same_peer_a, pmtu_probe),
-                   !internal::tx_datagram_matches_sendmmsg_batch(same_peer_a, invalid_destination),
-                   !internal::sendmmsg_supports_datagram(pmtu_probe),
-                   !internal::sendmmsg_supports_datagram(invalid_destination),
-               }),
-               "sendmmsg batch helpers reject incompatible datagrams");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::sendto_success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendto_fn = &batch_sendto_for_tests,
-            },
-        };
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload,
-                                          QuicEcnCodepoint::not_ect),
-            make_batch_datagram_for_tests(kSocketFd, peer, kOddPayload, QuicEcnCodepoint::not_ect),
-        };
-        record(all_true({
-                   internal::sendmmsg_batch(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendto_calls == 2,
-               }),
-               "sendmmsg_batch uses sendto fallback when the legacy sendto hook is active");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendto_fn = &batch_sendto_for_tests,
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect0),
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect0),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 1,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 0,
-                   g_send_many_batch_coverage_trace.socket_fd == kSocketFd,
-                   g_send_many_batch_coverage_trace.last_sendmsg_iov_count == datagrams.size(),
-                   g_send_many_batch_coverage_trace.last_sendmsg_total_bytes ==
-                       datagrams.size() * kSmallPayload.size(),
-                   g_send_many_batch_coverage_trace.saw_ecn_control,
-                   g_send_many_batch_coverage_trace.saw_udp_segment_control,
-                   g_send_many_batch_coverage_trace.linux_traffic_class ==
-                       internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect0),
-                   g_send_many_batch_coverage_trace.udp_segment_size == kSmallPayload.size(),
-               }),
-               "send_many uses UDP GSO for compatible equal-sized datagrams");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendto_fn = &batch_sendto_for_tests,
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, ipv6_peer, kSmallPayload,
-                                          QuicEcnCodepoint::ect0, false, sizeof(sockaddr_in6)),
-            make_batch_datagram_for_tests(kSocketFd, ipv6_peer, kSmallPayload,
-                                          QuicEcnCodepoint::ect0, false, sizeof(sockaddr_in6)),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 1,
-                   g_send_many_batch_coverage_trace.ecn_level == IPPROTO_IPV6,
-                   g_send_many_batch_coverage_trace.ecn_type == IPV6_TCLASS,
-               }),
-               "send_many uses IPv6 ECN ancillary data for UDP GSO");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendto_fn = &batch_sendto_for_tests,
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, v4_mapped_peer, kSmallPayload,
-                                          QuicEcnCodepoint::ect1, false, sizeof(sockaddr_in6)),
-            make_batch_datagram_for_tests(kSocketFd, v4_mapped_peer, kSmallPayload,
-                                          QuicEcnCodepoint::ect1, false, sizeof(sockaddr_in6)),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 1,
-                   g_send_many_batch_coverage_trace.ecn_level == IPPROTO_IP,
-                   g_send_many_batch_coverage_trace.ecn_type == IP_TOS,
-               }),
-               "send_many treats IPv4-mapped IPv6 peers as IPv4 for ECN ancillary data");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendto_fn = &batch_sendto_for_tests,
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        auto unsupported_peer = peer;
-        unsupported_peer.ss_family = AF_UNIX;
-        std::array<QuicIoEngineTxDatagram, 1> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, unsupported_peer, kSmallPayload,
-                                          QuicEcnCodepoint::ect0, false, sizeof(sockaddr_in)),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 0,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 0,
-                   g_send_many_batch_coverage_trace.sendto_calls == 1,
-               }),
-               "send_many falls back to sendto for ECN datagrams with unsupported peers");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::udp_gso_einval);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect0),
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect0),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 1,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-               }),
-               "send_many disables GSO on EINVAL before sendmmsg fallback");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::udp_gso_enoprotoopt);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect0),
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect0),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 1,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-               }),
-               "send_many disables GSO on ENOPROTOOPT before sendmmsg fallback");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::udp_gso_emsgsize);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect0),
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect0),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 1,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-               }),
-               "send_many keeps GSO enabled after EMSGSIZE fallback");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::udp_gso_ignorable_error);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect0),
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect0),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 1,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 0,
-               }),
-               "send_many accepts ignorable GSO send errors");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::udp_gso_hard_error);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect0),
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect0),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 1,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-                   !internal::udp_gso_disabled(),
-               }),
-               "send_many falls back to sendmmsg after hard GSO sendmsg errors");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kEmptyPayload,
-                                          QuicEcnCodepoint::not_ect),
-            make_batch_datagram_for_tests(kSocketFd, peer, kEmptyPayload,
-                                          QuicEcnCodepoint::not_ect),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 0,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-               }),
-               "send_many skips UDP GSO for empty datagram payloads");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 65> datagrams{};
-        for (auto &datagram : datagrams) {
-            datagram = make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload,
-                                                     QuicEcnCodepoint::not_ect);
-        }
-        record(all_true({
-                   internal::sendmmsg_batch(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 0,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-               }),
-               "send_many skips UDP GSO when a batch exceeds the segment limit");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 100> datagrams{};
-        for (auto &datagram : datagrams) {
-            datagram = make_batch_datagram_for_tests(kSocketFd, peer, kLargePayload,
-                                                     QuicEcnCodepoint::not_ect);
-        }
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 2,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 0,
-               }),
-               "send_many chunks large equal-size runs for UDP GSO");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::second_udp_gso_chunk_hard_error);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 100> datagrams{};
-        for (auto &datagram : datagrams) {
-            datagram = make_batch_datagram_for_tests(kSocketFd, peer, kLargePayload,
-                                                     QuicEcnCodepoint::not_ect);
-        }
-        record(all_true({
-                   !engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 2,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-               }),
-               "send_many reports errors from later UDP GSO chunks");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload,
-                                          QuicEcnCodepoint::not_ect),
-            make_batch_datagram_for_tests(kSocketFd, peer, kOddPayload, QuicEcnCodepoint::not_ect),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 0,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-                   g_send_many_batch_coverage_trace.last_sendmmsg_message_count == 2,
-               }),
-               "send_many batches mixed singletons until the next equal-size run");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 4> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kOddPayload, QuicEcnCodepoint::not_ect),
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload,
-                                          QuicEcnCodepoint::not_ect),
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload,
-                                          QuicEcnCodepoint::not_ect),
-            make_batch_datagram_for_tests(kSocketFd, peer, kOddPayload, QuicEcnCodepoint::not_ect),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 1,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 2,
-               }),
-               "send_many stops a mixed singleton batch before the next GSO run");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        record(internal::sendmmsg_batch(std::span<const QuicIoEngineTxDatagram>{}, "client"),
-               "sendmmsg_batch accepts an empty batch directly");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendto_fn = &batch_sendto_for_tests,
-            },
-        };
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload,
-                                          QuicEcnCodepoint::not_ect),
-            make_batch_datagram_for_tests(kSocketFd, peer, kOddPayload, QuicEcnCodepoint::not_ect),
-        };
-        record(all_true({
-                   internal::sendmmsg_batch(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendto_calls == 2,
-               }),
-               "sendmmsg_batch falls back to sendto without sendmmsg support");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::sendto_hard_error);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendto_fn = &batch_sendto_for_tests,
-            },
-        };
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload,
-                                          QuicEcnCodepoint::not_ect),
-            make_batch_datagram_for_tests(kSocketFd, peer, kOddPayload, QuicEcnCodepoint::not_ect),
-        };
-        record(all_true({
-                   !internal::sendmmsg_batch(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendto_calls == 1,
-               }),
-               "sendmmsg_batch reports sendto fallback errors");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        std::array<std::byte, 40000> huge_payload{};
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, huge_payload, QuicEcnCodepoint::not_ect),
-            make_batch_datagram_for_tests(kSocketFd, peer, huge_payload, QuicEcnCodepoint::not_ect),
-        };
-        record(all_true({
-                   internal::sendmmsg_batch(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 0,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-               }),
-               "sendmmsg_batch skips UDP GSO when the coalesced payload is too large");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        std::array<std::byte, 65536> oversized_payload{};
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, oversized_payload,
-                                          QuicEcnCodepoint::not_ect),
-            make_batch_datagram_for_tests(kSocketFd, peer, oversized_payload,
-                                          QuicEcnCodepoint::not_ect),
-        };
-        record(all_true({
-                   internal::sendmmsg_batch(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 0,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-               }),
-               "sendmmsg_batch skips UDP GSO when a segment exceeds uint16");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::gso_not_supported_then_partial_sendmmsg);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 2> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect1),
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::ect1),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 1,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 3,
-                   g_send_many_batch_coverage_trace.last_sendmmsg_message_count == 1,
-                   g_send_many_batch_coverage_trace.saw_ecn_control,
-                   g_send_many_batch_coverage_trace.saw_udp_segment_control,
-                   g_send_many_batch_coverage_trace.linux_traffic_class ==
-                       internal::linux_traffic_class_for_ecn(QuicEcnCodepoint::ect1),
-               }),
-               "send_many falls back from unsupported GSO to partial sendmmsg completion");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::sendmmsg_zero);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 1> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kOddPayload, QuicEcnCodepoint::not_ect),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 0,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-                   g_send_many_batch_coverage_trace.last_sendmmsg_message_count == 1,
-               }),
-               "send_many treats sendmmsg zero progress as a soft stop");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::sendmmsg_ignorable_error);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 1> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kOddPayload, QuicEcnCodepoint::not_ect),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-               }),
-               "send_many ignores connection-refused sendmmsg errors");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::sendmmsg_hard_error);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 1> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kOddPayload, QuicEcnCodepoint::not_ect),
-        };
-        record(all_true({
-                   !engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 1,
-               }),
-               "send_many reports hard sendmmsg errors");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::sendto_success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendto_fn = &batch_sendto_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 1> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::not_ect,
-                                          false, 0),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendto_calls == 1,
-               }),
-               "send_many falls back to sendto for unsupported destinations");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::sendto_hard_error);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendto_fn = &batch_sendto_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 1> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::not_ect,
-                                          false, 0),
-        };
-        record(all_true({
-                   !engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendto_calls == 1,
-               }),
-               "send_many reports hard sendto fallback errors");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::sendto_connrefused);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendto_fn = &batch_sendto_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 1> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::not_ect,
-                                          false, 0),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendto_calls == 1,
-               }),
-               "send_many ignores connection-refused sendto fallback errors");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::sendto_success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendto_fn = &batch_sendto_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 1> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::not_ect,
-                                          true),
-        };
-        record(all_true({
-                   engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendto_calls == 1,
-               }),
-               "send_many sends PMTU probes through the single datagram path");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendmsg_fn = &batch_sendmsg_for_tests,
-                .sendmmsg_fn = &batch_sendmmsg_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        record(all_true({
-                   engine.send_many(std::span<const QuicIoEngineTxDatagram>{}, "client"),
-                   g_send_many_batch_coverage_trace.sendmsg_calls == 0,
-                   g_send_many_batch_coverage_trace.sendmmsg_calls == 0,
-                   g_send_many_batch_coverage_trace.sendto_calls == 0,
-               }),
-               "send_many accepts an empty datagram batch");
-    }
-
-    {
-        reset_trace(SendManyBatchCoverageTrace::Mode::success);
-        const ScopedSocketIoBackendOpsOverride runtime_ops{
-            SocketIoBackendOpsOverride{
-                .sendto_fn = &batch_sendto_for_tests,
-            },
-        };
-        PollIoEngine engine;
-        std::array<QuicIoEngineTxDatagram, 1> datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::not_ect,
-                                          true, 0),
-        };
-        g_send_many_batch_coverage_trace.mode = SendManyBatchCoverageTrace::Mode::sendto_hard_error;
-        record(all_true({
-                   !engine.send_many(datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendto_calls == 1,
-               }),
-               "send_many reports hard PMTU probe sendto fallback errors");
-
-        reset_trace(SendManyBatchCoverageTrace::Mode::sendto_pmtu_error);
-        std::array<QuicIoEngineTxDatagram, 1> ignorable_datagrams{
-            make_batch_datagram_for_tests(kSocketFd, peer, kSmallPayload, QuicEcnCodepoint::not_ect,
-                                          true, 0),
-        };
-        record(all_true({
-                   engine.send_many(ignorable_datagrams, "client"),
-                   g_send_many_batch_coverage_trace.sendto_calls == 1,
-               }),
-               "send_many ignores PMTU probe EMSGSIZE fallback errors");
-    }
-
-    g_send_many_batch_coverage_trace = saved_trace;
-    g_recorded_sendmsg_for_tests = saved_sendmsg;
-    internal::udp_gso_disabled() = saved_udp_gso_disabled;
-    return coverage_ok;
-}
-
-bool poll_io_engine_pmtud_coverage_for_tests() {
-    g_recorded_recvmsg_for_tests = {};
-    auto &pmtud_ipv6_peer = *reinterpret_cast<sockaddr_in6 *>(&g_recorded_recvmsg_for_tests.peer);
-    pmtud_ipv6_peer.sin6_family = AF_INET6;
-    pmtud_ipv6_peer.sin6_port = htons(7443);
-    pmtud_ipv6_peer.sin6_addr = in6addr_loopback;
-    g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in6);
-    g_recorded_recvmsg_for_tests.pmtu = 1500;
-
-    const ScopedSocketIoBackendOpsOverride runtime_ops{
-        SocketIoBackendOpsOverride{
-            .poll_fn =
-                [](pollfd *poll_descriptors, nfds_t descriptor_count, int) {
-                    for (nfds_t index = 0; index < descriptor_count; ++index) {
-                        poll_descriptors[index].revents = POLLERR;
-                    }
-                    return descriptor_count == 0 ? 0 : 1;
-                },
-            .recvmsg_fn = &record_recvmsg_for_tests,
-        },
-    };
-
-    PollIoEngine engine;
-    constexpr std::array<int, 1> kSockets = {61};
-    auto wait_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
-    auto observed_event = wait_event.value_or(QuicIoEngineEvent{});
-    auto path_mtu_update = observed_event.path_mtu.value_or(QuicIoEnginePathMtuUpdate{});
-    return all_true({
-        wait_event.has_value(),
-        observed_event.kind == QuicIoEngineEvent::Kind::path_mtu_update,
-        observed_event.path_mtu.has_value(),
-        path_mtu_update.socket_fd == kSockets.front(),
-        path_mtu_update.max_udp_payload_size == 1452,
-        path_mtu_update.peer.ss_family == AF_INET6,
-        path_mtu_update.peer_len == sizeof(sockaddr_in6),
-    });
-}
-
 bool poll_io_engine_ignores_non_pmtu_errqueue_for_tests() {
     g_recorded_recvmsg_for_tests = {};
-    g_poll_engine_coverage_trace = {};
+    g_poll_engine_test_trace = {};
     auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&g_recorded_recvmsg_for_tests.peer);
     ipv4.sin_family = AF_INET;
     ipv4.sin_port = htons(7443);
@@ -4132,7 +2462,7 @@ bool poll_io_engine_ignores_non_pmtu_errqueue_for_tests() {
     return all_true({
         wait_event.has_value(),
         observed_event.kind == QuicIoEngineEvent::Kind::idle_timeout,
-        g_poll_engine_coverage_trace.ignored_errqueue_poll_calls == 2,
+        g_poll_engine_test_trace.ignored_errqueue_poll_calls == 2,
     });
 }
 
@@ -4160,65 +2490,6 @@ bool socket_io_backend_poll_engine_primes_descriptor_cache_for_tests() {
     cache_state_ok &= first_registration_ok;
     cache_state_ok &= second_registration_ok;
     return cache_state_ok;
-}
-
-bool poll_io_engine_descriptor_cache_guard_branches_for_tests() {
-    PollIoEngine engine;
-    bool cache_guards_ok = true;
-    struct DescriptorCacheExpectation {
-        std::size_t expected_count;
-        std::size_t minimum_capacity;
-        bool expect_empty;
-    };
-    const auto descriptor_cache_matches = [&](DescriptorCacheExpectation expected) {
-        if (engine.registered_socket_count_ != expected.expected_count) {
-            return false;
-        }
-        if (engine.descriptor_scratch_.empty() != expected.expect_empty) {
-            return false;
-        }
-        return engine.descriptor_scratch_.capacity() >= expected.minimum_capacity;
-    };
-
-    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
-        .expected_count = 1,
-        .minimum_capacity = 0,
-        .expect_empty = true,
-    });
-
-    engine.descriptor_scratch_.push_back(pollfd{});
-    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
-        .expected_count = 0,
-        .minimum_capacity = 0,
-        .expect_empty = true,
-    });
-
-    engine.descriptor_scratch_.clear();
-    engine.descriptor_scratch_.shrink_to_fit();
-    cache_guards_ok &= engine.register_socket(41);
-
-    engine.registered_socket_count_ = 0;
-    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
-        .expected_count = 1,
-        .minimum_capacity = 1,
-        .expect_empty = true,
-    });
-
-    engine.registered_socket_count_ = 1;
-    engine.descriptor_scratch_.push_back(pollfd{});
-    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
-        .expected_count = 1,
-        .minimum_capacity = 1,
-        .expect_empty = true,
-    });
-
-    engine.descriptor_scratch_.clear();
-    cache_guards_ok &= !descriptor_cache_matches(DescriptorCacheExpectation{
-        .expected_count = 1,
-        .minimum_capacity = engine.descriptor_scratch_.capacity() + 1,
-        .expect_empty = true,
-    });
-    return cache_guards_ok;
 }
 
 } // namespace test

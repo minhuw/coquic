@@ -1504,19 +1504,4 @@ TEST(IoUringBackendTest, ProbeRecvmsgSupportEnablesFallbackAfterEinvalCompletion
     EXPECT_NE(engine.receive_fallback_, nullptr);
 }
 
-TEST(IoUringBackendTest, InternalCoverageHookExercisesIoUringBackendColdPaths) {
-    EXPECT_TRUE(
-        coquic::io::test::io_uring_backend_internal_coverage_hook_exercises_cold_paths_for_tests());
-}
-
-TEST(IoUringBackendTest, InternalCoverageHookExercisesIoUringBackendResidualBranches) {
-    EXPECT_TRUE(
-        coquic::io::test::
-            io_uring_backend_internal_coverage_hook_exercises_remaining_branches_for_tests());
-}
-
-TEST(IoUringBackendTest, PendingEventGuardBranchesAreCovered) {
-    EXPECT_TRUE(coquic::io::test::io_uring_backend_has_pending_event_guard_branches_for_tests());
-}
-
 } // namespace

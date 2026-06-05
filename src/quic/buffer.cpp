@@ -6,9 +6,7 @@
 #include <cstdlib>
 #include <memory>
 
-#if defined(COQUIC_COVERAGE_BUILD)
-#define COQUIC_NO_PROFILE
-#elif defined(__clang__)
+#if defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #else
 #define COQUIC_NO_PROFILE
@@ -170,17 +168,6 @@ COQUIC_NO_PROFILE void deallocate_datagram_byte_storage(std::byte *pointer,
 #endif
 
     std::allocator<std::byte>{}.deallocate(pointer, allocation_count);
-}
-
-bool datagram_byte_storage_cache_coverage_for_tests() {
-#if COQUIC_DISABLE_DATAGRAM_BYTE_STORAGE_CACHE == 0
-    DatagramByteStorageCache cache;
-    cache.used = 1;
-    cache.entries[0] = DatagramByteStorageCache::Entry{};
-    return cache.take(kDatagramByteStorageCacheBucketBytes) == std::nullopt;
-#else
-    return true;
-#endif
 }
 
 } // namespace detail

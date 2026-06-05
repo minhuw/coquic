@@ -6,6 +6,8 @@ services:
     container_name: coquic-perf-runner
     restart: unless-stopped
     cpuset: "0-7"
+    security_opt:
+      - seccomp=unconfined
     environment:
       REPO_URL: ${REPO_URL:-https://github.com/minhuw/coquic}
       ACCESS_TOKEN: ${ACCESS_TOKEN:-}

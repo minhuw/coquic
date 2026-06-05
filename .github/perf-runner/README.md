@@ -66,6 +66,10 @@ credentials and does not need benchmark hardware.
   CLI, but the mounted host daemon runs the benchmark containers.
 - Mounting `/var/run/docker.sock` gives jobs effective control of host Docker.
   Only route trusted workflows to this runner.
+- The runner disables Docker's default seccomp profile because Nix
+  `dockerTools` uses `fakeroot` while building image layers. With the default
+  profile, `fakeroot` can hang before it starts `tar`, leaving the workflow
+  apparently frozen inside `nix build`.
 - The compose file runs the runner as root by default because Docker socket
   group IDs vary by host. This does not materially change the trust boundary
   once `/var/run/docker.sock` is mounted.

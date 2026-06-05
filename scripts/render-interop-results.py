@@ -257,18 +257,34 @@ def print_summary(sources: list[dict], rows: list[dict], event_name: str, commit
             continue
         print(
             f"- `{markdown(source['label'])}`: `{markdown(source['server'])}` -> `{markdown(source['client'])}` "
-            f"({source['succeeded']}/{source['total']} succeeded)"
+            f"({source['succeeded']}/{source['total']} succeeded, "
+            f"{source['unsupported']} unsupported, {source['failed']} failed)"
         )
     print()
-    print("### Failed Or Unsupported Cases")
+    print("### Failed Cases")
     print()
-    notable = [row for row in rows if row["result"] != "succeeded"]
-    if not notable:
-        print("All loaded interop cases succeeded.")
+    failed = [row for row in rows if row["result"] == "failed"]
+    if not failed:
+        print("No loaded interop cases failed.")
+    else:
+        print("| Peer | Direction | Case | Details |")
+        print("| --- | --- | --- | --- |")
+        for row in failed:
+            print(
+                f"| {markdown(row['peer'])}"
+                f" | {markdown(row['direction'])}"
+                f" | {markdown(row['name'])}"
+                f" | {markdown(row['details'])} |"
+            )
+    unsupported = [row for row in rows if row["result"] == "unsupported"]
+    if not unsupported:
         return
+    print()
+    print("### Unsupported Cases")
+    print()
     print("| Peer | Direction | Case | Result | Details |")
     print("| --- | --- | --- | --- | --- |")
-    for row in notable:
+    for row in unsupported:
         print(
             f"| {markdown(row['peer'])}"
             f" | {markdown(row['direction'])}"

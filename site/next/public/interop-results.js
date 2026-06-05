@@ -120,7 +120,7 @@ function resultToken(result) {
     return "fail";
   }
   if (isSkippedResult(result)) {
-    return "skip";
+    return "n/a";
   }
   return "-";
 }
@@ -136,7 +136,7 @@ function resultClass(result) {
 }
 
 function isSkippedResult(result) {
-  return result === "unsupported" || result === "skipped";
+  return result === "unsupported";
 }
 
 function rowResultForTests(laneKey, tests, rowByLaneAndTest) {

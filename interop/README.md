@@ -143,7 +143,7 @@ quictls image (`.#interop-image-quictls-musl` /
 official-runner path on a single image regardless of testcase selection,
 including `chacha20`.
 
-## Official Runner Smoke Matrix
+## Official Runner Matrix
 
 Run the checked-in official runner wrapper against `quic-go` with:
 
@@ -165,8 +165,13 @@ nix develop -c bash interop/run-official.sh
 
 The separate GitHub Actions workflow in `.github/workflows/interop.yml` builds
 and loads `coquic-interop:quictls-musl`, pulls the pinned official peer,
-simulator, and iperf images, and runs the requested testcases in both
-directions through `interop/run-official.sh`.
+simulator, and iperf images, and runs the full pinned QUIC testcase and
+measurement list for every peer in both directions through
+`interop/run-official.sh`.
+
+Official runner results marked `unsupported` are preserved in the summary and
+published matrix but do not fail the workflow. Results marked `failed`, missing
+requested results, or malformed runner output still fail the workflow.
 
 The image verification scripts live under `interop/tests/`.
 
@@ -183,11 +188,11 @@ simulator's own `/setup.sh` and `/wait-for-it.sh` instead of overriding them.
 ## quic-interop-runner Usage
 
 Point the runner at the built image in your local implementation entry, then
-run the `handshake`, `transfer`, or `chacha20` scenarios. The wrapper script
-expects the standard runner environment:
+run the requested QUIC testcase or measurement. The wrapper script expects the
+standard runner environment:
 
 - `ROLE=server` or `ROLE=client`
-- `TESTCASE=handshake`, `TESTCASE=transfer`, or `TESTCASE=chacha20`
+- `TESTCASE=<runner testcase>`
 - `REQUESTS` for client-side transfer runs
 
 For client-side runner invocations, the default network target is `server` and

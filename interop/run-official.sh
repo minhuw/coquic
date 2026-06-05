@@ -112,7 +112,7 @@ if missing:
         f"official runner results missing requested testcase or measurement results: {missing!r}"
     )
 
-failed = []
+bad = []
 for test in requested_tests:
     if test in testcase_results:
         result = testcase_results.get(test)
@@ -120,13 +120,13 @@ for test in requested_tests:
         result = measurement_results.get(test)
     else:
         result = None
-    if result != "succeeded":
-        failed.append(f"{test}={result!r}")
+    if result not in ("succeeded", "unsupported"):
+        bad.append(f"{test}={result!r}")
 
-if failed:
+if bad:
     raise SystemExit(
-        "requested testcase did not succeed for "
-        f"{server}/{client}: {', '.join(failed)}"
+        "requested testcase did not finish with an acceptable result for "
+        f"{server}/{client}: {', '.join(bad)}"
     )
 PY
 }
@@ -155,7 +155,30 @@ testcase_results = {
     for entry in results[0]
 }
 for test in requested_tests:
-    if test in retry_tests and testcase_results.get(test) not in (None, "succeeded"):
+    if test in retry_tests and testcase_results.get(test) == "failed":
+        print(test)
+PY
+}
+
+logged_official_testcases() {
+  local results_json=$1
+  local requested_testcases=$2
+
+  python3 - "${results_json}" "${requested_testcases}" <<'PY'
+import json
+import pathlib
+import sys
+
+results_path = pathlib.Path(sys.argv[1])
+requested_tests = [test for test in sys.argv[2].split(",") if test]
+
+data = json.loads(results_path.read_text())
+testcase_results = {
+    entry.get("name"): entry.get("result")
+    for entry in data.get("results", [[]])[0]
+}
+for test in requested_tests:
+    if testcase_results.get(test) in ("succeeded", "failed"):
         print(test)
 PY
 }
@@ -491,7 +514,7 @@ run_direction() {
     return "${status}"
   fi
 
-  for testcase in ${requested_testcases//,/ }; do
+  for testcase in $(logged_official_testcases "${results_json}" "${requested_testcases}"); do
     testcase_log_dir="${direction_log_dir}/${server}_${client}/${testcase}"
     if [ ! -d "${testcase_log_dir}" ]; then
       echo "official runner did not produce testcase logs for ${server}/${client}/${testcase}: ${testcase_log_dir}" >&2

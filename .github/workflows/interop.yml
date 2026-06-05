@@ -8,11 +8,14 @@ on:
 permissions:
   contents: read
 
+env:
+  INTEROP_ALL_TESTCASES: handshake,transfer,longrtt,chacha20,multiplexing,retry,resumption,zerortt,http3,blackhole,keyupdate,ecn,amplificationlimit,handshakeloss,transferloss,handshakecorruption,transfercorruption,ipv6,v2,rebind-port,rebind-addr,connectionmigration,goodput,crosstraffic
+
 jobs:
   interop-peer:
     name: ${{ matrix.display_name }} Official Runner
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -21,68 +24,46 @@ jobs:
             display_name: quic-go
             impl: quic-go
             image: martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424
-            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
           - peer: picoquic
             display_name: picoquic
             impl: picoquic
             image: privateoctopus/picoquic@sha256:7e4110e3260cd9d4f815ad63ca1d93e020e94d3a8d3cb6cb9cc5c59d97999b05
-            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,v2,amplificationlimit,rebind-port,rebind-addr,connectionmigration
           - peer: quinn
             display_name: quinn
             impl: quinn
             image: stammw/quinn-interop@sha256:5205c84e200ef1a999be602ed6eeec9a216f25ce27d5eac690fa1540ec73f355
-            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
           - peer: msquic
             display_name: msquic
             impl: msquic
             image: ghcr.io/microsoft/msquic/qns:main
-            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
           - peer: quiche
             display_name: quiche
             impl: quiche
             image: cloudflare/quiche-qns:latest
-            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
           - peer: ngtcp2
             display_name: ngtcp2
             impl: ngtcp2
             image: ghcr.io/ngtcp2/ngtcp2-interop:latest
-            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
           - peer: neqo
             display_name: neqo
             impl: neqo
             image: ghcr.io/mozilla/neqo-qns:latest
-            testcases: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,amplificationlimit,rebind-port,rebind-addr
           - peer: mvfst
             display_name: mvfst
             impl: mvfst
             image: ghcr.io/facebook/proxygen/mvfst-interop:latest
-            directions: coquic-server
-            testcases: handshake,transferloss,transfercorruption,blackhole,longrtt,goodput,ipv6
-            coquic_server_testcases: handshake,transferloss,transfercorruption,blackhole,longrtt,goodput,crosstraffic,ipv6
-            coquic_client_testcases: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,blackhole,goodput,ipv6,multiplexing,rebind-port
           - peer: aioquic
             display_name: aioquic
             impl: aioquic
             image: aiortc/aioquic-qns:latest
-            testcases: handshake,handshakeloss,transfer,transferloss,transfercorruption,blackhole,ipv6,multiplexing,retry,amplificationlimit
-            coquic_server_testcases: handshake,transfer,keyupdate,transferloss,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,amplificationlimit
-            coquic_client_testcases: handshakeloss,transfer,transferloss,transfercorruption,blackhole,ipv6,multiplexing,retry,amplificationlimit,rebind-port,rebind-addr
           - peer: xquic
             display_name: xquic
             impl: xquic
             image: ghcr.io/alibaba/xquic/xquic-interop:latest
-            directions: coquic-server
-            testcases: handshake,transfer,keyupdate,transferloss,transfercorruption,blackhole,chacha20,longrtt,goodput,ipv6,retry,zerortt,amplificationlimit,rebind-port,rebind-addr
-            coquic_server_testcases: handshake,transfer,keyupdate,transferloss,transfercorruption,blackhole,chacha20,longrtt,goodput,ipv6,retry,zerortt,amplificationlimit
-            coquic_client_testcases: handshake,transfer,keyupdate,transferloss,transfercorruption,blackhole,chacha20,longrtt,goodput,ipv6,retry,zerortt,rebind-port,rebind-addr
           - peer: s2n-quic
             display_name: s2n-quic
             impl: s2n-quic
             image: ghcr.io/aws/s2n-quic/s2n-quic-qns:latest
-            testcases: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,blackhole,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,amplificationlimit,rebind-port,rebind-addr
-            # s2n-quic's public QNS server uses its default transfer migration validator, which
-            # rejects rebind-addr when the simulator changes the peer UDP port scope mid-transfer.
-            coquic_client_testcases: handshake,handshakeloss,transfer,transferloss,handshakecorruption,transfercorruption,blackhole,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,amplificationlimit,rebind-port
 
     steps:
       - name: Checkout
@@ -120,12 +101,12 @@ jobs:
         id: run_interop
         continue-on-error: true
         env:
-          INTEROP_TESTCASES: ${{ matrix.testcases }}
-          INTEROP_COQUIC_SERVER_TESTCASES: ${{ matrix.coquic_server_testcases || matrix.testcases }}
-          INTEROP_COQUIC_CLIENT_TESTCASES: ${{ matrix.coquic_client_testcases || matrix.testcases }}
+          INTEROP_TESTCASES: ${{ env.INTEROP_ALL_TESTCASES }}
+          INTEROP_COQUIC_SERVER_TESTCASES: ${{ env.INTEROP_ALL_TESTCASES }}
+          INTEROP_COQUIC_CLIENT_TESTCASES: ${{ env.INTEROP_ALL_TESTCASES }}
           INTEROP_PEER_IMPL: ${{ matrix.impl }}
           INTEROP_PEER_IMAGE: ${{ matrix.image }}
-          INTEROP_DIRECTIONS: ${{ matrix.directions || 'both' }}
+          INTEROP_DIRECTIONS: both
           COQUIC_CONGESTION_CONTROL: ${{ matrix.congestion_control || '' }}
         run: bash interop/run-official.sh
 
@@ -166,7 +147,7 @@ jobs:
   interop-self:
     name: Self Official Runner
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -204,7 +185,7 @@ jobs:
         id: run_interop
         continue-on-error: true
         env:
-          INTEROP_TESTCASES: handshake,handshakeloss,transfer,keyupdate,transferloss,handshakecorruption,transfercorruption,blackhole,chacha20,longrtt,goodput,crosstraffic,ipv6,multiplexing,retry,resumption,zerortt,v2,amplificationlimit,rebind-port,rebind-addr,connectionmigration,ecn
+          INTEROP_TESTCASES: ${{ env.INTEROP_ALL_TESTCASES }}
           INTEROP_PEER_IMPL: coquic
           INTEROP_PEER_IMAGE: coquic-interop:quictls-musl
           INTEROP_DIRECTIONS: coquic-server

@@ -1132,7 +1132,6 @@ pub fn build(b: *std.Build) void {
         "tests/http09/runtime/migration_test.cpp",
         "tests/http09/runtime/preferred_address_test.cpp",
         "tests/http09/runtime/retry_zero_rtt_test.cpp",
-        "tests/http09/runtime/interop_alias_test.cpp",
         "tests/http09/runtime/linux_ecn_test.cpp",
         "tests/http09/runtime/io_backend_contract_test.cpp",
         "tests/http09/runtime/socket_io_backend_test.cpp",
@@ -1150,7 +1149,10 @@ pub fn build(b: *std.Build) void {
         "tests/http3/bootstrap_test.cpp",
         "tests/http3/server_test.cpp",
         "tests/http3/runtime_test.cpp",
-        "tests/http3/interop_test.cpp",
+    };
+    const interop_test_files = &.{
+        "interop/tests/http09_interop_test.cpp",
+        "interop/tests/http3_interop_test.cpp",
     };
     const qlog_test_files = &.{
         "tests/qlog/qlog_test.cpp",
@@ -1311,7 +1313,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         http09_test_files,
-        &.{"interop/coquic-interop/http09_interop.cpp"},
+        &.{},
     );
     const http3_tests = addTestBinary(
         b,
@@ -1323,7 +1325,22 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         http3_test_files,
-        &.{"interop/coquic-interop/http3_interop.cpp"},
+        &.{},
+    );
+    const interop_tests = addTestBinary(
+        b,
+        "coquic-tests-interop",
+        target,
+        optimize,
+        cpp_flags,
+        project_lib,
+        tls_include_dir,
+        gtest_root,
+        interop_test_files,
+        &.{
+            "interop/coquic-interop/http09_interop.cpp",
+            "interop/coquic-interop/http3_interop.cpp",
+        },
     );
     const qlog_tests = addTestBinary(
         b,
@@ -1377,6 +1394,10 @@ pub fn build(b: *std.Build) void {
     linkSpdlog(http3_tests);
     linkLiburing(http3_tests);
     const http3_tests_run = b.addRunArtifact(http3_tests);
+    linkTlsBackend(b, interop_tests, tls_backend, tls_lib_dir, tls_linkage);
+    linkSpdlog(interop_tests);
+    linkLiburing(interop_tests);
+    const interop_tests_run = b.addRunArtifact(interop_tests);
     linkTlsBackend(b, qlog_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(qlog_tests);
     linkLiburing(qlog_tests);
@@ -1394,6 +1415,7 @@ pub fn build(b: *std.Build) void {
         core_tests_run.addArgs(args);
         http09_tests_run.addArgs(args);
         http3_tests_run.addArgs(args);
+        interop_tests_run.addArgs(args);
         qlog_tests_run.addArgs(args);
         tls_tests_run.addArgs(args);
         perf_tests_run.addArgs(args);
@@ -1403,6 +1425,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&core_tests_run.step);
     test_step.dependOn(&http09_tests_run.step);
     test_step.dependOn(&http3_tests_run.step);
+    test_step.dependOn(&interop_tests_run.step);
     test_step.dependOn(&qlog_tests_run.step);
     test_step.dependOn(&tls_tests_run.step);
     test_step.dependOn(&perf_tests_run.step);
@@ -1416,6 +1439,7 @@ pub fn build(b: *std.Build) void {
     compdb_step.dependOn(&core_tests.step);
     compdb_step.dependOn(&http09_tests.step);
     compdb_step.dependOn(&http3_tests.step);
+    compdb_step.dependOn(&interop_tests.step);
     compdb_step.dependOn(&qlog_tests.step);
     compdb_step.dependOn(&tls_tests.step);
     compdb_step.dependOn(&perf_tests.step);
@@ -1437,6 +1461,7 @@ pub fn build(b: *std.Build) void {
     coverage_test_file_list.appendSlice(core_test_files) catch @panic("oom");
     coverage_test_file_list.appendSlice(http09_test_files) catch @panic("oom");
     coverage_test_file_list.appendSlice(http3_test_files) catch @panic("oom");
+    coverage_test_file_list.appendSlice(interop_test_files) catch @panic("oom");
     coverage_test_file_list.appendSlice(qlog_test_files) catch @panic("oom");
     coverage_test_file_list.appendSlice(tls_test_files) catch @panic("oom");
     const coverage_extra_sources = &.{

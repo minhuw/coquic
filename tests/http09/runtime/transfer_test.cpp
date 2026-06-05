@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 
 #include "tests/support/http09/runtime_test_fixtures.h"
-#include "interop/coquic-interop/http09_interop.h"
 
 namespace {
 using namespace coquic::http09::test_support;
@@ -458,38 +457,23 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileWithResumptionTestc
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
-    coquic::http09::Http09RuntimeConfig server;
-    {
-        const char *argv[] = {"coquic"};
-        ScopedEnvVar role("ROLE", "server");
-        ScopedEnvVar testcase("TESTCASE", "resumption");
-        ScopedEnvVar host("HOST", "127.0.0.1");
-        ScopedEnvVar port_env("PORT", std::to_string(port));
-        ScopedEnvVar document_root_env("DOCUMENT_ROOT", document_root.path().string());
-        ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", "tests/fixtures/quic-server-cert.pem");
-        ScopedEnvVar private_key("PRIVATE_KEY_PATH", "tests/fixtures/quic-server-key.pem");
-
-        const auto parsed =
-            coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
-        ASSERT_TRUE(parsed.has_value());
-        server = optional_value_or_terminate(parsed);
-    }
-
-    coquic::http09::Http09RuntimeConfig client;
-    {
-        const char *argv[] = {"coquic"};
-        ScopedEnvVar role("ROLE", "client");
-        ScopedEnvVar testcase("TESTCASE", "resumption");
-        ScopedEnvVar host("HOST", "127.0.0.1");
-        ScopedEnvVar port_env("PORT", std::to_string(port));
-        ScopedEnvVar download_root_env("DOWNLOAD_ROOT", download_root.path().string());
-        ScopedEnvVar requests("REQUESTS", "https://localhost/hello.txt");
-
-        const auto parsed =
-            coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
-        ASSERT_TRUE(parsed.has_value());
-        client = optional_value_or_terminate(parsed);
-    }
+    const auto server = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::http09::QuicHttp09Testcase::resumption,
+        .document_root = document_root.path(),
+        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+        .private_key_path = "tests/fixtures/quic-server-key.pem",
+    };
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = port,
+        .testcase = coquic::http09::QuicHttp09Testcase::resumption,
+        .download_root = download_root.path(),
+        .requests_env = "https://localhost/hello.txt",
+    };
 
     auto server_process = launch_runtime_server_process(server);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));

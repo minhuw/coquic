@@ -197,6 +197,8 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+        with:
+          summarize: false
 
       - name: Configure Nix Build Parallelism
         run: |

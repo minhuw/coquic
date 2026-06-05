@@ -24,6 +24,8 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
+        with:
+          summarize: false
 
       - name: Format Check
         run: nix develop -c pre-commit run clang-format --all-files --show-diff-on-failure
@@ -41,6 +43,8 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
+        with:
+          summarize: false
 
       - name: Lint
         env:
@@ -66,6 +70,8 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
+        with:
+          summarize: false
 
       - name: Full Lint
         env:

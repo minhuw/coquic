@@ -52,7 +52,6 @@ std::optional<ParsedHttp09Authority> parse_http09_authority(std::string_view aut
 std::optional<Http09ClientRemote>
 derive_http09_client_remote(const Http09RuntimeConfig &config,
                             const std::vector<QuicHttp09Request> &requests);
-std::optional<Http09RuntimeConfig> parse_http09_runtime_args(int argc, char **argv);
 quic::QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config);
 quic::QuicCoreConfig make_http09_server_core_config(const Http09RuntimeConfig &config);
 int run_http09_runtime(const Http09RuntimeConfig &config);

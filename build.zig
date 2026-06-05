@@ -289,7 +289,6 @@ fn http3SourceFiles() []const []const u8 {
         "src/http3/http3_client.cpp",
         "src/http3/http3_connection.cpp",
         "src/http3/http3_demo_routes.cpp",
-        "src/http3/http3_interop.cpp",
         "src/http3/http3_protocol.cpp",
         "src/http3/http3_qpack.cpp",
         "src/http3/http3_reverse_proxy.cpp",
@@ -326,8 +325,15 @@ fn apiSourceFiles() []const []const u8 {
         "src/api/core.cpp",
         "src/api/h3_server.cpp",
         "src/api/http3.cpp",
-        "src/api/interop.cpp",
         "src/api/quic.cpp",
+    };
+}
+
+fn interopSourceFiles() []const []const u8 {
+    return &.{
+        "interop/coquic-interop/http09_interop.cpp",
+        "interop/coquic-interop/http3_interop.cpp",
+        "interop/coquic-interop/interop.cpp",
     };
 }
 
@@ -996,6 +1002,7 @@ fn addTestBinary(
     tls_include_dir: []const u8,
     gtest_root: []const u8,
     test_files: []const []const u8,
+    extra_source_files: []const []const u8,
 ) *std.Build.Step.Compile {
     const gtest_include_dir = b.pathJoin(&.{ gtest_root, "googletest", "include" });
     const gtest_src_dir = b.pathJoin(&.{ gtest_root, "googletest" });
@@ -1014,6 +1021,13 @@ fn addTestBinary(
         .files = test_files,
         .flags = cpp_flags,
     });
+    if (extra_source_files.len != 0) {
+        addCSourceFiles(test_exe, .{
+            .root = b.path("."),
+            .files = extra_source_files,
+            .flags = cpp_flags,
+        });
+    }
     addCSourceFiles(test_exe, .{
         .root = .{ .cwd_relative = gtest_root },
         .files = &.{
@@ -1172,6 +1186,7 @@ pub fn build(b: *std.Build) void {
         .name = "coquic-interop",
         .root_module = rootModule(b, target, optimize),
     });
+    addIncludePath(interop_exe, b.path("."));
     addIncludePath(interop_exe, b.path("include"));
     const project_lib = addProjectLibrary(
         b,
@@ -1206,6 +1221,11 @@ pub fn build(b: *std.Build) void {
     addCSourceFiles(interop_exe, .{
         .root = b.path("."),
         .files = &.{"interop/coquic-interop/main.cpp"},
+        .flags = cpp_flags,
+    });
+    addCSourceFiles(interop_exe, .{
+        .root = b.path("."),
+        .files = interopSourceFiles(),
         .flags = cpp_flags,
     });
     linkLibrary(interop_exe, project_lib);
@@ -1267,6 +1287,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         smoke_test_files,
+        &.{},
     );
     const core_tests = addTestBinary(
         b,
@@ -1278,6 +1299,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         core_test_files,
+        &.{},
     );
     const http09_tests = addTestBinary(
         b,
@@ -1289,6 +1311,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         http09_test_files,
+        &.{"interop/coquic-interop/http09_interop.cpp"},
     );
     const http3_tests = addTestBinary(
         b,
@@ -1300,6 +1323,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         http3_test_files,
+        &.{"interop/coquic-interop/http3_interop.cpp"},
     );
     const qlog_tests = addTestBinary(
         b,
@@ -1311,6 +1335,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         qlog_test_files,
+        &.{},
     );
     const tls_tests = addTestBinary(
         b,
@@ -1322,6 +1347,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         tls_test_files,
+        &.{},
     );
     const perf_tests = addTestBinary(
         b,
@@ -1333,6 +1359,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         perf_test_files,
+        &.{},
     );
     linkTlsBackend(b, smoke_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(smoke_tests);
@@ -1412,6 +1439,10 @@ pub fn build(b: *std.Build) void {
     coverage_test_file_list.appendSlice(http3_test_files) catch @panic("oom");
     coverage_test_file_list.appendSlice(qlog_test_files) catch @panic("oom");
     coverage_test_file_list.appendSlice(tls_test_files) catch @panic("oom");
+    const coverage_extra_sources = &.{
+        "interop/coquic-interop/http09_interop.cpp",
+        "interop/coquic-interop/http3_interop.cpp",
+    };
 
     const coverage_tests = addTestBinary(
         b,
@@ -1423,6 +1454,7 @@ pub fn build(b: *std.Build) void {
         tls_include_dir,
         gtest_root,
         coverage_test_file_list.toOwnedSlice() catch @panic("oom"),
+        coverage_extra_sources,
     );
     linkTlsBackend(b, coverage_tests, tls_backend, tls_lib_dir, tls_linkage);
     linkSpdlog(coverage_tests);

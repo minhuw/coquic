@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "tests/support/http09/runtime_test_fixtures.h"
+#include "interop/coquic-interop/http09_interop.h"
 
 namespace {
 using namespace coquic::http09::test_support;
@@ -25,7 +26,8 @@ TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeTransfersWarmupAndFinalRequestsAcrossR
         ScopedEnvVar certificate("CERTIFICATE_CHAIN_PATH", "tests/fixtures/quic-server-cert.pem");
         ScopedEnvVar private_key("PRIVATE_KEY_PATH", "tests/fixtures/quic-server-key.pem");
 
-        const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        const auto parsed =
+            coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         server = optional_value_or_terminate(parsed);
     }
@@ -40,7 +42,8 @@ TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeTransfersWarmupAndFinalRequestsAcrossR
         ScopedEnvVar download_root_env("DOWNLOAD_ROOT", download_root.path().string());
         ScopedEnvVar requests("REQUESTS", "https://localhost/seed.txt https://localhost/final.txt");
 
-        const auto parsed = coquic::http09::parse_http09_runtime_args(1, const_cast<char **>(argv));
+        const auto parsed =
+            coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         client = optional_value_or_terminate(parsed);
     }

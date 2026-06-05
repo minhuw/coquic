@@ -14,7 +14,7 @@
 #include <unistd.h>
 #include <vector>
 
-#include "src/http3/http3_interop.h"
+#include "interop/coquic-interop/http3_interop.h"
 #include "src/http3/http3_runtime.h"
 #include "tests/support/core/connection_test_fixtures.h"
 #include "tests/support/quic_test_utils.h"

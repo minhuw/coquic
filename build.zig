@@ -1190,6 +1190,7 @@ pub fn build(b: *std.Build) void {
     });
     addIncludePath(interop_exe, b.path("."));
     addIncludePath(interop_exe, b.path("include"));
+    addIncludePath(interop_exe, .{ .cwd_relative = tls_include_dir });
     const project_lib = addProjectLibrary(
         b,
         "coquic",

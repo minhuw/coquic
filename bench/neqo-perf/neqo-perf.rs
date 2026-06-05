@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use futures::{stream::FuturesUnordered, StreamExt};
 use neqo_common::{event::Provider, Datagram, Tos};
 use neqo_transport::CongestionControl;
 use neqo_transport::{
@@ -1066,26 +1067,55 @@ async fn run_rr(cfg: &Config, counters: &mut Counters) -> Result<(), String> {
     Ok(())
 }
 
+fn merge_counters(dst: &mut Counters, mut src: Counters) {
+    dst.bytes_sent += src.bytes_sent;
+    dst.bytes_received += src.bytes_received;
+    dst.requests_completed += src.requests_completed;
+    dst.skipped_setup_errors += src.skipped_setup_errors;
+    dst.latencies.append(&mut src.latencies);
+}
+
+async fn run_single_crr_request(cfg: &Config, shape: RequestShape) -> Result<Counters, String> {
+    let mut counters = Counters::default();
+    run_request_batch(cfg, 1, shape, &mut counters).await?;
+    Ok(counters)
+}
+
 async fn run_crr(cfg: &Config, counters: &mut Counters) -> Result<(), String> {
     let shape = RequestShape {
         request_bytes: cfg.request_bytes,
         response_bytes: cfg.response_bytes,
         counts_latency: true,
     };
-    if cfg.requests.set {
-        let mut remaining = cfg.requests.value;
-        while remaining > 0 {
-            let batch = remaining.min(cfg.connections);
-            run_request_batch(cfg, batch, shape, counters).await?;
-            remaining -= batch;
+
+    let mut active = FuturesUnordered::new();
+    let mut started = 0_u64;
+    let deadline = Instant::now() + cfg.duration;
+
+    loop {
+        while (active.len() as u64) < cfg.connections {
+            if cfg.requests.set {
+                if started >= cfg.requests.value {
+                    break;
+                }
+            } else if Instant::now() >= deadline {
+                break;
+            }
+
+            active.push(run_single_crr_request(cfg, shape));
+            started += 1;
         }
-        return Ok(());
+
+        if active.is_empty() {
+            break;
+        }
+
+        let Some(result) = active.next().await else {
+            break;
+        };
+        merge_counters(counters, result?);
     }
 
-    let deadline = Instant::now() + cfg.duration;
-    while Instant::now() < deadline {
-        run_request_batch(cfg, cfg.connections.max(1), shape, counters).await?;
-    }
     Ok(())
 }
 

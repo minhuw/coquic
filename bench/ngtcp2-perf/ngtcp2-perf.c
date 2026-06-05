@@ -162,6 +162,7 @@ struct perf_conn {
     uint64_t expected_requests;
     uint64_t started_requests;
     uint64_t completed_requests;
+    uint64_t started_at;
     counters_t *counters;
 };
 
@@ -1294,6 +1295,135 @@ static void send_connection_close(perf_conn_t *pc) {
     }
 }
 
+static int start_single_crr_connection(const config_t *cfg, counters_t *counters,
+                                       perf_conn_t **slot, char *failure_reason,
+                                       size_t failure_reason_len) {
+    perf_conn_t *pc = calloc(1, sizeof(*pc));
+    if (!pc) {
+        snprintf(failure_reason, failure_reason_len, "out of memory");
+        return -1;
+    }
+    pc->fd = -1;
+    pc->cfg = *cfg;
+    pc->expected_requests = 1;
+    pc->started_at = now_us();
+    pc->counters = counters;
+    ngtcp2_ccerr_default(&pc->last_error);
+
+    if (create_client_socket(pc) != 0 || init_client_quic(pc) != 0) {
+        snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
+        free_conn(pc, 1);
+        return -1;
+    }
+
+    *slot = pc;
+    return 0;
+}
+
+static int crr_can_start_connection(const config_t *cfg, uint64_t started, uint64_t deadline) {
+    if (cfg->requests.set) {
+        return started < cfg->requests.value;
+    }
+    return now_us() < deadline;
+}
+
+static size_t active_crr_connection_count(perf_conn_t **slots, size_t count) {
+    size_t active = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (slots[i]) {
+            ++active;
+        }
+    }
+    return active;
+}
+
+static void free_crr_connections(perf_conn_t **slots, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        if (slots[i]) {
+            free_conn(slots[i], 1);
+            slots[i] = NULL;
+        }
+    }
+}
+
+static int wait_crr_connections(perf_conn_t **slots, size_t count, uint64_t max_wait_us,
+                                char *failure_reason, size_t failure_reason_len) {
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    int maxfd = -1;
+    uint64_t timeout_us = max_wait_us;
+    uint64_t now = ngtcp2_now();
+
+    for (size_t i = 0; i < count; ++i) {
+        perf_conn_t *pc = slots[i];
+        if (!pc) {
+            continue;
+        }
+        if (pc->fd >= FD_SETSIZE) {
+            snprintf(failure_reason, failure_reason_len,
+                     "ngtcp2 CRR connection fd exceeds select limit");
+            return -1;
+        }
+        FD_SET(pc->fd, &readfds);
+        if (pc->fd > maxfd) {
+            maxfd = pc->fd;
+        }
+
+        ngtcp2_tstamp expiry = ngtcp2_conn_get_expiry(pc->conn);
+        if (expiry <= now) {
+            timeout_us = 0;
+        } else {
+            uint64_t delta = (uint64_t)((expiry - now) / 1000);
+            if (delta < timeout_us) {
+                timeout_us = delta;
+            }
+        }
+    }
+
+    if (maxfd < 0) {
+        return 0;
+    }
+
+    struct timeval tv;
+    tv.tv_sec = (time_t)(timeout_us / 1000000ULL);
+    tv.tv_usec = (suseconds_t)(timeout_us % 1000000ULL);
+    int sret;
+    do {
+        sret = select(maxfd + 1, &readfds, NULL, NULL, &tv);
+    } while (sret == -1 && errno == EINTR);
+    if (sret < 0) {
+        snprintf(failure_reason, failure_reason_len, "%s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+static int drive_crr_connection(perf_conn_t *pc, uint64_t request_bytes, uint64_t response_bytes) {
+    if (pc->started_requests == 0 && ngtcp2_conn_get_handshake_completed(pc->conn)) {
+        if (open_batch_streams(pc, 1, request_bytes, response_bytes, 1) != 0) {
+            return -1;
+        }
+    }
+
+    if (drive_client_once(pc, 0) != 0) {
+        return -1;
+    }
+
+    if (pc->started_requests == 0 && now_us() - pc->started_at > HANDSHAKE_TIMEOUT_US) {
+        set_failure(pc, "ngtcp2 connection handshake timed out");
+        return -1;
+    }
+    if (now_us() - pc->started_at > BATCH_TIMEOUT_US) {
+        snprintf(pc->failure_reason, sizeof(pc->failure_reason),
+                 "ngtcp2-perf completed %" PRIu64 " of %" PRIu64 " requests",
+                 pc->completed_requests, pc->expected_requests);
+        pc->failed = 1;
+        return -1;
+    }
+
+    return 0;
+}
+
 static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t request_bytes,
                              uint64_t response_bytes, counters_t *counters, int counts_latency,
                              char *failure_reason, size_t failure_reason_len) {
@@ -1479,26 +1609,65 @@ static int run_rr(const config_t *cfg, counters_t *counters, char *failure_reaso
 
 static int run_crr(const config_t *cfg, counters_t *counters, char *failure_reason,
                    size_t failure_reason_len) {
-    if (cfg->requests.set) {
-        uint64_t remaining = cfg->requests.value;
-        while (remaining > 0) {
-            uint64_t batch = remaining < cfg->connections ? remaining : cfg->connections;
-            if (run_request_batch(cfg, batch, cfg->request_bytes, cfg->response_bytes, counters, 1,
-                                  failure_reason, failure_reason_len) != 0) {
+    size_t slot_count = (size_t)cfg->connections;
+    perf_conn_t **slots = calloc(slot_count, sizeof(slots[0]));
+    if (!slots) {
+        snprintf(failure_reason, failure_reason_len, "out of memory");
+        return -1;
+    }
+
+    uint64_t started = 0;
+    uint64_t deadline = now_us() + cfg->duration_us;
+    for (;;) {
+        for (size_t i = 0; i < slot_count; ++i) {
+            if (slots[i] || !crr_can_start_connection(cfg, started, deadline)) {
+                continue;
+            }
+            if (start_single_crr_connection(cfg, counters, &slots[i], failure_reason,
+                                            failure_reason_len) != 0) {
+                free_crr_connections(slots, slot_count);
+                free(slots);
                 return -1;
             }
-            remaining -= batch;
+            ++started;
         }
-        return 0;
-    }
-    uint64_t deadline = now_us() + cfg->duration_us;
-    while (now_us() < deadline) {
-        uint64_t batch = cfg->connections ? cfg->connections : 1;
-        if (run_request_batch(cfg, batch, cfg->request_bytes, cfg->response_bytes, counters, 1,
-                              failure_reason, failure_reason_len) != 0) {
+
+        if (active_crr_connection_count(slots, slot_count) == 0) {
+            break;
+        }
+
+        for (size_t i = 0; i < slot_count; ++i) {
+            perf_conn_t *pc = slots[i];
+            if (!pc) {
+                continue;
+            }
+            if (drive_crr_connection(pc, cfg->request_bytes, cfg->response_bytes) != 0 ||
+                pc->failed) {
+                snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
+                free_crr_connections(slots, slot_count);
+                free(slots);
+                return -1;
+            }
+            if (pc->completed_requests >= pc->expected_requests) {
+                send_connection_close(pc);
+                free_conn(pc, 1);
+                slots[i] = NULL;
+            }
+        }
+
+        if (active_crr_connection_count(slots, slot_count) == 0 &&
+            !crr_can_start_connection(cfg, started, deadline)) {
+            break;
+        }
+        if (wait_crr_connections(slots, slot_count, 100000, failure_reason, failure_reason_len) !=
+            0) {
+            free_crr_connections(slots, slot_count);
+            free(slots);
             return -1;
         }
     }
+
+    free(slots);
     return 0;
 }
 

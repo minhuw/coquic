@@ -10,7 +10,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cat >"${tmpdir}/coquic" <<'SH'
+cat >"${tmpdir}/coquic-interop" <<'SH'
 #!/usr/bin/env sh
 printf 'subcommand=%s\n' "$1"
 printf 'TESTCASE=%s\n' "${TESTCASE:-}"
@@ -19,10 +19,10 @@ printf 'PORT=%s\n' "${PORT:-}"
 printf 'DOCUMENT_ROOT=%s\n' "${DOCUMENT_ROOT:-}"
 printf 'DOWNLOAD_ROOT=%s\n' "${DOWNLOAD_ROOT:-}"
 SH
-chmod +x "${tmpdir}/coquic"
+chmod +x "${tmpdir}/coquic-interop"
 
 run_entrypoint() {
-  env COQUIC_SKIP_SETUP=1 COQUIC_SKIP_WAIT=1 COQUIC_BIN="${tmpdir}/coquic" "$@" \
+  env COQUIC_SKIP_SETUP=1 COQUIC_SKIP_WAIT=1 COQUIC_BIN="${tmpdir}/coquic-interop" "$@" \
     bash interop/entrypoint.sh
 }
 

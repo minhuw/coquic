@@ -70,7 +70,7 @@ PORT=443 \
 DOCUMENT_ROOT=/tmp/www \
 CERTIFICATE_CHAIN_PATH=tests/fixtures/quic-server-cert.pem \
 PRIVATE_KEY_PATH=tests/fixtures/quic-server-key.pem \
-$(nix path-info .#coquic-quictls)/bin/coquic interop-server
+$(nix path-info .#coquic-quictls)/bin/coquic-interop interop-server
 ```
 
 Run a client directly from the package output:
@@ -82,7 +82,7 @@ PORT=443 \
 SERVER_NAME=localhost \
 DOWNLOAD_ROOT=/tmp/downloads \
 REQUESTS="https://localhost/hello.txt" \
-$(nix path-info .#coquic-quictls)/bin/coquic interop-client
+$(nix path-info .#coquic-quictls)/bin/coquic-interop interop-client
 ```
 
 If you want an editable build environment instead of a packaged binary, use the

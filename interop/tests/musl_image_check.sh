@@ -67,10 +67,10 @@ docker load -i "${image_tar}" >/dev/null
 base_layers="$(docker image inspect martenseemann/quic-network-simulator-endpoint:latest --format '{{json .RootFS.Layers}}')"
 image_layers="$(docker image inspect "${image_tag}" --format '{{json .RootFS.Layers}}')"
 entrypoint="$(docker image inspect "${image_tag}" --format '{{json .Config.Entrypoint}}')"
-binary_target="$(docker run --rm --entrypoint /bin/sh "${image_tag}" -lc 'readlink -f /usr/local/bin/coquic')"
+binary_target="$(docker run --rm --entrypoint /bin/sh "${image_tag}" -lc 'readlink -f /usr/local/bin/coquic-interop')"
 cid="$(docker create "${image_tag}")"
-docker cp -L "${cid}:/usr/local/bin/coquic" "${tmpdir}/coquic"
-file_output="$(file "${tmpdir}/coquic")"
+docker cp -L "${cid}:/usr/local/bin/coquic-interop" "${tmpdir}/coquic-interop"
+file_output="$(file "${tmpdir}/coquic-interop")"
 
 printf 'binary_target=%s\n' "${binary_target}"
 printf 'file=%s\n' "${file_output}"
@@ -97,7 +97,7 @@ if len(image_layers) <= len(base_layers):
 
 if package_name not in binary_target:
     raise SystemExit(
-        f"expected /usr/local/bin/coquic to resolve into {package_name!r}, got: {binary_target}"
+        f"expected /usr/local/bin/coquic-interop to resolve into {package_name!r}, got: {binary_target}"
     )
 
 if "statically linked" not in file_output:

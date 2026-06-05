@@ -383,7 +383,7 @@
               else
                 ''
                   mkdir -p $out/bin
-                  cp zig-out/bin/coquic $out/bin/coquic
+                  cp zig-out/bin/coquic-interop $out/bin/coquic-interop
                   cp zig-out/bin/h3-server $out/bin/h3-server
                   cp zig-out/bin/coquic-perf $out/bin/coquic-perf
                 ''
@@ -433,7 +433,7 @@
         }:
         pkgs.runCommand "${name}-overlay" { } ''
           mkdir -p $out/usr/local/bin
-          ln -s ${coquicPackage}/bin/coquic $out/usr/local/bin/coquic
+          ln -s ${coquicPackage}/bin/coquic-interop $out/usr/local/bin/coquic-interop
           cp ${./interop/entrypoint.sh} $out/entrypoint.sh
           chmod +x $out/entrypoint.sh
         '';
@@ -1934,9 +1934,9 @@ EOF
           type = "app";
           program = "${qdrant-dev-app}/bin/qdrant-dev";
         };
-        coquic-quictls = {
+        coquic-interop-quictls = {
           type = "app";
-          program = "${quictlsPackage}/bin/coquic";
+          program = "${quictlsPackage}/bin/coquic-interop";
         };
         coquic-perf-quictls = {
           type = "app";
@@ -1946,9 +1946,9 @@ EOF
           type = "app";
           program = "${quictlsPackage}/bin/h3-server";
         };
-        coquic-quictls-musl = {
+        coquic-interop-quictls-musl = {
           type = "app";
-          program = "${quictlsMuslPackage}/bin/coquic";
+          program = "${quictlsMuslPackage}/bin/coquic-interop";
         };
         coquic-perf-quictls-musl = {
           type = "app";
@@ -1958,17 +1958,17 @@ EOF
           type = "app";
           program = "${quictlsMuslPackage}/bin/h3-server";
         };
-        coquic-boringssl = {
+        coquic-interop-boringssl = {
           type = "app";
-          program = "${boringsslPackage}/bin/coquic";
+          program = "${boringsslPackage}/bin/coquic-interop";
         };
         h3-server-boringssl = {
           type = "app";
           program = "${boringsslPackage}/bin/h3-server";
         };
-        coquic-boringssl-musl = {
+        coquic-interop-boringssl-musl = {
           type = "app";
-          program = "${boringsslMuslPackage}/bin/coquic";
+          program = "${boringsslMuslPackage}/bin/coquic-interop";
         };
         h3-server-boringssl-musl = {
           type = "app";

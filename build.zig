@@ -311,6 +311,7 @@ fn http3ProtocolSourceFiles() []const []const u8 {
 
 fn perfSourceFiles() []const []const u8 {
     return &.{
+        "bench/coquic-perf/perf_api.cpp",
         "bench/coquic-perf/perf_client.cpp",
         "bench/coquic-perf/perf_loop.cpp",
         "bench/coquic-perf/perf_metrics.cpp",
@@ -323,7 +324,9 @@ fn perfSourceFiles() []const []const u8 {
 fn apiSourceFiles() []const []const u8 {
     return &.{
         "src/api/core.cpp",
+        "src/api/h3_server.cpp",
         "src/api/http3.cpp",
+        "src/api/interop.cpp",
         "src/api/quic.cpp",
     };
 }
@@ -1165,12 +1168,11 @@ pub fn build(b: *std.Build) void {
     );
     wasm_quic_step.dependOn(&install_wasm_quic.step);
 
-    const exe = b.addExecutable(.{
-        .name = "coquic",
+    const interop_exe = b.addExecutable(.{
+        .name = "coquic-interop",
         .root_module = rootModule(b, target, optimize),
     });
-    addIncludePath(exe, b.path("."));
-    addIncludePath(exe, b.path("include"));
+    addIncludePath(interop_exe, b.path("include"));
     const project_lib = addProjectLibrary(
         b,
         "coquic",
@@ -1201,27 +1203,26 @@ pub fn build(b: *std.Build) void {
         tls_backend,
         tls_lib_dir,
     );
-    addCSourceFiles(exe, .{
+    addCSourceFiles(interop_exe, .{
         .root = b.path("."),
-        .files = &.{"src/main.cpp"},
+        .files = &.{"interop/coquic-interop/main.cpp"},
         .flags = cpp_flags,
     });
-    linkLibrary(exe, project_lib);
-    linkTlsBackend(b, exe, tls_backend, tls_lib_dir, tls_linkage);
-    linkSpdlog(exe);
-    linkLiburing(exe);
-    linkLibCpp(exe);
-    b.installArtifact(exe);
+    linkLibrary(interop_exe, project_lib);
+    linkTlsBackend(b, interop_exe, tls_backend, tls_lib_dir, tls_linkage);
+    linkSpdlog(interop_exe);
+    linkLiburing(interop_exe);
+    linkLibCpp(interop_exe);
+    b.installArtifact(interop_exe);
 
     const h3_server_exe = b.addExecutable(.{
         .name = "h3-server",
         .root_module = rootModule(b, target, optimize),
     });
-    addIncludePath(h3_server_exe, b.path("."));
     addIncludePath(h3_server_exe, b.path("include"));
     addCSourceFiles(h3_server_exe, .{
         .root = b.path("."),
-        .files = &.{"src/main_h3_server.cpp"},
+        .files = &.{"examples/h3-server/main.cpp"},
         .flags = cpp_flags,
     });
     linkLibrary(h3_server_exe, project_lib);
@@ -1235,7 +1236,6 @@ pub fn build(b: *std.Build) void {
         .name = "coquic-perf",
         .root_module = rootModule(b, target, optimize),
     });
-    addIncludePath(perf_exe, b.path("."));
     addIncludePath(perf_exe, b.path("include"));
     addCSourceFiles(perf_exe, .{
         .root = b.path("."),
@@ -1249,12 +1249,12 @@ pub fn build(b: *std.Build) void {
     linkLibCpp(perf_exe);
     b.installArtifact(perf_exe);
 
-    const run_exe = b.addRunArtifact(exe);
+    const run_exe = b.addRunArtifact(interop_exe);
     if (b.args) |args| {
         run_exe.addArgs(args);
     }
 
-    const run_step = b.step("run", "Run the coquic executable");
+    const run_step = b.step("run", "Run the coquic-interop executable");
     run_step.dependOn(&run_exe.step);
 
     const smoke_tests = addTestBinary(
@@ -1383,7 +1383,7 @@ pub fn build(b: *std.Build) void {
         "compdb",
         "Build the main executable and GoogleTest binaries without running them",
     );
-    compdb_step.dependOn(&exe.step);
+    compdb_step.dependOn(&interop_exe.step);
     compdb_step.dependOn(&perf_exe.step);
     compdb_step.dependOn(&smoke_tests.step);
     compdb_step.dependOn(&core_tests.step);

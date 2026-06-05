@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-binary="${COQUIC_BIN:-/usr/local/bin/coquic}"
+binary="${COQUIC_BIN:-/usr/local/bin/coquic-interop}"
 role="${ROLE:-}"
 testcase="${TESTCASE:-}"
 case "${role}" in

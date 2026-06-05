@@ -569,6 +569,7 @@ class Client:
         self.advance_benchmark_phase_sync(now)
         if self.phase == BenchmarkPhase.MEASURE and now >= self.measure_deadline:
             await self.enter_drain_phase(now)
+        await self.force_close_timed_bulk_drain(now)
 
     def advance_benchmark_phase_sync(self, now: int) -> None:
         if self.benchmark_started_at is None or not self.timed_mode():
@@ -578,14 +579,23 @@ class Client:
             and now - self.benchmark_started_at >= duration_us(self.config.warmup)
         ):
             self.enter_measure_phase(now)
+
+    async def force_close_timed_bulk_drain(self, now: int) -> None:
         if (
-            self.timed_bulk_download_mode()
-            and self.phase == BenchmarkPhase.DRAIN
-            and self.drain_deadline is not None
-            and now >= self.drain_deadline
+            not self.timed_bulk_download_mode()
+            or self.phase != BenchmarkPhase.DRAIN
+            or self.drain_deadline is None
+            or now < self.drain_deadline
         ):
-            for state in self.connections.values():
+            return
+
+        for handle in list(self.connections.keys()):
+            state = self.connections.get(handle)
+            if state is not None:
                 state.active_bulk_streams.clear()
+            for command in self.maybe_close_bulk_connection(handle):
+                result = self.execute_command(command, now)
+                await self.handle_result(result, now)
 
     def maybe_start_timed_benchmark(self, now: int) -> None:
         if not self.timed_mode() or self.benchmark_started_at is not None:

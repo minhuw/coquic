@@ -164,16 +164,12 @@ class UdpRuntime:
             if next_wakeup <= now:
                 return WaitEvent("timer")
             timer_timeout = (next_wakeup - now) / 1_000_000.0
-        timeout = (
-            min(timer_timeout, idle_timeout)
-            if timer_timeout is not None
-            else idle_timeout
-        )
+        timeout = timer_timeout if timer_timeout is not None else idle_timeout
         try:
             datagram = await asyncio.wait_for(self.recv(), timeout)
             return WaitEvent("datagram", datagram)
         except asyncio.TimeoutError:
-            if timer_timeout is not None and timer_timeout <= idle_timeout:
+            if timer_timeout is not None:
                 return WaitEvent("timer")
             return WaitEvent("idle")
 

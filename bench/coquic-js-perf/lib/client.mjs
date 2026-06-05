@@ -2,7 +2,7 @@ import { ClientConfig, Endpoint, Lifecycle, StateChange } from "@coquic/coquic";
 
 import { Direction, Mode, clientEndpointConfig } from "./config.mjs";
 import { PerfError } from "./error.mjs";
-import { copyNonSendEffects, UdpRuntime } from "./io.mjs";
+import { copyNonSendEffects, timeUsToNumber, UdpRuntime } from "./io.mjs";
 import {
   durationMillis,
   finalizeSummary,
@@ -170,7 +170,7 @@ class Client {
 
   async handleDueTimer() {
     while (true) {
-      const wakeup = this.endpoint.nextWakeup();
+      const wakeup = timeUsToNumber(this.endpoint.nextWakeup());
       if (wakeup == null) {
         return;
       }
@@ -586,6 +586,7 @@ class Client {
     if (this.phase === BenchmarkPhase.MEASURE && now >= this.measureDeadline) {
       await this.enterDrainPhase(now);
     }
+    await this.forceCloseTimedBulkDrain(now);
   }
 
   advanceBenchmarkPhaseSync(now) {
@@ -598,14 +599,24 @@ class Client {
     ) {
       this.enterMeasurePhase(now);
     }
+  }
+
+  async forceCloseTimedBulkDrain(now) {
     if (
-      this.timedBulkDownloadMode() &&
-      this.phase === BenchmarkPhase.DRAIN &&
-      this.drainDeadline != null &&
-      now >= this.drainDeadline
+      !this.timedBulkDownloadMode() ||
+      this.phase !== BenchmarkPhase.DRAIN ||
+      this.drainDeadline == null ||
+      now < this.drainDeadline
     ) {
-      for (const state of this.connections.values()) {
-        state.activeBulkStreams.clear();
+      return;
+    }
+
+    for (const handle of Array.from(this.connections.keys())) {
+      const state = this.connections.get(handle);
+      state?.activeBulkStreams.clear();
+      for (const command of this.maybeCloseBulkConnection(handle)) {
+        const result = this.executeCommand(command, now);
+        await this.handleResult(result, now);
       }
     }
   }
@@ -705,6 +716,7 @@ class Client {
   }
 
   nextWaitWakeup(coreNextWakeup) {
+    coreNextWakeup = timeUsToNumber(coreNextWakeup);
     const benchmark = this.benchmarkNextWakeup();
     const values = [coreNextWakeup, benchmark].filter((value) => value != null);
     return values.length > 0 ? Math.min(...values) : null;

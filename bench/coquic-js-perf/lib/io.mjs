@@ -9,6 +9,16 @@ import { PerfError } from "./error.mjs";
 const MAX_UDP_DATAGRAM_SIZE = 64 * 1024;
 const MAX_BUFFERED_SEND_DATAGRAMS = 4096;
 
+export function timeUsToNumber(value) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === "bigint") {
+    return value > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(value);
+  }
+  return Math.min(Number(value), Number.MAX_SAFE_INTEGER);
+}
+
 export class WaitEvent {
   constructor(kind, datagram = null) {
     this.kind = kind;
@@ -138,6 +148,7 @@ export class UdpRuntime {
   }
 
   async wait(nextWakeup, idleTimeout) {
+    nextWakeup = timeUsToNumber(nextWakeup);
     if (this.recvQueue.length > 0) {
       return new WaitEvent("datagram", await this.recv());
     }
@@ -150,7 +161,7 @@ export class UdpRuntime {
       }
       timerTimeout = (nextWakeup - now) / 1_000_000.0;
     }
-    const timeout = timerTimeout == null ? idleTimeout : Math.min(timerTimeout, idleTimeout);
+    const timeout = timerTimeout == null ? idleTimeout : timerTimeout;
 
     return await new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -158,7 +169,7 @@ export class UdpRuntime {
         if (index >= 0) {
           this.waiters.splice(index, 1);
         }
-        if (timerTimeout != null && timerTimeout <= idleTimeout) {
+        if (timerTimeout != null) {
           resolve(new WaitEvent("timer"));
         } else {
           resolve(new WaitEvent("idle"));

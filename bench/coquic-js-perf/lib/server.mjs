@@ -2,7 +2,7 @@ import { Endpoint, Lifecycle, StateChange } from "@coquic/coquic";
 
 import { Direction, Mode, serverEndpointConfig } from "./config.mjs";
 import { PerfError } from "./error.mjs";
-import { copyNonSendEffects, UdpRuntime } from "./io.mjs";
+import { copyNonSendEffects, timeUsToNumber, UdpRuntime } from "./io.mjs";
 import { newRunSummary } from "./metrics.mjs";
 import {
   CONTROL_STREAM_ID,
@@ -94,7 +94,7 @@ class Server {
 
   async handleDueTimer() {
     while (true) {
-      const wakeup = this.endpoint.nextWakeup();
+      const wakeup = timeUsToNumber(this.endpoint.nextWakeup());
       if (wakeup == null) {
         return;
       }

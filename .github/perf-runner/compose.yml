@@ -1,0 +1,29 @@
+services:
+  runner:
+    build:
+      context: .
+    image: coquic-perf-runner:latest
+    container_name: coquic-perf-runner
+    restart: unless-stopped
+    cpuset: "0-1"
+    environment:
+      REPO_URL: ${REPO_URL:-https://github.com/minhuw/coquic}
+      ACCESS_TOKEN: ${ACCESS_TOKEN:-}
+      RUNNER_NAME: ${RUNNER_NAME:-coquic-perf-1}
+      LABELS: ${LABELS:-coquic-perf,docker,nix}
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+      RUNNER_SCOPE: ${RUNNER_SCOPE:-repo}
+      RUNNER_WORKDIR: ${RUNNER_WORKDIR:-/home/minhu/coquic-perf-runner/_work}
+      CONFIGURED_ACTIONS_RUNNER_FILES_DIR: ${CONFIGURED_ACTIONS_RUNNER_FILES_DIR:-/home/minhu/coquic-perf-runner/config}
+      DISABLE_AUTOMATIC_DEREGISTRATION: ${DISABLE_AUTOMATIC_DEREGISTRATION:-true}
+      RUN_AS_ROOT: ${RUN_AS_ROOT:-true}
+      UNSET_CONFIG_VARS: "true"
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        sandbox = false
+        max-jobs = 2
+        cores = 2
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${RUNNER_WORKDIR:-/home/minhu/coquic-perf-runner/_work}:${RUNNER_WORKDIR:-/home/minhu/coquic-perf-runner/_work}
+      - ${CONFIGURED_ACTIONS_RUNNER_FILES_DIR:-/home/minhu/coquic-perf-runner/config}:${CONFIGURED_ACTIONS_RUNNER_FILES_DIR:-/home/minhu/coquic-perf-runner/config}

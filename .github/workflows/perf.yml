@@ -24,7 +24,11 @@ jobs:
 
   perf-impl:
     name: ${{ matrix.display_name }} Perf
-    runs-on: ubuntu-latest
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - coquic-perf
     needs:
       - perf-config
     timeout-minutes: 120
@@ -34,6 +38,7 @@ jobs:
         cores = 2
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - label: coquic
@@ -184,6 +189,7 @@ jobs:
           fetch-depth: 0
 
       - name: Free Runner Disk
+        if: runner.environment == 'github-hosted'
         run: |
           df -h
           sudo rm -rf \
@@ -196,6 +202,7 @@ jobs:
           df -h
 
       - name: Install Nix
+        if: runner.environment == 'github-hosted'
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
         with:
           summarize: false
@@ -209,7 +216,8 @@ jobs:
           } >> "${HOME}/.config/nix/nix.conf"
 
       # Remove this when GitHub runner gets docker engine >= v28.1.0.
-      - uses: docker/setup-docker-action@0234bb73ccb40f0c430b795634f9247e2b5c2d23
+      - if: runner.environment == 'github-hosted'
+        uses: docker/setup-docker-action@0234bb73ccb40f0c430b795634f9247e2b5c2d23
         with:
           version: version=v28.3.0
 

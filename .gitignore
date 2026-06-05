@@ -10,6 +10,8 @@ coverage/
 .rag/
 .remote-ci/
 .envrc.local
+.github/perf-runner/.env
+.github/perf-runner/.env.*
 .interop-logs/
 result
 rag/.pytest_cache/

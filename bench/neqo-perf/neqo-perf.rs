@@ -1059,11 +1059,37 @@ async fn run_rr(cfg: &Config, counters: &mut Counters) -> Result<(), String> {
         return run_request_batch(cfg, cfg.requests.value, shape, counters).await;
     }
 
-    let deadline = Instant::now() + cfg.duration;
-    while Instant::now() < deadline {
-        let count = cfg.requests_in_flight.min(DEFAULT_MAX_RUN_REQUESTS).max(1);
-        run_request_batch(cfg, count, shape, counters).await?;
+    let (socket, local_addr, mut conn) = connect_client(cfg).await?;
+    let mut batch = ClientBatch::new(u64::MAX, shape);
+    batch.max_active_requests = Some((cfg.requests_in_flight * cfg.connections).max(1));
+
+    let started = Instant::now();
+    let deadline = started + cfg.duration;
+    let drain_deadline = deadline + DRAIN_TIMEOUT;
+    while Instant::now() < drain_deadline {
+        if Instant::now() >= deadline {
+            batch.target_requests = batch.started_requests;
+        }
+        batch.handle_events(&mut conn, counters)?;
+        let next_timeout = drain_client_output(&mut conn, &socket)
+            .await
+            .map_err(|err| format!("neqo output failed: {err}"))?;
+        if Instant::now() >= deadline && batch.active_requests() == 0 {
+            break;
+        }
+        if !conn.state().connected() && started.elapsed() > HANDSHAKE_TIMEOUT {
+            return Err("neqo connection handshake timed out".to_string());
+        }
+        wait_socket(&socket, next_timeout)
+            .await
+            .map_err(|err| format!("neqo socket wait failed: {err}"))?;
+        drain_client_socket(&socket, &mut conn, local_addr)
+            .await
+            .map_err(|err| format!("neqo socket read failed: {err}"))?;
     }
+
+    conn.close(Instant::now(), 0, "done");
+    let _ = drain_client_output(&mut conn, &socket).await;
     Ok(())
 }
 

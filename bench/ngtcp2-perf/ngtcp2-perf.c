@@ -680,6 +680,9 @@ static int stream_close_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
         stream = conn_find_stream(pc, stream_id);
     }
     if (stream) {
+        if (pc->is_server) {
+            ngtcp2_conn_extend_max_streams_bidi(conn, 1);
+        }
         conn_remove_stream(pc, stream);
     }
     return 0;
@@ -1240,6 +1243,16 @@ static int open_timed_bulk_streams(perf_conn_t *pc, uint64_t target_active, uint
     return 0;
 }
 
+static int open_timed_rr_streams(perf_conn_t *pc, uint64_t target_active, uint64_t request_bytes,
+                                 uint64_t response_bytes) {
+    while (active_requests(pc) < target_active) {
+        if (open_request_stream(pc, request_bytes, response_bytes, 1) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int drive_client_once(perf_conn_t *pc, uint64_t max_wait_us) {
     if (conn_write(pc) != 0) {
         return -1;
@@ -1590,21 +1603,66 @@ static int run_rr(const config_t *cfg, counters_t *counters, char *failure_reaso
         return run_request_batch(cfg, cfg->requests.value, cfg->request_bytes, cfg->response_bytes,
                                  counters, 1, failure_reason, failure_reason_len);
     }
-    uint64_t deadline = now_us() + cfg->duration_us;
-    while (now_us() < deadline) {
-        uint64_t count = cfg->requests_in_flight;
-        if (count > DEFAULT_MAX_RUN_REQUESTS) {
-            count = DEFAULT_MAX_RUN_REQUESTS;
+
+    perf_conn_t *pc = calloc(1, sizeof(*pc));
+    if (!pc) {
+        snprintf(failure_reason, failure_reason_len, "out of memory");
+        return -1;
+    }
+    pc->fd = -1;
+    pc->cfg = *cfg;
+    pc->counters = counters;
+    ngtcp2_ccerr_default(&pc->last_error);
+
+    if (create_client_socket(pc) != 0 || init_client_quic(pc) != 0) {
+        snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
+        free_conn(pc, 1);
+        return -1;
+    }
+
+    uint64_t target_active = cfg->requests_in_flight * cfg->connections;
+    if (target_active == 0) {
+        target_active = 1;
+    }
+    uint64_t started_at = now_us();
+    uint64_t deadline = started_at + cfg->duration_us;
+    uint64_t drain_deadline = deadline + DRAIN_TIMEOUT_US;
+    int opened_streams = 0;
+    while (!pc->failed) {
+        uint64_t now = now_us();
+        if (!opened_streams && ngtcp2_conn_get_handshake_completed(pc->conn)) {
+            opened_streams = 1;
         }
-        if (count == 0) {
-            count = 1;
+        if (opened_streams && now < deadline &&
+            open_timed_rr_streams(pc, target_active, cfg->request_bytes, cfg->response_bytes) !=
+                0) {
+            break;
         }
-        if (run_request_batch(cfg, count, cfg->request_bytes, cfg->response_bytes, counters, 1,
-                              failure_reason, failure_reason_len) != 0) {
-            return -1;
+        if (opened_streams && now >= deadline && active_requests(pc) == 0) {
+            break;
+        }
+        if (now >= drain_deadline) {
+            break;
+        }
+        if (!opened_streams && now - started_at > HANDSHAKE_TIMEOUT_US) {
+            set_failure(pc, "ngtcp2 connection handshake timed out");
+            break;
+        }
+        if (drive_client_once(pc, 100000) != 0) {
+            break;
         }
     }
-    return 0;
+
+    if (!pc->failed) {
+        send_connection_close(pc);
+    }
+
+    int rc = pc->failed ? -1 : 0;
+    if (pc->failed) {
+        snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
+    }
+    free_conn(pc, 1);
+    return rc;
 }
 
 static int run_crr(const config_t *cfg, counters_t *counters, char *failure_reason,

@@ -40,6 +40,7 @@
 #define TRANSFER_CONNECTION_WINDOW (32U * 1024U * 1024U)
 #define TRANSFER_STREAM_WINDOW (16U * 1024U * 1024U)
 #define DRAIN_TIMEOUT_US 2000000ULL
+#define WRITE_CHUNK_SIZE 32768U
 
 typedef struct {
     uint64_t value;
@@ -129,6 +130,17 @@ typedef struct {
     int failed;
     char failure_reason[256];
 } client_batch_t;
+
+typedef struct {
+    quicly_streambuf_t streambuf;
+    uint8_t header[16];
+    size_t header_read;
+    uint64_t request_bytes;
+    uint64_t response_bytes;
+    uint64_t request_read;
+    int ready_to_send;
+    int send_closed;
+} server_stream_data_t;
 
 typedef struct {
     quicly_streambuf_t streambuf;
@@ -535,6 +547,21 @@ static latency_summary_t summarize_latency(const latency_vec_t *latencies) {
     return summary;
 }
 
+static void encode_be64(uint8_t out[8], uint64_t value) {
+    for (int i = 7; i >= 0; --i) {
+        out[i] = (uint8_t)(value & 0xffU);
+        value >>= 8;
+    }
+}
+
+static uint64_t decode_be64(const uint8_t in[8]) {
+    uint64_t value = 0;
+    for (int i = 0; i != 8; ++i) {
+        value = (value << 8) | in[i];
+    }
+    return value;
+}
+
 static uint64_t ceil_div(uint64_t numerator, uint64_t denominator) {
     if (denominator == 0) {
         denominator = 1;
@@ -646,7 +673,12 @@ static void configure_context(const config_t *cfg, int server) {
     context->transport_params.max_stream_data.bidi_local = TRANSFER_STREAM_WINDOW;
     context->transport_params.max_stream_data.bidi_remote = TRANSFER_STREAM_WINDOW;
     context->transport_params.max_stream_data.uni = TRANSFER_STREAM_WINDOW;
-    context->transport_params.max_streams_bidi = cfg->streams > 100 ? cfg->streams : 100;
+    uint64_t max_streams_bidi = is_mode(cfg, "rr") ? cfg->requests_in_flight * cfg->connections
+                                                   : cfg->streams * cfg->connections;
+    if (max_streams_bidi < 100) {
+        max_streams_bidi = 100;
+    }
+    context->transport_params.max_streams_bidi = max_streams_bidi;
     context->transport_params.max_udp_payload_size = 1500;
 
     const char *cc_name = quicly_cc_name(cfg->congestion_control);
@@ -664,47 +696,6 @@ static void configure_context(const config_t *cfg, int server) {
     } else if (cfg->verify_peer) {
         setup_verify_certificate(context->tls);
     }
-}
-
-static int parse_request(ptls_iovec_t input, char **path, int *is_http1) {
-    size_t off = 0;
-    size_t path_start;
-    for (off = 0; off != input.len; ++off) {
-        if (input.base[off] == ' ') {
-            goto end_of_method;
-        }
-    }
-    return 0;
-
-end_of_method:
-    ++off;
-    path_start = off;
-    for (; off != input.len; ++off) {
-        if (input.base[off] == ' ' || input.base[off] == '\r' || input.base[off] == '\n') {
-            goto end_of_path;
-        }
-    }
-    return 0;
-
-end_of_path:
-    *path = (char *)(input.base + path_start);
-    *is_http1 = input.base[off] == ' ';
-    input.base[off] = '\0';
-    return 1;
-}
-
-static void send_str(quicly_stream_t *stream, const char *text) {
-    quicly_streambuf_egress_write(stream, text, strlen(text));
-}
-
-static void send_header(quicly_stream_t *stream, int is_http1, int status, const char *mime_type) {
-    char buf[256];
-    if (!is_http1) {
-        return;
-    }
-    snprintf(buf, sizeof(buf), "HTTP/1.1 %03d OK\r\nConnection: close\r\nContent-Type: %s\r\n\r\n",
-             status, mime_type);
-    send_str(stream, buf);
 }
 
 static quicly_error_t flatten_sized_text(quicly_sendbuf_vec_t *vec, void *dst, size_t off,
@@ -735,19 +726,6 @@ static const quicly_streambuf_sendvec_callbacks_t *sized_text_callbacks(void) {
     return callbacks;
 }
 
-static int send_sized_text(quicly_stream_t *stream, const char *path, int is_http1) {
-    size_t size;
-    int lastpos;
-    if (sscanf(path, "/%zu%n", &size, &lastpos) != 1 || lastpos != (int)strlen(path)) {
-        return 0;
-    }
-    send_header(stream, is_http1, 200, "text/plain; charset=utf-8");
-    const quicly_streambuf_sendvec_callbacks_t *callbacks = sized_text_callbacks();
-    quicly_sendbuf_vec_t vec = {callbacks, size, NULL};
-    quicly_streambuf_egress_write_vec(stream, &vec);
-    return 1;
-}
-
 static void on_stop_sending(quicly_stream_t *stream, quicly_error_t err) {
     (void)stream;
     (void)err;
@@ -759,33 +737,70 @@ static void on_receive_reset(quicly_stream_t *stream, quicly_error_t err) {
 }
 
 static void server_on_receive(quicly_stream_t *stream, size_t off, const void *src, size_t len) {
-    char *path;
-    int is_http1;
+    server_stream_data_t *data = stream->data;
     if (!quicly_sendstate_is_open(&stream->sendstate)) {
         return;
     }
+    if (!data || data->send_closed) {
+        return;
+    }
+
     if (quicly_streambuf_ingress_receive(stream, off, src, len) != 0) {
         return;
     }
-    if (!parse_request(quicly_streambuf_ingress_get(stream), &path, &is_http1)) {
-        if (!quicly_recvstate_transfer_complete(&stream->recvstate)) {
-            return;
+
+    for (;;) {
+        ptls_iovec_t input = quicly_streambuf_ingress_get(stream);
+        size_t consumed = 0;
+        if (input.len == 0) {
+            break;
         }
-        send_header(stream, 1, 500, "text/plain; charset=utf-8");
-        send_str(stream, "failed to parse HTTP request\n");
-        goto sent;
-    }
-    if (!quicly_recvstate_transfer_complete(&stream->recvstate)) {
-        quicly_request_stop(stream, QUICLY_ERROR_FROM_APPLICATION_ERROR_CODE(0));
-    }
-    if (!send_sized_text(stream, path, is_http1)) {
-        send_header(stream, is_http1, 404, "text/plain; charset=utf-8");
-        send_str(stream, "not found\n");
+
+        if (data->header_read < sizeof(data->header)) {
+            size_t need = sizeof(data->header) - data->header_read;
+            size_t take = input.len < need ? input.len : need;
+            memcpy(data->header + data->header_read, input.base, take);
+            data->header_read += take;
+            consumed += take;
+            if (data->header_read == sizeof(data->header)) {
+                data->request_bytes = decode_be64(data->header);
+                data->response_bytes = decode_be64(data->header + 8);
+            }
+        }
+
+        if (data->header_read == sizeof(data->header) && consumed < input.len) {
+            uint64_t need = data->request_bytes - data->request_read;
+            size_t available = input.len - consumed;
+            size_t take = available > need ? (size_t)need : available;
+            data->request_read += take;
+            consumed += take;
+        }
+        if (consumed != 0) {
+            quicly_streambuf_ingress_shift(stream, consumed);
+        }
+        if (data->header_read == sizeof(data->header) &&
+            data->request_read >= data->request_bytes) {
+            data->ready_to_send = 1;
+            break;
+        }
+        if (consumed == 0) {
+            break;
+        }
     }
 
-sent:
+    if (quicly_recvstate_transfer_complete(&stream->recvstate) &&
+        data->header_read == sizeof(data->header) && data->request_read >= data->request_bytes) {
+        data->ready_to_send = 1;
+    }
+    if (!data->ready_to_send) {
+        return;
+    }
+
+    const quicly_streambuf_sendvec_callbacks_t *callbacks = sized_text_callbacks();
+    quicly_sendbuf_vec_t vec = {callbacks, data->response_bytes, NULL};
+    quicly_streambuf_egress_write_vec(stream, &vec);
     quicly_streambuf_egress_shutdown(stream);
-    quicly_streambuf_ingress_shift(stream, quicly_streambuf_ingress_get(stream).len);
+    data->send_closed = 1;
 }
 
 static void client_count_stream(client_stream_data_t *data) {
@@ -867,7 +882,7 @@ static const quicly_stream_callbacks_t *client_stream_callback_table(void) {
 static quicly_error_t on_stream_open(quicly_stream_open_t *self, quicly_stream_t *stream) {
     (void)self;
     int ret;
-    if ((ret = quicly_streambuf_create(stream, is_server_role ? sizeof(quicly_streambuf_t)
+    if ((ret = quicly_streambuf_create(stream, is_server_role ? sizeof(server_stream_data_t)
                                                               : sizeof(client_stream_data_t))) !=
         0) {
         return ret;
@@ -1038,12 +1053,26 @@ static int open_request_stream(quicly_conn_t *conn, client_batch_t *batch, int c
     data->started_at = now_us();
     data->counts_latency = counts && batch->counts_latency;
 
-    char req[128];
-    int req_len = snprintf(req, sizeof(req), "GET /%" PRIu64 "\r\n", batch->response_bytes);
-    if (req_len < 0 || (size_t)req_len >= sizeof(req) ||
-        quicly_streambuf_egress_write(stream, req, (size_t)req_len) != 0 ||
-        quicly_streambuf_egress_shutdown(stream) != 0) {
-        set_batch_failure(batch, "could not write request stream");
+    uint8_t header[16];
+    encode_be64(header, batch->request_bytes);
+    encode_be64(header + 8, batch->response_bytes);
+    if (quicly_streambuf_egress_write(stream, header, sizeof(header)) != 0) {
+        set_batch_failure(batch, "could not write request stream header");
+        return -1;
+    }
+    static const uint8_t zeros[WRITE_CHUNK_SIZE] = {0};
+    uint64_t sent = 0;
+    while (sent < batch->request_bytes) {
+        uint64_t left = batch->request_bytes - sent;
+        size_t chunk = left > sizeof(zeros) ? sizeof(zeros) : (size_t)left;
+        if (quicly_streambuf_egress_write(stream, zeros, chunk) != 0) {
+            set_batch_failure(batch, "could not write request stream body");
+            return -1;
+        }
+        sent += chunk;
+    }
+    if (quicly_streambuf_egress_shutdown(stream) != 0) {
+        set_batch_failure(batch, "could not close request stream send side");
         return -1;
     }
     ++batch->active_requests;
@@ -1053,6 +1082,16 @@ static int open_request_stream(quicly_conn_t *conn, client_batch_t *batch, int c
 static int enqueue_requests(quicly_conn_t *conn, client_batch_t *batch, uint64_t count) {
     for (uint64_t i = 0; i != count; ++i) {
         if (open_request_stream(conn, batch, batch->counts_latency) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int open_refill_streams(quicly_conn_t *conn, client_batch_t *batch, uint64_t target_active,
+                               int counts_latency) {
+    while (batch->active_requests < target_active) {
+        if (open_request_stream(conn, batch, counts_latency) != 0) {
             return -1;
         }
     }
@@ -1345,6 +1384,99 @@ static int run_timed_bulk_download(const config_t *cfg, uint64_t response_bytes,
     return 0;
 }
 
+static int run_timed_rr(const config_t *cfg, counters_t *counters, char *failure_reason,
+                        size_t failure_reason_len) {
+    struct sockaddr_storage sa;
+    socklen_t salen;
+    int fd = -1;
+    if (prepare_client_socket(cfg, &fd, &sa, &salen, failure_reason, failure_reason_len) != 0) {
+        return -1;
+    }
+    (void)salen;
+
+    client_batch_t *batch = calloc(1, sizeof(*batch));
+    if (batch == NULL) {
+        close(fd);
+        snprintf(failure_reason, failure_reason_len, "out of memory");
+        return -1;
+    }
+    batch->request_bytes = cfg->request_bytes;
+    batch->response_bytes = cfg->response_bytes;
+    batch->counts_latency = 1;
+
+    quicly_conn_t *conn = connect_client(cfg, &sa, failure_reason, failure_reason_len);
+    if (conn == NULL) {
+        free_batch(batch);
+        close(fd);
+        return -1;
+    }
+
+    uint64_t target_active = cfg->requests_in_flight * cfg->connections;
+    if (target_active == 0) {
+        target_active = 1;
+    }
+    uint64_t deadline = now_us() + cfg->duration_us;
+    uint64_t drain_deadline = deadline + DRAIN_TIMEOUT_US;
+    while (batch->active_requests < target_active && now_us() < deadline) {
+        if (open_request_stream(conn, batch, 1) != 0) {
+            snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
+            quicly_free(conn);
+            finish_batch(batch, counters);
+            close(fd);
+            return -1;
+        }
+    }
+    send_pending(fd, conn);
+
+    int close_called = 0;
+    while (conn != NULL) {
+        uint64_t now = now_us();
+        if (now < deadline) {
+            if (open_refill_streams(conn, batch, target_active, 1) != 0) {
+                snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
+                quicly_free(conn);
+                finish_batch(batch, counters);
+                close(fd);
+                return -1;
+            }
+        } else if (!close_called && batch->active_requests == 0 && quicly_num_streams(conn) == 0) {
+            quicly_close(conn, 0, "");
+            close_called = 1;
+        } else if (now > drain_deadline) {
+            quicly_free(conn);
+            conn = NULL;
+            break;
+        }
+
+        quicly_error_t ret = drive_client_once(fd, conn, 100);
+        if (ret != 0) {
+            quicly_free(conn);
+            conn = NULL;
+            if (ret != QUICLY_ERROR_FREE_CONNECTION) {
+                snprintf(failure_reason, failure_reason_len, "quicly_send returned %" PRId64,
+                         (int64_t)ret);
+                finish_batch(batch, counters);
+                close(fd);
+                return -1;
+            }
+        }
+        if (batch->failed) {
+            snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
+            if (conn != NULL) {
+                quicly_close(conn, QUICLY_ERROR_FROM_APPLICATION_ERROR_CODE(1), "perf failure");
+                quicly_free(conn);
+            }
+            finish_batch(batch, counters);
+            close(fd);
+            return -1;
+        }
+    }
+
+    close(fd);
+    finish_batch(batch, counters);
+    return 0;
+}
+
 static int run_bulk(const config_t *cfg, counters_t *counters, char *failure_reason,
                     size_t failure_reason_len) {
     uint64_t request_bytes;
@@ -1399,21 +1531,7 @@ static int run_rr(const config_t *cfg, counters_t *counters, char *failure_reaso
         return run_request_batch(cfg, cfg->requests.value, cfg->response_bytes, cfg->request_bytes,
                                  counters, 1, failure_reason, failure_reason_len);
     }
-    uint64_t deadline = now_us() + cfg->duration_us;
-    while (now_us() < deadline) {
-        uint64_t count = cfg->requests_in_flight;
-        if (count > DEFAULT_MAX_RUN_REQUESTS) {
-            count = DEFAULT_MAX_RUN_REQUESTS;
-        }
-        if (count == 0) {
-            count = 1;
-        }
-        if (run_request_batch(cfg, count, cfg->response_bytes, cfg->request_bytes, counters, 1,
-                              failure_reason, failure_reason_len) != 0) {
-            return -1;
-        }
-    }
-    return 0;
+    return run_timed_rr(cfg, counters, failure_reason, failure_reason_len);
 }
 
 static int run_crr(const config_t *cfg, counters_t *counters, char *failure_reason,

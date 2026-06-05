@@ -34,6 +34,8 @@ jobs:
     timeout-minutes: 120
     env:
       NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        sandbox = false
         max-jobs = 2
         cores = 2
     strategy:

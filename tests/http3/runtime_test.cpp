@@ -73,6 +73,37 @@ template <typename T> const T &optional_ref_or_terminate(const std::optional<T> 
     return *value;
 }
 
+template <typename Operation> void expect_true_with_captured_stderr(Operation operation) {
+    testing::internal::CaptureStderr();
+    const bool result = operation();
+    const std::string captured_stderr = testing::internal::GetCapturedStderr();
+    EXPECT_TRUE(result) << captured_stderr;
+}
+
+class ScopedStderrSilencer {
+  public:
+    ScopedStderrSilencer() {
+        testing::internal::CaptureStderr();
+    }
+
+    ~ScopedStderrSilencer() {
+        if (!released_) {
+            (void)testing::internal::GetCapturedStderr();
+        }
+    }
+
+    ScopedStderrSilencer(const ScopedStderrSilencer &) = delete;
+    ScopedStderrSilencer &operator=(const ScopedStderrSilencer &) = delete;
+
+    std::string release() {
+        released_ = true;
+        return testing::internal::GetCapturedStderr();
+    }
+
+  private:
+    bool released_ = false;
+};
+
 class ScopedEnvVar {
   public:
     ScopedEnvVar(std::string name, std::optional<std::string> value) : name_(std::move(name)) {
@@ -965,6 +996,7 @@ TEST(QuicHttp3RuntimeTest, ParsesStandaloneClientInvocation) {
 }
 
 TEST(QuicHttp3RuntimeTest, RejectsInvalidSingleDashArg) {
+    const ScopedStderrSilencer silence_stderr;
     const char *argv[] = {
         "h3-client",
         "https://localhost:9443/_coquic/echo",
@@ -977,6 +1009,7 @@ TEST(QuicHttp3RuntimeTest, RejectsInvalidSingleDashArg) {
 }
 
 TEST(QuicHttp3RuntimeTest, ServerParserRejectsClientOnlyFlag) {
+    const ScopedStderrSilencer silence_stderr;
     const char *argv[] = {
         "h3-server",
         "--output",
@@ -989,6 +1022,7 @@ TEST(QuicHttp3RuntimeTest, ServerParserRejectsClientOnlyFlag) {
 }
 
 TEST(QuicHttp3RuntimeTest, ClientParserRejectsServerOnlyFlag) {
+    const ScopedStderrSilencer silence_stderr;
     const char *argv[] = {
         "h3-client",
         "https://localhost:9443/_coquic/echo",
@@ -1002,6 +1036,7 @@ TEST(QuicHttp3RuntimeTest, ClientParserRejectsServerOnlyFlag) {
 }
 
 TEST(QuicHttp3RuntimeTest, ServerParserRejectsMalformedNumericAndBackendValues) {
+    const ScopedStderrSilencer silence_stderr;
     {
         const char *argv[] = {
             "h3-server",
@@ -1059,6 +1094,7 @@ TEST(QuicHttp3RuntimeTest, ServerParserRejectsMalformedNumericAndBackendValues) 
 }
 
 TEST(QuicHttp3RuntimeTest, ParsersRejectMissingOptionValuesAndRepeatedUrls) {
+    const ScopedStderrSilencer silence_stderr;
     {
         const char *argv[] = {"h3-server", "--host"};
         EXPECT_FALSE(coquic::http3::parse_http3_server_args(static_cast<int>(std::size(argv)),
@@ -1163,6 +1199,7 @@ TEST(QuicHttp3RuntimeTest, ParsersRejectMissingOptionValuesAndRepeatedUrls) {
 }
 
 TEST(QuicHttp3RuntimeTest, ParsersRejectWrongModeFlagsUnknownOptionsAndEmptyArgv) {
+    const ScopedStderrSilencer silence_stderr;
     EXPECT_FALSE(coquic::http3::parse_http3_server_args(0, nullptr).has_value());
     EXPECT_FALSE(coquic::http3::parse_http3_client_args(0, nullptr).has_value());
 
@@ -1257,6 +1294,7 @@ TEST(QuicHttp3RuntimeTest, ParsersRejectWrongModeFlagsUnknownOptionsAndEmptyArgv
 }
 
 TEST(QuicHttp3RuntimeTest, ClientParserRejectsMalformedHeadersAndUrls) {
+    const ScopedStderrSilencer silence_stderr;
     {
         const char *argv[] = {
             "h3-client",
@@ -1371,6 +1409,7 @@ TEST(QuicHttp3RuntimeTest, ClientParserRejectsMalformedHeadersAndUrls) {
 }
 
 TEST(QuicHttp3RuntimeTest, ClientParserAcceptsBodyFileAndRejectsBodySourceConflicts) {
+    const ScopedStderrSilencer silence_stderr;
     {
         coquic::quic::test::ScopedTempDir body_root;
         body_root.write_file("body.bin", "payload");
@@ -1461,6 +1500,7 @@ TEST(QuicHttp3RuntimeTest, ClientParserAcceptsIpv6AndPortAuthorities) {
 }
 
 TEST(QuicHttp3RuntimeTest, ParsersRejectAdditionalArgumentEdgeCases) {
+    const ScopedStderrSilencer silence_stderr;
     {
         const char *argv[] = {
             "h3-server",
@@ -1741,6 +1781,7 @@ TEST(QuicHttp3RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection)
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeParserRejectsInvalidCongestionControlArguments) {
+    const ScopedStderrSilencer silence_stderr;
     {
         const char *argv[] = {
             "coquic-http3",
@@ -1765,7 +1806,8 @@ TEST(QuicHttp3RuntimeTest, RuntimeParserRejectsInvalidCongestionControlArguments
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeMiscInternalCoverageHookReturnsTrue) {
-    EXPECT_TRUE(coquic::http3::runtime_misc_internal_coverage_for_test());
+    expect_true_with_captured_stderr(
+        [] { return coquic::http3::runtime_misc_internal_coverage_for_test(); });
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeLoopInternalCoverageHookReturnsTrue) {
@@ -1795,7 +1837,8 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerCoverageHookHandlesLocalErrorWithoutConn
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeTailInternalCoverageHookReturnsTrue) {
-    EXPECT_TRUE(coquic::http3::runtime_tail_internal_coverage_for_test());
+    expect_true_with_captured_stderr(
+        [] { return coquic::http3::runtime_tail_internal_coverage_for_test(); });
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeStreamingReverseProxyDispatcherCoverageHookReturnsTrue) {

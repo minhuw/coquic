@@ -8,13 +8,17 @@ ENV NIX_CONFIG="experimental-features = nix-command flakes"
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN set -eux; \
-    install -d -o runner -g runner /home/runner/.config/nix; \
-    printf '%s\n' \
-      'experimental-features = nix-command flakes' \
-      'sandbox = false' \
-      'max-jobs = 2' \
-      'cores = 2' \
-      > /home/runner/.config/nix/nix.conf
+    for home in /home/runner /root; do \
+      install -d "${home}/.config/nix"; \
+      printf '%s\n' \
+        'experimental-features = nix-command flakes' \
+        'sandbox = false' \
+        'build-users-group =' \
+        'max-jobs = 2' \
+        'cores = 2' \
+        > "${home}/.config/nix/nix.conf"; \
+    done; \
+    chown -R runner:runner /home/runner/.config
 
 RUN set -eux; \
     install -d -o runner -g runner /nix /home/runner/tmp; \

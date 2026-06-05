@@ -3442,10 +3442,7 @@ bool runtime_additional_internal_coverage_for_test() {
                 endpoint, 1, Http3Request{.head = {.method = "GET", .path = "/"}}),
             "test access reports absent deferred request handlers");
         Http3ServerEndpoint rejecting_endpoint(Http3ServerConfig{
-            .deferred_request_handler =
-                [](std::uint64_t, Http3Request) {
-                    return false;
-                },
+            .deferred_request_handler = [](std::uint64_t, Http3Request) { return false; },
         });
         runtime_additional_internal_coverage_check(
             ok,

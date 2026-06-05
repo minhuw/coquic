@@ -217,9 +217,15 @@ const modeConfig = {
 
 let activeSnapshot = fallbackPerfSnapshot;
 let activeHistory = { schema_version: 1, generated_at: "unavailable", snapshots: [] };
-let dataSourceTime = "waiting";
-let historySource = "waiting for perf-history.json";
 let activePlotMode = "bulk";
+const activePlotFilters = {
+  languages: new Set(),
+  vendors: new Set(),
+};
+const plotFilterGroupsOpen = {
+  languages: true,
+  vendors: true,
+};
 
 function formatNumber(value, decimals = 3) {
   return Number(value).toLocaleString("en-US", {
@@ -230,6 +236,10 @@ function formatNumber(value, decimals = 3) {
 
 function implementationInfo(implementation) {
   return implementationMeta[implementation] || { company: "unknown", companyCode: "?", companyIcon: "", companyUrl: "", sourceUrl: "", language: "unknown", languageCode: "?" };
+}
+
+function implementationVendor(info) {
+  return info.familyLabel || info.company;
 }
 
 function isCoquicFamilyImplementation(implementation) {
@@ -405,15 +415,13 @@ function dateFromGeneratedAt(generatedAt) {
   return parsed.toISOString().slice(0, 10);
 }
 
-function timeFromGeneratedAt(generatedAt) {
-  const parsed = new Date(generatedAt);
-  if (Number.isNaN(parsed.getTime())) {
-    return "unavailable";
-  }
-  return parsed.toISOString().slice(11, 19) + "Z";
+function rowPassesPlotFilters(row) {
+  const info = implementationInfo(row.implementation);
+  return (!activePlotFilters.languages.size || activePlotFilters.languages.has(info.language))
+    && (!activePlotFilters.vendors.size || activePlotFilters.vendors.has(implementationVendor(info)));
 }
 
-function leaderboardRows(mode) {
+function leaderboardRows(mode, { applyFilters = true } = {}) {
   const config = modeConfig[mode];
   const best = new Map();
   for (const row of activeSnapshot.rows.filter((candidate) => candidate.mode === mode && candidate.status === "ok")) {
@@ -423,15 +431,215 @@ function leaderboardRows(mode) {
       best.set(key, row);
     }
   }
-  return [...best.values()].sort((left, right) => Number(right[config.metric]) - Number(left[config.metric]));
+  const rows = [...best.values()].sort((left, right) => Number(right[config.metric]) - Number(left[config.metric]));
+  return applyFilters ? rows.filter(rowPassesPlotFilters) : rows;
+}
+
+function renderPlotTabs() {
+  const tabs = document.createElement("div");
+  tabs.className = "plot-tabs";
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", "Benchmark mode");
+  tabs.replaceChildren(
+    ...Object.entries(modeConfig).map(([mode, config]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "plot-tab";
+      button.id = `plot-tab-${mode}`;
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", mode === activePlotMode ? "true" : "false");
+      button.setAttribute("aria-controls", "plot-panel");
+      button.addEventListener("click", () => selectPlotMode(mode));
+
+      const label = document.createElement("span");
+      label.textContent = mode.toUpperCase();
+      const title = document.createElement("strong");
+      title.textContent = config.title;
+      const metric = document.createElement("small");
+      metric.textContent = config.metricDetail;
+      button.append(label, title, metric);
+      return button;
+    }),
+  );
+  return tabs;
+}
+
+function sortedFilterEntries(counts, preferredOrder = []) {
+  const order = new Map(preferredOrder.map((item, index) => [item, index]));
+  return [...counts.entries()].sort(([left], [right]) => {
+    const leftOrder = order.has(left) ? order.get(left) : Number.POSITIVE_INFINITY;
+    const rightOrder = order.has(right) ? order.get(right) : Number.POSITIVE_INFINITY;
+    if (leftOrder !== rightOrder) {
+      return leftOrder - rightOrder;
+    }
+    return left.localeCompare(right);
+  });
+}
+
+function togglePlotFilter(kind, value) {
+  const selected = activePlotFilters[kind];
+  if (!selected) {
+    return;
+  }
+  if (selected.has(value)) {
+    selected.delete(value);
+  } else {
+    selected.add(value);
+  }
+  renderPlots();
+}
+
+function clearPlotFilter(kind) {
+  const selected = activePlotFilters[kind];
+  if (!selected || !selected.size) {
+    return;
+  }
+  selected.clear();
+  renderPlots();
+}
+
+function clearAllPlotFilters() {
+  if (!activePlotFilters.languages.size && !activePlotFilters.vendors.size) {
+    return;
+  }
+  activePlotFilters.languages.clear();
+  activePlotFilters.vendors.clear();
+  renderPlots();
+}
+
+function togglePlotFilterGroup(kind) {
+  if (!(kind in plotFilterGroupsOpen)) {
+    return;
+  }
+  plotFilterGroupsOpen[kind] = !plotFilterGroupsOpen[kind];
+  renderPlots();
+}
+
+function makeFilterChoice(kind, value, count, selected) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "filter-choice";
+  button.setAttribute("aria-pressed", selected ? "true" : "false");
+  button.addEventListener("click", () => togglePlotFilter(kind, value));
+
+  const label = document.createElement("span");
+  label.textContent = value;
+  const tally = document.createElement("small");
+  tally.textContent = String(count);
+  button.append(label, tally);
+  return button;
+}
+
+function makeAllFilterChoice(label, count, selected, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "filter-choice filter-choice-all";
+  button.setAttribute("aria-pressed", selected ? "true" : "false");
+  button.addEventListener("click", onClick);
+
+  const text = document.createElement("span");
+  text.textContent = label;
+  const tally = document.createElement("small");
+  tally.textContent = String(count);
+  button.append(text, tally);
+  return button;
+}
+
+function renderFilterGroup(title, kind, entries, totalCount) {
+  const group = document.createElement("section");
+  group.className = "plot-filter-group";
+  const optionsId = `plot-filter-options-${kind}`;
+  const isOpen = plotFilterGroupsOpen[kind] !== false;
+
+  const heading = document.createElement("button");
+  heading.type = "button";
+  heading.className = "plot-filter-group-title";
+  heading.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  heading.setAttribute("aria-controls", optionsId);
+  heading.addEventListener("click", () => togglePlotFilterGroup(kind));
+  const label = document.createElement("span");
+  label.textContent = title;
+  const count = document.createElement("small");
+  count.textContent = String(totalCount);
+  const chevron = document.createElement("i");
+  chevron.setAttribute("aria-hidden", "true");
+  heading.append(label, count, chevron);
+
+  const options = document.createElement("div");
+  options.id = optionsId;
+  options.className = `plot-filter-options ${kind === "vendors" ? "vendor-options" : ""}`;
+  options.hidden = !isOpen;
+  options.append(makeAllFilterChoice("All", totalCount, activePlotFilters[kind].size === 0, () => clearPlotFilter(kind)));
+  options.append(
+    ...entries.map(([value, count]) => makeFilterChoice(kind, value, count, activePlotFilters[kind].has(value))),
+  );
+
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "plot-filter-empty";
+    empty.textContent = "No options";
+    options.replaceChildren(empty);
+  }
+
+  group.append(heading, options);
+  return group;
+}
+
+function renderPlotFilters(mode) {
+  const allRows = leaderboardRows(mode, { applyFilters: false });
+  const filteredRows = leaderboardRows(mode);
+  const languageCounts = new Map();
+  const vendorCounts = new Map();
+
+  for (const row of allRows) {
+    const info = implementationInfo(row.implementation);
+    languageCounts.set(info.language, (languageCounts.get(info.language) || 0) + 1);
+    const vendor = implementationVendor(info);
+    vendorCounts.set(vendor, (vendorCounts.get(vendor) || 0) + 1);
+  }
+
+  const filters = document.createElement("aside");
+  filters.className = "plot-filters";
+  filters.setAttribute("aria-label", "Implementation filters");
+
+  const head = document.createElement("div");
+  head.className = "plot-filter-head";
+  const title = document.createElement("div");
+  title.className = "plot-filter-title";
+  const heading = document.createElement("h3");
+  heading.textContent = "Filters";
+  const summary = document.createElement("p");
+  summary.textContent = `${filteredRows.length}/${allRows.length} shown`;
+  title.append(heading, summary);
+
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.className = "plot-filter-reset";
+  reset.textContent = "Reset";
+  reset.disabled = !activePlotFilters.languages.size && !activePlotFilters.vendors.size;
+  reset.addEventListener("click", clearAllPlotFilters);
+
+  head.append(title, reset);
+  filters.append(
+    head,
+    renderFilterGroup("Language", "languages", sortedFilterEntries(languageCounts, ["C", "C++", "Go", "JavaScript", "Python", "Rust"]), allRows.length),
+    renderFilterGroup("Vendor", "vendors", sortedFilterEntries(vendorCounts, ["CoQUIC"]), allRows.length),
+  );
+  return filters;
 }
 
 function renderBarplot(mode) {
   const config = modeConfig[mode];
+  const unfilteredRows = leaderboardRows(mode, { applyFilters: false });
   const rows = leaderboardRows(mode);
   const maxValue = rows.length ? Math.max(...rows.map((row) => Number(row[config.metric]))) : 0;
   const plot = document.createElement("section");
   plot.className = "plot";
+  const content = document.createElement("div");
+  content.className = "plot-content";
+  content.id = "plot-panel";
+  content.setAttribute("role", "tabpanel");
+  content.setAttribute("aria-labelledby", `plot-tab-${activePlotMode}`);
   const heading = document.createElement("h3");
   heading.textContent = config.title;
   const subtitle = document.createElement("p");
@@ -442,9 +650,10 @@ function renderBarplot(mode) {
   if (!rows.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No completed benchmark rows loaded.";
+    empty.textContent = unfilteredRows.length ? "No implementations match the current filters." : "No completed benchmark rows loaded.";
     list.append(empty);
-    plot.append(heading, subtitle, list);
+    content.append(heading, subtitle, list, renderTrendChart(mode));
+    plot.append(content);
     return plot;
   }
 
@@ -488,7 +697,8 @@ function renderBarplot(mode) {
     }),
   );
 
-  plot.append(heading, subtitle, list);
+  content.append(heading, subtitle, list, renderTrendChart(mode));
+  plot.append(content);
   return plot;
 }
 
@@ -501,47 +711,12 @@ function selectPlotMode(mode) {
 }
 
 function renderPlots() {
-  const dataSourceLabel = document.getElementById("data-source-label");
-  if (dataSourceLabel) {
-    dataSourceLabel.title = dataSourceTime;
-    dataSourceLabel.dataset.tooltip = dataSourceTime;
-    dataSourceLabel.setAttribute("aria-label", `Benchmark data time: ${dataSourceTime}`);
-  }
-  const tabs = document.createElement("div");
-  tabs.className = "plot-tabs";
-  tabs.setAttribute("role", "tablist");
-  tabs.setAttribute("aria-label", "Benchmark mode");
-  tabs.replaceChildren(
-    ...Object.entries(modeConfig).map(([mode, config]) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "plot-tab";
-      button.id = `plot-tab-${mode}`;
-      button.setAttribute("role", "tab");
-      button.setAttribute("aria-selected", mode === activePlotMode ? "true" : "false");
-      button.setAttribute("aria-controls", "plot-panel");
-      button.addEventListener("click", () => selectPlotMode(mode));
-
-      const label = document.createElement("span");
-      label.textContent = mode.toUpperCase();
-      const title = document.createElement("strong");
-      title.textContent = config.title;
-      const metric = document.createElement("small");
-      metric.textContent = config.metricDetail;
-      button.append(label, title, metric);
-      return button;
-    }),
-  );
-
   const panel = document.createElement("div");
   panel.className = "plot-panel-active";
-  panel.id = "plot-panel";
-  panel.setAttribute("role", "tabpanel");
-  panel.setAttribute("aria-labelledby", `plot-tab-${activePlotMode}`);
-  panel.append(renderBarplot(activePlotMode));
+  panel.append(renderPlotTabs(), renderBarplot(activePlotMode));
 
   document.getElementById("plot-grid").replaceChildren(
-    tabs,
+    renderPlotFilters(activePlotMode),
     panel,
   );
 }
@@ -606,6 +781,9 @@ function renderTrendChart(mode) {
   const valuesByImplementation = new Map();
   let maxValue = 0;
   for (const implementation of implementationOrder) {
+    if (!rowPassesPlotFilters({ implementation })) {
+      continue;
+    }
     const points = snapshots.map((snapshot, index) => {
       const value = bestHistoryValue(snapshot, implementation, mode);
       if (value !== null) {
@@ -621,7 +799,9 @@ function renderTrendChart(mode) {
   if (!valuesByImplementation.size || maxValue <= 0) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No completed history rows for this mode.";
+    empty.textContent = activePlotFilters.languages.size || activePlotFilters.vendors.size
+      ? "No history series match the current filters."
+      : "No completed history rows for this mode.";
     chart.append(heading, empty);
     return chart;
   }
@@ -805,18 +985,8 @@ function renderTrendChart(mode) {
   return chart;
 }
 
-function renderTrends() {
-  document.getElementById("history-source-label").textContent = historySource;
-  document.getElementById("trend-grid").replaceChildren(
-    renderTrendChart("bulk"),
-    renderTrendChart("rr"),
-    renderTrendChart("crr"),
-  );
-}
-
 function renderAll() {
   renderPlots();
-  renderTrends();
 }
 
 async function loadLiveData() {
@@ -830,10 +1000,8 @@ async function loadLiveData() {
       throw new Error("invalid perf-results.json");
     }
     activeSnapshot = snapshot;
-    dataSourceTime = timeFromGeneratedAt(snapshot.generated_at);
   } catch {
     activeSnapshot = fallbackPerfSnapshot;
-    dataSourceTime = "unavailable";
   }
   try {
     const response = await fetch("./perf-history.json", { cache: "no-store" });
@@ -845,10 +1013,8 @@ async function loadLiveData() {
       throw new Error("invalid perf-history.json");
     }
     activeHistory = history;
-    historySource = `perf-history.json from ${history.generated_at || "latest workflow"}`;
   } catch {
     activeHistory = { schema_version: 1, generated_at: "unavailable", snapshots: [] };
-    historySource = "perf-history.json not available yet";
   }
   renderAll();
 }

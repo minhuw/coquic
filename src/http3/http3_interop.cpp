@@ -147,7 +147,7 @@ std::optional<Http3InteropConfig> parse_http3_interop_args(int argc, char **argv
         requests_present = true;
     }
     if (const auto congestion_control = getenv_string("COQUIC_CONGESTION_CONTROL");
-        congestion_control.has_value()) {
+        congestion_control.has_value() && !congestion_control->empty()) {
         const auto parsed = quic::parse_congestion_control_algorithm(*congestion_control);
         if (!parsed.has_value()) {
             return std::nullopt;

@@ -45,6 +45,18 @@ explicit_output="$(
 )"
 grep -q '^TESTCASE=retry$' <<<"${explicit_output}"
 
+h3_server_output="$(
+  run_entrypoint ROLE=server TESTCASE_SERVER=http3
+)"
+grep -q '^subcommand=h3-interop-server$' <<<"${h3_server_output}"
+grep -q '^TESTCASE=http3$' <<<"${h3_server_output}"
+
+h3_client_output="$(
+  run_entrypoint ROLE=client TESTCASE_CLIENT=http3
+)"
+grep -q '^subcommand=h3-interop-client$' <<<"${h3_client_output}"
+grep -q '^TESTCASE=http3$' <<<"${h3_client_output}"
+
 invalid_output="${tmpdir}/invalid.out"
 if run_entrypoint ROLE=client TESTCASE_CLIENT=not-a-case >"${invalid_output}" 2>&1; then
   echo "expected unsupported role-specific TESTCASE to fail" >&2

@@ -97,36 +97,6 @@ COQUIC_NO_PROFILE DatagramByteStorageCache &datagram_byte_storage_cache() {
 }
 #endif
 
-std::optional<CodecError> write_varint_into_fixed_span(std::span<std::byte> output,
-                                                       std::size_t &writer_offset,
-                                                       std::uint64_t value) {
-    constexpr std::uint64_t kMaxQuicVarInt = 4611686018427387903ull;
-    const auto start_offset = writer_offset;
-    if (value > kMaxQuicVarInt) {
-        return CodecError{
-            .code = CodecErrorCode::invalid_varint,
-            .offset = start_offset,
-        };
-    }
-    if (start_offset > output.size()) {
-        return CodecError{
-            .code = CodecErrorCode::truncated_input,
-            .offset = start_offset,
-        };
-    }
-    const auto encoded_size = encoded_varint_size(value);
-    if (output.size() - start_offset < encoded_size) {
-        return CodecError{
-            .code = CodecErrorCode::truncated_input,
-            .offset = start_offset,
-        };
-    }
-
-    const auto written = encode_varint_into(output.subspan(start_offset), value).value();
-    writer_offset += written;
-    return std::nullopt;
-}
-
 COQUIC_NO_PROFILE void abort_if(bool condition) {
     if (condition) {
         std::abort();
@@ -399,7 +369,31 @@ std::optional<CodecError> SpanBufferWriter::write_bytes(std::span<const std::byt
 }
 
 std::optional<CodecError> SpanBufferWriter::write_varint(std::uint64_t value) {
-    return write_varint_into_fixed_span(bytes_, offset_, value);
+    constexpr std::uint64_t kMaxQuicVarInt = 4611686018427387903ull;
+    const auto start_offset = offset_;
+    if (value > kMaxQuicVarInt) {
+        return CodecError{
+            .code = CodecErrorCode::invalid_varint,
+            .offset = start_offset,
+        };
+    }
+    if (start_offset > bytes_.size()) {
+        return CodecError{
+            .code = CodecErrorCode::truncated_input,
+            .offset = start_offset,
+        };
+    }
+    const auto encoded_size = encoded_varint_size(value);
+    if (bytes_.size() - start_offset < encoded_size) {
+        return CodecError{
+            .code = CodecErrorCode::truncated_input,
+            .offset = start_offset,
+        };
+    }
+
+    const auto written = encode_varint_into(bytes_.subspan(start_offset), value).value();
+    offset_ += written;
+    return std::nullopt;
 }
 
 void SpanBufferWriter::write_varint_unchecked(std::uint64_t value) {

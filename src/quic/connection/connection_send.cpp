@@ -3,6 +3,247 @@
 
 namespace coquic::quic {
 
+struct PendingPathValidationFrames {
+    QuicPathId path_id = 0;
+    std::optional<PathResponseFrame> response;
+    std::optional<PathChallengeFrame> challenge;
+};
+
+std::span<const Frame> selectable_application_crypto_frames(bool send_application_close_only,
+                                                            const std::vector<Frame> &frames) {
+    if (send_application_close_only) {
+        return {};
+    }
+    return std::span<const Frame>(frames);
+}
+
+void append_application_ack_frame(std::vector<Frame> &frame_list,
+                                  const ReceivedPacketHistory &received_packets,
+                                  const std::optional<OutboundAckHeader> &ack_header) {
+    if (!ack_header.has_value()) {
+        return;
+    }
+    frame_list.emplace_back(OutboundAckFrame{
+        .history = &received_packets,
+        .header = *ack_header,
+    });
+}
+
+std::span<const Frame> build_application_candidate_frames(
+    std::vector<Frame> &candidate_frames, const ReceivedPacketHistory &received_packets,
+    std::span<const Frame> crypto_frames, bool include_handshake_done,
+    const std::optional<OutboundAckHeader> &candidate_ack_header,
+    const std::optional<MaxDataFrame> &candidate_max_data_frame,
+    std::span<const NewTokenFrame> new_token_frames,
+    std::span<const NewConnectionIdFrame> new_connection_id_frames,
+    std::span<const RetireConnectionIdFrame> retire_connection_id_frames,
+    const PendingPathValidationFrames &candidate_path_validation_frames,
+    std::span<const MaxStreamDataFrame> max_stream_data_frames,
+    std::span<const MaxStreamsFrame> max_streams_frames,
+    std::span<const ResetStreamFrame> reset_stream_frames,
+    std::span<const StopSendingFrame> stop_sending_frames,
+    const std::optional<DataBlockedFrame> &data_blocked_frame,
+    std::span<const StreamDataBlockedFrame> stream_data_blocked_frames,
+    const std::optional<DatagramFrame> &datagram_frame,
+    const std::optional<ApplicationConnectionCloseFrame> &application_close_frame,
+    bool include_ping) {
+    candidate_frames.clear();
+    candidate_frames.reserve(
+        crypto_frames.size() + (candidate_ack_header.has_value() ? 1u : 0u) +
+        (include_handshake_done ? 1u : 0u) + (candidate_max_data_frame.has_value() ? 1u : 0u) +
+        new_token_frames.size() + new_connection_id_frames.size() +
+        retire_connection_id_frames.size() +
+        static_cast<std::size_t>(candidate_path_validation_frames.response.has_value()) +
+        static_cast<std::size_t>(candidate_path_validation_frames.challenge.has_value()) +
+        max_stream_data_frames.size() + max_streams_frames.size() + reset_stream_frames.size() +
+        stop_sending_frames.size() + (data_blocked_frame.has_value() ? 1u : 0u) +
+        stream_data_blocked_frames.size() + (datagram_frame.has_value() ? 1u : 0u) +
+        (application_close_frame.has_value() ? 1u : 0u) + (include_ping ? 1u : 0u));
+    candidate_frames.insert(candidate_frames.end(), crypto_frames.begin(), crypto_frames.end());
+    append_application_ack_frame(candidate_frames, received_packets, candidate_ack_header);
+    if (include_handshake_done) {
+        candidate_frames.emplace_back(HandshakeDoneFrame{});
+    }
+    if (candidate_max_data_frame.has_value()) {
+        candidate_frames.emplace_back(*candidate_max_data_frame);
+    }
+    for (const auto &frame : new_token_frames) {
+        candidate_frames.emplace_back(frame);
+    }
+    for (const auto &frame : new_connection_id_frames) {
+        candidate_frames.emplace_back(frame);
+    }
+    for (const auto &frame : retire_connection_id_frames) {
+        candidate_frames.emplace_back(frame);
+    }
+    if (candidate_path_validation_frames.response.has_value()) {
+        candidate_frames.emplace_back(*candidate_path_validation_frames.response);
+    }
+    if (candidate_path_validation_frames.challenge.has_value()) {
+        candidate_frames.emplace_back(*candidate_path_validation_frames.challenge);
+    }
+    for (const auto &frame : max_stream_data_frames) {
+        candidate_frames.emplace_back(frame);
+    }
+    for (const auto &frame : max_streams_frames) {
+        candidate_frames.emplace_back(frame);
+    }
+    for (const auto &frame : reset_stream_frames) {
+        candidate_frames.emplace_back(frame);
+    }
+    for (const auto &frame : stop_sending_frames) {
+        candidate_frames.emplace_back(frame);
+    }
+    if (data_blocked_frame.has_value()) {
+        candidate_frames.emplace_back(*data_blocked_frame);
+    }
+    for (const auto &frame : stream_data_blocked_frames) {
+        candidate_frames.emplace_back(frame);
+    }
+    if (datagram_frame.has_value()) {
+        candidate_frames.emplace_back(*datagram_frame);
+    }
+    if (application_close_frame.has_value()) {
+        candidate_frames.emplace_back(*application_close_frame);
+    }
+    if (include_ping) {
+        candidate_frames.emplace_back(PingFrame{});
+    }
+    return std::span<const Frame>(candidate_frames);
+}
+
+class ApplicationCandidateFrameCache {
+  public:
+    void invalidate() {
+        candidate_frames_valid_ = false;
+        candidate_frames_ = {};
+    }
+
+    std::span<const Frame>
+    current(std::vector<Frame> &scratch, const ReceivedPacketHistory &received_packets,
+            std::span<const Frame> crypto_frames, bool include_handshake_done,
+            const std::optional<OutboundAckHeader> &candidate_ack_header,
+            const std::optional<MaxDataFrame> &candidate_max_data_frame,
+            std::span<const NewTokenFrame> new_token_frames,
+            std::span<const NewConnectionIdFrame> new_connection_id_frames,
+            std::span<const RetireConnectionIdFrame> retire_connection_id_frames,
+            const PendingPathValidationFrames &candidate_path_validation_frames,
+            std::span<const MaxStreamDataFrame> max_stream_data_frames,
+            std::span<const MaxStreamsFrame> max_streams_frames,
+            std::span<const ResetStreamFrame> reset_stream_frames,
+            std::span<const StopSendingFrame> stop_sending_frames,
+            const std::optional<DataBlockedFrame> &data_blocked_frame,
+            std::span<const StreamDataBlockedFrame> stream_data_blocked_frames,
+            const std::optional<DatagramFrame> &datagram_frame,
+            const std::optional<ApplicationConnectionCloseFrame> &application_close_frame,
+            bool include_ping) {
+        if (!candidate_frames_valid_) {
+            candidate_frames_ = build_application_candidate_frames(
+                scratch, received_packets, crypto_frames, include_handshake_done,
+                candidate_ack_header, candidate_max_data_frame, new_token_frames,
+                new_connection_id_frames, retire_connection_id_frames,
+                candidate_path_validation_frames, max_stream_data_frames, max_streams_frames,
+                reset_stream_frames, stop_sending_frames, data_blocked_frame,
+                stream_data_blocked_frames, datagram_frame, application_close_frame, include_ping);
+            candidate_frames_valid_ = true;
+        }
+        return candidate_frames_;
+    }
+
+  private:
+    std::span<const Frame> candidate_frames_;
+    bool candidate_frames_valid_ = false;
+};
+
+class ApplicationCandidateFrameBuilder {
+  public:
+    struct Args {
+        std::vector<Frame> &scratch;
+        std::vector<Frame> &alternate_scratch;
+        const ReceivedPacketHistory &received_packets;
+        std::span<const Frame> crypto_frames;
+        bool include_handshake_done = false;
+        std::optional<OutboundAckHeader> &ack_header;
+        std::optional<MaxDataFrame> &max_data_frame;
+        std::vector<NewTokenFrame> &new_token_frames;
+        std::vector<NewConnectionIdFrame> &new_connection_id_frames;
+        std::vector<RetireConnectionIdFrame> &retire_connection_id_frames;
+        PendingPathValidationFrames &path_validation_frames;
+        std::vector<MaxStreamDataFrame> &max_stream_data_frames;
+        std::vector<MaxStreamsFrame> &max_streams_frames;
+        std::vector<ResetStreamFrame> &reset_stream_frames;
+        std::vector<StopSendingFrame> &stop_sending_frames;
+        std::optional<DataBlockedFrame> &data_blocked_frame;
+        std::vector<StreamDataBlockedFrame> &stream_data_blocked_frames;
+        std::optional<DatagramFrame> &datagram_frame;
+        std::optional<ApplicationConnectionCloseFrame> &application_close_frame;
+    };
+
+    explicit ApplicationCandidateFrameBuilder(Args args)
+        : scratch_(args.scratch), alternate_scratch_(args.alternate_scratch),
+          received_packets_(args.received_packets), crypto_frames_(args.crypto_frames),
+          include_handshake_done_(args.include_handshake_done), ack_header_(args.ack_header),
+          max_data_frame_(args.max_data_frame), new_token_frames_(args.new_token_frames),
+          new_connection_id_frames_(args.new_connection_id_frames),
+          retire_connection_id_frames_(args.retire_connection_id_frames),
+          path_validation_frames_(args.path_validation_frames),
+          max_stream_data_frames_(args.max_stream_data_frames),
+          max_streams_frames_(args.max_streams_frames),
+          reset_stream_frames_(args.reset_stream_frames),
+          stop_sending_frames_(args.stop_sending_frames),
+          data_blocked_frame_(args.data_blocked_frame),
+          stream_data_blocked_frames_(args.stream_data_blocked_frames),
+          datagram_frame_(args.datagram_frame),
+          application_close_frame_(args.application_close_frame) {
+    }
+
+    void invalidate() {
+        cache_.invalidate();
+    }
+
+    std::span<const Frame> current() {
+        return cache_.current(
+            scratch_, received_packets_, crypto_frames_, include_handshake_done_, ack_header_,
+            max_data_frame_, new_token_frames_, new_connection_id_frames_,
+            retire_connection_id_frames_, path_validation_frames_, max_stream_data_frames_,
+            max_streams_frames_, reset_stream_frames_, stop_sending_frames_, data_blocked_frame_,
+            stream_data_blocked_frames_, datagram_frame_, application_close_frame_,
+            /*include_ping=*/false);
+    }
+
+    std::span<const Frame> alternate(const std::optional<OutboundAckHeader> &ack_header) {
+        return build_application_candidate_frames(
+            alternate_scratch_, received_packets_, crypto_frames_, include_handshake_done_,
+            ack_header, max_data_frame_, new_token_frames_, new_connection_id_frames_,
+            retire_connection_id_frames_, path_validation_frames_, max_stream_data_frames_,
+            max_streams_frames_, reset_stream_frames_, stop_sending_frames_, data_blocked_frame_,
+            stream_data_blocked_frames_, datagram_frame_, application_close_frame_,
+            /*include_ping=*/false);
+    }
+
+  private:
+    std::vector<Frame> &scratch_;
+    std::vector<Frame> &alternate_scratch_;
+    const ReceivedPacketHistory &received_packets_;
+    std::span<const Frame> crypto_frames_;
+    bool include_handshake_done_ = false;
+    std::optional<OutboundAckHeader> &ack_header_;
+    std::optional<MaxDataFrame> &max_data_frame_;
+    std::vector<NewTokenFrame> &new_token_frames_;
+    std::vector<NewConnectionIdFrame> &new_connection_id_frames_;
+    std::vector<RetireConnectionIdFrame> &retire_connection_id_frames_;
+    PendingPathValidationFrames &path_validation_frames_;
+    std::vector<MaxStreamDataFrame> &max_stream_data_frames_;
+    std::vector<MaxStreamsFrame> &max_streams_frames_;
+    std::vector<ResetStreamFrame> &reset_stream_frames_;
+    std::vector<StopSendingFrame> &stop_sending_frames_;
+    std::optional<DataBlockedFrame> &data_blocked_frame_;
+    std::vector<StreamDataBlockedFrame> &stream_data_blocked_frames_;
+    std::optional<DatagramFrame> &datagram_frame_;
+    std::optional<ApplicationConnectionCloseFrame> &application_close_frame_;
+    ApplicationCandidateFrameCache cache_;
+};
+
 DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                                                        bool continue_paced_burst) {
     register_send_profile_printer_once();
@@ -1364,11 +1605,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             }
             return retire_connection_id_frame_list;
         };
-        struct PendingPathValidationFrames {
-            QuicPathId path_id = 0;
-            std::optional<PathResponseFrame> response;
-            std::optional<PathChallengeFrame> challenge;
-        };
         const auto defer_retire_connection_id_frames =
             [&](std::vector<RetireConnectionIdFrame> &retire_frame_list) {
                 if (retire_frame_list.empty()) {
@@ -1774,101 +2010,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 });
             }
         };
-        auto append_application_ack_frame =
-            [&](std::vector<Frame> &frame_list,
-                const std::optional<OutboundAckHeader> &ack_header) {
-                if (!ack_header.has_value()) {
-                    return;
-                }
-                frame_list.emplace_back(OutboundAckFrame{
-                    .history = &application_space_.received_packets,
-                    .header = *ack_header,
-                });
-            };
-        auto build_application_candidate_frames =
-            [&](std::vector<Frame> &candidate_frames, std::span<const Frame> crypto_frames,
-                bool include_handshake_done,
-                const std::optional<OutboundAckHeader> &candidate_ack_header,
-                const std::optional<MaxDataFrame> &candidate_max_data_frame,
-                std::span<const NewTokenFrame> new_token_frames,
-                std::span<const NewConnectionIdFrame> new_connection_id_frames,
-                std::span<const RetireConnectionIdFrame> retire_connection_id_frames,
-                const PendingPathValidationFrames &candidate_path_validation_frames,
-                std::span<const MaxStreamDataFrame> max_stream_data_frames,
-                std::span<const MaxStreamsFrame> max_streams_frames,
-                std::span<const ResetStreamFrame> reset_stream_frames,
-                std::span<const StopSendingFrame> stop_sending_frames,
-                const std::optional<DataBlockedFrame> &data_blocked_frame,
-                std::span<const StreamDataBlockedFrame> stream_data_blocked_frames,
-                const std::optional<DatagramFrame> &datagram_frame,
-                const std::optional<ApplicationConnectionCloseFrame> &application_close_frame,
-                bool include_ping) -> std::span<const Frame> {
-            candidate_frames.clear();
-            candidate_frames.reserve(
-                crypto_frames.size() + (candidate_ack_header.has_value() ? 1u : 0u) +
-                (include_handshake_done ? 1u : 0u) +
-                (candidate_max_data_frame.has_value() ? 1u : 0u) + new_token_frames.size() +
-                new_connection_id_frames.size() + retire_connection_id_frames.size() +
-                static_cast<std::size_t>(candidate_path_validation_frames.response.has_value()) +
-                static_cast<std::size_t>(candidate_path_validation_frames.challenge.has_value()) +
-                max_stream_data_frames.size() + max_streams_frames.size() +
-                reset_stream_frames.size() + stop_sending_frames.size() +
-                (data_blocked_frame.has_value() ? 1u : 0u) + stream_data_blocked_frames.size() +
-                (datagram_frame.has_value() ? 1u : 0u) +
-                (application_close_frame.has_value() ? 1u : 0u) + (include_ping ? 1u : 0u));
-            candidate_frames.insert(candidate_frames.end(), crypto_frames.begin(),
-                                    crypto_frames.end());
-            append_application_ack_frame(candidate_frames, candidate_ack_header);
-            if (include_handshake_done) {
-                candidate_frames.emplace_back(HandshakeDoneFrame{});
-            }
-            if (candidate_max_data_frame.has_value()) {
-                candidate_frames.emplace_back(*candidate_max_data_frame);
-            }
-            for (const auto &frame : new_token_frames) {
-                candidate_frames.emplace_back(frame);
-            }
-            for (const auto &frame : new_connection_id_frames) {
-                candidate_frames.emplace_back(frame);
-            }
-            for (const auto &frame : retire_connection_id_frames) {
-                candidate_frames.emplace_back(frame);
-            }
-            if (candidate_path_validation_frames.response.has_value()) {
-                candidate_frames.emplace_back(*candidate_path_validation_frames.response);
-            }
-            if (candidate_path_validation_frames.challenge.has_value()) {
-                candidate_frames.emplace_back(*candidate_path_validation_frames.challenge);
-            }
-            for (const auto &frame : max_stream_data_frames) {
-                candidate_frames.emplace_back(frame);
-            }
-            for (const auto &frame : max_streams_frames) {
-                candidate_frames.emplace_back(frame);
-            }
-            for (const auto &frame : reset_stream_frames) {
-                candidate_frames.emplace_back(frame);
-            }
-            for (const auto &frame : stop_sending_frames) {
-                candidate_frames.emplace_back(frame);
-            }
-            if (data_blocked_frame.has_value()) {
-                candidate_frames.emplace_back(*data_blocked_frame);
-            }
-            for (const auto &frame : stream_data_blocked_frames) {
-                candidate_frames.emplace_back(frame);
-            }
-            if (datagram_frame.has_value()) {
-                candidate_frames.emplace_back(*datagram_frame);
-            }
-            if (application_close_frame.has_value()) {
-                candidate_frames.emplace_back(*application_close_frame);
-            }
-            if (include_ping) {
-                candidate_frames.emplace_back(PingFrame{});
-            }
-            return std::span<const Frame>(candidate_frames);
-        };
         struct ApplicationCandidateFrameScratchGuard {
             std::vector<Frame> &frame_scratch;
             std::vector<Frame> &alternate_frame_scratch;
@@ -1938,12 +2079,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             crypto_frames.reserve(crypto_ranges.size());
             append_application_crypto_frames(crypto_frames, crypto_ranges);
             const auto candidate_frames = build_application_candidate_frames(
-                application_candidate_frame_scratch_, crypto_frames, include_handshake_done,
-                candidate_ack_header, candidate_max_data_frame, new_token_frames,
-                new_connection_id_frames, retire_connection_id_frames,
-                candidate_path_validation_frames, max_stream_data_frames, max_streams_frames,
-                reset_stream_frames, stop_sending_frames, data_blocked_frame,
-                stream_data_blocked_frames, datagram_frame, application_close_frame, include_ping);
+                application_candidate_frame_scratch_, application_space_.received_packets,
+                crypto_frames, include_handshake_done, candidate_ack_header,
+                candidate_max_data_frame, new_token_frames, new_connection_id_frames,
+                retire_connection_id_frames, candidate_path_validation_frames,
+                max_stream_data_frames, max_streams_frames, reset_stream_frames,
+                stop_sending_frames, data_blocked_frame, stream_data_blocked_frames, datagram_frame,
+                application_close_frame, include_ping);
             return serialize_application_candidate_from_frames(
                 candidate_frames, stream_fragments, application_close_frame.has_value(),
                 application_space_.next_send_packet_number, application_write_key_phase_);
@@ -2016,12 +2158,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             crypto_frames.reserve(crypto_ranges.size());
             append_application_crypto_frames(crypto_frames, crypto_ranges);
             const auto candidate_frames = build_application_candidate_frames(
-                application_candidate_frame_scratch_, crypto_frames, include_handshake_done,
-                candidate_ack_header, candidate_max_data_frame, new_token_frames,
-                new_connection_id_frames, retire_connection_id_frames,
-                candidate_path_validation_frames, max_stream_data_frames, max_streams_frames,
-                reset_stream_frames, stop_sending_frames, data_blocked_frame,
-                stream_data_blocked_frames, datagram_frame, application_close_frame, include_ping);
+                application_candidate_frame_scratch_, application_space_.received_packets,
+                crypto_frames, include_handshake_done, candidate_ack_header,
+                candidate_max_data_frame, new_token_frames, new_connection_id_frames,
+                retire_connection_id_frames, candidate_path_validation_frames,
+                max_stream_data_frames, max_streams_frames, reset_stream_frames,
+                stop_sending_frames, data_blocked_frame, stream_data_blocked_frames, datagram_frame,
+                application_close_frame, include_ping);
             return estimate_application_candidate_size_from_frames(
                 candidate_frames, stream_fragments, application_close_frame.has_value(),
                 application_space_.next_send_packet_number, application_write_key_phase_);
@@ -2438,9 +2581,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 append_application_crypto_frames(crypto_frames, probe_crypto_ranges);
                 std::vector<Frame> frames_with_padding_storage;
                 static_cast<void>(build_application_candidate_frames(
-                    frames_with_padding_storage, crypto_frames, probe_packet.has_handshake_done,
-                    candidate_ack_frame, probe_max_data_frame, {}, {}, {},
-                    probe_path_validation_frames, probe_max_stream_data_frames,
+                    frames_with_padding_storage, application_space_.received_packets, crypto_frames,
+                    probe_packet.has_handshake_done, candidate_ack_frame, probe_max_data_frame, {},
+                    {}, {}, probe_path_validation_frames, probe_max_stream_data_frames,
                     probe_packet.max_streams_frames, probe_packet.reset_stream_frames,
                     probe_packet.stop_sending_frames, probe_packet.data_blocked_frame,
                     probe_packet.stream_data_blocked_frames, std::nullopt, std::nullopt,
@@ -2610,7 +2753,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 (probe_packet.data_blocked_frame.has_value() ? 1u : 0u) +
                 probe_packet.stream_data_blocked_frames.size() + (include_ping ? 1u : 0u));
             append_application_crypto_frames(probe_frames, probe_crypto_ranges);
-            append_application_ack_frame(probe_frames, probe_ack_frame);
+            append_application_ack_frame(probe_frames, application_space_.received_packets,
+                                         probe_ack_frame);
             if (probe_packet.has_handshake_done) {
                 probe_frames.emplace_back(HandshakeDoneFrame{});
             }
@@ -2769,9 +2913,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             const auto application_candidate_crypto_ranges =
                 send_application_close_only ? std::span<const ByteRange>{}
                                             : std::span<const ByteRange>(application_crypto_ranges);
-            const auto pending_application_crypto_frames =
-                send_application_close_only ? std::span<const Frame>{}
-                                            : std::span<const Frame>(application_crypto_frames);
             const auto send_application_ack_only =
                 [&](const OutboundAckHeader &ack_header) -> DatagramBuffer {
                 auto restore_ack_path_validation_after_send_failure =
@@ -2788,7 +2929,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                         ? std::optional<QuicPathId>{ack_only_path_validation_frames.path_id}
                         : current_send_path_id_;
                 std::vector<Frame> ack_only_frames;
-                append_application_ack_frame(ack_only_frames,
+                append_application_ack_frame(ack_only_frames, application_space_.received_packets,
                                              std::optional<OutboundAckHeader>{ack_header});
                 if (ack_only_path_validation_frames.response.has_value()) {
                     ack_only_frames.emplace_back(*ack_only_path_validation_frames.response);
@@ -2976,40 +3117,29 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 return {};
             }
 
-            auto application_candidate_frames = std::span<const Frame>{};
-            bool application_candidate_frames_valid = false;
-            const auto invalidate_application_candidate_frames = [&]() {
-                application_candidate_frames_valid = false;
-                application_candidate_frames = {};
-            };
-            const auto current_application_candidate_frames = [&]() -> std::span<const Frame> {
-                if (!application_candidate_frames_valid) {
-                    application_candidate_frames = build_application_candidate_frames(
-                        application_candidate_frame_scratch_, pending_application_crypto_frames,
-                        include_handshake_done, selected_ack_frame, application_max_data_frame,
-                        new_token_frames, new_connection_id_frames, retire_connection_id_frames,
-                        application_path_validation_frames, max_stream_data_frames,
-                        max_streams_frames, reset_stream_frames, stop_sending_frames,
-                        data_blocked_frame, stream_data_blocked_frames, selected_datagram_frame,
-                        application_close_frame,
-                        /*include_ping=*/false);
-                    application_candidate_frames_valid = true;
-                }
-                return application_candidate_frames;
-            };
-            const auto alternate_application_candidate_frames =
-                [&](const std::optional<OutboundAckHeader> &candidate_ack_frame)
-                -> std::span<const Frame> {
-                return build_application_candidate_frames(
-                    alternate_application_candidate_frame_scratch_,
-                    pending_application_crypto_frames, include_handshake_done, candidate_ack_frame,
-                    application_max_data_frame, new_token_frames, new_connection_id_frames,
-                    retire_connection_id_frames, application_path_validation_frames,
-                    max_stream_data_frames, max_streams_frames, reset_stream_frames,
-                    stop_sending_frames, data_blocked_frame, stream_data_blocked_frames,
-                    selected_datagram_frame, application_close_frame,
-                    /*include_ping=*/false);
-            };
+            ApplicationCandidateFrameBuilder application_candidate_frames{
+                ApplicationCandidateFrameBuilder::Args{
+                    .scratch = application_candidate_frame_scratch_,
+                    .alternate_scratch = alternate_application_candidate_frame_scratch_,
+                    .received_packets = application_space_.received_packets,
+                    .crypto_frames = selectable_application_crypto_frames(
+                        send_application_close_only, application_crypto_frames),
+                    .include_handshake_done = include_handshake_done,
+                    .ack_header = selected_ack_frame,
+                    .max_data_frame = application_max_data_frame,
+                    .new_token_frames = new_token_frames,
+                    .new_connection_id_frames = new_connection_id_frames,
+                    .retire_connection_id_frames = retire_connection_id_frames,
+                    .path_validation_frames = application_path_validation_frames,
+                    .max_stream_data_frames = max_stream_data_frames,
+                    .max_streams_frames = max_streams_frames,
+                    .reset_stream_frames = reset_stream_frames,
+                    .stop_sending_frames = stop_sending_frames,
+                    .data_blocked_frame = data_blocked_frame,
+                    .stream_data_blocked_frames = stream_data_blocked_frames,
+                    .datagram_frame = selected_datagram_frame,
+                    .application_close_frame = application_close_frame,
+                }};
 
             const auto application_stream_send_pacing_ready = [&]() {
                 if (continue_paced_burst) {
@@ -3033,7 +3163,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             if (select_application_stream_data) {
                 auto application_stream_budget = base_application_stream_budget;
                 auto control_candidate_size = estimate_application_candidate_size_from_frames(
-                    current_application_candidate_frames(), stream_fragments,
+                    application_candidate_frames.current(), stream_fragments,
                     application_close_frame.has_value(), application_space_.next_send_packet_number,
                     application_write_key_phase_);
                 const auto minimum_stream_wire_bytes =
@@ -3048,7 +3178,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                             : congestion_limited_datagram_size - control_candidate_size.value();
                     if (remaining_stream_budget < *minimum_stream_wire_bytes) {
                         const auto no_ack_control_candidate_frames =
-                            alternate_application_candidate_frames(std::nullopt);
+                            application_candidate_frames.alternate(std::nullopt);
                         auto no_ack_control_candidate_size =
                             estimate_application_candidate_size_from_frames(
                                 no_ack_control_candidate_frames, stream_fragments,
@@ -3064,12 +3194,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                                 base_application_stream_budget, *minimum_stream_wire_bytes,
                                 selected_ack_frame, application_stream_budget,
                                 control_candidate_size, no_ack_control_candidate_size));
-                            invalidate_application_candidate_frames();
+                            application_candidate_frames.invalidate();
                         } else if (maybe_select_sized_no_ack_candidate(
                                        congestion_limited_datagram_size, *minimum_stream_wire_bytes,
                                        selected_ack_frame, application_stream_budget,
                                        control_candidate_size, no_ack_control_candidate_size)) {
-                            invalidate_application_candidate_frames();
+                            application_candidate_frames.invalidate();
                         }
                     }
                 }
@@ -3177,7 +3307,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 return fallback_to_existing_packets_or_ack_only(/*require_due_ack_only=*/true);
             };
             const auto application_candidate_is_ack_eliciting = [&]() {
-                return !pending_application_crypto_frames.empty() ||
+                return !selectable_application_crypto_frames(send_application_close_only,
+                                                             application_crypto_frames)
+                            .empty() ||
                        application_ack_eliciting_frame_count(
                            new_token_frames, include_handshake_done, application_max_data_frame,
                            new_connection_id_frames, retire_connection_id_frames,
@@ -3209,7 +3341,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             };
 
             auto candidate_application_datagram = serialize_application_profiled(
-                current_application_candidate_frames(), stream_fragments,
+                application_candidate_frames.current(), stream_fragments,
                 application_close_frame.has_value(), application_space_.next_send_packet_number,
                 application_write_key_phase_);
             if (!candidate_application_datagram.has_value()) {
@@ -3233,7 +3365,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     ++send_profile_counters().application_no_ack_candidate_attempts;
                 }
                 auto no_ack_candidate = serialize_application_profiled(
-                    alternate_application_candidate_frames(std::nullopt), stream_fragments,
+                    application_candidate_frames.alternate(std::nullopt), stream_fragments,
                     application_close_frame.has_value(), application_space_.next_send_packet_number,
                     application_write_key_phase_);
                 if (!no_ack_candidate.has_value()) {
@@ -3242,7 +3374,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     }
                 } else if (no_ack_candidate.value().bytes.size() <= max_outbound_datagram_size) {
                     selected_ack_frame = std::nullopt;
-                    invalidate_application_candidate_frames();
+                    application_candidate_frames.invalidate();
                     candidate_application_datagram = std::move(no_ack_candidate);
                     if (send_profile_enabled()) {
                         ++send_profile_counters().application_no_ack_candidate_used;
@@ -3298,7 +3430,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     }
 
                     datagram = serialize_application_profiled(
-                        current_application_candidate_frames(), fragments,
+                        application_candidate_frames.current(), fragments,
                         application_close_frame.has_value(),
                         application_space_.next_send_packet_number, application_write_key_phase_);
                     if (!datagram.has_value()) {
@@ -3355,9 +3487,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                             prefer_fresh_application_stream_data);
                     }
                     selected_ack_frame = std::nullopt;
-                    invalidate_application_candidate_frames();
+                    application_candidate_frames.invalidate();
                     candidate_application_datagram = serialize_application_profiled(
-                        current_application_candidate_frames(), stream_fragments,
+                        application_candidate_frames.current(), stream_fragments,
                         application_close_frame.has_value(),
                         application_space_.next_send_packet_number, application_write_key_phase_);
                     if (should_fail_non_empty_packet_payload_candidate(
@@ -3409,9 +3541,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                         candidate_last_stream_id, stream_fragments,
                         prefer_fresh_application_stream_data);
                 }
-                invalidate_application_candidate_frames();
+                application_candidate_frames.invalidate();
                 candidate_application_datagram = serialize_application_profiled(
-                    current_application_candidate_frames(), stream_fragments,
+                    application_candidate_frames.current(), stream_fragments,
                     application_close_frame.has_value(), application_space_.next_send_packet_number,
                     application_write_key_phase_);
                 if (!candidate_application_datagram.has_value()) {
@@ -3438,9 +3570,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     ++send_profile_counters().application_close_reason_retry_attempts;
                 }
                 retry_close_frame.reason.bytes.clear();
-                invalidate_application_candidate_frames();
+                application_candidate_frames.invalidate();
                 candidate_application_datagram = serialize_application_profiled(
-                    current_application_candidate_frames(), stream_fragments,
+                    application_candidate_frames.current(), stream_fragments,
                     application_close_frame.has_value(), application_space_.next_send_packet_number,
                     application_write_key_phase_);
                 if (!candidate_application_datagram.has_value()) {
@@ -3548,7 +3680,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             bool write_key_phase_changed =
                 application_write_key_phase_ != candidate_application_write_key_phase;
             if (write_key_phase_changed || !use_fast_serialized_one_rtt_commit) {
-                const auto final_frame_span = current_application_candidate_frames();
+                const auto final_frame_span = application_candidate_frames.current();
                 final_frames.assign(final_frame_span.begin(), final_frame_span.end());
             }
             if (write_key_phase_changed) {

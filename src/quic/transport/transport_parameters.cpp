@@ -93,11 +93,6 @@ void append_u16_be(std::vector<std::byte> &output, std::uint16_t value) {
     output.push_back(static_cast<std::byte>(value & 0xffu));
 }
 
-std::uint16_t read_u16_be(std::span<const std::byte> bytes) {
-    return static_cast<std::uint16_t>((std::to_integer<std::uint8_t>(bytes[0]) << 8) |
-                                      std::to_integer<std::uint8_t>(bytes[1]));
-}
-
 void append_preferred_address_parameter(
     std::vector<std::byte> &output, const std::optional<coquic::quic::PreferredAddress> &value) {
     if (!value.has_value()) {
@@ -484,10 +479,14 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
             PreferredAddress preferred_address;
             std::copy_n(value.begin(), preferred_address.ipv4_address.size(),
                         preferred_address.ipv4_address.begin());
-            preferred_address.ipv4_port = read_u16_be(value.subspan(4, 2));
+            preferred_address.ipv4_port =
+                static_cast<std::uint16_t>((std::to_integer<std::uint8_t>(value[4]) << 8) |
+                                           std::to_integer<std::uint8_t>(value[5]));
             std::copy_n(value.begin() + 6, preferred_address.ipv6_address.size(),
                         preferred_address.ipv6_address.begin());
-            preferred_address.ipv6_port = read_u16_be(value.subspan(22, 2));
+            preferred_address.ipv6_port =
+                static_cast<std::uint16_t>((std::to_integer<std::uint8_t>(value[22]) << 8) |
+                                           std::to_integer<std::uint8_t>(value[23]));
             preferred_address.connection_id.assign(value.begin() + 25,
                                                    value.begin() + 25 + connection_id_length);
             std::copy_n(value.begin() + 25 + connection_id_length,

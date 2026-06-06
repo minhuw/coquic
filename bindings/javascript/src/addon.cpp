@@ -143,8 +143,19 @@ napi_valuetype value_type(napi_env env, napi_value value) {
 }
 
 bool is_nullish(napi_env env, napi_value value) {
+    if (value == nullptr) {
+        return true;
+    }
     const auto type = value_type(env, value);
     return type == napi_undefined || type == napi_null;
+}
+
+bool require_argument(napi_env env, napi_value value, std::string_view message) {
+    if (!is_nullish(env, value)) {
+        return true;
+    }
+    throw_error(env, message);
+    return false;
 }
 
 bool get_named(napi_env env, napi_value object, const char *name, napi_value *out) {
@@ -922,12 +933,11 @@ napi_value EndpointConstructor(napi_env env, napi_callback_info info) {
                "failed to read endpoint constructor arguments")) {
         return nullptr;
     }
-    if (argc < 1) {
-        throw_error(env, "endpoint config is required");
-        return nullptr;
-    }
     if (coquic_ffi_abi_version() != kExpectedFfiAbiVersion) {
         throw_error(env, "coquic FFI ABI mismatch");
+        return nullptr;
+    }
+    if (!require_argument(env, argv[0], "endpoint config is required")) {
         return nullptr;
     }
 
@@ -1036,15 +1046,19 @@ napi_value EndpointSendStream(napi_env env, napi_callback_info info) {
     if (holder == nullptr) {
         return nullptr;
     }
+    if (!require_argument(env, argv[5], "stream priority is required")) {
+        return nullptr;
+    }
     Bytes bytes = bytes_from_value(env, argv[2]);
     bool fin = false;
     napi_get_value_bool(env, argv[3], &fin);
+    const auto priority = number_to_u64(env, argv[5]);
     coquic_send_stream_data_t stream{
         .size = sizeof(coquic_send_stream_data_t),
         .stream_id = number_to_u64(env, argv[1]),
         .bytes = bytes.view(),
         .fin = static_cast<std::uint8_t>(fin),
-        .priority = argc >= 6 ? static_cast<std::int32_t>(number_to_u64(env, argv[5])) : 0,
+        .priority = static_cast<std::int32_t>(priority),
     };
     coquic_result_t *result = nullptr;
     const auto status =
@@ -1064,11 +1078,15 @@ napi_value EndpointSendDatagram(napi_env env, napi_callback_info info) {
     if (holder == nullptr) {
         return nullptr;
     }
+    if (!require_argument(env, argv[3], "datagram priority is required")) {
+        return nullptr;
+    }
     Bytes bytes = bytes_from_value(env, argv[1]);
+    const auto priority = number_to_u64(env, argv[3]);
     coquic_send_datagram_data_t datagram{
         .size = sizeof(coquic_send_datagram_data_t),
         .bytes = bytes.view(),
-        .priority = argc >= 4 ? static_cast<std::int32_t>(number_to_u64(env, argv[3])) : 0,
+        .priority = static_cast<std::int32_t>(priority),
     };
     coquic_result_t *result = nullptr;
     const auto status =

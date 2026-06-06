@@ -456,10 +456,9 @@ decode_ack_additional_ranges(BufferReader &reader, std::uint64_t additional_rang
     return CodecResult<std::uint64_t>::success(previous_smallest);
 }
 
-template <typename OnRange>
 COQUIC_NO_PROFILE CodecResult<std::size_t>
 scan_ack_extra_range_bytes(std::span<const std::byte> bytes, std::uint64_t additional_range_count,
-                           std::uint64_t previous_smallest, OnRange &&on_range) {
+                           std::uint64_t previous_smallest) {
     std::size_t offset = 0;
     for (std::uint64_t i = 0; i < additional_range_count; ++i) {
         const auto gap = decode_varint_bytes(bytes, offset);
@@ -484,7 +483,6 @@ scan_ack_extra_range_bytes(std::span<const std::byte> bytes, std::uint64_t addit
             return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, offset);
         }
 
-        on_range(gap.value().value, range_length.value().value);
         previous_smallest = largest - range_length.value().value;
     }
 
@@ -590,7 +588,7 @@ CodecResult<ReceivedAckFrame> decode_received_ack_frame(BufferReader &reader, bo
 
     const auto decoded_ranges = scan_ack_extra_range_bytes(
         bytes.span().subspan(additional_range_begin), header.value().additional_range_count,
-        header.value().first_range_smallest, [](std::uint64_t, std::uint64_t) {});
+        header.value().first_range_smallest);
     if (!decoded_ranges.has_value()) {
         return CodecResult<ReceivedAckFrame>::failure(
             decoded_ranges.error().code, additional_range_begin + decoded_ranges.error().offset);
@@ -1898,7 +1896,7 @@ CodecResult<AckRangeCursor> make_ack_range_cursor(const ReceivedAckFrame &ack) {
     if (!ack.additional_ranges_validated) {
         const auto decoded_ranges = scan_ack_extra_range_bytes(
             ack.additional_range_bytes.span(), ack.additional_range_count,
-            ack.largest_acknowledged - ack.first_ack_range, [](std::uint64_t, std::uint64_t) {});
+            ack.largest_acknowledged - ack.first_ack_range);
         if (!decoded_ranges.has_value()) {
             return CodecResult<AckRangeCursor>::failure(decoded_ranges.error().code,
                                                         decoded_ranges.error().offset);

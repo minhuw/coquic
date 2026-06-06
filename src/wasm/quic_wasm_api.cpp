@@ -243,15 +243,13 @@ std::optional<TlsIdentity> generate_demo_server_identity() {
         return std::nullopt;
     }
 
-    auto certificate_pem = memory_bio_string(certificate_bio.get());
-    auto key_pem = memory_bio_string(key_bio.get());
-    if (!certificate_pem.has_value() || !key_pem.has_value()) {
+    auto identity = std::optional<TlsIdentity>{TlsIdentity{}};
+    identity->certificate_pem = memory_bio_string(certificate_bio.get()).value_or(std::string{});
+    identity->private_key_pem = memory_bio_string(key_bio.get()).value_or(std::string{});
+    if (identity->certificate_pem.empty() || identity->private_key_pem.empty()) {
         return std::nullopt;
     }
-    return TlsIdentity{
-        .certificate_pem = std::move(*certificate_pem),
-        .private_key_pem = std::move(*key_pem),
-    };
+    return identity;
 }
 
 std::optional<TlsIdentity> demo_server_identity() {

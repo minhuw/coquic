@@ -168,7 +168,15 @@ and loads `coquic-interop:quictls-musl`, pulls the pinned official peer,
 simulator, and iperf images, and runs peer-specific QUIC testcase and
 measurement lists through `interop/run-official.sh`. The workflow keeps the full
 testcase list as the default and narrows individual peer/direction cells where
-the current official peer image does not support or cannot pass that case.
+the current official peer image does not support that case.
+
+For `connectionmigration`, the matrix uses the public interop dashboard
+(`https://interop.seemann.io/quic`) as the role-support signal: peers that have
+no public `CM` success as active-migrating clients are skipped in the
+`coquic-server` direction, and peers that have no public `CM` success as
+preferred-address servers are skipped in the `coquic-client` direction. A public
+role-level `CM` success keeps the testcase in the workflow, so coquic-specific
+pairing failures still fail CI.
 
 Official runner results marked `unsupported` are preserved in the summary and
 published matrix but do not fail the workflow. Results marked `failed`, missing

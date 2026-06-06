@@ -25,6 +25,7 @@ jobs:
             impl: quic-go
             image: martenseemann/quic-go-interop@sha256:919f70ed559ccffaeadf884b864a406b0f16d2bd14a220507e83cc8d699c4424
             coquic_server_skip_testcases: connectionmigration
+            coquic_client_skip_testcases: connectionmigration
           - peer: picoquic
             display_name: picoquic
             impl: picoquic
@@ -34,17 +35,19 @@ jobs:
             impl: quinn
             image: stammw/quinn-interop@sha256:5205c84e200ef1a999be602ed6eeec9a216f25ce27d5eac690fa1540ec73f355
             coquic_server_skip_testcases: v2,connectionmigration
+            coquic_client_skip_testcases: connectionmigration
           - peer: msquic
             display_name: msquic
             impl: msquic
             image: ghcr.io/microsoft/msquic/qns:main
             coquic_server_skip_testcases: connectionmigration
+            coquic_client_skip_testcases: connectionmigration
           - peer: quiche
             display_name: quiche
             impl: quiche
             image: cloudflare/quiche-qns:latest
             coquic_server_skip_testcases: connectionmigration
-            coquic_client_skip_testcases: rebind-port,rebind-addr
+            coquic_client_skip_testcases: connectionmigration,rebind-port,rebind-addr
           - peer: ngtcp2
             display_name: ngtcp2
             impl: ngtcp2
@@ -54,7 +57,6 @@ jobs:
             display_name: neqo
             impl: neqo
             image: ghcr.io/mozilla/neqo-qns:latest
-            coquic_client_skip_testcases: connectionmigration
           - peer: mvfst
             display_name: mvfst
             impl: mvfst
@@ -66,6 +68,7 @@ jobs:
             impl: aioquic
             image: aiortc/aioquic-qns:latest
             coquic_server_skip_testcases: connectionmigration
+            coquic_client_skip_testcases: connectionmigration
           - peer: xquic
             display_name: xquic
             impl: xquic

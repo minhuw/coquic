@@ -1921,16 +1921,16 @@ std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
 
         BufferReader range_reader(
             cursor.encoded_additional_ranges.subspan(cursor.next_encoded_offset));
-        const auto encoded_range_gap_result = read_varint(range_reader);
-        if (!encoded_range_gap_result.has_value()) {
-            cursor.next_additional_index = cursor.additional_range_count;
-            cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
-            return std::nullopt;
-        }
-        const auto encoded_range_gap_value = encoded_range_gap_result.value();
-
-        const auto ack_range_extent = read_varint(range_reader);
-        if (!ack_range_extent.has_value()) {
+        AckRange decoded_range;
+        if (const auto error = decode_ack_additional_ranges(
+                range_reader, 1, cursor.previous_smallest,
+                [&decoded_range](std::uint64_t decoded_gap_value, std::uint64_t decoded_length) {
+                    decoded_range = AckRange{
+                        .gap = decoded_gap_value,
+                        .range_length = decoded_length,
+                    };
+                });
+            error.has_value()) {
             cursor.next_additional_index = cursor.additional_range_count;
             cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
             return std::nullopt;
@@ -1938,20 +1938,8 @@ std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
         cursor.next_encoded_offset += range_reader.offset();
         ++cursor.next_additional_index;
 
-        if (cursor.previous_smallest < encoded_range_gap_value + 2) {
-            cursor.next_additional_index = cursor.additional_range_count;
-            cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
-            return std::nullopt;
-        }
-
-        const auto range_largest = cursor.previous_smallest - encoded_range_gap_value - 2;
-        if (range_largest < ack_range_extent.value()) {
-            cursor.next_additional_index = cursor.additional_range_count;
-            cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
-            return std::nullopt;
-        }
-
-        cursor.previous_smallest = range_largest - ack_range_extent.value();
+        const auto range_largest = cursor.previous_smallest - decoded_range.gap - 2;
+        cursor.previous_smallest = range_largest - decoded_range.range_length;
         return AckPacketNumberRange{
             .smallest = cursor.previous_smallest,
             .largest = range_largest,

@@ -201,6 +201,10 @@ settings_from_snapshot(const coquic::http3::Http3SettingsSnapshot &settings) {
         .id = coquic::http3::kHttp3SettingsQpackBlockedStreams,
         .value = settings.qpack_blocked_streams,
     });
+    values.push_back(coquic::http3::Http3Setting{
+        .id = coquic::http3::kHttp3SettingsReservedGrease,
+        .value = 0,
+    });
     return values;
 }
 

@@ -114,6 +114,48 @@ TEST(QuicCoreTest, TwoPeersExchangeDatagramFramesThroughEffects) {
     EXPECT_EQ(datagram_events[0].byte_count(), 4u);
 }
 
+TEST(QuicCoreTest, DatagramSendPriorityChoosesHigherPriorityThenFifo) {
+    auto connection = make_connected_client_connection();
+
+    ASSERT_TRUE(connection.queue_datagram_send(bytes_from_ints({0x01}), 0).has_value());
+    ASSERT_TRUE(connection.queue_datagram_send(bytes_from_ints({0x02}), 7).has_value());
+    ASSERT_TRUE(connection.queue_datagram_send(bytes_from_ints({0x03}), 7).has_value());
+
+    auto first = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first.empty());
+    EXPECT_EQ(application_datagram_payloads_from_datagram(connection, first),
+              std::vector<std::vector<std::byte>>({bytes_from_ints({0x02})}));
+
+    auto second = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(second.empty());
+    EXPECT_EQ(application_datagram_payloads_from_datagram(connection, second),
+              std::vector<std::vector<std::byte>>({bytes_from_ints({0x03})}));
+}
+
+TEST(QuicCoreTest, DatagramSendPriorityIsRelativeToPendingStreamWork) {
+    auto connection = make_connected_client_connection();
+
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0, bytes_from_ints({0x73}), false,
+                                       /*priority=*/5)
+                    .has_value());
+    ASSERT_TRUE(
+        connection.queue_datagram_send(bytes_from_ints({0x64}), /*priority=*/1).has_value());
+
+    auto stream_first = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(stream_first.empty());
+    EXPECT_TRUE(datagram_has_application_stream(connection, stream_first));
+    EXPECT_FALSE(datagram_has_application_datagram_frame(connection, stream_first));
+
+    ASSERT_TRUE(
+        connection.queue_datagram_send(bytes_from_ints({0x68}), /*priority=*/9).has_value());
+    auto high_priority_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(high_priority_datagram.empty());
+    EXPECT_EQ(application_datagram_payloads_from_datagram(connection, high_priority_datagram),
+              std::vector<std::vector<std::byte>>({bytes_from_ints({0x68})}));
+}
+
 TEST(QuicCoreTest, TwoPeersExchangeSharedDatagramFramesThroughEffects) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());

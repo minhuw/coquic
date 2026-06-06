@@ -46,8 +46,12 @@ constexpr std::size_t kPathMtuUpdateSizeV1 =
     sizeof(coquic_path_mtu_update_t::max_udp_payload_size);
 constexpr std::size_t kSendStreamDataSizeV1 =
     offsetof(coquic_send_stream_data_t, fin) + sizeof(coquic_send_stream_data_t::fin);
+constexpr std::size_t kSendStreamDataSizeV2 =
+    offsetof(coquic_send_stream_data_t, priority) + sizeof(coquic_send_stream_data_t::priority);
 constexpr std::size_t kSendDatagramDataSizeV1 =
     offsetof(coquic_send_datagram_data_t, bytes) + sizeof(coquic_send_datagram_data_t::bytes);
+constexpr std::size_t kSendDatagramDataSizeV2 =
+    offsetof(coquic_send_datagram_data_t, priority) + sizeof(coquic_send_datagram_data_t::priority);
 constexpr std::size_t kResetStreamSizeV1 = offsetof(coquic_reset_stream_t, application_error_code) +
                                            sizeof(coquic_reset_stream_t::application_error_code);
 constexpr std::size_t kStopSendingSizeV1 = offsetof(coquic_stop_sending_t, application_error_code) +
@@ -678,6 +682,9 @@ std::optional<coquic::core::ConnectionInput> to_cpp(const coquic_connection_inpu
             .stream_id = input.as.send_stream.stream_id,
             .bytes = to_vector(input.as.send_stream.bytes),
             .fin = input.as.send_stream.fin != 0,
+            .priority = input.as.send_stream.size >= kSendStreamDataSizeV2
+                            ? input.as.send_stream.priority
+                            : 0,
         };
     case COQUIC_CONNECTION_INPUT_SEND_DATAGRAM:
         if (input.as.send_datagram.size < kSendDatagramDataSizeV1) {
@@ -685,6 +692,9 @@ std::optional<coquic::core::ConnectionInput> to_cpp(const coquic_connection_inpu
         }
         return coquic::core::SendDatagramData{
             .bytes = to_vector(input.as.send_datagram.bytes),
+            .priority = input.as.send_datagram.size >= kSendDatagramDataSizeV2
+                            ? input.as.send_datagram.priority
+                            : 0,
         };
     case COQUIC_CONNECTION_INPUT_RESET_STREAM:
         if (input.as.reset_stream.size < kResetStreamSizeV1) {
@@ -785,7 +795,7 @@ void coquic_endpoint_config_init(coquic_endpoint_config_t *config) {
         .role = COQUIC_ROLE_CLIENT,
         .supported_versions = nullptr,
         .supported_versions_count = 0,
-        .verify_peer = 0,
+        .verify_peer = 1,
         .retry_enabled = 0,
         .application_protocol = "coquic",
         .application_protocol_length = 6,
@@ -928,13 +938,15 @@ coquic_status_t coquic_connection_send_stream(coquic_endpoint_t *endpoint,
         }
         return COQUIC_STATUS_INVALID_ARGUMENT;
     }
-    return advance_connection(endpoint, connection,
-                              coquic::core::SendStreamData{
-                                  .stream_id = input->stream_id,
-                                  .bytes = to_vector(input->bytes),
-                                  .fin = input->fin != 0,
-                              },
-                              now, out_result);
+    return advance_connection(
+        endpoint, connection,
+        coquic::core::SendStreamData{
+            .stream_id = input->stream_id,
+            .bytes = to_vector(input->bytes),
+            .fin = input->fin != 0,
+            .priority = input->size >= kSendStreamDataSizeV2 ? input->priority : 0,
+        },
+        now, out_result);
 }
 
 coquic_status_t coquic_connection_send_datagram(coquic_endpoint_t *endpoint,
@@ -948,11 +960,13 @@ coquic_status_t coquic_connection_send_datagram(coquic_endpoint_t *endpoint,
         }
         return COQUIC_STATUS_INVALID_ARGUMENT;
     }
-    return advance_connection(endpoint, connection,
-                              coquic::core::SendDatagramData{
-                                  .bytes = to_vector(input->bytes),
-                              },
-                              now, out_result);
+    return advance_connection(
+        endpoint, connection,
+        coquic::core::SendDatagramData{
+            .bytes = to_vector(input->bytes),
+            .priority = input->size >= kSendDatagramDataSizeV2 ? input->priority : 0,
+        },
+        now, out_result);
 }
 
 coquic_status_t coquic_connection_reset_stream(coquic_endpoint_t *endpoint,
@@ -1171,6 +1185,7 @@ coquic_status_t coquic_quic_stream_send(coquic_endpoint_t *endpoint,
         .stream_id = stream_id,
         .bytes = bytes,
         .fin = fin,
+        .priority = 0,
     };
     return coquic_connection_send_stream(endpoint, connection, &input, now, out_result);
 }

@@ -66,6 +66,7 @@ enum class QuicTransportErrorCode : std::uint64_t { // NOLINT(performance-enum-s
     key_update_error = 0x0e,
     aead_limit_reached = 0x0f,
     no_viable_path = 0x10,
+    version_negotiation_error = 0x11,
 };
 
 class PacketSpacePacketMapView {
@@ -525,11 +526,13 @@ class QuicConnection {
                              QuicPathId path_id = 0,
                              QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
     StreamStateResult<bool> queue_stream_send(std::uint64_t stream_id,
-                                              std::span<const std::byte> bytes, bool fin);
+                                              std::span<const std::byte> bytes, bool fin,
+                                              std::int32_t priority = 0);
     StreamStateResult<bool> queue_stream_send_shared(std::uint64_t stream_id, SharedBytes bytes,
-                                                     bool fin);
-    CodecResult<bool> queue_datagram_send(std::span<const std::byte> bytes);
-    CodecResult<bool> queue_datagram_send_shared(SharedBytes bytes);
+                                                     bool fin, std::int32_t priority = 0);
+    CodecResult<bool> queue_datagram_send(std::span<const std::byte> bytes,
+                                          std::int32_t priority = 0);
+    CodecResult<bool> queue_datagram_send_shared(SharedBytes bytes, std::int32_t priority = 0);
     StreamStateResult<bool> queue_stream_reset(LocalResetCommand command);
     StreamStateResult<bool> queue_stop_sending(LocalStopSendingCommand command);
     CodecResult<bool> request_connection_migration(QuicPathId path_id,
@@ -746,6 +749,8 @@ class QuicConnection {
     QuicCoreDuration path_validation_timeout_period() const;
     void install_available_secrets();
     void collect_pending_tls_bytes();
+    CodecResult<bool>
+    maybe_negotiate_server_version_from_client_hello(std::span<const std::byte> crypto_bytes);
     CodecResult<bool> sync_tls_state();
     bool can_skip_outbound_tls_sync() const;
     void replay_deferred_protected_packets(QuicCoreTimePoint now);
@@ -838,7 +843,7 @@ class QuicConnection {
     StreamStateResult<bool> queue_stream_send_impl(std::uint64_t stream_id,
                                                    std::span<const std::byte> owned_bytes,
                                                    std::optional<SharedBytes> shared_bytes,
-                                                   bool fin);
+                                                   bool fin, std::int32_t priority);
     void maybe_emit_zero_rtt_attempted_event();
     PeerStreamOpenLimits peer_stream_open_limits() const;
     bool has_pending_application_send() const;
@@ -969,6 +974,7 @@ class QuicConnection {
     PacketSpaceState handshake_space_;
     PacketSpaceState zero_rtt_space_;
     PacketSpaceState application_space_;
+    std::vector<std::byte> server_initial_crypto_scan_prefix_;
     std::optional<TlsAdapter> tls_;
     TransportParameters local_transport_parameters_;
     std::optional<ConnectionId> peer_source_connection_id_;
@@ -1017,7 +1023,14 @@ class QuicConnection {
     ConnectionFlowControlState connection_flow_control_;
     StreamOpenLimits stream_open_limits_;
     LocalStreamLimitState local_stream_limit_state_;
-    std::deque<SharedBytes> pending_datagram_send_queue_;
+    struct PendingDatagramSend {
+        SharedBytes bytes;
+        std::int32_t priority = 0;
+        std::uint64_t sequence = 0;
+    };
+    std::deque<PendingDatagramSend> pending_datagram_send_queue_;
+    std::uint64_t next_pending_datagram_sequence_ = 0;
+    std::unordered_map<std::uint64_t, std::int32_t> stream_send_priorities_;
     std::deque<QuicCoreReceiveStreamData> pending_stream_receive_effects_;
     std::deque<QuicCoreReceiveDatagramData> pending_datagram_receive_effects_;
     std::deque<QuicCorePeerResetStream> pending_peer_reset_effects_;

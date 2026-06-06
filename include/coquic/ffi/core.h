@@ -256,11 +256,13 @@ typedef struct coquic_send_stream_data {
     coquic_stream_id_t stream_id;
     coquic_bytes_t bytes;
     uint8_t fin;
+    int32_t priority;
 } coquic_send_stream_data_t;
 
 typedef struct coquic_send_datagram_data {
     size_t size;
     coquic_bytes_t bytes;
+    int32_t priority;
 } coquic_send_datagram_data_t;
 
 typedef struct coquic_reset_stream {

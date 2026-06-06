@@ -1185,9 +1185,6 @@ version_information_for_handshake(std::span<const std::uint32_t> supported_versi
 
 inline std::uint32_t select_server_version(std::span<const std::uint32_t> supported_versions,
                                            std::uint32_t client_initial_version) {
-    if (client_initial_version == kQuicVersion1 && supports_quic_v2(supported_versions)) {
-        return kQuicVersion2;
-    }
     if (supports_version(supported_versions, client_initial_version)) {
         return client_initial_version;
     }
@@ -1517,6 +1514,16 @@ inline CodecError transport_parameter_error(CodecErrorCode code, std::size_t off
         .offset = offset,
         .transport_error_code =
             transport_error_code_value(QuicTransportErrorCode::transport_parameter_error),
+        .has_transport_error_code = true,
+    };
+}
+
+inline CodecError version_negotiation_error(std::size_t offset = 0) {
+    return CodecError{
+        .code = CodecErrorCode::invalid_packet_protection_state,
+        .offset = offset,
+        .transport_error_code =
+            transport_error_code_value(QuicTransportErrorCode::version_negotiation_error),
         .has_transport_error_code = true,
     };
 }
@@ -2124,8 +2131,15 @@ inline COQUIC_NO_PROFILE bool peer_connection_id_route_changed(
 
 inline bool should_adopt_supported_client_version(EndpointRole role, std::uint32_t packet_version,
                                                   std::uint32_t current_version) {
-    return (role == EndpointRole::client) & is_supported_quic_version(packet_version) &
-           (packet_version != current_version);
+    return (role == EndpointRole::client) & (current_version == kQuicVersion1) &
+           is_supported_quic_version(packet_version) & (packet_version != current_version);
+}
+
+inline bool should_drop_wrong_version_client_long_header(EndpointRole role,
+                                                         std::uint32_t packet_version,
+                                                         std::uint32_t current_version) {
+    return role == EndpointRole::client && current_version != kQuicVersion1 &&
+           packet_version != current_version;
 }
 
 inline std::optional<QuicCoreTimePoint>

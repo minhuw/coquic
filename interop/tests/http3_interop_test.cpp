@@ -127,7 +127,8 @@ bool wait_for_http3_server_ready(pid_t pid, const coquic::http3::Http3RuntimeCon
 
 class ScopedHttp3Process {
   public:
-    explicit ScopedHttp3Process(const coquic::http3::Http3RuntimeConfig &config) {
+    explicit ScopedHttp3Process(const coquic::http3::Http3RuntimeConfig &config)
+        : fixture_cert_trust_("SSL_CERT_FILE", "tests/fixtures/quic-server-cert.pem") {
         pid_ = ::fork();
         if (pid_ == 0) {
             _exit(coquic::http3::run_http3_runtime(config));
@@ -185,6 +186,7 @@ class ScopedHttp3Process {
     }
 
   private:
+    ScopedEnvVar fixture_cert_trust_;
     pid_t pid_ = -1;
 };
 

@@ -116,7 +116,8 @@ constexpr std::string_view kHttp3ServerUsageLine =
 constexpr std::string_view kHttp3ClientUsageLine =
     "usage: h3-client URL [--method GET|HEAD|POST] [--header NAME:VALUE] "
     "[--data TEXT] [--body-file PATH] [--output PATH] [--server-name NAME] "
-    "[--verify-peer] [--host HOST] [--port PORT] [--io-backend socket|io_uring] "
+    "[--verify-peer] [--no-verify-peer] [--host HOST] [--port PORT] "
+    "[--io-backend socket|io_uring] "
     "[--congestion-control newreno|cubic|bbr|copa]";
 
 enum class Http3CliMode : std::uint8_t { server, client };
@@ -1325,6 +1326,7 @@ Http3RuntimeConfig make_runtime_client_config_for_test() {
     return Http3RuntimeConfig{
         .mode = Http3RuntimeMode::client,
         .url = "https://example.test/resource.txt",
+        .verify_peer = false,
     };
 }
 
@@ -1862,6 +1864,10 @@ std::optional<Http3RuntimeConfig> parse_http3_args(int argc, char **argv, Http3C
 
         if (arg == "--verify-peer") {
             config.verify_peer = true;
+            continue;
+        }
+        if (arg == "--no-verify-peer") {
+            config.verify_peer = false;
             continue;
         }
         if (arg == "--host") {

@@ -2890,23 +2890,58 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             }();
             auto base_application_stream_budget = application_stream_frame_budget(
                 congestion_limited_datagram_size, application_destination_connection_id().size());
+            const auto pending_application_stream_priority = [&]() -> std::optional<std::int32_t> {
+                std::optional<std::int32_t> highest;
+                for (const auto &[stream_id, stream] : streams_) {
+                    if (stream.reset_state != StreamControlFrameState::none) {
+                        continue;
+                    }
+                    if (stream.sendable_bytes() == 0 && !stream.send_buffer.has_lost_data() &&
+                        !stream_fin_sendable(stream)) {
+                        continue;
+                    }
+                    const auto priority_it = stream_send_priorities_.find(stream_id);
+                    const auto priority =
+                        priority_it == stream_send_priorities_.end() ? 0 : priority_it->second;
+                    highest = highest.has_value() ? std::max(*highest, priority) : priority;
+                }
+                return highest;
+            }();
             std::optional<DatagramFrame> selected_datagram_frame;
+            std::optional<std::size_t> selected_datagram_queue_index;
             bool can_select_datagram_frame = !ack_only_mode && !send_application_close_only &&
                                              !validation_only_send &&
                                              !pending_datagram_send_queue_.empty();
             if (can_select_datagram_frame) {
-                const auto &datagram_payload = pending_datagram_send_queue_.front();
-                const auto datagram_wire_size =
-                    datagram_frame_wire_size(datagram_payload.size(), /*has_length=*/true);
-                const bool peer_limit_allows_datagram =
-                    peer_transport_parameters_.has_value() &&
-                    peer_transport_parameters_->max_datagram_frame_size != 0 &&
-                    datagram_wire_size <= peer_transport_parameters_->max_datagram_frame_size;
-                if (peer_limit_allows_datagram &&
-                    datagram_wire_size <= base_application_stream_budget) {
+                for (std::size_t index = 0; index < pending_datagram_send_queue_.size(); ++index) {
+                    const auto &pending_datagram = pending_datagram_send_queue_[index];
+                    const auto datagram_wire_size = datagram_frame_wire_size(
+                        pending_datagram.bytes.size(), /*has_length=*/true);
+                    const bool peer_limit_allows_datagram =
+                        peer_transport_parameters_.has_value() &&
+                        peer_transport_parameters_->max_datagram_frame_size != 0 &&
+                        datagram_wire_size <= peer_transport_parameters_->max_datagram_frame_size;
+                    if (pending_application_stream_priority.has_value() &&
+                        pending_datagram.priority < *pending_application_stream_priority) {
+                        continue;
+                    }
+                    if (!peer_limit_allows_datagram ||
+                        datagram_wire_size > base_application_stream_budget) {
+                        continue;
+                    }
+                    if (selected_datagram_queue_index.has_value()) {
+                        const auto &selected =
+                            pending_datagram_send_queue_[*selected_datagram_queue_index];
+                        if (pending_datagram.priority < selected.priority ||
+                            (pending_datagram.priority == selected.priority &&
+                             pending_datagram.sequence > selected.sequence)) {
+                            continue;
+                        }
+                    }
+                    selected_datagram_queue_index = index;
                     selected_datagram_frame = DatagramFrame{
                         .has_length = true,
-                        .data = datagram_payload.to_vector(),
+                        .data = pending_datagram.bytes.to_vector(),
                     };
                 }
             }
@@ -3629,7 +3664,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     });
                 if (should_consume_selected_datagram_frame_after_commit(
                         committed.empty(), selected_datagram_frame.has_value())) {
-                    pending_datagram_send_queue_.pop_front();
+                    if (selected_datagram_queue_index.has_value() &&
+                        *selected_datagram_queue_index < pending_datagram_send_queue_.size()) {
+                        pending_datagram_send_queue_.erase(
+                            pending_datagram_send_queue_.begin() +
+                            static_cast<std::ptrdiff_t>(*selected_datagram_queue_index));
+                    }
                 }
                 return committed;
             }
@@ -3646,7 +3686,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 });
             if (should_consume_selected_datagram_frame_after_commit(
                     committed.empty(), selected_datagram_frame.has_value())) {
-                pending_datagram_send_queue_.pop_front();
+                if (selected_datagram_queue_index.has_value() &&
+                    *selected_datagram_queue_index < pending_datagram_send_queue_.size()) {
+                    pending_datagram_send_queue_.erase(
+                        pending_datagram_send_queue_.begin() +
+                        static_cast<std::ptrdiff_t>(*selected_datagram_queue_index));
+                }
             }
             return committed;
         }

@@ -362,6 +362,7 @@ coquic_connection_input_t from_cpp(const coquic::core::ConnectionInput &input) {
                                 {
                                     .size = sizeof(coquic_send_datagram_data_t),
                                     .bytes = bytes_input(value.bytes),
+                                    .priority = value.priority,
                                 },
                         },
                 };
@@ -584,6 +585,7 @@ void coquic_http3_server_endpoint_config_init(coquic_endpoint_config_t *config) 
         return;
     }
     config->role = COQUIC_ROLE_SERVER;
+    config->verify_peer = 0;
     config->application_protocol = "h3";
     config->application_protocol_length = 2;
 }

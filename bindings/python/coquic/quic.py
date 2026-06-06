@@ -124,10 +124,11 @@ class Connection:
         data: bytes | bytearray | memoryview,
         fin: bool,
         now: TimeUs,
+        priority: int = 0,
     ) -> QueryResult:
         return self._with_endpoint(
             lambda endpoint: endpoint._core.quic_connection_send_stream(
-                self._handle, SendStreamData(stream_id, bytes(data), fin), now
+                self._handle, SendStreamData(stream_id, bytes(data), fin, priority), now
             )
         )
 
@@ -206,12 +207,16 @@ class Stream:
         return self._connection.is_valid()
 
     def send(
-        self, data: bytes | bytearray | memoryview, fin: bool, now: TimeUs
+        self,
+        data: bytes | bytearray | memoryview,
+        fin: bool,
+        now: TimeUs,
+        priority: int = 0,
     ) -> QueryResult:
-        return self._connection.send_stream(self._stream_id, bytes(data), fin, now)
+        return self._connection.send_stream(self._stream_id, bytes(data), fin, now, priority)
 
-    def finish(self, now: TimeUs) -> QueryResult:
-        return self._connection.send_stream(self._stream_id, b"", True, now)
+    def finish(self, now: TimeUs, priority: int = 0) -> QueryResult:
+        return self._connection.send_stream(self._stream_id, b"", True, now, priority)
 
     def reset(self, application_error_code: int, now: TimeUs) -> QueryResult:
         return self._connection.reset_stream(

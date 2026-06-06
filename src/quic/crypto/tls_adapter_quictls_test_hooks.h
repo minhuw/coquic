@@ -134,6 +134,7 @@ class TlsAdapterTestPeer {
     static void update_runtime_status(TlsAdapter &adapter);
     static void update_early_data_status(TlsAdapter &adapter);
     static void update_resumed_resumption_state(TlsAdapter &adapter);
+    static void set_handshake_complete(TlsAdapter &adapter, bool complete);
     static void set_early_data_attempted(TlsAdapter &adapter, bool attempted);
     static void apply_early_data_status(TlsAdapter &adapter, int early_data_status,
                                         bool handshake_complete);

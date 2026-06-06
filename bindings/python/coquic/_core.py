@@ -351,6 +351,7 @@ class SendStreamData:
     stream_id: StreamId
     bytes: bytes
     fin: bool = False
+    priority: int = 0
 
     def to_raw(self, arena: "_CallArena") -> ffi.coquic_send_stream_data_t:
         return ffi.coquic_send_stream_data_t(
@@ -358,17 +359,20 @@ class SendStreamData:
             stream_id=self.stream_id,
             bytes=arena.bytes(self.bytes),
             fin=int(self.fin),
+            priority=self.priority,
         )
 
 
 @dataclass(slots=True)
 class SendDatagramData:
     bytes: bytes
+    priority: int = 0
 
     def to_raw(self, arena: "_CallArena") -> ffi.coquic_send_datagram_data_t:
         return ffi.coquic_send_datagram_data_t(
             size=C.sizeof(ffi.coquic_send_datagram_data_t),
             bytes=arena.bytes(self.bytes),
+            priority=self.priority,
         )
 
 

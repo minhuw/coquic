@@ -1506,6 +1506,25 @@ TEST(QuicCoreTest, ValidatePeerTransportParametersWaitsForTlsBytesWhenNoneAreAva
     EXPECT_FALSE(connection.peer_transport_parameters_validated_);
 }
 
+TEST(QuicCoreTest, ValidatePeerTransportParametersFailsWhenTlsCompleteWithoutExtension) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    connection.start_client_if_needed();
+
+    ASSERT_TRUE(connection.tls_.has_value());
+    auto &tls = optional_ref_or_terminate(connection.tls_);
+    coquic::quic::test::TlsAdapterTestPeer::clear_peer_transport_parameters(tls);
+    coquic::quic::test::TlsAdapterTestPeer::set_handshake_complete(tls, true);
+
+    const auto validation = connection.validate_peer_transport_parameters_if_ready();
+
+    ASSERT_FALSE(validation.has_value());
+    EXPECT_EQ(validation.error().code,
+              coquic::quic::CodecErrorCode::invalid_packet_protection_state);
+    EXPECT_TRUE(validation.error().has_transport_error_code);
+    EXPECT_EQ(validation.error().transport_error_code, 0x016du);
+    EXPECT_FALSE(connection.peer_transport_parameters_validated_);
+}
+
 TEST(QuicCoreTest, ProcessInboundCryptoApplicationHandshakeDoneConfirmsHandshake) {
     auto connection = make_connected_client_connection();
     connection.handshake_confirmed_ = false;

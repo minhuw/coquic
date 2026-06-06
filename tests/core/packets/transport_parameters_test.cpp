@@ -47,6 +47,12 @@ TransportParametersValidationContext make_validation_context(
     };
 }
 
+void expect_version_negotiation_error(const coquic::quic::CodecError &error) {
+    EXPECT_EQ(error.code, CodecErrorCode::invalid_packet_protection_state);
+    EXPECT_TRUE(error.has_transport_error_code);
+    EXPECT_EQ(error.transport_error_code, 0x11u);
+}
+
 PreferredAddress sample_preferred_address() {
     return PreferredAddress{
         .ipv4_address = {std::byte{0xc0}, std::byte{0x00}, std::byte{0x02}, std::byte{0x0a}},
@@ -1215,7 +1221,53 @@ TEST(QuicTransportParametersTest, ServerRejectsPeerVersionInformationWithMismatc
                                 }));
 
     ASSERT_FALSE(validation.has_value());
-    EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+    expect_version_negotiation_error(validation.error());
+}
+
+TEST(QuicTransportParametersTest, RejectsPeerVersionInformationWithZeroChosenVersion) {
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::client,
+        TransportParameters{
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+            .version_information =
+                VersionInformation{
+                    .chosen_version = 0,
+                    .available_versions = {0x00000001u},
+                },
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}}, std::nullopt, std::nullopt,
+                                VersionInformation{
+                                    .chosen_version = 0x00000001u,
+                                    .available_versions = {0x00000001u},
+                                }));
+
+    ASSERT_FALSE(validation.has_value());
+    expect_version_negotiation_error(validation.error());
+}
+
+TEST(QuicTransportParametersTest, RejectsPeerVersionInformationWithZeroAvailableVersion) {
+    const auto validation = coquic::quic::validate_peer_transport_parameters(
+        EndpointRole::client,
+        TransportParameters{
+            .max_udp_payload_size = 1200,
+            .active_connection_id_limit = 2,
+            .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+            .version_information =
+                VersionInformation{
+                    .chosen_version = 0x00000001u,
+                    .available_versions = {0x00000001u, 0},
+                },
+        },
+        make_validation_context(ConnectionId{std::byte{0xaa}}, std::nullopt, std::nullopt,
+                                VersionInformation{
+                                    .chosen_version = 0x00000001u,
+                                    .available_versions = {0x00000001u},
+                                }));
+
+    ASSERT_FALSE(validation.has_value());
+    expect_version_negotiation_error(validation.error());
 }
 
 TEST(QuicTransportParametersTest, ClientRejectsMissingExpectedVersionInformation) {

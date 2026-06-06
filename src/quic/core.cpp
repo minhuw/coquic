@@ -505,24 +505,26 @@ COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
 
 COQUIC_NO_PROFILE StreamStateResult<bool>
 queue_legacy_local_command(QuicConnection &quic_connection, const QuicCoreSendStreamData &input) {
-    return quic_connection.queue_stream_send(input.stream_id, input.bytes, input.fin);
+    return quic_connection.queue_stream_send(input.stream_id, input.bytes, input.fin,
+                                             input.priority);
 }
 
 COQUIC_NO_PROFILE StreamStateResult<bool>
 queue_legacy_local_command(QuicConnection &quic_connection,
                            const QuicCoreSendSharedStreamData &input) {
-    return quic_connection.queue_stream_send_shared(input.stream_id, input.bytes, input.fin);
+    return quic_connection.queue_stream_send_shared(input.stream_id, input.bytes, input.fin,
+                                                    input.priority);
 }
 
 COQUIC_NO_PROFILE CodecResult<bool>
 queue_legacy_local_command(QuicConnection &quic_connection, const QuicCoreSendDatagramData &input) {
-    return quic_connection.queue_datagram_send(input.bytes);
+    return quic_connection.queue_datagram_send(input.bytes, input.priority);
 }
 
 COQUIC_NO_PROFILE CodecResult<bool>
 queue_legacy_local_command(QuicConnection &quic_connection,
                            const QuicCoreSendSharedDatagramData &input) {
-    return quic_connection.queue_datagram_send_shared(input.bytes);
+    return quic_connection.queue_datagram_send_shared(input.bytes, input.priority);
 }
 
 COQUIC_NO_PROFILE bool legacy_stream_send_batchable(const QuicCoreInput &input) {
@@ -1787,6 +1789,81 @@ QuicCore::take_client_new_token_for_open(const QuicCoreClientConnectionConfig &c
     return std::nullopt;
 }
 
+std::optional<QuicCoreResult>
+    COQUIC_NO_PROFILE QuicCore::maybe_process_client_endpoint_version_negotiation(
+        ConnectionEntry &entry, std::span<const std::byte> inbound_payload,
+        const std::optional<QuicRouteHandle> &route_handle, QuicPathId path_id,
+        QuicCoreTimePoint now) {
+    if (endpoint_config_.role != EndpointRole::client || entry.connection == nullptr ||
+        entry.connection->is_handshake_complete() ||
+        entry.connection->config_.reacted_to_version_negotiation) {
+        return std::nullopt;
+    }
+
+    const auto version_negotiation = parse_version_negotiation_packet(inbound_payload);
+    if (!version_negotiation.has_value()) {
+        return std::nullopt;
+    }
+
+    auto config = entry.connection->config_;
+    const bool valid_destination_connection_id =
+        version_negotiation->destination_connection_id == config.source_connection_id;
+    const bool valid_source_connection_id =
+        version_negotiation->source_connection_id == config.initial_destination_connection_id;
+    const bool echoes_original_version =
+        std::find(version_negotiation->supported_versions.begin(),
+                  version_negotiation->supported_versions.end(),
+                  config.original_version) != version_negotiation->supported_versions.end();
+    if (!valid_destination_connection_id || !valid_source_connection_id) {
+        return std::nullopt;
+    }
+    if (echoes_original_version) {
+        return QuicCoreResult{};
+    }
+
+    for (const auto supported_version : config.supported_versions) {
+        if (std::find(version_negotiation->supported_versions.begin(),
+                      version_negotiation->supported_versions.end(),
+                      supported_version) == version_negotiation->supported_versions.end()) {
+            continue;
+        }
+
+        config.initial_version = supported_version;
+        config.reacted_to_version_negotiation = true;
+        erase_endpoint_connection_routes(entry);
+        entry.connection = std::make_unique<QuicConnection>(std::move(config));
+        entry.active_connection_id_keys.clear();
+        entry.local_stateless_reset_connection_id_keys.clear();
+        entry.peer_stateless_reset_token_keys.clear();
+        entry.initial_destination_connection_id_key.reset();
+        entry.endpoint_route_generation = 0;
+        entry.default_route_handle = route_handle;
+        if (route_handle.has_value()) {
+            entry.path_id_by_route_handle[*route_handle] = path_id;
+            entry.route_handle_by_path_id[path_id] = *route_handle;
+        } else {
+            entry.route_handle_by_path_id.erase(path_id);
+        }
+        entry.connection->last_inbound_path_id_ = path_id;
+        entry.connection->current_send_path_id_ = path_id;
+        entry.connection->ensure_path_state(path_id).is_current_send_path = true;
+        remember_path_address_family(
+            entry, path_id,
+            route_address_family_from_identity(current_address_validation_identity(entry)));
+        entry.connection->start(now);
+
+        auto result =
+            drain_connection_effects(entry.handle, entry.default_route_handle,
+                                     entry.route_handle_by_path_id, *entry.connection, now);
+        remember_client_new_tokens(entry, result);
+        note_send_continuation(entry, result, now);
+        refresh_server_connection_routes(entry);
+        return result;
+    }
+
+    return QuicCoreResult{};
+}
+
 std::optional<QuicConnectionHandle>
     COQUIC_NO_PROFILE QuicCore::detect_stateless_reset(std::span<const std::byte> bytes) const {
     if (bytes.size() < kMinimumStatelessResetDatagramSize) {
@@ -2736,6 +2813,36 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
             }
             return true;
         };
+
+        if (endpoint_config_.role == EndpointRole::client &&
+            parse_version_negotiation_packet(inbound_payload).has_value()) {
+            for (auto &[handle, entry] : connections_) {
+                (void)handle;
+                if (entry.connection == nullptr) {
+                    continue;
+                }
+                const auto path_id = path_id_for_inbound_route(
+                    entry, inbound->route_handle, inbound->address_validation_identity);
+                if (!path_id.has_value()) {
+                    continue;
+                }
+                auto version_negotiation = maybe_process_client_endpoint_version_negotiation(
+                    entry, inbound_payload, inbound->route_handle, *path_id, now);
+                if (!version_negotiation.has_value()) {
+                    continue;
+                }
+                if (should_remove_endpoint_connection_entry(*entry.connection, *version_negotiation,
+                                                            now)) {
+                    retire_endpoint_connection_routes(entry, now);
+                    ++entry.wakeup_generation;
+                    connections_.erase(handle);
+                } else {
+                    refresh_entry_wakeup(entry);
+                }
+                return finalize_endpoint_result(std::move(*version_negotiation), now);
+            }
+        }
+
         auto parsed =
             parse_endpoint_datagram(inbound_payload, endpoint_config_.transport.grease_quic_bit);
         if (!parsed.has_value()) {
@@ -2813,10 +2920,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
              !endpoint_supports_version);
         if (should_send_version_negotiation) {
             if (inbound_payload.size() >= kMinimumClientInitialDatagramBytes) {
-                const auto advertised_versions =
-                    parsed->kind == ParsedEndpointDatagram::Kind::unsupported_version_long_header
-                        ? supported_quic_versions()
-                        : endpoint_config_.supported_versions;
+                const auto advertised_versions = endpoint_config_.supported_versions;
                 auto bytes = make_version_negotiation_packet_bytes(
                     *parsed, advertised_versions,
                     endpoint_config_.transport.grease_reserved_versions);
@@ -3014,30 +3118,32 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
         std::visit(
             overloaded{
                 [&](const QuicCoreSendStreamData &in) {
-                    const auto queued =
-                        entry.connection->queue_stream_send(in.stream_id, in.bytes, in.fin);
+                    const auto queued = entry.connection->queue_stream_send(in.stream_id, in.bytes,
+                                                                            in.fin, in.priority);
                     if (!queued.has_value()) {
                         result.local_error = stream_state_error_to_local_error(queued.error());
                         result.local_error->connection = entry.handle;
                     }
                 },
                 [&](const QuicCoreSendSharedStreamData &in) {
-                    const auto queued =
-                        entry.connection->queue_stream_send_shared(in.stream_id, in.bytes, in.fin);
+                    const auto queued = entry.connection->queue_stream_send_shared(
+                        in.stream_id, in.bytes, in.fin, in.priority);
                     if (!queued.has_value()) {
                         result.local_error = stream_state_error_to_local_error(queued.error());
                         result.local_error->connection = entry.handle;
                     }
                 },
                 [&](const QuicCoreSendDatagramData &in) {
-                    const auto queued = entry.connection->queue_datagram_send(in.bytes);
+                    const auto queued =
+                        entry.connection->queue_datagram_send(in.bytes, in.priority);
                     if (!queued.has_value()) {
                         result.local_error = datagram_send_error_to_local_error(queued.error());
                         result.local_error->connection = entry.handle;
                     }
                 },
                 [&](const QuicCoreSendSharedDatagramData &in) {
-                    const auto queued = entry.connection->queue_datagram_send_shared(in.bytes);
+                    const auto queued =
+                        entry.connection->queue_datagram_send_shared(in.bytes, in.priority);
                     if (!queued.has_value()) {
                         result.local_error = datagram_send_error_to_local_error(queued.error());
                         result.local_error->connection = entry.handle;
@@ -3184,7 +3290,8 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                 }
                 const auto inbound_payload = in.payload();
                 if (config.role == EndpointRole::client) {
-                    if (!connection->is_handshake_complete()) {
+                    if (!connection->is_handshake_complete() &&
+                        !config.reacted_to_version_negotiation) {
                         const auto version_negotiation =
                             parse_version_negotiation_packet(inbound_payload);
                         if (version_negotiation.has_value()) {
@@ -3290,14 +3397,15 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                 connection->apply_path_mtu_update(path_it->second, in.max_udp_payload_size);
             },
             [&](const QuicCoreSendStreamData &in) {
-                const auto queued = connection->queue_stream_send(in.stream_id, in.bytes, in.fin);
+                const auto queued =
+                    connection->queue_stream_send(in.stream_id, in.bytes, in.fin, in.priority);
                 if (!queued.has_value()) {
                     result.local_error = stream_state_error_to_local_error(queued.error());
                 }
             },
             [&](const QuicCoreSendSharedStreamData &in) {
-                const auto queued =
-                    connection->queue_stream_send_shared(in.stream_id, in.bytes, in.fin);
+                const auto queued = connection->queue_stream_send_shared(in.stream_id, in.bytes,
+                                                                         in.fin, in.priority);
                 if (!queued.has_value()) {
                     result.local_error = stream_state_error_to_local_error(queued.error());
                 }

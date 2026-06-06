@@ -87,12 +87,15 @@ class Http3Connection {
         std::optional<RequestFieldSectionKind> blocked_field_section;
         std::optional<std::uint64_t> expected_content_length;
         std::uint64_t body_bytes_received = 0;
+        bool connect_request = false;
     };
 
     struct LocalResponseStreamState {
         bool final_response_started = false;
         bool trailers_sent = false;
         bool finished = false;
+        bool connect_request = false;
+        bool connect_response = false;
         std::optional<std::uint64_t> expected_content_length;
         std::uint64_t body_bytes_sent = 0;
     };
@@ -104,6 +107,8 @@ class Http3Connection {
         bool final_request_headers_sent = false;
         bool request_trailers_sent = false;
         bool request_finished = false;
+        bool connect_request = false;
+        bool connect_response = false;
         bool final_response_received = false;
         bool response_trailers_received = false;
         std::optional<ResponseFieldSectionKind> blocked_field_section;

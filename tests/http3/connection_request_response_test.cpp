@@ -61,6 +61,39 @@ TEST(QuicHttp3ConnectionTest, ServerRoleRequestHeadersReadSharedReceiveBytes) {
     expect_get_request_head(*request_head_event);
 }
 
+TEST(QuicHttp3ConnectionTest, ServerRoleAcceptsConnectRequestWithoutSchemeOrPath) {
+    std::array request_fields{
+        coquic::http3::Http3Field{":method", "CONNECT"},
+        coquic::http3::Http3Field{":authority", "example.test:443"},
+    };
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+    });
+
+    auto update =
+        connection.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields)),
+                                  coquic::quic::QuicCoreTimePoint{});
+
+    EXPECT_FALSE(close_input_from(update).has_value());
+    ASSERT_EQ(update.events.size(), 1u);
+    auto *request_head_event =
+        std::get_if<coquic::http3::Http3PeerRequestHeadEvent>(&update.events[0]);
+    ASSERT_NE(request_head_event, nullptr);
+    EXPECT_EQ(request_head_event->head.method, "CONNECT");
+    EXPECT_EQ(request_head_event->head.authority, "example.test:443");
+    EXPECT_TRUE(request_head_event->head.scheme.empty());
+    EXPECT_TRUE(request_head_event->head.path.empty());
+
+    const auto data_update = connection.on_core_result(
+        receive_result(0, data_frame_bytes("tunnel")), coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(data_update).has_value());
+    ASSERT_EQ(data_update.events.size(), 1u);
+    const auto *body_event =
+        std::get_if<coquic::http3::Http3PeerRequestBodyEvent>(&data_update.events[0]);
+    ASSERT_NE(body_event, nullptr);
+    EXPECT_EQ(body_event->body, bytes_from_text("tunnel"));
+}
+
 TEST(QuicHttp3ConnectionTest, DataBeforeHeadersClosesConnectionWithFrameUnexpected) {
     coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
         .role = coquic::http3::Http3ConnectionRole::server,
@@ -373,6 +406,33 @@ TEST(QuicHttp3ConnectionTest, ServerQueuesFinalHeadersThenBodyWithFin) {
     EXPECT_EQ(sends[1].stream_id, 0u);
     EXPECT_EQ(sends[1].bytes, expected_body);
     EXPECT_TRUE(sends[1].fin);
+}
+
+TEST(QuicHttp3ConnectionTest, ClientQueuesConnectRequestWithoutSchemeOrPath) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    prime_client_transport(connection);
+    receive_peer_settings(connection, {});
+
+    auto head = connection.submit_request_head(0, coquic::http3::Http3RequestHead{
+                                                      .method = "CONNECT",
+                                                      .authority = "example.test:443",
+                                                  });
+    ASSERT_TRUE(head.has_value());
+
+    auto update = connection.poll(coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(update);
+    const std::array expected_fields{
+        coquic::http3::Http3Field{":method", "CONNECT"},
+        coquic::http3::Http3Field{":authority", "example.test:443"},
+    };
+
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends[0].stream_id, 0u);
+    EXPECT_EQ(sends[0].bytes, headers_frame_bytes(0, expected_fields));
+    EXPECT_FALSE(sends[0].fin);
 }
 
 TEST(QuicHttp3ConnectionTest, ServerQueuesTrailersWithFinAfterResponseBody) {

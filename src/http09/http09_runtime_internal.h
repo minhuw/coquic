@@ -107,7 +107,7 @@ constexpr std::string_view kUsageLine =
     "[--requests URLS] "
     "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
-    "[--server-name NAME] [--verify-peer] [--retry]";
+    "[--server-name NAME] [--verify-peer] [--no-verify-peer] [--retry]";
 
 struct LinuxSocketDescriptor {
     int fd = -1;

@@ -244,17 +244,19 @@ std::vector<Http3Field> request_fields_from_head(const Http3RequestHead &head) {
         .value = head.method,
     });
     fields.push_back(Http3Field{
-        .name = ":scheme",
-        .value = head.scheme,
-    });
-    fields.push_back(Http3Field{
         .name = ":authority",
         .value = head.authority,
     });
-    fields.push_back(Http3Field{
-        .name = ":path",
-        .value = head.path,
-    });
+    if (head.method != "CONNECT") {
+        fields.push_back(Http3Field{
+            .name = ":scheme",
+            .value = head.scheme,
+        });
+        fields.push_back(Http3Field{
+            .name = ":path",
+            .value = head.path,
+        });
+    }
     if (head.content_length.has_value()) {
         fields.push_back(Http3Field{
             .name = "content-length",
@@ -282,7 +284,16 @@ std::vector<Http3Setting> settings_from_snapshot(const Http3SettingsSnapshot &se
         .id = kHttp3SettingsQpackBlockedStreams,
         .value = settings.qpack_blocked_streams,
     });
+    values.push_back(Http3Setting{
+        .id = kHttp3SettingsReservedGrease,
+        .value = 0,
+    });
     return values;
+}
+
+bool field_section_exceeds_limit(std::span<const Http3Field> fields, std::uint64_t limit) {
+    const auto size = http3_field_section_size(fields);
+    return !size.has_value() || *size > limit;
 }
 
 std::optional<std::size_t> complete_http3_frame_size(std::span<const std::byte> bytes) {
@@ -414,6 +425,12 @@ Http3Result<bool> Http3Connection::submit_request_head(std::uint64_t stream_id,
     if (const auto validated = validate_http3_request_headers(fields); !validated.has_value()) {
         return Http3Result<bool>::failure(validated.error());
     }
+    if (peer_settings_.max_field_section_size.has_value() &&
+        field_section_exceeds_limit(fields, *peer_settings_.max_field_section_size)) {
+        return local_http3_failure<bool>(
+            Http3ErrorCode::message_error,
+            "request field section exceeds peer max field section size", stream_id);
+    }
 
     const auto encoded = encode_http3_field_section(encoder_, stream_id, fields).value();
     if (!encoded.encoder_instructions.empty()) {
@@ -433,6 +450,7 @@ Http3Result<bool> Http3Connection::submit_request_head(std::uint64_t stream_id,
                                           },
                                       });
     request.head_request = head.method == "HEAD";
+    request.connect_request = head.method == "CONNECT";
     request.final_request_headers_sent = true;
     request.expected_request_content_length = head.content_length;
     return Http3Result<bool>::success(true);
@@ -532,6 +550,10 @@ Http3Result<bool> Http3Connection::submit_request_trailers(std::uint64_t stream_
         return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
                                          "request trailers before request headers", stream_id);
     }
+    if (request.connect_request) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "request trailers after connect request", stream_id);
+    }
     if (request.request_trailers_sent) {
         return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
                                          "request trailers already sent", stream_id);
@@ -549,6 +571,12 @@ Http3Result<bool> Http3Connection::submit_request_trailers(std::uint64_t stream_
     const auto validated = validate_http3_trailers(trailers);
     if (!validated.has_value()) {
         return Http3Result<bool>::failure(validated.error());
+    }
+    if (peer_settings_.max_field_section_size.has_value() &&
+        field_section_exceeds_limit(validated.value(), *peer_settings_.max_field_section_size)) {
+        return local_http3_failure<bool>(Http3ErrorCode::message_error,
+                                         "request trailers exceed peer max field section size",
+                                         stream_id);
     }
 
     const auto encoded = encode_http3_field_section(encoder_, stream_id, validated.value()).value();
@@ -694,6 +722,12 @@ Http3Result<bool> Http3Connection::submit_response_head(std::uint64_t stream_id,
     if (const auto validated = validate_http3_response_headers(fields); !validated.has_value()) {
         return Http3Result<bool>::failure(validated.error());
     }
+    if (peer_settings_.max_field_section_size.has_value() &&
+        field_section_exceeds_limit(fields, *peer_settings_.max_field_section_size)) {
+        return local_http3_failure<bool>(
+            Http3ErrorCode::message_error,
+            "response field section exceeds peer max field section size", stream_id);
+    }
 
     const auto encoded = encode_http3_field_section(encoder_, stream_id, fields).value();
     if (!encoded.encoder_instructions.empty()) {
@@ -715,6 +749,10 @@ Http3Result<bool> Http3Connection::submit_response_head(std::uint64_t stream_id,
     if (!informational) {
         response.final_response_started = true;
         response.expected_content_length = head.content_length;
+        if (response.connect_request && head.status >= 200u && head.status < 300u) {
+            response.connect_response = true;
+            response.expected_content_length.reset();
+        }
     }
 
     return Http3Result<bool>::success(true);
@@ -745,6 +783,24 @@ Http3Result<bool> Http3Connection::submit_response_body(std::uint64_t stream_id,
     if (response.finished) {
         return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
                                          "response stream already finished", stream_id);
+    }
+    if (response.connect_request && !response.connect_response) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "connect response data before 2xx response headers",
+                                         stream_id);
+    }
+    if (response.connect_response) {
+        const auto frame = serialize_http3_frame(
+                               Http3Frame{
+                                   Http3DataFrame{
+                                       .payload = std::vector<std::byte>(body.begin(), body.end()),
+                                   },
+                               })
+                               .value();
+
+        queue_send(stream_id, frame, fin);
+        response.finished = fin;
+        return Http3Result<bool>::success(true);
     }
     if (!response.final_response_started) {
         return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
@@ -813,6 +869,10 @@ Http3Result<bool> Http3Connection::submit_response_trailers(std::uint64_t stream
         return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
                                          "response stream already finished", stream_id);
     }
+    if (response.connect_response) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "response trailers after connect response", stream_id);
+    }
     if (!response.final_response_started) {
         return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
                                          "response trailers before final response headers",
@@ -831,6 +891,12 @@ Http3Result<bool> Http3Connection::submit_response_trailers(std::uint64_t stream
     const auto validated = validate_http3_trailers(trailers);
     if (!validated.has_value()) {
         return Http3Result<bool>::failure(validated.error());
+    }
+    if (peer_settings_.max_field_section_size.has_value() &&
+        field_section_exceeds_limit(validated.value(), *peer_settings_.max_field_section_size)) {
+        return local_http3_failure<bool>(Http3ErrorCode::message_error,
+                                         "response trailers exceed peer max field section size",
+                                         stream_id);
     }
 
     const auto encoded = encode_http3_field_section(encoder_, stream_id, validated.value()).value();
@@ -1213,6 +1279,16 @@ void Http3Connection::register_peer_uni_stream(std::uint64_t stream_id, std::uin
         return;
     }
 
+    if (stream_type == static_cast<std::uint64_t>(Http3UniStreamType::push)) {
+        queue_connection_close(config_.role == Http3ConnectionRole::server
+                                   ? Http3ErrorCode::stream_creation_error
+                                   : Http3ErrorCode::id_error,
+                               config_.role == Http3ConnectionRole::server
+                                   ? "client-initiated push stream is not permitted"
+                                   : "push stream received without enabled push id");
+        return;
+    }
+
     if (stream_type == static_cast<std::uint64_t>(Http3UniStreamType::qpack_encoder)) {
         if (state_.remote_qpack_encoder_stream_id.has_value()) {
             queue_connection_close(Http3ErrorCode::stream_creation_error,
@@ -1446,6 +1522,11 @@ void Http3Connection::handle_request_frame(std::uint64_t stream_id, const Http3F
 
     if (const auto *data = std::get_if<Http3DataFrame>(&frame)) {
         handle_request_data_frame(stream_id, *data);
+        return;
+    }
+
+    if (std::holds_alternative<Http3PushPromiseFrame>(frame)) {
+        queue_connection_close(Http3ErrorCode::frame_unexpected, "client sent push promise frame");
     }
 }
 
@@ -1457,6 +1538,12 @@ void Http3Connection::handle_response_frame(std::uint64_t stream_id, const Http3
 
     if (const auto *data = std::get_if<Http3DataFrame>(&frame)) {
         handle_response_data_frame(stream_id, *data);
+        return;
+    }
+
+    if (std::holds_alternative<Http3PushPromiseFrame>(frame)) {
+        queue_connection_close(Http3ErrorCode::id_error,
+                               "push promise received without enabled push id");
     }
 }
 
@@ -1469,6 +1556,11 @@ void Http3Connection::handle_request_headers_frame(std::uint64_t stream_id,
 
     RequestFieldSectionKind kind = RequestFieldSectionKind::initial_headers;
     if (request->second.initial_headers_received) {
+        if (request->second.connect_request) {
+            queue_connection_close(Http3ErrorCode::frame_unexpected,
+                                   "headers frame after connect request is not permitted");
+            return;
+        }
         if (request->second.trailing_headers_received) {
             queue_connection_close(Http3ErrorCode::frame_unexpected,
                                    "headers frame after trailing headers is not permitted");
@@ -1513,6 +1605,15 @@ void Http3Connection::handle_request_data_frame(std::uint64_t stream_id,
                                "data frame before request headers is not permitted");
         return;
     }
+    if (request->second.connect_request) {
+        if (!frame.payload.empty()) {
+            pending_events_.push_back(Http3PeerRequestBodyEvent{
+                .stream_id = stream_id,
+                .body = frame.payload,
+            });
+        }
+        return;
+    }
     if (request->second.trailing_headers_received) {
         queue_connection_close(Http3ErrorCode::frame_unexpected,
                                "data frame after trailing headers is not permitted");
@@ -1551,6 +1652,11 @@ void Http3Connection::handle_response_headers_frame(std::uint64_t stream_id,
 
     ResponseFieldSectionKind kind = ResponseFieldSectionKind::informational_or_final_headers;
     if (request->second.final_response_received) {
+        if (request->second.connect_response) {
+            queue_connection_close(Http3ErrorCode::frame_unexpected,
+                                   "headers frame after connect response is not permitted");
+            return;
+        }
         if (request->second.response_trailers_received) {
             queue_connection_close(Http3ErrorCode::frame_unexpected,
                                    "headers frame after response trailers is not permitted");
@@ -1600,6 +1706,15 @@ void Http3Connection::handle_response_data_frame(std::uint64_t stream_id,
                                "data frame on response to HEAD request is not permitted");
         return;
     }
+    if (request->second.connect_response) {
+        if (!frame.payload.empty()) {
+            pending_events_.push_back(Http3PeerResponseBodyEvent{
+                .stream_id = stream_id,
+                .body = frame.payload,
+            });
+        }
+        return;
+    }
     if (request->second.response_trailers_received) {
         queue_connection_close(Http3ErrorCode::frame_unexpected,
                                "data frame after response trailers is not permitted");
@@ -1638,6 +1753,12 @@ void Http3Connection::apply_request_field_section(std::uint64_t stream_id,
     }
 
     if (kind == RequestFieldSectionKind::initial_headers) {
+        if (config_.local_settings.max_field_section_size.has_value() &&
+            field_section_exceeds_limit(headers, *config_.local_settings.max_field_section_size)) {
+            queue_stream_error(stream_id, Http3ErrorCode::message_error);
+            return;
+        }
+
         auto head = validate_http3_request_headers(headers);
         if (!head.has_value()) {
             queue_stream_error(stream_id, head.error().code);
@@ -1646,7 +1767,10 @@ void Http3Connection::apply_request_field_section(std::uint64_t stream_id,
 
         request->second.initial_headers_received = true;
         request->second.expected_content_length = head.value().content_length;
-        local_response_streams_.try_emplace(stream_id);
+        request->second.connect_request = head.value().method == "CONNECT";
+        auto [response, inserted] = local_response_streams_.try_emplace(stream_id);
+        (void)inserted;
+        response->second.connect_request = request->second.connect_request;
         pending_events_.push_back(Http3PeerRequestHeadEvent{
             .stream_id = stream_id,
             .head = std::move(head.value()),
@@ -1657,6 +1781,12 @@ void Http3Connection::apply_request_field_section(std::uint64_t stream_id,
     auto trailers = validate_http3_trailers(headers);
     if (!trailers.has_value()) {
         queue_stream_error(stream_id, trailers.error().code);
+        return;
+    }
+    if (config_.local_settings.max_field_section_size.has_value() &&
+        field_section_exceeds_limit(trailers.value(),
+                                    *config_.local_settings.max_field_section_size)) {
+        queue_stream_error(stream_id, Http3ErrorCode::message_error);
         return;
     }
 
@@ -1676,6 +1806,12 @@ void Http3Connection::apply_response_field_section(std::uint64_t stream_id,
     }
 
     if (kind == ResponseFieldSectionKind::informational_or_final_headers) {
+        if (config_.local_settings.max_field_section_size.has_value() &&
+            field_section_exceeds_limit(headers, *config_.local_settings.max_field_section_size)) {
+            queue_stream_error(stream_id, Http3ErrorCode::message_error);
+            return;
+        }
+
         auto head = validate_http3_response_headers(headers);
         if (!head.has_value()) {
             queue_stream_error(stream_id, head.error().code);
@@ -1692,6 +1828,11 @@ void Http3Connection::apply_response_field_section(std::uint64_t stream_id,
 
         request->second.final_response_received = true;
         request->second.expected_response_content_length = head.value().content_length;
+        if (request->second.connect_request && head.value().status >= 200u &&
+            head.value().status < 300u) {
+            request->second.connect_response = true;
+            request->second.expected_response_content_length.reset();
+        }
         pending_events_.push_back(Http3PeerResponseHeadEvent{
             .stream_id = stream_id,
             .head = std::move(head.value()),
@@ -1702,6 +1843,12 @@ void Http3Connection::apply_response_field_section(std::uint64_t stream_id,
     auto trailers = validate_http3_trailers(headers);
     if (!trailers.has_value()) {
         queue_stream_error(stream_id, trailers.error().code);
+        return;
+    }
+    if (config_.local_settings.max_field_section_size.has_value() &&
+        field_section_exceeds_limit(trailers.value(),
+                                    *config_.local_settings.max_field_section_size)) {
+        queue_stream_error(stream_id, Http3ErrorCode::message_error);
         return;
     }
 
@@ -1835,6 +1982,12 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
             return;
         }
         state_.goaway_id = goaway->id;
+    }
+
+    if (std::holds_alternative<Http3CancelPushFrame>(frame)) {
+        queue_connection_close(Http3ErrorCode::id_error,
+                               "cancel push references unavailable push id");
+        return;
     }
 
     (void)stream_id;

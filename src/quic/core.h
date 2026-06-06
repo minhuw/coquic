@@ -159,7 +159,7 @@ struct QuicCoreConfig {
     std::uint32_t initial_version = kQuicVersion1;
     std::vector<std::uint32_t> supported_versions = {kQuicVersion1};
     bool reacted_to_version_negotiation = false;
-    bool verify_peer = false;
+    bool verify_peer = true;
     std::string server_name = "localhost";
     std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
@@ -312,7 +312,7 @@ struct QuicCorePacketInspection {
 struct QuicCoreEndpointConfig {
     EndpointRole role = EndpointRole::client;
     std::vector<std::uint32_t> supported_versions = {kQuicVersion1};
-    bool verify_peer = false;
+    bool verify_peer = true;
     bool retry_enabled = false;
     std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
@@ -420,20 +420,24 @@ struct QuicCoreSendStreamData {
     std::uint64_t stream_id = 0;
     std::vector<std::byte> bytes;
     bool fin = false;
+    std::int32_t priority = 0;
 };
 
 struct QuicCoreSendSharedStreamData {
     std::uint64_t stream_id = 0;
     SharedBytes bytes;
     bool fin = false;
+    std::int32_t priority = 0;
 };
 
 struct QuicCoreSendDatagramData {
     std::vector<std::byte> bytes;
+    std::int32_t priority = 0;
 };
 
 struct QuicCoreSendSharedDatagramData {
     SharedBytes bytes;
+    std::int32_t priority = 0;
 };
 
 struct QuicCoreResetStream {
@@ -761,6 +765,10 @@ class QuicCore {
     void remember_client_new_tokens(ConnectionEntry &entry, const QuicCoreResult &result);
     std::optional<std::vector<std::byte>>
     take_client_new_token_for_open(const QuicCoreClientConnectionConfig &connection);
+    std::optional<QuicCoreResult> maybe_process_client_endpoint_version_negotiation(
+        ConnectionEntry &entry, std::span<const std::byte> inbound_payload,
+        const std::optional<QuicRouteHandle> &route_handle, QuicPathId path_id,
+        QuicCoreTimePoint now);
     std::optional<QuicConnectionHandle>
     detect_stateless_reset(std::span<const std::byte> bytes) const;
     std::optional<QuicCoreSendDatagram> make_stateless_reset_for_unknown_cid(

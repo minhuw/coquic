@@ -724,6 +724,32 @@ TEST(QuicHttp3ConnectionTest, ServerRoleMalformedRequestHeadersFieldSectionClose
         static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::qpack_decompression_failed));
 }
 
+TEST(QuicHttp3ConnectionTest, ServerRoleOversizedRequestFieldSectionResetsStream) {
+    std::array request_fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/"},
+    };
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+        .local_settings =
+            {
+                .max_field_section_size = 16,
+            },
+    });
+
+    auto update =
+        connection.on_core_result(receive_result(0, headers_frame_bytes(0, request_fields)),
+                                  coquic::quic::QuicCoreTimePoint{});
+
+    EXPECT_FALSE(close_input_from(update).has_value());
+    const auto resets = reset_stream_inputs_from(update);
+    ASSERT_EQ(resets.size(), 1u);
+    EXPECT_EQ(resets[0].application_error_code,
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::message_error));
+}
+
 TEST(QuicHttp3ConnectionTest, ServerRoleInvalidRequestTrailersResetStream) {
     std::array request_fields{
         coquic::http3::Http3Field{":method", "GET"},
@@ -1034,6 +1060,31 @@ TEST(QuicHttp3ConnectionTest, ClientRoleMalformedResponseHeadersFieldSectionClos
         static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::qpack_decompression_failed));
 }
 
+TEST(QuicHttp3ConnectionTest, ClientRoleOversizedResponseFieldSectionResetsStream) {
+    auto response_headers = response_fields(200, {});
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+        .local_settings =
+            {
+                .max_field_section_size = 16,
+            },
+    });
+
+    prime_client_transport(connection);
+    receive_peer_settings(connection, {});
+    submit_completed_client_get_request(connection, 0);
+
+    auto update =
+        connection.on_core_result(receive_result(0, headers_frame_bytes(0, response_headers)),
+                                  coquic::quic::QuicCoreTimePoint{});
+
+    EXPECT_FALSE(close_input_from(update).has_value());
+    const auto resets = reset_stream_inputs_from(update);
+    ASSERT_EQ(resets.size(), 1u);
+    EXPECT_EQ(resets[0].application_error_code,
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::message_error));
+}
+
 TEST(QuicHttp3ConnectionTest, ClientRoleInvalidResponseHeadersResetStream) {
     std::array invalid_response_headers{
         coquic::http3::Http3Field{"server", "coquic"},
@@ -1330,6 +1381,28 @@ TEST(QuicHttp3ConnectionTest, ClientRoleRequestHeadersRequireLocalQpackEncoderSt
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::general_protocol_error);
 }
 
+TEST(QuicHttp3ConnectionTest, ClientRoleRequestHeadHonorsPeerMaxFieldSectionSize) {
+    coquic::http3::Http3SettingsSnapshot peer_settings{
+        .max_field_section_size = 16,
+    };
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    prime_client_transport(connection);
+    receive_client_peer_settings(connection, peer_settings);
+
+    auto result = connection.submit_request_head(0, coquic::http3::Http3RequestHead{
+                                                        .method = "GET",
+                                                        .scheme = "https",
+                                                        .authority = "example.test",
+                                                        .path = "/resource",
+                                                    });
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::message_error);
+}
+
 TEST(QuicHttp3ConnectionTest, ClientRoleRequestTrailersRequireLocalQpackEncoderStream) {
     coquic::http3::Http3SettingsSnapshot peer_settings{
         .qpack_max_table_capacity = 220,
@@ -1473,6 +1546,26 @@ TEST(QuicHttp3ConnectionTest, ServerRoleResponseHeadersRequireLocalQpackEncoderS
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::general_protocol_error);
+}
+
+TEST(QuicHttp3ConnectionTest, ServerRoleResponseHeadHonorsPeerMaxFieldSectionSize) {
+    coquic::http3::Http3SettingsSnapshot peer_settings{
+        .max_field_section_size = 16,
+    };
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+    });
+
+    prime_server_transport(connection);
+    receive_peer_settings(connection, peer_settings);
+    receive_completed_get_request(connection, 0);
+
+    auto result = connection.submit_response_head(0, coquic::http3::Http3ResponseHead{
+                                                         .status = 200,
+                                                     });
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::message_error);
 }
 
 TEST(QuicHttp3ConnectionTest, ServerRoleResponseTrailersRequireLocalQpackEncoderStream) {

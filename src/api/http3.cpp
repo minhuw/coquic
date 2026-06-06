@@ -164,10 +164,12 @@ core::ConnectionInput from_internal(::coquic::quic::QuicCoreInput input) {
                     .stream_id = value.stream_id,
                     .bytes = std::move(value.bytes),
                     .fin = value.fin,
+                    .priority = value.priority,
                 };
             } else if constexpr (std::is_same_v<T, ::coquic::quic::QuicCoreSendDatagramData>) {
                 return core::SendDatagramData{
                     .bytes = std::move(value.bytes),
+                    .priority = value.priority,
                 };
             } else if constexpr (std::is_same_v<T, ::coquic::quic::QuicCoreResetStream>) {
                 return core::ResetStream{
@@ -443,6 +445,7 @@ core::EndpointConfig client_endpoint_config(core::EndpointConfig config) {
 
 core::EndpointConfig server_endpoint_config(core::EndpointConfig config) {
     config.role = core::Role::server;
+    config.verify_peer = false;
     config.application_protocol = std::string(kApplicationProtocol);
     return config;
 }

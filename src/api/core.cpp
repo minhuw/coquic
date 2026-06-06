@@ -304,10 +304,12 @@ quic::QuicCoreConnectionInput to_internal(ConnectionInput input) {
                     .stream_id = value.stream_id,
                     .bytes = std::move(value.bytes),
                     .fin = value.fin,
+                    .priority = value.priority,
                 };
             } else if constexpr (std::is_same_v<T, SendDatagramData>) {
                 return quic::QuicCoreSendDatagramData{
                     .bytes = std::move(value.bytes),
+                    .priority = value.priority,
                 };
             } else if constexpr (std::is_same_v<T, ResetStream>) {
                 return quic::QuicCoreResetStream{

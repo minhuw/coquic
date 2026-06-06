@@ -37,7 +37,7 @@ struct AvailableTrafficSecret {
 
 struct TlsAdapterConfig {
     EndpointRole role = EndpointRole::client;
-    bool verify_peer = false;
+    bool verify_peer = true;
     std::string server_name = "localhost";
     std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
@@ -63,6 +63,7 @@ class TlsAdapter {
     CodecResult<bool> start();
     CodecResult<bool> provide(EncryptionLevel level, std::span<const std::byte> bytes);
     CodecResult<bool> poll();
+    CodecResult<bool> update_local_transport_parameters(std::span<const std::byte> bytes);
     std::vector<std::byte> take_pending(EncryptionLevel level);
     std::vector<AvailableTrafficSecret> take_available_secrets();
     std::optional<std::vector<std::byte>> take_resumption_state();

@@ -67,7 +67,7 @@ std::unique_ptr<Session> Session::try_open_with_sink_for_test(std::unique_ptr<Ql
         .description = "core QUIC trace",
         .group_id = odcid_hex,
         .vantage_point_type = suffix,
-        .event_schemas = {"urn:ietf:params:qlog:events:quic-12"},
+        .event_schemas = {"urn:ietf:params:qlog:events:quic"},
     });
     if (!sink->write_record(make_json_seq_record(preamble))) {
         return nullptr;

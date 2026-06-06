@@ -139,7 +139,7 @@ struct ResumptionState {
 struct EndpointConfig {
     Role role = Role::client;
     std::vector<std::uint32_t> supported_versions = {1};
-    bool verify_peer = false;
+    bool verify_peer = true;
     bool retry_enabled = false;
     std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
@@ -189,10 +189,12 @@ struct SendStreamData {
     StreamId stream_id = 0;
     std::vector<std::byte> bytes;
     bool fin = false;
+    std::int32_t priority = 0;
 };
 
 struct SendDatagramData {
     std::vector<std::byte> bytes;
+    std::int32_t priority = 0;
 };
 
 struct ResetStream {

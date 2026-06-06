@@ -883,6 +883,11 @@ TEST(QuicTlsAdapterContractTest, MismatchedApplicationProtocolsFailHandshake) {
     EXPECT_FALSE(server.provide(EncryptionLevel::initial, initial_client_flight).has_value());
     EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(server),
               CodecErrorCode::invalid_packet_protection_state);
+    const auto server_poll = server.poll();
+    ASSERT_FALSE(server_poll.has_value());
+    EXPECT_EQ(server_poll.error().code, CodecErrorCode::invalid_packet_protection_state);
+    EXPECT_TRUE(server_poll.error().has_transport_error_code);
+    EXPECT_EQ(server_poll.error().transport_error_code, 0x0178u);
 }
 
 TEST(QuicTlsAdapterContractTest, ProvideAndPollRejectStickyOrMissingSslState) {

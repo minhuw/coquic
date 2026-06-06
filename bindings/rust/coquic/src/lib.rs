@@ -741,6 +741,7 @@ pub struct SendStreamData<'a> {
     pub stream_id: StreamId,
     pub bytes: &'a [u8],
     pub fin: bool,
+    pub priority: i32,
 }
 
 impl<'a> SendStreamData<'a> {
@@ -750,6 +751,7 @@ impl<'a> SendStreamData<'a> {
             stream_id: self.stream_id,
             bytes: bytes(self.bytes),
             fin: self.fin as u8,
+            priority: self.priority,
         }
     }
 }
@@ -757,6 +759,7 @@ impl<'a> SendStreamData<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SendDatagramData<'a> {
     pub bytes: &'a [u8],
+    pub priority: i32,
 }
 
 impl<'a> SendDatagramData<'a> {
@@ -764,6 +767,7 @@ impl<'a> SendDatagramData<'a> {
         ffi::coquic_send_datagram_data_t {
             size: std::mem::size_of::<ffi::coquic_send_datagram_data_t>(),
             bytes: bytes(self.bytes),
+            priority: self.priority,
         }
     }
 }
@@ -885,6 +889,7 @@ impl<'a> ConnectionInput<'a> {
                     send_datagram: ffi::coquic_send_datagram_data_t {
                         size: 0,
                         bytes: ffi::coquic_bytes_t::empty(),
+                        priority: 0,
                     },
                 },
             },

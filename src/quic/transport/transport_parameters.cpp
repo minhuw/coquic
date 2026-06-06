@@ -11,6 +11,7 @@
 
 namespace {
 
+using coquic::quic::CodecError;
 using coquic::quic::CodecErrorCode;
 using coquic::quic::CodecResult;
 using coquic::quic::ConnectionId;
@@ -157,8 +158,22 @@ CodecResult<TransportParametersValidationOk> validation_failure() {
         CodecErrorCode::invalid_packet_protection_state, 0);
 }
 
+CodecResult<TransportParametersValidationOk> version_negotiation_validation_failure() {
+    return CodecResult<TransportParametersValidationOk>::failure(CodecError{
+        .code = CodecErrorCode::invalid_packet_protection_state,
+        .offset = 0,
+        .transport_error_code = 0x11u,
+        .has_transport_error_code = true,
+    });
+}
+
 bool contains_version(std::span<const std::uint32_t> versions, std::uint32_t version) {
     return std::find(versions.begin(), versions.end(), version) != versions.end();
+}
+
+bool has_zero_version_information_value(const VersionInformation &version_information) {
+    return version_information.chosen_version == 0 ||
+           contains_version(version_information.available_versions, 0);
 }
 
 std::uint32_t select_preferred_version(std::span<const std::uint32_t> preferred_versions,
@@ -502,11 +517,20 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
                     std::span<const std::byte, sizeof(std::uint32_t)>{
                         value.first(sizeof(std::uint32_t))}),
             };
+            if (version_information.chosen_version == 0) {
+                return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
+                                                                 offset);
+            }
             for (std::size_t version_offset = sizeof(std::uint32_t); version_offset < value.size();
                  version_offset += sizeof(std::uint32_t)) {
-                version_information.available_versions.push_back(read_transport_parameter_u32_be(
+                const auto available_version = read_transport_parameter_u32_be(
                     std::span<const std::byte, sizeof(std::uint32_t)>{
-                        value.subspan(version_offset, sizeof(std::uint32_t))}));
+                        value.subspan(version_offset, sizeof(std::uint32_t))});
+                if (available_version == 0) {
+                    return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
+                                                                     offset);
+                }
+                version_information.available_versions.push_back(available_version);
             }
             parameters.version_information = std::move(version_information);
             break;
@@ -581,6 +605,11 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
             return validation_failure();
         }
 
+        if (parameters.version_information.has_value() &&
+            has_zero_version_information_value(parameters.version_information.value())) {
+            return version_negotiation_validation_failure();
+        }
+
         if (context.expected_version_information.has_value() &&
             parameters.version_information.has_value()) {
             // RFC 9368 allows servers to complete the handshake even if the
@@ -591,7 +620,7 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
                     context.expected_version_information->chosen_version ||
                 !contains_version(parameters.version_information->available_versions,
                                   parameters.version_information->chosen_version)) {
-                return validation_failure();
+                return version_negotiation_validation_failure();
             }
         }
 
@@ -625,24 +654,29 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
     }
 
     if (context.expected_version_information.has_value()) {
+        if (parameters.version_information.has_value() &&
+            has_zero_version_information_value(parameters.version_information.value())) {
+            return version_negotiation_validation_failure();
+        }
+
         if (!parameters.version_information.has_value() ||
             parameters.version_information->chosen_version !=
                 context.expected_version_information->chosen_version ||
             !contains_version(context.expected_version_information->available_versions,
                               parameters.version_information->chosen_version)) {
-            return validation_failure();
+            return version_negotiation_validation_failure();
         }
 
         if (context.reacted_to_version_negotiation) {
             if (parameters.version_information->available_versions.empty()) {
-                return validation_failure();
+                return version_negotiation_validation_failure();
             }
 
             const auto selected_version =
                 select_preferred_version(context.expected_version_information->available_versions,
                                          parameters.version_information.value());
             if (selected_version != parameters.version_information->chosen_version) {
-                return validation_failure();
+                return version_negotiation_validation_failure();
             }
         }
     }

@@ -156,6 +156,10 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
         [&](const auto &protected_packet) -> CodecResult<bool> {
             using PacketType = std::decay_t<decltype(protected_packet)>;
             if constexpr (std::is_same_v<PacketType, ProtectedInitialPacket>) {
+                if (should_drop_wrong_version_client_long_header(
+                        config_.role, protected_packet.version, current_version_)) {
+                    return CodecResult<bool>::success(true);
+                }
                 if (should_adopt_supported_client_version(config_.role, protected_packet.version,
                                                           current_version_)) {
                     current_version_ = protected_packet.version;
@@ -216,6 +220,10 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                 }
                 return processed;
             } else if constexpr (std::is_same_v<PacketType, ProtectedHandshakePacket>) {
+                if (should_drop_wrong_version_client_long_header(
+                        config_.role, protected_packet.version, current_version_)) {
+                    return CodecResult<bool>::success(true);
+                }
                 if (should_adopt_supported_client_version(config_.role, protected_packet.version,
                                                           current_version_)) {
                     current_version_ = protected_packet.version;
@@ -369,6 +377,10 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
         [&](const auto &protected_packet) -> CodecResult<bool> {
             using PacketType = std::decay_t<decltype(protected_packet)>;
             if constexpr (std::is_same_v<PacketType, ReceivedProtectedInitialPacket>) {
+                if (should_drop_wrong_version_client_long_header(
+                        config_.role, protected_packet.version, current_version_)) {
+                    return CodecResult<bool>::success(true);
+                }
                 if (should_adopt_supported_client_version(config_.role, protected_packet.version,
                                                           current_version_)) {
                     current_version_ = protected_packet.version;
@@ -429,6 +441,10 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 }
                 return processed;
             } else if constexpr (std::is_same_v<PacketType, ReceivedProtectedHandshakePacket>) {
+                if (should_drop_wrong_version_client_long_header(
+                        config_.role, protected_packet.version, current_version_)) {
+                    return CodecResult<bool>::success(true);
+                }
                 if (should_adopt_supported_client_version(config_.role, protected_packet.version,
                                                           current_version_)) {
                     current_version_ = protected_packet.version;
@@ -778,6 +794,14 @@ CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
             return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
         }
 
+        if (level == EncryptionLevel::initial) {
+            const auto negotiated =
+                maybe_negotiate_server_version_from_client_hello(contiguous_bytes.value());
+            if (!negotiated.has_value()) {
+                return negotiated;
+            }
+        }
+
         const auto provided = tls_->provide(level, contiguous_bytes.value());
         if (!provided.has_value()) {
             return provided;
@@ -842,6 +866,14 @@ CodecResult<bool> QuicConnection::process_inbound_received_crypto(
 
         if (!tls_.has_value()) {
             return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
+        }
+
+        if (level == EncryptionLevel::initial) {
+            const auto negotiated =
+                maybe_negotiate_server_version_from_client_hello(contiguous_bytes.value().span());
+            if (!negotiated.has_value()) {
+                return negotiated;
+            }
         }
 
         const auto provided = tls_->provide(level, contiguous_bytes.value().span());

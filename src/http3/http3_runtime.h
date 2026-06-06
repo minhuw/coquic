@@ -41,7 +41,7 @@ struct Http3RuntimeConfig {
     std::optional<std::filesystem::path> body_file_path;
     std::optional<std::filesystem::path> output_path;
     std::string server_name;
-    bool verify_peer = false;
+    bool verify_peer = true;
     quic::QuicCongestionControlAlgorithm congestion_control =
         quic::QuicCongestionControlAlgorithm::newreno;
 };

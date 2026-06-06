@@ -261,12 +261,19 @@ export class Connection {
     return new Stream(this, streamId);
   }
 
-  sendStream(streamId, data, fin, now) {
-    return this._endpoint._native.sendStream(this.handle, streamId, toBuffer(data), fin, now);
+  sendStream(streamId, data, fin, now, priority = 0) {
+    return this._endpoint._native.sendStream(
+      this.handle,
+      streamId,
+      toBuffer(data),
+      fin,
+      now,
+      priority,
+    );
   }
 
-  sendDatagram(data, now) {
-    return this._endpoint._native.sendDatagram(this.handle, toBuffer(data), now);
+  sendDatagram(data, now, priority = 0) {
+    return this._endpoint._native.sendDatagram(this.handle, toBuffer(data), now, priority);
   }
 
   close(applicationErrorCode, reasonPhrase = Buffer.alloc(0), now) {
@@ -285,8 +292,8 @@ export class Stream {
     this.id = streamId;
   }
 
-  send(data, fin, now) {
-    return this._connection.sendStream(this.id, data, fin, now);
+  send(data, fin, now, priority = 0) {
+    return this._connection.sendStream(this.id, data, fin, now, priority);
   }
 
   finish(now) {

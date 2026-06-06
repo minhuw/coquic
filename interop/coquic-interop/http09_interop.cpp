@@ -19,7 +19,7 @@ constexpr std::string_view kUsageLine =
     "[--requests URLS] "
     "[--document-root PATH] "
     "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
-    "[--server-name NAME] [--verify-peer] [--retry]";
+    "[--server-name NAME] [--verify-peer] [--no-verify-peer] [--retry]";
 
 std::optional<std::string> getenv_string(const char *name) {
     const char *value = std::getenv(name);
@@ -129,6 +129,10 @@ std::optional<http09::Http09RuntimeConfig> parse_http09_interop_args(int argc, c
 
         if (arg == "--verify-peer") {
             config.verify_peer = true;
+            continue;
+        }
+        if (arg == "--no-verify-peer") {
+            config.verify_peer = false;
             continue;
         }
         if (arg == "--retry") {

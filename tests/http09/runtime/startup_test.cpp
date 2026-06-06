@@ -419,7 +419,7 @@ TEST(QuicHttp09RuntimeTest, ServerRespondsToUnsupportedVersionProbeAndStillTrans
     EXPECT_NE(std::find(version_negotiation.supported_versions.begin(),
                         version_negotiation.supported_versions.end(), 1u),
               version_negotiation.supported_versions.end());
-    EXPECT_NE(std::find(version_negotiation.supported_versions.begin(),
+    EXPECT_EQ(std::find(version_negotiation.supported_versions.begin(),
                         version_negotiation.supported_versions.end(), 0x6b3343cfu),
               version_negotiation.supported_versions.end());
 

@@ -247,6 +247,7 @@ class coquic_send_stream_data_t(C.Structure):
         ("stream_id", C.c_uint64),
         ("bytes", coquic_bytes_t),
         ("fin", C.c_uint8),
+        ("priority", C.c_int32),
     ]
 
 
@@ -254,6 +255,7 @@ class coquic_send_datagram_data_t(C.Structure):
     _fields_ = [
         ("size", C.c_size_t),
         ("bytes", coquic_bytes_t),
+        ("priority", C.c_int32),
     ]
 
 

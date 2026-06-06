@@ -294,6 +294,7 @@ pub struct coquic_send_stream_data_t {
     pub stream_id: coquic_stream_id_t,
     pub bytes: coquic_bytes_t,
     pub fin: u8,
+    pub priority: i32,
 }
 
 #[repr(C)]
@@ -301,6 +302,7 @@ pub struct coquic_send_stream_data_t {
 pub struct coquic_send_datagram_data_t {
     pub size: usize,
     pub bytes: coquic_bytes_t,
+    pub priority: i32,
 }
 
 #[repr(C)]

@@ -1028,8 +1028,8 @@ napi_value EndpointTimerExpired(napi_env env, napi_callback_info info) {
 }
 
 napi_value EndpointSendStream(napi_env env, napi_callback_info info) {
-    std::size_t argc = 5;
-    napi_value argv[5]{};
+    std::size_t argc = 6;
+    napi_value argv[6]{};
     auto *holder = endpoint_holder(env, info, &argc, argv);
     if (holder == nullptr) {
         return nullptr;
@@ -1037,10 +1037,17 @@ napi_value EndpointSendStream(napi_env env, napi_callback_info info) {
     Bytes bytes = bytes_from_value(env, argv[2]);
     bool fin = false;
     napi_get_value_bool(env, argv[3], &fin);
+    coquic_send_stream_data_t stream{
+        .size = sizeof(coquic_send_stream_data_t),
+        .stream_id = number_to_u64(env, argv[1]),
+        .bytes = bytes.view(),
+        .fin = static_cast<std::uint8_t>(fin),
+        .priority = argc >= 6 ? static_cast<std::int32_t>(number_to_u64(env, argv[5])) : 0,
+    };
     coquic_result_t *result = nullptr;
-    const auto status = coquic_quic_stream_send(
-        holder->endpoint->get(), number_to_u64(env, argv[0]), number_to_u64(env, argv[1]),
-        bytes.view(), static_cast<std::uint8_t>(fin), number_to_u64(env, argv[4]), &result);
+    const auto status =
+        coquic_quic_connection_send_stream(holder->endpoint->get(), number_to_u64(env, argv[0]),
+                                           &stream, number_to_u64(env, argv[4]), &result);
     if (status != COQUIC_STATUS_OK) {
         throw_status(env, status);
         return nullptr;
@@ -1049,8 +1056,8 @@ napi_value EndpointSendStream(napi_env env, napi_callback_info info) {
 }
 
 napi_value EndpointSendDatagram(napi_env env, napi_callback_info info) {
-    std::size_t argc = 3;
-    napi_value argv[3]{};
+    std::size_t argc = 4;
+    napi_value argv[4]{};
     auto *holder = endpoint_holder(env, info, &argc, argv);
     if (holder == nullptr) {
         return nullptr;
@@ -1059,6 +1066,7 @@ napi_value EndpointSendDatagram(napi_env env, napi_callback_info info) {
     coquic_send_datagram_data_t datagram{
         .size = sizeof(coquic_send_datagram_data_t),
         .bytes = bytes.view(),
+        .priority = argc >= 4 ? static_cast<std::int32_t>(number_to_u64(env, argv[3])) : 0,
     };
     coquic_result_t *result = nullptr;
     const auto status =

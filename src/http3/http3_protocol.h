@@ -23,12 +23,14 @@ inline constexpr std::uint64_t kHttp3FrameTypeData = 0x00;
 inline constexpr std::uint64_t kHttp3FrameTypeHeaders = 0x01;
 inline constexpr std::uint64_t kHttp3FrameTypeCancelPush = 0x03;
 inline constexpr std::uint64_t kHttp3FrameTypeSettings = 0x04;
+inline constexpr std::uint64_t kHttp3FrameTypePushPromise = 0x05;
 inline constexpr std::uint64_t kHttp3FrameTypeGoaway = 0x07;
 inline constexpr std::uint64_t kHttp3FrameTypeMaxPushId = 0x0d;
 
 inline constexpr std::uint64_t kHttp3SettingsQpackMaxTableCapacity = 0x01;
 inline constexpr std::uint64_t kHttp3SettingsMaxFieldSectionSize = 0x06;
 inline constexpr std::uint64_t kHttp3SettingsQpackBlockedStreams = 0x07;
+inline constexpr std::uint64_t kHttp3SettingsReservedGrease = 0x21;
 
 struct Http3Setting {
     std::uint64_t id = 0;
@@ -49,10 +51,23 @@ struct Http3HeadersFrame {
     bool operator==(const Http3HeadersFrame &) const = default;
 };
 
+struct Http3CancelPushFrame {
+    std::uint64_t push_id = 0;
+
+    bool operator==(const Http3CancelPushFrame &) const = default;
+};
+
 struct Http3SettingsFrame {
     std::vector<Http3Setting> settings;
 
     bool operator==(const Http3SettingsFrame &) const = default;
+};
+
+struct Http3PushPromiseFrame {
+    std::uint64_t push_id = 0;
+    std::vector<std::byte> field_section;
+
+    bool operator==(const Http3PushPromiseFrame &) const = default;
 };
 
 struct Http3GoawayFrame {
@@ -74,8 +89,9 @@ struct Http3UnknownFrame {
     bool operator==(const Http3UnknownFrame &) const = default;
 };
 
-using Http3Frame = std::variant<Http3DataFrame, Http3HeadersFrame, Http3SettingsFrame,
-                                Http3GoawayFrame, Http3MaxPushIdFrame, Http3UnknownFrame>;
+using Http3Frame =
+    std::variant<Http3DataFrame, Http3HeadersFrame, Http3CancelPushFrame, Http3SettingsFrame,
+                 Http3PushPromiseFrame, Http3GoawayFrame, Http3MaxPushIdFrame, Http3UnknownFrame>;
 
 struct Http3DecodedFrame {
     Http3Frame frame;
@@ -103,6 +119,7 @@ serialize_http3_uni_stream_prefix(Http3UniStreamType type);
 quic::CodecResult<std::vector<std::byte>>
 serialize_http3_control_stream(std::span<const Http3Setting> settings);
 
+std::optional<std::uint64_t> http3_field_section_size(std::span<const Http3Field> fields);
 Http3Result<bool> validate_http3_settings_frame(const Http3SettingsFrame &frame);
 Http3Result<bool> validate_http3_goaway_id(Http3ConnectionRole role, std::uint64_t id);
 Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Http3Field> fields);

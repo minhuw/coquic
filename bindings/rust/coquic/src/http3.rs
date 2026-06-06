@@ -945,12 +945,14 @@ unsafe fn connection_input_from_raw<'a>(
                 stream_id: input.stream_id,
                 bytes: unsafe { input_bytes(input.bytes) },
                 fin: input.fin != 0,
+                priority: input.priority,
             })
         }
         ffi::COQUIC_CONNECTION_INPUT_SEND_DATAGRAM => {
             let input = unsafe { raw.as_.send_datagram };
             ConnectionInput::SendDatagram(crate::SendDatagramData {
                 bytes: unsafe { input_bytes(input.bytes) },
+                priority: input.priority,
             })
         }
         ffi::COQUIC_CONNECTION_INPUT_RESET_STREAM => {

@@ -837,10 +837,9 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
     return result;
 }
 
-StreamStateResult<bool>
-QuicConnection::queue_stream_send_impl(std::uint64_t stream_id,
-                                       std::span<const std::byte> owned_bytes,
-                                       std::optional<SharedBytes> shared_bytes, bool fin) {
+StreamStateResult<bool> QuicConnection::queue_stream_send_impl(
+    std::uint64_t stream_id, std::span<const std::byte> owned_bytes,
+    std::optional<SharedBytes> shared_bytes, bool fin, std::int32_t priority) {
     if (status_ == HandshakeStatus::failed ||
         (owned_bytes.empty() && (!shared_bytes.has_value() || shared_bytes->empty()) && !fin)) {
         return StreamStateResult<bool>::success(true);
@@ -878,6 +877,7 @@ QuicConnection::queue_stream_send_impl(std::uint64_t stream_id,
         stream->send_final_size = stream->send_flow_control_committed;
         stream->send_fin_state = StreamSendFinState::pending;
     }
+    stream_send_priorities_[stream_id] = priority;
     note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
                                    *stream);
 
@@ -886,7 +886,8 @@ QuicConnection::queue_stream_send_impl(std::uint64_t stream_id,
     return StreamStateResult<bool>::success(true);
 }
 
-CodecResult<bool> QuicConnection::queue_datagram_send_shared(SharedBytes bytes) {
+CodecResult<bool> QuicConnection::queue_datagram_send_shared(SharedBytes bytes,
+                                                             std::int32_t priority) {
     if (status_ == HandshakeStatus::failed) {
         return CodecResult<bool>::success(true);
     }
@@ -901,7 +902,11 @@ CodecResult<bool> QuicConnection::queue_datagram_send_shared(SharedBytes bytes) 
         return CodecResult<bool>::failure(CodecErrorCode::packet_length_mismatch, 0);
     }
 
-    pending_datagram_send_queue_.push_back(std::move(bytes));
+    pending_datagram_send_queue_.push_back(PendingDatagramSend{
+        .bytes = std::move(bytes),
+        .priority = priority,
+        .sequence = next_pending_datagram_sequence_++,
+    });
 
     maybe_emit_zero_rtt_attempted_event();
 

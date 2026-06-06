@@ -267,14 +267,14 @@ TEST(QuicQlogTest, SerializesSequentialPreambleWithDraftQuicSchema) {
         .description = "client trace",
         .group_id = "8394c8f03e515708",
         .vantage_point_type = "client",
-        .event_schemas = {"urn:ietf:params:qlog:events:quic-12"},
+        .event_schemas = {"urn:ietf:params:qlog:events:quic"},
     });
 
     EXPECT_NE(preamble.find("\"file_schema\":\"urn:ietf:params:qlog:file:sequential\""),
               std::string::npos);
     EXPECT_NE(preamble.find("\"serialization_format\":\"application/qlog+json-seq\""),
               std::string::npos);
-    EXPECT_NE(preamble.find("\"event_schemas\":[\"urn:ietf:params:qlog:events:quic-12\"]"),
+    EXPECT_NE(preamble.find("\"event_schemas\":[\"urn:ietf:params:qlog:events:quic\"]"),
               std::string::npos);
     EXPECT_NE(preamble.find("\"group_id\":\"8394c8f03e515708\""), std::string::npos);
     EXPECT_NE(preamble.find("\"type\":\"client\""), std::string::npos);

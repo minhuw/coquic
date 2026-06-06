@@ -130,18 +130,17 @@ static inline coquic_status_t coquic_go_quic_stream_send(
     const uint8_t *bytes,
     size_t bytes_length,
     uint8_t fin,
+    int32_t priority,
     coquic_time_us_t now,
     coquic_result_t **out_result
 ) {
-    return coquic_quic_stream_send(
-        endpoint,
-        connection,
-        stream_id,
-        coquic_go_bytes(bytes, bytes_length),
-        fin,
-        now,
-        out_result
-    );
+    coquic_send_stream_data_t input;
+    input.size = sizeof(coquic_send_stream_data_t);
+    input.stream_id = stream_id;
+    input.bytes = coquic_go_bytes(bytes, bytes_length);
+    input.fin = fin;
+    input.priority = priority;
+    return coquic_quic_connection_send_stream(endpoint, connection, &input, now, out_result);
 }
 
 static inline coquic_status_t coquic_go_quic_connection_close(
@@ -450,11 +449,18 @@ func NewClientConfig(sourceConnectionID, initialDestinationConnectionID []byte) 
 }
 
 type InboundDatagram struct {
-	Bytes                     []byte
-	RouteHandle               RouteHandle
-	HasRouteHandle            bool
-	AddressValidationIdentity []byte
-	Ecn                       EcnCodepoint
+    Bytes                     []byte
+    RouteHandle               RouteHandle
+    HasRouteHandle            bool
+    AddressValidationIdentity []byte
+    Ecn                       EcnCodepoint
+}
+
+type SendStreamData struct {
+    StreamID StreamID
+    Bytes    []byte
+    Fin      bool
+    Priority int32
 }
 
 type Endpoint struct {
@@ -578,20 +584,33 @@ func (e *Endpoint) TimerExpired(now TimeUs) (*QueryResult, error) {
 }
 
 func (e *Endpoint) SendStream(connection ConnectionHandle, streamID StreamID, data []byte, fin bool, now TimeUs) (*QueryResult, error) {
-	if e == nil || e.ptr == nil {
-		return nil, StatusError{Status: StatusInvalidArgument}
-	}
-	var out *C.coquic_result_t
-	status := C.coquic_go_quic_stream_send(
-		e.ptr,
-		C.coquic_connection_handle_t(connection),
-		C.coquic_stream_id_t(streamID),
-		bytePtr(data),
-		C.size_t(len(data)),
-		cBool(fin),
-		C.coquic_time_us_t(now),
-		&out,
-	)
+    return e.SendStreamWithPriority(
+        connection,
+        SendStreamData{
+            StreamID: streamID,
+            Bytes:    data,
+            Fin:      fin,
+        },
+        now,
+    )
+}
+
+func (e *Endpoint) SendStreamWithPriority(connection ConnectionHandle, streamData SendStreamData, now TimeUs) (*QueryResult, error) {
+    if e == nil || e.ptr == nil {
+        return nil, StatusError{Status: StatusInvalidArgument}
+    }
+    var out *C.coquic_result_t
+    status := C.coquic_go_quic_stream_send(
+        e.ptr,
+        C.coquic_connection_handle_t(connection),
+        C.coquic_stream_id_t(streamData.StreamID),
+        bytePtr(streamData.Bytes),
+        C.size_t(len(streamData.Bytes)),
+        cBool(streamData.Fin),
+        C.int32_t(streamData.Priority),
+        C.coquic_time_us_t(now),
+        &out,
+    )
 	if err := statusError(status); err != nil {
 		return nil, err
 	}

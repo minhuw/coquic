@@ -5,6 +5,128 @@
 
 namespace coquic::quic {
 
+namespace {
+
+constexpr std::uint16_t kTlsQuicTransportParametersExtension = 0x0039;
+
+bool contains_version(std::span<const std::uint32_t> versions, std::uint32_t version) {
+    return std::find(versions.begin(), versions.end(), version) != versions.end();
+}
+
+std::uint16_t read_u16_be(std::span<const std::byte> bytes) {
+    return static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes[0])) << 8) |
+        static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes[1])));
+}
+
+std::uint32_t read_u24_be(std::span<const std::byte> bytes) {
+    return (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[0])) << 16) |
+           (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[1])) << 8) |
+           static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[2]));
+}
+
+std::optional<std::span<const std::byte>>
+read_tls_vector(std::span<const std::byte> bytes, std::size_t &offset, std::size_t length_bytes) {
+    if (length_bytes == 0 || length_bytes > 3 || offset + length_bytes > bytes.size()) {
+        return std::nullopt;
+    }
+
+    std::size_t length = 0;
+    for (std::size_t index = 0; index < length_bytes; ++index) {
+        length = (length << 8) | std::to_integer<std::uint8_t>(bytes[offset + index]);
+    }
+    offset += length_bytes;
+    if (offset + length > bytes.size()) {
+        return std::nullopt;
+    }
+
+    const auto value = bytes.subspan(offset, length);
+    offset += length;
+    return value;
+}
+
+CodecResult<std::optional<std::span<const std::byte>>>
+extract_client_hello_quic_transport_parameters(std::span<const std::byte> bytes) {
+    if (bytes.size() < 4) {
+        return CodecResult<std::optional<std::span<const std::byte>>>::success(std::nullopt);
+    }
+    if (std::to_integer<std::uint8_t>(bytes[0]) != 0x01u) {
+        return CodecResult<std::optional<std::span<const std::byte>>>::failure(
+            CodecErrorCode::invalid_packet_protection_state, 0);
+    }
+
+    const auto handshake_length = read_u24_be(bytes.subspan(1, 3));
+    if (bytes.size() < 4 + handshake_length) {
+        return CodecResult<std::optional<std::span<const std::byte>>>::success(std::nullopt);
+    }
+
+    const auto client_hello = bytes.subspan(4, handshake_length);
+    std::size_t offset = 0;
+    if (client_hello.size() < 34) {
+        return CodecResult<std::optional<std::span<const std::byte>>>::failure(
+            CodecErrorCode::invalid_packet_protection_state, 0);
+    }
+    offset += 2;
+    offset += 32;
+
+    if (!read_tls_vector(client_hello, offset, 1).has_value() ||
+        !read_tls_vector(client_hello, offset, 2).has_value() ||
+        !read_tls_vector(client_hello, offset, 1).has_value()) {
+        return CodecResult<std::optional<std::span<const std::byte>>>::failure(
+            CodecErrorCode::invalid_packet_protection_state, offset);
+    }
+    if (offset == client_hello.size()) {
+        return CodecResult<std::optional<std::span<const std::byte>>>::success(std::nullopt);
+    }
+
+    const auto extensions = read_tls_vector(client_hello, offset, 2);
+    if (!extensions.has_value() || offset != client_hello.size()) {
+        return CodecResult<std::optional<std::span<const std::byte>>>::failure(
+            CodecErrorCode::invalid_packet_protection_state, offset);
+    }
+
+    std::size_t extension_offset = 0;
+    while (extension_offset < extensions->size()) {
+        if (extension_offset + 4 > extensions->size()) {
+            return CodecResult<std::optional<std::span<const std::byte>>>::failure(
+                CodecErrorCode::invalid_packet_protection_state, extension_offset);
+        }
+        const auto extension_type = read_u16_be(extensions->subspan(extension_offset, 2));
+        const auto extension_length = read_u16_be(extensions->subspan(extension_offset + 2, 2));
+        extension_offset += 4;
+        if (extension_offset + extension_length > extensions->size()) {
+            return CodecResult<std::optional<std::span<const std::byte>>>::failure(
+                CodecErrorCode::invalid_packet_protection_state, extension_offset);
+        }
+
+        const auto extension_data = extensions->subspan(extension_offset, extension_length);
+        extension_offset += extension_length;
+        if (extension_type == kTlsQuicTransportParametersExtension) {
+            return CodecResult<std::optional<std::span<const std::byte>>>::success(extension_data);
+        }
+    }
+
+    return CodecResult<std::optional<std::span<const std::byte>>>::success(std::nullopt);
+}
+
+std::optional<std::uint32_t>
+select_compatible_server_version(std::span<const std::uint32_t> supported_versions,
+                                 const VersionInformation &client_version_information,
+                                 std::uint32_t client_initial_version) {
+    if (client_version_information.chosen_version != client_initial_version ||
+        !contains_version(client_version_information.available_versions, client_initial_version)) {
+        return std::nullopt;
+    }
+    for (const auto supported_version : supported_versions) {
+        if (contains_version(client_version_information.available_versions, supported_version)) {
+            return supported_version;
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
 void QuicConnection::install_available_secrets() {
     if (!tls_.has_value()) {
         return;
@@ -60,6 +182,85 @@ void QuicConnection::collect_pending_tls_bytes() {
     }
     zero_rtt_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::zero_rtt));
     application_space_.send_crypto.append(tls_->take_pending(EncryptionLevel::application));
+}
+
+CodecResult<bool> QuicConnection::maybe_negotiate_server_version_from_client_hello(
+    std::span<const std::byte> crypto_bytes) {
+    if (config_.role != EndpointRole::server || peer_transport_parameters_validated_ ||
+        original_version_ != current_version_ || !tls_.has_value()) {
+        return CodecResult<bool>::success(true);
+    }
+
+    server_initial_crypto_scan_prefix_.insert(server_initial_crypto_scan_prefix_.end(),
+                                              crypto_bytes.begin(), crypto_bytes.end());
+    const auto extension =
+        extract_client_hello_quic_transport_parameters(server_initial_crypto_scan_prefix_);
+    if (!extension.has_value()) {
+        return CodecResult<bool>::failure(extension.error());
+    }
+    if (!extension.value().has_value()) {
+        return CodecResult<bool>::success(true);
+    }
+
+    const auto parameters = deserialize_transport_parameters(extension.value().value());
+    if (!parameters.has_value()) {
+        return CodecResult<bool>::failure(
+            transport_parameter_error(parameters.error().code, parameters.error().offset));
+    }
+
+    const auto validation_context = peer_transport_parameters_validation_context();
+    if (!validation_context.has_value()) {
+        return CodecResult<bool>::success(true);
+    }
+    const auto &peer_parameters = parameters.value();
+    const auto validation = validate_peer_transport_parameters(
+        opposite_role(config_.role), peer_parameters, validation_context.value());
+    if (!validation.has_value()) {
+        return CodecResult<bool>::failure(validation.error());
+    }
+
+    peer_transport_parameters_ = peer_parameters;
+    peer_transport_parameters_validated_ = true;
+    server_initial_crypto_scan_prefix_.clear();
+    reset_current_short_header_deserialize_context_cache();
+    note_endpoint_route_state_changed();
+    initialize_peer_flow_control_from_transport_parameters();
+
+    const auto &peer_version_information = peer_parameters.version_information;
+    if (peer_version_information.has_value()) {
+        const auto selected_version = select_compatible_server_version(
+            config_.supported_versions, peer_version_information.value(), original_version_);
+        if (!selected_version.has_value()) {
+            return CodecResult<bool>::failure(version_negotiation_error());
+        }
+        current_version_ = *selected_version;
+        local_transport_parameters_.version_information = version_information_for_handshake(
+            config_.supported_versions, current_version_, config_.retry_source_connection_id,
+            original_version_, current_version_);
+
+        const auto serialized_transport_parameters =
+            serialize_locally_validated_transport_parameters(
+                config_.role, local_transport_parameters_,
+                TransportParametersValidationContext{
+                    .expected_initial_source_connection_id = config_.source_connection_id,
+                    .expected_original_destination_connection_id =
+                        local_transport_parameters_.original_destination_connection_id,
+                    .expected_retry_source_connection_id = config_.retry_source_connection_id,
+                });
+        if (!serialized_transport_parameters.has_value()) {
+            return CodecResult<bool>::failure(serialized_transport_parameters.error());
+        }
+        if (!tls_.has_value()) {
+            return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
+        }
+        const auto updated =
+            tls_->update_local_transport_parameters(serialized_transport_parameters.value());
+        if (!updated.has_value()) {
+            return updated;
+        }
+    }
+
+    return CodecResult<bool>::success(true);
 }
 
 void QuicConnection::replay_deferred_protected_packets(QuicCoreTimePoint now) {
@@ -173,6 +374,14 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
         note_endpoint_route_state_changed();
     }
     if (!received_peer_transport_parameters && !peer_transport_parameters_.has_value()) {
+        if (tls_->handshake_complete()) {
+            return CodecResult<bool>::failure(CodecError{
+                .code = CodecErrorCode::invalid_packet_protection_state,
+                .offset = 0,
+                .transport_error_code = 0x016du,
+                .has_transport_error_code = true,
+            });
+        }
         return CodecResult<bool>::success(true);
     }
 
@@ -187,7 +396,7 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
         opposite_role(config_.role), peer_transport_parameters, validation_context.value());
     if (!validation.has_value()) {
         log_codec_failure("validate_peer_transport_parameters", validation.error());
-        return CodecResult<bool>::failure(validation.error().code, validation.error().offset);
+        return CodecResult<bool>::failure(validation.error());
     }
     const bool accepted_zero_rtt = tls_.has_value() && tls_->early_data_accepted().value_or(false);
     if (config_.role == EndpointRole::client && accepted_zero_rtt) {
@@ -853,6 +1062,7 @@ void QuicConnection::reset_client_handshake_peer_state_for_new_source_connection
     active_peer_connection_id_sequence_ = 0;
     largest_peer_retire_prior_to_ = 0;
     peer_transport_parameters_validated_ = false;
+    server_initial_crypto_scan_prefix_.clear();
     reset_current_short_header_deserialize_context_cache();
 }
 
@@ -901,6 +1111,7 @@ void QuicConnection::discard_packet_space_state(PacketSpaceState &packet_space) 
 void QuicConnection::discard_initial_packet_space() {
     recovery_rtt_state_ = shared_recovery_rtt_state();
     initial_packet_space_discarded_ = true;
+    server_initial_crypto_scan_prefix_.clear();
     discard_packet_space_state(initial_space_);
     pto_count_ = 0;
 }
@@ -1909,10 +2120,11 @@ QuicConnection::minimum_pending_application_stream_datagram_bytes() const {
 std::optional<std::size_t> QuicConnection::minimum_pending_application_datagram_wire_bytes() const {
     auto minimum_wire_bytes = minimum_pending_application_stream_wire_bytes();
     if (!pending_datagram_send_queue_.empty()) {
-        remember_minimum_wire_size(
-            minimum_wire_bytes,
-            datagram_frame_wire_size(pending_datagram_send_queue_.front().size(),
-                                     /*has_length=*/true));
+        for (const auto &pending_datagram : pending_datagram_send_queue_) {
+            remember_minimum_wire_size(
+                minimum_wire_bytes,
+                datagram_frame_wire_size(pending_datagram.bytes.size(), /*has_length=*/true));
+        }
     }
     return minimum_wire_bytes;
 }

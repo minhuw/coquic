@@ -360,9 +360,14 @@ COQUIC_NO_PROFILE bool ssl_quic_method_failed(SSL *ssl, const SSL_QUIC_METHOD *q
 }
 
 COQUIC_NO_PROFILE bool server_name_failed(SSL *ssl, const TlsAdapterConfig &config) {
-    return !config.server_name.empty() && config.role == EndpointRole::client &&
-           (consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_server_name) ||
-            SSL_set_tlsext_host_name(ssl, config.server_name.c_str()) != 1);
+    if (config.server_name.empty() || config.role != EndpointRole::client) {
+        return false;
+    }
+    if (consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_server_name) ||
+        SSL_set_tlsext_host_name(ssl, config.server_name.c_str()) != 1) {
+        return true;
+    }
+    return config.verify_peer && SSL_set1_host(ssl, config.server_name.c_str()) != 1;
 }
 
 COQUIC_NO_PROFILE bool transport_params_failed(SSL *ssl,
@@ -686,6 +691,19 @@ class TlsAdapter::Impl {
         return drive_handshake();
     }
 
+    CodecResult<bool> update_local_transport_parameters(std::span<const std::byte> bytes) {
+        if (sticky_error_.has_value()) {
+            return tls_failure(sticky_error_);
+        }
+        if (ssl_ == nullptr || transport_params_failed(ssl_.get(), bytes)) {
+            sticky_error_ =
+                CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
+            return tls_failure(sticky_error_);
+        }
+        config_.local_transport_parameters = std::vector<std::byte>(bytes.begin(), bytes.end());
+        return CodecResult<bool>::success(true);
+    }
+
     std::vector<std::byte> take_pending(EncryptionLevel level) {
         auto &bytes = pending_[level_index(level)];
         auto result = std::move(bytes);
@@ -730,6 +748,9 @@ class TlsAdapter::Impl {
     }
 
     bool handshake_complete() const {
+        if (handshake_complete_override_.has_value()) {
+            return *handshake_complete_override_;
+        }
         if (ssl_ == nullptr) {
             return false;
         }
@@ -788,6 +809,9 @@ class TlsAdapter::Impl {
             !application_protocol_valid(impl->config_.application_protocol) ||
             !client_offered_application_protocol(std::span(in, in_len),
                                                  impl->config_.application_protocol)) {
+            if (impl != nullptr) {
+                impl->sticky_error_ = tls_alert_error(SSL_AD_NO_APPLICATION_PROTOCOL);
+            }
             return SSL_TLSEXT_ERR_ALERT_FATAL;
         }
 
@@ -1046,6 +1070,9 @@ class TlsAdapter::Impl {
                 continue;
             }
 
+            if (sticky_error_.has_value()) {
+                return tls_failure(sticky_error_);
+            }
             sticky_error_ =
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return tls_failure(sticky_error_);
@@ -1238,6 +1265,7 @@ class TlsAdapter::Impl {
     std::mutex tls_keylog_mutex_;
     bool early_data_attempted_ = false;
     std::optional<bool> early_data_accepted_;
+    std::optional<bool> handshake_complete_override_;
     std::optional<CodecError> sticky_error_;
 };
 
@@ -1260,6 +1288,10 @@ CodecResult<bool> TlsAdapter::provide(EncryptionLevel level, std::span<const std
 
 CodecResult<bool> TlsAdapter::poll() {
     return impl_->poll();
+}
+
+CodecResult<bool> TlsAdapter::update_local_transport_parameters(std::span<const std::byte> bytes) {
+    return impl_->update_local_transport_parameters(bytes);
 }
 
 std::vector<std::byte> TlsAdapter::take_pending(EncryptionLevel level) {
@@ -1617,6 +1649,10 @@ void TlsAdapterTestPeer::update_early_data_status(TlsAdapter &adapter) {
 
 void TlsAdapterTestPeer::update_resumed_resumption_state(TlsAdapter &adapter) {
     adapter.impl_->update_resumed_resumption_state();
+}
+
+void TlsAdapterTestPeer::set_handshake_complete(TlsAdapter &adapter, bool complete) {
+    adapter.impl_->handshake_complete_override_ = complete;
 }
 
 void TlsAdapterTestPeer::set_early_data_attempted(TlsAdapter &adapter, bool attempted) {

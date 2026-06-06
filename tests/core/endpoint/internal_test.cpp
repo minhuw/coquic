@@ -384,6 +384,113 @@ TEST(QuicCoreEndpointInternalTest, VersionNegotiationCanGreaseReservedVersion) {
               (std::vector<std::uint32_t>{kQuicVersion1, 0x1a2a3a4a}));
 }
 
+TEST(QuicCoreEndpointInternalTest, ClientEndpointRestartsHandshakeAfterValidVersionNegotiation) {
+    auto endpoint_config = make_client_endpoint_config();
+    endpoint_config.supported_versions = {kQuicVersion2, kQuicVersion1};
+    QuicCore client(std::move(endpoint_config));
+
+    auto open_config = make_client_open_config();
+    open_config.original_version = kQuicVersion1;
+    open_config.initial_version = kQuicVersion1;
+    auto start = client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = open_config,
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0));
+    ASSERT_FALSE(send_effects_from(start).empty());
+
+    const auto version_negotiation = serialize_packet(VersionNegotiationPacket{
+        .destination_connection_id = open_config.source_connection_id,
+        .source_connection_id = open_config.initial_destination_connection_id,
+        .supported_versions = {kQuicVersion2},
+    });
+    ASSERT_TRUE(version_negotiation.has_value());
+
+    auto after_version_negotiation = client.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = version_negotiation.value(),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(1));
+
+    const auto restart_sends = send_effects_from(after_version_negotiation);
+    ASSERT_FALSE(restart_sends.empty());
+    EXPECT_EQ(read_u32_be_at(restart_sends.front().bytes, 1), kQuicVersion2);
+    ASSERT_EQ(client.connections_.size(), 1u);
+    const auto &entry = client.connections_.begin()->second;
+    ASSERT_NE(entry.connection, nullptr);
+    EXPECT_EQ(entry.connection->config_.initial_version, kQuicVersion2);
+    EXPECT_TRUE(entry.connection->config_.reacted_to_version_negotiation);
+    EXPECT_EQ(entry.default_route_handle, std::optional<QuicRouteHandle>{17});
+    EXPECT_EQ(entry.route_handle_by_path_id.at(0), 17u);
+}
+
+TEST(QuicCoreEndpointInternalTest, ClientEndpointIgnoresInvalidOrRepeatedVersionNegotiation) {
+    auto endpoint_config = make_client_endpoint_config();
+    endpoint_config.supported_versions = {kQuicVersion2, kQuicVersion1};
+    QuicCore client(std::move(endpoint_config));
+
+    auto open_config = make_client_open_config();
+    open_config.original_version = kQuicVersion1;
+    open_config.initial_version = kQuicVersion1;
+    auto start = client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = open_config,
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0));
+    ASSERT_FALSE(send_effects_from(start).empty());
+
+    const auto echoes_original = serialize_packet(VersionNegotiationPacket{
+        .destination_connection_id = open_config.source_connection_id,
+        .source_connection_id = open_config.initial_destination_connection_id,
+        .supported_versions = {kQuicVersion1, kQuicVersion2},
+    });
+    ASSERT_TRUE(echoes_original.has_value());
+    auto ignored = client.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = echoes_original.value(),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(1));
+    EXPECT_TRUE(send_effects_from(ignored).empty());
+
+    const auto valid = serialize_packet(VersionNegotiationPacket{
+        .destination_connection_id = open_config.source_connection_id,
+        .source_connection_id = open_config.initial_destination_connection_id,
+        .supported_versions = {kQuicVersion2},
+    });
+    ASSERT_TRUE(valid.has_value());
+    auto restarted = client.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = valid.value(),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(2));
+    ASSERT_FALSE(send_effects_from(restarted).empty());
+
+    const auto repeated = serialize_packet(VersionNegotiationPacket{
+        .destination_connection_id = open_config.source_connection_id,
+        .source_connection_id = open_config.initial_destination_connection_id,
+        .supported_versions = {kQuicVersion1},
+    });
+    ASSERT_TRUE(repeated.has_value());
+    auto second = client.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = repeated.value(),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(3));
+    EXPECT_TRUE(send_effects_from(second).empty());
+
+    ASSERT_EQ(client.connections_.size(), 1u);
+    const auto &entry = client.connections_.begin()->second;
+    ASSERT_NE(entry.connection, nullptr);
+    EXPECT_EQ(entry.connection->config_.initial_version, kQuicVersion2);
+    EXPECT_TRUE(entry.connection->config_.reacted_to_version_negotiation);
+}
+
 TEST(QuicCoreEndpointInternalTest, RouteRefreshRememberPathAndLegacySeedingCoverCollisionPaths) {
     QuicCore server_core(make_server_endpoint_config());
 

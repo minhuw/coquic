@@ -27,7 +27,7 @@ struct Http09RuntimeConfig {
     std::filesystem::path download_root = "/downloads";
     std::filesystem::path certificate_chain_path = "/certs/cert.pem";
     std::filesystem::path private_key_path = "/certs/priv.key";
-    bool verify_peer = false;
+    bool verify_peer = true;
     std::string application_protocol = "hq-interop";
     std::string server_name = "localhost";
     std::string requests_env;

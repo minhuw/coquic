@@ -256,6 +256,7 @@ class ScopedChildProcess {
         const coquic::io::test::SocketIoBackendOpsOverride &override_ops = {})
         : host_(config.host), port_(config.port),
           stop_requested_(std::make_shared<std::atomic<bool>>(false)),
+          fixture_cert_trust_("SSL_CERT_FILE", "tests/fixtures/quic-server-cert.pem"),
           future_(std::async(std::launch::async, run_http09_runtime_child_process, config,
                              stop_requested_, override_ops)) {
     }
@@ -299,6 +300,7 @@ class ScopedChildProcess {
     std::string host_;
     std::uint16_t port_ = 0;
     std::shared_ptr<std::atomic<bool>> stop_requested_;
+    ScopedEnvVar fixture_cert_trust_;
     std::future<int> future_;
     std::optional<int> cached_status_;
 };
@@ -1249,6 +1251,7 @@ struct InMemoryHttp09TransferConfig {
 inline InMemoryHttp09TransferResult
 run_in_memory_http09_transfer(const InMemoryHttp09TransferConfig &transfer_config) {
     InMemoryHttp09TransferResult transfer_result;
+    ScopedEnvVar fixture_cert_trust("SSL_CERT_FILE", "tests/fixtures/quic-server-cert.pem");
 
     // The in-memory client still uses the real request parser so bad request envs fail early.
     const auto requests =

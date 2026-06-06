@@ -9,18 +9,20 @@ namespace coquic::quic {
 
 StreamStateResult<bool> QuicConnection::queue_stream_send(std::uint64_t stream_id,
                                                           std::span<const std::byte> bytes,
-                                                          bool fin) {
-    return queue_stream_send_impl(stream_id, bytes, std::nullopt, fin);
+                                                          bool fin, std::int32_t priority) {
+    return queue_stream_send_impl(stream_id, bytes, std::nullopt, fin, priority);
 }
 
 StreamStateResult<bool> QuicConnection::queue_stream_send_shared(std::uint64_t stream_id,
-                                                                 SharedBytes bytes, bool fin) {
-    return queue_stream_send_impl(stream_id, {}, std::move(bytes), fin);
+                                                                 SharedBytes bytes, bool fin,
+                                                                 std::int32_t priority) {
+    return queue_stream_send_impl(stream_id, {}, std::move(bytes), fin, priority);
 }
 
-CodecResult<bool> QuicConnection::queue_datagram_send(std::span<const std::byte> bytes) {
+CodecResult<bool> QuicConnection::queue_datagram_send(std::span<const std::byte> bytes,
+                                                      std::int32_t priority) {
     return queue_datagram_send_shared(
-        SharedBytes(std::vector<std::byte>(bytes.begin(), bytes.end())));
+        SharedBytes(std::vector<std::byte>(bytes.begin(), bytes.end())), priority);
 }
 
 StreamStateResult<bool> QuicConnection::queue_stop_sending(LocalStopSendingCommand command) {

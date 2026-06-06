@@ -166,6 +166,7 @@ impl Connection {
                     stream_id,
                     bytes,
                     fin,
+                    priority: 0,
                 },
                 now,
             )
@@ -174,7 +175,11 @@ impl Connection {
 
     pub fn send_datagram(&self, bytes: &[u8], now: TimeUs) -> Result<QueryResult, Status> {
         self.with_endpoint(|endpoint| {
-            endpoint.quic_connection_send_datagram(self.handle, SendDatagramData { bytes }, now)
+            endpoint.quic_connection_send_datagram(
+                self.handle,
+                SendDatagramData { bytes, priority: 0 },
+                now,
+            )
         })
     }
 

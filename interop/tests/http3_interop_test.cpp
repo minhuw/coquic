@@ -223,6 +223,33 @@ TEST(QuicHttp3InteropTest, UnsupportedTestcaseReturnsRunnerSkipExitCode) {
     EXPECT_EQ(coquic::http3::run_http3_interop(config), 127);
 }
 
+TEST(QuicHttp3InteropTest, ServerRuntimeConfigDisablesPeerVerificationForInterop) {
+    const auto interop_config = coquic::http3::Http3InteropConfig{
+        .mode = coquic::http3::Http3InteropMode::server,
+        .testcase = "http3",
+        .host = "0.0.0.0",
+        .port = 443,
+        .document_root = "/www",
+        .certificate_chain_path = "/certs/cert.pem",
+        .private_key_path = "/certs/priv.key",
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::copa,
+    };
+
+    const auto runtime_config =
+        coquic::http3::make_http3_interop_server_runtime_config(interop_config);
+
+    EXPECT_EQ(runtime_config.mode, coquic::http3::Http3RuntimeMode::server);
+    EXPECT_EQ(runtime_config.host, "0.0.0.0");
+    EXPECT_EQ(runtime_config.port, 443);
+    EXPECT_FALSE(runtime_config.enable_bootstrap);
+    EXPECT_EQ(runtime_config.document_root, std::filesystem::path("/www"));
+    EXPECT_EQ(runtime_config.certificate_chain_path, std::filesystem::path("/certs/cert.pem"));
+    EXPECT_EQ(runtime_config.private_key_path, std::filesystem::path("/certs/priv.key"));
+    EXPECT_FALSE(runtime_config.verify_peer);
+    EXPECT_EQ(runtime_config.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::copa);
+}
+
 TEST(QuicHttp3InteropTest, ParsesClientInvocationWithRequestsFromEnvironment) {
     const char *argv[] = {"coquic", "h3-interop-client"};
     ScopedEnvVar testcase("TESTCASE", "http3");
@@ -540,15 +567,8 @@ TEST(QuicHttp3InteropTest, ServerModeStartsHttp3Runtime) {
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
-    const auto runtime_config = coquic::http3::Http3RuntimeConfig{
-        .mode = coquic::http3::Http3RuntimeMode::server,
-        .host = interop_config.host,
-        .port = interop_config.port,
-        .enable_bootstrap = false,
-        .document_root = interop_config.document_root,
-        .certificate_chain_path = interop_config.certificate_chain_path,
-        .private_key_path = interop_config.private_key_path,
-    };
+    const auto runtime_config =
+        coquic::http3::make_http3_interop_server_runtime_config(interop_config);
 
     pid_t child_pid = ::fork();
     ASSERT_GE(child_pid, 0);

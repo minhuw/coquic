@@ -1,7 +1,5 @@
 #include "interop/coquic-interop/http3_interop.h"
 
-#include "src/http3/http3_runtime.h"
-
 #include <charconv>
 #include <cctype>
 #include <cstdlib>
@@ -175,16 +173,7 @@ int run_http3_interop(const Http3InteropConfig &config) {
     }
 
     if (config.mode == Http3InteropMode::server) {
-        return run_http3_runtime(Http3RuntimeConfig{
-            .mode = Http3RuntimeMode::server,
-            .host = config.host,
-            .port = config.port,
-            .document_root = config.document_root,
-            .enable_bootstrap = false,
-            .certificate_chain_path = config.certificate_chain_path,
-            .private_key_path = config.private_key_path,
-            .congestion_control = config.congestion_control,
-        });
+        return run_http3_runtime(make_http3_interop_server_runtime_config(config));
     }
 
     std::vector<Http3RuntimeTransferJob> jobs;
@@ -214,6 +203,20 @@ int run_http3_interop(const Http3InteropConfig &config) {
             .congestion_control = config.congestion_control,
         },
         std::span<const Http3RuntimeTransferJob>(jobs));
+}
+
+Http3RuntimeConfig make_http3_interop_server_runtime_config(const Http3InteropConfig &config) {
+    return Http3RuntimeConfig{
+        .mode = Http3RuntimeMode::server,
+        .host = config.host,
+        .port = config.port,
+        .document_root = config.document_root,
+        .enable_bootstrap = false,
+        .certificate_chain_path = config.certificate_chain_path,
+        .private_key_path = config.private_key_path,
+        .verify_peer = false,
+        .congestion_control = config.congestion_control,
+    };
 }
 
 } // namespace coquic::http3

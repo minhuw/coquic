@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "src/http3/http3_runtime.h"
 #include "src/quic/core.h"
 
 namespace coquic::http3 {
@@ -28,6 +29,7 @@ struct Http3InteropConfig {
 };
 
 std::optional<Http3InteropConfig> parse_http3_interop_args(int argc, char **argv);
+Http3RuntimeConfig make_http3_interop_server_runtime_config(const Http3InteropConfig &config);
 int run_http3_interop(const Http3InteropConfig &config);
 
 } // namespace coquic::http3

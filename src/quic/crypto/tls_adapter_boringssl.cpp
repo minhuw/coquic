@@ -931,10 +931,14 @@ class TlsAdapter::Impl {
     }
 
     bool initialize_context() {
+#if COQUIC_TLS_ADAPTER_SINGLE_THREADED_WASM
+        return initialize_unique_context();
+#else
         if (shared_server_context_allowed(config_)) {
             return initialize_shared_server_context();
         }
         return initialize_unique_context();
+#endif
     }
 
     bool load_identity() {

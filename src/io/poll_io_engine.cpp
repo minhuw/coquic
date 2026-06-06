@@ -658,7 +658,10 @@ SendmmsgBatchScratch &sendmmsg_batch_scratch() {
 }
 
 bool &udp_gso_disabled() {
-    static thread_local bool disabled = false;
+    static thread_local bool disabled = [] {
+        const char *value = std::getenv("COQUIC_DISABLE_UDP_GSO");
+        return value != nullptr && value[0] != '\0' && std::string_view(value) != "0";
+    }();
     return disabled;
 }
 
@@ -1047,6 +1050,7 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
             source_len = static_cast<socklen_t>(inbound_message.msg_namelen);
             if (bytes_read >= 0) {
                 inbound_ecn = recvmsg_ecn_from_control(inbound_message);
+#if defined(__linux__) && defined(UDP_GRO)
                 auto segment_size = recvmsg_udp_gro_segment_size_from_control(inbound_message);
                 if (segment_size > 0) {
                     segment_size = std::min(segment_size, static_cast<std::size_t>(bytes_read));
@@ -1063,6 +1067,7 @@ ReceiveDatagramResult receive_datagram(int socket_fd, std::string_view role_name
                         .udp_gro_segment_size = segment_size,
                     };
                 }
+#endif
             }
         }
         if (recv_call_completed(bytes_read, errno)) {

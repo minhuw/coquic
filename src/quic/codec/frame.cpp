@@ -1922,7 +1922,7 @@ std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
         BufferReader range_reader(
             cursor.encoded_additional_ranges.subspan(cursor.next_encoded_offset));
         AckRange decoded_range;
-        if (const auto error = decode_ack_additional_ranges(
+        if (const auto decoded_range_error = decode_ack_additional_ranges(
                 range_reader, 1, cursor.previous_smallest,
                 [&decoded_range](std::uint64_t decoded_gap_value, std::uint64_t decoded_length) {
                     decoded_range = AckRange{
@@ -1930,7 +1930,7 @@ std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
                         .range_length = decoded_length,
                     };
                 });
-            error.has_value()) {
+            decoded_range_error.has_value()) {
             cursor.next_additional_index = cursor.additional_range_count;
             cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
             return std::nullopt;
@@ -1938,11 +1938,11 @@ std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
         cursor.next_encoded_offset += range_reader.offset();
         ++cursor.next_additional_index;
 
-        const auto range_largest = cursor.previous_smallest - decoded_range.gap - 2;
-        cursor.previous_smallest = range_largest - decoded_range.range_length;
+        cursor.previous_smallest =
+            cursor.previous_smallest - decoded_range.gap - 2 - decoded_range.range_length;
         return AckPacketNumberRange{
             .smallest = cursor.previous_smallest,
-            .largest = range_largest,
+            .largest = cursor.previous_smallest + decoded_range.range_length,
         };
     }
 

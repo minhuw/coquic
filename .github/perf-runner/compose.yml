@@ -22,7 +22,7 @@ services:
       UNSET_CONFIG_VARS: "true"
       NIX_CONFIG: |
         experimental-features = nix-command flakes
-        sandbox = false
+        sandbox = true
         build-users-group =
         max-jobs = 8
         cores = 8

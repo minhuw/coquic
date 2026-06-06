@@ -12,7 +12,7 @@ RUN set -eux; \
       install -d "${home}/.config/nix"; \
       printf '%s\n' \
         'experimental-features = nix-command flakes' \
-        'sandbox = false' \
+        'sandbox = true' \
         'build-users-group =' \
         'max-jobs = 8' \
         'cores = 8' \

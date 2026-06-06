@@ -35,7 +35,7 @@ jobs:
     env:
       NIX_CONFIG: |
         experimental-features = nix-command flakes
-        sandbox = false
+        sandbox = true
         build-users-group =
         max-jobs = 8
         cores = 8
@@ -217,7 +217,7 @@ jobs:
           mkdir -p "${HOME}/.config/nix"
           {
             echo 'experimental-features = nix-command flakes'
-            echo 'sandbox = false'
+            echo 'sandbox = true'
             echo 'build-users-group ='
             echo 'max-jobs = 8'
             echo 'cores = 8'
@@ -232,16 +232,6 @@ jobs:
       - name: Show Docker Version
         run: |
           docker version
-
-      - name: Clean Unsandboxed Nix Build Home
-        run: |
-          if [ -d /homeless-shelter ]; then
-            if command -v sudo >/dev/null; then
-              sudo rm -rf /homeless-shelter
-            else
-              rm -rf /homeless-shelter
-            fi
-          fi
 
       - name: Run ${{ matrix.display_name }} Perf CI Matrix
         id: run_perf

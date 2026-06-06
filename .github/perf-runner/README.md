@@ -70,6 +70,11 @@ credentials and does not need benchmark hardware.
   `dockerTools` uses `fakeroot` while building image layers. With the default
   profile, `fakeroot` can hang before it starts `tar`, leaving the workflow
   apparently frozen inside `nix build`.
+- Keep Nix sandboxing enabled. The sandbox prevents Nix's fake build home
+  (`/homeless-shelter`) from leaking between derivations inside the long-lived
+  runner container.
+- Keep `build-users-group =` explicit with this single-user Nix install. The
+  upstream runner image does not provide a `nixbld` group.
 - The compose file runs the runner as root by default because Docker socket
   group IDs vary by host. This does not materially change the trust boundary
   once `/var/run/docker.sock` is mounted.

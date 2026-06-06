@@ -12,8 +12,8 @@
 
 #include <gtest/gtest.h>
 
-#include "src/quic/packet_crypto.h"
-#include "src/quic/packet_crypto_test_hooks.h"
+#include "src/quic/crypto/packet_crypto.h"
+#include "src/quic/crypto/packet_crypto_test_hooks.h"
 
 namespace coquic::quic {
 CodecResult<TrafficSecret> derive_next_traffic_secret(const TrafficSecret &secret);

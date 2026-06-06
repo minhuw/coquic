@@ -20,12 +20,12 @@
 #include <variant>
 #include <vector>
 
-#include "src/quic/buffer.h"
-#include "src/quic/crypto_stream.h"
-#include "src/quic/packet.h"
-#include "src/quic/resumption.h"
-#include "src/quic/tls_adapter.h"
-#include "src/quic/transport_parameters.h"
+#include "src/quic/codec/buffer.h"
+#include "src/quic/crypto/crypto_stream.h"
+#include "src/quic/codec/packet.h"
+#include "src/quic/crypto/resumption.h"
+#include "src/quic/crypto/tls_adapter.h"
+#include "src/quic/transport/transport_parameters.h"
 #include "src/quic/version.h"
 
 namespace coquic::quic {

@@ -6,7 +6,7 @@
 #include <gtest/gtest.h>
 
 #define private public
-#include "src/quic/buffer.h"
+#include "src/quic/codec/buffer.h"
 #undef private
 
 namespace {

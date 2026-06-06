@@ -5,8 +5,8 @@
 #include <string>
 #include <utility>
 
-#include "src/quic/streams.h"
-#include "src/quic/varint.h"
+#include "src/quic/transport/streams.h"
+#include "src/quic/codec/varint.h"
 
 namespace coquic::http3 {
 

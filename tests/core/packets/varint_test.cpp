@@ -5,8 +5,8 @@
 
 #include <gtest/gtest.h>
 
-#include "src/quic/buffer.h"
-#include "src/quic/varint.h"
+#include "src/quic/codec/buffer.h"
+#include "src/quic/codec/varint.h"
 
 namespace {
 

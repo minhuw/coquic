@@ -8,7 +8,7 @@
 #include <optional>
 #include <span>
 
-#include "src/quic/recovery.h"
+#include "src/quic/transport/recovery.h"
 
 namespace coquic::quic {
 

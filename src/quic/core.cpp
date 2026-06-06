@@ -23,10 +23,10 @@
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 
-#include "src/quic/buffer.h"
-#include "src/quic/connection.h"
-#include "src/quic/packet_crypto.h"
-#include "src/quic/streams.h"
+#include "src/quic/codec/buffer.h"
+#include "src/quic/connection/connection.h"
+#include "src/quic/crypto/packet_crypto.h"
+#include "src/quic/transport/streams.h"
 
 #if defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))

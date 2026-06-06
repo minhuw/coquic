@@ -35,11 +35,11 @@
 #include <utility>
 #include <vector>
 
-#include "src/quic/packet.h"
+#include "src/quic/codec/packet.h"
 #define private public
 #include "src/io/io_backend_test_hooks.h"
 #include "src/http09/http09_runtime.h"
-#include "src/quic/connection.h"
+#include "src/quic/connection/connection.h"
 #undef private
 #include "src/http09/http09_runtime_test_hooks.h"
 #include "tests/support/quic_test_utils.h"

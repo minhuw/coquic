@@ -7,8 +7,8 @@
 
 #include <gtest/gtest.h>
 
-#include "src/quic/packet.h"
-#include "src/quic/recovery.h"
+#include "src/quic/codec/packet.h"
+#include "src/quic/transport/recovery.h"
 #include "tests/support/quic_test_utils.h"
 
 namespace {

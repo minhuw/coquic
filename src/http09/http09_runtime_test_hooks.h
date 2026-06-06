@@ -13,7 +13,7 @@
 
 #include "src/io/io_backend_test_hooks.h"
 #include "src/http09/http09_runtime.h"
-#include "src/quic/packet.h"
+#include "src/quic/codec/packet.h"
 
 namespace coquic::http09::test {
 

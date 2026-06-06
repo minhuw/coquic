@@ -10,7 +10,7 @@
 #include "bench/coquic-perf/perf_loop.h"
 #include "bench/coquic-perf/perf_protocol.h"
 #include "bench/coquic-perf/perf_runtime.h"
-#include "src/quic/crypto_stream.h"
+#include "src/quic/crypto/crypto_stream.h"
 
 namespace coquic::perf {
 

@@ -2,7 +2,7 @@
 
 #include "src/quic/qlog/session.h"
 #include "src/quic/qlog/types.h"
-#include "src/quic/tls_adapter_quictls_test_hooks.h"
+#include "src/quic/crypto/tls_adapter_quictls_test_hooks.h"
 #include "tests/support/core/connection_test_fixtures.h"
 
 namespace {

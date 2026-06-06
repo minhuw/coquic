@@ -8,7 +8,7 @@
 #include <gtest/gtest.h>
 
 #define private public
-#include "src/quic/crypto_stream.h"
+#include "src/quic/crypto/crypto_stream.h"
 #undef private
 
 namespace {

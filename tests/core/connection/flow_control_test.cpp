@@ -9,9 +9,9 @@
 #include <memory>
 #include <type_traits>
 
-#include "src/quic/packet_crypto_test_hooks.h"
-#include "src/quic/protected_codec.h"
-#include "src/quic/varint.h"
+#include "src/quic/crypto/packet_crypto_test_hooks.h"
+#include "src/quic/codec/protected_codec.h"
+#include "src/quic/codec/varint.h"
 #include "src/quic/qlog/types.h"
 #include "tests/support/core/connection_test_fixtures.h"
 #include "tests/support/quic_test_utils.h"

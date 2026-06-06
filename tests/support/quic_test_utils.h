@@ -23,10 +23,10 @@
 #include <gtest/gtest.h>
 
 #define private public
-#include "src/quic/connection.h"
+#include "src/quic/connection/connection.h"
 #undef private
-#include "src/quic/buffer.h"
-#include "src/quic/packet_crypto.h"
+#include "src/quic/codec/buffer.h"
+#include "src/quic/crypto/packet_crypto.h"
 
 namespace coquic::quic::test {
 

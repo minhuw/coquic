@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-#include "src/quic/streams.h"
+#include "src/quic/transport/streams.h"
 
 namespace {
 

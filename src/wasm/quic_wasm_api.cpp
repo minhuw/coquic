@@ -25,7 +25,7 @@
 #include <openssl/x509.h>
 
 #include "src/quic/core.h"
-#include "src/quic/protected_codec.h"
+#include "src/quic/codec/protected_codec.h"
 #include "src/quic/version.h"
 
 namespace {

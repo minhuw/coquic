@@ -9,7 +9,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "src/quic/buffer.h"
+#include "src/quic/codec/buffer.h"
 
 namespace coquic::http3 {
 

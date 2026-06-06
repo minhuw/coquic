@@ -3,7 +3,7 @@
 
 #include <gtest/gtest.h>
 
-#include "src/quic/packet_number.h"
+#include "src/quic/codec/packet_number.h"
 
 namespace {
 

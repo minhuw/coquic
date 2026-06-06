@@ -1,0 +1,702 @@
+#include "src/quic/crypto/crypto_stream.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
+#include <limits>
+#include <utility>
+#include <vector>
+
+namespace {
+
+using coquic::quic::CodecErrorCode;
+using coquic::quic::CodecResult;
+using coquic::quic::ContiguousReceiveBytes;
+using coquic::quic::CryptoFrame;
+using coquic::quic::ReliableSendBuffer;
+using coquic::quic::SharedBytes;
+
+constexpr std::uint64_t maximum_stream_offset = (std::uint64_t{1} << 62) - 1;
+
+template <typename T> CodecResult<T> crypto_stream_failure() {
+    return CodecResult<T>::failure(CodecErrorCode::invalid_varint, 0);
+}
+
+std::uint64_t range_end(std::uint64_t offset, std::size_t length) {
+    const auto max_uint64 = std::numeric_limits<std::uint64_t>::max();
+    if (length > static_cast<std::size_t>(max_uint64 - offset)) {
+        return max_uint64;
+    }
+
+    return offset + static_cast<std::uint64_t>(length);
+}
+
+void append_contiguous_segment(ContiguousReceiveBytes &contiguous, SharedBytes bytes) {
+    if (contiguous.shared.empty() && contiguous.owned.empty()) {
+        contiguous.shared = std::move(bytes);
+        return;
+    }
+
+    if (!contiguous.shared.empty()) {
+        if (contiguous.shared.storage() == bytes.storage() &&
+            contiguous.shared.end_offset() == bytes.begin_offset()) {
+            contiguous.shared =
+                SharedBytes(bytes.storage(), contiguous.shared.begin_offset(), bytes.end_offset());
+            return;
+        }
+
+        contiguous.owned = contiguous.shared.to_vector();
+        contiguous.shared = {};
+    }
+
+    contiguous.owned.insert(contiguous.owned.end(), bytes.begin(), bytes.end());
+}
+
+} // namespace
+
+namespace coquic::quic {
+
+void ReliableSendBuffer::note_segment_inserted(const Segment &segment) {
+    ++segment_state_counts_[segment_state_index(segment.state)];
+}
+
+void ReliableSendBuffer::note_segment_erased(const Segment &segment) {
+    --segment_state_counts_[segment_state_index(segment.state)];
+}
+
+void ReliableSendBuffer::transition_segment_state(Segment &segment, SegmentState new_state) {
+    if (segment.state == new_state) {
+        return;
+    }
+
+    --segment_state_counts_[segment_state_index(segment.state)];
+    segment.state = new_state;
+    ++segment_state_counts_[segment_state_index(segment.state)];
+}
+
+void ReliableSendBuffer::append(const std::vector<std::byte> &bytes) {
+    append(std::span<const std::byte>(bytes));
+}
+
+void ReliableSendBuffer::append(std::span<const std::byte> bytes) {
+    if (bytes.empty()) {
+        return;
+    }
+
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes.begin(), bytes.end());
+    append(SharedBytes{std::move(storage), 0, bytes.size()});
+}
+
+void ReliableSendBuffer::append(const SharedBytes &bytes) {
+    if (bytes.empty()) {
+        return;
+    }
+
+    const auto [it, inserted] =
+        segments_.emplace(next_append_offset_, Segment{
+                                                   .state = SegmentState::unsent,
+                                                   .storage = bytes.storage(),
+                                                   .begin = bytes.begin_offset(),
+                                                   .end = bytes.end_offset(),
+                                               });
+    if (inserted) {
+        note_segment_inserted(it->second);
+    }
+    next_append_offset_ += static_cast<std::uint64_t>(bytes.size());
+    merge_adjacent_segments();
+}
+
+std::vector<ByteRange>
+ReliableSendBuffer::take_ranges_by_state(SegmentState state, std::size_t &remaining_bytes,
+                                         std::optional<std::uint64_t> max_offset) {
+    std::vector<ByteRange> ranges;
+    if (max_offset.has_value()) {
+        split_at(*max_offset);
+    }
+
+    const auto segment_length = [](const Segment &segment) { return segment.end - segment.begin; };
+
+    for (auto it = segments_.begin(); it != segments_.end() && remaining_bytes > 0; ++it) {
+        if (max_offset.has_value() && it->first >= *max_offset) {
+            break;
+        }
+        if (it->second.state != state) {
+            continue;
+        }
+
+        const auto available_bytes = segment_length(it->second);
+        const auto chunk_size = std::min(remaining_bytes, available_bytes);
+        auto range = ByteRange{
+            .offset = it->first,
+            .bytes =
+                SharedBytes{
+                    it->second.storage,
+                    it->second.begin,
+                    it->second.begin + chunk_size,
+                },
+        };
+        ranges.push_back(std::move(range));
+
+        if (chunk_size == available_bytes) {
+            transition_segment_state(it->second, SegmentState::sent);
+            remaining_bytes -= chunk_size;
+            continue;
+        }
+
+        const auto tail_offset = it->first + static_cast<std::uint64_t>(chunk_size);
+        auto tail = Segment{
+            .state = state,
+            .storage = it->second.storage,
+            .begin = it->second.begin + chunk_size,
+            .end = it->second.end,
+        };
+        it->second.end = it->second.begin + chunk_size;
+        transition_segment_state(it->second, SegmentState::sent);
+        const auto [tail_it, tail_inserted] = segments_.emplace(tail_offset, std::move(tail));
+        if (tail_inserted) {
+            note_segment_inserted(tail_it->second);
+        }
+        remaining_bytes -= chunk_size;
+    }
+
+    return ranges;
+}
+
+std::vector<ByteRange> ReliableSendBuffer::take_ranges(std::size_t max_bytes) {
+    std::vector<ByteRange> ranges;
+    if (max_bytes == 0) {
+        return ranges;
+    }
+
+    auto remaining_bytes = max_bytes;
+    auto lost_ranges = take_ranges_by_state(SegmentState::lost, remaining_bytes);
+    ranges.insert(ranges.end(), std::make_move_iterator(lost_ranges.begin()),
+                  std::make_move_iterator(lost_ranges.end()));
+
+    auto unsent_ranges = take_ranges_by_state(SegmentState::unsent, remaining_bytes);
+    ranges.insert(ranges.end(), std::make_move_iterator(unsent_ranges.begin()),
+                  std::make_move_iterator(unsent_ranges.end()));
+    merge_adjacent_segments();
+    return ranges;
+}
+
+std::vector<ByteRange>
+ReliableSendBuffer::take_lost_ranges(std::size_t max_bytes,
+                                     std::optional<std::uint64_t> max_offset) {
+    if (max_bytes == 0 || segment_state_counts_[segment_state_index(SegmentState::lost)] == 0) {
+        return {};
+    }
+
+    auto remaining_bytes = max_bytes;
+    auto ranges = take_ranges_by_state(SegmentState::lost, remaining_bytes, max_offset);
+    merge_adjacent_segments();
+    return ranges;
+}
+
+std::vector<ByteRange>
+ReliableSendBuffer::take_unsent_ranges(std::size_t max_bytes,
+                                       std::optional<std::uint64_t> max_offset) {
+    if (max_bytes == 0 || segment_state_counts_[segment_state_index(SegmentState::unsent)] == 0) {
+        return {};
+    }
+
+    auto remaining_bytes = max_bytes;
+    auto ranges = take_ranges_by_state(SegmentState::unsent, remaining_bytes, max_offset);
+    merge_adjacent_segments();
+    return ranges;
+}
+
+std::optional<std::uint64_t> ReliableSendBuffer::first_offset_by_state(SegmentState state) const {
+    if (segment_state_counts_[segment_state_index(state)] == 0) {
+        return std::nullopt;
+    }
+
+    for (const auto &[offset, segment] : segments_) {
+        if (segment.state == state) {
+            return offset;
+        }
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::uint64_t> ReliableSendBuffer::first_lost_offset() const {
+    return first_offset_by_state(SegmentState::lost);
+}
+
+std::optional<std::uint64_t> ReliableSendBuffer::first_unsent_offset() const {
+    return first_offset_by_state(SegmentState::unsent);
+}
+
+bool ReliableSendBuffer::acknowledge_leading_sent_range(std::uint64_t offset, std::uint64_t end) {
+    if (segments_.empty()) {
+        return false;
+    }
+
+    auto it = segments_.begin();
+    if (it->first != offset || it->second.state != SegmentState::sent) {
+        return false;
+    }
+
+    const auto segment_end = range_end(it->first, it->second.end - it->second.begin);
+    if (end > segment_end) {
+        return false;
+    }
+    if (end == segment_end) {
+        note_segment_erased(it->second);
+        segments_.erase(it);
+        return true;
+    }
+
+    const auto removed = static_cast<std::size_t>(end - offset);
+    auto node = segments_.extract(it);
+    node.key() = end;
+    node.mapped().begin += removed;
+    segments_.insert(std::move(node));
+    return true;
+}
+
+void ReliableSendBuffer::split_at(std::uint64_t offset) {
+    const auto candidate = segments_.upper_bound(offset);
+    if (candidate == segments_.begin()) {
+        return;
+    }
+
+    auto it = candidate;
+    --it;
+
+    const auto segment_offset = it->first;
+    const auto segment_end =
+        segment_offset + static_cast<std::uint64_t>(it->second.end - it->second.begin);
+    if (offset <= segment_offset || offset >= segment_end) {
+        return;
+    }
+
+    const auto split_index = static_cast<std::size_t>(offset - segment_offset);
+    auto tail = Segment{
+        .state = it->second.state,
+        .storage = it->second.storage,
+        .begin = it->second.begin + split_index,
+        .end = it->second.end,
+    };
+    it->second.end = it->second.begin + split_index;
+    const auto tail_it = segments_.emplace(offset, std::move(tail)).first;
+    note_segment_inserted(tail_it->second);
+}
+
+void ReliableSendBuffer::merge_adjacent_segments() {
+    const auto segment_length = [](const Segment &segment) { return segment.end - segment.begin; };
+
+    auto it = segments_.begin();
+    while (it != segments_.end()) {
+        auto next = std::next(it);
+        if (next == segments_.end()) {
+            break;
+        }
+
+        const auto expected_next_offset =
+            it->first + static_cast<std::uint64_t>(segment_length(it->second));
+        if (it->second.state != next->second.state || expected_next_offset != next->first) {
+            it = next;
+            continue;
+        }
+
+        if (it->second.storage == next->second.storage && it->second.end == next->second.begin) {
+            it->second.end = next->second.end;
+            note_segment_erased(next->second);
+            segments_.erase(next);
+            continue;
+        }
+        it = next;
+    }
+}
+
+void ReliableSendBuffer::acknowledge(std::uint64_t offset, std::size_t length) {
+    if (length == 0) {
+        return;
+    }
+
+    const auto end = range_end(offset, length);
+    if (acknowledge_leading_sent_range(offset, end)) {
+        return;
+    }
+
+    const auto segment_length = [](const Segment &segment) { return segment.end - segment.begin; };
+
+    auto it = segments_.upper_bound(offset);
+    if (it != segments_.begin()) {
+        auto previous = std::prev(it);
+        const auto previous_end = range_end(previous->first, segment_length(previous->second));
+        if (previous_end > offset) {
+            it = previous;
+        }
+    }
+
+    while (it != segments_.end()) {
+        const auto segment_offset = it->first;
+        if (segment_offset >= end) {
+            break;
+        }
+
+        const auto segment_end = range_end(segment_offset, segment_length(it->second));
+        const auto ack_start = std::max(offset, segment_offset);
+        const auto ack_end = std::min(end, segment_end);
+        const auto remove_prefix = ack_start == segment_offset;
+        const auto remove_suffix = ack_end == segment_end;
+
+        if (remove_prefix && remove_suffix) {
+            note_segment_erased(it->second);
+            it = segments_.erase(it);
+            continue;
+        }
+
+        if (remove_prefix) {
+            const auto removed = static_cast<std::size_t>(ack_end - segment_offset);
+            auto node = segments_.extract(it++);
+            node.key() = ack_end;
+            node.mapped().begin += removed;
+            const auto inserted = segments_.insert(std::move(node));
+            it = std::next(inserted.position);
+            continue;
+        }
+
+        if (remove_suffix) {
+            const auto kept = static_cast<std::size_t>(ack_start - segment_offset);
+            it->second.end = it->second.begin + kept;
+            ++it;
+            continue;
+        }
+
+        const auto right_begin =
+            it->second.begin + static_cast<std::size_t>(ack_end - segment_offset);
+        auto right = Segment{
+            .state = it->second.state,
+            .storage = it->second.storage,
+            .begin = right_begin,
+            .end = it->second.end,
+        };
+        it->second.end = it->second.begin + static_cast<std::size_t>(ack_start - segment_offset);
+        const auto [right_it, right_inserted] = segments_.emplace(ack_end, std::move(right));
+        if (right_inserted) {
+            note_segment_inserted(right_it->second);
+        }
+        break;
+    }
+
+    merge_adjacent_segments();
+}
+
+void ReliableSendBuffer::mark_lost(std::uint64_t offset, std::size_t length) {
+    if (length == 0) {
+        return;
+    }
+
+    const auto end = range_end(offset, length);
+    split_at(offset);
+    split_at(end);
+
+    for (auto it = segments_.lower_bound(offset); it != segments_.end() && it->first < end; ++it) {
+        if (it->second.state == SegmentState::sent) {
+            transition_segment_state(it->second, SegmentState::lost);
+        }
+    }
+    merge_adjacent_segments();
+}
+
+void ReliableSendBuffer::mark_unsent(std::uint64_t offset, std::size_t length) {
+    if (length == 0) {
+        return;
+    }
+
+    const auto end = range_end(offset, length);
+    split_at(offset);
+    split_at(end);
+
+    for (auto it = segments_.lower_bound(offset); it != segments_.end() && it->first < end; ++it) {
+        if (it->second.state == SegmentState::sent) {
+            transition_segment_state(it->second, SegmentState::unsent);
+        }
+    }
+    merge_adjacent_segments();
+}
+
+void ReliableSendBuffer::mark_sent(std::uint64_t offset, std::size_t length) {
+    if (length == 0) {
+        return;
+    }
+
+    const auto end = range_end(offset, length);
+    split_at(offset);
+    split_at(end);
+
+    for (auto it = segments_.lower_bound(offset); it != segments_.end() && it->first < end; ++it) {
+        if (it->second.state == SegmentState::lost) {
+            transition_segment_state(it->second, SegmentState::sent);
+        }
+    }
+    merge_adjacent_segments();
+}
+
+std::optional<SharedBytes> ReliableSendBuffer::bytes_for_range(std::uint64_t offset,
+                                                               std::size_t length) const {
+    if (length == 0) {
+        return SharedBytes{};
+    }
+
+    const auto end = range_end(offset, length);
+    const auto segment_length = [](const Segment &segment) { return segment.end - segment.begin; };
+    auto it = segments_.upper_bound(offset);
+    if (it != segments_.begin()) {
+        --it;
+    }
+
+    std::vector<std::byte> owned;
+    SharedBytes contiguous;
+    auto covered_until = offset;
+    for (; it != segments_.end() && covered_until < end; ++it) {
+        const auto segment_offset = it->first;
+        const auto segment_end = range_end(segment_offset, segment_length(it->second));
+        if (segment_end <= covered_until) {
+            continue;
+        }
+        if (segment_offset > covered_until) {
+            return std::nullopt;
+        }
+        if (it->second.state != SegmentState::sent && it->second.state != SegmentState::lost) {
+            return std::nullopt;
+        }
+
+        const auto read_start = std::max(covered_until, segment_offset);
+        const auto read_end = std::min(end, segment_end);
+        const auto begin = it->second.begin + static_cast<std::size_t>(read_start - segment_offset);
+        const auto finish = it->second.begin + static_cast<std::size_t>(read_end - segment_offset);
+        SharedBytes chunk{it->second.storage, begin, finish};
+        if (contiguous.empty() && owned.empty()) {
+            contiguous = std::move(chunk);
+        } else if (!contiguous.empty() && contiguous.storage() == chunk.storage() &&
+                   contiguous.end_offset() == chunk.begin_offset()) {
+            contiguous =
+                SharedBytes{chunk.storage(), contiguous.begin_offset(), chunk.end_offset()};
+        } else {
+            if (!contiguous.empty()) {
+                owned = contiguous.to_vector();
+                contiguous = {};
+            }
+            owned.insert(owned.end(), chunk.begin(), chunk.end());
+        }
+        covered_until = read_end;
+    }
+
+    if (covered_until < end) {
+        return std::nullopt;
+    }
+    if (!owned.empty()) {
+        return SharedBytes{std::move(owned)};
+    }
+    return contiguous;
+}
+
+bool ReliableSendBuffer::has_pending_data() const {
+    return segment_state_counts_[segment_state_index(SegmentState::unsent)] != 0 ||
+           segment_state_counts_[segment_state_index(SegmentState::lost)] != 0;
+}
+
+bool ReliableSendBuffer::has_outstanding_data() const {
+    return segment_state_counts_[segment_state_index(SegmentState::sent)] != 0 ||
+           segment_state_counts_[segment_state_index(SegmentState::lost)] != 0;
+}
+
+bool ReliableSendBuffer::has_outstanding_range(std::uint64_t offset, std::size_t length) const {
+    if (length == 0) {
+        return false;
+    }
+
+    const auto end = range_end(offset, length);
+    const auto segment_length = [](const Segment &segment) { return segment.end - segment.begin; };
+    auto it = segments_.upper_bound(offset);
+    if (it != segments_.begin()) {
+        --it;
+    }
+
+    auto covered_until = offset;
+    for (; it != segments_.end() && covered_until < end; ++it) {
+        const auto segment_offset = it->first;
+        const auto segment_end =
+            segment_offset + static_cast<std::uint64_t>(segment_length(it->second));
+        if (segment_end <= covered_until) {
+            continue;
+        }
+        if (segment_offset > covered_until) {
+            return false;
+        }
+        if (it->second.state != SegmentState::sent && it->second.state != SegmentState::lost) {
+            return false;
+        }
+
+        covered_until = std::min(end, segment_end);
+    }
+
+    return covered_until >= end;
+}
+
+bool ReliableSendBuffer::has_lost_data() const {
+    return segment_state_counts_[segment_state_index(SegmentState::lost)] != 0;
+}
+
+void CryptoSendBuffer::append(std::span<const std::byte> bytes) {
+    reliable_.append(bytes);
+}
+
+std::vector<CryptoFrame> CryptoSendBuffer::take_frames(std::size_t max_frame_payload_size) {
+    std::vector<CryptoFrame> frames;
+    if (max_frame_payload_size == 0) {
+        return frames;
+    }
+
+    while (true) {
+        const auto ranges = reliable_.take_ranges(max_frame_payload_size);
+        if (ranges.empty()) {
+            break;
+        }
+
+        for (const auto &range : ranges) {
+            frames.push_back(CryptoFrame{
+                .offset = range.offset,
+                .crypto_data = range.bytes.to_vector(),
+            });
+        }
+    }
+
+    return frames;
+}
+
+bool CryptoSendBuffer::empty() const {
+    return !reliable_.has_pending_data();
+}
+
+CodecResult<ContiguousReceiveBytes> ReliableReceiveBuffer::push_shared(std::uint64_t offset,
+                                                                       const SharedBytes &bytes) {
+    if (bytes.empty()) {
+        return CodecResult<ContiguousReceiveBytes>::success({});
+    }
+    if (offset > maximum_stream_offset || bytes.size() - 1 > maximum_stream_offset - offset) {
+        return crypto_stream_failure<ContiguousReceiveBytes>();
+    }
+
+    const auto end = range_end(offset, bytes.size());
+    if (offset == next_contiguous_offset_ && buffered_bytes_.empty()) {
+        next_contiguous_offset_ = end;
+        return CodecResult<ContiguousReceiveBytes>::success(ContiguousReceiveBytes{
+            .shared = bytes,
+        });
+    }
+
+    const auto start = std::max(offset, next_contiguous_offset_);
+    if (start < end) {
+        buffer_range(start, bytes.subspan(static_cast<std::size_t>(start - offset)));
+    }
+
+    return CodecResult<ContiguousReceiveBytes>::success(take_contiguous_buffered_bytes({}));
+}
+
+CodecResult<std::vector<std::byte>> ReliableReceiveBuffer::push(std::uint64_t offset,
+                                                                std::vector<std::byte> &&bytes) {
+    auto received = push_shared(offset, SharedBytes(std::move(bytes)));
+    if (!received.has_value()) {
+        return CodecResult<std::vector<std::byte>>::failure(received.error().code,
+                                                            received.error().offset);
+    }
+
+    return CodecResult<std::vector<std::byte>>::success(received.value().to_vector());
+}
+
+CodecResult<std::vector<std::byte>> ReliableReceiveBuffer::push(std::uint64_t offset,
+                                                                std::span<const std::byte> bytes) {
+    if (bytes.empty()) {
+        return CodecResult<std::vector<std::byte>>::success({});
+    }
+
+    auto owned = std::vector<std::byte>(bytes.begin(), bytes.end());
+    return push(offset, std::move(owned));
+}
+
+void ReliableReceiveBuffer::buffer_range(std::uint64_t offset, const SharedBytes &bytes) {
+    if (bytes.empty()) {
+        return;
+    }
+
+    auto cursor = offset;
+    const auto end = range_end(offset, bytes.size());
+    auto next_buffered = buffered_bytes_.lower_bound(offset);
+    if (next_buffered != buffered_bytes_.begin()) {
+        auto previous = std::prev(next_buffered);
+        if (range_end(previous->first, previous->second.size()) > offset) {
+            next_buffered = previous;
+        }
+    }
+
+    while (true) {
+        while (next_buffered != buffered_bytes_.end() &&
+               range_end(next_buffered->first, next_buffered->second.size()) <= cursor) {
+            ++next_buffered;
+        }
+
+        auto next_gap_end = end;
+        if (next_buffered != buffered_bytes_.end() && next_buffered->first < next_gap_end) {
+            next_gap_end = next_buffered->first;
+        }
+
+        if (cursor < next_gap_end) {
+            const auto begin_index = static_cast<std::size_t>(cursor - offset);
+            const auto byte_count = static_cast<std::size_t>(next_gap_end - cursor);
+            buffered_bytes_.emplace(cursor, bytes.subspan(begin_index, byte_count));
+            cursor = next_gap_end;
+            continue;
+        }
+
+        if (next_buffered == buffered_bytes_.end()) {
+            break;
+        }
+
+        cursor = std::max(cursor, range_end(next_buffered->first, next_buffered->second.size()));
+        if (cursor >= end) {
+            break;
+        }
+        ++next_buffered;
+    }
+}
+
+ContiguousReceiveBytes
+ReliableReceiveBuffer::take_contiguous_buffered_bytes(ContiguousReceiveBytes contiguous) {
+    while (!buffered_bytes_.empty()) {
+        auto next = buffered_bytes_.begin();
+        const auto segment_offset = next->first;
+        const auto segment_end = range_end(segment_offset, next->second.size());
+        if (segment_offset > next_contiguous_offset_) {
+            break;
+        }
+
+        const auto already_delivered =
+            static_cast<std::size_t>(next_contiguous_offset_ - segment_offset);
+        if (already_delivered < next->second.size()) {
+            append_contiguous_segment(contiguous, next->second.subspan(already_delivered));
+            next_contiguous_offset_ = segment_end;
+        }
+
+        buffered_bytes_.erase(next);
+    }
+
+    return contiguous;
+}
+
+std::vector<std::byte> ReliableReceiveBuffer::take_contiguous_buffered_bytes() {
+    return take_contiguous_buffered_bytes({}).to_vector();
+}
+
+CodecResult<std::vector<std::byte>> CryptoReceiveBuffer::push(std::uint64_t offset,
+                                                              std::span<const std::byte> bytes) {
+    return reliable_.push(offset, bytes);
+}
+
+} // namespace coquic::quic

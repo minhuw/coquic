@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "src/http3/http3.h"
-#include "src/quic/varint.h"
+#include "src/quic/codec/varint.h"
 
 namespace coquic::http3 {
 

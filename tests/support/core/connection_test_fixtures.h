@@ -5,8 +5,8 @@
 #include <cstring>
 #include <memory>
 
-#include "src/quic/protected_codec.h"
-#include "src/quic/varint.h"
+#include "src/quic/codec/protected_codec.h"
+#include "src/quic/codec/varint.h"
 #include "tests/support/quic_test_utils.h"
 
 namespace coquic::quic::test_support {

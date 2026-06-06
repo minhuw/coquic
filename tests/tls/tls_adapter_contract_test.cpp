@@ -15,8 +15,8 @@
 
 #include <gtest/gtest.h>
 
-#include "src/quic/tls_adapter.h"
-#include "src/quic/tls_adapter_quictls_test_hooks.h"
+#include "src/quic/crypto/tls_adapter.h"
+#include "src/quic/crypto/tls_adapter_quictls_test_hooks.h"
 #include "tests/support/quic_test_utils.h"
 
 namespace {

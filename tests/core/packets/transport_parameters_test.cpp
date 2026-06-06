@@ -8,7 +8,7 @@
 
 #include <gtest/gtest.h>
 
-#include "src/quic/transport_parameters.h"
+#include "src/quic/transport/transport_parameters.h"
 #include "tests/support/core/connection_test_fixtures.h"
 
 namespace {

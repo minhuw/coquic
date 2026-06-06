@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include "src/quic/buffer.h"
+#include "src/quic/codec/buffer.h"
 
 namespace {
 

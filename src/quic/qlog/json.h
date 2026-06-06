@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 
-#include "src/quic/transport_parameters.h"
+#include "src/quic/transport/transport_parameters.h"
 #include "src/quic/qlog/types.h"
 
 namespace coquic::quic::qlog {

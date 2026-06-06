@@ -11,9 +11,9 @@
 #include "src/http09/http09_runtime.h"
 #include "src/http09/http09_runtime_test_hooks.h"
 #include "src/io/io_backend_factory.h"
-#include "src/quic/buffer.h"
-#include "src/quic/packet.h"
-#include "src/quic/packet_crypto.h"
+#include "src/quic/codec/buffer.h"
+#include "src/quic/codec/packet.h"
+#include "src/quic/crypto/packet_crypto.h"
 #include "src/quic/version.h"
 
 #include <arpa/inet.h>

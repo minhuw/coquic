@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "src/quic/core.h"
-#include "src/quic/varint.h"
+#include "src/quic/codec/varint.h"
 
 namespace coquic::http09 {
 

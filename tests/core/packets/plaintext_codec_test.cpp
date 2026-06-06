@@ -4,7 +4,7 @@
 #include <gtest/gtest.h>
 
 #include "src/quic/core.h"
-#include "src/quic/plaintext_codec.h"
+#include "src/quic/codec/plaintext_codec.h"
 
 namespace {
 

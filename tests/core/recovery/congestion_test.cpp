@@ -10,7 +10,7 @@
 #include <gtest/gtest.h>
 
 #define private public
-#include "src/quic/congestion.h"
+#include "src/quic/transport/congestion.h"
 #undef private
 #include "tests/support/quic_test_utils.h"
 

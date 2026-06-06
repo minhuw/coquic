@@ -6,8 +6,8 @@
 #include <string>
 #include <vector>
 
-#include "src/quic/frame.h"
-#include "src/quic/packet.h"
+#include "src/quic/codec/frame.h"
+#include "src/quic/codec/packet.h"
 
 namespace coquic::quic::qlog {
 

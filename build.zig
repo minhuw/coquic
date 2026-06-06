@@ -99,12 +99,12 @@ fn withSpdlogFlags(
 
 fn appendTlsAdapterSource(files: *StringList, tls_backend: []const u8) void {
     if (std.mem.eql(u8, tls_backend, "quictls")) {
-        files.append("src/quic/tls_adapter_quictls.cpp") catch @panic("oom");
+        files.append("src/quic/crypto/tls_adapter_quictls.cpp") catch @panic("oom");
         return;
     }
 
     if (std.mem.eql(u8, tls_backend, "boringssl")) {
-        files.append("src/quic/tls_adapter_boringssl.cpp") catch @panic("oom");
+        files.append("src/quic/crypto/tls_adapter_boringssl.cpp") catch @panic("oom");
         return;
     }
 
@@ -113,12 +113,12 @@ fn appendTlsAdapterSource(files: *StringList, tls_backend: []const u8) void {
 
 fn appendPacketCryptoSource(files: *StringList, tls_backend: []const u8) void {
     if (std.mem.eql(u8, tls_backend, "quictls")) {
-        files.append("src/quic/packet_crypto_quictls.cpp") catch @panic("oom");
+        files.append("src/quic/crypto/packet_crypto_quictls.cpp") catch @panic("oom");
         return;
     }
 
     if (std.mem.eql(u8, tls_backend, "boringssl")) {
-        files.append("src/quic/packet_crypto_boringssl.cpp") catch @panic("oom");
+        files.append("src/quic/crypto/packet_crypto_boringssl.cpp") catch @panic("oom");
         return;
     }
 
@@ -182,74 +182,74 @@ fn concatSlices(b: *std.Build, slices: []const []const []const u8) []const []con
 
 fn quicProductionSourceFiles() []const []const u8 {
     return &.{
-        "src/quic/buffer.cpp",
+        "src/quic/codec/buffer.cpp",
         "src/quic/cca/bbr.cpp",
         "src/quic/cca/common.cpp",
         "src/quic/cca/copa.cpp",
         "src/quic/cca/cubic.cpp",
         "src/quic/cca/newreno.cpp",
-        "src/quic/congestion.cpp",
-        "src/quic/connection.cpp",
-        "src/quic/connection_diagnostics.cpp",
-        "src/quic/connection_effects.cpp",
-        "src/quic/connection_flow_control.cpp",
-        "src/quic/connection_inbound_recovery.cpp",
-        "src/quic/connection_packet_inspection.cpp",
-        "src/quic/connection_paths_streams.cpp",
-        "src/quic/connection_qlog.cpp",
-        "src/quic/connection_send.cpp",
-        "src/quic/connection_timers.cpp",
+        "src/quic/transport/congestion.cpp",
+        "src/quic/connection/connection.cpp",
+        "src/quic/connection/connection_diagnostics.cpp",
+        "src/quic/connection/connection_effects.cpp",
+        "src/quic/connection/connection_flow_control.cpp",
+        "src/quic/connection/connection_inbound_recovery.cpp",
+        "src/quic/connection/connection_packet_inspection.cpp",
+        "src/quic/connection/connection_paths_streams.cpp",
+        "src/quic/connection/connection_qlog.cpp",
+        "src/quic/connection/connection_send.cpp",
+        "src/quic/connection/connection_timers.cpp",
         "src/quic/core.cpp",
-        "src/quic/crypto_stream.cpp",
-        "src/quic/frame.cpp",
-        "src/quic/packet.cpp",
-        "src/quic/packet_number.cpp",
-        "src/quic/plaintext_codec.cpp",
-        "src/quic/protected_codec.cpp",
+        "src/quic/crypto/crypto_stream.cpp",
+        "src/quic/codec/frame.cpp",
+        "src/quic/codec/packet.cpp",
+        "src/quic/codec/packet_number.cpp",
+        "src/quic/codec/plaintext_codec.cpp",
+        "src/quic/codec/protected_codec.cpp",
         "src/quic/qlog/json.cpp",
         "src/quic/qlog/session.cpp",
         "src/quic/qlog/sink.cpp",
-        "src/quic/recovery.cpp",
-        "src/quic/streams.cpp",
-        "src/quic/transport_parameters.cpp",
-        "src/quic/varint.cpp",
+        "src/quic/transport/recovery.cpp",
+        "src/quic/transport/streams.cpp",
+        "src/quic/transport/transport_parameters.cpp",
+        "src/quic/codec/varint.cpp",
     };
 }
 
 
 fn quicSourceFiles() []const []const u8 {
     return &.{
-        "src/quic/buffer.cpp",
+        "src/quic/codec/buffer.cpp",
         "src/quic/cca/bbr.cpp",
         "src/quic/cca/common.cpp",
         "src/quic/cca/copa.cpp",
         "src/quic/cca/cubic.cpp",
         "src/quic/cca/newreno.cpp",
-        "src/quic/congestion.cpp",
-        "src/quic/connection.cpp",
-        "src/quic/connection_diagnostics.cpp",
-        "src/quic/connection_effects.cpp",
-        "src/quic/connection_flow_control.cpp",
-        "src/quic/connection_inbound_recovery.cpp",
-        "src/quic/connection_packet_inspection.cpp",
-        "src/quic/connection_paths_streams.cpp",
-        "src/quic/connection_qlog.cpp",
-        "src/quic/connection_send.cpp",
-        "src/quic/connection_timers.cpp",
+        "src/quic/transport/congestion.cpp",
+        "src/quic/connection/connection.cpp",
+        "src/quic/connection/connection_diagnostics.cpp",
+        "src/quic/connection/connection_effects.cpp",
+        "src/quic/connection/connection_flow_control.cpp",
+        "src/quic/connection/connection_inbound_recovery.cpp",
+        "src/quic/connection/connection_packet_inspection.cpp",
+        "src/quic/connection/connection_paths_streams.cpp",
+        "src/quic/connection/connection_qlog.cpp",
+        "src/quic/connection/connection_send.cpp",
+        "src/quic/connection/connection_timers.cpp",
         "src/quic/core.cpp",
-        "src/quic/crypto_stream.cpp",
-        "src/quic/frame.cpp",
-        "src/quic/packet.cpp",
-        "src/quic/packet_number.cpp",
-        "src/quic/plaintext_codec.cpp",
-        "src/quic/protected_codec.cpp",
+        "src/quic/crypto/crypto_stream.cpp",
+        "src/quic/codec/frame.cpp",
+        "src/quic/codec/packet.cpp",
+        "src/quic/codec/packet_number.cpp",
+        "src/quic/codec/plaintext_codec.cpp",
+        "src/quic/codec/protected_codec.cpp",
         "src/quic/qlog/json.cpp",
         "src/quic/qlog/session.cpp",
         "src/quic/qlog/sink.cpp",
-        "src/quic/recovery.cpp",
-        "src/quic/streams.cpp",
-        "src/quic/transport_parameters.cpp",
-        "src/quic/varint.cpp",
+        "src/quic/transport/recovery.cpp",
+        "src/quic/transport/streams.cpp",
+        "src/quic/transport/transport_parameters.cpp",
+        "src/quic/codec/varint.cpp",
     };
 }
 
@@ -300,8 +300,8 @@ fn http3ProtocolSourceFiles() []const []const u8 {
 
 fn coreTestSupportSourceFiles() []const []const u8 {
     return &.{
-        "src/quic/connection_test_hooks.cpp",
-        "src/quic/protected_codec_test_hooks.cpp",
+        "src/quic/connection/connection_test_hooks.cpp",
+        "src/quic/codec/protected_codec_test_hooks.cpp",
     };
 }
 
@@ -608,39 +608,39 @@ fn addCoreFfiPackageLibraries(
 
 fn wasmQuicSourceFiles() []const []const u8 {
     return &.{
-        "src/quic/buffer.cpp",
+        "src/quic/codec/buffer.cpp",
         "src/quic/cca/bbr.cpp",
         "src/quic/cca/common.cpp",
         "src/quic/cca/copa.cpp",
         "src/quic/cca/cubic.cpp",
         "src/quic/cca/newreno.cpp",
-        "src/quic/congestion.cpp",
-        "src/quic/connection.cpp",
-        "src/quic/connection_diagnostics.cpp",
-        "src/quic/connection_effects.cpp",
-        "src/quic/connection_flow_control.cpp",
-        "src/quic/connection_inbound_recovery.cpp",
-        "src/quic/connection_packet_inspection.cpp",
-        "src/quic/connection_paths_streams.cpp",
-        "src/quic/connection_qlog.cpp",
-        "src/quic/connection_send.cpp",
-        "src/quic/connection_timers.cpp",
+        "src/quic/transport/congestion.cpp",
+        "src/quic/connection/connection.cpp",
+        "src/quic/connection/connection_diagnostics.cpp",
+        "src/quic/connection/connection_effects.cpp",
+        "src/quic/connection/connection_flow_control.cpp",
+        "src/quic/connection/connection_inbound_recovery.cpp",
+        "src/quic/connection/connection_packet_inspection.cpp",
+        "src/quic/connection/connection_paths_streams.cpp",
+        "src/quic/connection/connection_qlog.cpp",
+        "src/quic/connection/connection_send.cpp",
+        "src/quic/connection/connection_timers.cpp",
         "src/quic/core.cpp",
-        "src/quic/crypto_stream.cpp",
-        "src/quic/frame.cpp",
-        "src/quic/packet.cpp",
-        "src/quic/packet_crypto_boringssl.cpp",
-        "src/quic/packet_number.cpp",
-        "src/quic/plaintext_codec.cpp",
-        "src/quic/protected_codec.cpp",
+        "src/quic/crypto/crypto_stream.cpp",
+        "src/quic/codec/frame.cpp",
+        "src/quic/codec/packet.cpp",
+        "src/quic/crypto/packet_crypto_boringssl.cpp",
+        "src/quic/codec/packet_number.cpp",
+        "src/quic/codec/plaintext_codec.cpp",
+        "src/quic/codec/protected_codec.cpp",
         "src/quic/qlog/json.cpp",
         "src/quic/qlog/session.cpp",
         "src/quic/qlog/sink.cpp",
-        "src/quic/recovery.cpp",
-        "src/quic/streams.cpp",
-        "src/quic/tls_adapter_boringssl.cpp",
-        "src/quic/transport_parameters.cpp",
-        "src/quic/varint.cpp",
+        "src/quic/transport/recovery.cpp",
+        "src/quic/transport/streams.cpp",
+        "src/quic/crypto/tls_adapter_boringssl.cpp",
+        "src/quic/transport/transport_parameters.cpp",
+        "src/quic/codec/varint.cpp",
         "src/wasm/quic_wasm_api.cpp",
     };
 }

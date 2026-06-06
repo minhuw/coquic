@@ -12,12 +12,12 @@
 
 #include <gtest/gtest.h>
 
-#include "src/quic/packet_crypto_test_hooks.h"
+#include "src/quic/crypto/packet_crypto_test_hooks.h"
 #include "src/quic/core.h"
-#include "src/quic/protected_codec.h"
-#include "src/quic/protected_codec_test_hooks.h"
-#include "src/quic/recovery.h"
-#include "src/quic/streams.h"
+#include "src/quic/codec/protected_codec.h"
+#include "src/quic/codec/protected_codec_test_hooks.h"
+#include "src/quic/transport/recovery.h"
+#include "src/quic/transport/streams.h"
 #include "tests/support/quic_test_utils.h"
 
 namespace {

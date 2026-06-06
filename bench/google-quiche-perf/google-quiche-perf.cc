@@ -52,7 +52,7 @@
 #include "quiche/common/platform/api/quiche_reference_counted.h"
 #include "quiche/common/platform/api/quiche_system_event_loop.h"
 
-namespace {
+namespace coquic::bench::google_quiche_perf {
 
 using Clock = std::chrono::steady_clock;
 using Duration = std::chrono::microseconds;
@@ -1341,9 +1341,11 @@ int EmitSummary(const RunSummary &summary) {
     return 0;
 }
 
-} // namespace
+} // namespace coquic::bench::google_quiche_perf
 
 int main(int argc, char **argv) {
+    using namespace coquic::bench::google_quiche_perf;
+
     absl::InitializeLog();
 
     Config cfg;

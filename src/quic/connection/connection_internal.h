@@ -756,11 +756,11 @@ inline ConnectionId make_issued_connection_id(std::span<const std::byte> base_co
     }
     absorb_connection_id_seed_byte(state, 0xffu);
     absorb_connection_id_seed_byte(state, static_cast<std::uint8_t>(sequence_number & 0xffu));
-    const auto mixed_fallback_word = mix_connection_id_word(state + sequence_number);
     for (std::size_t i = 0; i < connection_id.size(); ++i) {
-        connection_id[i] = static_cast<std::byte>(
-            (mixed_fallback_word >> static_cast<unsigned>((i % sizeof(mixed_fallback_word)) * 8u)) &
-            0xffu);
+        connection_id[i] =
+            static_cast<std::byte>((mix_connection_id_word(state + sequence_number) >>
+                                    static_cast<unsigned>((i % sizeof(std::uint64_t)) * 8u)) &
+                                   0xffu);
     }
     return connection_id;
 }

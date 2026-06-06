@@ -194,7 +194,7 @@ std::uint64_t number_to_u64(napi_env env, napi_value value, std::uint64_t fallba
     if (napi_get_value_double(env, value, &number) != napi_ok) {
         return fallback;
     }
-    if (!std::isfinite(number) || number < 0 ||
+    if (!std::isfinite(number) || std::signbit(number) ||
         number > static_cast<double>(std::numeric_limits<std::uint64_t>::max())) {
         return fallback;
     }
@@ -914,10 +914,6 @@ napi_value FfiAbiVersion(napi_env env, napi_callback_info) {
     return make_u32(env, coquic_ffi_abi_version());
 }
 
-void finalize_endpoint_holder(napi_env, void *data, void *) {
-    delete static_cast<EndpointHolder *>(data);
-}
-
 napi_value EndpointConstructor(napi_env env, napi_callback_info info) {
     std::size_t argc = 1;
     napi_value argv[1]{};
@@ -945,8 +941,10 @@ napi_value EndpointConstructor(napi_env env, napi_callback_info info) {
 
     auto *new_endpoint_holder = new EndpointHolder{std::make_unique<EndpointWrap>(endpoint)};
     if (!check(env,
-               napi_wrap(env, this_value, new_endpoint_holder, finalize_endpoint_holder, nullptr,
-                         nullptr),
+               napi_wrap(
+                   env, this_value, new_endpoint_holder,
+                   [](napi_env, void *data, void *) { delete static_cast<EndpointHolder *>(data); },
+                   nullptr, nullptr),
                "failed to wrap endpoint")) {
         delete new_endpoint_holder;
         return nullptr;

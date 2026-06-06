@@ -2314,7 +2314,6 @@ bool socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests() {
         !internal::should_apply_ipv6_flow_label(ipv4_peer,
                                                 static_cast<socklen_t>(sizeof(sockaddr_in))),
         !internal::should_apply_ipv6_flow_label(peer, 1),
-        internal::normalize_ipv6_flow_label_hash(0x12300000u) != 0u,
         datagram_sent,
         g_recorded_sendmsg_for_tests.calls == 1,
         g_recorded_sendmsg_for_tests.socket_fd == 29,

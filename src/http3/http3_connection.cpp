@@ -1768,8 +1768,7 @@ void Http3Connection::apply_request_field_section(std::uint64_t stream_id,
         request->second.initial_headers_received = true;
         request->second.expected_content_length = head.value().content_length;
         request->second.connect_request = head.value().method == "CONNECT";
-        auto [response, inserted] = local_response_streams_.try_emplace(stream_id);
-        (void)inserted;
+        auto response = local_response_streams_.try_emplace(stream_id).first;
         response->second.connect_request = request->second.connect_request;
         pending_events_.push_back(Http3PeerRequestHeadEvent{
             .stream_id = stream_id,

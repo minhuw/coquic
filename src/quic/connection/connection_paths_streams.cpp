@@ -213,10 +213,10 @@ CodecResult<bool> QuicConnection::maybe_negotiate_server_version_from_client_hel
         return CodecResult<bool>::success(true);
     }
     const auto &peer_parameters = parameters.value();
-    const auto validation = validate_peer_transport_parameters(
-        opposite_role(config_.role), peer_parameters, validation_context.value());
-    if (!validation.has_value()) {
-        return CodecResult<bool>::failure(validation.error());
+    if (const auto validated = validate_peer_transport_parameters(
+            opposite_role(config_.role), peer_parameters, validation_context.value());
+        !validated.has_value()) {
+        return CodecResult<bool>::failure(validated.error());
     }
 
     peer_transport_parameters_ = peer_parameters;
@@ -392,11 +392,11 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
 
     const auto peer_transport_parameters =
         peer_transport_parameters_.value_or(TransportParameters{});
-    auto validation = validate_peer_transport_parameters(
-        opposite_role(config_.role), peer_transport_parameters, validation_context.value());
-    if (!validation.has_value()) {
-        log_codec_failure("validate_peer_transport_parameters", validation.error());
-        return CodecResult<bool>::failure(validation.error());
+    if (auto validated = validate_peer_transport_parameters(
+            opposite_role(config_.role), peer_transport_parameters, validation_context.value());
+        !validated.has_value()) {
+        log_codec_failure("validate_peer_transport_parameters", validated.error());
+        return CodecResult<bool>::failure(validated.error());
     }
     const bool accepted_zero_rtt = tls_.has_value() && tls_->early_data_accepted().value_or(false);
     if (config_.role == EndpointRole::client && accepted_zero_rtt) {

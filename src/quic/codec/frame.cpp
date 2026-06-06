@@ -429,24 +429,25 @@ std::optional<CodecError>
 decode_ack_additional_ranges(BufferReader &reader, std::uint64_t additional_range_count,
                              std::uint64_t ack_previous_smallest, OnRange &&on_range) {
     for (std::uint64_t i = 0; i < additional_range_count; ++i) {
-        const auto ack_gap = read_varint(reader);
-        if (!ack_gap.has_value()) {
-            return ack_gap.error();
+        const auto additional_range_gap_result = read_varint(reader);
+        if (!additional_range_gap_result.has_value()) {
+            return additional_range_gap_result.error();
         }
+        const auto additional_range_gap_value = additional_range_gap_result.value();
 
         const auto ack_range_length = read_varint(reader);
         if (!ack_range_length.has_value()) {
             return ack_range_length.error();
         }
 
-        if (ack_previous_smallest < ack_gap.value() + 2) {
+        if (ack_previous_smallest < additional_range_gap_value + 2) {
             return CodecError{
                 .code = CodecErrorCode::invalid_varint,
                 .offset = reader.offset(),
             };
         }
 
-        const auto largest = ack_previous_smallest - ack_gap.value() - 2;
+        const auto largest = ack_previous_smallest - additional_range_gap_value - 2;
         if (largest < ack_range_length.value()) {
             return CodecError{
                 .code = CodecErrorCode::invalid_varint,
@@ -454,7 +455,7 @@ decode_ack_additional_ranges(BufferReader &reader, std::uint64_t additional_rang
             };
         }
 
-        on_range(ack_gap.value(), ack_range_length.value());
+        on_range(additional_range_gap_value, ack_range_length.value());
         ack_previous_smallest = largest - ack_range_length.value();
     }
 
@@ -518,9 +519,9 @@ CodecResult<AckFrame> decode_ack_frame(BufferReader &reader, bool has_ecn_counts
 
     if (const auto error = decode_ack_additional_ranges(
             reader, header.value().additional_range_count, header.value().first_range_smallest,
-            [&frame](std::uint64_t ack_gap, std::uint64_t ack_range_length) {
+            [&frame](std::uint64_t decoded_range_gap_value, std::uint64_t ack_range_length) {
                 frame.additional_ranges.push_back(AckRange{
-                    .gap = ack_gap,
+                    .gap = decoded_range_gap_value,
                     .range_length = ack_range_length,
                 });
             });
@@ -1920,12 +1921,13 @@ std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
 
         BufferReader range_reader(
             cursor.encoded_additional_ranges.subspan(cursor.next_encoded_offset));
-        const auto ack_gap = read_varint(range_reader);
-        if (!ack_gap.has_value()) {
+        const auto encoded_range_gap_result = read_varint(range_reader);
+        if (!encoded_range_gap_result.has_value()) {
             cursor.next_additional_index = cursor.additional_range_count;
             cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
             return std::nullopt;
         }
+        const auto encoded_range_gap_value = encoded_range_gap_result.value();
 
         const auto ack_range_extent = read_varint(range_reader);
         if (!ack_range_extent.has_value()) {
@@ -1936,13 +1938,13 @@ std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
         cursor.next_encoded_offset += range_reader.offset();
         ++cursor.next_additional_index;
 
-        if (cursor.previous_smallest < ack_gap.value() + 2) {
+        if (cursor.previous_smallest < encoded_range_gap_value + 2) {
             cursor.next_additional_index = cursor.additional_range_count;
             cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
             return std::nullopt;
         }
 
-        const auto range_largest = cursor.previous_smallest - ack_gap.value() - 2;
+        const auto range_largest = cursor.previous_smallest - encoded_range_gap_value - 2;
         if (range_largest < ack_range_extent.value()) {
             cursor.next_additional_index = cursor.additional_range_count;
             cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();

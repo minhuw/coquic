@@ -431,6 +431,18 @@
         export CARGO_HOME="$TMPDIR/cargo-home"
         mkdir -p "$HOME" "$CARGO_HOME"
       '';
+      goBuildHome = ''
+        export HOME="$TMPDIR/home"
+        export GOCACHE="$TMPDIR/go-cache"
+        export GOPATH="$TMPDIR/go"
+        export GOMODCACHE="$GOPATH/pkg/mod"
+        mkdir -p "$HOME" "$GOCACHE" "$GOMODCACHE"
+      '';
+      nodeBuildHome = ''
+        export HOME="$TMPDIR/home"
+        export npm_config_cache="$TMPDIR/npm-cache"
+        mkdir -p "$HOME" "$npm_config_cache"
+      '';
       mkOfficialEndpointOverlay =
         {
           name,
@@ -589,6 +601,7 @@
         version = "dev";
         src = ./bench/quicgo-perf;
         vendorHash = "sha256-lqos9WjFCedcUHa1Y6lWVxaggTrS4fwlbn352OqLTfw=";
+        prePatch = goBuildHome;
         env.CGO_ENABLED = "0";
       };
       quinnPerfClient = pkgs.rustPlatform.buildRustPackage {
@@ -680,10 +693,9 @@
           boringsslPackage
           pkgs.stdenv.cc.cc.lib
         ];
+        preBuild = goBuildHome;
         buildPhase = ''
           runHook preBuild
-          export GOCACHE="$TMPDIR/go-cache"
-          export GOPATH="$TMPDIR/go"
           export GOFLAGS="-mod=mod"
           pushd bench/coquic-go-perf
           go build -tags boringssl -trimpath -o coquic-go-perf ./cmd/coquic-go-perf
@@ -724,6 +736,7 @@
           boringsslPackage
           pkgs.stdenv.cc.cc.lib
         ];
+        preBuild = nodeBuildHome;
         buildPhase = ''
           runHook preBuild
           npm --prefix bindings/javascript run build

@@ -43,6 +43,7 @@ TEST(QuicHttp09InteropTest, BuildsRuntimeConfigWithRunnerDefaultsAndClientFallba
     EXPECT_TRUE(runtime.host.empty());
     EXPECT_TRUE(runtime.server_name.empty());
     EXPECT_EQ(runtime.application_protocol, "hq-interop");
+    EXPECT_FALSE(runtime.verify_peer);
     EXPECT_EQ(runtime.document_root, std::filesystem::path("/www"));
     EXPECT_EQ(runtime.download_root, std::filesystem::path("/downloads"));
     EXPECT_EQ(runtime.certificate_chain_path, std::filesystem::path("/certs/cert.pem"));
@@ -228,6 +229,7 @@ TEST(QuicHttp09InteropTest, ParsesServerEnvironmentAndCliFlags) {
         EXPECT_EQ(runtime.certificate_chain_path, std::filesystem::path("/tls/cert.pem"));
         EXPECT_EQ(runtime.private_key_path, std::filesystem::path("/tls/key.pem"));
         EXPECT_EQ(runtime.server_name, "interop.example");
+        EXPECT_FALSE(runtime.verify_peer);
     }
 
     {

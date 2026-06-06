@@ -11,8 +11,29 @@ readonly interop_peer_image="${INTEROP_PEER_IMAGE:-}"
 readonly simulator_image="${INTEROP_SIMULATOR_IMAGE:-martenseemann/quic-network-simulator@sha256:c23d82a55caffe681b1bdae65d4d30d23e1283141a414a7f02ee56cf15f9c6b9}"
 readonly iperf_image="${INTEROP_IPERF_IMAGE:-martenseemann/quic-interop-iperf-endpoint@sha256:cb50cc8019d45d9cad5faecbe46a3c21dd5e871949819a5175423755a9045106}"
 readonly interop_testcases="${INTEROP_TESTCASES:-handshake,transfer}"
-readonly interop_coquic_server_testcases="${INTEROP_COQUIC_SERVER_TESTCASES:-${interop_testcases}}"
-readonly interop_coquic_client_testcases="${INTEROP_COQUIC_CLIENT_TESTCASES:-${interop_testcases}}"
+csv_without_testcases() {
+  local requested=$1
+  local skipped=$2
+
+  python3 - "${requested}" "${skipped}" <<'PY'
+import sys
+
+requested = [test for test in sys.argv[1].split(",") if test]
+skipped = {test for test in sys.argv[2].replace(",", " ").split() if test}
+print(",".join(test for test in requested if test not in skipped))
+PY
+}
+
+readonly interop_coquic_server_testcases="$(
+  csv_without_testcases \
+    "${INTEROP_COQUIC_SERVER_TESTCASES:-${interop_testcases}}" \
+    "${INTEROP_COQUIC_SERVER_SKIP_TESTCASES:-}"
+)"
+readonly interop_coquic_client_testcases="$(
+  csv_without_testcases \
+    "${INTEROP_COQUIC_CLIENT_TESTCASES:-${interop_testcases}}" \
+    "${INTEROP_COQUIC_CLIENT_SKIP_TESTCASES:-}"
+)"
 readonly interop_directions="${INTEROP_DIRECTIONS:-both}"
 readonly interop_analysis_shell_package="${INTEROP_ANALYSIS_SHELL_PACKAGE:-nixpkgs#wireshark}"
 readonly interop_runner_output_tail_lines="${INTEROP_RUNNER_OUTPUT_TAIL_LINES:-200}"

@@ -165,9 +165,10 @@ nix develop -c bash interop/run-official.sh
 
 The separate GitHub Actions workflow in `.github/workflows/interop.yml` builds
 and loads `coquic-interop:quictls-musl`, pulls the pinned official peer,
-simulator, and iperf images, and runs the full pinned QUIC testcase and
-measurement list for every peer in both directions through
-`interop/run-official.sh`.
+simulator, and iperf images, and runs peer-specific QUIC testcase and
+measurement lists through `interop/run-official.sh`. The workflow keeps the full
+testcase list as the default and narrows individual peer/direction cells where
+the current official peer image does not support or cannot pass that case.
 
 Official runner results marked `unsupported` are preserved in the summary and
 published matrix but do not fail the workflow. Results marked `failed`, missing

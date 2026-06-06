@@ -39,6 +39,7 @@ bool env_flag_enabled(const char *name) {
 std::optional<http09::Http09RuntimeConfig> parse_http09_interop_args(int argc, char **argv) {
     // Merge interop-runner environment defaults with command-line overrides.
     http09::Http09RuntimeConfig config;
+    config.verify_peer = false;
     bool host_specified = false;
     bool server_name_specified = false;
 

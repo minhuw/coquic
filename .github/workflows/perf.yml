@@ -233,6 +233,16 @@ jobs:
         run: |
           docker version
 
+      - name: Clean Unsandboxed Nix Build Home
+        run: |
+          if [ -d /homeless-shelter ]; then
+            if command -v sudo >/dev/null; then
+              sudo rm -rf /homeless-shelter
+            else
+              rm -rf /homeless-shelter
+            fi
+          fi
+
       - name: Run ${{ matrix.display_name }} Perf CI Matrix
         id: run_perf
         continue-on-error: true

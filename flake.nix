@@ -22,6 +22,7 @@
       llvmPkgs = pkgs.llvmPackages_20;
       coverageLlvmPkgs = pkgs.llvmPackages_21;
       zig = pkgs.zig_0_16;
+      goToolchain = pkgs.go_1_25;
       ngtcp2TlsPackage = pkgs.openssl;
       staticPkgs = pkgs.pkgsStatic;
       staticLlvmPkgs = staticPkgs.llvmPackages_20;
@@ -681,7 +682,7 @@
         version = "dev";
         src = projectSrc;
         nativeBuildInputs = [
-          pkgs.go
+          goToolchain
           pkgs.makeWrapper
         ];
         buildInputs = [
@@ -746,7 +747,7 @@
           runHook preInstall
           mkdir -p \
             "$out/bin" \
-            "$out/share/coquic-js-binding/build/Release" \
+            "$out/share/coquic-js-binding/native" \
             "$out/share/coquic-js-binding/scripts" \
             "$out/share/coquic-js-binding/src" \
             "$out/share/coquic-js-binding" \
@@ -757,7 +758,7 @@
             "$out/share/coquic-js-binding/scripts/build-native.mjs"
           cp bindings/javascript/src/addon.cpp "$out/share/coquic-js-binding/src/addon.cpp"
           cp bindings/javascript/build/Release/coquic_js.node \
-            "$out/share/coquic-js-binding/build/Release/coquic_js.node"
+            "$out/share/coquic-js-binding/native/coquic_js.node"
           cp -R bench/coquic-js-perf/. "$out/share/coquic-js-perf/"
           rm -rf \
             "$out/share/coquic-js-binding/node_modules" \
@@ -767,7 +768,6 @@
             "$out/share/coquic-js-perf/node_modules/@coquic/coquic"
           makeWrapper "${pkgs.nodejs}/bin/node" "$out/bin/coquic-js-perf" \
             --add-flags "$out/share/coquic-js-perf/bin/coquic-js-perf.mjs" \
-            --set COQUIC_JS_NATIVE_PATH "$out/share/coquic-js-binding/build/Release/coquic_js.node" \
             --prefix LD_LIBRARY_PATH : ${
               lib.makeLibraryPath [
                 boringsslPackage
@@ -1830,6 +1830,7 @@ EOF
           pkgs.lldb
           pkgs.mkcert
           pkgs.nodejs
+          goToolchain
           boringssl
           pkgs.python3
           pkgs.uv

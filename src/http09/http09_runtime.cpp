@@ -1551,7 +1551,7 @@ void refresh_server_session_connection_id_routes(ServerSession &session,
     std::vector<std::string> active_route_keys;
     for (const auto &connection_id : session.core.active_local_connection_ids()) {
         const auto route_key = connection_id_key(connection_id);
-        if (route_key.empty() | route_key == session.local_connection_id_key) {
+        if ((route_key.empty()) | (route_key == session.local_connection_id_key)) {
             continue;
         }
         connection_id_routes[route_key] = session.local_connection_id_key;
@@ -3531,7 +3531,7 @@ int run_http09_runtime(const Http09RuntimeConfig &config) {
     init_runtime_logging();
 
     if (config.mode == Http09RuntimeMode::health_check) {
-        return kProjectName.empty() | !runtime_has_openssl() | !runtime_logging_ready_flag();
+        return (kProjectName.empty()) | (!runtime_has_openssl()) | (!runtime_logging_ready_flag());
     }
     if (config.mode == Http09RuntimeMode::client) {
         return run_http09_client(config);

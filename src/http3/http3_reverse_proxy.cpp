@@ -90,7 +90,7 @@ ReverseProxySocketOps g_reverse_proxy_socket_ops;
 
 class ScopedReverseProxySocketOpsForTest {
   public:
-    explicit ScopedReverseProxySocketOpsForTest(ReverseProxySocketOps ops)
+    explicit ScopedReverseProxySocketOpsForTest(const ReverseProxySocketOps &ops)
         : previous_(g_reverse_proxy_socket_ops) {
         g_reverse_proxy_socket_ops = ops;
     }

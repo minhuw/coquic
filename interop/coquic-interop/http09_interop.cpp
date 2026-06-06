@@ -42,6 +42,7 @@ std::optional<http09::Http09RuntimeConfig> parse_http09_interop_args(int argc, c
     bool host_specified = false;
     bool server_name_specified = false;
 
+    // The official runner mostly configures endpoints through environment variables.
     if (const auto role = getenv_string("ROLE"); role.has_value()) {
         if (!http09::parse_role_into(config, *role)) {
             std::cerr << kUsageLine << '\n';
@@ -105,6 +106,7 @@ std::optional<http09::Http09RuntimeConfig> parse_http09_interop_args(int argc, c
         config.retry_enabled = true;
     }
 
+    // Positional subcommands and flags override environment-provided defaults.
     int index = 1;
     if (index < argc) {
         const std::string_view subcommand = argv[index];
@@ -219,6 +221,7 @@ std::optional<http09::Http09RuntimeConfig> parse_http09_interop_args(int argc, c
         continue;
     }
 
+    // Interop clients derive peer authority from REQUESTS unless a caller explicitly overrides it.
     if (config.mode == http09::Http09RuntimeMode::client && config.requests_env.empty()) {
         std::cerr << kUsageLine << '\n';
         return std::nullopt;

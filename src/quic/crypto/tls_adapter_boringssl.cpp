@@ -474,8 +474,12 @@ std::string server_context_cache_key(const TlsAdapterConfig &config) {
 }
 
 bool shared_server_context_allowed(const TlsAdapterConfig &config) {
-    return config.role == EndpointRole::server && !tls_adapter_fault_armed() &&
-           !COQUIC_TLS_ADAPTER_SINGLE_THREADED_WASM;
+#if COQUIC_TLS_ADAPTER_SINGLE_THREADED_WASM
+    static_cast<void>(config);
+    return false;
+#else
+    return config.role == EndpointRole::server && !tls_adapter_fault_armed();
+#endif
 }
 
 #if !COQUIC_TLS_ADAPTER_SINGLE_THREADED_WASM

@@ -191,7 +191,9 @@ std::uint64_t number_to_u64(napi_env env, napi_value value, std::uint64_t fallba
         return out;
     }
     double number = static_cast<double>(fallback);
-    napi_get_value_double(env, value, &number);
+    if (napi_get_value_double(env, value, &number) != napi_ok) {
+        return fallback;
+    }
     if (!std::isfinite(number) || number < 0 ||
         number > static_cast<double>(std::numeric_limits<std::uint64_t>::max())) {
         return fallback;
@@ -777,6 +779,7 @@ napi_value effect_to_js(napi_env env, const coquic_effect_t &raw) {
         const auto &value = raw.as.peer_preferred_address_available;
         set_string(env, out, "kind", "peer_preferred_address_available");
         set_u64(env, out, "connection", value.connection);
+        // Keep nested address fields grouped so callers can distinguish absent and zero values.
         set_named(env, out, "preferredAddress",
                   preferred_address_to_js(env, value.preferred_address));
         break;
@@ -810,6 +813,7 @@ napi_value effect_to_js(napi_env env, const coquic_effect_t &raw) {
         break;
     }
     default:
+        // Preserve unknown effect discriminants so newer native libraries remain diagnosable.
         set_string(env, out, "kind", "unknown");
         set_u32(env, out, "unknown", raw.kind);
         break;

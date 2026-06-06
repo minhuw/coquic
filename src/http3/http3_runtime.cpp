@@ -398,49 +398,9 @@ std::optional<std::filesystem::path> &forced_file_size_failure_path_for_test() {
     return path;
 }
 
-bool &force_bootstrap_guard_failure_for_test() {
-    static bool enabled = false;
+std::atomic<bool> &force_bootstrap_guard_failure_for_test() {
+    static std::atomic<bool> enabled = false;
     return enabled;
-}
-
-std::optional<std::size_t> &force_server_handle_result_failure_after_calls_for_test() {
-    static std::optional<std::size_t> remaining_calls;
-    return remaining_calls;
-}
-
-std::optional<std::size_t> &force_client_handle_result_failure_after_calls_for_test() {
-    static std::optional<std::size_t> remaining_calls;
-    return remaining_calls;
-}
-
-std::size_t &force_server_due_timer_count_for_test() {
-    static std::size_t count = 0;
-    return count;
-}
-
-std::size_t &force_client_due_timer_count_for_test() {
-    static std::size_t count = 0;
-    return count;
-}
-
-std::size_t &force_server_drain_failure_count_for_test() {
-    static std::size_t count = 0;
-    return count;
-}
-
-std::size_t &force_server_polled_submit_failure_count_for_test() {
-    static std::size_t count = 0;
-    return count;
-}
-
-std::size_t &force_client_initial_submit_failure_count_for_test() {
-    static std::size_t count = 0;
-    return count;
-}
-
-std::size_t &force_streaming_reverse_proxy_thread_failure_count_for_test() {
-    static std::size_t count = 0;
-    return count;
 }
 
 std::optional<quic::QuicCoreEndpointConfig> &forced_server_endpoint_config_for_test() {
@@ -463,26 +423,6 @@ std::optional<io::QuicServerIoBootstrap> take_forced_server_bootstrap_for_test()
     auto bootstrap = std::move(forced_server_bootstrap_for_test());
     forced_server_bootstrap_for_test().reset();
     return bootstrap;
-}
-
-bool consume_forced_failure_after_calls(std::optional<std::size_t> &remaining_calls) {
-    if (!remaining_calls.has_value()) {
-        return false;
-    }
-    if (*remaining_calls == 0) {
-        remaining_calls.reset();
-        return true;
-    }
-    --*remaining_calls;
-    return false;
-}
-
-bool consume_forced_count(std::size_t &count) {
-    if (count == 0) {
-        return false;
-    }
-    --count;
-    return true;
 }
 
 std::optional<std::vector<std::byte>> read_runtime_file_bytes(const std::filesystem::path &path) {
@@ -1003,7 +943,7 @@ Http3BootstrapConfig make_http3_bootstrap_config(const Http3RuntimeConfig &confi
 int run_http3_bootstrap_server_guarded(const Http3BootstrapConfig &config,
                                        const std::atomic<bool> *stop_requested) noexcept {
     try {
-        if (force_bootstrap_guard_failure_for_test()) {
+        if (force_bootstrap_guard_failure_for_test().exchange(false)) {
             throw 1;
         }
         return run_http3_bootstrap_server(config, stop_requested);
@@ -1058,10 +998,10 @@ class RuntimeTestBackend final : public io::QuicIoBackend {
 
 class RuntimeScopedTempDir {
   public:
-    RuntimeScopedTempDir() {
-        path_ = std::filesystem::temp_directory_path() /
+    RuntimeScopedTempDir()
+        : path_(std::filesystem::temp_directory_path() /
                 ("coquic-h3-runtime-" +
-                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))) {
         std::error_code ignored;
         std::filesystem::create_directories(path_, ignored);
     }
@@ -1123,11 +1063,6 @@ class StreamingReverseProxyDispatcher {
         }
 
         try {
-            if (consume_forced_count(
-                    force_streaming_reverse_proxy_thread_failure_count_for_test())) {
-                throw std::system_error(
-                    std::make_error_code(std::errc::resource_unavailable_try_again));
-            }
             job_it->second.worker =
                 std::thread([config = config_, request = std::move(request), queue]() mutable {
                     stream_http_reverse_proxy_response(config, request,
@@ -1346,8 +1281,7 @@ class Http3ServerRuntime {
             }
             const auto current = quic::QuicCoreClock::now();
             const auto core_next_wakeup = core_.next_wakeup();
-            if (consume_forced_count(force_server_due_timer_count_for_test()) ||
-                (core_next_wakeup.has_value() && *core_next_wakeup <= current)) {
+            if (core_next_wakeup.has_value() && *core_next_wakeup <= current) {
                 if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, current),
                                    current)) {
                     return 1;
@@ -1389,10 +1323,6 @@ class Http3ServerRuntime {
 
   private:
     bool handle_result(const quic::QuicCoreResult &result, quic::QuicCoreTimePoint now) {
-        if (consume_forced_failure_after_calls(
-                force_server_handle_result_failure_after_calls_for_test())) {
-            return false;
-        }
         std::optional<quic::QuicConnectionHandle> local_error_connection;
         if (result.local_error.has_value()) {
             if (!result.local_error->connection.has_value()) {
@@ -1494,9 +1424,6 @@ class Http3ServerRuntime {
 
     bool drain_endpoint(quic::QuicConnectionHandle connection, Http3ServerEndpointUpdate update,
                         quic::QuicCoreTimePoint now) {
-        if (consume_forced_count(force_server_drain_failure_count_for_test())) {
-            return false;
-        }
         if (!submit_endpoint_commands(connection, std::move(update.core_inputs), now)) {
             return false;
         }
@@ -1513,11 +1440,6 @@ class Http3ServerRuntime {
             update = endpoint_it->second.poll(now);
             if (!server_update_has_immediate_work(update)) {
                 return true;
-            }
-            const bool force_submit_failure =
-                consume_forced_count(force_server_polled_submit_failure_count_for_test());
-            if (force_submit_failure) {
-                return false;
             }
             if (!submit_endpoint_commands(connection, std::move(update.core_inputs), now)) {
                 return false;
@@ -1593,11 +1515,6 @@ class Http3ClientRuntime {
         }
         for (const auto &transfer : transfers_) {
             auto submitted = endpoint_.submit_request(transfer.execution.request);
-            if (consume_forced_count(force_client_initial_submit_failure_count_for_test())) {
-                submitted = Http3Result<std::uint64_t>::failure(Http3Error{
-                    .detail = "forced initial request submission failure for tests",
-                });
-            }
             if (!submitted.has_value()) {
                 return 1;
             }
@@ -1627,7 +1544,7 @@ class Http3ClientRuntime {
             const auto next_wakeup = core_.next_wakeup();
             const bool wakeup_due =
                 next_wakeup.value_or(current + std::chrono::nanoseconds{1}) <= current;
-            if (consume_forced_count(force_client_due_timer_count_for_test()) || wakeup_due) {
+            if (wakeup_due) {
                 if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, current),
                                    current)) {
                     return 1;
@@ -1663,10 +1580,6 @@ class Http3ClientRuntime {
 
   private:
     bool handle_result(const quic::QuicCoreResult &result, quic::QuicCoreTimePoint now) {
-        if (consume_forced_failure_after_calls(
-                force_client_handle_result_failure_after_calls_for_test())) {
-            return false;
-        }
         if (result.local_error.has_value()) {
             return false;
         }
@@ -1811,7 +1724,7 @@ void runtime_clear_forced_file_read_failure_path_for_test() {
 }
 
 void runtime_set_force_bootstrap_guard_failure_for_test(bool enabled) {
-    force_bootstrap_guard_failure_for_test() = enabled;
+    force_bootstrap_guard_failure_for_test().store(enabled);
 }
 
 void runtime_set_forced_server_endpoint_config_for_test(

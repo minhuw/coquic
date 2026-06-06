@@ -3231,8 +3231,7 @@ QuicCoreResult QuicCore::advance_endpoint(QuicCoreEndpointInput input, QuicCoreT
     }
 
     QuicCoreResult result;
-    const auto due_connection_handles_snapshot = due_connection_handles(now);
-    for (const auto handle : due_connection_handles_snapshot) {
+    for (const auto handle : due_connection_handles(now)) {
         auto entry_it = connections_.find(handle);
         if (entry_it == connections_.end() || entry_it->second.connection == nullptr) {
             continue;

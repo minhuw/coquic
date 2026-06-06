@@ -48,8 +48,11 @@ function findNodeIncludeDir() {
   ].filter(Boolean);
 
   for (const candidate of candidates) {
-    if (fs.existsSync(path.join(candidate, "node_api.h"))) {
+    try {
+      fs.accessSync(path.join(candidate, "node_api.h"), fs.constants.R_OK);
       return candidate;
+    } catch {
+      continue;
     }
   }
 

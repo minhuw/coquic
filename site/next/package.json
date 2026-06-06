@@ -51,7 +51,6 @@
       "declaration-empty-line-before": null,
       "import-notation": null,
       "media-feature-range-notation": null,
-      "scss/function-disallowed-list": null,
       "value-keyword-case": null
     }
   },

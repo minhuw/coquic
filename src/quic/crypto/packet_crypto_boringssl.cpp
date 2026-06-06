@@ -684,7 +684,7 @@ serialize_retry_pseudo_packet(const RetryPacket &packet,
 
 CodecResult<std::size_t> seal_cipher_chunks_into(const EVP_CIPHER *packet_cipher,
                                                  const SealCipherChunksRequest &request) {
-    // Prepare one AEAD operation over split plaintext chunks while preserving OpenSSL int limits.
+    // Validate the combined AEAD inputs before handing sizes to OpenSSL's int-based API.
     const auto plaintext_length = total_plaintext_length(request.plaintext_chunks);
     if (!plaintext_length.has_value()) {
         return plaintext_length;
@@ -725,6 +725,7 @@ CodecResult<std::size_t> seal_cipher_chunks_into(const EVP_CIPHER *packet_cipher
         }
     }
 
+    // Feed each plaintext chunk through the same AEAD context, then append one trailing tag.
     auto payload_output = request.ciphertext.first(request.ciphertext.size() - aead_tag_length);
     std::size_t payload_bytes_produced = 0;
     for (const auto &chunk : request.plaintext_chunks) {
@@ -764,6 +765,7 @@ CodecResult<std::size_t> seal_cipher_chunks_into(const EVP_CIPHER *packet_cipher
                                                  0);
     }
 
+    // OpenSSL reports final payload bytes separately; the QUIC tag is placed after that payload.
     const auto total_ciphertext_length =
         payload_bytes_produced + static_cast<std::size_t>(final_length);
     if (total_ciphertext_length + aead_tag_length > request.ciphertext.size()) {

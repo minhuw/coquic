@@ -308,6 +308,7 @@ uint64_t CeilDiv(uint64_t numerator, uint64_t denominator) {
 }
 
 using GoogleQuicheConfig = quic::QuicConfig;
+using GoogleQuicheSocketAddress = quic::QuicSocketAddress;
 using GoogleQuicheVersionVector = quic::ParsedQuicVersionVector;
 
 GoogleQuicheConfig QuicConfigForPerf() {
@@ -326,7 +327,7 @@ GoogleQuicheConfig QuicConfigForPerf() {
 
 GoogleQuicheVersionVector SupportedVersions() {
     GoogleQuicheVersionVector versions = {quic::ParsedQuicVersion::RFCv1()};
-    for (const quic::ParsedQuicVersion &version : versions) {
+    for (const auto &version : versions) {
         quic::QuicEnableVersion(version);
     }
     return versions;
@@ -356,13 +357,13 @@ std::unique_ptr<quic::ProofSource> LoadProofSource(const Config &cfg) {
     return proof;
 }
 
-quic::QuicSocketAddress ResolveRemote(const Config &cfg) {
-    quic::QuicSocketAddress addr =
+GoogleQuicheSocketAddress ResolveRemote(const Config &cfg) {
+    GoogleQuicheSocketAddress address =
         quic::tools::LookupAddress(AF_UNSPEC, cfg.host, absl::StrCat(cfg.port));
-    if (!addr.IsInitialized()) {
+    if (!address.IsInitialized()) {
         throw std::runtime_error(absl::StrCat("unable to resolve address: ", cfg.host));
     }
-    return addr;
+    return address;
 }
 
 void EncodeU64(std::array<char, kRequestHeaderSize> *header, size_t offset, uint64_t value) {

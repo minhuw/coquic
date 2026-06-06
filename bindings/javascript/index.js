@@ -83,67 +83,62 @@ export const PacketInspectionPacketType = Object.freeze({
   ONE_RTT: 3,
 });
 
-export class TlsIdentity {
-  constructor({ certificatePem = Buffer.alloc(0), privateKeyPem = Buffer.alloc(0) } = {}) {
-    this.certificatePem = toBuffer(certificatePem);
-    this.privateKeyPem = toBuffer(privateKeyPem);
-  }
+export function TlsIdentity({
+  certificatePem = Buffer.alloc(0),
+  privateKeyPem = Buffer.alloc(0),
+} = {}) {
+  this.certificatePem = toBuffer(certificatePem);
+  this.privateKeyPem = toBuffer(privateKeyPem);
 }
 
-export class ZeroRttConfig {
-  constructor({ attempt = false, allow = false, applicationContext = Buffer.alloc(0) } = {}) {
-    this.attempt = Boolean(attempt);
-    this.allow = Boolean(allow);
-    this.applicationContext = toBuffer(applicationContext);
-  }
+export function ZeroRttConfig({
+  attempt = false,
+  allow = false,
+  applicationContext = Buffer.alloc(0),
+} = {}) {
+  this.attempt = Boolean(attempt);
+  this.allow = Boolean(allow);
+  this.applicationContext = toBuffer(applicationContext);
 }
 
-export class TransportConfig {
-  constructor(values = {}) {
-    Object.assign(this, native.defaultTransportConfig(), values);
-  }
+export function TransportConfig(values = {}) {
+  Object.assign(this, native.defaultTransportConfig(), values);
 }
 
-export class EndpointConfig {
-  constructor(values = {}) {
-    const defaults = native.defaultEndpointConfig();
-    Object.assign(this, defaults, values);
-    this.supportedVersions = Array.from(values.supportedVersions ?? defaults.supportedVersions);
-    this.applicationProtocol = toBuffer(values.applicationProtocol ?? defaults.applicationProtocol);
-    this.identity = values.identity == null ? null : new TlsIdentity(values.identity);
-    this.transport = new TransportConfig(values.transport ?? defaults.transport);
-    this.zeroRtt = new ZeroRttConfig(values.zeroRtt ?? defaults.zeroRtt);
-  }
+export function EndpointConfig(values = {}) {
+  const defaults = native.defaultEndpointConfig();
+  Object.assign(this, defaults, values);
+  this.supportedVersions = Array.from(values.supportedVersions ?? defaults.supportedVersions);
+  this.applicationProtocol = toBuffer(values.applicationProtocol ?? defaults.applicationProtocol);
+  this.identity = values.identity == null ? null : new TlsIdentity(values.identity);
+  this.transport = new TransportConfig(values.transport ?? defaults.transport);
+  this.zeroRtt = new ZeroRttConfig(values.zeroRtt ?? defaults.zeroRtt);
 }
 
-export class ResumptionState {
-  constructor({ serialized = Buffer.alloc(0) } = {}) {
-    this.serialized = toBuffer(serialized);
-  }
+export function ResumptionState({ serialized = Buffer.alloc(0) } = {}) {
+  this.serialized = toBuffer(serialized);
 }
 
-export class ClientConnectionConfig {
-  constructor(values = {}) {
-    const defaults = native.defaultClientConnectionConfig();
-    Object.assign(this, defaults, values);
-    this.sourceConnectionId = toBuffer(
-      values.sourceConnectionId ?? defaults.sourceConnectionId,
-    );
-    this.initialDestinationConnectionId = toBuffer(
-      values.initialDestinationConnectionId ?? defaults.initialDestinationConnectionId,
-    );
-    this.originalDestinationConnectionId =
-      values.originalDestinationConnectionId == null
-        ? null
-        : toBuffer(values.originalDestinationConnectionId);
-    this.retrySourceConnectionId =
-      values.retrySourceConnectionId == null ? null : toBuffer(values.retrySourceConnectionId);
-    this.retryToken = toBuffer(values.retryToken ?? defaults.retryToken);
-    this.serverName = toBuffer(values.serverName ?? defaults.serverName);
-    this.resumptionState =
-      values.resumptionState == null ? null : new ResumptionState(values.resumptionState);
-    this.zeroRtt = new ZeroRttConfig(values.zeroRtt ?? defaults.zeroRtt);
-  }
+export function ClientConnectionConfig(values = {}) {
+  const defaults = native.defaultClientConnectionConfig();
+  Object.assign(this, defaults, values);
+  this.sourceConnectionId = toBuffer(
+    values.sourceConnectionId ?? defaults.sourceConnectionId,
+  );
+  this.initialDestinationConnectionId = toBuffer(
+    values.initialDestinationConnectionId ?? defaults.initialDestinationConnectionId,
+  );
+  this.originalDestinationConnectionId =
+    values.originalDestinationConnectionId == null
+      ? null
+      : toBuffer(values.originalDestinationConnectionId);
+  this.retrySourceConnectionId =
+    values.retrySourceConnectionId == null ? null : toBuffer(values.retrySourceConnectionId);
+  this.retryToken = toBuffer(values.retryToken ?? defaults.retryToken);
+  this.serverName = toBuffer(values.serverName ?? defaults.serverName);
+  this.resumptionState =
+    values.resumptionState == null ? null : new ResumptionState(values.resumptionState);
+  this.zeroRtt = new ZeroRttConfig(values.zeroRtt ?? defaults.zeroRtt);
 }
 
 export class ClientConfig {
@@ -175,18 +170,16 @@ export class ClientConfig {
   }
 }
 
-export class InboundDatagram {
-  constructor({
-    bytes,
-    routeHandle = null,
-    addressValidationIdentity = Buffer.alloc(0),
-    ecn = EcnCodepoint.UNAVAILABLE,
-  }) {
-    this.bytes = toBuffer(bytes);
-    this.routeHandle = routeHandle;
-    this.addressValidationIdentity = toBuffer(addressValidationIdentity);
-    this.ecn = ecn;
-  }
+export function InboundDatagram({
+  bytes,
+  routeHandle = null,
+  addressValidationIdentity = Buffer.alloc(0),
+  ecn = EcnCodepoint.UNAVAILABLE,
+}) {
+  this.bytes = toBuffer(bytes);
+  this.routeHandle = routeHandle;
+  this.addressValidationIdentity = toBuffer(addressValidationIdentity);
+  this.ecn = ecn;
 }
 
 export class Endpoint {
@@ -349,19 +342,19 @@ function toBuffer(value) {
 }
 
 function loadNative() {
-  const candidates = [
-    process.env.COQUIC_JS_NATIVE_PATH,
-    path.join(packageRoot, "native", "coquic_js.node"),
-    path.join(packageRoot, "build", "Release", "coquic_js.node"),
-  ].filter(Boolean);
-
   const errors = [];
-  for (const candidate of candidates) {
-    try {
-      return require(candidate);
-    } catch (error) {
-      errors.push(`${candidate}: ${error.message}`);
-    }
+  try {
+    return require("./native/coquic_js.node");
+  } catch (error) {
+    errors.push(`${path.join(packageRoot, "native", "coquic_js.node")}: ${error.message}`);
+  }
+
+  try {
+    return require("./build/Release/coquic_js.node");
+  } catch (error) {
+    errors.push(
+      `${path.join(packageRoot, "build", "Release", "coquic_js.node")}: ${error.message}`,
+    );
   }
 
   throw new Error(`failed to load CoQUIC native addon:\n${errors.join("\n")}`);

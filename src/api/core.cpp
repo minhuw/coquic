@@ -522,14 +522,6 @@ ConnectionDiagnostics from_internal(const quic::QuicCoreConnectionDiagnostics &d
     };
 }
 
-bool diagnostics_have_pending_stream_send(
-    std::span<const quic::QuicCoreConnectionDiagnostics> diagnostics) {
-    return std::ranges::any_of(diagnostics, [](const auto &connection) {
-        return std::ranges::any_of(connection.streams,
-                                   [](const auto &stream) { return stream.pending_send; });
-    });
-}
-
 template <typename T> std::vector<T> effects_of(const Result &result) {
     std::vector<T> out;
     for (const auto &effect : result.effects) {
@@ -608,7 +600,10 @@ bool Endpoint::has_send_continuation_pending() const {
 
 bool Endpoint::has_pending_stream_send() const {
     const auto diagnostics = impl_->core.connection_diagnostics();
-    return diagnostics_have_pending_stream_send(diagnostics);
+    return std::ranges::any_of(diagnostics, [](const auto &connection) {
+        return std::ranges::any_of(connection.streams,
+                                   [](const auto &stream) { return stream.pending_send; });
+    });
 }
 
 std::vector<SendDatagram> send_datagrams(const Result &result) {

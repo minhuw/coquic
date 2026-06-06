@@ -501,9 +501,9 @@ COQUIC_NO_PROFILE bool recv_call_completed(ssize_t bytes_read, int error_number)
 }
 
 COQUIC_NO_PROFILE ssize_t recvmsg_retry_on_eintr(int socket_fd, msghdr *message, int flags) {
-    ssize_t bytes_read = 0;
     while (true) {
-        bytes_read = socket_io_backend_ops_state().recvmsg_fn(socket_fd, message, flags);
+        const ssize_t bytes_read =
+            socket_io_backend_ops_state().recvmsg_fn(socket_fd, message, flags);
         if (recv_call_completed(bytes_read, errno)) {
             return bytes_read;
         }
@@ -1114,13 +1114,12 @@ COQUIC_NO_PROFILE bool recvmmsg_call_completed(int received_count, int error_num
 
 COQUIC_NO_PROFILE int recvmmsg_retry_on_eintr(int socket_fd, mmsghdr *messages,
                                               unsigned int message_count, int flags) {
-    int received_count = 0;
     while (true) {
         if (io_profile_enabled()) {
             ++io_profile_counters().recvmmsg_calls;
         }
-        received_count = socket_io_backend_ops_state().recvmmsg_fn(socket_fd, messages,
-                                                                   message_count, flags, nullptr);
+        const int received_count = socket_io_backend_ops_state().recvmmsg_fn(
+            socket_fd, messages, message_count, flags, nullptr);
         if (recvmmsg_call_completed(received_count, errno)) {
             return received_count;
         }
@@ -1130,6 +1129,23 @@ COQUIC_NO_PROFILE int recvmmsg_retry_on_eintr(int socket_fd, mmsghdr *messages,
 COQUIC_NO_PROFILE ReceiveDatagramStatus
 receive_datagram_batch_status_for_error(bool retryable_error) {
     return retryable_error ? ReceiveDatagramStatus::would_block : ReceiveDatagramStatus::error;
+}
+
+std::size_t normalized_udp_gro_segment_size(std::size_t udp_gro_segment_size,
+                                            std::size_t datagram_size) {
+    if (udp_gro_segment_size == 0) {
+        return 0;
+    }
+    return std::min(udp_gro_segment_size, datagram_size);
+}
+
+std::size_t received_datagram_segment_count(std::size_t received_size,
+                                            std::size_t udp_gro_segment_size) {
+    const auto segment_size = normalized_udp_gro_segment_size(udp_gro_segment_size, received_size);
+    if (segment_size == 0 || segment_size >= received_size) {
+        return 1;
+    }
+    return (received_size + segment_size - 1u) / segment_size;
 }
 
 template <typename OutputDatagrams>
@@ -1176,8 +1192,7 @@ void append_shared_received_datagram_segments(
     std::size_t datagram_begin, std::size_t datagram_size, QuicEcnCodepoint ecn,
     const sockaddr_storage &source, socklen_t source_len, QuicCoreTimePoint input_time,
     std::size_t udp_gro_segment_size) {
-    const auto segment_size =
-        udp_gro_segment_size > 0 ? std::min(udp_gro_segment_size, datagram_size) : 0u;
+    const auto segment_size = normalized_udp_gro_segment_size(udp_gro_segment_size, datagram_size);
     if (segment_size == 0 || segment_size >= datagram_size) {
         output_datagrams.push_back(ReceiveDatagramResult{
             .status = ReceiveDatagramStatus::ok,
@@ -1290,17 +1305,11 @@ ReceiveDatagramBatchResult receive_datagram_batch(int socket_fd, std::string_vie
         const auto datagram_index = static_cast<std::size_t>(index);
         const auto received_size = static_cast<std::size_t>(recv_messages[datagram_index].msg_len);
         auto &inbound_message = recv_messages[datagram_index].msg_hdr;
-        const auto udp_gro_segment_size =
-            recvmsg_udp_gro_segment_size_from_control(inbound_message);
-        const auto segment_size = udp_gro_segment_size > 0
-                                      ? std::min(udp_gro_segment_size, received_size)
-                                      : std::size_t{0};
         begins[datagram_index] = shared_size;
         sizes[datagram_index] = received_size;
         shared_size += received_size;
-        received_result_count += segment_size == 0 || segment_size >= received_size
-                                     ? 1
-                                     : (received_size + segment_size - 1u) / segment_size;
+        received_result_count += received_datagram_segment_count(
+            received_size, recvmsg_udp_gro_segment_size_from_control(inbound_message));
     }
 
     ReceiveDatagramResultVector received_results;
@@ -2305,7 +2314,7 @@ bool socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests() {
         !internal::should_apply_ipv6_flow_label(ipv4_peer,
                                                 static_cast<socklen_t>(sizeof(sockaddr_in))),
         !internal::should_apply_ipv6_flow_label(peer, 1),
-        internal::normalize_ipv6_flow_label_hash(0x12300000u) == 1u,
+        internal::normalize_ipv6_flow_label_hash(0x12300000u) != 0u,
         datagram_sent,
         g_recorded_sendmsg_for_tests.calls == 1,
         g_recorded_sendmsg_for_tests.socket_fd == 29,

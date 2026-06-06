@@ -37,6 +37,30 @@ TEST(QuicHttp3ConnectionTest, ServerRoleRequestHeadersEmitPeerRequestHeadEvent) 
     expect_get_request_head(*request_head_event);
 }
 
+TEST(QuicHttp3ConnectionTest, ServerRoleRequestHeadersReadSharedReceiveBytes) {
+    std::array request_fields{
+        coquic::http3::Http3Field{":method", "GET"},
+        coquic::http3::Http3Field{":scheme", "https"},
+        coquic::http3::Http3Field{":authority", "example.test"},
+        coquic::http3::Http3Field{":path", "/hello"},
+        coquic::http3::Http3Field{"content-length", "0"},
+    };
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+    });
+
+    auto update =
+        connection.on_core_result(receive_shared_result(0, headers_frame_bytes(0, request_fields)),
+                                  coquic::quic::QuicCoreTimePoint{});
+
+    EXPECT_FALSE(close_input_from(update).has_value());
+    ASSERT_EQ(update.events.size(), 1u);
+    auto *request_head_event =
+        std::get_if<coquic::http3::Http3PeerRequestHeadEvent>(&update.events[0]);
+    ASSERT_NE(request_head_event, nullptr);
+    expect_get_request_head(*request_head_event);
+}
+
 TEST(QuicHttp3ConnectionTest, DataBeforeHeadersClosesConnectionWithFrameUnexpected) {
     coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
         .role = coquic::http3::Http3ConnectionRole::server,

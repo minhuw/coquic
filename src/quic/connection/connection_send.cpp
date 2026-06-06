@@ -2664,13 +2664,28 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             if (!datagram.has_value()) {
                 return fail_datagram_send(!pending_tracked_packets.empty());
             }
-            if (fresh_probe_max_data_frame.has_value()) {
+            if (probe_max_data_frame.has_value() &&
+                max_data_frame_matches(connection_flow_control_.pending_max_data_frame,
+                                       *probe_max_data_frame)) {
                 static_cast<void>(connection_flow_control_.take_max_data_frame());
             }
-            for (const auto &frame : fresh_probe_max_stream_data_frames) {
-                static_cast<void>(streams_.at(frame.stream_id).take_max_stream_data_frame());
+            bool sent_max_stream_data = false;
+            for (const auto &frame : probe_max_stream_data_frames) {
+                auto stream = streams_.find(frame.stream_id);
+                if (stream == streams_.end()) {
+                    continue;
+                }
+                if (!max_stream_data_frame_matches(
+                        stream->second.flow_control.pending_max_stream_data_frame, frame)) {
+                    continue;
+                }
+
+                const bool was_pending = stream->second.flow_control.max_stream_data_state ==
+                                         StreamControlFrameState::pending;
+                static_cast<void>(stream->second.take_max_stream_data_frame());
+                sent_max_stream_data |= was_pending;
             }
-            if (!fresh_probe_max_stream_data_frames.empty()) {
+            if (sent_max_stream_data) {
                 invalidate_stream_sendability_cache();
             }
 

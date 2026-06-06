@@ -297,8 +297,7 @@ bool resolve_udp_address(UdpAddressResolutionQuery query, ResolvedUdpAddress &re
     return true;
 }
 
-PreferredAddress preferred_address_from_resolved_udp_address(const ResolvedUdpAddress &resolved,
-                                                             ConnectionId connection_id) {
+PreferredAddress preferred_address_with_connection_id(ConnectionId connection_id) {
     PreferredAddress preferred_address{
         .connection_id = std::move(connection_id),
     };
@@ -312,6 +311,11 @@ PreferredAddress preferred_address_from_resolved_udp_address(const ResolvedUdpAd
         }
         preferred_address.stateless_reset_token[index] = std::byte{mixed};
     }
+    return preferred_address;
+}
+
+void apply_resolved_udp_address_to_preferred_address(PreferredAddress &preferred_address,
+                                                     const ResolvedUdpAddress &resolved) {
     if (resolved.family == AF_INET) {
         const auto *ipv4 = reinterpret_cast<const sockaddr_in *>(&resolved.address);
         std::memcpy(preferred_address.ipv4_address.data(), &ipv4->sin_addr,
@@ -323,6 +327,12 @@ PreferredAddress preferred_address_from_resolved_udp_address(const ResolvedUdpAd
                     preferred_address.ipv6_address.size());
         preferred_address.ipv6_port = ntohs(ipv6->sin6_port);
     }
+}
+
+PreferredAddress preferred_address_from_resolved_udp_address(const ResolvedUdpAddress &resolved,
+                                                             ConnectionId connection_id) {
+    auto preferred_address = preferred_address_with_connection_id(std::move(connection_id));
+    apply_resolved_udp_address_to_preferred_address(preferred_address, resolved);
     return preferred_address;
 }
 
@@ -530,19 +540,45 @@ runtime_preferred_address_for_server(const Http09RuntimeConfig &config) {
         return std::nullopt;
     }
 
+    const auto preferred_port = static_cast<std::uint16_t>(config.port + 1);
+    const auto wildcard_host = host_is_unspecified(config.host);
+    if (wildcard_host) {
+        auto preferred_address =
+            preferred_address_with_connection_id(make_runtime_connection_id(std::byte{0x5a}, 1));
+        bool resolved_any_address = false;
+        for (const auto family : {AF_INET, AF_INET6}) {
+            ResolvedUdpAddress resolved{};
+            if (resolve_udp_address(
+                    UdpAddressResolutionQuery{
+                        .host = *preferred_host,
+                        .port = preferred_port,
+                        .family = family,
+                    },
+                    resolved)) {
+                apply_resolved_udp_address_to_preferred_address(preferred_address, resolved);
+                resolved_any_address = true;
+            }
+        }
+        if (!resolved_any_address) {
+            return std::nullopt;
+        }
+        return preferred_address;
+    }
+
     ResolvedUdpAddress preferred_bind{};
     if (!resolve_udp_address(
             UdpAddressResolutionQuery{
                 .host = *preferred_host,
-                .port = static_cast<std::uint16_t>(config.port + 1),
+                .port = preferred_port,
                 .family = preferred_udp_address_family(config.host),
             },
             preferred_bind)) {
         return std::nullopt;
     }
 
-    return preferred_address_from_resolved_udp_address(
+    auto preferred_address = preferred_address_from_resolved_udp_address(
         preferred_bind, make_runtime_connection_id(std::byte{0x5a}, 1));
+    return preferred_address;
 }
 
 std::string connection_id_key(std::span<const std::byte> connection_id) {
@@ -1774,10 +1810,6 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
         terminal_success_deadline =
             current + std::chrono::milliseconds(kClientSuccessDrainWindowMs);
     };
-    const auto refresh_terminal_success_deadline_from_peer_input = [&](QuicCoreTimePoint current) {
-        terminal_success_deadline =
-            current + std::chrono::milliseconds(kClientSuccessDrainWindowMs);
-    };
     const auto should_exit_after_terminal_success = [&](QuicCoreTimePoint current) {
         if (!saw_peer_input) {
             return true;
@@ -1932,7 +1964,7 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
             return 1;
         }
         if (state.terminal_success) {
-            refresh_terminal_success_deadline_from_peer_input(event->now);
+            ensure_terminal_success_deadline(event->now);
             if (should_exit_after_terminal_success(now())) {
                 return 0;
             }
@@ -1960,10 +1992,6 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
             return;
         }
 
-        terminal_success_deadline =
-            current + std::chrono::milliseconds(kClientSuccessDrainWindowMs);
-    };
-    const auto refresh_terminal_success_deadline_from_peer_input = [&](QuicCoreTimePoint current) {
         terminal_success_deadline =
             current + std::chrono::milliseconds(kClientSuccessDrainWindowMs);
     };
@@ -2106,7 +2134,7 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
                 const bool terminal_after_receive =
                     state.terminal_success || state.terminal_failure;
                 if (terminal_after_receive) {
-                    refresh_terminal_success_deadline_from_peer_input(receive.step.input_time);
+                    ensure_terminal_success_deadline(receive.step.input_time);
                     return true;
                 }
                 break;
@@ -2226,7 +2254,7 @@ int run_http09_client_connection_loop(const Http09RuntimeConfig &config,
                 return 1;
             }
             if (state.terminal_success) {
-                refresh_terminal_success_deadline_from_peer_input(step->input_time);
+                ensure_terminal_success_deadline(step->input_time);
                 if (should_exit_after_terminal_success(io.current_time())) {
                     return 0;
                 }

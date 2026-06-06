@@ -209,6 +209,7 @@ void QuicHttp09ServerEndpoint::pump_response_chunks(std::size_t max_chunks) {
 
 bool QuicHttp09ServerEndpoint::process_receive_stream_data(
     const QuicCoreReceiveStreamData &received) {
+    const auto payload = received.payload();
     const auto stream_info = classify_stream_id(received.stream_id, EndpointRole::server);
     if (stream_info.initiator != StreamInitiator::peer ||
         stream_info.direction != StreamDirection::bidirectional) {
@@ -217,20 +218,19 @@ bool QuicHttp09ServerEndpoint::process_receive_stream_data(
     }
     if (closed_streams_.contains(received.stream_id)) {
         pending_requests_.erase(received.stream_id);
-        return received.bytes.empty() && received.fin;
+        return payload.empty() && received.fin;
     }
     if (pending_responses_.contains(received.stream_id)) {
-        return received.bytes.empty() && received.fin;
+        return payload.empty() && received.fin;
     }
 
     auto &pending = pending_requests_[received.stream_id];
-    if (received.bytes.empty() && received.fin) {
+    if (payload.empty() && received.fin) {
         pending_requests_.erase(received.stream_id);
         return false;
     }
 
-    pending.request_bytes.insert(pending.request_bytes.end(), received.bytes.begin(),
-                                 received.bytes.end());
+    pending.request_bytes.insert(pending.request_bytes.end(), payload.begin(), payload.end());
     if (pending.request_bytes.size() > kMaxBufferedRequestBytes) {
         pending_requests_.erase(received.stream_id);
         return false;

@@ -108,6 +108,7 @@ struct ClientConnectionLoopResultForTests {
     std::size_t receive_calls = 0;
     std::size_t wait_calls = 0;
     std::size_t current_time_calls = 0;
+    std::vector<std::optional<quic::QuicCoreTimePoint>> wait_requests;
 };
 
 bool runtime_trace_enabled_for_tests();

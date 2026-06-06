@@ -2074,7 +2074,9 @@ peek_discardable_long_header_packet_length(std::span<const std::byte> bytes) {
 inline bool should_discard_corrupted_long_header_packet(bool short_header_packet,
                                                         CodecErrorCode code) {
     return !short_header_packet && (code == CodecErrorCode::invalid_fixed_bit ||
-                                    code == CodecErrorCode::unsupported_packet_type);
+                                    code == CodecErrorCode::unsupported_packet_type ||
+                                    code == CodecErrorCode::packet_decryption_failed ||
+                                    code == CodecErrorCode::header_protection_failed);
 }
 
 inline COQUIC_NO_PROFILE bool invalid_fixed_bit_is_rejected(std::uint8_t header_byte,

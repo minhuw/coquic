@@ -81,6 +81,56 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigUsesConcreteAddressFo
         core.transport.preferred_address.value_or(coquic::quic::PreferredAddress{});
     EXPECT_EQ(g_last_getaddrinfo_family, AF_INET6);
     EXPECT_EQ(g_freeaddrinfo_calls, 1);
+    EXPECT_EQ(preferred_address.ipv4_port, 0);
+    EXPECT_EQ(preferred_address.ipv6_port, 444);
+    EXPECT_EQ(preferred_address.ipv6_address, (std::array<std::byte, 16>{
+                                                  std::byte{0x20},
+                                                  std::byte{0x01},
+                                                  std::byte{0x0d},
+                                                  std::byte{0xb8},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x00},
+                                                  std::byte{0x09},
+                                              }));
+}
+
+TEST(QuicHttp09RuntimeTest, ConnectionMigrationWildcardServerConfigAdvertisesBothFamilies) {
+    ScopedEnvVar hostname("HOSTNAME", "interop-server-host");
+    ScopedFreeaddrinfoCounterReset freeaddrinfo_counter;
+    ScopedRuntimeAddressFamilyReset address_family_reset;
+    const coquic::io::test::ScopedSocketIoBackendOpsOverride runtime_ops(
+        coquic::io::test::SocketIoBackendOpsOverride{
+            .getaddrinfo_fn = hostname_dual_stack_getaddrinfo,
+            .freeaddrinfo_fn = counting_freeaddrinfo,
+        });
+
+    auto core = coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::server,
+        .host = "::",
+        .port = 443,
+        .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
+    });
+
+    ASSERT_TRUE(core.transport.preferred_address.has_value());
+    auto preferred_address =
+        core.transport.preferred_address.value_or(coquic::quic::PreferredAddress{});
+    EXPECT_EQ(g_freeaddrinfo_calls, 2);
+    EXPECT_EQ(preferred_address.ipv4_port, 444);
+    EXPECT_EQ(preferred_address.ipv4_address, (std::array<std::byte, 4>{
+                                                  std::byte{192},
+                                                  std::byte{0},
+                                                  std::byte{2},
+                                                  std::byte{9},
+                                              }));
     EXPECT_EQ(preferred_address.ipv6_port, 444);
     EXPECT_EQ(preferred_address.ipv6_address, (std::array<std::byte, 16>{
                                                   std::byte{0x20},

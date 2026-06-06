@@ -747,6 +747,40 @@ TEST(QuicCoreTest, ProcessInboundDatagramQlogPathTracesDiscardedUnreadableShortH
     EXPECT_NE(stderr_output.find("quic-packet-trace discard scid=c101"), std::string::npos);
 }
 
+TEST(QuicCoreTest, ProcessInboundDatagramQlogPathTracesDiscardedUnreadableInitialPacket) {
+    ScopedEnvVar trace("COQUIC_PACKET_TRACE", "1");
+
+    coquic::quic::test::ScopedTempDir qlog_dir;
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.initial_packet_space_discarded_ = false;
+    enable_qlog_session_for_test(connection, qlog_dir.path());
+
+    const auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedInitialPacket{
+                .version = coquic::quic::kQuicVersion2,
+                .destination_connection_id = connection.config_.source_connection_id,
+                .source_connection_id = {std::byte{0xaa}},
+                .packet_number_length = 2,
+                .packet_number = 197,
+                .frames = {coquic::quic::AckFrame{}},
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id = {std::byte{0xde}, std::byte{0xad}},
+        });
+    ASSERT_TRUE(encoded.has_value());
+
+    testing::internal::CaptureStderr();
+    connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(1));
+    const auto stderr_output = testing::internal::GetCapturedStderr();
+
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_NE(stderr_output.find("quic-packet-trace discard scid=5301"), std::string::npos);
+}
+
 TEST(QuicCoreTest, ProcessInboundDatagramQlogPathIgnoresLaterHandshakeCryptoFailure) {
     coquic::quic::test::ScopedTempDir qlog_dir;
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());

@@ -303,9 +303,10 @@ bool QuicHttp09ClientEndpoint::process_receive_stream_data(
         return false;
     }
 
-    if (!received.bytes.empty()) {
-        output.write(reinterpret_cast<const char *>(received.bytes.data()),
-                     static_cast<std::streamsize>(received.bytes.size()));
+    const auto payload = received.payload();
+    if (!payload.empty()) {
+        output.write(reinterpret_cast<const char *>(payload.data()),
+                     static_cast<std::streamsize>(payload.size()));
     }
 
     output.close();

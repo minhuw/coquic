@@ -57,6 +57,7 @@ using coquic::quic::QuicCoreResult;
 using coquic::quic::QuicCoreSendStreamData;
 using coquic::quic::QuicCoreStateChange;
 using coquic::quic::QuicCoreStateEvent;
+using coquic::quic::SharedBytes;
 
 template <typename T> T optional_value_or_terminate(const std::optional<T> &value) {
     if (!value.has_value()) {
@@ -94,6 +95,19 @@ QuicCoreResult single_receive_result(std::uint64_t stream_id, std::string_view t
         QuicCoreReceiveStreamData{
             .stream_id = stream_id,
             .bytes = coquic::quic::test::bytes_from_string(text),
+            .fin = fin,
+        },
+    });
+    return result;
+}
+
+QuicCoreResult single_shared_receive_result(std::uint64_t stream_id, std::string_view text,
+                                            bool fin) {
+    QuicCoreResult result;
+    result.effects.push_back(QuicCoreEffect{
+        QuicCoreReceiveStreamData{
+            .stream_id = stream_id,
+            .shared_bytes = SharedBytes(coquic::quic::test::bytes_from_string(text)),
             .fin = fin,
         },
     });
@@ -158,6 +172,26 @@ TEST(QuicHttp09ServerTest, ServesFileBodyOnRequestedBidirectionalStream) {
 
     EXPECT_EQ(coquic::quic::test::string_from_bytes(body), "hello");
     EXPECT_TRUE(saw_fin);
+}
+
+TEST(QuicHttp09ServerTest, ServesFileBodyFromSharedRequestBytes) {
+    coquic::quic::test::ScopedTempDir document_root;
+    document_root.write_file("hello.txt", "hello");
+
+    QuicHttp09ServerEndpoint endpoint(
+        QuicHttp09ServerConfig{.document_root = document_root.path()});
+
+    const auto update =
+        endpoint.on_core_result(single_shared_receive_result(0, "GET /hello.txt\r\n", true),
+                                coquic::quic::test::test_time(1));
+    const auto sends = send_stream_inputs_from(update);
+
+    ASSERT_FALSE(endpoint.has_failed());
+    ASSERT_FALSE(update.terminal_failure);
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends.front().stream_id, 0u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(sends.front().bytes), "hello");
+    EXPECT_TRUE(sends.front().fin);
 }
 
 TEST(QuicHttp09ServerTest, SendsResponseWhenRequestArrivesBeforeHandshakeCompletes) {

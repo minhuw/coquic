@@ -554,6 +554,7 @@ run_client_connection_loop_case_for_tests(ClientConnectionLoopCaseForTests case_
                 .receive_calls = io_script.next_receive_index,
                 .wait_calls = io_script.next_wait_index,
                 .current_time_calls = io_script.next_now_index,
+                .wait_requests = io_script.wait_requests,
             };
         });
 }
@@ -901,6 +902,7 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
         .terminal_failure = state.terminal_failure,
         .endpoint_has_pending_work = state.endpoint_has_pending_work,
         .wait_calls = backend_ptr->wait_requests.size(),
+        .wait_requests = backend_ptr->wait_requests,
     };
 }
 

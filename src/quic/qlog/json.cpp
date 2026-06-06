@@ -275,6 +275,18 @@ std::string serialize_parameters_set(std::string_view initiator,
     append_u64("initial_max_streams_bidi", parameters.initial_max_streams_bidi);
     append_u64("initial_max_streams_uni", parameters.initial_max_streams_uni);
     append_u64("max_datagram_frame_size", parameters.max_datagram_frame_size);
+    if (parameters.preferred_address.has_value()) {
+        const auto &preferred_address = *parameters.preferred_address;
+        json += ",\"preferred_address\":{";
+        json += "\"ipv4_address\":\"" + hex_bytes(preferred_address.ipv4_address) + "\"";
+        append_u64("ipv4_port", preferred_address.ipv4_port);
+        json += ",\"ipv6_address\":\"" + hex_bytes(preferred_address.ipv6_address) + "\"";
+        append_u64("ipv6_port", preferred_address.ipv6_port);
+        json += ",\"connection_id\":\"" + hex_bytes(preferred_address.connection_id) + "\"";
+        json += ",\"stateless_reset_token\":\"" +
+                hex_bytes(preferred_address.stateless_reset_token) + "\"";
+        json += "}";
+    }
     json += ",\"grease_quic_bit\":";
     json += parameters.grease_quic_bit ? "true" : "false";
     json += "}";

@@ -104,6 +104,8 @@ struct Http3ConnectionTestAccess {
 
 namespace {
 
+constexpr std::uint64_t kHttp3RuntimeActiveConnectionIdLimit = 8;
+
 constexpr std::string_view kHttp3ServerUsageLine =
     "usage: h3-server [--host HOST] [--port PORT] [--bootstrap-port PORT] "
     "[--alt-svc-max-age SECONDS] [--io-backend socket|io_uring] "
@@ -2168,6 +2170,7 @@ quic::QuicCoreEndpointConfig make_http3_client_endpoint_config(const Http3Runtim
         .application_protocol = std::string(kHttp3ApplicationProtocol),
     };
     endpoint.transport.congestion_control = config.congestion_control;
+    endpoint.transport.active_connection_id_limit = kHttp3RuntimeActiveConnectionIdLimit;
     return endpoint;
 }
 
@@ -2190,6 +2193,7 @@ make_http3_server_endpoint_config(const Http3RuntimeConfig &config) {
             },
     };
     endpoint.transport.congestion_control = config.congestion_control;
+    endpoint.transport.active_connection_id_limit = kHttp3RuntimeActiveConnectionIdLimit;
     return endpoint;
 }
 

@@ -72,6 +72,20 @@ coquic::quic::QuicCoreResult receive_result(std::uint64_t stream_id,
     return result;
 }
 
+coquic::quic::QuicCoreResult
+receive_shared_result(std::uint64_t stream_id, std::span<const std::byte> bytes, bool fin = false) {
+    coquic::quic::QuicCoreResult result;
+    result.effects.push_back(coquic::quic::QuicCoreEffect{
+        coquic::quic::QuicCoreReceiveStreamData{
+            .stream_id = stream_id,
+            .shared_bytes =
+                coquic::quic::SharedBytes(std::vector<std::byte>(bytes.begin(), bytes.end())),
+            .fin = fin,
+        },
+    });
+    return result;
+}
+
 coquic::quic::QuicCoreResult reset_result(std::uint64_t stream_id, std::uint64_t error_code = 0) {
     coquic::quic::QuicCoreResult result;
     result.effects.push_back(coquic::quic::QuicCoreEffect{

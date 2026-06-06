@@ -1031,10 +1031,11 @@ void Http3Connection::queue_stream_error(std::uint64_t stream_id, Http3ErrorCode
 }
 
 void Http3Connection::handle_receive_stream_data(const quic::QuicCoreReceiveStreamData &received) {
+    const auto payload = received.payload();
     const auto info = classify_stream_id(received.stream_id, endpoint_role(config_.role));
     if (info.initiator == StreamInitiator::peer &&
         info.direction == StreamDirection::unidirectional) {
-        handle_peer_uni_stream_data(received.stream_id, received.bytes, received.fin);
+        handle_peer_uni_stream_data(received.stream_id, payload, received.fin);
         return;
     }
 
@@ -1047,8 +1048,7 @@ void Http3Connection::handle_receive_stream_data(const quic::QuicCoreReceiveStre
             return;
         }
 
-        request->second.buffer.insert(request->second.buffer.end(), received.bytes.begin(),
-                                      received.bytes.end());
+        request->second.buffer.insert(request->second.buffer.end(), payload.begin(), payload.end());
         if (received.fin) {
             request->second.fin_received = true;
         }
@@ -1057,7 +1057,7 @@ void Http3Connection::handle_receive_stream_data(const quic::QuicCoreReceiveStre
     }
 
     if (info.initiator == StreamInitiator::peer) {
-        handle_peer_bidi_stream(received.stream_id, received.bytes, received.fin);
+        handle_peer_bidi_stream(received.stream_id, payload, received.fin);
     }
 }
 

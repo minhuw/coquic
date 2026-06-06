@@ -27,6 +27,7 @@ using coquic::quic::QuicCoreResult;
 using coquic::quic::QuicCoreSendStreamData;
 using coquic::quic::QuicCoreStateChange;
 using coquic::quic::QuicCoreStateEvent;
+using coquic::quic::SharedBytes;
 
 QuicCoreResult handshake_ready_result() {
     QuicCoreResult result;
@@ -61,6 +62,18 @@ QuicCoreResult receive_result(std::uint64_t stream_id, std::string_view text, bo
         QuicCoreReceiveStreamData{
             .stream_id = stream_id,
             .bytes = coquic::quic::test::bytes_from_string(text),
+            .fin = fin,
+        },
+    });
+    return result;
+}
+
+QuicCoreResult receive_shared_result(std::uint64_t stream_id, std::string_view text, bool fin) {
+    QuicCoreResult result;
+    result.effects.push_back(QuicCoreEffect{
+        QuicCoreReceiveStreamData{
+            .stream_id = stream_id,
+            .shared_bytes = SharedBytes(coquic::quic::test::bytes_from_string(text)),
             .fin = fin,
         },
     });
@@ -403,6 +416,26 @@ TEST(QuicHttp09ClientTest, WritesDownloadedResponseBodiesToFilesystem) {
     EXPECT_FALSE(on_receive.terminal_failure);
 
     EXPECT_EQ(read_file_bytes(download_root.path() / "hello.txt"), "hello");
+}
+
+TEST(QuicHttp09ClientTest, WritesDownloadedSharedResponseBodiesToFilesystem) {
+    const auto now = coquic::quic::test::test_time();
+    coquic::quic::test::ScopedTempDir download_root;
+
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/shared.txt")},
+        .download_root = download_root.path(),
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    endpoint.poll(now);
+
+    const auto on_receive = endpoint.on_core_result(receive_shared_result(0, "shared", true),
+                                                    coquic::quic::test::test_time(1));
+    EXPECT_TRUE(on_receive.terminal_success);
+    EXPECT_FALSE(on_receive.terminal_failure);
+
+    EXPECT_EQ(read_file_bytes(download_root.path() / "shared.txt"), "shared");
 }
 
 TEST(QuicHttp09ClientTest, ReportsSuccessOnlyAfterAllStreamsFinishWithFin) {

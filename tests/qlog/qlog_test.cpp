@@ -419,6 +419,63 @@ TEST(QuicQlogTest, SerializersCoverRemainingFramesAndOptionalFields) {
     const auto parameters_json = coquic::quic::qlog::serialize_parameters_set(
         "local", coquic::quic::TransportParameters{.grease_quic_bit = true});
     EXPECT_NE(parameters_json.find("\"grease_quic_bit\":true"), std::string::npos);
+    const auto preferred_parameters_json =
+        coquic::quic::qlog::serialize_parameters_set(
+            "local",
+            coquic::quic::TransportParameters{
+                .preferred_address =
+                    coquic::quic::PreferredAddress{
+                        .ipv4_address = {std::byte{192}, std::byte{0}, std::byte{2}, std::byte{9}},
+                        .ipv4_port = 444,
+                        .ipv6_address =
+                            {
+                                std::byte{0x20},
+                                std::byte{0x01},
+                                std::byte{0x0d},
+                                std::byte{0xb8},
+                                std::byte{0x00},
+                                std::byte{0x00},
+                                std::byte{0x00},
+                                std::byte{0x00},
+                                std::byte{0x00},
+                                std::byte{0x00},
+                                std::byte{0x00},
+                                std::byte{0x00},
+                                std::byte{0x00},
+                                std::byte{0x00},
+                                std::byte{0x00},
+                                std::byte{0x09},
+                            },
+                        .ipv6_port = 444,
+                        .connection_id = {std::byte{0x5a}, std::byte{0x00}, std::byte{0x00},
+                                          std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+                                          std::byte{0x00}, std::byte{0x01}},
+                        .stateless_reset_token =
+                            {
+                                std::byte{0x00},
+                                std::byte{0x01},
+                                std::byte{0x02},
+                                std::byte{0x03},
+                                std::byte{0x04},
+                                std::byte{0x05},
+                                std::byte{0x06},
+                                std::byte{0x07},
+                                std::byte{0x08},
+                                std::byte{0x09},
+                                std::byte{0x0a},
+                                std::byte{0x0b},
+                                std::byte{0x0c},
+                                std::byte{0x0d},
+                                std::byte{0x0e},
+                                std::byte{0x0f},
+                            },
+                    },
+            });
+    EXPECT_NE(preferred_parameters_json.find("\"preferred_address\""), std::string::npos);
+    EXPECT_NE(preferred_parameters_json.find("\"ipv4_port\":444"), std::string::npos);
+    EXPECT_NE(preferred_parameters_json.find("\"ipv6_port\":444"), std::string::npos);
+    EXPECT_NE(preferred_parameters_json.find("\"connection_id\":\"5a00000000000001\""),
+              std::string::npos);
     const auto default_parameters_json =
         coquic::quic::qlog::serialize_parameters_set("remote", coquic::quic::TransportParameters{});
     EXPECT_NE(default_parameters_json.find("\"grease_quic_bit\":false"), std::string::npos);

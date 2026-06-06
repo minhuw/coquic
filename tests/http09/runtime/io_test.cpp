@@ -340,6 +340,11 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionLoopCases) {
     EXPECT_TRUE(wait_input_then_terminal_success_with_followup_input.terminal_success);
     EXPECT_FALSE(wait_input_then_terminal_success_with_followup_input.terminal_failure);
     EXPECT_GE(wait_input_then_terminal_success_with_followup_input.wait_calls, 2u);
+    ASSERT_GE(wait_input_then_terminal_success_with_followup_input.wait_requests.size(), 3u);
+    ASSERT_TRUE(wait_input_then_terminal_success_with_followup_input.wait_requests[1].has_value());
+    ASSERT_TRUE(wait_input_then_terminal_success_with_followup_input.wait_requests[2].has_value());
+    EXPECT_EQ(wait_input_then_terminal_success_with_followup_input.wait_requests[1],
+              wait_input_then_terminal_success_with_followup_input.wait_requests[2]);
 
     const auto wait_input_then_drive_failure =
         coquic::http09::test::run_client_connection_loop_case_for_tests(
@@ -552,6 +557,11 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_TRUE(rx_datagram_then_terminal_success_with_followup_input.terminal_success);
     EXPECT_FALSE(rx_datagram_then_terminal_success_with_followup_input.terminal_failure);
     EXPECT_EQ(rx_datagram_then_terminal_success_with_followup_input.wait_calls, 3U);
+    ASSERT_EQ(rx_datagram_then_terminal_success_with_followup_input.wait_requests.size(), 3u);
+    ASSERT_TRUE(rx_datagram_then_terminal_success_with_followup_input.wait_requests[1].has_value());
+    ASSERT_TRUE(rx_datagram_then_terminal_success_with_followup_input.wait_requests[2].has_value());
+    EXPECT_EQ(rx_datagram_then_terminal_success_with_followup_input.wait_requests[1],
+              rx_datagram_then_terminal_success_with_followup_input.wait_requests[2]);
 
     const auto pending_work_terminal_failure =
         coquic::http09::test::run_client_connection_backend_loop_case_for_tests(

@@ -195,6 +195,7 @@ struct ScriptedClientLoopIoForTests {
     std::vector<QuicCoreTimePoint> now_values;
     std::vector<ReceiveDatagramResult> receive_results;
     std::vector<std::optional<RuntimeWaitStep>> wait_steps;
+    std::vector<std::optional<QuicCoreTimePoint>> wait_requests;
     std::size_t next_now_index = 0;
     std::size_t next_receive_index = 0;
     std::size_t next_wait_index = 0;
@@ -221,8 +222,9 @@ ReceiveDatagramResult scripted_client_loop_receive_for_tests(void *context, int,
 
 std::optional<RuntimeWaitStep>
 scripted_client_loop_wait_for_tests(void *context, const RuntimeWaitConfig &,
-                                    const std::optional<QuicCoreTimePoint> &) {
+                                    const std::optional<QuicCoreTimePoint> &next_wakeup) {
     auto &script = *static_cast<ScriptedClientLoopIoForTests *>(context);
+    script.wait_requests.push_back(next_wakeup);
     if (script.next_wait_index >= script.wait_steps.size()) {
         return std::nullopt;
     }

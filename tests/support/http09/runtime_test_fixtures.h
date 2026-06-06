@@ -585,6 +585,53 @@ inline int hostname_ipv6_getaddrinfo(const char *node, const char *service, cons
     return 0;
 }
 
+inline int hostname_dual_stack_getaddrinfo(const char *node, const char *service,
+                                           const addrinfo *hints, addrinfo **results) {
+    if (results == nullptr || hints == nullptr || node == nullptr || service == nullptr) {
+        return EAI_FAIL;
+    }
+    *results = nullptr;
+
+    g_last_getaddrinfo_family = hints->ai_family;
+    if (std::string_view(node) != "interop-server-host" || std::string_view(service) != "444") {
+        return EAI_NONAME;
+    }
+    if (hints->ai_flags != AI_NUMERICSERV) {
+        return EAI_BADFLAGS;
+    }
+
+    if (hints->ai_family == AF_INET) {
+        auto *ipv4 = make_ipv4_addrinfo_result("192.0.2.9", 444);
+        if (ipv4 == nullptr) {
+            return EAI_FAIL;
+        }
+        *results = ipv4;
+        return 0;
+    }
+    if (hints->ai_family == AF_INET6) {
+        auto *ipv6 = make_ipv6_addrinfo_result("2001:db8::9", 444);
+        if (ipv6 == nullptr) {
+            return EAI_FAIL;
+        }
+        *results = ipv6;
+        return 0;
+    }
+    if (hints->ai_family != AF_UNSPEC) {
+        return EAI_ADDRFAMILY;
+    }
+
+    auto *ipv4 = make_ipv4_addrinfo_result("192.0.2.9", 444);
+    auto *ipv6 = make_ipv6_addrinfo_result("2001:db8::9", 444);
+    if (ipv4 == nullptr || ipv6 == nullptr) {
+        counting_freeaddrinfo(ipv4);
+        counting_freeaddrinfo(ipv6);
+        return EAI_FAIL;
+    }
+    ipv4->ai_next = ipv6;
+    *results = ipv4;
+    return 0;
+}
+
 inline int fallback_to_earlier_valid_result_getaddrinfo(const char *node, const char *service,
                                                         const addrinfo *hints, addrinfo **results) {
     if (results == nullptr || hints == nullptr || node == nullptr || service == nullptr) {

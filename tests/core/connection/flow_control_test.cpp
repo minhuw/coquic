@@ -196,6 +196,10 @@ TEST(QuicCoreTest, PeerDataBlockedTriggersMaxDataRefresh) {
 
 TEST(QuicCoreTest, ApplicationProbeForceAckDoesNotDuplicateMatchingMaxStreamDataFrame) {
     auto connection = make_connected_client_connection();
+    connection.connection_flow_control_.pending_max_data_frame =
+        coquic::quic::MaxDataFrame{.maximum_data = 23};
+    connection.connection_flow_control_.max_data_state =
+        coquic::quic::StreamControlFrameState::pending;
     auto &stream =
         connection.streams_
             .emplace(0, coquic::quic::make_implicit_stream_state(0, connection.config_.role))
@@ -212,6 +216,7 @@ TEST(QuicCoreTest, ApplicationProbeForceAckDoesNotDuplicateMatchingMaxStreamData
         .packet_number = 25,
         .ack_eliciting = true,
         .in_flight = true,
+        .max_data_frame = connection.connection_flow_control_.pending_max_data_frame,
         .max_stream_data_frames =
             {
                 *stream.flow_control.pending_max_stream_data_frame,
@@ -227,14 +232,23 @@ TEST(QuicCoreTest, ApplicationProbeForceAckDoesNotDuplicateMatchingMaxStreamData
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
     ASSERT_NE(application, nullptr);
 
+    std::size_t max_data_frames = 0;
     std::size_t max_stream_data_frames = 0;
     for (const auto &frame : application->frames) {
+        if (std::holds_alternative<coquic::quic::MaxDataFrame>(frame)) {
+            ++max_data_frames;
+        }
         if (std::holds_alternative<coquic::quic::MaxStreamDataFrame>(frame)) {
             ++max_stream_data_frames;
         }
     }
 
+    EXPECT_EQ(max_data_frames, 1u);
     EXPECT_EQ(max_stream_data_frames, 1u);
+    EXPECT_EQ(connection.connection_flow_control_.max_data_state,
+              coquic::quic::StreamControlFrameState::sent);
+    EXPECT_EQ(stream.flow_control.max_stream_data_state,
+              coquic::quic::StreamControlFrameState::sent);
 }
 
 TEST(QuicCoreTest, ApplicationProbeForceAckDropsFreshReceiveCreditWhenProbeWouldOverflow) {

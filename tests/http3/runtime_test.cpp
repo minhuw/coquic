@@ -1758,6 +1758,7 @@ TEST(QuicHttp3RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection)
     const auto client_core = coquic::http3::make_http3_client_endpoint_config(client_config);
     EXPECT_EQ(client_core.transport.congestion_control,
               coquic::quic::QuicCongestionControlAlgorithm::copa);
+    EXPECT_EQ(client_core.transport.active_connection_id_limit, 8u);
 
     auto server_config = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::server,
@@ -1769,6 +1770,7 @@ TEST(QuicHttp3RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection)
     ASSERT_TRUE(server_core.has_value());
     EXPECT_EQ(optional_ref_or_terminate(server_core).transport.congestion_control,
               coquic::quic::QuicCongestionControlAlgorithm::bbr);
+    EXPECT_EQ(optional_ref_or_terminate(server_core).transport.active_connection_id_limit, 8u);
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeParserRejectsInvalidCongestionControlArguments) {

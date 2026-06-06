@@ -435,8 +435,11 @@ int preferred_udp_address_family(std::string_view host);
 bool host_is_unspecified(std::string_view host);
 std::optional<std::string> preferred_address_host_for_server(std::string_view host);
 bool resolve_udp_address(UdpAddressResolutionQuery query, ResolvedUdpAddress &resolved);
+PreferredAddress preferred_address_with_connection_id(ConnectionId connection_id);
 PreferredAddress preferred_address_from_resolved_udp_address(const ResolvedUdpAddress &resolved,
                                                              ConnectionId connection_id);
+void apply_resolved_udp_address_to_preferred_address(PreferredAddress &preferred_address,
+                                                     const ResolvedUdpAddress &resolved);
 sockaddr_storage sockaddr_from_preferred_address(const PreferredAddress &preferred_address);
 socklen_t sockaddr_len_from_preferred_address(const PreferredAddress &preferred_address);
 std::optional<ParsedHttp09Authority> parse_http09_authority_impl(std::string_view authority);

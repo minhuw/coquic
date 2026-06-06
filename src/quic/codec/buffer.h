@@ -47,12 +47,20 @@ template <typename T> class UninitializedAllocator {
         }
     }
 
-    template <typename U, typename... Args> void construct(U *pointer, Args &&...args) {
-        if constexpr (sizeof...(Args) == 0 && std::is_trivially_default_constructible_v<U>) {
+    template <typename U> void construct(U *pointer) {
+        if constexpr (std::is_trivially_default_constructible_v<U>) {
             ::new (static_cast<void *>(pointer)) U;
         } else {
-            std::construct_at(pointer, std::forward<Args>(args)...);
+            std::construct_at(pointer);
         }
+    }
+
+    template <typename U> void construct(U *pointer, const U &value) {
+        std::construct_at(pointer, value);
+    }
+
+    template <typename U> void construct(U *pointer, U &&value) {
+        std::construct_at(pointer, std::forward<U>(value));
     }
 
     template <typename U> struct rebind {

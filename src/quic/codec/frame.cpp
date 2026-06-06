@@ -423,100 +423,70 @@ CodecResult<DecodedAckHeader> decode_ack_header(BufferReader &reader) {
 
 // NOLINTBEGIN(bugprone-easily-swappable-parameters)
 template <typename OnRange>
-CodecResult<std::uint64_t>
+std::optional<CodecError>
 decode_ack_additional_ranges(BufferReader &reader, std::uint64_t additional_range_count,
                              std::uint64_t previous_smallest, OnRange &&on_range) {
     for (std::uint64_t i = 0; i < additional_range_count; ++i) {
         const auto gap = read_varint(reader);
         if (!gap.has_value()) {
-            return CodecResult<std::uint64_t>::failure(gap.error().code, gap.error().offset);
+            return gap.error();
         }
 
-        const auto range_length = read_varint(reader);
-        if (!range_length.has_value()) {
-            return CodecResult<std::uint64_t>::failure(range_length.error().code,
-                                                       range_length.error().offset);
+        const auto ack_range_length = read_varint(reader);
+        if (!ack_range_length.has_value()) {
+            return ack_range_length.error();
         }
 
         if (previous_smallest < gap.value() + 2) {
-            return CodecResult<std::uint64_t>::failure(CodecErrorCode::invalid_varint,
-                                                       reader.offset());
+            return CodecError{
+                .code = CodecErrorCode::invalid_varint,
+                .offset = reader.offset(),
+            };
         }
 
         const auto largest = previous_smallest - gap.value() - 2;
-        if (largest < range_length.value()) {
-            return CodecResult<std::uint64_t>::failure(CodecErrorCode::invalid_varint,
-                                                       reader.offset());
+        if (largest < ack_range_length.value()) {
+            return CodecError{
+                .code = CodecErrorCode::invalid_varint,
+                .offset = reader.offset(),
+            };
         }
 
-        on_range(gap.value(), range_length.value());
-        previous_smallest = largest - range_length.value();
+        on_range(gap.value(), ack_range_length.value());
+        previous_smallest = largest - ack_range_length.value();
     }
 
-    return CodecResult<std::uint64_t>::success(previous_smallest);
+    return std::nullopt;
 }
 
-COQUIC_NO_PROFILE CodecResult<std::size_t>
-scan_ack_extra_range_bytes(std::span<const std::byte> bytes, std::uint64_t additional_range_count,
-                           std::uint64_t previous_smallest) {
-    std::size_t offset = 0;
-    for (std::uint64_t i = 0; i < additional_range_count; ++i) {
-        const auto gap = decode_varint_bytes(bytes, offset);
-        if (!gap.has_value()) {
-            return CodecResult<std::size_t>::failure(gap.error().code, gap.error().offset);
-        }
-        offset += gap.value().bytes_consumed;
-
-        const auto range_length = decode_varint_bytes(bytes, offset);
-        if (!range_length.has_value()) {
-            return CodecResult<std::size_t>::failure(range_length.error().code,
-                                                     range_length.error().offset);
-        }
-        offset += range_length.value().bytes_consumed;
-
-        if (previous_smallest < gap.value().value + 2) {
-            return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, offset);
-        }
-
-        const auto largest = previous_smallest - gap.value().value - 2;
-        if (largest < range_length.value().value) {
-            return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, offset);
-        }
-
-        previous_smallest = largest - range_length.value().value;
-    }
-
-    return CodecResult<std::size_t>::success(offset);
-}
 // NOLINTEND(bugprone-easily-swappable-parameters)
 
-CodecResult<std::optional<AckEcnCounts>> decode_ack_ecn_counts(BufferReader &reader,
-                                                               bool has_ecn_counts) {
+std::optional<CodecError> decode_ack_ecn_counts(BufferReader &reader, bool has_ecn_counts,
+                                                std::optional<AckEcnCounts> &output) {
     if (!has_ecn_counts) {
-        return CodecResult<std::optional<AckEcnCounts>>::success(std::nullopt);
+        output.reset();
+        return std::nullopt;
     }
 
     const auto ect0 = read_varint(reader);
     const auto ect1 = read_varint(reader);
     const auto ecn_ce = read_varint(reader);
     if (!ect0.has_value()) {
-        return CodecResult<std::optional<AckEcnCounts>>::failure(ect0.error().code,
-                                                                 ect0.error().offset);
+        return ect0.error();
     }
     if (!ect1.has_value()) {
-        return CodecResult<std::optional<AckEcnCounts>>::failure(ect1.error().code,
-                                                                 ect1.error().offset);
+        return ect1.error();
     }
     if (!ecn_ce.has_value()) {
-        return CodecResult<std::optional<AckEcnCounts>>::failure(ecn_ce.error().code,
-                                                                 ecn_ce.error().offset);
+        return ecn_ce.error();
     }
 
-    return CodecResult<std::optional<AckEcnCounts>>::success(AckEcnCounts{
+    output = AckEcnCounts{
         .ect0 = ect0.value(),
         .ect1 = ect1.value(),
         .ecn_ce = ecn_ce.value(),
-    });
+    };
+    return std::nullopt;
 }
 
 CodecResult<AckFrame> decode_ack_frame(BufferReader &reader, bool has_ecn_counts) {
@@ -544,24 +514,21 @@ CodecResult<AckFrame> decode_ack_frame(BufferReader &reader, bool has_ecn_counts
     frame.additional_ranges.reserve(
         static_cast<std::size_t>(header.value().additional_range_count));
 
-    const auto decoded_ranges = decode_ack_additional_ranges(
-        reader, header.value().additional_range_count, header.value().first_range_smallest,
-        [&frame](std::uint64_t gap, std::uint64_t range_length) {
-            frame.additional_ranges.push_back(AckRange{
-                .gap = gap,
-                .range_length = range_length,
+    if (const auto error = decode_ack_additional_ranges(
+            reader, header.value().additional_range_count, header.value().first_range_smallest,
+            [&frame](std::uint64_t gap, std::uint64_t ack_range_length) {
+                frame.additional_ranges.push_back(AckRange{
+                    .gap = gap,
+                    .range_length = ack_range_length,
+                });
             });
-        });
-    if (!decoded_ranges.has_value()) {
-        return CodecResult<AckFrame>::failure(decoded_ranges.error().code,
-                                              decoded_ranges.error().offset);
+        error.has_value()) {
+        return CodecResult<AckFrame>::failure(error->code, error->offset);
     }
 
-    const auto ecn_counts = decode_ack_ecn_counts(reader, has_ecn_counts);
-    if (!ecn_counts.has_value()) {
-        return CodecResult<AckFrame>::failure(ecn_counts.error().code, ecn_counts.error().offset);
+    if (const auto error = decode_ack_ecn_counts(reader, has_ecn_counts, frame.ecn_counts)) {
+        return CodecResult<AckFrame>::failure(error->code, error->offset);
     }
-    frame.ecn_counts = ecn_counts.value();
 
     return CodecResult<AckFrame>::success(std::move(frame));
 }
@@ -586,23 +553,22 @@ CodecResult<ReceivedAckFrame> decode_received_ack_frame(BufferReader &reader, bo
                                                       additional_range_begin);
     }
 
-    const auto decoded_ranges = scan_ack_extra_range_bytes(
-        bytes.span().subspan(additional_range_begin), header.value().additional_range_count,
-        header.value().first_range_smallest);
-    if (!decoded_ranges.has_value()) {
-        return CodecResult<ReceivedAckFrame>::failure(
-            decoded_ranges.error().code, additional_range_begin + decoded_ranges.error().offset);
+    BufferReader additional_ranges_reader(bytes.span().subspan(additional_range_begin));
+    if (const auto error = decode_ack_additional_ranges(
+            additional_ranges_reader, header.value().additional_range_count,
+            header.value().first_range_smallest, [](std::uint64_t, std::uint64_t) {});
+        error.has_value()) {
+        return CodecResult<ReceivedAckFrame>::failure(error->code,
+                                                      additional_range_begin + error->offset);
     }
-    static_cast<void>(reader.read_exact(decoded_ranges.value()).value());
-    frame.additional_range_bytes = bytes.subspan(additional_range_begin, decoded_ranges.value());
+    static_cast<void>(reader.read_exact(additional_ranges_reader.offset()).value());
+    frame.additional_range_bytes =
+        bytes.subspan(additional_range_begin, additional_ranges_reader.offset());
     frame.additional_ranges_validated = true;
 
-    const auto ecn_counts = decode_ack_ecn_counts(reader, has_ecn_counts);
-    if (!ecn_counts.has_value()) {
-        return CodecResult<ReceivedAckFrame>::failure(ecn_counts.error().code,
-                                                      ecn_counts.error().offset);
+    if (const auto error = decode_ack_ecn_counts(reader, has_ecn_counts, frame.ecn_counts)) {
+        return CodecResult<ReceivedAckFrame>::failure(error->code, error->offset);
     }
-    frame.ecn_counts = ecn_counts.value();
 
     return CodecResult<ReceivedAckFrame>::success(std::move(frame));
 }
@@ -1894,16 +1860,16 @@ CodecResult<AckRangeCursor> make_ack_range_cursor(const ReceivedAckFrame &ack) {
     }
 
     if (!ack.additional_ranges_validated) {
-        const auto decoded_ranges = scan_ack_extra_range_bytes(
-            ack.additional_range_bytes.span(), ack.additional_range_count,
-            ack.largest_acknowledged - ack.first_ack_range);
-        if (!decoded_ranges.has_value()) {
-            return CodecResult<AckRangeCursor>::failure(decoded_ranges.error().code,
-                                                        decoded_ranges.error().offset);
+        BufferReader additional_ranges_reader(ack.additional_range_bytes.span());
+        if (const auto error =
+                decode_ack_additional_ranges(additional_ranges_reader, ack.additional_range_count,
+                                             ack.largest_acknowledged - ack.first_ack_range,
+                                             [](std::uint64_t, std::uint64_t) {})) {
+            return CodecResult<AckRangeCursor>::failure(error->code, error->offset);
         }
-        if (decoded_ranges.value() != ack.additional_range_bytes.size()) {
+        if (additional_ranges_reader.offset() != ack.additional_range_bytes.size()) {
             return CodecResult<AckRangeCursor>::failure(CodecErrorCode::invalid_varint,
-                                                        decoded_ranges.value());
+                                                        additional_ranges_reader.offset());
         }
     }
 
@@ -1947,14 +1913,14 @@ std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
         }
         cursor.next_encoded_offset += gap.value().bytes_consumed;
 
-        const auto range_length =
+        const auto decoded_range_length =
             decode_varint_bytes(cursor.encoded_additional_ranges, cursor.next_encoded_offset);
-        if (!range_length.has_value()) {
+        if (!decoded_range_length.has_value()) {
             cursor.next_additional_index = cursor.additional_range_count;
             cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
             return std::nullopt;
         }
-        cursor.next_encoded_offset += range_length.value().bytes_consumed;
+        cursor.next_encoded_offset += decoded_range_length.value().bytes_consumed;
         ++cursor.next_additional_index;
 
         if (cursor.previous_smallest < gap.value().value + 2) {
@@ -1964,13 +1930,13 @@ std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
         }
 
         const auto range_largest = cursor.previous_smallest - gap.value().value - 2;
-        if (range_largest < range_length.value().value) {
+        if (range_largest < decoded_range_length.value().value) {
             cursor.next_additional_index = cursor.additional_range_count;
             cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
             return std::nullopt;
         }
 
-        cursor.previous_smallest = range_largest - range_length.value().value;
+        cursor.previous_smallest = range_largest - decoded_range_length.value().value;
         return AckPacketNumberRange{
             .smallest = cursor.previous_smallest,
             .largest = range_largest,

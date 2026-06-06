@@ -127,18 +127,6 @@ void append_version_information_parameter(std::vector<std::byte> &output,
     append_raw_parameter(output, version_information_parameter_id, encoded);
 }
 
-CodecResult<std::uint64_t> decode_integer_parameter(std::span<const std::byte> bytes) {
-    const auto decoded = coquic::quic::decode_varint_bytes(bytes);
-    if (!decoded.has_value()) {
-        return CodecResult<std::uint64_t>::failure(decoded.error().code, decoded.error().offset);
-    }
-    if (decoded.value().bytes_consumed != bytes.size()) {
-        return CodecResult<std::uint64_t>::failure(CodecErrorCode::invalid_varint, 0);
-    }
-
-    return CodecResult<std::uint64_t>::success(decoded.value().value);
-}
-
 CodecResult<TransportParametersValidationOk> validation_failure() {
     return CodecResult<TransportParametersValidationOk>::failure(
         CodecErrorCode::invalid_packet_protection_state, 0);
@@ -176,6 +164,18 @@ std::uint32_t select_preferred_version(std::span<const std::uint32_t> preferred_
 } // namespace
 
 namespace coquic::quic {
+
+CodecResult<std::uint64_t> decode_integer_parameter(std::span<const std::byte> bytes) {
+    const auto decoded = decode_varint_bytes(bytes);
+    if (!decoded.has_value()) {
+        return CodecResult<std::uint64_t>::failure(decoded.error().code, decoded.error().offset);
+    }
+    if (decoded.value().bytes_consumed != bytes.size()) {
+        return CodecResult<std::uint64_t>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    return CodecResult<std::uint64_t>::success(decoded.value().value);
+}
 
 CodecResult<std::vector<std::byte>>
 serialize_transport_parameters(const TransportParameters &parameters) {

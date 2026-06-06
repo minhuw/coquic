@@ -179,7 +179,7 @@ class ApplicationCandidateFrameBuilder {
         std::optional<ApplicationConnectionCloseFrame> &application_close_frame;
     };
 
-    explicit ApplicationCandidateFrameBuilder(Args args)
+    explicit ApplicationCandidateFrameBuilder(const Args &args)
         : scratch_(args.scratch), alternate_scratch_(args.alternate_scratch),
           received_packets_(args.received_packets), crypto_frames_(args.crypto_frames),
           include_handshake_done_(args.include_handshake_done), ack_header_(args.ack_header),

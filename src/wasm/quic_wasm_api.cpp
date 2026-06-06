@@ -192,13 +192,15 @@ std::optional<std::string> input_string(const std::uint8_t *input, std::size_t i
     return std::string(reinterpret_cast<const char *>(input), input_len);
 }
 
-std::optional<std::string> memory_bio_string(BIO *bio) {
+bool read_memory_bio_string(BIO *bio, std::string &output) {
     char *data = nullptr;
     const long length = BIO_get_mem_data(bio, &data);
     if (data == nullptr || length <= 0) {
-        return std::nullopt;
+        output.clear();
+        return false;
     }
-    return std::string(data, static_cast<std::size_t>(length));
+    output.assign(data, static_cast<std::size_t>(length));
+    return true;
 }
 
 std::optional<TlsIdentity> generate_demo_server_identity() {
@@ -243,16 +245,12 @@ std::optional<TlsIdentity> generate_demo_server_identity() {
         return std::nullopt;
     }
 
-    const auto certificate_output = memory_bio_string(certificate_bio.get());
-    const auto private_key_output = memory_bio_string(key_bio.get());
-    if (!certificate_output.has_value() || !private_key_output.has_value() ||
-        certificate_output->empty() || private_key_output->empty()) {
+    TlsIdentity identity;
+    if (!read_memory_bio_string(certificate_bio.get(), identity.certificate_pem) ||
+        !read_memory_bio_string(key_bio.get(), identity.private_key_pem)) {
         return std::nullopt;
     }
-    return TlsIdentity{
-        .certificate_pem = certificate_output.value(),
-        .private_key_pem = private_key_output.value(),
-    };
+    return identity;
 }
 
 std::optional<TlsIdentity> demo_server_identity() {

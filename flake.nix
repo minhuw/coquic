@@ -426,6 +426,11 @@
             touch $out/passed
           '';
         };
+      rustBuildHome = ''
+        export HOME="$TMPDIR/home"
+        export CARGO_HOME="$TMPDIR/cargo-home"
+        mkdir -p "$HOME" "$CARGO_HOME"
+      '';
       mkOfficialEndpointOverlay =
         {
           name,
@@ -591,6 +596,7 @@
         version = "dev";
         src = ./bench/quinn-perf;
         cargoHash = "sha256-k3wfuwWKkH6lMe6TXRwts5qIX1xC47x/JvbfF6Pkw2c=";
+        prePatch = rustBuildHome;
       };
       coquicRustPerfClient = pkgs.rustPlatform.buildRustPackage {
         pname = "coquic-rust-perf-client";
@@ -605,6 +611,7 @@
           "--bin"
           "coquic-rust-perf"
         ];
+        prePatch = rustBuildHome;
         nativeBuildInputs = [
           pkgs.makeWrapper
         ];
@@ -937,6 +944,7 @@
         version = "0.28.1";
         src = neqoSrc;
         cargoHash = "sha256-xRjNfIckWKhW0EqNYmsKI8bT66jRl0xWh/4Ckr27VPk=";
+        prePatch = rustBuildHome;
         depsExtraArgs.postPatch = ''
           cp ${./bench/neqo-perf/Cargo.lock} Cargo.lock
         '';
@@ -1123,6 +1131,7 @@ EOF
         version = "dev";
         src = ./bench/s2n-quic-perf;
         cargoHash = "sha256-k1DA7O55DTDRdTIWYhUEZBlH3+p9NcgzHI/qgagqrq8=";
+        prePatch = rustBuildHome;
         nativeBuildInputs = [
           pkgs.cmake
           pkgs.pkg-config
@@ -1151,6 +1160,7 @@ EOF
         version = "dev";
         src = ./bench/msquic-perf;
         cargoHash = "sha256-XOSZdG0Af1XZkuXDOCIVSONlxQzHu/LRI5tR3bxXRV4=";
+        prePatch = rustBuildHome;
         buildInputs = [
           libmsquicForMsquicPerf
         ];
@@ -1174,6 +1184,7 @@ EOF
         version = "dev";
         src = ./bench/quiche-perf;
         cargoHash = "sha256-5m+oup7YJJ8xDk2zfZjnkcZvlsp9j42whzNnMO3RZkc=";
+        prePatch = rustBuildHome;
         nativeBuildInputs = [
           pkgs.git
           llvmPkgs.clang
@@ -1386,6 +1397,7 @@ EOF
         src = tquicSrc;
         buildAndTestSubdir = "tools";
         cargoHash = "sha256-QzfLW+5eOrPilBEl0C25Mkj411lWZPGAqjW320rTjuU=";
+        prePatch = rustBuildHome;
         depsExtraArgs.postPatch = ''
           cp ${./bench/tquic-perf/Cargo.lock} Cargo.lock
           substituteInPlace tools/Cargo.toml --replace-fail 'tquic = { path = "..", version = "1.5.0"}' 'tquic = { path = "..", version = "1.6.0"}'

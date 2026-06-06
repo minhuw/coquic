@@ -105,43 +105,44 @@ class ScopedFrameFault {
     std::size_t previous_occurrence_ = 0;
 };
 
-template <typename Writer> std::optional<CodecError> append_byte(Writer &writer, std::byte value) {
+template <typename Writer>
+std::optional<CodecError> append_byte(Writer &frame_writer, std::byte value) {
     if constexpr (kCoquicFrameFaultHooksEnabled) {
         if (const auto injected = consume_frame_fault(FrameFaultPoint::append_byte)) {
             return injected;
         }
     }
-    if constexpr (std::is_void_v<decltype(writer.write_byte(value))>) {
-        writer.write_byte(value);
+    if constexpr (std::is_void_v<decltype(frame_writer.write_byte(value))>) {
+        frame_writer.write_byte(value);
         return std::nullopt;
     } else {
-        return writer.write_byte(value);
+        return frame_writer.write_byte(value);
     }
 }
 
 template <typename Writer>
-std::optional<CodecError> append_bytes(Writer &writer, std::span<const std::byte> bytes) {
+std::optional<CodecError> append_bytes(Writer &frame_writer, std::span<const std::byte> bytes) {
     if constexpr (kCoquicFrameFaultHooksEnabled) {
         if (const auto injected = consume_frame_fault(FrameFaultPoint::append_bytes)) {
             return injected;
         }
     }
-    if constexpr (std::is_void_v<decltype(writer.write_bytes(bytes))>) {
-        writer.write_bytes(bytes);
+    if constexpr (std::is_void_v<decltype(frame_writer.write_bytes(bytes))>) {
+        frame_writer.write_bytes(bytes);
         return std::nullopt;
     } else {
-        return writer.write_bytes(bytes);
+        return frame_writer.write_bytes(bytes);
     }
 }
 
 template <typename Writer>
-std::optional<CodecError> append_varint(Writer &writer, std::uint64_t value) {
+std::optional<CodecError> append_varint(Writer &frame_writer, std::uint64_t value) {
     if constexpr (kCoquicFrameFaultHooksEnabled) {
         if (const auto injected = consume_frame_fault(FrameFaultPoint::append_varint)) {
             return injected;
         }
     }
-    auto error = writer.write_varint(value);
+    auto error = frame_writer.write_varint(value);
     if (error.has_value()) {
         error->offset *= static_cast<std::size_t>(error->code != CodecErrorCode::invalid_varint);
     }
@@ -149,24 +150,24 @@ std::optional<CodecError> append_varint(Writer &writer, std::uint64_t value) {
 }
 
 template <typename Writer>
-std::optional<CodecError> append_exact_length_bytes(Writer &writer,
+std::optional<CodecError> append_exact_length_bytes(Writer &frame_writer,
                                                     const std::vector<std::byte> &bytes) {
-    if (const auto error = append_varint(writer, bytes.size())) {
+    if (const auto error = append_varint(frame_writer, bytes.size())) {
         return error;
     }
-    if (const auto error = append_bytes(writer, bytes)) {
+    if (const auto error = append_bytes(frame_writer, bytes)) {
         return error;
     }
     return std::nullopt;
 }
 
 template <typename Writer>
-std::optional<CodecError> append_single_varint_frame(Writer &writer, std::byte type,
+std::optional<CodecError> append_single_varint_frame(Writer &frame_writer, std::byte type,
                                                      std::uint64_t value) {
-    if (const auto error = append_byte(writer, type)) {
+    if (const auto error = append_byte(frame_writer, type)) {
         return error;
     }
-    if (const auto error = append_varint(writer, value)) {
+    if (const auto error = append_varint(frame_writer, value)) {
         return error;
     }
 
@@ -176,23 +177,23 @@ std::optional<CodecError> append_single_varint_frame(Writer &writer, std::byte t
 // NOLINTBEGIN(bugprone-easily-swappable-parameters)
 template <typename Writer>
 std::optional<CodecError>
-write_ack_fields(Writer &writer, std::uint64_t largest_acknowledged, std::uint64_t ack_delay,
+write_ack_fields(Writer &frame_writer, std::uint64_t largest_acknowledged, std::uint64_t ack_delay,
                  std::size_t additional_range_count, std::uint64_t first_ack_range,
                  const std::optional<AckEcnCounts> &ecn_counts) {
     if (const auto error =
-            append_byte(writer, ecn_counts.has_value() ? std::byte{0x03} : std::byte{0x02})) {
+            append_byte(frame_writer, ecn_counts.has_value() ? std::byte{0x03} : std::byte{0x02})) {
         return error;
     }
-    if (const auto error = append_varint(writer, largest_acknowledged)) {
+    if (const auto error = append_varint(frame_writer, largest_acknowledged)) {
         return error;
     }
-    if (const auto error = append_varint(writer, ack_delay)) {
+    if (const auto error = append_varint(frame_writer, ack_delay)) {
         return error;
     }
-    if (const auto error = append_varint(writer, additional_range_count)) {
+    if (const auto error = append_varint(frame_writer, additional_range_count)) {
         return error;
     }
-    if (const auto error = append_varint(writer, first_ack_range)) {
+    if (const auto error = append_varint(frame_writer, first_ack_range)) {
         return error;
     }
     return std::nullopt;
@@ -200,7 +201,7 @@ write_ack_fields(Writer &writer, std::uint64_t largest_acknowledged, std::uint64
 // NOLINTEND(bugprone-easily-swappable-parameters)
 
 template <typename Writer>
-std::optional<CodecError> write_ack_ranges(Writer &writer, std::uint64_t largest_acknowledged,
+std::optional<CodecError> write_ack_ranges(Writer &frame_writer, std::uint64_t largest_acknowledged,
                                            std::uint64_t first_ack_range,
                                            std::span<const AckRange> additional_ranges) {
     if (largest_acknowledged < first_ack_range) {
@@ -217,10 +218,10 @@ std::optional<CodecError> write_ack_ranges(Writer &writer, std::uint64_t largest
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
 
-        if (const auto error = append_varint(writer, range.gap)) {
+        if (const auto error = append_varint(frame_writer, range.gap)) {
             return error;
         }
-        if (const auto error = append_varint(writer, range.range_length)) {
+        if (const auto error = append_varint(frame_writer, range.range_length)) {
             return error;
         }
 
@@ -231,52 +232,53 @@ std::optional<CodecError> write_ack_ranges(Writer &writer, std::uint64_t largest
 }
 
 template <typename Writer>
-std::optional<CodecError> write_ack_ecn_counts(Writer &writer,
+std::optional<CodecError> write_ack_ecn_counts(Writer &frame_writer,
                                                const std::optional<AckEcnCounts> &ecn_counts) {
     if (!ecn_counts.has_value()) {
         return std::nullopt;
     }
 
-    if (const auto error = append_varint(writer, ecn_counts->ect0)) {
+    if (const auto error = append_varint(frame_writer, ecn_counts->ect0)) {
         return error;
     }
-    if (const auto error = append_varint(writer, ecn_counts->ect1)) {
+    if (const auto error = append_varint(frame_writer, ecn_counts->ect1)) {
         return error;
     }
-    if (const auto error = append_varint(writer, ecn_counts->ecn_ce)) {
+    if (const auto error = append_varint(frame_writer, ecn_counts->ecn_ce)) {
         return error;
     }
     return std::nullopt;
 }
 
 template <typename Writer>
-std::optional<CodecError> write_ack_frame(Writer &writer, const AckFrame &ack) {
+std::optional<CodecError> write_ack_frame(Writer &frame_writer, const AckFrame &ack) {
     if (const auto error =
-            write_ack_fields(writer, ack.largest_acknowledged, ack.ack_delay,
+            write_ack_fields(frame_writer, ack.largest_acknowledged, ack.ack_delay,
                              ack.additional_ranges.size(), ack.first_ack_range, ack.ecn_counts)) {
         return error;
     }
-    if (const auto error = write_ack_ranges(writer, ack.largest_acknowledged, ack.first_ack_range,
-                                            ack.additional_ranges)) {
+    if (const auto error = write_ack_ranges(frame_writer, ack.largest_acknowledged,
+                                            ack.first_ack_range, ack.additional_ranges)) {
         return error;
     }
-    return write_ack_ecn_counts(writer, ack.ecn_counts);
+    return write_ack_ecn_counts(frame_writer, ack.ecn_counts);
 }
 
 template <typename Writer>
-std::optional<CodecError> write_outbound_ack_frame(Writer &writer, const OutboundAckFrame &ack) {
+std::optional<CodecError> write_outbound_ack_frame(Writer &frame_writer,
+                                                   const OutboundAckFrame &ack) {
     if (const auto error =
-            write_ack_fields(writer, ack.header.largest_acknowledged, ack.header.ack_delay,
+            write_ack_fields(frame_writer, ack.header.largest_acknowledged, ack.header.ack_delay,
                              ack.header.additional_ranges.size(), ack.header.first_ack_range,
                              ack.header.ecn_counts)) {
         return error;
     }
     if (const auto error =
-            write_ack_ranges(writer, ack.header.largest_acknowledged, ack.header.first_ack_range,
-                             ack.header.additional_ranges)) {
+            write_ack_ranges(frame_writer, ack.header.largest_acknowledged,
+                             ack.header.first_ack_range, ack.header.additional_ranges)) {
         return error;
     }
-    return write_ack_ecn_counts(writer, ack.header.ecn_counts);
+    return write_ack_ecn_counts(frame_writer, ack.header.ecn_counts);
 }
 
 CodecResult<AckFrame> materialize_outbound_ack_frame(const OutboundAckFrame &ack) {
@@ -425,7 +427,7 @@ CodecResult<DecodedAckHeader> decode_ack_header(BufferReader &reader) {
 template <typename OnRange>
 std::optional<CodecError>
 decode_ack_additional_ranges(BufferReader &reader, std::uint64_t additional_range_count,
-                             std::uint64_t previous_smallest, OnRange &&on_range) {
+                             std::uint64_t ack_previous_smallest, OnRange &&on_range) {
     for (std::uint64_t i = 0; i < additional_range_count; ++i) {
         const auto gap = read_varint(reader);
         if (!gap.has_value()) {
@@ -437,14 +439,14 @@ decode_ack_additional_ranges(BufferReader &reader, std::uint64_t additional_rang
             return ack_range_length.error();
         }
 
-        if (previous_smallest < gap.value() + 2) {
+        if (ack_previous_smallest < gap.value() + 2) {
             return CodecError{
                 .code = CodecErrorCode::invalid_varint,
                 .offset = reader.offset(),
             };
         }
 
-        const auto largest = previous_smallest - gap.value() - 2;
+        const auto largest = ack_previous_smallest - gap.value() - 2;
         if (largest < ack_range_length.value()) {
             return CodecError{
                 .code = CodecErrorCode::invalid_varint,
@@ -453,7 +455,7 @@ decode_ack_additional_ranges(BufferReader &reader, std::uint64_t additional_rang
         }
 
         on_range(gap.value(), ack_range_length.value());
-        previous_smallest = largest - ack_range_length.value();
+        ack_previous_smallest = largest - ack_range_length.value();
     }
 
     return std::nullopt;
@@ -1026,13 +1028,14 @@ decode_application_connection_close_frame(BufferReader &reader) {
 }
 
 template <typename Writer>
-std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Frame &frame) {
+std::optional<CodecError> serialize_frame_into_writer(Writer &frame_writer, const Frame &frame) {
+    // Padding and ping are the only zero-field frames.
     if (const auto *padding = std::get_if<PaddingFrame>(&frame)) {
         if (padding->length == 0) {
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
         for (std::size_t i = 0; i < padding->length; ++i) {
-            if (const auto error = append_byte(writer, std::byte{0x00})) {
+            if (const auto error = append_byte(frame_writer, std::byte{0x00})) {
                 return error;
             }
         }
@@ -1040,46 +1043,47 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Fram
     }
 
     if (std::holds_alternative<PingFrame>(frame)) {
-        if (const auto error = append_byte(writer, std::byte{0x01})) {
+        if (const auto error = append_byte(frame_writer, std::byte{0x01})) {
             return error;
         }
         return std::nullopt;
     }
 
     if (const auto *ack = std::get_if<AckFrame>(&frame)) {
-        return write_ack_frame(writer, *ack);
+        return write_ack_frame(frame_writer, *ack);
     }
 
     if (const auto *ack = std::get_if<OutboundAckFrame>(&frame)) {
-        return write_outbound_ack_frame(writer, *ack);
+        return write_outbound_ack_frame(frame_writer, *ack);
     }
 
+    // Reset, stop-sending, crypto, and token frames carry direct varint fields.
     if (const auto *reset_stream = std::get_if<ResetStreamFrame>(&frame)) {
-        if (const auto error = append_byte(writer, std::byte{0x04})) {
+        if (const auto error = append_byte(frame_writer, std::byte{0x04})) {
             return error;
         }
-        if (const auto error = append_varint(writer, reset_stream->stream_id)) {
+        if (const auto error = append_varint(frame_writer, reset_stream->stream_id)) {
             return error;
         }
         if (const auto error =
-                append_varint(writer, reset_stream->application_protocol_error_code)) {
+                append_varint(frame_writer, reset_stream->application_protocol_error_code)) {
             return error;
         }
-        if (const auto error = append_varint(writer, reset_stream->final_size)) {
+        if (const auto error = append_varint(frame_writer, reset_stream->final_size)) {
             return error;
         }
         return std::nullopt;
     }
 
     if (const auto *stop_sending = std::get_if<StopSendingFrame>(&frame)) {
-        if (const auto error = append_byte(writer, std::byte{0x05})) {
+        if (const auto error = append_byte(frame_writer, std::byte{0x05})) {
             return error;
         }
-        if (const auto error = append_varint(writer, stop_sending->stream_id)) {
+        if (const auto error = append_varint(frame_writer, stop_sending->stream_id)) {
             return error;
         }
         if (const auto error =
-                append_varint(writer, stop_sending->application_protocol_error_code)) {
+                append_varint(frame_writer, stop_sending->application_protocol_error_code)) {
             return error;
         }
         return std::nullopt;
@@ -1090,13 +1094,13 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Fram
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
 
-        if (const auto error = append_byte(writer, std::byte{0x06})) {
+        if (const auto error = append_byte(frame_writer, std::byte{0x06})) {
             return error;
         }
-        if (const auto error = append_varint(writer, crypto->offset)) {
+        if (const auto error = append_varint(frame_writer, crypto->offset)) {
             return error;
         }
-        if (const auto error = append_exact_length_bytes(writer, crypto->crypto_data)) {
+        if (const auto error = append_exact_length_bytes(frame_writer, crypto->crypto_data)) {
             return error;
         }
         return std::nullopt;
@@ -1107,15 +1111,16 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Fram
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
 
-        if (const auto error = append_byte(writer, std::byte{0x07})) {
+        if (const auto error = append_byte(frame_writer, std::byte{0x07})) {
             return error;
         }
-        if (const auto error = append_exact_length_bytes(writer, new_token->token)) {
+        if (const auto error = append_exact_length_bytes(frame_writer, new_token->token)) {
             return error;
         }
         return std::nullopt;
     }
 
+    // STREAM and DATAGRAM frame type bits encode optional length, offset, and FIN fields.
     if (const auto *stream = std::get_if<StreamFrame>(&frame)) {
         std::byte type = std::byte{0x08};
         if (stream->has_offset) {
@@ -1133,56 +1138,57 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Fram
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
 
-        if (const auto error = append_byte(writer, type)) {
+        if (const auto error = append_byte(frame_writer, type)) {
             return error;
         }
-        if (const auto error = append_varint(writer, stream->stream_id)) {
+        if (const auto error = append_varint(frame_writer, stream->stream_id)) {
             return error;
         }
         if (stream->has_offset) {
-            if (const auto error = append_varint(writer, offset)) {
+            if (const auto error = append_varint(frame_writer, offset)) {
                 return error;
             }
         }
         if (stream->has_length) {
-            if (const auto error = append_varint(writer, stream->stream_data.size())) {
+            if (const auto error = append_varint(frame_writer, stream->stream_data.size())) {
                 return error;
             }
         }
-        if (const auto error = append_bytes(writer, stream->stream_data)) {
+        if (const auto error = append_bytes(frame_writer, stream->stream_data)) {
             return error;
         }
         return std::nullopt;
     }
 
     if (const auto *datagram = std::get_if<DatagramFrame>(&frame)) {
-        if (const auto error =
-                append_byte(writer, datagram->has_length ? std::byte{0x31} : std::byte{0x30})) {
+        if (const auto error = append_byte(frame_writer, datagram->has_length ? std::byte{0x31}
+                                                                              : std::byte{0x30})) {
             return error;
         }
         if (datagram->has_length) {
-            if (const auto error = append_varint(writer, datagram->data.size())) {
+            if (const auto error = append_varint(frame_writer, datagram->data.size())) {
                 return error;
             }
         }
-        if (const auto error = append_bytes(writer, datagram->data)) {
+        if (const auto error = append_bytes(frame_writer, datagram->data)) {
             return error;
         }
         return std::nullopt;
     }
 
+    // Flow-control frames share the same compact varint limit encoding.
     if (const auto *max_data = std::get_if<MaxDataFrame>(&frame)) {
-        return append_single_varint_frame(writer, std::byte{0x10}, max_data->maximum_data);
+        return append_single_varint_frame(frame_writer, std::byte{0x10}, max_data->maximum_data);
     }
 
     if (const auto *max_stream_data = std::get_if<MaxStreamDataFrame>(&frame)) {
-        if (const auto error = append_byte(writer, std::byte{0x11})) {
+        if (const auto error = append_byte(frame_writer, std::byte{0x11})) {
             return error;
         }
-        if (const auto error = append_varint(writer, max_stream_data->stream_id)) {
+        if (const auto error = append_varint(frame_writer, max_stream_data->stream_id)) {
             return error;
         }
-        if (const auto error = append_varint(writer, max_stream_data->maximum_stream_data)) {
+        if (const auto error = append_varint(frame_writer, max_stream_data->maximum_stream_data)) {
             return error;
         }
         return std::nullopt;
@@ -1193,29 +1199,31 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Fram
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
         if (const auto error =
-                append_byte(writer, max_streams->stream_type == StreamLimitType::bidirectional
-                                        ? std::byte{0x12}
-                                        : std::byte{0x13})) {
+                append_byte(frame_writer, max_streams->stream_type == StreamLimitType::bidirectional
+                                              ? std::byte{0x12}
+                                              : std::byte{0x13})) {
             return error;
         }
-        if (const auto error = append_varint(writer, max_streams->maximum_streams)) {
+        if (const auto error = append_varint(frame_writer, max_streams->maximum_streams)) {
             return error;
         }
         return std::nullopt;
     }
 
     if (const auto *data_blocked = std::get_if<DataBlockedFrame>(&frame)) {
-        return append_single_varint_frame(writer, std::byte{0x14}, data_blocked->maximum_data);
+        return append_single_varint_frame(frame_writer, std::byte{0x14},
+                                          data_blocked->maximum_data);
     }
 
     if (const auto *stream_data_blocked = std::get_if<StreamDataBlockedFrame>(&frame)) {
-        if (const auto error = append_byte(writer, std::byte{0x15})) {
+        if (const auto error = append_byte(frame_writer, std::byte{0x15})) {
             return error;
         }
-        if (const auto error = append_varint(writer, stream_data_blocked->stream_id)) {
+        if (const auto error = append_varint(frame_writer, stream_data_blocked->stream_id)) {
             return error;
         }
-        if (const auto error = append_varint(writer, stream_data_blocked->maximum_stream_data)) {
+        if (const auto error =
+                append_varint(frame_writer, stream_data_blocked->maximum_stream_data)) {
             return error;
         }
         return std::nullopt;
@@ -1225,18 +1233,19 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Fram
         if (streams_blocked->maximum_streams > kMaxStreamsLimit) {
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
-        if (const auto error =
-                append_byte(writer, streams_blocked->stream_type == StreamLimitType::bidirectional
-                                        ? std::byte{0x16}
-                                        : std::byte{0x17})) {
+        if (const auto error = append_byte(frame_writer, streams_blocked->stream_type ==
+                                                                 StreamLimitType::bidirectional
+                                                             ? std::byte{0x16}
+                                                             : std::byte{0x17})) {
             return error;
         }
-        if (const auto error = append_varint(writer, streams_blocked->maximum_streams)) {
+        if (const auto error = append_varint(frame_writer, streams_blocked->maximum_streams)) {
             return error;
         }
         return std::nullopt;
     }
 
+    // Connection-ID and path-validation frames carry bounded identifiers or fixed challenge bytes.
     if (const auto *new_connection_id = std::get_if<NewConnectionIdFrame>(&frame)) {
         const auto invalid_new_connection_id =
             new_connection_id->connection_id.empty() |
@@ -1246,84 +1255,89 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &writer, const Fram
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
 
-        if (const auto error = append_byte(writer, std::byte{0x18})) {
+        if (const auto error = append_byte(frame_writer, std::byte{0x18})) {
             return error;
         }
-        if (const auto error = append_varint(writer, new_connection_id->sequence_number)) {
+        if (const auto error = append_varint(frame_writer, new_connection_id->sequence_number)) {
             return error;
         }
-        if (const auto error = append_varint(writer, new_connection_id->retire_prior_to)) {
+        if (const auto error = append_varint(frame_writer, new_connection_id->retire_prior_to)) {
             return error;
         }
         if (const auto error = append_byte(
-                writer, static_cast<std::byte>(new_connection_id->connection_id.size()))) {
+                frame_writer, static_cast<std::byte>(new_connection_id->connection_id.size()))) {
             return error;
         }
-        if (const auto error = append_bytes(writer, new_connection_id->connection_id)) {
+        if (const auto error = append_bytes(frame_writer, new_connection_id->connection_id)) {
             return error;
         }
-        if (const auto error = append_bytes(writer, new_connection_id->stateless_reset_token)) {
+        if (const auto error =
+                append_bytes(frame_writer, new_connection_id->stateless_reset_token)) {
             return error;
         }
         return std::nullopt;
     }
 
     if (const auto *retire_connection_id = std::get_if<RetireConnectionIdFrame>(&frame)) {
-        return append_single_varint_frame(writer, std::byte{0x19},
+        return append_single_varint_frame(frame_writer, std::byte{0x19},
                                           retire_connection_id->sequence_number);
     }
 
     if (const auto *path_challenge = std::get_if<PathChallengeFrame>(&frame)) {
-        if (const auto error = append_byte(writer, std::byte{0x1a})) {
+        if (const auto error = append_byte(frame_writer, std::byte{0x1a})) {
             return error;
         }
-        if (const auto error = append_bytes(writer, path_challenge->data)) {
+        if (const auto error = append_bytes(frame_writer, path_challenge->data)) {
             return error;
         }
         return std::nullopt;
     }
 
     if (const auto *path_response = std::get_if<PathResponseFrame>(&frame)) {
-        if (const auto error = append_byte(writer, std::byte{0x1b})) {
+        if (const auto error = append_byte(frame_writer, std::byte{0x1b})) {
             return error;
         }
-        if (const auto error = append_bytes(writer, path_response->data)) {
+        if (const auto error = append_bytes(frame_writer, path_response->data)) {
             return error;
         }
         return std::nullopt;
     }
 
+    // Close frames carry protocol error metadata followed by a length-prefixed reason.
     if (const auto *transport_close = std::get_if<TransportConnectionCloseFrame>(&frame)) {
-        if (const auto error = append_byte(writer, std::byte{0x1c})) {
+        if (const auto error = append_byte(frame_writer, std::byte{0x1c})) {
             return error;
         }
-        if (const auto error = append_varint(writer, transport_close->error_code)) {
+        if (const auto error = append_varint(frame_writer, transport_close->error_code)) {
             return error;
         }
-        if (const auto error = append_varint(writer, transport_close->frame_type)) {
+        if (const auto error = append_varint(frame_writer, transport_close->frame_type)) {
             return error;
         }
-        if (const auto error = append_exact_length_bytes(writer, transport_close->reason.bytes)) {
+        if (const auto error =
+                append_exact_length_bytes(frame_writer, transport_close->reason.bytes)) {
             return error;
         }
         return std::nullopt;
     }
 
     if (const auto *application_close = std::get_if<ApplicationConnectionCloseFrame>(&frame)) {
-        if (const auto error = append_byte(writer, std::byte{0x1d})) {
+        if (const auto error = append_byte(frame_writer, std::byte{0x1d})) {
             return error;
         }
-        if (const auto error = append_varint(writer, application_close->error_code)) {
+        if (const auto error = append_varint(frame_writer, application_close->error_code)) {
             return error;
         }
-        if (const auto error = append_exact_length_bytes(writer, application_close->reason.bytes)) {
+        if (const auto error =
+                append_exact_length_bytes(frame_writer, application_close->reason.bytes)) {
             return error;
         }
         return std::nullopt;
     }
 
+    // HANDSHAKE_DONE is the only remaining frame alternative.
     static_cast<void>(std::get<HandshakeDoneFrame>(frame));
-    if (const auto error = append_byte(writer, std::byte{0x1e})) {
+    if (const auto error = append_byte(frame_writer, std::byte{0x1e})) {
         return error;
     }
     return std::nullopt;
@@ -1339,29 +1353,29 @@ COQUIC_NO_PROFILE bool matches_codec_error(const CodecResult<T> &result, CodecEr
 } // namespace
 
 CodecResult<std::size_t> frame_wire_size(const Frame &frame) {
-    CountingBufferWriter writer;
+    CountingBufferWriter frame_writer;
     if (const auto *outbound_ack = std::get_if<OutboundAckFrame>(&frame)) {
-        if (const auto error = write_outbound_ack_frame(writer, *outbound_ack)) {
+        if (const auto error = write_outbound_ack_frame(frame_writer, *outbound_ack)) {
             return CodecResult<std::size_t>::failure(error->code, error->offset);
         }
-    } else if (const auto error = serialize_frame_into_writer(writer, frame)) {
+    } else if (const auto error = serialize_frame_into_writer(frame_writer, frame)) {
         return CodecResult<std::size_t>::failure(error->code, error->offset);
     }
 
-    return CodecResult<std::size_t>::success(writer.offset());
+    return CodecResult<std::size_t>::success(frame_writer.offset());
 }
 
 CodecResult<std::size_t> write_frame_wire_bytes(std::span<std::byte> output, const Frame &frame) {
-    SpanBufferWriter writer(output);
+    SpanBufferWriter frame_writer(output);
     if (const auto *outbound_ack = std::get_if<OutboundAckFrame>(&frame)) {
-        if (const auto error = write_outbound_ack_frame(writer, *outbound_ack)) {
+        if (const auto error = write_outbound_ack_frame(frame_writer, *outbound_ack)) {
             return CodecResult<std::size_t>::failure(error->code, error->offset);
         }
-    } else if (const auto error = serialize_frame_into_writer(writer, frame)) {
+    } else if (const auto error = serialize_frame_into_writer(frame_writer, frame)) {
         return CodecResult<std::size_t>::failure(error->code, error->offset);
     }
 
-    return CodecResult<std::size_t>::success(writer.offset());
+    return CodecResult<std::size_t>::success(frame_writer.offset());
 }
 
 CodecResult<std::vector<std::byte>> serialize_frame(const Frame &frame) {
@@ -1898,45 +1912,44 @@ std::optional<AckPacketNumberRange> next_ack_range(AckRangeCursor &cursor) {
             return std::nullopt;
         }
 
-        if (cursor.next_encoded_offset > cursor.encoded_additional_ranges.size()) {
+        if (cursor.next_encoded_offset >= cursor.encoded_additional_ranges.size()) {
             cursor.next_additional_index = cursor.additional_range_count;
             cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
             return std::nullopt;
         }
 
-        const auto gap =
-            decode_varint_bytes(cursor.encoded_additional_ranges, cursor.next_encoded_offset);
+        BufferReader range_reader(
+            cursor.encoded_additional_ranges.subspan(cursor.next_encoded_offset));
+        const auto gap = read_varint(range_reader);
         if (!gap.has_value()) {
             cursor.next_additional_index = cursor.additional_range_count;
             cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
             return std::nullopt;
         }
-        cursor.next_encoded_offset += gap.value().bytes_consumed;
 
-        const auto decoded_range_length =
-            decode_varint_bytes(cursor.encoded_additional_ranges, cursor.next_encoded_offset);
-        if (!decoded_range_length.has_value()) {
+        const auto ack_range_extent = read_varint(range_reader);
+        if (!ack_range_extent.has_value()) {
             cursor.next_additional_index = cursor.additional_range_count;
             cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
             return std::nullopt;
         }
-        cursor.next_encoded_offset += decoded_range_length.value().bytes_consumed;
+        cursor.next_encoded_offset += range_reader.offset();
         ++cursor.next_additional_index;
 
-        if (cursor.previous_smallest < gap.value().value + 2) {
+        if (cursor.previous_smallest < gap.value() + 2) {
             cursor.next_additional_index = cursor.additional_range_count;
             cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
             return std::nullopt;
         }
 
-        const auto range_largest = cursor.previous_smallest - gap.value().value - 2;
-        if (range_largest < decoded_range_length.value().value) {
+        const auto range_largest = cursor.previous_smallest - gap.value() - 2;
+        if (range_largest < ack_range_extent.value()) {
             cursor.next_additional_index = cursor.additional_range_count;
             cursor.next_encoded_offset = cursor.encoded_additional_ranges.size();
             return std::nullopt;
         }
 
-        cursor.previous_smallest = range_largest - decoded_range_length.value().value;
+        cursor.previous_smallest = range_largest - ack_range_extent.value();
         return AckPacketNumberRange{
             .smallest = cursor.previous_smallest,
             .largest = range_largest,
@@ -1978,8 +1991,9 @@ COQUIC_NO_PROFILE bool matches_optional_codec_error(const std::optional<CodecErr
 COQUIC_NO_PROFILE bool span_writer_error_matches(const Frame &frame, CodecErrorCode code,
                                                  std::size_t offset) {
     std::array<std::byte, 512> output{};
-    SpanBufferWriter writer(output);
-    return matches_optional_codec_error(serialize_frame_into_writer(writer, frame), code, offset);
+    SpanBufferWriter frame_writer(output);
+    return matches_optional_codec_error(serialize_frame_into_writer(frame_writer, frame), code,
+                                        offset);
 }
 
 COQUIC_NO_PROFILE bool span_writer_fault_matches(const Frame &frame, FrameFaultPoint point,
@@ -1990,8 +2004,8 @@ COQUIC_NO_PROFILE bool span_writer_fault_matches(const Frame &frame, FrameFaultP
 
 COQUIC_NO_PROFILE bool span_writer_succeeds(const Frame &frame) {
     std::array<std::byte, 512> output{};
-    SpanBufferWriter writer(output);
-    return !serialize_frame_into_writer(writer, frame).has_value();
+    SpanBufferWriter frame_writer(output);
+    return !serialize_frame_into_writer(frame_writer, frame).has_value();
 }
 
 } // namespace test

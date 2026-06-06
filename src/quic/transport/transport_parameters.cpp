@@ -9,6 +9,12 @@
 
 #include "src/quic/codec/varint.h"
 
+namespace coquic::quic {
+
+bool contains_version(std::span<const std::uint32_t> versions, std::uint32_t version);
+
+} // namespace coquic::quic
+
 namespace {
 
 using coquic::quic::CodecError;
@@ -141,13 +147,9 @@ CodecResult<TransportParametersValidationOk> version_negotiation_validation_fail
     });
 }
 
-bool contains_version(std::span<const std::uint32_t> versions, std::uint32_t version) {
-    return std::find(versions.begin(), versions.end(), version) != versions.end();
-}
-
 bool has_zero_version_information_value(const VersionInformation &version_information) {
     return version_information.chosen_version == 0 ||
-           contains_version(version_information.available_versions, 0);
+           coquic::quic::contains_version(version_information.available_versions, 0);
 }
 
 std::uint32_t select_preferred_version(std::span<const std::uint32_t> preferred_versions,
@@ -156,7 +158,8 @@ std::uint32_t select_preferred_version(std::span<const std::uint32_t> preferred_
     const auto selected = std::find_if(
         preferred_versions.begin(), preferred_versions.end(), [&](std::uint32_t preferred_version) {
             return preferred_version == version_information.chosen_version ||
-                   contains_version(version_information.available_versions, preferred_version);
+                   coquic::quic::contains_version(version_information.available_versions,
+                                                  preferred_version);
         });
     return *selected;
 }
@@ -164,6 +167,10 @@ std::uint32_t select_preferred_version(std::span<const std::uint32_t> preferred_
 } // namespace
 
 namespace coquic::quic {
+
+bool contains_version(std::span<const std::uint32_t> versions, std::uint32_t version) {
+    return std::find(versions.begin(), versions.end(), version) != versions.end();
+}
 
 CodecResult<std::uint64_t> decode_integer_parameter(std::span<const std::byte> bytes) {
     const auto decoded = decode_varint_bytes(bytes);

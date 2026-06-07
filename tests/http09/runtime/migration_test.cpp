@@ -24,7 +24,8 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerBindsPreferredSocketAndPoll
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
+        .enable_client_preferred_address_migration = true,
+        .enable_server_preferred_address = true,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -39,8 +40,7 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerBindsPreferredSocketAndPoll
 }
 
 TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigAdvertisesPreferredAddress) {
-    EXPECT_TRUE(
-        coquic::http09::test::server_connectionmigration_preferred_address_config_for_tests());
+    EXPECT_TRUE(coquic::http09::test::server_preferred_address_config_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigIncludesPreferredAddressResetToken) {
@@ -48,7 +48,8 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigIncludesPreferredAddr
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
+        .enable_client_preferred_address_migration = true,
+        .enable_server_preferred_address = true,
     });
 
     ASSERT_TRUE(core.transport.preferred_address.has_value());
@@ -73,7 +74,8 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationServerConfigUsesConcreteAddressFo
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "::",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
+        .enable_client_preferred_address_migration = true,
+        .enable_server_preferred_address = true,
     });
 
     ASSERT_TRUE(core.transport.preferred_address.has_value());
@@ -117,7 +119,8 @@ TEST(QuicHttp09RuntimeTest, ConnectionMigrationWildcardServerConfigAdvertisesBot
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "::",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
+        .enable_client_preferred_address_migration = true,
+        .enable_server_preferred_address = true,
     });
 
     ASSERT_TRUE(core.transport.preferred_address.has_value());

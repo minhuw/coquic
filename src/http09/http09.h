@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 #include <filesystem>
 #include <span>
 #include <string>
@@ -12,21 +11,6 @@
 #include "src/quic/codec/varint.h"
 
 namespace coquic::http09 {
-
-enum class QuicHttp09Testcase : std::uint8_t {
-    handshake,
-    transfer,
-    keyupdate,
-    rebind_port,
-    rebind_addr,
-    connectionmigration,
-    ecn,
-    multiconnect,
-    chacha20,
-    resumption,
-    zerortt,
-    v2,
-};
 
 struct QuicHttp09Request {
     std::string url;
@@ -53,9 +37,5 @@ resolve_http09_path_under_root(const std::filesystem::path &root, std::string_vi
 
 std::vector<std::byte>
 http09_zero_rtt_application_context(std::span<const QuicHttp09Request> requests);
-
-quic::QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase testcase);
-quic::QuicTransportConfig http09_server_transport_for_testcase(QuicHttp09Testcase testcase);
-std::vector<quic::CipherSuite> http09_tls_cipher_suites_for_testcase(QuicHttp09Testcase testcase);
 
 } // namespace coquic::http09

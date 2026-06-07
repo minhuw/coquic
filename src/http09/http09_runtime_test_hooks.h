@@ -143,8 +143,7 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
 bool existing_server_session_failure_cleans_up_for_tests();
 bool existing_server_session_missing_input_fails_for_tests();
 bool preferred_address_routes_to_existing_server_session_for_tests();
-bool runtime_backend_connectionmigration_request_flow_for_tests();
-bool runtime_backend_official_connectionmigration_client_request_flow_for_tests();
+bool runtime_backend_preferred_address_request_flow_for_tests();
 bool runtime_backend_cross_family_preferred_address_requests_backend_route_for_tests();
 bool runtime_client_loop_requests_preferred_address_route_from_backend_for_tests();
 bool runtime_backend_preferred_address_route_failure_stops_migration_request_for_tests();
@@ -158,7 +157,7 @@ bool zero_rtt_request_allowance_for_tests();
 bool runtime_assigns_stable_path_ids_for_tests();
 bool drive_endpoint_uses_transport_selected_path_for_tests();
 bool runtime_policy_core_inputs_advance_before_terminal_success_for_tests();
-bool server_connectionmigration_preferred_address_config_for_tests();
+bool server_preferred_address_config_for_tests();
 bool runtime_configures_linux_ecn_socket_options_for_tests();
 bool runtime_sendmsg_uses_outbound_ecn_for_tests();
 bool runtime_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests();
@@ -167,5 +166,6 @@ bool runtime_registers_all_server_core_connection_ids_for_tests();
 bool runtime_server_route_handles_are_stable_per_peer_tuple_for_tests();
 bool runtime_server_send_effect_uses_route_handle_for_tests();
 bool runtime_restart_failure_paths_for_tests();
+bool runtime_server_backend_loop_prioritizes_due_timer_for_tests();
 
 } // namespace coquic::http09::test

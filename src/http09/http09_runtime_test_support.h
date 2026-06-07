@@ -634,8 +634,8 @@ bool core_version_negotiation_restart_preserves_inbound_path_ids_case_for_tests(
 bool core_retry_restart_preserves_inbound_path_ids_case_for_tests(
     bool force_integrity_failure, bool force_serialization_failure,
     bool force_path_id_mismatch = false);
-bool runtime_backend_connectionmigration_request_flow_case_for_tests(
-    bool official_alias, bool include_preferred_address,
+bool runtime_backend_preferred_address_request_flow_case_for_tests(
+    bool include_preferred_address,
     std::optional<QuicRouteHandle> preferred_route_result = QuicRouteHandle{41});
 bool runtime_registers_all_server_core_connection_ids_case_for_tests(
     bool include_preferred_address);

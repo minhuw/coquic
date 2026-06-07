@@ -6,6 +6,35 @@
 namespace {
 using namespace coquic::http09::test_support;
 
+constexpr std::uint64_t kTransferClientInitialMaxData = 32ull * 1024ull * 1024ull;
+constexpr std::uint64_t kTransferClientInitialMaxStreamData = 16ull * 1024ull * 1024ull;
+constexpr std::uint64_t kTransferServerInitialMaxStreamsBidi = 1000;
+
+void expect_interop_defaults(const coquic::http09::Http09RuntimeConfig &runtime) {
+    EXPECT_EQ(runtime.application_protocol, "hq-interop");
+    EXPECT_EQ(runtime.client_receive_timeout_ms, 30000);
+    EXPECT_EQ(runtime.client_run_mode, coquic::http09::Http09ClientRunMode::single_connection);
+    EXPECT_FALSE(runtime.request_key_update);
+    EXPECT_FALSE(runtime.attempt_zero_rtt);
+    EXPECT_FALSE(runtime.enable_client_preferred_address_migration);
+    EXPECT_FALSE(runtime.enable_server_preferred_address);
+    EXPECT_FALSE(runtime.server_zero_rtt.allow);
+    EXPECT_EQ(runtime.supported_versions,
+              (std::vector<std::uint32_t>{coquic::quic::kQuicVersion1}));
+}
+
+void expect_transfer_transport_profile(const coquic::http09::Http09RuntimeConfig &runtime) {
+    EXPECT_EQ(runtime.client_transport.max_idle_timeout, 180000u);
+    EXPECT_EQ(runtime.client_transport.active_connection_id_limit, 8u);
+    EXPECT_EQ(runtime.client_transport.initial_max_data, kTransferClientInitialMaxData);
+    EXPECT_EQ(runtime.client_transport.initial_max_stream_data_bidi_local,
+              kTransferClientInitialMaxStreamData);
+    EXPECT_EQ(runtime.server_transport.max_idle_timeout, 180000u);
+    EXPECT_EQ(runtime.server_transport.active_connection_id_limit, 8u);
+    EXPECT_EQ(runtime.server_transport.initial_max_streams_bidi,
+              kTransferServerInitialMaxStreamsBidi);
+}
+
 TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialRunnerAliasesViaCliFlags) {
     const char *multiconnect_argv[] = {"coquic",       "interop-client", "--testcase",
                                        "multiconnect", "--requests",     "https://localhost/a.txt"};
@@ -13,7 +42,9 @@ TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialRunnerAliasesViaCliFlags) {
         coquic::interop::parse_http09_interop_args(6, const_cast<char **>(multiconnect_argv));
     ASSERT_TRUE(multiconnect.has_value());
     const auto multiconnect_runtime = multiconnect.value_or(coquic::http09::Http09RuntimeConfig{});
-    EXPECT_EQ(multiconnect_runtime.testcase, coquic::http09::QuicHttp09Testcase::multiconnect);
+    EXPECT_EQ(multiconnect_runtime.client_run_mode,
+              coquic::http09::Http09ClientRunMode::one_connection_per_request);
+    EXPECT_EQ(multiconnect_runtime.client_receive_timeout_ms, 180000);
 
     const char *chacha20_argv[] = {"coquic",   "interop-client", "--testcase",
                                    "chacha20", "--requests",     "https://localhost/a.txt"};
@@ -21,7 +52,10 @@ TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialRunnerAliasesViaCliFlags) {
         coquic::interop::parse_http09_interop_args(6, const_cast<char **>(chacha20_argv));
     ASSERT_TRUE(chacha20.has_value());
     const auto chacha20_runtime = chacha20.value_or(coquic::http09::Http09RuntimeConfig{});
-    EXPECT_EQ(chacha20_runtime.testcase, coquic::http09::QuicHttp09Testcase::chacha20);
+    EXPECT_EQ(chacha20_runtime.allowed_tls_cipher_suites,
+              (std::vector<coquic::quic::CipherSuite>{
+                  coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+              }));
 }
 
 TEST(QuicHttp09InteropTest, BuildsRuntimeConfigWithRunnerDefaultsAndClientFallbackRemote) {
@@ -223,7 +257,7 @@ TEST(QuicHttp09InteropTest, ParsesServerEnvironmentAndCliFlags) {
         EXPECT_EQ(runtime.mode, coquic::http09::Http09RuntimeMode::server);
         EXPECT_EQ(runtime.host, "0.0.0.0");
         EXPECT_EQ(runtime.port, 8443);
-        EXPECT_EQ(runtime.testcase, coquic::http09::QuicHttp09Testcase::handshake);
+        expect_interop_defaults(runtime);
         EXPECT_EQ(runtime.document_root, std::filesystem::path("/srv/http09"));
         EXPECT_EQ(runtime.download_root, std::filesystem::path("/srv/downloads"));
         EXPECT_EQ(runtime.certificate_chain_path, std::filesystem::path("/tls/cert.pem"));
@@ -274,8 +308,8 @@ TEST(QuicHttp09InteropTest, ParsesRetryFlagsAndRetryTestcaseAlias) {
             coquic::interop::parse_http09_interop_args(1, const_cast<char **>(env_argv));
         ASSERT_TRUE(parsed.has_value());
         const auto &runtime = optional_ref_or_terminate(parsed);
-        EXPECT_EQ(runtime.testcase, coquic::http09::QuicHttp09Testcase::handshake);
         EXPECT_TRUE(runtime.retry_enabled);
+        expect_interop_defaults(runtime);
     }
 
     {
@@ -285,8 +319,8 @@ TEST(QuicHttp09InteropTest, ParsesRetryFlagsAndRetryTestcaseAlias) {
             coquic::interop::parse_http09_interop_args(6, const_cast<char **>(cli_argv));
         ASSERT_TRUE(parsed.has_value());
         const auto &runtime = optional_ref_or_terminate(parsed);
-        EXPECT_EQ(runtime.testcase, coquic::http09::QuicHttp09Testcase::handshake);
         EXPECT_TRUE(runtime.retry_enabled);
+        expect_interop_defaults(runtime);
     }
 }
 
@@ -387,7 +421,10 @@ TEST(QuicHttp09InteropTest, CliFlagsOverrideEnvironmentAndKeepExplicitClientRemo
     EXPECT_EQ(runtime.mode, coquic::http09::Http09RuntimeMode::client);
     EXPECT_EQ(runtime.host, "198.51.100.20");
     EXPECT_EQ(runtime.port, 9443);
-    EXPECT_EQ(runtime.testcase, coquic::http09::QuicHttp09Testcase::chacha20);
+    EXPECT_EQ(runtime.allowed_tls_cipher_suites,
+              (std::vector<coquic::quic::CipherSuite>{
+                  coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256,
+              }));
     EXPECT_EQ(runtime.requests_env, "https://cli.example/a.txt https://cli.example/b.txt");
     EXPECT_EQ(runtime.document_root, std::filesystem::path("/unused/server-root"));
     EXPECT_EQ(runtime.download_root, std::filesystem::path("/cli/downloads"));
@@ -405,6 +442,10 @@ TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialMulticonnectTestcase) {
 
     const auto parsed = coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
+    const auto &runtime = optional_ref_or_terminate(parsed);
+    EXPECT_EQ(runtime.client_run_mode,
+              coquic::http09::Http09ClientRunMode::one_connection_per_request);
+    EXPECT_EQ(runtime.client_receive_timeout_ms, 180000);
 }
 
 TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialV2Testcase) {
@@ -415,7 +456,12 @@ TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialV2Testcase) {
 
     const auto parsed = coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::http09::QuicHttp09Testcase::v2);
+    const auto &runtime = optional_ref_or_terminate(parsed);
+    EXPECT_EQ(runtime.original_version, coquic::quic::kQuicVersion1);
+    EXPECT_EQ(runtime.initial_version, coquic::quic::kQuicVersion1);
+    EXPECT_EQ(
+        runtime.supported_versions,
+        (std::vector<std::uint32_t>{coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1}));
 }
 
 TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialEcnTestcase) {
@@ -426,7 +472,7 @@ TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialEcnTestcase) {
 
     const auto parsed = coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase, coquic::http09::QuicHttp09Testcase::ecn);
+    expect_transfer_transport_profile(optional_ref_or_terminate(parsed));
 }
 
 TEST(QuicHttp09InteropTest, RuntimeTreatsAmplificationLimitEnvironmentAliasAsTransfer) {
@@ -437,8 +483,7 @@ TEST(QuicHttp09InteropTest, RuntimeTreatsAmplificationLimitEnvironmentAliasAsTra
 
     const auto parsed = coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::http09::QuicHttp09Testcase::transfer);
+    expect_transfer_transport_profile(optional_ref_or_terminate(parsed));
 }
 
 TEST(QuicHttp09InteropTest, RuntimeTreatsAmplificationLimitCliAliasAsTransfer) {
@@ -448,8 +493,7 @@ TEST(QuicHttp09InteropTest, RuntimeTreatsAmplificationLimitCliAliasAsTransfer) {
 
     const auto parsed = coquic::interop::parse_http09_interop_args(6, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::http09::QuicHttp09Testcase::transfer);
+    expect_transfer_transport_profile(optional_ref_or_terminate(parsed));
 }
 
 TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialResumptionAndZeroRttTestcases) {
@@ -462,8 +506,13 @@ TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialResumptionAndZeroRttTestcases)
         const auto parsed =
             coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
-        EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-                  coquic::http09::QuicHttp09Testcase::resumption);
+        const auto &runtime = optional_ref_or_terminate(parsed);
+        EXPECT_EQ(runtime.client_run_mode,
+                  coquic::http09::Http09ClientRunMode::resumption_sequence);
+        EXPECT_FALSE(runtime.attempt_zero_rtt);
+        EXPECT_TRUE(runtime.server_zero_rtt.allow);
+        EXPECT_TRUE(runtime.client_transport.disable_active_migration);
+        EXPECT_EQ(runtime.server_transport.initial_max_streams_bidi, 64u);
     }
 
     {
@@ -475,8 +524,13 @@ TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialResumptionAndZeroRttTestcases)
         const auto parsed =
             coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
-        EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-                  coquic::http09::QuicHttp09Testcase::zerortt);
+        const auto &runtime = optional_ref_or_terminate(parsed);
+        EXPECT_EQ(runtime.client_run_mode,
+                  coquic::http09::Http09ClientRunMode::resumption_sequence);
+        EXPECT_TRUE(runtime.attempt_zero_rtt);
+        EXPECT_TRUE(runtime.server_zero_rtt.allow);
+        EXPECT_TRUE(runtime.client_transport.disable_active_migration);
+        EXPECT_EQ(runtime.server_transport.initial_max_streams_bidi, 64u);
     }
 }
 
@@ -488,8 +542,9 @@ TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialKeyUpdateTestcase) {
 
     const auto parsed = coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::http09::QuicHttp09Testcase::keyupdate);
+    const auto &runtime = optional_ref_or_terminate(parsed);
+    EXPECT_TRUE(runtime.request_key_update);
+    expect_transfer_transport_profile(runtime);
 }
 
 TEST(QuicHttp09InteropTest, RuntimeAcceptsKeyUpdateCliFlag) {
@@ -498,8 +553,9 @@ TEST(QuicHttp09InteropTest, RuntimeAcceptsKeyUpdateCliFlag) {
 
     const auto parsed = coquic::interop::parse_http09_interop_args(6, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::http09::QuicHttp09Testcase::keyupdate);
+    const auto &runtime = optional_ref_or_terminate(parsed);
+    EXPECT_TRUE(runtime.request_key_update);
+    expect_transfer_transport_profile(runtime);
 }
 
 TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialRebindPortTestcase) {
@@ -510,8 +566,7 @@ TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialRebindPortTestcase) {
 
     const auto parsed = coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::http09::QuicHttp09Testcase::rebind_port);
+    expect_transfer_transport_profile(optional_ref_or_terminate(parsed));
 }
 
 TEST(QuicHttp09InteropTest, RuntimeAcceptsRebindAddrCliFlag) {
@@ -520,8 +575,7 @@ TEST(QuicHttp09InteropTest, RuntimeAcceptsRebindAddrCliFlag) {
 
     const auto parsed = coquic::interop::parse_http09_interop_args(6, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::http09::QuicHttp09Testcase::rebind_addr);
+    expect_transfer_transport_profile(optional_ref_or_terminate(parsed));
 }
 
 TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialConnectionMigrationTestcase) {
@@ -532,8 +586,24 @@ TEST(QuicHttp09InteropTest, RuntimeAcceptsOfficialConnectionMigrationTestcase) {
 
     const auto parsed = coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(parsed).testcase,
-              coquic::http09::QuicHttp09Testcase::connectionmigration);
+    const auto &runtime = optional_ref_or_terminate(parsed);
+    EXPECT_TRUE(runtime.enable_client_preferred_address_migration);
+    EXPECT_TRUE(runtime.enable_server_preferred_address);
+    expect_transfer_transport_profile(runtime);
+}
+
+TEST(QuicHttp09InteropTest, RuntimeEnablesMigrationForOfficialServer46TransferAlias) {
+    const char *argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "client");
+    ScopedEnvVar testcase("TESTCASE", "transfer");
+    ScopedEnvVar requests("REQUESTS", "https://server46:443/file.bin");
+
+    const auto parsed = coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    const auto &runtime = optional_ref_or_terminate(parsed);
+    EXPECT_TRUE(runtime.enable_client_preferred_address_migration);
+    EXPECT_FALSE(runtime.enable_server_preferred_address);
+    expect_transfer_transport_profile(runtime);
 }
 
 } // namespace

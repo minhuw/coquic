@@ -11,13 +11,7 @@ TEST(QuicHttp09RuntimeTest, PreferredAddressCidRoutesToExistingServerSession) {
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeQueuesPreferredAddressMigrationRequestAfterHandshakeConfirmed) {
-    EXPECT_TRUE(coquic::http09::test::runtime_backend_connectionmigration_request_flow_for_tests());
-}
-
-TEST(QuicHttp09RuntimeTest,
-     OfficialConnectionMigrationClientRequestQueuesPreferredAddressMigration) {
-    EXPECT_TRUE(coquic::http09::test::
-                    runtime_backend_official_connectionmigration_client_request_flow_for_tests());
+    EXPECT_TRUE(coquic::http09::test::runtime_backend_preferred_address_request_flow_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, CrossFamilyPreferredAddressRequestsIpv6BackendRoute) {

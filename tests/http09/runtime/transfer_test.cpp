@@ -39,7 +39,6 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileOverUdpSockets) {
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -48,7 +47,6 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileOverUdpSockets) {
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/hello.txt",
     };
@@ -73,7 +71,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileAfterConnectionMigr
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
+        .enable_client_preferred_address_migration = true,
+        .enable_server_preferred_address = true,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -82,7 +81,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileAfterConnectionMigr
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
+        .enable_client_preferred_address_migration = true,
+        .enable_server_preferred_address = true,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/hello.txt",
     };
@@ -106,7 +106,6 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferLargeFile) {
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -115,7 +114,6 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferLargeFile) {
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/large.bin",
     };
@@ -143,7 +141,6 @@ TEST(QuicHttp09RuntimeTest,
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -152,7 +149,6 @@ TEST(QuicHttp09RuntimeTest,
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/large.bin",
     };
@@ -181,7 +177,6 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferMediumFile) {
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -190,7 +185,6 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferMediumFile) {
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/medium.bin",
     };
@@ -228,7 +222,6 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferManyFilesAcrossRefres
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -237,7 +230,6 @@ TEST(QuicHttp09RuntimeTest, InMemoryClientAndServerTransferManyFilesAcrossRefres
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .requests_env = requests_env.str(),
     };
@@ -270,7 +262,6 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferLargeFileOverUdpSockets) {
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -279,7 +270,6 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferLargeFileOverUdpSockets) {
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/large.bin",
     };
@@ -305,7 +295,6 @@ TEST(QuicHttp09RuntimeTest,
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -314,7 +303,6 @@ TEST(QuicHttp09RuntimeTest,
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/hello.txt",
     };
@@ -338,7 +326,7 @@ TEST(QuicHttp09RuntimeTest,
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());
 }
 
-TEST(QuicHttp09RuntimeTest, TransferCaseUsesSingleConnectionAndMultipleStreams) {
+TEST(QuicHttp09RuntimeTest, SingleConnectionModeUsesMultipleStreams) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir download_root;
     document_root.write_file("alpha.txt", "alpha-bytes");
@@ -351,7 +339,6 @@ TEST(QuicHttp09RuntimeTest, TransferCaseUsesSingleConnectionAndMultipleStreams) 
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -360,7 +347,6 @@ TEST(QuicHttp09RuntimeTest, TransferCaseUsesSingleConnectionAndMultipleStreams) 
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/alpha.txt https://localhost/beta.txt",
     };
@@ -374,7 +360,7 @@ TEST(QuicHttp09RuntimeTest, TransferCaseUsesSingleConnectionAndMultipleStreams) 
     EXPECT_EQ(read_file_bytes(download_root.path() / "beta.txt"), "beta-bytes");
 }
 
-TEST(QuicHttp09RuntimeTest, MulticonnectCaseUsesSeparateConnectionPerRequest) {
+TEST(QuicHttp09RuntimeTest, OneConnectionPerRequestModeUsesSeparateConnectionPerRequest) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir download_root;
     document_root.write_file("alpha.txt", "alpha-bytes");
@@ -387,7 +373,8 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseUsesSeparateConnectionPerRequest) {
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
+        .client_run_mode = coquic::http09::Http09ClientRunMode::one_connection_per_request,
+        .client_receive_timeout_ms = 180000,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -396,7 +383,8 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseUsesSeparateConnectionPerRequest) {
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
+        .client_run_mode = coquic::http09::Http09ClientRunMode::one_connection_per_request,
+        .client_receive_timeout_ms = 180000,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/alpha.txt https://localhost/beta.txt",
     };
@@ -410,7 +398,8 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseUsesSeparateConnectionPerRequest) {
     EXPECT_EQ(read_file_bytes(download_root.path() / "beta.txt"), "beta-bytes");
 }
 
-TEST(QuicHttp09RuntimeTest, MulticonnectCaseSupportsThreeRequestsWithoutRoutingCollisions) {
+TEST(QuicHttp09RuntimeTest,
+     OneConnectionPerRequestModeSupportsThreeRequestsWithoutRoutingCollisions) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir download_root;
     document_root.write_file("alpha.txt", "alpha-bytes");
@@ -424,7 +413,8 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseSupportsThreeRequestsWithoutRoutingC
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
+        .client_run_mode = coquic::http09::Http09ClientRunMode::one_connection_per_request,
+        .client_receive_timeout_ms = 180000,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -433,7 +423,8 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseSupportsThreeRequestsWithoutRoutingC
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
+        .client_run_mode = coquic::http09::Http09ClientRunMode::one_connection_per_request,
+        .client_receive_timeout_ms = 180000,
         .download_root = download_root.path(),
         .requests_env =
             "https://localhost/alpha.txt https://localhost/beta.txt https://localhost/gamma.txt",
@@ -449,7 +440,7 @@ TEST(QuicHttp09RuntimeTest, MulticonnectCaseSupportsThreeRequestsWithoutRoutingC
     EXPECT_EQ(read_file_bytes(download_root.path() / "gamma.txt"), "gamma-bytes");
 }
 
-TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileWithResumptionTestcase) {
+TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileWithResumptionSequence) {
     coquic::quic::test::ScopedTempDir document_root;
     coquic::quic::test::ScopedTempDir download_root;
     document_root.write_file("hello.txt", "hello-after-resumption");
@@ -461,7 +452,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileWithResumptionTestc
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::resumption,
+        .server_zero_rtt = coquic::quic::QuicZeroRttConfig{.allow = true},
+        .client_run_mode = coquic::http09::Http09ClientRunMode::resumption_sequence,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -470,7 +462,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndServerTransferSingleFileWithResumptionTestc
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::resumption,
+        .server_zero_rtt = coquic::quic::QuicZeroRttConfig{.allow = true},
+        .client_run_mode = coquic::http09::Http09ClientRunMode::resumption_sequence,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/hello.txt",
     };
@@ -487,7 +480,8 @@ TEST(QuicHttp09RuntimeTest, ClientMulticonnectStopsWhenAConnectionFails) {
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "invalid-host-name",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
+        .client_run_mode = coquic::http09::Http09ClientRunMode::one_connection_per_request,
+        .client_receive_timeout_ms = 180000,
         .server_name = "localhost",
         .requests_env = "https://localhost/a.txt https://localhost/b.txt",
     };
@@ -509,7 +503,6 @@ TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerTransferLargeFileOverUdpSocket
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -518,7 +511,6 @@ TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerTransferLargeFileOverUdpSocket
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/runtime-large.bin",
     };
@@ -546,7 +538,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerMulticonnectThreeFilesOverUdpS
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
+        .client_run_mode = coquic::http09::Http09ClientRunMode::one_connection_per_request,
+        .client_receive_timeout_ms = 180000,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -555,7 +548,8 @@ TEST(QuicHttp09RuntimeTest, ClientAndRuntimeServerMulticonnectThreeFilesOverUdpS
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
+        .client_run_mode = coquic::http09::Http09ClientRunMode::one_connection_per_request,
+        .client_receive_timeout_ms = 180000,
         .download_root = download_root.path(),
         .requests_env =
             "https://localhost/alpha.txt https://localhost/beta.txt https://localhost/gamma.txt",

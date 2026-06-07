@@ -1,21 +1,17 @@
 #include "src/http09/http09.h"
 
 #include <algorithm>
-#include <cstdint>
 #include <string_view>
 #include <utility>
 
 namespace coquic::http09 {
 
-using quic::CipherSuite;
 using quic::CodecErrorCode;
 using quic::CodecResult;
-using quic::QuicTransportConfig;
 
 namespace {
 
 constexpr CodecErrorCode kHttp09ParseError = CodecErrorCode::http09_parse_error;
-constexpr std::uint64_t kHttp09InteropActiveConnectionIdLimit = 8;
 
 CodecResult<QuicHttp09Request> parse_absolute_https_request(std::string_view token) {
     constexpr std::string_view scheme = "https://";
@@ -73,22 +69,6 @@ bool has_raw_dot_segment(const std::filesystem::path &path) {
 bool is_invalid_http09_target_char(char ch) {
     const auto value = static_cast<unsigned char>(ch);
     return value <= 0x20u || value == 0x7fu;
-}
-
-constexpr QuicHttp09Testcase transfer_profile_testcase(QuicHttp09Testcase testcase) {
-    if (testcase == QuicHttp09Testcase::keyupdate || testcase == QuicHttp09Testcase::rebind_port ||
-        testcase == QuicHttp09Testcase::rebind_addr || testcase == QuicHttp09Testcase::ecn ||
-        testcase == QuicHttp09Testcase::connectionmigration) {
-        return QuicHttp09Testcase::transfer;
-    }
-    return testcase;
-}
-
-QuicTransportConfig http09_transport_for_testcase(QuicHttp09Testcase) {
-    auto config = QuicTransportConfig{};
-    config.max_idle_timeout = 180000;
-    config.active_connection_id_limit = kHttp09InteropActiveConnectionIdLimit;
-    return config;
 }
 
 } // namespace
@@ -218,41 +198,6 @@ http09_zero_rtt_application_context(std::span<const QuicHttp09Request> requests)
         context.push_back(static_cast<std::byte>(static_cast<unsigned char>(ch)));
     }
     return context;
-}
-
-QuicTransportConfig http09_client_transport_for_testcase(QuicHttp09Testcase testcase) {
-    testcase = transfer_profile_testcase(testcase);
-    auto config = http09_transport_for_testcase(testcase);
-    if (testcase == QuicHttp09Testcase::transfer) {
-        config.initial_max_data = 32ull * 1024ull * 1024ull;
-        config.initial_max_stream_data_bidi_local = 16ull * 1024ull * 1024ull;
-    }
-    if (testcase == QuicHttp09Testcase::resumption || testcase == QuicHttp09Testcase::zerortt) {
-        config.disable_active_migration = true;
-    }
-    return config;
-}
-
-QuicTransportConfig http09_server_transport_for_testcase(QuicHttp09Testcase testcase) {
-    testcase = transfer_profile_testcase(testcase);
-    auto config = http09_transport_for_testcase(testcase);
-    if (testcase == QuicHttp09Testcase::resumption || testcase == QuicHttp09Testcase::zerortt) {
-        // Official resumed interop cases fan out enough request streams that the
-        // default limit of 16 forces extra 1-RTT churn after warmup.
-        config.initial_max_streams_bidi = 64;
-    }
-    return config;
-}
-
-std::vector<CipherSuite> http09_tls_cipher_suites_for_testcase(QuicHttp09Testcase testcase) {
-    testcase = transfer_profile_testcase(testcase);
-    if (testcase == QuicHttp09Testcase::chacha20) {
-        return {
-            CipherSuite::tls_chacha20_poly1305_sha256,
-        };
-    }
-
-    return {};
 }
 
 } // namespace coquic::http09

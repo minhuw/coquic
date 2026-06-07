@@ -18,7 +18,9 @@ TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeTransfersWarmupAndFinalRequestsAcrossR
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::zerortt,
+        .attempt_zero_rtt = true,
+        .server_zero_rtt = coquic::quic::QuicZeroRttConfig{.allow = true},
+        .client_run_mode = coquic::http09::Http09ClientRunMode::resumption_sequence,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -27,7 +29,9 @@ TEST(QuicHttp09RuntimeTest, ZeroRttRuntimeTransfersWarmupAndFinalRequestsAcrossR
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::zerortt,
+        .attempt_zero_rtt = true,
+        .server_zero_rtt = coquic::quic::QuicZeroRttConfig{.allow = true},
+        .client_run_mode = coquic::http09::Http09ClientRunMode::resumption_sequence,
         .download_root = download_root.path(),
         .requests_env = "https://localhost/seed.txt https://localhost/final.txt",
     };
@@ -44,7 +48,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverRetryAndZeroRttBranches) {
     EXPECT_TRUE(coquic::http09::test::zero_rtt_request_allowance_for_tests());
 }
 
-TEST(QuicHttp09RuntimeTest, HandshakeCaseNeverEmitsRetryPackets) {
+TEST(QuicHttp09RuntimeTest, RetryDisabledServerNeverEmitsRetryPackets) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
@@ -52,7 +56,6 @@ TEST(QuicHttp09RuntimeTest, HandshakeCaseNeverEmitsRetryPackets) {
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -73,7 +76,6 @@ TEST(QuicHttp09RuntimeTest, HandshakeCaseNeverEmitsRetryPackets) {
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .requests_env = "https://localhost/hello.txt",
     };
     coquic::quic::QuicCore client(coquic::http09::make_http09_client_core_config(client_runtime));
@@ -148,7 +150,7 @@ TEST(QuicHttp09RuntimeTest, RetryEnabledServerCompletesHandshakeAfterRetriedInit
     EXPECT_EQ(run_retry_enabled_runtime_handshake(), 0);
 }
 
-TEST(QuicHttp09RuntimeTest, V2CaseStartsInQuicV1AndNegotiatesQuicV2LongHeaders) {
+TEST(QuicHttp09RuntimeTest, ConfiguredCompatibleVersionsStartInQuicV1AndNegotiateV2LongHeaders) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);
 
@@ -156,7 +158,7 @@ TEST(QuicHttp09RuntimeTest, V2CaseStartsInQuicV1AndNegotiatesQuicV2LongHeaders) 
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::v2,
+        .supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1},
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -177,7 +179,7 @@ TEST(QuicHttp09RuntimeTest, V2CaseStartsInQuicV1AndNegotiatesQuicV2LongHeaders) 
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::v2,
+        .supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1},
         .requests_env = "https://localhost/hello.txt",
     };
     coquic::quic::QuicCore client(coquic::http09::make_http09_client_core_config(client_runtime));

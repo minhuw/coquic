@@ -18,10 +18,7 @@ bool runtime_has_openssl() {
 }
 
 int client_receive_timeout_ms(const Http09RuntimeConfig &config) {
-    if (config.testcase == QuicHttp09Testcase::multiconnect) {
-        return kMulticonnectClientReceiveTimeoutMs;
-    }
-    return kDefaultClientReceiveTimeoutMs;
+    return config.client_receive_timeout_ms;
 }
 
 test::Http09RuntimeOpsOverride &runtime_ops() {
@@ -159,49 +156,6 @@ std::optional<std::uint16_t> parse_port(std::string_view value) {
     return static_cast<std::uint16_t>(parsed);
 }
 
-std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value) {
-    if (value == "handshake") {
-        return QuicHttp09Testcase::handshake;
-    }
-    if (value == "transfer") {
-        return QuicHttp09Testcase::transfer;
-    }
-    if (value == "keyupdate") {
-        return QuicHttp09Testcase::keyupdate;
-    }
-    if (value == "amplificationlimit") {
-        return QuicHttp09Testcase::transfer;
-    }
-    if (value == "rebind-port") {
-        return QuicHttp09Testcase::rebind_port;
-    }
-    if (value == "rebind-addr") {
-        return QuicHttp09Testcase::rebind_addr;
-    }
-    if (value == "connectionmigration") {
-        return QuicHttp09Testcase::connectionmigration;
-    }
-    if (value == "ecn") {
-        return QuicHttp09Testcase::ecn;
-    }
-    if (value == "multiconnect") {
-        return QuicHttp09Testcase::multiconnect;
-    }
-    if (value == "chacha20") {
-        return QuicHttp09Testcase::chacha20;
-    }
-    if (value == "resumption") {
-        return QuicHttp09Testcase::resumption;
-    }
-    if (value == "zerortt") {
-        return QuicHttp09Testcase::zerortt;
-    }
-    if (value == "v2") {
-        return QuicHttp09Testcase::v2;
-    }
-    return std::nullopt;
-}
-
 std::optional<io::QuicIoBackendKind> parse_io_backend_kind(std::string_view value) {
     if (value == "socket") {
         return io::QuicIoBackendKind::socket;
@@ -210,22 +164,6 @@ std::optional<io::QuicIoBackendKind> parse_io_backend_kind(std::string_view valu
         return io::QuicIoBackendKind::io_uring;
     }
     return std::nullopt;
-}
-
-bool apply_testcase_name(Http09RuntimeConfig &config, std::string_view value) {
-    if (value == "retry") {
-        config.testcase = QuicHttp09Testcase::handshake;
-        config.retry_enabled = true;
-        return true;
-    }
-
-    const auto parsed = parse_testcase(value);
-    if (!parsed.has_value()) {
-        return false;
-    }
-
-    config.testcase = *parsed;
-    return true;
 }
 
 bool parse_role_into(Http09RuntimeConfig &config, std::string_view role) {
@@ -460,23 +398,6 @@ int open_and_bind_udp_socket(const ResolvedUdpAddress &bind_address, std::string
     return socket_fd;
 }
 
-std::uint32_t runtime_original_quic_version_for_testcase(QuicHttp09Testcase testcase) {
-    if (testcase == QuicHttp09Testcase::v2) {
-        // The interop v2 testcase uses compatible version negotiation:
-        // start in v1, advertise v2, then switch to v2 after the server selects it.
-        return kQuicVersion1;
-    }
-    return kQuicVersion1;
-}
-
-std::vector<std::uint32_t>
-runtime_supported_quic_versions_for_testcase(QuicHttp09Testcase testcase) {
-    if (testcase == QuicHttp09Testcase::v2) {
-        return {kQuicVersion2, kQuicVersion1};
-    }
-    return {kQuicVersion1};
-}
-
 std::optional<PreferredAddress>
 runtime_preferred_address_for_server(const Http09RuntimeConfig &config);
 
@@ -489,25 +410,20 @@ void configure_runtime_datagram_profile(QuicTransportConfig &transport) {
 
 QuicCoreConfig make_http09_server_core_config_with_identity(const Http09RuntimeConfig &config,
                                                             TlsIdentity identity) {
-    const auto original_version = runtime_original_quic_version_for_testcase(config.testcase);
-    const auto transfer_like_testcase = transfer_semantics_testcase(config.testcase);
     auto core = QuicCoreConfig{
         .role = EndpointRole::server,
         .source_connection_id = {std::byte{0x53}, std::byte{0x01}},
-        .original_version = original_version,
-        .initial_version = original_version,
-        .supported_versions = runtime_supported_quic_versions_for_testcase(config.testcase),
+        .original_version = config.original_version,
+        .initial_version = config.initial_version,
+        .supported_versions = config.supported_versions,
         .verify_peer = config.verify_peer,
         .server_name = config.server_name,
-        .application_protocol = std::string(kInteropApplicationProtocol),
+        .application_protocol = config.application_protocol,
         .identity = std::move(identity),
-        .transport = http09_server_transport_for_testcase(transfer_like_testcase),
+        .transport = config.server_transport,
         .max_outbound_datagram_size = kRuntimeMaxOutboundDatagramBytes,
-        .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(transfer_like_testcase),
-        .zero_rtt =
-            QuicZeroRttConfig{
-                .allow = config.testcase == QuicHttp09Testcase::zerortt,
-            },
+        .allowed_tls_cipher_suites = config.allowed_tls_cipher_suites,
+        .zero_rtt = config.server_zero_rtt,
     };
     if (config.qlog_directory.has_value()) {
         core.qlog = QuicQlogConfig{.directory = *config.qlog_directory};
@@ -531,7 +447,7 @@ ConnectionId make_runtime_connection_id(std::byte prefix, std::uint64_t sequence
 
 std::optional<PreferredAddress>
 runtime_preferred_address_for_server(const Http09RuntimeConfig &config) {
-    if (config.testcase != QuicHttp09Testcase::connectionmigration) {
+    if (!config.enable_server_preferred_address) {
         return std::nullopt;
     }
 
@@ -1486,34 +1402,11 @@ bool observe_client_runtime_policy_effects_with_backend(const QuicCoreResult &re
     return true;
 }
 
-bool runtime_client_should_attempt_preferred_address_migration(const Http09RuntimeConfig &config) {
-    if (config.testcase == QuicHttp09Testcase::connectionmigration) {
-        return true;
-    }
-    if ((config.mode != Http09RuntimeMode::client) |
-        (config.testcase != QuicHttp09Testcase::transfer) | config.requests_env.empty()) {
-        return false;
-    }
-
-    const auto requests = parse_http09_requests_env(config.requests_env);
-    if (!requests.has_value()) {
-        return false;
-    }
-
-    const auto &parsed_requests = requests.value();
-    return std::any_of(parsed_requests.begin(), parsed_requests.end(),
-                       [](const QuicHttp09Request &request) {
-                           return parse_http09_authority_impl(request.authority)
-                                      .value_or(ParsedHttp09Authority{})
-                                      .host == "server46";
-                       });
-}
-
 void maybe_queue_client_runtime_policy_inputs(const Http09RuntimeConfig &config,
                                               ClientRuntimePolicyState &policy,
                                               std::vector<QuicCoreInput> &core_inputs) {
-    if (!runtime_client_should_attempt_preferred_address_migration(config) ||
-        !policy.handshake_confirmed_seen || !policy.preferred_address_route_handle.has_value() ||
+    if (!config.enable_client_preferred_address_migration || !policy.handshake_confirmed_seen ||
+        !policy.preferred_address_route_handle.has_value() ||
         policy.preferred_address_request_queued) {
         return;
     }
@@ -2288,7 +2181,7 @@ QuicHttp09ClientConfig make_http09_client_endpoint_config(
         .download_root = config.download_root,
         .allow_requests_before_handshake_ready =
             allow_requests_before_handshake_ready(attempt_zero_rtt_requests, start_result),
-        .request_key_update = config.testcase == QuicHttp09Testcase::keyupdate,
+        .request_key_update = config.request_key_update,
     };
 }
 
@@ -2370,7 +2263,7 @@ int run_http09_resumed_client_sequence(const Http09RuntimeConfig &config,
     auto resumed_core_config = make_runtime_client_core_config(config, 2);
     resumed_core_config.resumption_state = warmup.resumption_state;
     resumed_core_config.zero_rtt = QuicZeroRttConfig{
-        .attempt = config.testcase == QuicHttp09Testcase::zerortt,
+        .attempt = config.attempt_zero_rtt,
         .application_context = http09_zero_rtt_application_context(requests),
     };
     return runner(config, requests, std::move(resumed_core_config), 2).exit_code;
@@ -2392,9 +2285,7 @@ int run_http09_client(const Http09RuntimeConfig &config) {
         return 1;
     }
 
-    const bool resumed_case = config.testcase == QuicHttp09Testcase::resumption ||
-                              config.testcase == QuicHttp09Testcase::zerortt;
-    if (config.testcase == QuicHttp09Testcase::multiconnect) {
+    if (config.client_run_mode == Http09ClientRunMode::one_connection_per_request) {
         for (std::size_t index = 0; index < requests.value().size(); ++index) {
             if (run_http09_client_connection(
                     config, std::vector<QuicHttp09Request>{requests.value().at(index)},
@@ -2405,7 +2296,7 @@ int run_http09_client(const Http09RuntimeConfig &config) {
         return 0;
     }
 
-    if (!resumed_case) {
+    if (config.client_run_mode != Http09ClientRunMode::resumption_sequence) {
         return run_http09_client_connection(config, requests.value(), 1);
     }
 
@@ -3228,37 +3119,10 @@ int run_server_backend_loop_with_driver(const ServerBackendLoopDriver &driver) {
         }
         if (top_due) {
             log_wait_request("top_due", next_wakeup, current);
-            const auto event = driver.wait(next_wakeup);
-            log_wait_event("top_due", event);
-            if (!event.has_value()) {
-                return 1;
+            if (!driver.process_wait_timer(current)) {
+                server_failed = true;
             }
-            if (event->kind == QuicIoEvent::Kind::rx_datagram) {
-                if (!event->datagram.has_value()) {
-                    server_failed = true;
-                    continue;
-                }
-                if (!driver.process_datagram(*event->datagram, event->now)) {
-                    server_failed = true;
-                }
-                continue;
-            }
-            if (event->kind == QuicIoEvent::Kind::path_mtu_update) {
-                if (!event->path_mtu.has_value()) {
-                    server_failed = true;
-                    continue;
-                }
-                process_path_mtu_update_event_or_mark_failed(driver, *event->path_mtu, event->now,
-                                                             server_failed);
-                continue;
-            }
-            if (event->kind == QuicIoEvent::Kind::timer_expired) {
-                if (!driver.process_wait_timer(event->now)) {
-                    server_failed = true;
-                }
-                continue;
-            }
-            buffered_event = event;
+            continue;
         }
 
         bool made_progress = false;
@@ -3454,9 +3318,8 @@ int run_http09_server(const Http09RuntimeConfig &config) {
                 },
         },
         config.host,
-        config.testcase == QuicHttp09Testcase::connectionmigration
-            ? std::span<const std::uint16_t>(ports)
-            : std::span<const std::uint16_t>(ports.data(), 1));
+        config.enable_server_preferred_address ? std::span<const std::uint16_t>(ports)
+                                               : std::span<const std::uint16_t>(ports.data(), 1));
     if (!bootstrap.has_value()) {
         return 1;
     }
@@ -3496,23 +3359,21 @@ derive_http09_client_remote(const Http09RuntimeConfig &config,
 }
 
 QuicCoreConfig make_http09_client_core_config(const Http09RuntimeConfig &config) {
-    const auto original_version = runtime_original_quic_version_for_testcase(config.testcase);
-    const auto transfer_like_testcase = transfer_semantics_testcase(config.testcase);
     auto core = QuicCoreConfig{
         .role = EndpointRole::client,
         .source_connection_id = {std::byte{0xc1}, std::byte{0x01}},
         .initial_destination_connection_id = {std::byte{0x83}, std::byte{0x94}, std::byte{0xc8},
                                               std::byte{0xf0}, std::byte{0x3e}, std::byte{0x51},
                                               std::byte{0x57}, std::byte{0x08}},
-        .original_version = original_version,
-        .initial_version = original_version,
-        .supported_versions = runtime_supported_quic_versions_for_testcase(config.testcase),
+        .original_version = config.original_version,
+        .initial_version = config.initial_version,
+        .supported_versions = config.supported_versions,
         .verify_peer = config.verify_peer,
         .server_name = config.server_name.empty() ? "localhost" : config.server_name,
-        .application_protocol = std::string(kInteropApplicationProtocol),
-        .transport = http09_client_transport_for_testcase(transfer_like_testcase),
+        .application_protocol = config.application_protocol,
+        .transport = config.client_transport,
         .max_outbound_datagram_size = kRuntimeMaxOutboundDatagramBytes,
-        .allowed_tls_cipher_suites = http09_tls_cipher_suites_for_testcase(transfer_like_testcase),
+        .allowed_tls_cipher_suites = config.allowed_tls_cipher_suites,
     };
     if (config.qlog_directory.has_value()) {
         core.qlog = QuicQlogConfig{.directory = *config.qlog_directory};

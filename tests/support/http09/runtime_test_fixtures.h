@@ -984,7 +984,6 @@ inline RuntimeHandshakeObservation run_retry_enabled_runtime_handshake_observati
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .retry_enabled = true,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -1010,7 +1009,6 @@ inline RuntimeHandshakeObservation run_retry_enabled_runtime_handshake_observati
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .requests_env = "https://localhost/hello.txt",
     };
     coquic::quic::QuicCore client(coquic::http09::make_http09_client_core_config(client_runtime));

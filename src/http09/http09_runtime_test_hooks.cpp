@@ -1001,14 +1001,11 @@ bool preferred_address_routes_to_existing_server_session_for_tests() {
                                             initial_destination_routes, parsed) != sessions.end();
 }
 
-bool runtime_backend_connectionmigration_request_flow_case_for_tests(
-    bool official_alias, bool include_preferred_address,
-    std::optional<QuicRouteHandle> preferred_route_result) {
+bool runtime_backend_preferred_address_request_flow_case_for_tests(
+    bool include_preferred_address, std::optional<QuicRouteHandle> preferred_route_result) {
     const Http09RuntimeConfig config{
         .mode = Http09RuntimeMode::client,
-        .testcase =
-            official_alias ? QuicHttp09Testcase::transfer : QuicHttp09Testcase::connectionmigration,
-        .requests_env = official_alias ? "https://server46:443/file.bin" : "",
+        .enable_client_preferred_address_migration = true,
     };
 
     auto backend = std::make_unique<ScriptedIoBackendForTests>();
@@ -1061,14 +1058,9 @@ bool runtime_backend_connectionmigration_request_flow_case_for_tests(
            (remote.family == AF_INET) && (peer_port_for_remote_for_tests(remote) == 4444);
 }
 
-bool runtime_backend_connectionmigration_request_flow_for_tests() {
-    return runtime_backend_connectionmigration_request_flow_case_for_tests(
-        /*official_alias=*/false, /*include_preferred_address=*/true);
-}
-
-bool runtime_backend_official_connectionmigration_client_request_flow_for_tests() {
-    return runtime_backend_connectionmigration_request_flow_case_for_tests(
-        /*official_alias=*/true, /*include_preferred_address=*/true);
+bool runtime_backend_preferred_address_request_flow_for_tests() {
+    return runtime_backend_preferred_address_request_flow_case_for_tests(
+        /*include_preferred_address=*/true);
 }
 
 bool runtime_backend_cross_family_preferred_address_requests_backend_route_for_tests() {
@@ -1122,7 +1114,7 @@ bool runtime_client_loop_requests_preferred_address_route_from_backend_for_tests
     const int exit_code = run_http09_client_connection_backend_loop(
         Http09RuntimeConfig{
             .mode = Http09RuntimeMode::client,
-            .testcase = QuicHttp09Testcase::connectionmigration,
+            .enable_client_preferred_address_migration = true,
         },
         make_endpoint_driver(endpoint), core, io_context, state, policy, start_result);
 
@@ -1136,7 +1128,7 @@ bool runtime_client_loop_requests_preferred_address_route_from_backend_for_tests
 bool runtime_backend_preferred_address_route_failure_stops_migration_request_for_tests() {
     const Http09RuntimeConfig config{
         .mode = Http09RuntimeMode::client,
-        .testcase = QuicHttp09Testcase::connectionmigration,
+        .enable_client_preferred_address_migration = true,
     };
 
     auto backend = std::make_unique<ScriptedIoBackendForTests>();
@@ -1174,7 +1166,6 @@ bool runtime_backend_preferred_address_route_failure_stops_migration_request_for
 bool runtime_backend_regular_transfer_does_not_queue_preferred_address_migration_for_tests() {
     const Http09RuntimeConfig config{
         .mode = Http09RuntimeMode::client,
-        .testcase = QuicHttp09Testcase::transfer,
         .requests_env = "https://localhost:443/file.bin",
     };
 
@@ -1363,7 +1354,8 @@ bool resumed_client_warmup_failure_exits_early_for_tests() {
     const auto requests = parse_http09_requests_env("https://localhost/warmup.txt").value();
     Http09RuntimeConfig config{
         .mode = Http09RuntimeMode::client,
-        .testcase = QuicHttp09Testcase::zerortt,
+        .attempt_zero_rtt = true,
+        .client_run_mode = Http09ClientRunMode::resumption_sequence,
         .download_root = "downloads",
     };
 
@@ -1711,7 +1703,7 @@ bool runtime_policy_core_inputs_advance_before_terminal_success_for_tests() {
     return [&] {
         const Http09RuntimeConfig config{
             .mode = Http09RuntimeMode::client,
-            .testcase = QuicHttp09Testcase::connectionmigration,
+            .enable_client_preferred_address_migration = true,
         };
         return drive_endpoint_until_blocked(make_endpoint_driver(endpoint), core, /*fd=*/17, &peer,
                                             /*peer_len=*/0, initial_result, state, "client",
@@ -1720,7 +1712,7 @@ bool runtime_policy_core_inputs_advance_before_terminal_success_for_tests() {
            policy.preferred_address_request_queued && (endpoint.next_on_core_result_index == 2);
 }
 
-bool server_connectionmigration_preferred_address_config_for_tests() {
+bool server_preferred_address_config_for_tests() {
     const auto inspect_preferred_address = [](const Http09RuntimeConfig &config) {
         const auto core = make_http09_server_core_config(config);
         const bool has_preferred_address = core.transport.preferred_address.has_value();
@@ -1737,14 +1729,13 @@ bool server_connectionmigration_preferred_address_config_for_tests() {
             .mode = Http09RuntimeMode::server,
             .host = "127.0.0.1",
             .port = 443,
-            .testcase = QuicHttp09Testcase::connectionmigration,
+            .enable_server_preferred_address = true,
         });
     const auto [transfer_has_preferred_address, transfer_preferred_port,
                 transfer_preferred_connection_id] = inspect_preferred_address(Http09RuntimeConfig{
         .mode = Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = 443,
-        .testcase = QuicHttp09Testcase::transfer,
     });
     return has_preferred_address && (preferred_port == 444) &&
            (preferred_connection_id == make_runtime_connection_id(std::byte{0x5a}, 1)) &&
@@ -1758,8 +1749,7 @@ bool runtime_registers_all_server_core_connection_ids_case_for_tests(
         .mode = Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = 443,
-        .testcase = include_preferred_address ? QuicHttp09Testcase::connectionmigration
-                                              : QuicHttp09Testcase::transfer,
+        .enable_server_preferred_address = include_preferred_address,
     });
     if (!core_config.transport.preferred_address.has_value()) {
         return false;
@@ -1797,6 +1787,74 @@ bool runtime_registers_all_server_core_connection_ids_case_for_tests(
 bool runtime_registers_all_server_core_connection_ids_for_tests() {
     return runtime_registers_all_server_core_connection_ids_case_for_tests(
         /*include_preferred_address=*/true);
+}
+
+bool runtime_server_backend_loop_prioritizes_due_timer_for_tests() {
+    enum class Operation : std::uint8_t {
+        wait,
+        timer,
+        rx,
+    };
+
+    std::vector<Operation> operations;
+    const auto event_time = now();
+    bool processed_timer = false;
+    std::size_t wait_calls = 0;
+
+    const int exit_code = run_server_backend_loop_with_driver(ServerBackendLoopDriver{
+        .current_time = [&] { return event_time; },
+        .next_wakeup = [&]() -> std::optional<QuicCoreTimePoint> {
+            return processed_timer ? std::nullopt : std::optional<QuicCoreTimePoint>{event_time};
+        },
+        .pump_endpoint_work =
+            [](bool &made_progress) {
+                made_progress = false;
+                return true;
+            },
+        .has_pending_endpoint_work = [] { return false; },
+        .wait = [&](const std::optional<QuicCoreTimePoint> &) -> std::optional<QuicIoEvent> {
+            operations.push_back(Operation::wait);
+            ++wait_calls;
+            if (wait_calls == 1) {
+                return QuicIoEvent{
+                    .kind = QuicIoEvent::Kind::rx_datagram,
+                    .now = event_time,
+                    .datagram =
+                        QuicIoRxDatagram{
+                            .route_handle = QuicRouteHandle{17},
+                            .bytes = {std::byte{0x01}},
+                        },
+                };
+            }
+            return QuicIoEvent{
+                .kind = QuicIoEvent::Kind::shutdown,
+                .now = event_time,
+            };
+        },
+        .process_wait_timer =
+            [&](QuicCoreTimePoint current) {
+                if (current != event_time) {
+                    return false;
+                }
+                operations.push_back(Operation::timer);
+                processed_timer = true;
+                return true;
+            },
+        .process_datagram =
+            [&](const QuicIoRxDatagram &, QuicCoreTimePoint current) {
+                if (current != event_time) {
+                    return false;
+                }
+                operations.push_back(Operation::rx);
+                return true;
+            },
+    });
+
+    const auto timer_it = std::find(operations.begin(), operations.end(), Operation::timer);
+    const auto wait_it = std::find(operations.begin(), operations.end(), Operation::wait);
+    const auto rx_it = std::find(operations.begin(), operations.end(), Operation::rx);
+    return exit_code == 1 && timer_it != operations.end() && wait_it != operations.end() &&
+           rx_it != operations.end() && timer_it < wait_it && timer_it < rx_it;
 }
 
 } // namespace test

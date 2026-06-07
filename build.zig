@@ -336,6 +336,7 @@ fn apiSourceFiles() []const []const u8 {
 fn interopSourceFiles() []const []const u8 {
     return &.{
         "interop/coquic-interop/http09_interop.cpp",
+        "interop/coquic-interop/http09_interop_profile.cpp",
         "interop/coquic-interop/http3_interop.cpp",
         "interop/coquic-interop/interop.cpp",
     };
@@ -1338,6 +1339,7 @@ pub fn build(b: *std.Build) void {
         interop_test_files,
         &.{
             "interop/coquic-interop/http09_interop.cpp",
+            "interop/coquic-interop/http09_interop_profile.cpp",
             "interop/coquic-interop/http3_interop.cpp",
         },
     );
@@ -1465,6 +1467,7 @@ pub fn build(b: *std.Build) void {
     coverage_test_file_list.appendSlice(tls_test_files) catch @panic("oom");
     const coverage_extra_sources = &.{
         "interop/coquic-interop/http09_interop.cpp",
+        "interop/coquic-interop/http09_interop_profile.cpp",
         "interop/coquic-interop/http3_interop.cpp",
     };
 

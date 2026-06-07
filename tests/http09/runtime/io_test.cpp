@@ -127,14 +127,14 @@ TEST(QuicHttp09RuntimeTest, ServerContinuesAfterIdlePollTimeoutThenFailsOnPollEr
     EXPECT_EQ(coquic::http09::run_http09_runtime(server), 1);
 }
 
-TEST(QuicHttp09RuntimeTest, RuntimeHelperExtendsClientReceiveTimeoutForMulticonnect) {
+TEST(QuicHttp09RuntimeTest, RuntimeHelperUsesConfiguredClientReceiveTimeout) {
     const auto transfer = coquic::http09::Http09RuntimeConfig{
         .mode = coquic::http09::Http09RuntimeMode::client,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
     };
     const auto multiconnect = coquic::http09::Http09RuntimeConfig{
         .mode = coquic::http09::Http09RuntimeMode::client,
-        .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
+        .client_run_mode = coquic::http09::Http09ClientRunMode::one_connection_per_request,
+        .client_receive_timeout_ms = 180000,
     };
 
     EXPECT_EQ(coquic::http09::test::client_receive_timeout_ms_for_tests(transfer), 30000);
@@ -643,6 +643,11 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_TRUE(pending_work_followup_timer_continue_then_terminal_success.terminal_success);
     EXPECT_FALSE(pending_work_followup_timer_continue_then_terminal_success.terminal_failure);
     EXPECT_EQ(pending_work_followup_timer_continue_then_terminal_success.wait_calls, 0U);
+}
+
+TEST(QuicHttp09RuntimeTest, ServerBackendLoopProcessesDueTimersBeforeReadyDatagrams) {
+    EXPECT_TRUE(
+        coquic::http09::test::runtime_server_backend_loop_prioritizes_due_timer_for_tests());
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksCoverServerFailureCleanup) {

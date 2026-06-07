@@ -17,7 +17,6 @@ TEST(QuicHttp09RuntimeTest, ClientDerivesPeerAddressAndServerNameFromRequests) {
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -26,7 +25,6 @@ TEST(QuicHttp09RuntimeTest, ClientDerivesPeerAddressAndServerNameFromRequests) {
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "",
         .port = 443,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = download_root.path(),
         .server_name = "",
         .requests_env = "https://localhost:" + std::to_string(port) + "/hello.txt",
@@ -56,35 +54,38 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionRejectsInvalidDerivedRequestAuthorit
     EXPECT_EQ(coquic::http09::test::run_http09_client_connection_for_tests(client, requests, 1), 1);
 }
 
-TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndDefaults) {
+TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithConfiguredAlpnAndDefaults) {
     const auto runtime = coquic::http09::Http09RuntimeConfig{
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "",
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .server_name = "",
         .requests_env = "https://localhost/a.txt https://localhost/b.txt",
     };
     EXPECT_EQ(runtime.mode, coquic::http09::Http09RuntimeMode::client);
     EXPECT_TRUE(runtime.host.empty());
     EXPECT_TRUE(runtime.server_name.empty());
-    EXPECT_EQ(runtime.application_protocol, "hq-interop");
+    EXPECT_EQ(runtime.application_protocol, "coquic");
     EXPECT_EQ(runtime.document_root, std::filesystem::path("/www"));
     EXPECT_EQ(runtime.download_root, std::filesystem::path("/downloads"));
     EXPECT_EQ(runtime.certificate_chain_path, std::filesystem::path("/certs/cert.pem"));
     EXPECT_EQ(runtime.private_key_path, std::filesystem::path("/certs/priv.key"));
 
     auto overridden_runtime = runtime;
-    overridden_runtime.application_protocol = "not-hq-interop";
+    overridden_runtime.application_protocol = "test-hq";
+    overridden_runtime.client_transport.max_idle_timeout = 12345;
+    overridden_runtime.client_transport.initial_max_data = 32ull * 1024u * 1024u;
+    overridden_runtime.client_transport.initial_max_stream_data_bidi_local = 16ull * 1024u * 1024u;
+    overridden_runtime.server_transport.max_idle_timeout = 54321;
 
     const auto client_core = coquic::http09::make_http09_client_core_config(overridden_runtime);
-    EXPECT_EQ(client_core.application_protocol, "hq-interop");
+    EXPECT_EQ(client_core.application_protocol, "test-hq");
     EXPECT_EQ(client_core.max_outbound_datagram_size, 1452u);
     EXPECT_EQ(client_core.transport.max_udp_payload_size, 1452u);
     EXPECT_EQ(client_core.transport.pmtud_base_datagram_size, 1452u);
     EXPECT_EQ(client_core.transport.pmtud_max_datagram_size, 1452u);
-    EXPECT_EQ(client_core.transport.max_idle_timeout, 180000u);
-    EXPECT_EQ(client_core.transport.initial_max_data, 32u * 1024u * 1024u);
-    EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_local, 16u * 1024u * 1024u);
+    EXPECT_EQ(client_core.transport.max_idle_timeout, 12345u);
+    EXPECT_EQ(client_core.transport.initial_max_data, 32ull * 1024u * 1024u);
+    EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_local, 16ull * 1024u * 1024u);
     EXPECT_EQ(client_core.transport.initial_max_stream_data_bidi_remote, 256u * 1024u);
     EXPECT_EQ(client_core.original_version, 0x00000001u);
     EXPECT_EQ(client_core.initial_version, 0x00000001u);
@@ -95,12 +96,12 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndDefaults) {
     server_runtime.certificate_chain_path = "tests/fixtures/quic-server-cert.pem";
     server_runtime.private_key_path = "tests/fixtures/quic-server-key.pem";
     const auto server_core = coquic::http09::make_http09_server_core_config(server_runtime);
-    EXPECT_EQ(server_core.application_protocol, "hq-interop");
+    EXPECT_EQ(server_core.application_protocol, "test-hq");
     EXPECT_EQ(server_core.max_outbound_datagram_size, 1452u);
     EXPECT_EQ(server_core.transport.max_udp_payload_size, 1452u);
     EXPECT_EQ(server_core.transport.pmtud_base_datagram_size, 1452u);
     EXPECT_EQ(server_core.transport.pmtud_max_datagram_size, 1452u);
-    EXPECT_EQ(server_core.transport.max_idle_timeout, 180000u);
+    EXPECT_EQ(server_core.transport.max_idle_timeout, 54321u);
     EXPECT_EQ(server_core.original_version, 0x00000001u);
     EXPECT_EQ(server_core.initial_version, 0x00000001u);
     EXPECT_EQ(server_core.supported_versions, (std::vector<std::uint32_t>{0x00000001u}));
@@ -119,7 +120,7 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigWithInteropAlpnAndDefaults) {
                                 .certificate_pem = identity.certificate_pem,
                                 .private_key_pem = identity.private_key_pem,
                             });
-    EXPECT_EQ(server_endpoint.application_protocol, "hq-interop");
+    EXPECT_EQ(server_endpoint.application_protocol, "test-hq");
     EXPECT_EQ(server_endpoint.max_outbound_datagram_size, 1452u);
     EXPECT_EQ(server_endpoint.transport.max_udp_payload_size, 1452u);
     EXPECT_EQ(server_endpoint.transport.pmtud_base_datagram_size, 1452u);
@@ -334,96 +335,15 @@ TEST(QuicHttp09RuntimeTest, DerivationFailsForInvalidRequestAuthority) {
     EXPECT_FALSE(coquic::http09::derive_http09_client_remote(config, requests).has_value());
 }
 
-TEST(QuicHttp09RuntimeTest, MigrationCasesUseTransferTransportProfile) {
-    const auto transfer = coquic::http09::Http09RuntimeConfig{
-        .mode = coquic::http09::Http09RuntimeMode::client,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
-        .requests_env = "https://localhost/hello.txt",
-    };
-    const auto rebind_port = coquic::http09::Http09RuntimeConfig{
-        .mode = coquic::http09::Http09RuntimeMode::client,
-        .testcase = coquic::http09::QuicHttp09Testcase::rebind_port,
-        .requests_env = "https://localhost/hello.txt",
-    };
-    const auto rebind_addr = coquic::http09::Http09RuntimeConfig{
-        .mode = coquic::http09::Http09RuntimeMode::client,
-        .testcase = coquic::http09::QuicHttp09Testcase::rebind_addr,
-        .requests_env = "https://localhost/hello.txt",
-    };
-    const auto migration = coquic::http09::Http09RuntimeConfig{
-        .mode = coquic::http09::Http09RuntimeMode::client,
-        .testcase = coquic::http09::QuicHttp09Testcase::connectionmigration,
-        .requests_env = "https://localhost/hello.txt",
-    };
-
-    const auto transfer_core = coquic::http09::make_http09_client_core_config(transfer);
-    const auto rebind_port_core = coquic::http09::make_http09_client_core_config(rebind_port);
-    const auto rebind_addr_core = coquic::http09::make_http09_client_core_config(rebind_addr);
-    const auto migration_core = coquic::http09::make_http09_client_core_config(migration);
-
-    EXPECT_EQ(rebind_port_core.transport.initial_max_data,
-              transfer_core.transport.initial_max_data);
-    EXPECT_EQ(rebind_addr_core.transport.initial_max_data,
-              transfer_core.transport.initial_max_data);
-    EXPECT_EQ(migration_core.transport.initial_max_data, transfer_core.transport.initial_max_data);
-    EXPECT_EQ(rebind_port_core.transport.initial_max_streams_uni,
-              transfer_core.transport.initial_max_streams_uni);
-    EXPECT_EQ(rebind_addr_core.transport.initial_max_streams_uni,
-              transfer_core.transport.initial_max_streams_uni);
-    EXPECT_EQ(migration_core.transport.initial_max_streams_uni,
-              transfer_core.transport.initial_max_streams_uni);
-    EXPECT_EQ(rebind_port_core.allowed_tls_cipher_suites, transfer_core.allowed_tls_cipher_suites);
-    EXPECT_EQ(rebind_addr_core.allowed_tls_cipher_suites, transfer_core.allowed_tls_cipher_suites);
-    EXPECT_EQ(migration_core.allowed_tls_cipher_suites, transfer_core.allowed_tls_cipher_suites);
-}
-
-TEST(QuicHttp09RuntimeTest, KeyUpdateUsesTransferTransportProfile) {
-    const auto keyupdate = coquic::http09::Http09RuntimeConfig{
-        .mode = coquic::http09::Http09RuntimeMode::client,
-        .testcase = coquic::http09::QuicHttp09Testcase::keyupdate,
-        .requests_env = "https://localhost/hello.txt",
-    };
-    const auto transfer = coquic::http09::Http09RuntimeConfig{
-        .mode = coquic::http09::Http09RuntimeMode::client,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
-        .requests_env = "https://localhost/hello.txt",
-    };
-
-    const auto keyupdate_core = coquic::http09::make_http09_client_core_config(keyupdate);
-    const auto transfer_core = coquic::http09::make_http09_client_core_config(transfer);
-
-    EXPECT_EQ(keyupdate_core.transport.max_idle_timeout, transfer_core.transport.max_idle_timeout);
-    EXPECT_EQ(keyupdate_core.transport.max_udp_payload_size,
-              transfer_core.transport.max_udp_payload_size);
-    EXPECT_EQ(keyupdate_core.transport.ack_delay_exponent,
-              transfer_core.transport.ack_delay_exponent);
-    EXPECT_EQ(keyupdate_core.transport.max_ack_delay, transfer_core.transport.max_ack_delay);
-    EXPECT_EQ(keyupdate_core.transport.initial_max_data, transfer_core.transport.initial_max_data);
-    EXPECT_EQ(keyupdate_core.transport.initial_max_stream_data_bidi_local,
-              transfer_core.transport.initial_max_stream_data_bidi_local);
-    EXPECT_EQ(keyupdate_core.transport.initial_max_stream_data_bidi_remote,
-              transfer_core.transport.initial_max_stream_data_bidi_remote);
-    EXPECT_EQ(keyupdate_core.transport.initial_max_stream_data_uni,
-              transfer_core.transport.initial_max_stream_data_uni);
-    EXPECT_EQ(keyupdate_core.transport.initial_max_streams_bidi,
-              transfer_core.transport.initial_max_streams_bidi);
-    EXPECT_EQ(keyupdate_core.transport.initial_max_streams_uni,
-              transfer_core.transport.initial_max_streams_uni);
-    EXPECT_EQ(keyupdate_core.allowed_tls_cipher_suites, transfer_core.allowed_tls_cipher_suites);
-    EXPECT_EQ(coquic::http09::test::client_receive_timeout_ms_for_tests(keyupdate),
-              coquic::http09::test::client_receive_timeout_ms_for_tests(transfer));
-}
-
 TEST(QuicHttp09RuntimeTest, KeyUpdateRuntimeEnablesClientKeyUpdatePolicy) {
     const auto keyupdate = coquic::http09::Http09RuntimeConfig{
         .mode = coquic::http09::Http09RuntimeMode::client,
-        .testcase = coquic::http09::QuicHttp09Testcase::keyupdate,
+        .request_key_update = true,
         .download_root = std::filesystem::path("/downloads"),
         .requests_env = "https://localhost/hello.txt",
     };
     const auto transfer = coquic::http09::Http09RuntimeConfig{
         .mode = coquic::http09::Http09RuntimeMode::client,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
         .download_root = std::filesystem::path("/downloads"),
         .requests_env = "https://localhost/hello.txt",
     };
@@ -439,43 +359,6 @@ TEST(QuicHttp09RuntimeTest, KeyUpdateRuntimeEnablesClientKeyUpdatePolicy) {
 
     EXPECT_TRUE(keyupdate_client_config.request_key_update);
     EXPECT_FALSE(transfer_client_config.request_key_update);
-}
-
-TEST(QuicHttp09RuntimeTest, KeyUpdateUsesTransferTransportProfileOnServerPath) {
-    const auto keyupdate = coquic::http09::Http09RuntimeConfig{
-        .mode = coquic::http09::Http09RuntimeMode::server,
-        .testcase = coquic::http09::QuicHttp09Testcase::keyupdate,
-        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
-        .private_key_path = "tests/fixtures/quic-server-key.pem",
-    };
-    const auto transfer = coquic::http09::Http09RuntimeConfig{
-        .mode = coquic::http09::Http09RuntimeMode::server,
-        .testcase = coquic::http09::QuicHttp09Testcase::transfer,
-        .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
-        .private_key_path = "tests/fixtures/quic-server-key.pem",
-    };
-
-    const auto keyupdate_core = coquic::http09::make_http09_server_core_config(keyupdate);
-    const auto transfer_core = coquic::http09::make_http09_server_core_config(transfer);
-
-    EXPECT_EQ(keyupdate_core.transport.max_idle_timeout, transfer_core.transport.max_idle_timeout);
-    EXPECT_EQ(keyupdate_core.transport.max_udp_payload_size,
-              transfer_core.transport.max_udp_payload_size);
-    EXPECT_EQ(keyupdate_core.transport.ack_delay_exponent,
-              transfer_core.transport.ack_delay_exponent);
-    EXPECT_EQ(keyupdate_core.transport.max_ack_delay, transfer_core.transport.max_ack_delay);
-    EXPECT_EQ(keyupdate_core.transport.initial_max_data, transfer_core.transport.initial_max_data);
-    EXPECT_EQ(keyupdate_core.transport.initial_max_stream_data_bidi_local,
-              transfer_core.transport.initial_max_stream_data_bidi_local);
-    EXPECT_EQ(keyupdate_core.transport.initial_max_stream_data_bidi_remote,
-              transfer_core.transport.initial_max_stream_data_bidi_remote);
-    EXPECT_EQ(keyupdate_core.transport.initial_max_stream_data_uni,
-              transfer_core.transport.initial_max_stream_data_uni);
-    EXPECT_EQ(keyupdate_core.transport.initial_max_streams_bidi,
-              transfer_core.transport.initial_max_streams_bidi);
-    EXPECT_EQ(keyupdate_core.transport.initial_max_streams_uni,
-              transfer_core.transport.initial_max_streams_uni);
-    EXPECT_EQ(keyupdate_core.allowed_tls_cipher_suites, transfer_core.allowed_tls_cipher_suites);
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimePropagatesCongestionControlSelection) {
@@ -503,32 +386,27 @@ TEST(QuicHttp09RuntimeTest, TransferRuntimeKeepsNewRenoAsDefaultCongestionContro
     const auto transfer_client =
         coquic::http09::make_http09_client_core_config(coquic::http09::Http09RuntimeConfig{
             .mode = coquic::http09::Http09RuntimeMode::client,
-            .testcase = coquic::http09::QuicHttp09Testcase::transfer,
             .requests_env = "https://localhost/a.txt",
         });
     const auto transfer_server =
         coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
             .mode = coquic::http09::Http09RuntimeMode::server,
-            .testcase = coquic::http09::QuicHttp09Testcase::transfer,
             .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
             .private_key_path = "tests/fixtures/quic-server-key.pem",
         });
     const auto keyupdate_server =
         coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
             .mode = coquic::http09::Http09RuntimeMode::server,
-            .testcase = coquic::http09::QuicHttp09Testcase::keyupdate,
             .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
             .private_key_path = "tests/fixtures/quic-server-key.pem",
         });
     const auto handshake_client =
         coquic::http09::make_http09_client_core_config(coquic::http09::Http09RuntimeConfig{
             .mode = coquic::http09::Http09RuntimeMode::client,
-            .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         });
     const auto explicit_transfer_newreno_server =
         coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
             .mode = coquic::http09::Http09RuntimeMode::server,
-            .testcase = coquic::http09::QuicHttp09Testcase::transfer,
             .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
             .private_key_path = "tests/fixtures/quic-server-key.pem",
             .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::newreno,
@@ -546,11 +424,38 @@ TEST(QuicHttp09RuntimeTest, TransferRuntimeKeepsNewRenoAsDefaultCongestionContro
               coquic::quic::QuicCongestionControlAlgorithm::newreno);
 }
 
-TEST(QuicHttp09RuntimeTest, RuntimeChacha20TestcaseConstrainsCipherSuites) {
+TEST(QuicHttp09RuntimeTest, ResumptionServerAdvertisesZeroRttCapableTickets) {
+    const auto resumption_server =
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
+            .server_zero_rtt = coquic::quic::QuicZeroRttConfig{.allow = true},
+            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+            .private_key_path = "tests/fixtures/quic-server-key.pem",
+        });
+    EXPECT_TRUE(resumption_server.zero_rtt.allow);
+
+    const auto resumption_client =
+        coquic::http09::make_http09_client_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::client,
+            .requests_env = "https://localhost/a.txt",
+        });
+    EXPECT_FALSE(resumption_client.zero_rtt.attempt);
+
+    const auto zero_rtt_server =
+        coquic::http09::make_http09_server_core_config(coquic::http09::Http09RuntimeConfig{
+            .mode = coquic::http09::Http09RuntimeMode::server,
+            .server_zero_rtt = coquic::quic::QuicZeroRttConfig{.allow = true},
+            .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
+            .private_key_path = "tests/fixtures/quic-server-key.pem",
+        });
+    EXPECT_TRUE(zero_rtt_server.zero_rtt.allow);
+}
+
+TEST(QuicHttp09RuntimeTest, RuntimePropagatesConfiguredCipherSuites) {
     const auto runtime = coquic::http09::Http09RuntimeConfig{
         .mode = coquic::http09::Http09RuntimeMode::client,
-        .testcase = coquic::http09::QuicHttp09Testcase::chacha20,
         .requests_env = "https://localhost/a.txt",
+        .allowed_tls_cipher_suites = {coquic::quic::CipherSuite::tls_chacha20_poly1305_sha256},
     };
     const auto client_core = coquic::http09::make_http09_client_core_config(runtime);
     EXPECT_EQ(client_core.allowed_tls_cipher_suites,
@@ -569,10 +474,10 @@ TEST(QuicHttp09RuntimeTest, RuntimeChacha20TestcaseConstrainsCipherSuites) {
               }));
 }
 
-TEST(QuicHttp09RuntimeTest, RuntimeBuildsV2CoreConfigsWithCompatibleVersionSupport) {
+TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigsWithConfiguredVersionSupport) {
     const auto runtime = coquic::http09::Http09RuntimeConfig{
         .mode = coquic::http09::Http09RuntimeMode::client,
-        .testcase = coquic::http09::QuicHttp09Testcase::v2,
+        .supported_versions = {0x6b3343cfu, 0x00000001u},
         .requests_env = "https://localhost/a.txt",
     };
 
@@ -593,10 +498,13 @@ TEST(QuicHttp09RuntimeTest, RuntimeBuildsV2CoreConfigsWithCompatibleVersionSuppo
               (std::vector<std::uint32_t>{0x6b3343cfu, 0x00000001u}));
 }
 
-TEST(QuicHttp09RuntimeTest, RuntimeBuildsServerCoreConfigWithExtendedIdleTimeoutForMulticonnect) {
+TEST(QuicHttp09RuntimeTest, RuntimeBuildsServerCoreConfigWithConfiguredTransport) {
     const auto server_runtime = coquic::http09::Http09RuntimeConfig{
         .mode = coquic::http09::Http09RuntimeMode::server,
-        .testcase = coquic::http09::QuicHttp09Testcase::multiconnect,
+        .server_transport =
+            coquic::quic::QuicTransportConfig{
+                .max_idle_timeout = 180000,
+            },
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -660,7 +568,6 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionWithoutRequestsCompletesAfterHandsha
         .mode = coquic::http09::Http09RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
@@ -668,7 +575,6 @@ TEST(QuicHttp09RuntimeTest, ClientConnectionWithoutRequestsCompletesAfterHandsha
         .mode = coquic::http09::Http09RuntimeMode::client,
         .host = "127.0.0.1",
         .port = port,
-        .testcase = coquic::http09::QuicHttp09Testcase::handshake,
         .server_name = "localhost",
     };
 

@@ -1,9 +1,10 @@
 #include "interop/coquic-interop/http09_interop.h"
 
-#include "src/http09/http09_runtime_internal.h"
+#include "interop/coquic-interop/http09_interop_profile.h"
 
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -40,6 +41,8 @@ std::optional<http09::Http09RuntimeConfig> parse_http09_interop_args(int argc, c
     // Merge interop-runner environment defaults with command-line overrides.
     http09::Http09RuntimeConfig config;
     config.verify_peer = false;
+    Http09InteropTestcase selected_testcase = Http09InteropTestcase::handshake;
+    apply_http09_interop_profile(config, selected_testcase);
     bool host_specified = false;
     bool server_name_specified = false;
 
@@ -51,7 +54,15 @@ std::optional<http09::Http09RuntimeConfig> parse_http09_interop_args(int argc, c
         }
     }
     if (const auto testcase = getenv_string("TESTCASE"); testcase.has_value()) {
-        if (!http09::apply_testcase_name(config, *testcase)) {
+        if (*testcase == "retry") {
+            selected_testcase = Http09InteropTestcase::handshake;
+            config.retry_enabled = true;
+            apply_http09_interop_profile(config, selected_testcase);
+        } else if (const auto parsed = parse_http09_interop_testcase(*testcase);
+                   parsed.has_value()) {
+            selected_testcase = *parsed;
+            apply_http09_interop_profile(config, selected_testcase);
+        } else {
             std::cerr << kUsageLine << '\n';
             return std::nullopt;
         }
@@ -190,7 +201,15 @@ std::optional<http09::Http09RuntimeConfig> parse_http09_interop_args(int argc, c
             continue;
         }
         if (arg == "--testcase") {
-            if (!http09::apply_testcase_name(config, *value)) {
+            if (*value == "retry") {
+                selected_testcase = Http09InteropTestcase::handshake;
+                config.retry_enabled = true;
+                apply_http09_interop_profile(config, selected_testcase);
+            } else if (const auto parsed = parse_http09_interop_testcase(*value);
+                       parsed.has_value()) {
+                selected_testcase = *parsed;
+                apply_http09_interop_profile(config, selected_testcase);
+            } else {
                 std::cerr << kUsageLine << '\n';
                 return std::nullopt;
             }
@@ -233,6 +252,7 @@ std::optional<http09::Http09RuntimeConfig> parse_http09_interop_args(int argc, c
     if (config.mode == http09::Http09RuntimeMode::client && !server_name_specified) {
         config.server_name.clear();
     }
+    apply_http09_interop_profile(config, selected_testcase);
 
     return config;
 }

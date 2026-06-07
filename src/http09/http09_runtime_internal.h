@@ -92,22 +92,10 @@ constexpr std::size_t kMinimumClientInitialDatagramBytes = 1200;
 constexpr std::size_t kRuntimeMaxOutboundDatagramBytes = 1452;
 constexpr std::size_t kRuntimeConnectionIdLength = 8;
 constexpr int kDefaultClientReceiveTimeoutMs = 30000;
-constexpr int kMulticonnectClientReceiveTimeoutMs = 180000;
 constexpr int kClientSuccessDrainWindowMs = 500;
 constexpr int kServerZeroRttDrainGraceMs = 100;
 constexpr int kServerIdleTimeoutMs = 1000;
 constexpr std::string_view kProjectName = "coquic";
-constexpr std::string_view kInteropApplicationProtocol = "hq-interop";
-constexpr std::string_view kUsageLine =
-    "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
-    "[--io-backend socket|io_uring] [--congestion-control newreno|cubic|bbr|copa] "
-    "[--testcase "
-    "handshake|transfer|keyupdate|amplificationlimit|rebind-port|rebind-addr|"
-    "connectionmigration|ecn|multiconnect|chacha20|retry|resumption|zerortt|v2] "
-    "[--requests URLS] "
-    "[--document-root PATH] "
-    "[--download-root PATH] [--certificate-chain PATH] [--private-key PATH] "
-    "[--server-name NAME] [--verify-peer] [--no-verify-peer] [--retry]";
 
 struct LinuxSocketDescriptor {
     int fd = -1;
@@ -419,17 +407,7 @@ std::string read_text_file(const std::filesystem::path &path);
 std::optional<std::string> read_required_text_file(const std::filesystem::path &path,
                                                    std::string_view description);
 std::optional<std::uint16_t> parse_port(std::string_view value);
-std::optional<QuicHttp09Testcase> parse_testcase(std::string_view value);
 std::optional<io::QuicIoBackendKind> parse_io_backend_kind(std::string_view value);
-constexpr QuicHttp09Testcase transfer_semantics_testcase(QuicHttp09Testcase testcase) {
-    if (testcase == QuicHttp09Testcase::keyupdate || testcase == QuicHttp09Testcase::rebind_port ||
-        testcase == QuicHttp09Testcase::rebind_addr || testcase == QuicHttp09Testcase::ecn ||
-        testcase == QuicHttp09Testcase::connectionmigration) {
-        return QuicHttp09Testcase::transfer;
-    }
-    return testcase;
-}
-bool apply_testcase_name(Http09RuntimeConfig &config, std::string_view value);
 bool parse_role_into(Http09RuntimeConfig &config, std::string_view role);
 int preferred_udp_address_family(std::string_view host);
 bool host_is_unspecified(std::string_view host);
@@ -448,9 +426,6 @@ derive_http09_client_remote_impl(const Http09RuntimeConfig &config,
                                  const std::vector<QuicHttp09Request> &requests);
 int open_udp_socket(int family);
 int open_and_bind_udp_socket(const ResolvedUdpAddress &bind_address, std::string_view role_name);
-std::uint32_t runtime_original_quic_version_for_testcase(QuicHttp09Testcase testcase);
-std::vector<std::uint32_t>
-runtime_supported_quic_versions_for_testcase(QuicHttp09Testcase testcase);
 std::optional<PreferredAddress>
 runtime_preferred_address_for_server(const Http09RuntimeConfig &config);
 void configure_runtime_datagram_profile(QuicTransportConfig &transport);
@@ -543,7 +518,6 @@ bool observe_client_runtime_policy_effects_with_backend(const QuicCoreResult &re
                                                         ClientRuntimePolicyState &policy,
                                                         ClientIoContext &io_context,
                                                         std::string_view role_name);
-bool runtime_client_should_attempt_preferred_address_migration(const Http09RuntimeConfig &config);
 void maybe_queue_client_runtime_policy_inputs(const Http09RuntimeConfig &config,
                                               ClientRuntimePolicyState &policy,
                                               std::vector<QuicCoreInput> &core_inputs);

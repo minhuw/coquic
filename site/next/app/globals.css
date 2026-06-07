@@ -2410,6 +2410,10 @@
     @apply inline-flex min-h-7 items-center gap-2 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-2 font-mono text-[11px] text-[var(--muted)];
   }
 
+  .interop-legend b {
+    @apply ml-1 inline-flex min-w-5 items-center justify-center rounded-[var(--radius)] border border-[var(--line-strong)] bg-[var(--surface)] px-1 text-[10px] font-semibold text-[var(--ink)];
+  }
+
   .interop-legend i {
     @apply size-2.5 rounded-full;
 

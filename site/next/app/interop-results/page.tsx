@@ -26,22 +26,27 @@ export default function InteropPage() {
             <span>
               <i style={{ '--legend-color': 'var(--ok)' } as React.CSSProperties} />
               pass
+              <b data-interop-count="pass">0</b>
             </span>
             <span>
               <i style={{ '--legend-color': 'var(--warning)' } as React.CSSProperties} />
               unsupported
+              <b data-interop-count="unsupported">0</b>
             </span>
             <span>
               <i style={{ '--legend-color': 'var(--danger)' } as React.CSSProperties} />
               failed
+              <b data-interop-count="failed">0</b>
             </span>
             <span>
               <i style={{ '--legend-color': 'var(--known-broken)' } as React.CSSProperties} />
               known peer-broken
+              <b data-interop-count="known-broken">0</b>
             </span>
             <span>
               <i style={{ '--legend-color': 'var(--muted)' } as React.CSSProperties} />
               not reported
+              <b data-interop-count="not-reported">0</b>
             </span>
           </div>
         </div>

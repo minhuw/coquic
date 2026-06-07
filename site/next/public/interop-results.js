@@ -209,6 +209,48 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
   return sawUnsupported ? "unsupported" : "unknown";
 }
 
+function legendCategoryForResult(result, row) {
+  if (isKnownBrokenFailure(row, result)) {
+    return "known-broken";
+  }
+  if (isSkippedResult(result)) {
+    return "unsupported";
+  }
+  if (result === "succeeded") {
+    return "pass";
+  }
+  if (result === "failed") {
+    return "failed";
+  }
+  return "not-reported";
+}
+
+function updateLegendCounts(lanes, tests, rowByLaneAndTest) {
+  const counts = {
+    pass: 0,
+    unsupported: 0,
+    failed: 0,
+    "known-broken": 0,
+    "not-reported": 0,
+  };
+
+  for (const source of lanes) {
+    const laneKey = sourceKey(source.server, source.client);
+    for (const test of tests) {
+      const row = rowByLaneAndTest.get(`${laneKey}:${test}`);
+      const category = legendCategoryForResult(row ? row.result : "unknown", row);
+      counts[category] += 1;
+    }
+  }
+
+  for (const [category, count] of Object.entries(counts)) {
+    const target = document.querySelector(`[data-interop-count="${category}"]`);
+    if (target) {
+      target.textContent = count.toLocaleString();
+    }
+  }
+}
+
 function renderParticipantIcon(kind, iconUrl, code, label) {
   const badge = document.createElement("span");
   badge.className = `participant-identity-icon ${kind}`;
@@ -272,6 +314,7 @@ function renderMatrix() {
     const rightKey = laneSortKey(right);
     return leftKey[0] - rightKey[0] || leftKey[1] - rightKey[1] || leftKey[2].localeCompare(rightKey[2]);
   });
+  updateLegendCounts(lanes, tests, rowByLaneAndTest);
 
   const headRow = document.createElement("tr");
   const rowHeader = document.createElement("th");

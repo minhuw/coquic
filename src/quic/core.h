@@ -591,6 +591,26 @@ struct QuicCoreResult {
     std::optional<QuicCoreTimePoint> next_wakeup;
     std::optional<QuicCoreLocalError> local_error;
     bool send_continuation_pending = false;
+    bool send_sink_failed = false;
+};
+
+class QuicCoreSendDatagramSink {
+  public:
+    virtual ~QuicCoreSendDatagramSink() = default;
+    virtual bool on_send_datagram(QuicCoreSendDatagram datagram) = 0;
+    virtual bool on_send_datagram_payload(QuicConnectionHandle connection,
+                                          QuicRouteHandle route_handle, DatagramBuffer bytes,
+                                          QuicEcnCodepoint ecn, bool is_pmtu_probe,
+                                          std::uint64_t packet_inspection_datagram_id) {
+        return on_send_datagram(QuicCoreSendDatagram{
+            .connection = connection,
+            .route_handle = route_handle,
+            .bytes = std::move(bytes),
+            .ecn = ecn,
+            .is_pmtu_probe = is_pmtu_probe,
+            .packet_inspection_datagram_id = packet_inspection_datagram_id,
+        });
+    }
 };
 
 class QuicConnection;
@@ -614,6 +634,8 @@ class QuicCore {
     QuicCore &operator=(QuicCore &&) noexcept;
 
     QuicCoreResult advance_endpoint(QuicCoreEndpointInput input, QuicCoreTimePoint now);
+    QuicCoreResult advance_endpoint(QuicCoreEndpointInput input, QuicCoreTimePoint now,
+                                    QuicCoreSendDatagramSink &send_sink);
     QuicCoreResult advance(QuicCoreInput input, QuicCoreTimePoint now);
     QuicCoreResult advance(std::span<const QuicCoreInput> inputs, QuicCoreTimePoint now);
     std::optional<QuicCoreTimePoint> next_wakeup() const;
@@ -761,14 +783,15 @@ class QuicCore {
         QuicCoreTimePoint now, std::span<const std::byte> address_validation_identity);
     void maybe_queue_server_new_token(ConnectionEntry &entry, QuicCoreTimePoint now);
     void drain_queued_server_new_token(ConnectionEntry &entry, QuicCoreResult &drained,
-                                       QuicCoreTimePoint now);
+                                       QuicCoreTimePoint now,
+                                       QuicCoreSendDatagramSink *send_sink = nullptr);
     void remember_client_new_tokens(ConnectionEntry &entry, const QuicCoreResult &result);
     std::optional<std::vector<std::byte>>
     take_client_new_token_for_open(const QuicCoreClientConnectionConfig &connection);
     std::optional<QuicCoreResult> maybe_process_client_endpoint_version_negotiation(
         ConnectionEntry &entry, std::span<const std::byte> inbound_payload,
         const std::optional<QuicRouteHandle> &route_handle, QuicPathId path_id,
-        QuicCoreTimePoint now);
+        QuicCoreTimePoint now, QuicCoreSendDatagramSink *send_sink = nullptr);
     std::optional<QuicConnectionHandle>
     detect_stateless_reset(std::span<const std::byte> bytes) const;
     std::optional<QuicCoreSendDatagram> make_stateless_reset_for_unknown_cid(
@@ -822,6 +845,8 @@ class QuicCore {
     std::vector<QuicConnectionHandle> due_connection_handles(QuicCoreTimePoint now) const;
     QuicCoreResult finalize_endpoint_result(QuicCoreResult result, QuicCoreTimePoint now);
     QuicCoreResult finalize_legacy_result(QuicCoreResult result, QuicCoreTimePoint now);
+    QuicCoreResult advance_endpoint_impl(QuicCoreEndpointInput input, QuicCoreTimePoint now,
+                                         QuicCoreSendDatagramSink *send_sink);
 
     QuicCoreEndpointConfig endpoint_config_;
     std::optional<QuicCoreConfig> legacy_config_;

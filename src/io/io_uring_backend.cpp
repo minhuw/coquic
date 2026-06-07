@@ -70,6 +70,11 @@ bool IoUringBackend::send_many(std::span<const QuicIoTxDatagram> datagrams) {
     return core_->send_many(datagrams);
 }
 
+bool IoUringBackend::send_many_on_route(QuicRouteHandle route_handle,
+                                        std::span<const QuicIoTxDatagram> datagrams) {
+    return core_->send_many_on_route(route_handle, datagrams);
+}
+
 std::unique_ptr<IoUringBackend> make_io_uring_backend(QuicUdpBackendConfig config) {
     return IoUringBackend::create(std::move(config));
 }

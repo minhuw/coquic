@@ -17,6 +17,7 @@ constexpr std::size_t kPerfMinimumUdpPayloadSize = 1200;
 constexpr std::uint64_t kPerfTransferConnectionReceiveWindow = 32ull * 1024ull * 1024ull;
 constexpr std::uint64_t kPerfTransferStreamReceiveWindow = 16ull * 1024ull * 1024ull;
 constexpr std::uint64_t kPerfAckElicitingThreshold = 2;
+constexpr std::uint64_t kPerfBulkAckElicitingThreshold = 64;
 constexpr std::uint64_t kPerfCopaBulkAckElicitingThreshold = 1;
 constexpr std::uint64_t kPerfCopaInteractiveAckElicitingThreshold = 8;
 constexpr std::string_view kPerfUsageLine =
@@ -413,6 +414,11 @@ std::uint64_t perf_ack_eliciting_threshold(const QuicPerfConfig &config) {
     if (config.congestion_control == quic::QuicCongestionControlAlgorithm::copa) {
         return config.mode == QuicPerfMode::bulk ? kPerfCopaBulkAckElicitingThreshold
                                                  : kPerfCopaInteractiveAckElicitingThreshold;
+    }
+    if (config.mode == QuicPerfMode::bulk &&
+        (config.congestion_control == quic::QuicCongestionControlAlgorithm::newreno ||
+         config.congestion_control == quic::QuicCongestionControlAlgorithm::cubic)) {
+        return kPerfBulkAckElicitingThreshold;
     }
     return kPerfAckElicitingThreshold;
 }

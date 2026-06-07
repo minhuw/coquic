@@ -5,6 +5,7 @@
 #include "src/io/poll_io_engine.h"
 
 #include "src/io/socket_io_backend_internal.h"
+#include "src/quic/object_cache.h"
 
 #include <arpa/inet.h>
 #include <linux/errqueue.h>
@@ -101,65 +102,11 @@ COQUIC_NO_PROFILE std::size_t receive_result_storage_allocation_bytes(std::size_
         return bytes;
     }
 
-    return ((bytes + kReceiveResultStorageCacheBucketBytes - 1) /
-            kReceiveResultStorageCacheBucketBytes) *
-           kReceiveResultStorageCacheBucketBytes;
+    return quic::detail::round_up_to_cache_bucket(bytes, kReceiveResultStorageCacheBucketBytes);
 }
 
-COQUIC_NO_PROFILE void *allocate_receive_result_storage(std::size_t bytes, std::size_t alignment) {
-    if (alignment > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
-        return ::operator new(bytes, std::align_val_t{alignment});
-    }
-    return ::operator new(bytes);
-}
-
-COQUIC_NO_PROFILE void deallocate_receive_result_storage(void *pointer,
-                                                         std::size_t alignment) noexcept {
-    if (alignment > __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
-        ::operator delete(pointer, std::align_val_t{alignment});
-        return;
-    }
-    ::operator delete(pointer);
-}
-
-struct ReceiveResultStorageCache {
-    struct Entry {
-        void *pointer = nullptr;
-        std::size_t bytes = 0;
-        std::size_t alignment = 0;
-    };
-
-    COQUIC_NO_PROFILE std::optional<void *> take(std::size_t bytes, std::size_t alignment) {
-        for (std::size_t index = 0; index < used; ++index) {
-            if (entries[index].bytes != bytes || entries[index].alignment != alignment) {
-                continue;
-            }
-
-            auto *pointer = entries[index].pointer;
-            --used;
-            entries[index] = entries[used];
-            entries[used] = Entry{};
-            return pointer;
-        }
-        return std::nullopt;
-    }
-
-    COQUIC_NO_PROFILE bool put(void *pointer, std::size_t bytes, std::size_t alignment) {
-        if (used == entries.size()) {
-            return false;
-        }
-        entries[used] = Entry{
-            .pointer = pointer,
-            .bytes = bytes,
-            .alignment = alignment,
-        };
-        ++used;
-        return true;
-    }
-
-    std::array<Entry, kReceiveResultStorageCacheSlots> entries{};
-    std::size_t used = 0;
-};
+using ReceiveResultStorageCache =
+    quic::detail::FixedAlignedBlockCache<kReceiveResultStorageCacheSlots>;
 
 COQUIC_NO_PROFILE ReceiveResultStorageCache &receive_result_storage_cache() {
     thread_local auto *cache = new ReceiveResultStorageCache;
@@ -182,10 +129,11 @@ template <typename T> class ReceiveResultAllocator {
         }
 
         const auto bytes = receive_result_storage_allocation_bytes(count * sizeof(T));
-        if (auto cached = receive_result_storage_cache().take(bytes, alignof(T))) {
-            return static_cast<T *>(*cached);
+        if (auto *cached = receive_result_storage_cache().take(bytes, alignof(T));
+            cached != nullptr) {
+            return static_cast<T *>(cached);
         }
-        return static_cast<T *>(allocate_receive_result_storage(bytes, alignof(T)));
+        return static_cast<T *>(quic::detail::allocate_aligned_cache_storage(bytes, alignof(T)));
     }
 
     void deallocate(T *pointer, std::size_t count) noexcept {
@@ -198,7 +146,7 @@ template <typename T> class ReceiveResultAllocator {
             receive_result_storage_cache().put(pointer, bytes, alignof(T))) {
             return;
         }
-        deallocate_receive_result_storage(pointer, alignof(T));
+        quic::detail::deallocate_aligned_cache_storage(pointer, alignof(T));
     }
 
     template <typename U> struct rebind {
@@ -222,16 +170,8 @@ struct ReceiveDatagramBatchResult {
     bool may_have_more_datagrams = false;
 };
 
-struct ReceiveByteStoragePool {
-    ReceiveByteStoragePool() {
-        for (auto &entry : entries) {
-            entry = nullptr;
-        }
-    }
-
-    std::array<std::unique_ptr<std::vector<std::byte>>, kMaxReceiveDrainBatch * 2> entries{};
-    std::size_t size = 0;
-};
+using ReceiveByteStoragePool =
+    quic::detail::FixedObjectCache<std::vector<std::byte>, kMaxReceiveDrainBatch * 2>;
 
 COQUIC_NO_PROFILE bool io_profile_enabled();
 COQUIC_NO_PROFILE IoProfileCounters &io_profile_counters();
@@ -246,50 +186,60 @@ COQUIC_NO_PROFILE void recycle_receive_byte_storage(std::vector<std::byte> *stor
         return;
     }
 
+    auto &pool = receive_byte_storage_pool();
     if (storage->size() != kMaxDatagramBytes) {
         if (io_profile_enabled()) {
             ++io_profile_counters().rx_storage_drops;
+        }
+        if (pool.owns(storage)) {
+            storage->clear();
+            static_cast<void>(pool.put(storage));
+            return;
         }
         delete storage;
         return;
     }
 
-    auto &pool = receive_byte_storage_pool();
-    if (pool.size >= pool.entries.size()) {
+    if (!pool.owns(storage)) {
         if (io_profile_enabled()) {
             ++io_profile_counters().rx_storage_drops;
         }
         delete storage;
         return;
     }
-    pool.entries[pool.size].reset(storage);
-    ++pool.size;
+    if (!pool.put(storage)) {
+        if (io_profile_enabled()) {
+            ++io_profile_counters().rx_storage_drops;
+        }
+        return;
+    }
     if (io_profile_enabled()) {
         auto &counters = io_profile_counters();
         ++counters.rx_storage_recycles;
         counters.rx_storage_pool_high_water = std::max<std::uint64_t>(
-            counters.rx_storage_pool_high_water, static_cast<std::uint64_t>(pool.size));
+            counters.rx_storage_pool_high_water, static_cast<std::uint64_t>(pool.size()));
     }
 }
 
 COQUIC_NO_PROFILE std::shared_ptr<std::vector<std::byte>> acquire_receive_byte_storage() {
     auto &pool = receive_byte_storage_pool();
-    std::unique_ptr<std::vector<std::byte>> storage;
-    if (pool.size != 0) {
-        --pool.size;
-        storage = std::move(pool.entries[pool.size]);
+    std::vector<std::byte> *storage = nullptr;
+    if (auto *cached = pool.take(); cached != nullptr) {
+        storage = cached;
         if (io_profile_enabled()) {
             ++io_profile_counters().rx_storage_pool_reuses;
         }
     } else {
-        storage = std::make_unique<std::vector<std::byte>>();
-        storage->resize(kMaxDatagramBytes);
+        storage = new std::vector<std::byte>(kMaxDatagramBytes);
         if (io_profile_enabled()) {
             ++io_profile_counters().rx_storage_allocations;
         }
     }
+    if (storage->size() != kMaxDatagramBytes) {
+        storage->resize(kMaxDatagramBytes);
+    }
 
-    return std::shared_ptr<std::vector<std::byte>>(storage.release(), recycle_receive_byte_storage);
+    return std::shared_ptr<std::vector<std::byte>>(storage, recycle_receive_byte_storage);
 }
 
 COQUIC_NO_PROFILE void

@@ -797,6 +797,66 @@ TEST(SocketIoBackendTest, SharedUdpBackendCoreSendManyMapsRoutesIntoEngineBatch)
     EXPECT_EQ(engine_ptr->send_many_calls, 2u);
 }
 
+TEST(SocketIoBackendTest, SharedUdpBackendCoreSendManyOnRouteMapsSingleRouteIntoEngineBatch) {
+    using namespace coquic::io;
+
+    auto engine = std::make_unique<ScriptedIoEngine>();
+    auto *engine_ptr = engine.get();
+    engine_ptr->record_send_many_directly = true;
+    SharedUdpBackendCore backend(
+        QuicUdpBackendConfig{
+            .role_name = "client",
+        },
+        std::move(engine));
+
+    const auto route = backend.ensure_route(QuicIoRemote{
+        .peer = make_ipv4_loopback_peer(8443),
+        .peer_len = sizeof(sockaddr_in),
+        .family = AF_INET,
+    });
+    ASSERT_TRUE(route.has_value());
+    auto route_handle = coquic::quic::test_support::optional_value_or_terminate(route);
+
+    std::array first_payload = {std::byte{0x01}, std::byte{0x02}};
+    std::array second_payload = {std::byte{0x03}, std::byte{0x04}, std::byte{0x05}};
+    std::array datagrams{
+        QuicIoTxDatagram{
+            .route_handle = 99,
+            .bytes_view = first_payload,
+            .ecn = coquic::quic::QuicEcnCodepoint::ect0,
+        },
+        QuicIoTxDatagram{
+            .route_handle = 100,
+            .bytes_view = second_payload,
+            .ecn = coquic::quic::QuicEcnCodepoint::ect1,
+            .is_pmtu_probe = true,
+        },
+    };
+
+    ASSERT_TRUE(backend.send_many_on_route(route_handle, datagrams));
+    EXPECT_EQ(engine_ptr->send_many_calls, 1u);
+    EXPECT_EQ(engine_ptr->send_calls, 0u);
+    EXPECT_EQ(engine_ptr->last_send_many_role_name, "client");
+    ASSERT_EQ(engine_ptr->last_send_many_datagrams.size(), datagrams.size());
+    EXPECT_GE(engine_ptr->last_send_many_datagrams[0].socket_fd, 0);
+    EXPECT_EQ(engine_ptr->last_send_many_datagrams[0].peer_len, sizeof(sockaddr_in));
+    EXPECT_EQ(engine_ptr->last_send_many_datagrams[0].bytes.data(), first_payload.data());
+    EXPECT_EQ(engine_ptr->last_send_many_datagrams[0].bytes.size(), first_payload.size());
+    EXPECT_EQ(engine_ptr->last_send_many_datagrams[0].ecn, coquic::quic::QuicEcnCodepoint::ect0);
+    EXPECT_FALSE(engine_ptr->last_send_many_datagrams[0].is_pmtu_probe);
+    EXPECT_EQ(engine_ptr->last_send_many_datagrams[1].bytes.data(), second_payload.data());
+    EXPECT_EQ(engine_ptr->last_send_many_datagrams[1].bytes.size(), second_payload.size());
+    EXPECT_EQ(engine_ptr->last_send_many_datagrams[1].ecn, coquic::quic::QuicEcnCodepoint::ect1);
+    EXPECT_TRUE(engine_ptr->last_send_many_datagrams[1].is_pmtu_probe);
+
+    EXPECT_FALSE(backend.send_many_on_route(999, datagrams));
+    EXPECT_EQ(engine_ptr->send_many_calls, 1u);
+
+    engine_ptr->send_many_result = false;
+    EXPECT_FALSE(backend.send_many_on_route(route_handle, datagrams));
+    EXPECT_EQ(engine_ptr->send_many_calls, 2u);
+}
+
 TEST(SocketIoBackendTest, ConfiguresLinuxSocketsForReceivingEcnMetadata) {
     EXPECT_TRUE(
         coquic::io::test::socket_io_backend_configures_linux_ecn_socket_options_for_tests());

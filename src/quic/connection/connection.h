@@ -48,6 +48,20 @@ struct QuicInboundDatagramResult {
     bool processed_any_packet = false;
 };
 
+struct QuicConnectionDrainedDatagram {
+    DatagramBuffer bytes;
+    std::optional<QuicPathId> path_id;
+    QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+    bool is_pmtu_probe = false;
+    std::uint64_t packet_inspection_datagram_id = 0;
+};
+
+class QuicConnectionDrainedDatagramSink {
+  public:
+    virtual ~QuicConnectionDrainedDatagramSink() = default;
+    virtual bool on_connection_datagram(QuicConnectionDrainedDatagram datagram) = 0;
+};
+
 enum class QuicTransportErrorCode : std::uint64_t { // NOLINT(performance-enum-size)
     no_error = 0x00,
     internal_error = 0x01,
@@ -544,6 +558,9 @@ class QuicConnection {
     void request_key_update();
     DatagramBuffer drain_outbound_datagram(QuicCoreTimePoint now);
     DatagramBuffer drain_outbound_datagram(QuicCoreTimePoint now, bool continue_paced_burst);
+    std::size_t drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool continue_paced_burst,
+                                                 std::size_t max_datagrams,
+                                                 QuicConnectionDrainedDatagramSink &sink);
     void on_timeout(QuicCoreTimePoint now);
     std::optional<QuicCoreReceiveStreamData> take_received_stream_data();
     std::optional<QuicCoreReceiveDatagramData> take_received_datagram_data();
@@ -582,6 +599,21 @@ class QuicConnection {
         SentPacketRecord packet;
         std::size_t packet_index = 0;
         std::size_t fallback_packet_length = 0;
+    };
+
+    struct PendingSimpleStreamPacketScratch {
+        PacketSpaceState *packet_space = nullptr;
+        std::uint64_t packet_number = 0;
+        QuicCoreTimePoint sent_time{};
+        std::optional<StreamFrameSendMetadata> first_stream_frame_metadata;
+        std::vector<StreamFrameSendMetadata> stream_frame_metadata;
+        std::size_t packet_index = 0;
+        std::size_t fallback_packet_length = 0;
+        QuicPathId path_id = 0;
+        QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+        std::uint64_t protection_key_update_generation = 0;
+        std::size_t bytes_in_flight = 0;
+        std::optional<SimpleStreamPacketSentCongestionResult> congestion_result;
     };
 
     friend class QuicCore;
@@ -683,13 +715,23 @@ class QuicConnection {
                                                     std::uint64_t max_ack_delay_ms);
     void reset_recovery_for_new_path(QuicPathId path_id);
     void track_sent_packet(PacketSpaceState &packet_space, SentPacketRecord packet);
+    void track_sent_simple_stream_packet(PacketSpaceState &packet_space,
+                                         PendingSimpleStreamPacketScratch &&packet);
+    void
+    track_precongested_simple_stream_packets(PacketSpaceState &packet_space,
+                                             std::span<PendingSimpleStreamPacketScratch> packets);
     bool try_retire_simple_stream_acked_packet(
         PacketSpaceState &packet_space, RecoveryPacketHandle handle,
         std::vector<SentPacketRecord> &acked_packets,
         std::vector<AckedStreamPacketSample> &simple_stream_ack_samples,
         bool use_lightweight_sample);
+    bool try_retire_simple_stream_acked_packets_fast_path(
+        PacketSpaceState &packet_space, const AckApplyResult &ack_result,
+        std::vector<AckedStreamPacketSample> &simple_stream_ack_samples,
+        AckedStreamPacketAggregate &simple_stream_ack_aggregate);
     bool try_ack_simple_congestion_batch(
         std::span<const AckedStreamPacketSample> simple_stream_ack_samples,
+        const AckedStreamPacketAggregate &simple_stream_ack_aggregate,
         std::span<const SentPacketRecord> acked_packets, QuicCoreTimePoint now,
         const RecoveryRttState &rtt_state);
     bool can_use_simple_stream_ack_fast_path(std::span<const SentPacketRecord> acked_packets,
@@ -697,6 +739,7 @@ class QuicConnection {
     bool try_ack_simple_stream_fast_path(
         PacketSpaceState &packet_space, const AckApplyResult &ack_result,
         std::span<const AckedStreamPacketSample> simple_stream_ack_samples,
+        const AckedStreamPacketAggregate &simple_stream_ack_aggregate,
         std::span<const SentPacketRecord> acked_packets, QuicCoreTimePoint now,
         const std::optional<AckEcnCounts> &ecn_counts, bool suppress_pto_reset);
     bool process_simple_stream_ack_ecn(
@@ -1125,6 +1168,8 @@ class QuicConnection {
     std::uint64_t fresh_sendable_stream_bytes_ = 0;
     std::uint64_t streams_with_lost_send_data_ = 0;
     std::vector<PendingTrackedPacketScratch> pending_tracked_packet_scratch_;
+    std::vector<PendingSimpleStreamPacketScratch> pending_simple_stream_packet_scratch_;
+    std::vector<SimpleStreamSentPacketRecord> simple_stream_sent_packet_scratch_;
     std::vector<StreamFrameSendFragment> application_stream_fragment_scratch_;
     std::vector<std::map<std::uint64_t, StreamState>::iterator> active_stream_iterator_scratch_;
     std::vector<Frame> application_crypto_frame_scratch_;

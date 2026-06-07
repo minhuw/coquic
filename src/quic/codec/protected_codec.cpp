@@ -3168,6 +3168,164 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
     return CodecResult<std::size_t>::success(final_packet_size);
 }
 
+COQUIC_NO_PROFILE CodecResult<std::size_t>
+append_protected_one_rtt_stream_fragment_packet_to_datagram(
+    DatagramBuffer &out_datagram, bool spin_bit, bool key_phase,
+    std::span<const std::byte> destination_connection_id, std::uint8_t packet_number_length,
+    std::uint64_t packet_number, const StreamFrameSendFragment &fragment,
+    const SerializeProtectionContext &context) {
+    COQUIC_SERIALIZE_PROFILE_TIMER(one_rtt_timer, one_rtt_ns);
+    COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_calls, 1);
+    COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_frames, 0);
+    COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_stream_fragments, 1);
+    COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_packets_with_stream_fragments, 1);
+    COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_single_stream_fragment_packets, 1);
+    COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_multi_stream_fragment_packets, 0);
+
+    const auto *one_rtt_secret = one_rtt_secret_for_context(context);
+    if (one_rtt_secret == nullptr) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::missing_crypto_context, 0);
+    }
+    if (key_phase != context.one_rtt_key_phase) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state,
+                                                 0);
+    }
+    if (fragment.offset > kMaxVarInt - fragment.bytes.size()) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+
+    const PacketProtectionKeys *keys_ref_ptr = nullptr;
+    {
+        COQUIC_SERIALIZE_PROFILE_TIMER(key_timer, key_lookup_ns);
+        auto keys = CodecResult<std::reference_wrapper<const PacketProtectionKeys>>::failure(
+            CodecErrorCode::invalid_packet_protection_state, 0);
+        if (!traffic_secret_cached_keys_available(one_rtt_secret,
+                                                  context.one_rtt_secret_cache_primed)) {
+            keys = expand_traffic_secret_cached(*one_rtt_secret);
+            if (!keys.has_value()) {
+                return CodecResult<std::size_t>::failure(keys.error().code, keys.error().offset);
+            }
+        }
+        keys_ref_ptr = traffic_secret_cached_keys_available(one_rtt_secret,
+                                                            context.one_rtt_secret_cache_primed)
+                           ? &traffic_secret_cached_keys_or_assert(
+                                 one_rtt_secret, context.one_rtt_secret_cache_primed)
+                           : &keys.value().get();
+    }
+
+    auto truncated_packet_number =
+        CodecResult<std::uint32_t>::failure(CodecErrorCode::invalid_varint, 0);
+    {
+        COQUIC_SERIALIZE_PROFILE_TIMER(packet_number_timer, packet_number_ns);
+        truncated_packet_number = truncate_packet_number(packet_number, packet_number_length);
+    }
+    if (!truncated_packet_number.has_value()) {
+        return CodecResult<std::size_t>::failure(truncated_packet_number.error().code,
+                                                 truncated_packet_number.error().offset);
+    }
+
+    const auto cipher_suite = one_rtt_secret->cipher_suite;
+    std::array<std::byte, 32> nonce_storage;
+    std::span<const std::byte> nonce;
+    {
+        COQUIC_SERIALIZE_PROFILE_TIMER(nonce_timer, nonce_ns);
+        nonce =
+            make_packet_protection_nonce_or_assert(keys_ref_ptr->iv, packet_number, nonce_storage);
+    }
+
+    const auto packet_number_offset = 1 + destination_connection_id.size();
+    const auto payload_offset = packet_number_offset + packet_number_length;
+    auto packet_number_span = PacketNumberSpan{
+        .packet_number_offset = packet_number_offset,
+        .packet_number_length = packet_number_length,
+    };
+    const auto datagram_begin = out_datagram.size();
+    const auto rollback = [&]() { out_datagram.resize(datagram_begin); };
+
+    const auto header_bytes = fragment.stream_frame_header_bytes();
+    const auto payload_size = header_bytes.size() + fragment.bytes.size();
+    if (payload_size == 0 ||
+        payload_size < minimum_payload_bytes_for_header_sample(packet_number_length)) {
+        return CodecResult<std::size_t>::failure(CodecErrorCode::empty_packet_payload, 0);
+    }
+
+    const auto maximum_packet_size = payload_offset + payload_size + kPacketProtectionTagLength;
+    std::span<std::byte> packet_bytes;
+    {
+        COQUIC_SERIALIZE_PROFILE_TIMER(reserve_timer, reserve_resize_ns);
+        packet_bytes = out_datagram.append_uninitialized_exact(maximum_packet_size);
+    }
+
+    {
+        COQUIC_SERIALIZE_PROFILE_TIMER(header_timer, header_write_ns);
+        auto *cursor = packet_bytes.data();
+        *cursor++ = make_short_header_first_byte(spin_bit, key_phase, packet_number_length,
+                                                 context.grease_quic_bit,
+                                                 context.grease_quic_bit_seed, packet_number);
+        if (!destination_connection_id.empty()) {
+            std::memcpy(cursor, destination_connection_id.data(), destination_connection_id.size());
+            cursor += static_cast<std::ptrdiff_t>(destination_connection_id.size());
+        }
+        const auto truncated = truncated_packet_number.value();
+        for (std::size_t index = 0; index < packet_number_length; ++index) {
+            const auto shift = static_cast<unsigned>((packet_number_length - index - 1) * 8);
+            *cursor++ = static_cast<std::byte>((truncated >> shift) & 0xffu);
+        }
+    }
+
+    auto payload_bytes = packet_bytes.subspan(payload_offset, payload_size);
+    {
+        COQUIC_SERIALIZE_PROFILE_TIMER(payload_timer, payload_write_ns);
+        std::memcpy(payload_bytes.data(), header_bytes.data(), header_bytes.size());
+    }
+    const std::array plaintext_chunks{
+        PlaintextChunk{
+            .bytes = std::span<const std::byte>(payload_bytes).first(header_bytes.size()),
+        },
+        PlaintextChunk{
+            .bytes = fragment.bytes.span(),
+        },
+    };
+
+    auto ciphertext =
+        CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
+    {
+        COQUIC_SERIALIZE_PROFILE_TIMER(seal_timer, aead_seal_ns);
+        ciphertext = seal_payload_chunks_into(SealPayloadChunksIntoInput{
+            .cipher_suite = cipher_suite,
+            .key = keys_ref_ptr->key,
+            .nonce = nonce,
+            .associated_data = std::span<const std::byte>(packet_bytes).first(payload_offset),
+            .plaintext_chunks = plaintext_chunks,
+            .ciphertext = packet_bytes.subspan(payload_offset),
+        });
+    }
+    if (!ciphertext.has_value()) {
+        rollback();
+        return CodecResult<std::size_t>::failure(ciphertext.error().code,
+                                                 ciphertext.error().offset);
+    }
+
+    const auto final_packet_size = payload_offset + ciphertext.value();
+    out_datagram.resize(datagram_begin + final_packet_size);
+    auto protected_packet = CodecResult<bool>::failure(CodecErrorCode::header_protection_failed, 0);
+    {
+        COQUIC_SERIALIZE_PROFILE_TIMER(protect_timer, short_header_protect_ns);
+        protected_packet = apply_short_header_protection_in_place(
+            std::span<std::byte>(out_datagram).subspan(datagram_begin, final_packet_size),
+            packet_number_span, cipher_suite, *keys_ref_ptr);
+    }
+    if (!protected_packet.has_value()) {
+        rollback();
+        return CodecResult<std::size_t>::failure(protected_packet.error().code,
+                                                 protected_packet.error().offset);
+    }
+
+    COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_bytes, final_packet_size);
+    COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_payload_bytes, payload_size);
+    return CodecResult<std::size_t>::success(final_packet_size);
+}
+
 CodecResult<std::size_t>
 append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &datagram,
                                                  const ProtectedOneRttPacket &packet,
@@ -3378,19 +3536,133 @@ deserialize_received_protected_one_rtt_packet(std::span<const std::byte> bytes,
         });
 }
 
-COQUIC_NO_PROFILE CodecResult<ReceivedProtectedPacketDecodeResult>
-deserialize_received_protected_one_rtt_packet(
+template <typename ResultPacket, bool CompactAckOnly>
+COQUIC_NO_PROFILE CodecResult<ResultPacket> decode_received_one_rtt_packet_from_decrypted_plaintext(
+    const std::shared_ptr<std::vector<std::byte>> &storage, std::uint64_t packet_number,
+    std::span<const std::byte> plaintext_header, const SharedBytes &plaintext_payload,
+    std::uint8_t packet_number_length, const DeserializeProtectionContext &context,
+    bool ack_only_fast) {
+    if (ack_only_fast) {
+        auto decoded_ack_only_fields = [&] {
+            COQUIC_DESERIALIZE_PROFILE_TIMER(timer, frame_decode_ns);
+            return try_decode_received_short_header_ack_only_fast_packet_fields(
+                plaintext_header, plaintext_payload, context.accept_greased_quic_bit);
+        }();
+        if (decoded_ack_only_fields.has_value()) {
+            COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_plaintext_bytes,
+                                                   plaintext_payload.size());
+            COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_frames, 1);
+
+            if constexpr (CompactAckOnly) {
+                return CodecResult<ResultPacket>::success(ResultPacket{
+                    ReceivedProtectedOneRttAckOnlyFastPacket{
+                        .spin_bit = decoded_ack_only_fields.value().spin_bit,
+                        .packet_number = packet_number,
+                        .ack = std::move(decoded_ack_only_fields.value().ack),
+                    },
+                });
+            } else {
+                return CodecResult<ResultPacket>::success(ResultPacket{
+                    ReceivedProtectedOneRttAckOnlyPacket{
+                        .spin_bit = decoded_ack_only_fields.value().spin_bit,
+                        .key_phase = decoded_ack_only_fields.value().key_phase,
+                        .destination_connection_id =
+                            std::move(decoded_ack_only_fields.value().destination_connection_id),
+                        .packet_number_length =
+                            decoded_ack_only_fields.value().packet_number_length,
+                        .packet_number = packet_number,
+                        .plaintext_storage = storage,
+                        .ack = std::move(decoded_ack_only_fields.value().ack),
+                    },
+                });
+            }
+        }
+        auto decoded_stream_fields = [&] {
+            COQUIC_DESERIALIZE_PROFILE_TIMER(timer, frame_decode_ns);
+            return try_decode_received_short_header_stream_fast_packet_fields(
+                plaintext_header, plaintext_payload, context.accept_greased_quic_bit);
+        }();
+        if (decoded_stream_fields.has_value()) {
+            COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_plaintext_bytes,
+                                                   plaintext_payload.size());
+            COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_frames, 1);
+
+            return CodecResult<ResultPacket>::success(ResultPacket{
+                ReceivedProtectedOneRttStreamPacket{
+                    .spin_bit = decoded_stream_fields.value().spin_bit,
+                    .key_phase = decoded_stream_fields.value().key_phase,
+                    .destination_connection_id =
+                        std::move(decoded_stream_fields.value().destination_connection_id),
+                    .packet_number_length = decoded_stream_fields.value().packet_number_length,
+                    .packet_number = packet_number,
+                    .plaintext_storage = storage,
+                    .stream = std::move(decoded_stream_fields.value().stream),
+                },
+            });
+        }
+    } else {
+        auto decoded_ack_only_fields = [&] {
+            COQUIC_DESERIALIZE_PROFILE_TIMER(timer, frame_decode_ns);
+            return try_decode_received_short_header_ack_only_packet_fields(
+                plaintext_header, plaintext_payload, context.accept_greased_quic_bit);
+        }();
+        if (decoded_ack_only_fields.has_value()) {
+            COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_plaintext_bytes,
+                                                   plaintext_payload.size());
+            COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_frames, 1);
+
+            return CodecResult<ResultPacket>::success(ResultPacket{
+                ReceivedProtectedOneRttAckOnlyPacket{
+                    .spin_bit = decoded_ack_only_fields.value().spin_bit,
+                    .key_phase = decoded_ack_only_fields.value().key_phase,
+                    .destination_connection_id =
+                        std::move(decoded_ack_only_fields.value().destination_connection_id),
+                    .packet_number_length = decoded_ack_only_fields.value().packet_number_length,
+                    .packet_number = packet_number,
+                    .plaintext_storage = storage,
+                    .ack = std::move(decoded_ack_only_fields.value().ack),
+                },
+            });
+        }
+    }
+
+    auto decoded_fields = [&] {
+        COQUIC_DESERIALIZE_PROFILE_TIMER(timer, frame_decode_ns);
+        return decode_received_short_header_packet_fields(plaintext_header, plaintext_payload,
+                                                          context.accept_greased_quic_bit);
+    }();
+    if (!decoded_fields.has_value()) {
+        return CodecResult<ResultPacket>::failure(decoded_fields.error().code,
+                                                  decoded_fields.error().offset);
+    }
+    COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_plaintext_bytes, plaintext_payload.size());
+    COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_frames, decoded_fields.value().frames.size());
+
+    return CodecResult<ResultPacket>::success(ResultPacket{
+        ReceivedProtectedOneRttPacket{
+            .spin_bit = decoded_fields.value().spin_bit,
+            .key_phase = decoded_fields.value().key_phase,
+            .destination_connection_id =
+                std::move(decoded_fields.value().destination_connection_id),
+            .packet_number_length = packet_number_length,
+            .packet_number = packet_number,
+            .plaintext_storage = storage,
+            .frames = std::move(decoded_fields.value().frames),
+        },
+    });
+}
+
+template <typename DecodeResult, bool CompactAckOnly>
+COQUIC_NO_PROFILE CodecResult<DecodeResult> deserialize_received_protected_one_rtt_packet_impl(
     const std::shared_ptr<std::vector<std::byte>> &storage, std::size_t begin, std::size_t end,
     const DeserializeProtectionContext &context, bool ack_only_fast) {
     COQUIC_DESERIALIZE_PROFILE_TIMER(one_rtt_timer, one_rtt_in_place_ns);
     if (!storage || begin > end || end > storage->size()) {
-        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
-            CodecErrorCode::truncated_input, 0);
+        return CodecResult<DecodeResult>::failure(CodecErrorCode::truncated_input, 0);
     }
     const auto *one_rtt_secret = one_rtt_secret_for_context(context);
     if (one_rtt_secret == nullptr) {
-        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
-            CodecErrorCode::missing_crypto_context, 0);
+        return CodecResult<DecodeResult>::failure(CodecErrorCode::missing_crypto_context, 0);
     }
 
     auto packet_bytes = std::span<std::byte>(*storage).subspan(begin, end - begin);
@@ -3399,8 +3671,8 @@ deserialize_received_protected_one_rtt_packet(
     COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_in_place_bytes, bytes.size());
     auto packet_number_offset = 1 + context.one_rtt_destination_connection_id_length;
     if (packet_number_offset > bytes.size()) {
-        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
-            CodecErrorCode::malformed_short_header_context, 1);
+        return CodecResult<DecodeResult>::failure(CodecErrorCode::malformed_short_header_context,
+                                                  1);
     }
 
     auto keys = CodecResult<std::reference_wrapper<const PacketProtectionKeys>>::failure(
@@ -3411,8 +3683,7 @@ deserialize_received_protected_one_rtt_packet(
             return expand_traffic_secret_cached(*one_rtt_secret);
         }();
         if (!keys.has_value()) {
-            return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(keys.error().code,
-                                                                             keys.error().offset);
+            return CodecResult<DecodeResult>::failure(keys.error().code, keys.error().offset);
         }
     }
     const auto &keys_ref = one_rtt_cached_keys_available(context)
@@ -3425,16 +3696,16 @@ deserialize_received_protected_one_rtt_packet(
         return remove_short_header_protection(bytes, packet_number_offset, cipher_suite, keys_ref);
     }();
     if (!unprotected.has_value()) {
-        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
-            unprotected.error().code, unprotected.error().offset);
+        return CodecResult<DecodeResult>::failure(unprotected.error().code,
+                                                  unprotected.error().offset);
     }
 
     const auto &unprotected_value = unprotected.value();
     const auto plaintext_header = unprotected_value.plaintext_header_span();
     auto key_phase = (std::to_integer<std::uint8_t>(plaintext_header[0]) & 0x04u) != 0;
     if (key_phase != context.one_rtt_key_phase) {
-        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
-            CodecErrorCode::invalid_packet_protection_state, 0);
+        return CodecResult<DecodeResult>::failure(CodecErrorCode::invalid_packet_protection_state,
+                                                  0);
     }
 
     auto packet_number = [&] {
@@ -3444,8 +3715,8 @@ deserialize_received_protected_one_rtt_packet(
                                      unprotected_value.packet_number_length);
     }();
     if (!packet_number.has_value()) {
-        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
-            packet_number.error().code, packet_number.error().offset);
+        return CodecResult<DecodeResult>::failure(packet_number.error().code,
+                                                  packet_number.error().offset);
     }
 
     auto header_end = packet_number_offset + unprotected_value.packet_number_length;
@@ -3457,8 +3728,8 @@ deserialize_received_protected_one_rtt_packet(
     }();
     auto ciphertext = bytes.subspan(header_end);
     if (ciphertext.size() < kPacketProtectionTagLength) {
-        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
-            CodecErrorCode::packet_decryption_failed, header_end);
+        return CodecResult<DecodeResult>::failure(CodecErrorCode::packet_decryption_failed,
+                                                  header_end);
     }
     const auto plaintext_size = ciphertext.size() - kPacketProtectionTagLength;
     auto plaintext_output = packet_bytes.subspan(header_end, plaintext_size);
@@ -3474,127 +3745,49 @@ deserialize_received_protected_one_rtt_packet(
         });
     }();
     if (!plaintext.has_value()) {
-        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(plaintext.error().code,
-                                                                         plaintext.error().offset);
+        return CodecResult<DecodeResult>::failure(plaintext.error().code, plaintext.error().offset);
     }
     const auto plaintext_bytes_written = plaintext.value();
     if (plaintext_bytes_written != plaintext_size) {
-        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
-            CodecErrorCode::packet_length_mismatch, header_end + plaintext_bytes_written);
+        return CodecResult<DecodeResult>::failure(CodecErrorCode::packet_length_mismatch,
+                                                  header_end + plaintext_bytes_written);
     }
 
     const auto plaintext_begin = begin + header_end;
     auto plaintext_payload =
         SharedBytes(storage, plaintext_begin, plaintext_begin + plaintext_size);
-    if (ack_only_fast) {
-        auto decoded_ack_only_fields = [&] {
-            COQUIC_DESERIALIZE_PROFILE_TIMER(timer, frame_decode_ns);
-            return try_decode_received_short_header_ack_only_fast_packet_fields(
-                plaintext_header, plaintext_payload, context.accept_greased_quic_bit);
-        }();
-        if (decoded_ack_only_fields.has_value()) {
-            COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_plaintext_bytes, plaintext_size);
-            COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_frames, 1);
-
-            return CodecResult<ReceivedProtectedPacketDecodeResult>::success(
-                ReceivedProtectedPacketDecodeResult{
-                    .packet =
-                        ReceivedProtectedOneRttAckOnlyPacket{
-                            .spin_bit = decoded_ack_only_fields.value().spin_bit,
-                            .key_phase = decoded_ack_only_fields.value().key_phase,
-                            .destination_connection_id = std::move(
-                                decoded_ack_only_fields.value().destination_connection_id),
-                            .packet_number_length =
-                                decoded_ack_only_fields.value().packet_number_length,
-                            .packet_number = packet_number.value(),
-                            .plaintext_storage = storage,
-                            .ack = std::move(decoded_ack_only_fields.value().ack),
-                        },
-                    .bytes_consumed = bytes.size(),
-                });
-        }
-        auto decoded_stream_fields = [&] {
-            COQUIC_DESERIALIZE_PROFILE_TIMER(timer, frame_decode_ns);
-            return try_decode_received_short_header_stream_fast_packet_fields(
-                plaintext_header, plaintext_payload, context.accept_greased_quic_bit);
-        }();
-        if (decoded_stream_fields.has_value()) {
-            COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_plaintext_bytes, plaintext_size);
-            COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_frames, 1);
-
-            return CodecResult<ReceivedProtectedPacketDecodeResult>::success(
-                ReceivedProtectedPacketDecodeResult{
-                    .packet =
-                        ReceivedProtectedOneRttStreamPacket{
-                            .spin_bit = decoded_stream_fields.value().spin_bit,
-                            .key_phase = decoded_stream_fields.value().key_phase,
-                            .destination_connection_id =
-                                std::move(decoded_stream_fields.value().destination_connection_id),
-                            .packet_number_length =
-                                decoded_stream_fields.value().packet_number_length,
-                            .packet_number = packet_number.value(),
-                            .plaintext_storage = storage,
-                            .stream = std::move(decoded_stream_fields.value().stream),
-                        },
-                    .bytes_consumed = bytes.size(),
-                });
-        }
-    } else {
-        auto decoded_ack_only_fields = [&] {
-            COQUIC_DESERIALIZE_PROFILE_TIMER(timer, frame_decode_ns);
-            return try_decode_received_short_header_ack_only_packet_fields(
-                plaintext_header, plaintext_payload, context.accept_greased_quic_bit);
-        }();
-        if (decoded_ack_only_fields.has_value()) {
-            COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_plaintext_bytes, plaintext_size);
-            COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_frames, 1);
-
-            return CodecResult<ReceivedProtectedPacketDecodeResult>::success(
-                ReceivedProtectedPacketDecodeResult{
-                    .packet =
-                        ReceivedProtectedOneRttAckOnlyPacket{
-                            .spin_bit = decoded_ack_only_fields.value().spin_bit,
-                            .key_phase = decoded_ack_only_fields.value().key_phase,
-                            .destination_connection_id = std::move(
-                                decoded_ack_only_fields.value().destination_connection_id),
-                            .packet_number_length =
-                                decoded_ack_only_fields.value().packet_number_length,
-                            .packet_number = packet_number.value(),
-                            .plaintext_storage = storage,
-                            .ack = std::move(decoded_ack_only_fields.value().ack),
-                        },
-                    .bytes_consumed = bytes.size(),
-                });
-        }
+    auto decoded_packet =
+        decode_received_one_rtt_packet_from_decrypted_plaintext<typename DecodeResult::Packet,
+                                                                CompactAckOnly>(
+            storage, packet_number.value(), plaintext_header, plaintext_payload,
+            unprotected_value.packet_number_length, context, ack_only_fast);
+    if (!decoded_packet.has_value()) {
+        return CodecResult<DecodeResult>::failure(decoded_packet.error().code,
+                                                  decoded_packet.error().offset);
     }
 
-    auto decoded_fields = [&] {
-        COQUIC_DESERIALIZE_PROFILE_TIMER(timer, frame_decode_ns);
-        return decode_received_short_header_packet_fields(plaintext_header, plaintext_payload,
-                                                          context.accept_greased_quic_bit);
-    }();
-    if (!decoded_fields.has_value()) {
-        return CodecResult<ReceivedProtectedPacketDecodeResult>::failure(
-            decoded_fields.error().code, decoded_fields.error().offset);
-    }
-    COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_plaintext_bytes, plaintext_size);
-    COQUIC_ADD_DESERIALIZE_PROFILE_COUNTER(one_rtt_frames, decoded_fields.value().frames.size());
+    return CodecResult<DecodeResult>::success(DecodeResult{
+        .packet = std::move(decoded_packet.value()),
+        .bytes_consumed = bytes.size(),
+    });
+}
 
-    return CodecResult<ReceivedProtectedPacketDecodeResult>::success(
-        ReceivedProtectedPacketDecodeResult{
-            .packet =
-                ReceivedProtectedOneRttPacket{
-                    .spin_bit = decoded_fields.value().spin_bit,
-                    .key_phase = decoded_fields.value().key_phase,
-                    .destination_connection_id =
-                        std::move(decoded_fields.value().destination_connection_id),
-                    .packet_number_length = decoded_fields.value().packet_number_length,
-                    .packet_number = packet_number.value(),
-                    .plaintext_storage = storage,
-                    .frames = std::move(decoded_fields.value().frames),
-                },
-            .bytes_consumed = bytes.size(),
-        });
+COQUIC_NO_PROFILE CodecResult<ReceivedProtectedPacketDecodeResult>
+deserialize_received_protected_one_rtt_packet(
+    const std::shared_ptr<std::vector<std::byte>> &storage, std::size_t begin, std::size_t end,
+    const DeserializeProtectionContext &context, bool ack_only_fast) {
+    return deserialize_received_protected_one_rtt_packet_impl<ReceivedProtectedPacketDecodeResult,
+                                                              false>(storage, begin, end, context,
+                                                                     ack_only_fast);
+}
+
+COQUIC_NO_PROFILE CodecResult<ReceivedProtectedFastPacketDecodeResult>
+deserialize_received_protected_one_rtt_packet_fast_compact(
+    const std::shared_ptr<std::vector<std::byte>> &storage, std::size_t begin, std::size_t end,
+    const DeserializeProtectionContext &context) {
+    return deserialize_received_protected_one_rtt_packet_impl<
+        ReceivedProtectedFastPacketDecodeResult, true>(storage, begin, end, context,
+                                                       /*ack_only_fast=*/true);
 }
 
 CodecResult<bool> append_serialized_protected_packet(SerializedProtectedDatagram &datagram,
@@ -3649,6 +3842,16 @@ CodecResult<bool> append_serialized_protected_packet(SerializedProtectedDatagram
 } // namespace detail
 
 using namespace detail;
+
+CodecResult<std::size_t> append_protected_one_rtt_stream_fragment_packet_to_datagram(
+    DatagramBuffer &datagram, bool spin_bit, bool key_phase,
+    std::span<const std::byte> destination_connection_id, std::uint8_t packet_number_length,
+    std::uint64_t packet_number, const StreamFrameSendFragment &fragment,
+    const SerializeProtectionContext &context) {
+    return detail::append_protected_one_rtt_stream_fragment_packet_to_datagram(
+        datagram, spin_bit, key_phase, destination_connection_id, packet_number_length,
+        packet_number, fragment, context);
+}
 
 CodecResult<SerializedProtectedDatagram>
 serialize_protected_datagram_with_metadata(std::span<const ProtectedPacket> packets,
@@ -3875,6 +4078,38 @@ deserialize_received_protected_packet_fast(const std::shared_ptr<std::vector<std
     }
 
     return CodecResult<ReceivedProtectedPacket>::success(std::move(decoded.value().packet));
+}
+
+CodecResult<ReceivedProtectedFastPacket> deserialize_received_protected_packet_fast_compact(
+    const std::shared_ptr<std::vector<std::byte>> &storage, std::size_t begin, std::size_t end,
+    const DeserializeProtectionContext &context) {
+    if (!storage || begin >= end || end > storage->size()) {
+        return CodecResult<ReceivedProtectedFastPacket>::failure(CodecErrorCode::truncated_input,
+                                                                 0);
+    }
+
+    const auto bytes = std::span<const std::byte>(*storage).subspan(begin, end - begin);
+    if ((std::to_integer<std::uint8_t>(bytes.front()) & 0x80u) != 0) {
+        auto packet = deserialize_received_protected_packet(bytes, context);
+        if (!packet.has_value()) {
+            return CodecResult<ReceivedProtectedFastPacket>::failure(packet.error().code,
+                                                                     packet.error().offset);
+        }
+        return CodecResult<ReceivedProtectedFastPacket>::success(std::move(packet.value()));
+    }
+
+    auto decoded =
+        deserialize_received_protected_one_rtt_packet_fast_compact(storage, begin, end, context);
+    if (!decoded.has_value()) {
+        return CodecResult<ReceivedProtectedFastPacket>::failure(decoded.error().code,
+                                                                 decoded.error().offset);
+    }
+    if (decoded.value().bytes_consumed != bytes.size()) {
+        return CodecResult<ReceivedProtectedFastPacket>::failure(
+            CodecErrorCode::packet_length_mismatch, decoded.value().bytes_consumed);
+    }
+
+    return CodecResult<ReceivedProtectedFastPacket>::success(std::move(decoded.value().packet));
 }
 
 CodecResult<std::vector<ReceivedProtectedPacket>>

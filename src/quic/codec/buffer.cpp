@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <memory>
 
+#include "src/quic/object_cache.h"
+
 #if defined(__clang__)
 #define COQUIC_NO_PROFILE __attribute__((no_profile_instrument_function))
 #else
@@ -43,53 +45,7 @@ COQUIC_NO_PROFILE std::size_t datagram_byte_storage_allocation_count(std::size_t
 }
 
 #if COQUIC_DISABLE_DATAGRAM_BYTE_STORAGE_CACHE == 0
-struct DatagramByteStorageCache {
-    struct Entry {
-        std::byte *pointer = nullptr;
-        std::size_t count = 0;
-    };
-
-    ~DatagramByteStorageCache() {
-        for (std::size_t index = 0; index < used; ++index) {
-            auto &entry = entries[index];
-            if (entry.pointer != nullptr) {
-                std::allocator<std::byte>{}.deallocate(entry.pointer, entry.count);
-            }
-        }
-    }
-
-    std::optional<std::byte *> take(std::size_t count) {
-        for (std::size_t index = 0; index < used; ++index) {
-            if (entries[index].count != count) {
-                continue;
-            }
-
-            auto *pointer = entries[index].pointer;
-            --used;
-            entries[index] = entries[used];
-            entries[used] = Entry{};
-            return pointer;
-        }
-
-        return std::nullopt;
-    }
-
-    bool put(std::byte *pointer, std::size_t count) {
-        if (used == entries.size()) {
-            return false;
-        }
-
-        entries[used] = Entry{
-            .pointer = pointer,
-            .count = count,
-        };
-        ++used;
-        return true;
-    }
-
-    std::array<Entry, kDatagramByteStorageCacheSlots> entries{};
-    std::size_t used = 0;
-};
+using DatagramByteStorageCache = detail::FixedByteBlockCache<kDatagramByteStorageCacheSlots>;
 
 COQUIC_NO_PROFILE DatagramByteStorageCache &datagram_byte_storage_cache() {
     thread_local DatagramByteStorageCache cache;
@@ -115,8 +71,8 @@ COQUIC_NO_PROFILE std::byte *allocate_datagram_byte_storage(std::size_t count) {
     const auto allocation_count = datagram_byte_storage_allocation_count(count);
 #if COQUIC_DISABLE_DATAGRAM_BYTE_STORAGE_CACHE == 0
     auto &cache = datagram_byte_storage_cache();
-    if (auto cached = cache.take(allocation_count)) {
-        return *cached;
+    if (auto *cached = cache.take(allocation_count); cached != nullptr) {
+        return cached;
     }
 #endif
 

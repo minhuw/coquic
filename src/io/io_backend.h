@@ -106,6 +106,21 @@ class QuicIoBackend {
         }
         return true;
     }
+    virtual bool send_many_on_route(QuicRouteHandle route_handle,
+                                    std::span<const QuicIoTxDatagram> datagrams) {
+        for (const auto &datagram : datagrams) {
+            QuicIoTxDatagram routed_datagram{
+                .route_handle = route_handle,
+                .bytes_view = datagram.payload(),
+                .ecn = datagram.ecn,
+                .is_pmtu_probe = datagram.is_pmtu_probe,
+            };
+            if (!send(routed_datagram)) {
+                return false;
+            }
+        }
+        return true;
+    }
 };
 
 } // namespace coquic::io

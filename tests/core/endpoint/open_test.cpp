@@ -14,6 +14,16 @@ template <typename T>
 struct has_public_path_id_member<T, std::void_t<decltype(std::declval<T>().path_id)>>
     : std::true_type {};
 
+class CapturingSendSink : public coquic::quic::QuicCoreSendDatagramSink {
+  public:
+    bool on_send_datagram(coquic::quic::QuicCoreSendDatagram datagram) override {
+        datagrams.push_back(std::move(datagram));
+        return true;
+    }
+
+    std::vector<coquic::quic::QuicCoreSendDatagram> datagrams;
+};
+
 TEST(QuicCoreEndpointTest, ClientOpenCreatesStableHandleAndTagsInitialSendRoute) {
     coquic::quic::QuicCore core(make_client_endpoint_config());
 
@@ -93,6 +103,30 @@ TEST(QuicCoreEndpointTest, EndpointCommandUsesConnectionHandleWithoutLegacyFallb
     EXPECT_TRUE(core.active_local_connection_ids().empty());
     EXPECT_FALSE(core.is_handshake_complete());
     EXPECT_FALSE(core.has_failed());
+}
+
+TEST(QuicCoreEndpointTest, ClientOpenCanEmitSendDatagramsThroughSink) {
+    coquic::quic::QuicCore core(make_client_endpoint_config());
+    CapturingSendSink sink;
+
+    const auto result = core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0), sink);
+
+    EXPECT_FALSE(result.send_sink_failed);
+    EXPECT_TRUE(send_effects_from(result).empty());
+    ASSERT_FALSE(sink.datagrams.empty());
+    EXPECT_EQ(sink.datagrams.front().connection, 1u);
+    EXPECT_EQ(sink.datagrams.front().route_handle,
+              std::optional<coquic::quic::QuicRouteHandle>{17u});
+
+    const auto lifecycle = lifecycle_events_from(result);
+    ASSERT_EQ(lifecycle.size(), 1u);
+    EXPECT_EQ(lifecycle.front().connection, 1u);
+    EXPECT_EQ(lifecycle.front().event, coquic::quic::QuicCoreConnectionLifecycle::created);
 }
 
 TEST(QuicCoreEndpointTest, SharedSendCommandUsesConnectionHandleWithoutLegacyFallback) {

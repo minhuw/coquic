@@ -31,10 +31,15 @@ void HyStartPlusPlus::on_packet_sent(SentPacketRecord &packet) {
         return;
     }
 
-    packet.congestion_send_sequence = next_send_sequence_++;
+    packet.congestion_send_sequence = on_ack_eliciting_packet_sent();
+}
+
+std::uint64_t HyStartPlusPlus::on_ack_eliciting_packet_sent() {
+    const auto send_sequence = next_send_sequence_++;
     latest_sent_sequence_ = latest_sent_sequence_.has_value()
-                                ? std::max(*latest_sent_sequence_, packet.congestion_send_sequence)
-                                : packet.congestion_send_sequence;
+                                ? std::max(*latest_sent_sequence_, send_sequence)
+                                : send_sequence;
+    return send_sequence;
 }
 
 std::size_t HyStartPlusPlus::growth_bytes(std::size_t newly_acked_bytes) const {
@@ -77,6 +82,16 @@ void HyStartPlusPlus::on_slow_start_ack(std::span<const AckedStreamPacketSample>
                 : packet.congestion_send_sequence;
     }
     on_slow_start_ack_sequence(largest_acked_send_sequence, rtt_state);
+}
+
+void HyStartPlusPlus::on_slow_start_ack(const AckedStreamPacketAggregate &packets,
+                                        const RecoveryRttState &rtt_state) {
+    if (packets.largest_congestion_send_sequence == 0) {
+        on_slow_start_ack_sequence(std::nullopt, rtt_state);
+        return;
+    }
+
+    on_slow_start_ack_sequence(packets.largest_congestion_send_sequence, rtt_state);
 }
 
 void HyStartPlusPlus::on_slow_start_ack_sequence(

@@ -29,6 +29,8 @@ class IoUringBackend final : public QuicIoBackend {
     bool has_pending_events() const override;
     bool send(const QuicIoTxDatagram &datagram) override;
     bool send_many(std::span<const QuicIoTxDatagram> datagrams) override;
+    bool send_many_on_route(QuicRouteHandle route_handle,
+                            std::span<const QuicIoTxDatagram> datagrams) override;
 
   private:
     IoUringBackend(QuicUdpBackendConfig config, std::unique_ptr<QuicIoEngine> engine);

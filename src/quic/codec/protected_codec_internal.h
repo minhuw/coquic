@@ -85,7 +85,16 @@ struct ProtectedPacketDecodeResult {
 };
 
 struct ReceivedProtectedPacketDecodeResult {
+    using Packet = ReceivedProtectedPacket;
+
     ReceivedProtectedPacket packet;
+    std::size_t bytes_consumed = 0;
+};
+
+struct ReceivedProtectedFastPacketDecodeResult {
+    using Packet = ReceivedProtectedFastPacket;
+
+    ReceivedProtectedFastPacket packet;
     std::size_t bytes_consumed = 0;
 };
 
@@ -355,6 +364,10 @@ deserialize_received_protected_one_rtt_packet(std::span<const std::byte> bytes,
 CodecResult<ReceivedProtectedPacketDecodeResult> deserialize_received_protected_one_rtt_packet(
     const std::shared_ptr<std::vector<std::byte>> &storage, std::size_t begin, std::size_t end,
     const DeserializeProtectionContext &context, bool ack_only_fast = false);
+CodecResult<ReceivedProtectedFastPacketDecodeResult>
+deserialize_received_protected_one_rtt_packet_fast_compact(
+    const std::shared_ptr<std::vector<std::byte>> &storage, std::size_t begin, std::size_t end,
+    const DeserializeProtectionContext &context);
 CodecResult<bool> append_serialized_protected_packet(SerializedProtectedDatagram &datagram,
                                                      const ProtectedPacket &packet,
                                                      const SerializeProtectionContext &context);

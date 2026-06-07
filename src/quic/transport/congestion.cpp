@@ -171,6 +171,26 @@ void QuicCongestionController::on_packet_sent(SentPacketRecord &packet) {
     std::visit([&](auto &controller) { controller.on_packet_sent(packet); }, storage_);
 }
 
+std::optional<SimpleStreamPacketSentCongestionResult>
+QuicCongestionController::on_simple_stream_packet_sent(std::size_t bytes_sent,
+                                                       QuicCoreTimePoint sent_time,
+                                                       bool app_limited) {
+    return std::visit(
+        [&](auto &controller) -> std::optional<SimpleStreamPacketSentCongestionResult> {
+            using Controller = std::decay_t<decltype(controller)>;
+            if constexpr (std::is_same_v<Controller, NewRenoCongestionController> ||
+                          std::is_same_v<Controller, CubicCongestionController>) {
+                return controller.on_simple_stream_packet_sent(bytes_sent, sent_time, app_limited);
+            } else {
+                static_cast<void>(bytes_sent);
+                static_cast<void>(sent_time);
+                static_cast<void>(app_limited);
+                return std::nullopt;
+            }
+        },
+        storage_);
+}
+
 void QuicCongestionController::on_packets_acked(std::span<const SentPacketRecord> packets,
                                                 bool app_limited, QuicCoreTimePoint now,
                                                 const RecoveryRttState &rtt_state) {
@@ -183,6 +203,25 @@ void QuicCongestionController::on_packets_acked(std::span<const SentPacketRecord
 
 void QuicCongestionController::on_simple_stream_packets_acked(
     std::span<const AckedStreamPacketSample> packets, bool app_limited, QuicCoreTimePoint now,
+    const RecoveryRttState &rtt_state) {
+    std::visit(
+        [&](auto &controller) {
+            using Controller = std::decay_t<decltype(controller)>;
+            if constexpr (std::is_same_v<Controller, NewRenoCongestionController> ||
+                          std::is_same_v<Controller, CubicCongestionController>) {
+                controller.on_simple_stream_packets_acked(packets, app_limited, now, rtt_state);
+            } else {
+                static_cast<void>(packets);
+                static_cast<void>(app_limited);
+                static_cast<void>(now);
+                static_cast<void>(rtt_state);
+            }
+        },
+        storage_);
+}
+
+void QuicCongestionController::on_simple_stream_packets_acked(
+    const AckedStreamPacketAggregate &packets, bool app_limited, QuicCoreTimePoint now,
     const RecoveryRttState &rtt_state) {
     std::visit(
         [&](auto &controller) {

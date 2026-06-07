@@ -147,6 +147,12 @@ struct ReceivedProtectedOneRttAckOnlyPacket {
     ReceivedAckFrame ack;
 };
 
+struct ReceivedProtectedOneRttAckOnlyFastPacket {
+    bool spin_bit = false;
+    std::uint64_t packet_number = 0;
+    ReceivedAckFrame ack;
+};
+
 struct ReceivedProtectedOneRttStreamPacket {
     bool spin_bit = false;
     bool key_phase = false;
@@ -216,6 +222,8 @@ using ReceivedProtectedPacket =
     std::variant<ReceivedProtectedInitialPacket, ReceivedProtectedHandshakePacket,
                  ReceivedProtectedZeroRttPacket, ReceivedProtectedOneRttPacket,
                  ReceivedProtectedOneRttAckOnlyPacket, ReceivedProtectedOneRttStreamPacket>;
+using ReceivedProtectedFastPacket =
+    std::variant<ReceivedProtectedOneRttAckOnlyFastPacket, ReceivedProtectedPacket>;
 
 struct SerializedProtectedPacketMetadata {
     std::size_t offset = 0;
@@ -253,6 +261,12 @@ append_protected_one_rtt_packet_to_datagram(std::vector<std::byte> &datagram,
                                             const ProtectedOneRttPacketFragmentView &packet,
                                             const SerializeProtectionContext &context);
 
+CodecResult<std::size_t> append_protected_one_rtt_stream_fragment_packet_to_datagram(
+    DatagramBuffer &datagram, bool spin_bit, bool key_phase,
+    std::span<const std::byte> destination_connection_id, std::uint8_t packet_number_length,
+    std::uint64_t packet_number, const StreamFrameSendFragment &fragment,
+    const SerializeProtectionContext &context);
+
 CodecResult<std::vector<std::byte>>
 serialize_protected_datagram(std::span<const ProtectedPacket> packets,
                              const SerializeProtectionContext &context);
@@ -271,6 +285,9 @@ CodecResult<ReceivedProtectedPacket>
 deserialize_received_protected_packet_fast(const std::shared_ptr<std::vector<std::byte>> &storage,
                                            std::size_t begin, std::size_t end,
                                            const DeserializeProtectionContext &context);
+CodecResult<ReceivedProtectedFastPacket> deserialize_received_protected_packet_fast_compact(
+    const std::shared_ptr<std::vector<std::byte>> &storage, std::size_t begin, std::size_t end,
+    const DeserializeProtectionContext &context);
 CodecResult<std::vector<ReceivedProtectedPacket>>
 deserialize_received_protected_datagram(std::span<const std::byte> bytes,
                                         const DeserializeProtectionContext &context);

@@ -158,6 +158,11 @@ bool SocketIoBackend::send_many(std::span<const QuicIoTxDatagram> datagrams) {
     return core_->send_many(datagrams);
 }
 
+bool SocketIoBackend::send_many_on_route(QuicRouteHandle route_handle,
+                                         std::span<const QuicIoTxDatagram> datagrams) {
+    return core_->send_many_on_route(route_handle, datagrams);
+}
+
 std::unique_ptr<QuicIoBackend> make_socket_io_backend(SocketIoBackendConfig config) {
     return std::make_unique<SocketIoBackend>(std::move(config));
 }

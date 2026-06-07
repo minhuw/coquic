@@ -224,6 +224,7 @@ TEST(QuicPerfConfigTest, EndpointConfigUsesTransferSizedReceiveWindows) {
 
 TEST(QuicPerfConfigTest, EndpointConfigUsesPerfAckElicitingThreshold) {
     constexpr std::uint64_t kExpectedAckElicitingThreshold = 2;
+    constexpr std::uint64_t kExpectedBulkLossBasedAckElicitingThreshold = 64;
     constexpr std::uint64_t kExpectedCopaBulkAckElicitingThreshold = 1;
     constexpr std::uint64_t kExpectedCopaInteractiveAckElicitingThreshold = 8;
 
@@ -231,6 +232,16 @@ TEST(QuicPerfConfigTest, EndpointConfigUsesPerfAckElicitingThreshold) {
         make_perf_client_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::client});
     const auto bulk_server =
         make_perf_server_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::server});
+    const auto bulk_cubic_client = make_perf_client_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::bulk,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::cubic,
+    });
+    const auto bulk_cubic_server = make_perf_server_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::server,
+        .mode = QuicPerfMode::bulk,
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::cubic,
+    });
     const auto rr_client = make_perf_client_endpoint_config(QuicPerfConfig{
         .role = QuicPerfRole::client,
         .mode = QuicPerfMode::rr,
@@ -260,8 +271,14 @@ TEST(QuicPerfConfigTest, EndpointConfigUsesPerfAckElicitingThreshold) {
         .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::copa,
     });
 
-    EXPECT_EQ(bulk_client.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
-    EXPECT_EQ(bulk_server.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
+    EXPECT_EQ(bulk_client.transport.ack_eliciting_threshold,
+              kExpectedBulkLossBasedAckElicitingThreshold);
+    EXPECT_EQ(bulk_server.transport.ack_eliciting_threshold,
+              kExpectedBulkLossBasedAckElicitingThreshold);
+    EXPECT_EQ(bulk_cubic_client.transport.ack_eliciting_threshold,
+              kExpectedBulkLossBasedAckElicitingThreshold);
+    EXPECT_EQ(bulk_cubic_server.transport.ack_eliciting_threshold,
+              kExpectedBulkLossBasedAckElicitingThreshold);
     EXPECT_EQ(rr_client.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
     EXPECT_EQ(crr_server.transport.ack_eliciting_threshold, kExpectedAckElicitingThreshold);
     EXPECT_EQ(copa_client.transport.ack_eliciting_threshold,

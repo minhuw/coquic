@@ -68,6 +68,17 @@ void CubicCongestionController::on_packet_sent(SentPacketRecord &packet) {
     consume_pacing_budget(packet.bytes_in_flight, packet.sent_time);
 }
 
+SimpleStreamPacketSentCongestionResult CubicCongestionController::on_simple_stream_packet_sent(
+    std::size_t bytes_sent, QuicCoreTimePoint sent_time, bool app_limited) {
+    const auto congestion_send_sequence = hystart_.on_ack_eliciting_packet_sent();
+    bytes_in_flight_ += bytes_sent;
+    consume_pacing_budget(bytes_sent, sent_time);
+    return SimpleStreamPacketSentCongestionResult{
+        .congestion_send_sequence = congestion_send_sequence,
+        .app_limited = app_limited,
+    };
+}
+
 void CubicCongestionController::on_packets_acked(std::span<const SentPacketRecord> packets,
                                                  bool app_limited) {
     on_packets_acked(packets, app_limited, QuicCoreTimePoint{},
@@ -221,6 +232,66 @@ void CubicCongestionController::on_simple_stream_packets_acked(
 
     if (exit_recovery) {
         recovery_start_time_ = std::nullopt;
+    }
+
+    update_pacing_rate(rtt_state);
+    if (!pacing_budget_timestamp_.has_value() &&
+        acked_stream_bytes_for_pacing_ >= kPacingStartStreamBytes && now != QuicCoreTimePoint{} &&
+        pacing_rate_bytes_per_second_ > 0.0) {
+        pacing_budget_timestamp_ = now;
+        pacing_budget_bytes_ = pacing_budget_cap();
+    }
+}
+
+void CubicCongestionController::on_simple_stream_packets_acked(
+    const AckedStreamPacketAggregate &packets, bool app_limited, QuicCoreTimePoint now,
+    const RecoveryRttState &rtt_state) {
+    static_cast<void>(app_limited);
+    if (packets.empty()) {
+        update_pacing_rate(rtt_state);
+        return;
+    }
+
+    const auto recovery_boundary = recovery_start_time_;
+    const bool in_batch_recovery =
+        recovery_boundary.has_value() && packets.latest_sent_time <= *recovery_boundary;
+    if (packets.bytes_in_flight != 0) {
+        bytes_in_flight_ = packets.bytes_in_flight > bytes_in_flight_
+                               ? 0
+                               : bytes_in_flight_ - packets.bytes_in_flight;
+    }
+
+    acked_stream_bytes_for_pacing_ =
+        congestion_saturating_add(acked_stream_bytes_for_pacing_, packets.bytes_in_flight);
+    if (in_batch_recovery) {
+        update_pacing_rate(rtt_state);
+        if (epoch_start_time_.has_value() && !app_limited_start_time_.has_value()) {
+            app_limited_start_time_ = now;
+        }
+        return;
+    }
+
+    if (recovery_boundary.has_value() && packets.latest_sent_time > *recovery_boundary) {
+        recovery_start_time_ = std::nullopt;
+    }
+    if (app_limited_start_time_.has_value()) {
+        app_limited_pause_ +=
+            std::chrono::duration_cast<QuicCoreDuration>(now - *app_limited_start_time_);
+        app_limited_start_time_.reset();
+    }
+
+    if (congestion_window_ < slow_start_threshold_) {
+        congestion_window_ = congestion_saturating_add(
+            congestion_window_, hystart_.growth_bytes(packets.bytes_in_flight));
+        epoch_start_time_.reset();
+        cwnd_prior_segments_ = smss_segments(congestion_window_);
+        w_est_segments_ = cwnd_prior_segments_;
+        hystart_.on_slow_start_ack(packets, rtt_state);
+        if (hystart_.should_exit_slow_start()) {
+            enter_congestion_avoidance_from_slow_start(now);
+        }
+    } else {
+        grow_congestion_avoidance(packets.bytes_in_flight, now, rtt_state);
     }
 
     update_pacing_rate(rtt_state);

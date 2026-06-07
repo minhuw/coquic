@@ -30,6 +30,8 @@ class SocketIoBackend final : public QuicIoBackend {
     bool has_pending_events() const override;
     bool send(const QuicIoTxDatagram &datagram) override;
     bool send_many(std::span<const QuicIoTxDatagram> datagrams) override;
+    bool send_many_on_route(QuicRouteHandle route_handle,
+                            std::span<const QuicIoTxDatagram> datagrams) override;
 
   private:
     std::unique_ptr<SharedUdpBackendCore> core_;

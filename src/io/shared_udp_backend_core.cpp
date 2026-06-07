@@ -649,6 +649,39 @@ bool SharedUdpBackendCore::send_many(std::span<const QuicIoTxDatagram> datagrams
         impl_->config.role_name);
 }
 
+bool SharedUdpBackendCore::send_many_on_route(QuicRouteHandle route_handle,
+                                              std::span<const QuicIoTxDatagram> datagrams) {
+    if (datagrams.empty()) {
+        return true;
+    }
+
+    const auto route_it = impl_->route_state.routes_by_handle.find(route_handle);
+    if (route_it == impl_->route_state.routes_by_handle.end()) {
+        return false;
+    }
+
+    const auto &route = route_it->second;
+    auto &engine_datagrams = impl_->tx_datagram_scratch;
+    if (engine_datagrams.size() < datagrams.size()) {
+        engine_datagrams.resize(datagrams.size());
+    }
+    for (std::size_t index = 0; index < datagrams.size(); ++index) {
+        const auto &datagram = datagrams[index];
+        engine_datagrams[index] = QuicIoEngineTxDatagram{
+            .socket_fd = route.socket_fd,
+            .peer = route.peer,
+            .peer_len = route.peer_len,
+            .bytes = datagram.payload(),
+            .ecn = datagram.ecn,
+            .is_pmtu_probe = datagram.is_pmtu_probe,
+        };
+    }
+
+    return impl_->engine->send_many(
+        std::span<const QuicIoEngineTxDatagram>(engine_datagrams).first(datagrams.size()),
+        impl_->config.role_name);
+}
+
 namespace test {
 
 int socket_io_backend_preferred_udp_address_family_for_runtime_tests(std::string_view host) {

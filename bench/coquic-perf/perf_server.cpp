@@ -65,6 +65,7 @@ QuicPerfServer::QuicPerfServer(const QuicPerfConfig &config,
                                std::unique_ptr<io::QuicIoBackend> backend)
     : config_(config), core_(make_perf_server_endpoint_config(config)),
       backend_(std::move(backend)) {
+    send_buffer_.set_backend(backend_.get());
 }
 
 quic::SharedBytes QuicPerfServer::cached_download_payload(std::size_t bytes) {
@@ -123,8 +124,7 @@ int QuicPerfServer::run() {
                 ? profile_exit_at
                 : next_wakeup;
         if (next_wakeup.has_value() && *next_wakeup <= current) {
-            if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, current),
-                               current)) {
+            if (!handle_result(advance_endpoint(quic::QuicCoreTimerExpired{}, current), current)) {
                 return 1;
             }
             if (!flush_pending_sends()) {
@@ -160,7 +160,7 @@ int QuicPerfServer::run() {
             if (should_exit_on_session_complete()) {
                 return 0;
             }
-            if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, event->now),
+            if (!handle_result(advance_endpoint(quic::QuicCoreTimerExpired{}, event->now),
                                event->now)) {
                 return 1;
             }
@@ -177,7 +177,7 @@ int QuicPerfServer::run() {
         }
 
         if (auto input = make_endpoint_input_from_io_event(*event); input.has_value()) {
-            if (!handle_result(core_.advance_endpoint(std::move(*input), event->now), event->now)) {
+            if (!handle_result(advance_endpoint(std::move(*input), event->now), event->now)) {
                 return 1;
             }
         }
@@ -192,6 +192,9 @@ int QuicPerfServer::run() {
 
 bool QuicPerfServer::handle_result(quic::QuicCoreResult result, quic::QuicCoreTimePoint now) {
     if (result.local_error.has_value()) {
+        return false;
+    }
+    if (result.send_sink_failed) {
         return false;
     }
     if (!send_buffer_.append_or_flush(*backend_, result)) {
@@ -224,6 +227,11 @@ bool QuicPerfServer::handle_result(quic::QuicCoreResult result, quic::QuicCoreTi
     return true;
 }
 
+quic::QuicCoreResult QuicPerfServer::advance_endpoint(quic::QuicCoreEndpointInput input,
+                                                      quic::QuicCoreTimePoint now) {
+    return core_.advance_endpoint(std::move(input), now, send_buffer_);
+}
+
 bool QuicPerfServer::drain_pending_backend_events() {
     if (backend_ == nullptr) {
         return true;
@@ -243,7 +251,7 @@ bool QuicPerfServer::drain_pending_backend_events() {
         case io::QuicIoEvent::Kind::shutdown:
             return false;
         case io::QuicIoEvent::Kind::timer_expired:
-            if (!handle_result(core_.advance_endpoint(quic::QuicCoreTimerExpired{}, event->now),
+            if (!handle_result(advance_endpoint(quic::QuicCoreTimerExpired{}, event->now),
                                event->now)) {
                 return false;
             }
@@ -254,7 +262,7 @@ bool QuicPerfServer::drain_pending_backend_events() {
         }
 
         if (auto input = make_endpoint_input_from_io_event(*event); input.has_value()) {
-            if (!handle_result(core_.advance_endpoint(std::move(*input), event->now), event->now)) {
+            if (!handle_result(advance_endpoint(std::move(*input), event->now), event->now)) {
                 return false;
             }
         }
@@ -320,7 +328,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
             // Unbounded bulk download replies with the configured payload on each finished stream.
             const auto response_bytes = static_cast<std::size_t>(session.start->response_bytes);
             auto response_payload = cached_download_payload(response_bytes);
-            auto send_result = core_.advance_endpoint(
+            auto send_result = advance_endpoint(
                 quic::QuicCoreConnectionCommand{
                     .connection = session.connection,
                     .input =
@@ -331,7 +339,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                         },
                 },
                 now);
-            if (send_result.local_error.has_value() ||
+            if (send_result.local_error.has_value() || send_result.send_sink_failed ||
                 !send_buffer_.append_or_flush(*backend_, send_result)) {
                 return false;
             }
@@ -347,7 +355,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
             const auto per_stream = total_bytes / session.start->streams;
             const auto remainder = total_bytes % session.start->streams;
             const auto target_bytes = per_stream + (stream_index < remainder ? 1u : 0u);
-            auto send_result = core_.advance_endpoint(
+            auto send_result = advance_endpoint(
                 quic::QuicCoreConnectionCommand{
                     .connection = session.connection,
                     .input =
@@ -358,7 +366,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                         },
                 },
                 now);
-            if (send_result.local_error.has_value() ||
+            if (send_result.local_error.has_value() || send_result.send_sink_failed ||
                 !send_buffer_.append_or_flush(*backend_, send_result)) {
                 return false;
             }
@@ -392,7 +400,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
             received.fin) {
             // Request/response modes answer each finished request stream with one response body.
             const auto response_bytes = static_cast<std::size_t>(session.start->response_bytes);
-            auto send_result = core_.advance_endpoint(
+            auto send_result = advance_endpoint(
                 quic::QuicCoreConnectionCommand{
                     .connection = session.connection,
                     .input =
@@ -403,7 +411,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                         },
                 },
                 now);
-            if (send_result.local_error.has_value() ||
+            if (send_result.local_error.has_value() || send_result.send_sink_failed ||
                 !send_buffer_.append_or_flush(*backend_, send_result)) {
                 return false;
             }
@@ -455,7 +463,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
 bool QuicPerfServer::send_control(Session &session, const QuicPerfControlMessage &message) {
     const bool fin = std::holds_alternative<QuicPerfSessionError>(message) ||
                      std::holds_alternative<QuicPerfSessionComplete>(message);
-    auto result = core_.advance_endpoint(
+    auto result = advance_endpoint(
         quic::QuicCoreConnectionCommand{
             .connection = session.connection,
             .input =
@@ -466,7 +474,7 @@ bool QuicPerfServer::send_control(Session &session, const QuicPerfControlMessage
                 },
         },
         quic::QuicCoreClock::now());
-    if (result.local_error.has_value()) {
+    if (result.local_error.has_value() || result.send_sink_failed) {
         return false;
     }
     return send_buffer_.append_or_flush(*backend_, result);

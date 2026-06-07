@@ -8,6 +8,7 @@
 #define private public
 #include "src/quic/codec/buffer.h"
 #undef private
+#include "src/quic/object_cache.h"
 
 namespace {
 
@@ -262,6 +263,94 @@ TEST(QuicBufferTest, DatagramByteStorageAllocationHandlesZeroAndNullInputs) {
     auto *uncached = allocate_datagram_byte_storage(larger_than_cache);
     ASSERT_NE(uncached, nullptr);
     deallocate_datagram_byte_storage(uncached, larger_than_cache);
+}
+
+TEST(QuicObjectCacheTest, FixedObjectCacheReusesStableSlotsAndTracksOwnership) {
+    struct CachedObject {
+        int value = 0;
+    };
+
+    coquic::quic::detail::FixedObjectCache<CachedObject, 2> cache;
+    EXPECT_EQ(cache.available(), 2u);
+    EXPECT_EQ(cache.in_use(), 0u);
+
+    auto *first = cache.take();
+    auto *second = cache.take();
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    EXPECT_NE(first, second);
+    EXPECT_TRUE(cache.owns(first));
+    EXPECT_TRUE(cache.owns(second));
+    EXPECT_FALSE(cache.cached(first));
+    EXPECT_EQ(cache.take(), nullptr);
+    EXPECT_EQ(cache.available(), 0u);
+    EXPECT_EQ(cache.in_use(), 2u);
+
+    first->value = 42;
+    EXPECT_TRUE(cache.put(first, [](CachedObject &object) { object.value = 7; }));
+    EXPECT_TRUE(cache.cached(first));
+    EXPECT_EQ(cache.available(), 1u);
+    auto *reused = cache.take();
+    EXPECT_EQ(reused, first);
+    EXPECT_EQ(reused->value, 7);
+
+    EXPECT_TRUE(cache.put(reused));
+    EXPECT_TRUE(cache.put(second));
+    EXPECT_FALSE(cache.put(second));
+    EXPECT_EQ(cache.available(), 2u);
+}
+
+TEST(QuicObjectCacheTest, FixedObjectCacheRejectsForeignPointers) {
+    struct CachedObject {
+        int value = 0;
+    };
+
+    coquic::quic::detail::FixedObjectCache<CachedObject, 1> cache;
+    CachedObject foreign{};
+
+    EXPECT_FALSE(cache.owns(&foreign));
+    EXPECT_FALSE(cache.put(&foreign));
+
+    auto *cached = cache.take_assign(CachedObject{.value = 9});
+    ASSERT_NE(cached, nullptr);
+    EXPECT_EQ(cached->value, 9);
+    EXPECT_TRUE(cache.owns(cached));
+    EXPECT_TRUE(cache.put(cached));
+}
+
+TEST(QuicObjectCacheTest, FixedObjectCacheSupportsBulkTakeAndPut) {
+    struct CachedObject {
+        int value = 0;
+    };
+
+    coquic::quic::detail::FixedObjectCache<CachedObject, 3> cache;
+    std::array<CachedObject *, 4> objects{};
+
+    EXPECT_EQ(cache.take_bulk(objects), 3u);
+    EXPECT_NE(objects[0], nullptr);
+    EXPECT_NE(objects[1], nullptr);
+    EXPECT_NE(objects[2], nullptr);
+    EXPECT_EQ(objects[3], nullptr);
+    EXPECT_EQ(cache.available(), 0u);
+
+    objects[0]->value = 1;
+    objects[1]->value = 2;
+    objects[2]->value = 3;
+    EXPECT_EQ(cache.put_bulk(std::span<CachedObject *const>(objects.data(), 2),
+                             [](CachedObject &object) { object.value = 0; }),
+              2u);
+    EXPECT_EQ(cache.available(), 2u);
+
+    std::array<CachedObject *, 2> reused{};
+    EXPECT_EQ(cache.take_bulk(reused), 2u);
+    ASSERT_NE(reused[0], nullptr);
+    ASSERT_NE(reused[1], nullptr);
+    EXPECT_EQ(reused[0]->value, 0);
+    EXPECT_EQ(reused[1]->value, 0);
+
+    EXPECT_EQ(cache.put_bulk(std::span<CachedObject *const>(reused)), 2u);
+    EXPECT_TRUE(cache.put(objects[2]));
+    EXPECT_EQ(cache.available(), 3u);
 }
 
 TEST(QuicBufferTest, DatagramBufferConstructsFromInitializerList) {

@@ -57,6 +57,20 @@ class RecordingIoBackend final : public coquic::io::QuicIoBackend {
         return true;
     }
 
+    bool send_many_on_route(coquic::quic::QuicRouteHandle route_handle,
+                            std::span<const coquic::io::QuicIoTxDatagram> datagrams) override {
+        operations.push_back("send_many_on_route");
+        for (const auto &datagram : datagrams) {
+            sent_datagrams.push_back(coquic::io::QuicIoTxDatagram{
+                .route_handle = route_handle,
+                .bytes = coquic::quic::DatagramBuffer{datagram.payload()},
+                .ecn = datagram.ecn,
+                .is_pmtu_probe = datagram.is_pmtu_probe,
+            });
+        }
+        return true;
+    }
+
     std::vector<coquic::io::QuicIoEvent> pending_events;
     std::vector<coquic::io::QuicIoTxDatagram> sent_datagrams;
     std::vector<std::string> operations;
@@ -250,6 +264,39 @@ TEST(QuicPerfServerTest, PerfSendBufferReportsBufferedDatagramCount) {
     EXPECT_EQ(backend.sent_datagrams.size(), 1u);
 }
 
+TEST(QuicPerfServerTest, PerfSendBufferFlushesRouteRunsWithRouteBatchApi) {
+    RecordingIoBackend backend;
+    PerfSendBuffer buffer;
+
+    coquic::quic::QuicCoreResult result;
+    result.effects.emplace_back(coquic::quic::QuicCoreSendDatagram{
+        .connection = 1,
+        .route_handle = 17,
+        .bytes = coquic::quic::DatagramBuffer{std::vector<std::byte>{std::byte{0x01}}},
+    });
+    result.effects.emplace_back(coquic::quic::QuicCoreSendDatagram{
+        .connection = 1,
+        .route_handle = 17,
+        .bytes = coquic::quic::DatagramBuffer{std::vector<std::byte>{std::byte{0x02}}},
+    });
+    result.effects.emplace_back(coquic::quic::QuicCoreSendDatagram{
+        .connection = 1,
+        .route_handle = 18,
+        .bytes = coquic::quic::DatagramBuffer{std::vector<std::byte>{std::byte{0x03}}},
+    });
+
+    ASSERT_TRUE(buffer.append_or_flush(backend, result));
+    ASSERT_TRUE(buffer.flush(backend));
+
+    ASSERT_EQ(backend.operations.size(), 2u);
+    EXPECT_EQ(backend.operations[0], "send_many_on_route");
+    EXPECT_EQ(backend.operations[1], "send_many_on_route");
+    ASSERT_EQ(backend.sent_datagrams.size(), 3u);
+    EXPECT_EQ(backend.sent_datagrams[0].route_handle, 17u);
+    EXPECT_EQ(backend.sent_datagrams[1].route_handle, 17u);
+    EXPECT_EQ(backend.sent_datagrams[2].route_handle, 18u);
+}
+
 TEST(QuicPerfServerTest, FlushSendsBufferedDatagramsBeforeDrainingQueuedBackendEvents) {
     auto backend = std::make_unique<RecordingIoBackend>();
     auto *backend_ptr = backend.get();
@@ -270,7 +317,7 @@ TEST(QuicPerfServerTest, FlushSendsBufferedDatagramsBeforeDrainingQueuedBackendE
     ASSERT_TRUE(server.flush_pending_sends());
 
     ASSERT_EQ(backend_ptr->operations.size(), 2u);
-    EXPECT_EQ(backend_ptr->operations[0], "send");
+    EXPECT_EQ(backend_ptr->operations[0], "send_many_on_route");
     EXPECT_EQ(backend_ptr->operations[1], "wait");
     EXPECT_TRUE(backend_ptr->pending_events.empty());
     EXPECT_EQ(backend_ptr->sent_datagrams.size(), 1u);

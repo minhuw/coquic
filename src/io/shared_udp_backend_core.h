@@ -21,6 +21,8 @@ class SharedUdpBackendCore {
     bool has_pending_events() const;
     bool send(const QuicIoTxDatagram &datagram);
     bool send_many(std::span<const QuicIoTxDatagram> datagrams);
+    bool send_many_on_route(QuicRouteHandle route_handle,
+                            std::span<const QuicIoTxDatagram> datagrams);
 
   private:
     struct Impl;

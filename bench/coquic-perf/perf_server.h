@@ -34,6 +34,8 @@ class QuicPerfServer {
         std::uint64_t requests_completed = 0;
     };
 
+    quic::QuicCoreResult advance_endpoint(quic::QuicCoreEndpointInput input,
+                                          quic::QuicCoreTimePoint now);
     bool handle_result(quic::QuicCoreResult result, quic::QuicCoreTimePoint now);
     bool drain_pending_backend_events();
     bool flush_pending_sends();

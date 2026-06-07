@@ -82,6 +82,8 @@ class QuicPerfClient {
     bool timed_crr_mode() const;
     bool timed_bulk_download_mode() const;
     bool timed_mode() const;
+    quic::QuicCoreResult advance_endpoint(quic::QuicCoreEndpointInput input,
+                                          quic::QuicCoreTimePoint now);
     bool open_bulk_stream(ConnectionState &connection, quic::QuicCoreTimePoint now,
                           bool counts_toward_measurement);
     bool maybe_close_bulk_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);

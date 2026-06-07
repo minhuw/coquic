@@ -628,7 +628,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 ++send_profile_counters().deserialize_attempts;
             }
             COQUIC_SEND_PROFILE_TIMER(deserialize_timer, deserialize_ns);
-            return deserialize_received_protected_packet_fast(storage, begin, end, context);
+            return deserialize_received_protected_packet_fast_compact(storage, begin, end, context);
         };
 
         const auto current_context = make_current_short_header_deserialize_context();
@@ -691,7 +691,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         }
 
         if (const auto *ack_only =
-                std::get_if<ReceivedProtectedOneRttAckOnlyPacket>(&packet.value());
+                std::get_if<ReceivedProtectedOneRttAckOnlyFastPacket>(&packet.value());
             ack_only != nullptr) {
             if (send_profile_enabled()) {
                 ++send_profile_counters().process_decoded_packet_calls;
@@ -725,6 +725,12 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
             return true;
         }
 
+        const auto *received_packet = std::get_if<ReceivedProtectedPacket>(&packet.value());
+        if (received_packet == nullptr) {
+            return fail_with_codec_error(
+                "deserialize_received_protected_datagram",
+                CodecError{.code = CodecErrorCode::unsupported_packet_type, .offset = 0});
+        }
         if (send_profile_enabled()) {
             ++send_profile_counters().process_decoded_packet_calls;
         }
@@ -732,14 +738,14 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         CodecResult<bool> processed = CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
         {
             COQUIC_SEND_PROFILE_TIMER(process_timer, process_packet_ns);
-            processed = process_inbound_received_packet(packet.value(), now, ecn);
+            processed = process_inbound_received_packet(*received_packet, now, ecn);
         }
         if (!processed.has_value()) {
             log_codec_failure("process_inbound_received_packet", processed.error());
             queue_transport_close_for_error(now, processed.error());
             return false;
         }
-        if (packet_can_advance_tls_state(packet.value())) {
+        if (packet_can_advance_tls_state(*received_packet)) {
             if (send_profile_enabled()) {
                 ++send_profile_counters().inbound_post_process_sync_tls_calls;
             }

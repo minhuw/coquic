@@ -77,6 +77,27 @@ void NewRenoCongestionController::on_packet_sent(SentPacketRecord &packet) {
     consume_pacing_budget(packet.bytes_in_flight, packet.sent_time);
 }
 
+SimpleStreamPacketSentCongestionResult NewRenoCongestionController::on_simple_stream_packet_sent(
+    std::size_t bytes_sent, QuicCoreTimePoint sent_time, bool app_limited) {
+    const auto congestion_send_sequence = hystart_.on_ack_eliciting_packet_sent();
+    bytes_in_flight_ += bytes_sent;
+    if (sent_after_recovery_boundary(
+            AckedStreamPacketSample{
+                .congestion_send_sequence = congestion_send_sequence,
+                .sent_time = sent_time,
+            },
+            recovery_start_time_, recovery_start_sequence_) ||
+        (recovery_start_sequence_ == std::nullopt && recovery_start_time_.has_value() &&
+         sent_time >= *recovery_start_time_)) {
+        recovery_sent_bytes_ = congestion_saturating_add(recovery_sent_bytes_, bytes_sent);
+    }
+    consume_pacing_budget(bytes_sent, sent_time);
+    return SimpleStreamPacketSentCongestionResult{
+        .congestion_send_sequence = congestion_send_sequence,
+        .app_limited = app_limited,
+    };
+}
+
 void NewRenoCongestionController::on_packets_acked(std::span<const SentPacketRecord> packets,
                                                    bool app_limited) {
     on_packets_acked(packets, app_limited, QuicCoreTimePoint{}, RecoveryRttState{});
@@ -219,6 +240,70 @@ void NewRenoCongestionController::on_simple_stream_packets_acked(
     }
 
     if (exit_recovery) {
+        recovery_start_time_ = std::nullopt;
+        clear_spurious_loss_window();
+        reset_recovery_send_accounting();
+    }
+
+    update_pacing_rate(rtt_state);
+    if (!pacing_budget_timestamp_.has_value() &&
+        acked_stream_bytes_for_pacing_ >= kPacingStartStreamBytes && now != QuicCoreTimePoint{} &&
+        pacing_rate_bytes_per_second_ > 0.0) {
+        pacing_budget_timestamp_ = now;
+        pacing_budget_bytes_ = pacing_budget_cap();
+    }
+}
+
+void NewRenoCongestionController::on_simple_stream_packets_acked(
+    const AckedStreamPacketAggregate &packets, bool app_limited, QuicCoreTimePoint now,
+    const RecoveryRttState &rtt_state) {
+    static_cast<void>(app_limited);
+    if (packets.empty()) {
+        update_pacing_rate(rtt_state);
+        return;
+    }
+
+    const auto recovery_boundary = recovery_start_time_;
+    const auto congestion_recovery_boundary = this->recovery_boundary();
+    const bool sent_during_or_before_recovery =
+        (congestion_recovery_boundary.has_value() &&
+         packets.latest_sent_time <= *congestion_recovery_boundary) ||
+        (last_recovery_start_sequence_.has_value() &&
+         packets.largest_congestion_send_sequence != 0 &&
+         packets.largest_congestion_send_sequence <= *last_recovery_start_sequence_);
+
+    bytes_in_flight_ =
+        packets.bytes_in_flight > bytes_in_flight_ ? 0 : bytes_in_flight_ - packets.bytes_in_flight;
+    if (recovery_boundary.has_value()) {
+        note_recovery_delivered(packets.bytes_in_flight);
+    }
+    acked_stream_bytes_for_pacing_ =
+        congestion_saturating_add(acked_stream_bytes_for_pacing_, packets.bytes_in_flight);
+
+    if (!sent_during_or_before_recovery) {
+        if (congestion_window_ < slow_start_threshold_) {
+            congestion_window_ = congestion_saturating_add(
+                congestion_window_, hystart_.growth_bytes(packets.bytes_in_flight));
+            hystart_.on_slow_start_ack(packets, rtt_state);
+            if (hystart_.should_exit_slow_start()) {
+                slow_start_threshold_ = congestion_window_;
+            }
+        } else {
+            congestion_avoidance_credit_ =
+                congestion_saturating_add(congestion_avoidance_credit_, packets.bytes_in_flight);
+            while (congestion_avoidance_credit_ >= congestion_window_) {
+                congestion_avoidance_credit_ -= congestion_window_;
+                congestion_window_ += max_datagram_size_;
+            }
+        }
+    }
+
+    const bool exits_recovery =
+        (recovery_start_sequence_.has_value() && packets.largest_congestion_send_sequence != 0 &&
+         packets.largest_congestion_send_sequence > *recovery_start_sequence_) ||
+        (recovery_start_sequence_ == std::nullopt && recovery_boundary.has_value() &&
+         packets.latest_sent_time > *recovery_boundary);
+    if (exits_recovery) {
         recovery_start_time_ = std::nullopt;
         clear_spurious_loss_window();
         reset_recovery_send_accounting();

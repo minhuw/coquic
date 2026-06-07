@@ -20,11 +20,12 @@ namespace coquic::perf {
 
 namespace {
 
-constexpr std::size_t kMaxBufferedSendDatagrams = 64;
+constexpr std::size_t kMaxBufferedSendDatagrams = 256;
 constexpr bool kCoquicProfileHooksEnabled = COQUIC_PROFILE_HOOKS != 0;
 
 struct PerfLoopProfileCounters {
     std::uint64_t send_buffer_appends = 0;
+    std::uint64_t send_buffer_direct_appends = 0;
     std::uint64_t send_buffer_send_effects = 0;
     std::uint64_t send_buffer_flushes = 0;
     std::uint64_t send_buffer_flushed_datagrams = 0;
@@ -57,6 +58,7 @@ COQUIC_NO_PROFILE void print_perf_loop_profile() {
     const auto &c = perf_loop_profile_counters();
     std::cerr << "coquic-perf-loop-profile"
               << " send_buffer_appends=" << c.send_buffer_appends
+              << " send_buffer_direct_appends=" << c.send_buffer_direct_appends
               << " send_buffer_send_effects=" << c.send_buffer_send_effects
               << " send_buffer_flushes=" << c.send_buffer_flushes
               << " send_buffer_flushed_datagrams=" << c.send_buffer_flushed_datagrams
@@ -169,6 +171,41 @@ bool flush_send_effects(io::QuicIoBackend &backend, const quic::QuicCoreResult &
     return backend.send_many(datagrams);
 }
 
+void PerfSendBuffer::set_backend(io::QuicIoBackend *backend) {
+    backend_ = backend;
+}
+
+bool PerfSendBuffer::on_send_datagram(quic::QuicCoreSendDatagram datagram) {
+    register_perf_loop_profile_printer_once();
+    if (perf_loop_profile_enabled()) {
+        ++perf_loop_profile_counters().send_buffer_direct_appends;
+    }
+    if (backend_ == nullptr) {
+        return false;
+    }
+    COQUIC_PERF_LOOP_PROFILE_TIMER(perf_append_timer, send_buffer_append_ns);
+    return append_send_datagram(*backend_, std::move(datagram), /*flush_when_full=*/false);
+}
+
+bool PerfSendBuffer::on_send_datagram_payload(quic::QuicConnectionHandle connection,
+                                              quic::QuicRouteHandle route_handle,
+                                              quic::DatagramBuffer bytes,
+                                              quic::QuicEcnCodepoint ecn, bool is_pmtu_probe,
+                                              std::uint64_t packet_inspection_datagram_id) {
+    static_cast<void>(connection);
+    static_cast<void>(packet_inspection_datagram_id);
+    register_perf_loop_profile_printer_once();
+    if (perf_loop_profile_enabled()) {
+        ++perf_loop_profile_counters().send_buffer_direct_appends;
+    }
+    if (backend_ == nullptr) {
+        return false;
+    }
+    COQUIC_PERF_LOOP_PROFILE_TIMER(perf_append_timer, send_buffer_append_ns);
+    return append_payload_datagram(*backend_, route_handle, std::move(bytes), ecn, is_pmtu_probe,
+                                   /*flush_when_full=*/false);
+}
+
 bool PerfSendBuffer::append_or_flush(io::QuicIoBackend &backend, quic::QuicCoreResult &result) {
     register_perf_loop_profile_printer_once();
     if (perf_loop_profile_enabled()) {
@@ -186,18 +223,39 @@ bool PerfSendBuffer::append_or_flush(io::QuicIoBackend &backend, quic::QuicCoreR
     datagrams_.reserve(std::max(datagrams_.capacity(), datagrams_.size() + result.effects.size()));
     for (auto &effect : result.effects) {
         if (auto *send = std::get_if<quic::QuicCoreSendDatagram>(&effect)) {
-            if (!send->route_handle.has_value()) {
+            if (!append_send_datagram(backend, std::move(*send), /*flush_when_full=*/true)) {
                 return false;
             }
-            datagrams_.push_back(io::QuicIoTxDatagram{
-                .route_handle = *send->route_handle,
-                .bytes = std::move(send->bytes),
-                .ecn = send->ecn,
-                .is_pmtu_probe = send->is_pmtu_probe,
-            });
         }
     }
-    if (datagrams_.size() >= kMaxBufferedSendDatagrams) {
+    return true;
+}
+
+bool PerfSendBuffer::append_send_datagram(io::QuicIoBackend &backend,
+                                          quic::QuicCoreSendDatagram &&datagram,
+                                          bool flush_when_full) {
+    if (!datagram.route_handle.has_value()) {
+        return false;
+    }
+    return append_payload_datagram(backend, *datagram.route_handle, std::move(datagram.bytes),
+                                   datagram.ecn, datagram.is_pmtu_probe, flush_when_full);
+}
+
+bool PerfSendBuffer::append_payload_datagram(io::QuicIoBackend &backend,
+                                             quic::QuicRouteHandle route_handle,
+                                             quic::DatagramBuffer &&bytes,
+                                             quic::QuicEcnCodepoint ecn, bool is_pmtu_probe,
+                                             bool flush_when_full) {
+    if (flush_when_full && datagrams_.size() + 1 > kMaxBufferedSendDatagrams && !flush(backend)) {
+        return false;
+    }
+    datagrams_.push_back(io::QuicIoTxDatagram{
+        .route_handle = route_handle,
+        .bytes = std::move(bytes),
+        .ecn = ecn,
+        .is_pmtu_probe = is_pmtu_probe,
+    });
+    if (flush_when_full && datagrams_.size() >= kMaxBufferedSendDatagrams) {
         return flush(backend);
     }
     return true;
@@ -213,7 +271,21 @@ bool PerfSendBuffer::flush(io::QuicIoBackend &backend) {
         profile.send_buffer_flushed_datagrams += datagrams_.size();
     }
     COQUIC_PERF_LOOP_PROFILE_TIMER(perf_flush_timer, send_buffer_flush_ns);
-    const bool ok = backend.send_many(datagrams_);
+    bool ok = true;
+    for (std::size_t offset = 0; offset < datagrams_.size();) {
+        const auto route_handle = datagrams_[offset].route_handle;
+        std::size_t run_end = offset + 1;
+        while (run_end < datagrams_.size() && datagrams_[run_end].route_handle == route_handle) {
+            ++run_end;
+        }
+        ok = backend.send_many_on_route(
+            route_handle,
+            std::span<const io::QuicIoTxDatagram>(datagrams_).subspan(offset, run_end - offset));
+        if (!ok) {
+            break;
+        }
+        offset = run_end;
+    }
     datagrams_.clear();
     return ok;
 }

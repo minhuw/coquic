@@ -77,6 +77,19 @@ struct SentPacketRecord { // NOLINT(clang-analyzer-optin.performance.Padding)
     QuicCoreTimePoint time_threshold_loss_time{};
 };
 
+struct SimpleStreamSentPacketRecord {
+    std::uint64_t packet_number = 0;
+    QuicCoreTimePoint sent_time{};
+    std::uint64_t congestion_send_sequence = 0;
+    std::optional<StreamFrameSendMetadata> first_stream_frame_metadata;
+    std::vector<StreamFrameSendMetadata> stream_frame_metadata;
+    std::size_t bytes_in_flight = 0;
+    QuicPathId path_id = 0;
+    QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+    bool app_limited = false;
+    std::uint64_t protection_key_update_generation = 0;
+};
+
 struct AckedStreamPacketSample {
     std::uint64_t packet_number = 0;
     QuicCoreTimePoint sent_time{};
@@ -85,6 +98,24 @@ struct AckedStreamPacketSample {
     QuicPathId path_id = 0;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
 };
+
+struct AckedStreamPacketAggregate {
+    std::size_t packet_count = 0;
+    std::size_t bytes_in_flight = 0;
+    std::uint64_t largest_packet_number = 0;
+    QuicCoreTimePoint earliest_sent_time{};
+    QuicCoreTimePoint latest_sent_time{};
+    std::uint64_t smallest_congestion_send_sequence = 0;
+    std::uint64_t largest_congestion_send_sequence = 0;
+
+    bool empty() const {
+        return packet_count == 0;
+    }
+};
+
+SentPacketRecord
+sent_packet_record_from_simple_stream_packet(const SimpleStreamSentPacketRecord &packet,
+                                             bool declared_lost = false);
 
 inline bool sent_packet_has_stream_frames(const SentPacketRecord &packet) {
     return packet.first_stream_frame_metadata.has_value() ||
@@ -286,6 +317,8 @@ class PacketSpaceRecovery {
 
     void on_packet_sent(const SentPacketRecord &packet);
     void on_packet_sent(SentPacketRecord &&packet);
+    void on_simple_stream_packet_sent(SimpleStreamSentPacketRecord &&packet);
+    void on_simple_stream_packets_sent(std::span<SimpleStreamSentPacketRecord> packets);
     void on_packet_declared_lost(std::uint64_t packet_number);
     void retire_packet(RecoveryPacketHandle handle);
     void retire_packet(std::uint64_t packet_number);
@@ -302,6 +335,12 @@ class PacketSpaceRecovery {
     std::optional<RecoveryPacketHandle> handle_for_packet_number(std::uint64_t packet_number) const;
     SentPacketRecord *packet_for_handle(RecoveryPacketHandle handle);
     const SentPacketRecord *packet_for_handle(RecoveryPacketHandle handle) const;
+    const SimpleStreamSentPacketRecord *
+    simple_stream_packet_for_handle(RecoveryPacketHandle handle) const;
+    std::optional<SimpleStreamSentPacketRecord>
+    take_simple_stream_packet_if_present(RecoveryPacketHandle handle);
+    std::size_t
+    retire_simple_stream_packets_if_present(std::span<const RecoveryPacketHandle> handles);
     SentPacketRecord *find_packet(std::uint64_t packet_number);
     const SentPacketRecord *find_packet(std::uint64_t packet_number) const;
     const SentPacketRecord *find_newly_ackable_packet(std::uint64_t packet_number) const;
@@ -364,6 +403,7 @@ class PacketSpaceRecovery {
         LedgerSlotState state = LedgerSlotState::empty;
         std::uint64_t packet_number = 0;
         std::unique_ptr<SentPacketRecord> packet;
+        std::optional<SimpleStreamSentPacketRecord> simple_stream_packet;
         bool acknowledged = false;
     };
 
@@ -377,11 +417,20 @@ class PacketSpaceRecovery {
     static const SentPacketRecord *slot_packet_or_null(const SentPacketLedgerSlot &slot);
     static SentPacketRecord &slot_packet(SentPacketLedgerSlot &slot);
     static const SentPacketRecord &slot_packet(const SentPacketLedgerSlot &slot);
+    static bool slot_has_packet_record(const SentPacketLedgerSlot &slot);
+    static std::uint64_t slot_packet_number(const SentPacketLedgerSlot &slot);
+    static QuicCoreTimePoint slot_sent_time(const SentPacketLedgerSlot &slot);
+    static bool slot_ack_eliciting(const SentPacketLedgerSlot &slot);
+    static bool slot_in_flight(const SentPacketLedgerSlot &slot);
+    static bool slot_declared_lost(const SentPacketLedgerSlot &slot);
+    static bool slot_is_pmtu_probe(const SentPacketLedgerSlot &slot);
+    static DeadlineTrackedPacket tracked_packet(const SentPacketLedgerSlot &slot);
     static RecoveryPacketHandle packet_handle(const SentPacketLedgerSlot &slot,
                                               std::size_t slot_index);
     static void reclaim_retired_packet_storage(SentPacketRecord &packet);
     std::unique_ptr<SentPacketRecord> acquire_packet_record(SentPacketRecord &&packet);
     void recycle_packet_record(std::unique_ptr<SentPacketRecord> packet);
+    SentPacketRecord &materialize_slot_packet(SentPacketLedgerSlot &slot);
     void link_live_slot(std::size_t slot_index);
     void ensure_live_link_slot(std::size_t slot_index);
     void set_live_link(std::size_t slot_index, LiveSlotLink link);
@@ -402,10 +451,13 @@ class PacketSpaceRecovery {
     bool is_valid_in_flight_ack_eliciting_tracked_packet(const DeadlineTrackedPacket &packet) const;
     bool is_valid_eligible_loss_tracked_packet(const DeadlineTrackedPacket &packet) const;
     void maybe_track_latest_in_flight_ack_eliciting_packet(const SentPacketRecord &packet) const;
+    void maybe_track_latest_in_flight_ack_eliciting_packet(const SentPacketLedgerSlot &slot) const;
     void refresh_latest_in_flight_ack_eliciting_packet() const;
     void prune_stale_eligible_loss_packets() const;
     void erase_from_tracked_sets(const SentPacketRecord &packet);
+    void erase_from_tracked_sets(const SentPacketLedgerSlot &slot);
     void maybe_track_as_loss_candidate(const SentPacketRecord &packet);
+    void maybe_track_as_loss_candidate(const SentPacketLedgerSlot &slot);
     void track_new_loss_candidates(std::optional<std::uint64_t> previous_largest_acked,
                                    std::uint64_t largest_acked);
     bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest_acked) const;
@@ -441,6 +493,7 @@ class PacketSpaceRecovery {
     std::uint64_t compatibility_version_ = 0;
     RecoveryRttState rtt_state_;
     SentPacketsView sent_packets_{};
+    mutable std::optional<SentPacketRecord> packet_view_scratch_;
 
     friend struct test::PacketSpaceRecoveryTestPeer;
 };

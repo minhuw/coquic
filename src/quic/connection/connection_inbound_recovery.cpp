@@ -704,8 +704,14 @@ CodecResult<bool> QuicConnection::detect_old_key_ack_of_current_key_phase_packet
             if (handle.packet_number < range->smallest || handle.packet_number > range->largest) {
                 continue;
             }
-            const auto *packet = packet_space.recovery.packet_for_handle(handle);
-            if (acked_current_key_update_generation(packet,
+            const auto *simple_packet =
+                packet_space.recovery.simple_stream_packet_for_handle(handle);
+            const auto *packet = simple_packet == nullptr
+                                     ? packet_space.recovery.packet_for_handle(handle)
+                                     : nullptr;
+            if ((simple_packet != nullptr && simple_packet->protection_key_update_generation ==
+                                                 current_application_write_key_generation_) ||
+                acked_current_key_update_generation(packet,
                                                     current_application_write_key_generation_)) {
                 const auto error = key_update_error();
                 queue_transport_close_for_error(now, error);
@@ -725,6 +731,12 @@ void QuicConnection::maybe_complete_local_key_update_from_ack(const PacketSpaceS
     }
 
     const auto acked_current_generation_packet = [&](RecoveryPacketHandle handle) {
+        if (const auto *simple_packet =
+                packet_space.recovery.simple_stream_packet_for_handle(handle);
+            simple_packet != nullptr) {
+            return simple_packet->protection_key_update_generation ==
+                   current_application_write_key_generation_;
+        }
         const auto *packet = packet_space.recovery.packet_for_handle(handle);
         return acked_current_key_update_generation(packet,
                                                    current_application_write_key_generation_);
@@ -966,32 +978,41 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
     auto &late_acked_packets = late_acked_packet_scratch_;
     auto &newly_lost_packets = newly_lost_packet_scratch_;
     auto &simple_stream_ack_samples = simple_stream_ack_sample_scratch_;
+    AckedStreamPacketAggregate simple_stream_ack_aggregate;
     acked_packets.clear();
     late_acked_packets.clear();
     newly_lost_packets.clear();
     simple_stream_ack_samples.clear();
     acked_packets.reserve(ack_result.acked_packets.size());
     simple_stream_ack_samples.reserve(ack_result.acked_packets.size());
-    const auto can_collect_lightweight_simple_stream_ack_samples = [&]() {
-        if (!simple_stream_ack_sample_collection_is_eligible(
-                !ack_result.late_acked_packets.empty(), !ack_result.lost_packets.empty(),
-                config_.role, qlog_session_ != nullptr,
-                packet_trace_matches_connection(config_.source_connection_id),
-                congestion_controller_.algorithm())) {
-            return false;
+    const bool retired_simple_stream_batch = try_retire_simple_stream_acked_packets_fast_path(
+        packet_space, ack_result, simple_stream_ack_samples, simple_stream_ack_aggregate);
+    if (!retired_simple_stream_batch) {
+        const auto can_collect_lightweight_simple_stream_ack_samples = [&]() {
+            if (!simple_stream_ack_sample_collection_is_eligible(
+                    !ack_result.late_acked_packets.empty(), !ack_result.lost_packets.empty(),
+                    config_.role, qlog_session_ != nullptr,
+                    packet_trace_matches_connection(config_.source_connection_id),
+                    congestion_controller_.algorithm())) {
+                return false;
+            }
+            return std::ranges::all_of(ack_result.acked_packets, [&](const auto handle) {
+                if (packet_space.recovery.simple_stream_packet_for_handle(handle) != nullptr) {
+                    return true;
+                }
+                const auto *packet = packet_space.recovery.packet_for_handle(handle);
+                return packet != nullptr && packet_has_only_stream_frame_metadata(*packet);
+            });
+        }();
+        for (const auto handle : ack_result.acked_packets) {
+            if (try_retire_simple_stream_acked_packet(
+                    packet_space, handle, acked_packets, simple_stream_ack_samples,
+                    can_collect_lightweight_simple_stream_ack_samples)) {
+                continue;
+            }
+            append_retired_packet_if_present(acked_packets,
+                                             retire_acked_packet(packet_space, handle));
         }
-        return std::ranges::all_of(ack_result.acked_packets, [&](const auto handle) {
-            const auto *packet = packet_space.recovery.packet_for_handle(handle);
-            return packet != nullptr && packet_has_only_stream_frame_metadata(*packet);
-        });
-    }();
-    for (const auto handle : ack_result.acked_packets) {
-        if (try_retire_simple_stream_acked_packet(
-                packet_space, handle, acked_packets, simple_stream_ack_samples,
-                can_collect_lightweight_simple_stream_ack_samples)) {
-            continue;
-        }
-        append_retired_packet_if_present(acked_packets, retire_acked_packet(packet_space, handle));
     }
     late_acked_packets.reserve(ack_result.late_acked_packets.size());
     for (const auto handle : ack_result.late_acked_packets) {
@@ -1009,9 +1030,15 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
         profile.acked_packets += acked_packets.size();
         profile.late_acked_packets += late_acked_packets.size();
         profile.ack_lost_packets += newly_lost_packets.size();
+        profile.acked_packets += simple_stream_ack_samples.size();
+        profile.acked_packets += simple_stream_ack_aggregate.packet_count;
         for (const auto &packet : acked_packets) {
             profile.acked_bytes += packet.bytes_in_flight;
         }
+        for (const auto &packet : simple_stream_ack_samples) {
+            profile.acked_bytes += packet.bytes_in_flight;
+        }
+        profile.acked_bytes += simple_stream_ack_aggregate.bytes_in_flight;
         for (const auto &packet : late_acked_packets) {
             profile.late_acked_bytes += packet.bytes_in_flight;
         }
@@ -1127,7 +1154,8 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
     }
 
     if (try_ack_simple_stream_fast_path(packet_space, ack_result, simple_stream_ack_sample_span,
-                                        acked_packet_span, now, ecn_counts, suppress_pto_reset)) {
+                                        simple_stream_ack_aggregate, acked_packet_span, now,
+                                        ecn_counts, suppress_pto_reset)) {
         return CodecResult<bool>::success(true);
     }
 
@@ -1313,10 +1341,432 @@ void QuicConnection::track_sent_packet(PacketSpaceState &packet_space, SentPacke
     }
 }
 
+void QuicConnection::track_sent_simple_stream_packet(PacketSpaceState &packet_space,
+                                                     PendingSimpleStreamPacketScratch &&packet) {
+    if (!simple_stream_congestion_batch_algorithm_is_supported(
+            congestion_controller_.algorithm()) ||
+        qlog_session_ != nullptr || packet_trace_matches_connection(config_.source_connection_id)) {
+        SentPacketRecord record{
+            .packet_number = packet.packet_number,
+            .sent_time = packet.sent_time,
+            .ack_eliciting = true,
+            .in_flight = true,
+            .first_stream_frame_metadata = packet.first_stream_frame_metadata,
+            .bytes_in_flight = packet.bytes_in_flight,
+            .path_id = packet.path_id,
+            .ecn = packet.ecn,
+            .protection_key_update_generation = packet.protection_key_update_generation,
+        };
+        record.stream_frame_metadata = std::move(packet.stream_frame_metadata);
+        track_sent_packet(packet_space, std::move(record));
+        return;
+    }
+
+    const auto app_limited =
+        congestion_controller_.would_underutilize_congestion_window(packet.bytes_in_flight) &&
+        !has_pending_congestion_controlled_send();
+    std::optional<SimpleStreamPacketSentCongestionResult> congestion_result;
+    {
+        COQUIC_SEND_PROFILE_TIMER(congestion_timer, track_sent_congestion_ns);
+        congestion_result = congestion_controller_.on_simple_stream_packet_sent(
+            packet.bytes_in_flight, packet.sent_time, app_limited);
+        if (!congestion_result.has_value()) {
+            SentPacketRecord record{
+                .packet_number = packet.packet_number,
+                .sent_time = packet.sent_time,
+                .ack_eliciting = true,
+                .in_flight = true,
+                .bytes_in_flight = packet.bytes_in_flight,
+                .path_id = packet.path_id,
+                .ecn = packet.ecn,
+                .app_limited = app_limited,
+                .protection_key_update_generation = packet.protection_key_update_generation,
+            };
+            congestion_controller_.on_packet_sent(record);
+            congestion_result = SimpleStreamPacketSentCongestionResult{
+                .congestion_send_sequence = record.congestion_send_sequence,
+                .app_limited = record.app_limited,
+            };
+        }
+    }
+    {
+        COQUIC_SEND_PROFILE_TIMER(ecn_timer, track_sent_ecn_ns);
+        if (is_ect_codepoint(packet.ecn)) {
+            auto &path = ensure_path_state(packet.path_id);
+            if (packet.ecn == QuicEcnCodepoint::ect0) {
+                ++path.ecn.total_sent_ect0;
+            } else {
+                ++path.ecn.total_sent_ect1;
+            }
+            if (path.ecn.state == QuicPathEcnState::probing) {
+                ++path.ecn.probing_packets_sent;
+            }
+        }
+    }
+    const auto congestion = congestion_result.value();
+    SimpleStreamSentPacketRecord compact_record{
+        .packet_number = packet.packet_number,
+        .sent_time = packet.sent_time,
+        .congestion_send_sequence = congestion.congestion_send_sequence,
+        .first_stream_frame_metadata = packet.first_stream_frame_metadata,
+        .bytes_in_flight = packet.bytes_in_flight,
+        .path_id = packet.path_id,
+        .ecn = packet.ecn,
+        .app_limited = congestion.app_limited,
+        .protection_key_update_generation = packet.protection_key_update_generation,
+    };
+    compact_record.stream_frame_metadata = std::move(packet.stream_frame_metadata);
+    {
+        COQUIC_SEND_PROFILE_TIMER(recovery_timer, track_sent_recovery_ns);
+        packet_space.recovery.on_simple_stream_packet_sent(std::move(compact_record));
+    }
+    {
+        COQUIC_SEND_PROFILE_TIMER(profile_timer, track_sent_profile_ns);
+        if (send_profile_enabled()) {
+            auto &profile = send_profile_counters();
+            profile.congestion_cwnd_last =
+                static_cast<std::uint64_t>(congestion_controller_.congestion_window());
+            profile.congestion_cwnd_max =
+                std::max(profile.congestion_cwnd_max, profile.congestion_cwnd_last);
+            profile.congestion_bif_last =
+                static_cast<std::uint64_t>(congestion_controller_.bytes_in_flight());
+            profile.congestion_bif_max =
+                std::max(profile.congestion_bif_max, profile.congestion_bif_last);
+            record_congestion_debug_for_profile(congestion_controller_, packet.sent_time, profile);
+        }
+    }
+    {
+        COQUIC_SEND_PROFILE_TIMER(qlog_timer, track_sent_qlog_ns);
+        maybe_emit_qlog_recovery_metrics(packet.sent_time);
+    }
+}
+
+void QuicConnection::track_precongested_simple_stream_packets(
+    PacketSpaceState &packet_space, std::span<PendingSimpleStreamPacketScratch> packets) {
+    if (packets.empty()) {
+        return;
+    }
+    if (!simple_stream_congestion_batch_algorithm_is_supported(
+            congestion_controller_.algorithm()) ||
+        qlog_session_ != nullptr || packet_trace_matches_connection(config_.source_connection_id)) {
+        for (auto &packet : packets) {
+            track_sent_simple_stream_packet(packet_space, std::move(packet));
+        }
+        return;
+    }
+    if (std::ranges::any_of(packets, [](const PendingSimpleStreamPacketScratch &packet) {
+            return !packet.congestion_result.has_value();
+        })) {
+        for (auto &packet : packets) {
+            track_sent_simple_stream_packet(packet_space, std::move(packet));
+        }
+        return;
+    }
+
+    {
+        COQUIC_SEND_PROFILE_TIMER(ecn_timer, track_sent_ecn_ns);
+        for (const auto &packet : packets) {
+            if (is_ect_codepoint(packet.ecn)) {
+                auto &path = ensure_path_state(packet.path_id);
+                if (packet.ecn == QuicEcnCodepoint::ect0) {
+                    ++path.ecn.total_sent_ect0;
+                } else {
+                    ++path.ecn.total_sent_ect1;
+                }
+                if (path.ecn.state == QuicPathEcnState::probing) {
+                    ++path.ecn.probing_packets_sent;
+                }
+            }
+        }
+    }
+
+    auto &records = simple_stream_sent_packet_scratch_;
+    records.clear();
+    if (records.capacity() < packets.size()) {
+        records.reserve(packets.size());
+    }
+    for (auto &packet : packets) {
+        const auto *congestion = packet.congestion_result ? &*packet.congestion_result : nullptr;
+        if (congestion == nullptr) {
+            records.clear();
+            for (auto &fallback_packet : packets) {
+                track_sent_simple_stream_packet(packet_space, std::move(fallback_packet));
+            }
+            return;
+        }
+        SimpleStreamSentPacketRecord compact_record{
+            .packet_number = packet.packet_number,
+            .sent_time = packet.sent_time,
+            .congestion_send_sequence = congestion->congestion_send_sequence,
+            .first_stream_frame_metadata = packet.first_stream_frame_metadata,
+            .bytes_in_flight = packet.bytes_in_flight,
+            .path_id = packet.path_id,
+            .ecn = packet.ecn,
+            .app_limited = congestion->app_limited,
+            .protection_key_update_generation = packet.protection_key_update_generation,
+        };
+        compact_record.stream_frame_metadata = std::move(packet.stream_frame_metadata);
+        records.push_back(std::move(compact_record));
+    }
+    {
+        COQUIC_SEND_PROFILE_TIMER(recovery_timer, track_sent_recovery_ns);
+        packet_space.recovery.on_simple_stream_packets_sent(records);
+    }
+    records.clear();
+    {
+        COQUIC_SEND_PROFILE_TIMER(profile_timer, track_sent_profile_ns);
+        if (send_profile_enabled()) {
+            auto &profile = send_profile_counters();
+            profile.congestion_cwnd_last =
+                static_cast<std::uint64_t>(congestion_controller_.congestion_window());
+            profile.congestion_cwnd_max =
+                std::max(profile.congestion_cwnd_max, profile.congestion_cwnd_last);
+            profile.congestion_bif_last =
+                static_cast<std::uint64_t>(congestion_controller_.bytes_in_flight());
+            profile.congestion_bif_max =
+                std::max(profile.congestion_bif_max, profile.congestion_bif_last);
+            record_congestion_debug_for_profile(congestion_controller_, packets.back().sent_time,
+                                                profile);
+        }
+    }
+    {
+        COQUIC_SEND_PROFILE_TIMER(qlog_timer, track_sent_qlog_ns);
+        maybe_emit_qlog_recovery_metrics(packets.back().sent_time);
+    }
+}
+
+bool QuicConnection::try_retire_simple_stream_acked_packets_fast_path(
+    PacketSpaceState &packet_space, const AckApplyResult &ack_result,
+    std::vector<AckedStreamPacketSample> &simple_stream_ack_samples,
+    AckedStreamPacketAggregate &simple_stream_ack_aggregate) {
+    const auto handles = ack_result.acked_packets.handles();
+    if (handles.empty()) {
+        return true;
+    }
+    if (!ack_result.late_acked_packets.empty() || !ack_result.lost_packets.empty()) {
+        return false;
+    }
+    if (!simple_stream_ack_sample_collection_is_eligible(
+            /*has_late_acked_packets=*/false, /*has_lost_packets=*/false, config_.role,
+            qlog_session_ != nullptr, packet_trace_matches_connection(config_.source_connection_id),
+            congestion_controller_.algorithm())) {
+        return false;
+    }
+
+    bool can_use_aggregate_ack = true;
+    for (const auto handle : handles) {
+        const auto *packet = packet_space.recovery.simple_stream_packet_for_handle(handle);
+        if (packet == nullptr || !packet->first_stream_frame_metadata.has_value() ||
+            !packet->stream_frame_metadata.empty()) {
+            return false;
+        }
+        if (is_ect_codepoint(packet->ecn)) {
+            can_use_aggregate_ack = false;
+        }
+    }
+
+    if (!can_use_aggregate_ack) {
+        simple_stream_ack_samples.reserve(simple_stream_ack_samples.size() + handles.size());
+    }
+    std::optional<std::uint64_t> single_retirement_candidate;
+    std::vector<std::uint64_t> additional_retirement_candidates;
+    const auto note_retirement_candidate = [&](std::uint64_t stream_id) {
+        note_retirement_candidate_stream_id(single_retirement_candidate,
+                                            additional_retirement_candidates, stream_id);
+    };
+
+    struct StreamAckRun {
+        std::uint64_t stream_id = 0;
+        std::uint64_t offset = 0;
+        std::size_t length = 0;
+        bool has_value = false;
+    };
+    StreamAckRun run;
+    const auto flush_run = [&]() {
+        if (!run.has_value) {
+            return;
+        }
+        const auto stream_it = streams_.find(run.stream_id);
+        if (stream_it != streams_.end()) {
+            const auto previous_fresh_sendable_bytes =
+                fresh_sendable_bytes_for_cache(stream_it->second);
+            const auto previous_stream_has_lost_send_data =
+                stream_it->second.reset_state == StreamControlFrameState::none &&
+                stream_it->second.send_buffer.has_lost_data();
+            if (stream_it->second.reset_state == StreamControlFrameState::none) {
+                stream_it->second.send_buffer.acknowledge(run.offset, run.length);
+            }
+            note_stream_send_state_changed(previous_fresh_sendable_bytes,
+                                           previous_stream_has_lost_send_data, stream_it->second);
+            maybe_refresh_peer_stream_limit(stream_it->second);
+            note_retirement_candidate(run.stream_id);
+        }
+        run = StreamAckRun{};
+    };
+    const auto acknowledge_metadata = [&](const StreamFrameSendMetadata &metadata) {
+        if (metadata.fin || metadata.length == 0) {
+            flush_run();
+            const auto stream_it = streams_.find(metadata.stream_id);
+            if (stream_it == streams_.end()) {
+                return;
+            }
+            const auto previous_fresh_sendable_bytes =
+                fresh_sendable_bytes_for_cache(stream_it->second);
+            const auto previous_stream_has_lost_send_data =
+                stream_it->second.reset_state == StreamControlFrameState::none &&
+                stream_it->second.send_buffer.has_lost_data();
+            stream_it->second.acknowledge_send_metadata(metadata);
+            note_stream_send_state_changed(previous_fresh_sendable_bytes,
+                                           previous_stream_has_lost_send_data, stream_it->second);
+            maybe_refresh_peer_stream_limit(stream_it->second);
+            note_retirement_candidate(metadata.stream_id);
+            return;
+        }
+
+        if (run.has_value && run.stream_id == metadata.stream_id &&
+            metadata.offset == run.offset + static_cast<std::uint64_t>(run.length) &&
+            metadata.length <= std::numeric_limits<std::size_t>::max() - run.length) {
+            run.length += metadata.length;
+            return;
+        }
+
+        flush_run();
+        run = StreamAckRun{
+            .stream_id = metadata.stream_id,
+            .offset = metadata.offset,
+            .length = metadata.length,
+            .has_value = true,
+        };
+    };
+
+    for (const auto handle : handles) {
+        const auto *packet = packet_space.recovery.simple_stream_packet_for_handle(handle);
+        if (can_use_aggregate_ack) {
+            if (simple_stream_ack_aggregate.empty()) {
+                simple_stream_ack_aggregate.earliest_sent_time = packet->sent_time;
+                simple_stream_ack_aggregate.latest_sent_time = packet->sent_time;
+                simple_stream_ack_aggregate.smallest_congestion_send_sequence =
+                    packet->congestion_send_sequence;
+                simple_stream_ack_aggregate.largest_congestion_send_sequence =
+                    packet->congestion_send_sequence;
+            } else {
+                simple_stream_ack_aggregate.earliest_sent_time =
+                    std::min(simple_stream_ack_aggregate.earliest_sent_time, packet->sent_time);
+                simple_stream_ack_aggregate.latest_sent_time =
+                    std::max(simple_stream_ack_aggregate.latest_sent_time, packet->sent_time);
+                if (packet->congestion_send_sequence != 0) {
+                    if (simple_stream_ack_aggregate.smallest_congestion_send_sequence == 0) {
+                        simple_stream_ack_aggregate.smallest_congestion_send_sequence =
+                            packet->congestion_send_sequence;
+                    } else {
+                        simple_stream_ack_aggregate.smallest_congestion_send_sequence =
+                            std::min(simple_stream_ack_aggregate.smallest_congestion_send_sequence,
+                                     packet->congestion_send_sequence);
+                    }
+                    simple_stream_ack_aggregate.largest_congestion_send_sequence =
+                        std::max(simple_stream_ack_aggregate.largest_congestion_send_sequence,
+                                 packet->congestion_send_sequence);
+                }
+            }
+            ++simple_stream_ack_aggregate.packet_count;
+            simple_stream_ack_aggregate.bytes_in_flight = congestion_saturating_add(
+                simple_stream_ack_aggregate.bytes_in_flight, packet->bytes_in_flight);
+            simple_stream_ack_aggregate.largest_packet_number =
+                std::max(simple_stream_ack_aggregate.largest_packet_number, packet->packet_number);
+        } else {
+            simple_stream_ack_samples.push_back(AckedStreamPacketSample{
+                .packet_number = packet->packet_number,
+                .sent_time = packet->sent_time,
+                .congestion_send_sequence = packet->congestion_send_sequence,
+                .bytes_in_flight = packet->bytes_in_flight,
+                .path_id = packet->path_id,
+                .ecn = packet->ecn,
+            });
+        }
+        const auto first_stream_frame_metadata = packet->first_stream_frame_metadata;
+        if (!first_stream_frame_metadata.has_value()) {
+            return false;
+        }
+        acknowledge_metadata(*first_stream_frame_metadata);
+    }
+    flush_run();
+
+    const auto retired = packet_space.recovery.retire_simple_stream_packets_if_present(handles);
+    if (retired != handles.size()) {
+        return true;
+    }
+
+    for_each_retirement_candidate_stream_id(
+        single_retirement_candidate, additional_retirement_candidates,
+        [&](std::uint64_t stream_id) { maybe_retire_stream(stream_id); });
+    return true;
+}
+
 bool QuicConnection::try_retire_simple_stream_acked_packet(
     PacketSpaceState &packet_space, RecoveryPacketHandle handle,
     std::vector<SentPacketRecord> &acked_packets,
     std::vector<AckedStreamPacketSample> &simple_stream_ack_samples, bool use_lightweight_sample) {
+    if (const auto *simple_packet = packet_space.recovery.simple_stream_packet_for_handle(handle);
+        simple_packet != nullptr) {
+        const auto sample = AckedStreamPacketSample{
+            .packet_number = simple_packet->packet_number,
+            .sent_time = simple_packet->sent_time,
+            .congestion_send_sequence = simple_packet->congestion_send_sequence,
+            .bytes_in_flight = simple_packet->bytes_in_flight,
+            .path_id = simple_packet->path_id,
+            .ecn = simple_packet->ecn,
+        };
+        auto snapshot = use_lightweight_sample ? SentPacketRecord{}
+                                               : sent_packet_record_from_simple_stream_packet(
+                                                     *simple_packet, /*declared_lost=*/false);
+        std::optional<StreamFrameSendMetadata> first_stream_frame_metadata =
+            simple_packet->first_stream_frame_metadata;
+        auto stream_frame_metadata = simple_packet->stream_frame_metadata;
+        if (!packet_space.recovery.take_simple_stream_packet_if_present(handle).has_value()) {
+            return false;
+        }
+
+        std::optional<std::uint64_t> single_retirement_candidate;
+        std::vector<std::uint64_t> additional_retirement_candidates;
+        const auto note_retirement_candidate = [&](std::uint64_t stream_id) {
+            note_retirement_candidate_stream_id(single_retirement_candidate,
+                                                additional_retirement_candidates, stream_id);
+        };
+        const auto acknowledge_metadata = [&](const StreamFrameSendMetadata &metadata) {
+            const auto stream_it = streams_.find(metadata.stream_id);
+            if (stream_it == streams_.end()) {
+                return;
+            }
+
+            const auto previous_fresh_sendable_bytes =
+                fresh_sendable_bytes_for_cache(stream_it->second);
+            const auto previous_stream_has_lost_send_data =
+                stream_it->second.reset_state == StreamControlFrameState::none &&
+                stream_it->second.send_buffer.has_lost_data();
+            stream_it->second.acknowledge_send_metadata(metadata);
+            note_stream_send_state_changed(previous_fresh_sendable_bytes,
+                                           previous_stream_has_lost_send_data, stream_it->second);
+            maybe_refresh_peer_stream_limit(stream_it->second);
+            note_retirement_candidate(metadata.stream_id);
+        };
+        if (first_stream_frame_metadata.has_value()) {
+            acknowledge_metadata(first_stream_frame_metadata.value());
+        }
+        for (const auto &metadata : stream_frame_metadata) {
+            acknowledge_metadata(metadata);
+        }
+        for_each_retirement_candidate_stream_id(
+            single_retirement_candidate, additional_retirement_candidates,
+            [&](std::uint64_t stream_id) { maybe_retire_stream(stream_id); });
+
+        if (use_lightweight_sample) {
+            simple_stream_ack_samples.push_back(sample);
+        } else {
+            acked_packets.push_back(std::move(snapshot));
+        }
+        return true;
+    }
+
     const auto *packet = packet_space.recovery.packet_for_handle(handle);
     if (packet == nullptr || !packet_has_only_stream_frame_metadata(*packet)) {
         return false;
@@ -1375,12 +1825,13 @@ bool QuicConnection::try_retire_simple_stream_acked_packet(
 
 bool QuicConnection::try_ack_simple_congestion_batch(
     std::span<const AckedStreamPacketSample> simple_stream_ack_samples,
+    const AckedStreamPacketAggregate &simple_stream_ack_aggregate,
     std::span<const SentPacketRecord> acked_packets, QuicCoreTimePoint now,
     const RecoveryRttState &rtt_state) {
     if (!acked_packets.empty()) {
         return false;
     }
-    if (simple_stream_ack_samples.empty()) {
+    if (simple_stream_ack_samples.empty() && simple_stream_ack_aggregate.empty()) {
         return true;
     }
     const auto algorithm = congestion_controller_.algorithm();
@@ -1389,8 +1840,13 @@ bool QuicConnection::try_ack_simple_congestion_batch(
     }
 
     constexpr bool app_limited = false;
-    congestion_controller_.on_simple_stream_packets_acked(simple_stream_ack_samples, app_limited,
-                                                          now, rtt_state);
+    if (!simple_stream_ack_aggregate.empty()) {
+        congestion_controller_.on_simple_stream_packets_acked(simple_stream_ack_aggregate,
+                                                              app_limited, now, rtt_state);
+    } else {
+        congestion_controller_.on_simple_stream_packets_acked(simple_stream_ack_samples,
+                                                              app_limited, now, rtt_state);
+    }
     return true;
 }
 
@@ -1586,23 +2042,27 @@ bool QuicConnection::process_single_path_simple_stream_ack_ecn(
 bool QuicConnection::try_ack_simple_stream_fast_path(
     PacketSpaceState &packet_space, const AckApplyResult &ack_result,
     std::span<const AckedStreamPacketSample> simple_stream_ack_samples,
+    const AckedStreamPacketAggregate &simple_stream_ack_aggregate,
     std::span<const SentPacketRecord> acked_packets, QuicCoreTimePoint now,
     const std::optional<AckEcnCounts> &ecn_counts, bool suppress_pto_reset) {
     if (!can_use_simple_stream_ack_fast_path(acked_packets,
                                              !ack_result.late_acked_packets.empty()) ||
-        simple_stream_ack_samples.empty() || !ack_result.lost_packets.empty()) {
+        (simple_stream_ack_samples.empty() && simple_stream_ack_aggregate.empty()) ||
+        !ack_result.lost_packets.empty()) {
         return false;
     }
 
     std::optional<QuicCoreTimePoint> latest_ecn_ce_sent_time;
-    if (should_process_simple_stream_ack_ecn(ack_result.largest_acknowledged_was_newly_acked)) {
+    if (should_process_simple_stream_ack_ecn(ack_result.largest_acknowledged_was_newly_acked) &&
+        !simple_stream_ack_samples.empty()) {
         static_cast<void>(process_simple_stream_ack_ecn(packet_space, simple_stream_ack_samples,
                                                         ecn_counts, latest_ecn_ce_sent_time));
     }
 
     const auto &shared_rtt_state = shared_recovery_rtt_state();
-    static_cast<void>(try_ack_simple_congestion_batch(simple_stream_ack_samples, acked_packets, now,
-                                                      shared_rtt_state));
+    static_cast<void>(try_ack_simple_congestion_batch(simple_stream_ack_samples,
+                                                      simple_stream_ack_aggregate, acked_packets,
+                                                      now, shared_rtt_state));
     if (latest_ecn_ce_sent_time.has_value()) {
         if (send_profile_enabled()) {
             ++send_profile_counters().ecn_loss_events;

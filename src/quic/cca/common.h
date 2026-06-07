@@ -21,10 +21,13 @@ class HyStartPlusPlus {
     explicit HyStartPlusPlus(std::size_t max_datagram_size, bool enabled = true);
 
     void on_packet_sent(SentPacketRecord &packet);
+    std::uint64_t on_ack_eliciting_packet_sent();
     std::size_t growth_bytes(std::size_t newly_acked_bytes) const;
     void on_slow_start_ack(std::span<const SentPacketRecord> packets,
                            const RecoveryRttState &rtt_state);
     void on_slow_start_ack(std::span<const AckedStreamPacketSample> packets,
+                           const RecoveryRttState &rtt_state);
+    void on_slow_start_ack(const AckedStreamPacketAggregate &packets,
                            const RecoveryRttState &rtt_state);
     void disable();
 
@@ -54,6 +57,11 @@ class HyStartPlusPlus {
     std::optional<QuicCoreDuration> css_baseline_min_rtt_;
     std::uint8_t rtt_sample_count_ = 0;
     std::uint8_t css_rounds_ = 0;
+};
+
+struct SimpleStreamPacketSentCongestionResult {
+    std::uint64_t congestion_send_sequence = 0;
+    bool app_limited = false;
 };
 
 std::size_t congestion_initial_window(std::size_t max_datagram_size);

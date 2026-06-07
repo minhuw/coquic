@@ -96,11 +96,16 @@ class QuicCongestionController {
     std::size_t pacing_send_quantum() const;
     void on_packet_sent(std::size_t bytes_sent, bool ack_eliciting);
     void on_packet_sent(SentPacketRecord &packet);
+    std::optional<SimpleStreamPacketSentCongestionResult>
+    on_simple_stream_packet_sent(std::size_t bytes_sent, QuicCoreTimePoint sent_time,
+                                 bool app_limited);
     void on_packets_acked(std::span<const SentPacketRecord> packets, bool app_limited,
                           QuicCoreTimePoint now, const RecoveryRttState &rtt_state);
     void on_simple_stream_packets_acked(std::span<const AckedStreamPacketSample> packets,
                                         bool app_limited, QuicCoreTimePoint now,
                                         const RecoveryRttState &rtt_state);
+    void on_simple_stream_packets_acked(const AckedStreamPacketAggregate &packets, bool app_limited,
+                                        QuicCoreTimePoint now, const RecoveryRttState &rtt_state);
     void on_packets_discarded(std::span<const SentPacketRecord> packets);
     void on_packets_lost(std::span<const SentPacketRecord> packets);
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)

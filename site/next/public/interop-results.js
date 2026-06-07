@@ -125,15 +125,19 @@ function resultToken(result) {
   return "?";
 }
 
+function isKnownBrokenFailure(row, result) {
+  return result === "failed" && row && row.known_broken;
+}
+
 function resultTokenForRow(row, result) {
-  if (result === "failed" && row && row.known_broken) {
+  if (isKnownBrokenFailure(row, result)) {
     return "kb";
   }
   return resultToken(result);
 }
 
 function resultClass(result, row) {
-  if (result === "failed" && row && row.known_broken) {
+  if (isKnownBrokenFailure(row, result)) {
     return "known-broken";
   }
   if (isSkippedResult(result)) {
@@ -176,6 +180,10 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
     }
     const result = row.result || "unknown";
     if (result === "failed") {
+      if (isKnownBrokenFailure(row, result)) {
+        sawSucceeded = true;
+        continue;
+      }
       sawFailed = true;
       continue;
     }

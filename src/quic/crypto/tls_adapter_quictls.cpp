@@ -359,6 +359,10 @@ COQUIC_NO_PROFILE bool ssl_quic_method_failed(SSL *ssl, const SSL_QUIC_METHOD *q
            SSL_set_quic_method(ssl, quic_method) != 1;
 }
 
+COQUIC_NO_PROFILE void configure_rfc_quic_transport_extension(SSL *ssl) {
+    SSL_set_quic_transport_version(ssl, TLSEXT_TYPE_quic_transport_parameters);
+}
+
 COQUIC_NO_PROFILE bool server_name_failed(SSL *ssl, const TlsAdapterConfig &config) {
     if (config.server_name.empty() || config.role != EndpointRole::client) {
         return false;
@@ -870,6 +874,7 @@ class TlsAdapter::Impl {
                 CodecError{.code = CodecErrorCode::invalid_packet_protection_state, .offset = 0};
             return;
         }
+        configure_rfc_quic_transport_extension(ssl_.get());
 
         if (server_name_failed(ssl_.get(), config_)) {
             sticky_error_ =

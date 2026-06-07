@@ -9,6 +9,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,6 +32,9 @@ using coquic::quic::TlsIdentity;
 using coquic::quic::test::ScopedTlsAdapterFaultInjector;
 using coquic::quic::test::TlsAdapterFaultPoint;
 using coquic::quic::test::TlsAdapterTestPeer;
+
+constexpr std::uint16_t kTlsQuicTransportParametersExtension = 0x0039;
+constexpr std::uint16_t kTlsDraftQuicTransportParametersExtension = 0xffa5;
 
 TlsAdapterConfig make_client_config() {
     return TlsAdapterConfig{
@@ -69,6 +73,82 @@ CipherSuite invalid_cipher_suite() {
     CipherSuite cipher_suite{};
     std::memcpy(&cipher_suite, &raw, sizeof(cipher_suite));
     return cipher_suite;
+}
+
+std::uint16_t read_u16_be(std::span<const std::byte> bytes) {
+    return static_cast<std::uint16_t>(
+        (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes[0])) << 8) |
+        static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(bytes[1])));
+}
+
+std::uint32_t read_u24_be(std::span<const std::byte> bytes) {
+    return (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[0])) << 16) |
+           (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[1])) << 8) |
+           static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[2]));
+}
+
+std::optional<std::span<const std::byte>>
+read_tls_vector(std::span<const std::byte> bytes, std::size_t &offset, std::size_t length_bytes) {
+    if (length_bytes == 0 || length_bytes > 3 || offset + length_bytes > bytes.size()) {
+        return std::nullopt;
+    }
+
+    std::size_t length = 0;
+    for (std::size_t i = 0; i < length_bytes; ++i) {
+        length = (length << 8) | std::to_integer<std::uint8_t>(bytes[offset + i]);
+    }
+    offset += length_bytes;
+    if (offset + length > bytes.size()) {
+        return std::nullopt;
+    }
+
+    const auto value = bytes.subspan(offset, length);
+    offset += length;
+    return value;
+}
+
+std::optional<std::vector<std::uint16_t>>
+client_hello_extension_types(std::span<const std::byte> bytes) {
+    if (bytes.size() < 4 || std::to_integer<std::uint8_t>(bytes[0]) != 0x01u) {
+        return std::nullopt;
+    }
+
+    const auto handshake_length = read_u24_be(bytes.subspan(1, 3));
+    if (bytes.size() < 4 + handshake_length) {
+        return std::nullopt;
+    }
+
+    const auto client_hello = bytes.subspan(4, handshake_length);
+    if (client_hello.size() < 34) {
+        return std::nullopt;
+    }
+    std::size_t offset = 34;
+    if (!read_tls_vector(client_hello, offset, 1).has_value() ||
+        !read_tls_vector(client_hello, offset, 2).has_value() ||
+        !read_tls_vector(client_hello, offset, 1).has_value()) {
+        return std::nullopt;
+    }
+    const auto extensions = read_tls_vector(client_hello, offset, 2);
+    if (!extensions.has_value() || offset != client_hello.size()) {
+        return std::nullopt;
+    }
+
+    std::vector<std::uint16_t> types;
+    std::size_t extension_offset = 0;
+    while (extension_offset < extensions->size()) {
+        if (extension_offset + 4 > extensions->size()) {
+            return std::nullopt;
+        }
+        const auto extension_type = read_u16_be(extensions->subspan(extension_offset, 2));
+        const auto extension_length = read_u16_be(extensions->subspan(extension_offset + 2, 2));
+        extension_offset += 4;
+        if (extension_offset + extension_length > extensions->size()) {
+            return std::nullopt;
+        }
+        extension_offset += extension_length;
+        types.push_back(extension_type);
+    }
+    return types;
 }
 
 void drive_tls_handshake(TlsAdapter &client, TlsAdapter &server) {
@@ -158,6 +238,20 @@ TEST(QuicTlsAdapterContractTest, ClientAndServerExchangeHandshakeBytesAndSecrets
     EXPECT_TRUE(std::any_of(server_secrets.begin(), server_secrets.end(), [](const auto &secret) {
         return secret.level == EncryptionLevel::handshake;
     }));
+}
+
+TEST(QuicTlsAdapterContractTest, ClientHelloUsesRfcQuicTransportParametersExtensionOnly) {
+    TlsAdapter client(make_client_config());
+
+    ASSERT_TRUE(client.start().has_value());
+    const auto initial_client_flight = client.take_pending(EncryptionLevel::initial);
+    ASSERT_FALSE(initial_client_flight.empty());
+
+    const auto extension_types = client_hello_extension_types(initial_client_flight);
+    ASSERT_TRUE(extension_types.has_value());
+    const auto &types = optional_ref_or_terminate(extension_types);
+    EXPECT_EQ(std::count(types.begin(), types.end(), kTlsQuicTransportParametersExtension), 1);
+    EXPECT_EQ(std::count(types.begin(), types.end(), kTlsDraftQuicTransportParametersExtension), 0);
 }
 
 TEST(QuicTlsAdapterContractTest, HandshakeWritesTlsKeyLogFilesWhenConfigured) {

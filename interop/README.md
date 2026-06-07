@@ -182,6 +182,12 @@ Official runner results marked `unsupported` are preserved in the summary and
 published matrix but do not fail the workflow. Results marked `failed`, missing
 requested results, or malformed runner output still fail the workflow.
 
+The wrapper retries a small set of simulator-sensitive cases in isolation after
+an initial `failed` result. This keeps the full matrix strict while allowing
+known flaky path-change and loss/corruption scenarios to recover only when the
+same official runner pair succeeds on retry. Recovered results are marked as
+`succeeded` in the JSON snapshot and listed under `coquic_retried_testcases`.
+
 The image verification scripts live under `interop/tests/`.
 
 The Nix-native interop images are built with `dockerTools.buildLayeredImage`.

@@ -36,6 +36,10 @@ export default function InteropPage() {
               failed
             </span>
             <span>
+              <i style={{ '--legend-color': 'var(--known-broken)' } as React.CSSProperties} />
+              known peer-broken
+            </span>
+            <span>
               <i style={{ '--legend-color': 'var(--muted)' } as React.CSSProperties} />
               not reported
             </span>

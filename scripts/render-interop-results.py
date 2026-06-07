@@ -25,6 +25,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--json-out")
     parser.add_argument(
+        "--upstream-result",
+        help=(
+            "optional upstream interop.seemann.io result JSON used to annotate "
+            "failed rows that are known to fail for the peer across all supported peers"
+        ),
+    )
+    parser.add_argument(
         "--require-complete-sources",
         action="store_true",
         help="fail if any requested result source is missing",
@@ -131,6 +138,131 @@ def testcase_sort_key(row: dict) -> tuple[int, str]:
         "crosstraffic": 22,
     }
     return (order.get(row["name"], 1000), row["name"])
+
+
+def matrix_entries(data: dict, field_name: str, path: Path) -> list[list[dict]]:
+    value = data.get(field_name)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"result `{path}` field `{field_name}` must be a matrix list")
+    matrix = []
+    for cell in value:
+        if not isinstance(cell, list):
+            raise ValueError(f"result `{path}` field `{field_name}` matrix cells must be lists")
+        entries = []
+        for entry in cell:
+            if not isinstance(entry, dict):
+                raise ValueError(f"result `{path}` field `{field_name}` entries must be objects")
+            entries.append(entry)
+        matrix.append(entries)
+    return matrix
+
+
+def row_known_broken_key(row: dict) -> tuple[str, str, str] | None:
+    if row.get("result") != "failed":
+        return None
+    if row.get("server") == "coquic":
+        return ("client", str(row.get("client", "")), str(row.get("name", "")))
+    if row.get("client") == "coquic":
+        return ("server", str(row.get("server", "")), str(row.get("name", "")))
+    return None
+
+
+def build_known_broken_index(upstream_path: Path) -> dict[tuple[str, str, str], dict]:
+    data = load_results(upstream_path)
+    servers = data.get("servers")
+    clients = data.get("clients")
+    if not isinstance(servers, list) or not all(isinstance(item, str) for item in servers):
+        raise ValueError(f"upstream result `{upstream_path}` field `servers` must be a string list")
+    if not isinstance(clients, list) or not all(isinstance(item, str) for item in clients):
+        raise ValueError(f"upstream result `{upstream_path}` field `clients` must be a string list")
+
+    expected_cells = len(servers) * len(clients)
+    matrices = (
+        ("results", matrix_entries(data, "results", upstream_path)),
+        ("measurements", matrix_entries(data, "measurements", upstream_path)),
+    )
+    for field_name, cells in matrices:
+        if len(cells) not in (0, expected_cells):
+            raise ValueError(
+                f"upstream result `{upstream_path}` field `{field_name}` has {len(cells)} "
+                f"matrix cells, expected {expected_cells}"
+            )
+
+    observations: dict[tuple[str, str, str], dict[str, object]] = {}
+    for _field_name, cells in matrices:
+        for index, entries in enumerate(cells):
+            client = clients[index // len(servers)]
+            server = servers[index % len(servers)]
+            for entry in entries:
+                name = entry.get("name")
+                result = entry.get("result")
+                if not isinstance(name, str) or not isinstance(result, str):
+                    continue
+                for role, peer, counterpart in (
+                    ("client", client, server),
+                    ("server", server, client),
+                ):
+                    key = (role, peer, name)
+                    observed = observations.setdefault(
+                        key,
+                        {
+                            "role": role,
+                            "peer": peer,
+                            "name": name,
+                            "failed": 0,
+                            "succeeded": 0,
+                            "unsupported": 0,
+                            "other": 0,
+                            "failed_peers": [],
+                            "succeeded_peers": [],
+                        },
+                    )
+                    if result == "failed":
+                        observed["failed"] = int(observed["failed"]) + 1
+                        observed["failed_peers"].append(counterpart)
+                    elif result == "succeeded":
+                        observed["succeeded"] = int(observed["succeeded"]) + 1
+                        observed["succeeded_peers"].append(counterpart)
+                    elif result == "unsupported":
+                        observed["unsupported"] = int(observed["unsupported"]) + 1
+                    else:
+                        observed["other"] = int(observed["other"]) + 1
+
+    run_id = str(data.get("log_dir") or "latest")
+    start_time = data.get("start_time")
+    end_time = data.get("end_time")
+    known = {}
+    for key, observed in observations.items():
+        failed = int(observed["failed"])
+        succeeded = int(observed["succeeded"])
+        other = int(observed["other"])
+        if failed == 0 or succeeded != 0 or other != 0:
+            continue
+        known[key] = {
+            "source": "interop.seemann.io",
+            "run": run_id,
+            "start_time": start_time,
+            "end_time": end_time,
+            "role": observed["role"],
+            "peer": observed["peer"],
+            "case": observed["name"],
+            "failed_supported_peers": failed,
+            "succeeded_supported_peers": succeeded,
+            "supported_peers": failed + succeeded + other,
+            "unsupported_peers": int(observed["unsupported"]),
+            "failed_peers": sorted(str(peer) for peer in observed["failed_peers"]),
+            "reason": "upstream peer fails this case against every supported peer",
+        }
+    return known
+
+
+def annotate_known_broken(rows: list[dict], known: dict[tuple[str, str, str], dict]) -> None:
+    for row in rows:
+        key = row_known_broken_key(row)
+        if key is not None and key in known:
+            row["known_broken"] = known[key]
 
 
 def rows_from_result(label: str, path: Path, data: dict) -> tuple[dict, list[dict]]:
@@ -285,11 +417,18 @@ def print_summary(sources: list[dict], rows: list[dict], event_name: str, commit
         print("| Peer | Direction | Case | Details |")
         print("| --- | --- | --- | --- |")
         for row in failed:
+            known = row.get("known_broken")
+            known_note = ""
+            if isinstance(known, dict):
+                known_note = (
+                    f" known peer-broken: all {known.get('supported_peers', 0)} "
+                    "supported upstream peers failed"
+                )
             print(
                 f"| {markdown(row['peer'])}"
                 f" | {markdown(row['direction'])}"
                 f" | {markdown(row['name'])}"
-                f" | {markdown(row['details'])} |"
+                f" | {markdown((row['details'] + ';' if row['details'] and known_note else row['details']) + known_note)} |"
             )
     unsupported = [row for row in rows if row["result"] == "unsupported"]
     if not unsupported:
@@ -313,6 +452,11 @@ def main() -> int:
     args = parse_args()
     try:
         sources, rows = build_payload(args.result)
+        if args.upstream_result:
+            try:
+                annotate_known_broken(rows, build_known_broken_index(Path(args.upstream_result)))
+            except ValueError as exc:
+                print(f"warning: ignoring upstream interop result: {exc}", file=sys.stderr)
         if args.require_complete_sources:
             validate_complete_sources(sources)
         if args.json_out:

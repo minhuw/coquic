@@ -138,6 +138,12 @@ jobs:
           path: .interop-logs/interop-results-${{ matrix.peer }}.json
           if-no-files-found: error
 
+      - name: Fail On Interop Test Failure
+        if: always() && steps.run_interop.outcome != 'success'
+        run: |
+          echo "${{ matrix.display_name }} official interop tests failed" >&2
+          exit 1
+
   interop-self:
     name: Self Official Runner
     runs-on: ubuntu-latest
@@ -212,6 +218,12 @@ jobs:
           path: .interop-logs/interop-results-self.json
           if-no-files-found: error
 
+      - name: Fail On Interop Test Failure
+        if: always() && steps.run_interop.outcome != 'success'
+        run: |
+          echo "self official interop tests failed" >&2
+          exit 1
+
   publish-interop-results:
     name: Publish Interop Results
     runs-on: ubuntu-latest
@@ -233,8 +245,26 @@ jobs:
           path: .interop-results/downloaded
           merge-multiple: true
 
+      - name: Fetch Upstream Interop Results
+        continue-on-error: true
+        run: |
+          mkdir -p .interop-results/upstream
+          curl --fail --location --show-error --silent \
+            --connect-timeout 10 \
+            --max-time 60 \
+            --retry 3 \
+            --retry-delay 2 \
+            https://interop.seemann.io/logs/quic/latest/result.json \
+            --output .interop-results/upstream/interop-seemann-latest.json.tmp
+          mv .interop-results/upstream/interop-seemann-latest.json.tmp \
+            .interop-results/upstream/interop-seemann-latest.json
+
       - name: Merge Interop Result Snapshot
         run: |
+          upstream_args=()
+          if [ -f .interop-results/upstream/interop-seemann-latest.json ]; then
+            upstream_args=(--upstream-result .interop-results/upstream/interop-seemann-latest.json)
+          fi
           python3 scripts/render-interop-results.py \
             --result quicgo-server=.interop-results/downloaded/interop-results-quicgo.json \
             --result picoquic-server=.interop-results/downloaded/interop-results-picoquic.json \
@@ -251,6 +281,7 @@ jobs:
             --event-name "${GITHUB_EVENT_NAME}" \
             --commit "${GITHUB_SHA}" \
             --require-complete-sources \
+            "${upstream_args[@]}" \
             --json-out .interop-results/interop-results.json >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Configure Demo SSH
@@ -299,7 +330,7 @@ jobs:
             minhuw@coquic.minhuw.dev \
             "sudo install -m 644 /tmp/coquic-interop-results.json /opt/coquic-demo/current/app/public/interop-results.json && rm -f /tmp/coquic-interop-results.json"
 
-      - name: Fail On Interop Matrix Creation Errors
+      - name: Fail On Interop Job Errors
         if: always()
         run: |
           failed=0

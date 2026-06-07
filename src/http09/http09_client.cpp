@@ -16,6 +16,7 @@ namespace coquic::http09 {
 
 using quic::QuicCoreLocalError;
 using quic::QuicCoreLocalErrorCode;
+using quic::QuicCorePeerResetStream;
 using quic::QuicCoreReceiveStreamData;
 using quic::QuicCoreRequestKeyUpdate;
 using quic::QuicCoreResult;
@@ -67,13 +68,18 @@ QuicHttp09EndpointUpdate QuicHttp09ClientEndpoint::on_core_result(const QuicCore
             continue;
         }
 
-        const auto *received = std::get_if<QuicCoreReceiveStreamData>(&effect);
-        if (received == nullptr) {
+        if (const auto *received = std::get_if<QuicCoreReceiveStreamData>(&effect)) {
+            if (!process_receive_stream_data(*received)) {
+                return fail_endpoint();
+            }
             continue;
         }
 
-        if (!process_receive_stream_data(*received)) {
-            return fail_endpoint();
+        if (const auto *reset = std::get_if<QuicCorePeerResetStream>(&effect)) {
+            if (peer_reset_stream_is_fatal(*reset)) {
+                return fail_endpoint();
+            }
+            continue;
         }
     }
 
@@ -318,6 +324,12 @@ bool QuicHttp09ClientEndpoint::process_receive_stream_data(
         it->second.complete = true;
     }
     return true;
+}
+
+bool QuicHttp09ClientEndpoint::peer_reset_stream_is_fatal(
+    const QuicCorePeerResetStream &reset) const {
+    const auto it = request_streams_.find(reset.stream_id);
+    return it != request_streams_.end() && !it->second.complete;
 }
 
 bool QuicHttp09ClientEndpoint::all_streams_complete() const {

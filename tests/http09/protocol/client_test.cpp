@@ -22,6 +22,7 @@ using coquic::http09::QuicHttp09EndpointUpdate;
 using coquic::http09::QuicHttp09Request;
 using coquic::quic::QuicCoreEffect;
 using coquic::quic::QuicCoreLocalErrorCode;
+using coquic::quic::QuicCorePeerResetStream;
 using coquic::quic::QuicCoreReceiveStreamData;
 using coquic::quic::QuicCoreResult;
 using coquic::quic::QuicCoreSendStreamData;
@@ -75,6 +76,18 @@ QuicCoreResult receive_shared_result(std::uint64_t stream_id, std::string_view t
             .stream_id = stream_id,
             .shared_bytes = SharedBytes(coquic::quic::test::bytes_from_string(text)),
             .fin = fin,
+        },
+    });
+    return result;
+}
+
+QuicCoreResult peer_reset_result(std::uint64_t stream_id, std::uint64_t final_size) {
+    QuicCoreResult result;
+    result.effects.push_back(QuicCoreEffect{
+        QuicCorePeerResetStream{
+            .stream_id = stream_id,
+            .application_error_code = 1,
+            .final_size = final_size,
         },
     });
     return result;
@@ -708,6 +721,50 @@ TEST(QuicHttp09ClientTest, AppendsMultipleReceiveChunksToSameOutputFile) {
     EXPECT_TRUE(second.terminal_success);
     EXPECT_FALSE(second.terminal_failure);
     EXPECT_EQ(read_file_bytes(download_root.path() / "chunked.txt"), "hello");
+}
+
+TEST(QuicHttp09ClientTest, FailsWhenPeerResetsActiveResponseStream) {
+    const auto now = coquic::quic::test::test_time();
+    coquic::quic::test::ScopedTempDir download_root;
+
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/reset.txt")},
+        .download_root = download_root.path(),
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    endpoint.poll(now);
+    endpoint.on_core_result(QuicCoreResult{}, coquic::quic::test::test_time(1));
+
+    const auto update =
+        endpoint.on_core_result(peer_reset_result(0, 4096), coquic::quic::test::test_time(2));
+
+    EXPECT_TRUE(update.terminal_failure);
+    EXPECT_FALSE(update.terminal_success);
+    EXPECT_TRUE(endpoint.has_failed());
+}
+
+TEST(QuicHttp09ClientTest, IgnoresPeerResetAfterCompletedResponseStream) {
+    const auto now = coquic::quic::test::test_time();
+    coquic::quic::test::ScopedTempDir download_root;
+
+    QuicHttp09ClientEndpoint endpoint(QuicHttp09ClientConfig{
+        .requests = {request_for_target("/complete.txt")},
+        .download_root = download_root.path(),
+    });
+
+    endpoint.on_core_result(handshake_ready_result(), now);
+    endpoint.poll(now);
+    const auto completed =
+        endpoint.on_core_result(receive_result(0, "done", true), coquic::quic::test::test_time(1));
+    ASSERT_TRUE(completed.terminal_success);
+
+    const auto reset =
+        endpoint.on_core_result(peer_reset_result(0, 4), coquic::quic::test::test_time(2));
+
+    EXPECT_FALSE(reset.terminal_failure);
+    EXPECT_TRUE(reset.terminal_success);
+    EXPECT_FALSE(endpoint.has_failed());
 }
 
 TEST(QuicHttp09ClientTest, FailsWhenCoreReportsLocalError) {

@@ -125,7 +125,17 @@ function resultToken(result) {
   return "?";
 }
 
-function resultClass(result) {
+function resultTokenForRow(row, result) {
+  if (result === "failed" && row && row.known_broken) {
+    return "kb";
+  }
+  return resultToken(result);
+}
+
+function resultClass(result, row) {
+  if (result === "failed" && row && row.known_broken) {
+    return "known-broken";
+  }
   if (isSkippedResult(result)) {
     return "unsupported";
   }
@@ -137,6 +147,18 @@ function resultClass(result) {
 
 function isSkippedResult(result) {
   return result === "unsupported";
+}
+
+function knownBrokenTitle(row) {
+  const known = row && row.known_broken;
+  if (!known) {
+    return "";
+  }
+  const failed = known.failed_supported_peers ?? 0;
+  const supported = known.supported_peers ?? failed;
+  const unsupported = known.unsupported_peers ?? 0;
+  const run = known.run || "latest";
+  return ` Known peer-broken: upstream ${known.peer || row.peer} ${known.role || "peer"} fails ${known.case || row.name} against ${failed}/${supported} supported peers in ${known.source || "upstream"} run ${run}${unsupported ? `; ${unsupported} unsupported upstream peers` : ""}.`;
 }
 
 function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
@@ -306,9 +328,11 @@ function renderMatrix() {
         const row = rowByLaneAndTest.get(`${laneKey}:${test}`);
         const result = row ? row.result : "unknown";
         const cell = document.createElement("span");
-        cell.className = `test-cell ${resultClass(result)}`;
-        cell.textContent = resultToken(result);
-        cell.title = row ? `${source.server} -> ${source.client}: ${test} ${row.result}${row.details ? ` (${row.details})` : ""}` : `${source.server} -> ${source.client}: ${test} not reported`;
+        cell.className = `test-cell ${resultClass(result, row)}`;
+        cell.textContent = resultTokenForRow(row, result);
+        cell.title = row
+          ? `${source.server} -> ${source.client}: ${test} ${row.result}${row.details ? ` (${row.details})` : ""}.${knownBrokenTitle(row)}`
+          : `${source.server} -> ${source.client}: ${test} not reported`;
         td.append(cell);
         tr.append(td);
       }

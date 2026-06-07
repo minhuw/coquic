@@ -54,6 +54,7 @@ class QuicHttp09ClientEndpoint {
     std::optional<PendingOpenRequest> take_next_request_to_issue();
     void queue_request_send(const PendingOpenRequest &request);
     bool process_receive_stream_data(const quic::QuicCoreReceiveStreamData &received);
+    bool peer_reset_stream_is_fatal(const quic::QuicCorePeerResetStream &reset) const;
     bool all_streams_complete() const;
     void clear_state();
 

@@ -1135,6 +1135,10 @@ COQUIC_NO_PROFILE void write_advance_core_output_trace(std::ostream &stream,
                    << (send->route_handle.has_value() ? std::to_string(*send->route_handle)
                                                       : std::string{"-"})
                    << " send_bytes=" << send->bytes.size();
+        } else if (const auto *reset = std::get_if<QuicCorePeerResetStream>(&effect)) {
+            stream << " peer_reset_stream=" << reset->stream_id
+                   << " app_error=" << reset->application_error_code
+                   << " final_size=" << reset->final_size;
         }
     }
     stream << '\n';

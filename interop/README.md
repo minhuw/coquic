@@ -165,28 +165,23 @@ nix develop -c bash interop/run-official.sh
 
 The separate GitHub Actions workflow in `.github/workflows/interop.yml` builds
 and loads `coquic-interop:quictls-musl`, pulls the pinned official peer,
-simulator, and iperf images, and runs peer-specific QUIC testcase and
-measurement lists through `interop/run-official.sh`. The workflow keeps the full
-testcase list as the default and narrows individual peer/direction cells where
-the current official peer image does not support that case.
-
-For `connectionmigration`, the matrix uses the public interop dashboard
-(`https://interop.seemann.io/quic`) as the role-support signal: peers that have
-no public `CM` success as active-migrating clients are skipped in the
-`coquic-server` direction, and peers that have no public `CM` success as
-preferred-address servers are skipped in the `coquic-client` direction. A public
-role-level `CM` success keeps the testcase in the workflow, so coquic-specific
-pairing failures still fail CI.
+simulator, and iperf images, and runs the full QUIC testcase and measurement
+list through `interop/run-official.sh` in both directions for every configured
+peer.
 
 Official runner results marked `unsupported` are preserved in the summary and
 published matrix but do not fail the workflow. Results marked `failed`, missing
 requested results, or malformed runner output still fail the workflow.
 
-The wrapper retries a small set of simulator-sensitive cases in isolation after
-an initial `failed` result. This keeps the full matrix strict while allowing
-known flaky path-change and loss/corruption scenarios to recover only when the
-same official runner pair succeeds on retry. Recovered results are marked as
-`succeeded` in the JSON snapshot and listed under `coquic_retried_testcases`.
+Known peer failures are not skipped. They are published as failures so the
+interop matrix reflects the official runner result, regardless of which endpoint
+caused the failure.
+
+For local diagnosis, `INTEROP_RETRY_FAILED_TESTCASES=1` can retry a small set of
+simulator-sensitive cases in isolation after an initial `failed` result.
+Recovered results are marked as `succeeded` in the JSON snapshot and listed
+under `coquic_retried_testcases`. CI leaves this disabled so it reports the
+first official runner result.
 
 The image verification scripts live under `interop/tests/`.
 

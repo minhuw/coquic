@@ -1,6 +1,7 @@
 #include "src/http09/http09.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <string_view>
 #include <utility>
 
@@ -14,6 +15,7 @@ using quic::QuicTransportConfig;
 namespace {
 
 constexpr CodecErrorCode kHttp09ParseError = CodecErrorCode::http09_parse_error;
+constexpr std::uint64_t kHttp09InteropActiveConnectionIdLimit = 8;
 
 CodecResult<QuicHttp09Request> parse_absolute_https_request(std::string_view token) {
     constexpr std::string_view scheme = "https://";
@@ -82,13 +84,10 @@ constexpr QuicHttp09Testcase transfer_profile_testcase(QuicHttp09Testcase testca
     return testcase;
 }
 
-QuicTransportConfig http09_transport_for_testcase(QuicHttp09Testcase testcase) {
-    testcase = transfer_profile_testcase(testcase);
+QuicTransportConfig http09_transport_for_testcase(QuicHttp09Testcase) {
     auto config = QuicTransportConfig{};
     config.max_idle_timeout = 180000;
-    if (testcase == QuicHttp09Testcase::transfer) {
-        config.active_connection_id_limit = 4;
-    }
+    config.active_connection_id_limit = kHttp09InteropActiveConnectionIdLimit;
     return config;
 }
 

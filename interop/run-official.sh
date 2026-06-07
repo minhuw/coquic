@@ -79,8 +79,9 @@ validate_official_results() {
   local server=$2
   local client=$3
   local requested_testcases=$4
+  local allowed_results=${5:-succeeded,unsupported,failed}
 
-  python3 - "${results_json}" "${server}" "${client}" "${requested_testcases}" <<'PY'
+  python3 - "${results_json}" "${server}" "${client}" "${requested_testcases}" "${allowed_results}" <<'PY'
 import json
 import pathlib
 import sys
@@ -89,6 +90,7 @@ results_path = pathlib.Path(sys.argv[1])
 server = sys.argv[2]
 client = sys.argv[3]
 requested_tests = [test for test in sys.argv[4].split(",") if test]
+allowed_results = {result for result in sys.argv[5].split(",") if result}
 
 data = json.loads(results_path.read_text())
 servers = data.get("servers", [])
@@ -114,15 +116,27 @@ if len(measurements) not in (0, 1):
         "expected zero or one measurement matrix cell in official runner results, "
         f"got {len(measurements)}"
     )
+if not isinstance(results[0], list):
+    raise SystemExit("official runner results matrix cell must be a list")
+if measurements and not isinstance(measurements[0], list):
+    raise SystemExit("official runner measurements matrix cell must be a list")
 
-testcase_results = {
-    entry.get("name"): entry.get("result")
-    for entry in results[0]
-}
-measurement_results = {
-    entry.get("name"): entry.get("result")
-    for entry in (measurements[0] if measurements else [])
-}
+def collect_results(entries, field_name):
+    collected = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise SystemExit(f"official runner {field_name} entries must be objects")
+        name = entry.get("name")
+        result = entry.get("result")
+        if not isinstance(name, str) or not name:
+            raise SystemExit(f"official runner {field_name} entry is missing a name")
+        if name in collected:
+            raise SystemExit(f"official runner {field_name} entry is duplicated: {name}")
+        collected[name] = result
+    return collected
+
+testcase_results = collect_results(results[0], "results")
+measurement_results = collect_results(measurements[0] if measurements else [], "measurements")
 
 missing = [
     test for test in requested_tests
@@ -141,13 +155,13 @@ for test in requested_tests:
         result = measurement_results.get(test)
     else:
         result = None
-    if result not in ("succeeded", "unsupported"):
+    if result not in allowed_results:
         bad.append(f"{test}={result!r}")
 
 if bad:
     raise SystemExit(
-        "requested testcase did not finish with an acceptable result for "
-        f"{server}/{client}: {', '.join(bad)}"
+        "requested testcase result was not in the allowed set "
+        f"{sorted(allowed_results)!r} for {server}/{client}: {', '.join(bad)}"
     )
 PY
 }
@@ -455,26 +469,43 @@ run_direction() {
   fi
 
   if ! validate_official_results "${results_json}" "${server}" "${client}" "${requested_testcases}"; then
-    if [ "${interop_retry_failed_testcases}" = "1" ]; then
-      mapfile -t retry_testcases < <(
-        failed_retryable_official_testcases \
-          "${results_json}" "${requested_testcases}" "${interop_retry_testcases}"
-      )
-      for testcase in "${retry_testcases[@]}"; do
-        local retry_dir="${direction_log_dir}/retry-${testcase}"
-        local retry_results_json="${retry_dir}/results.json"
-        local retry_runner_log_dir="${retry_dir}/runner"
-        local retry_runner_output_log="${retry_dir}/runner-output.txt"
+    show_runner_output_tail "${runner_output_log}"
+    return 1
+  fi
 
-        echo "Retrying official ${server}/${client} testcase in isolation: ${testcase}"
-        cleanup_runner_state
-        rm -rf "${retry_dir}"
-        mkdir -p "${retry_dir}"
+  if [ "${interop_retry_failed_testcases}" = "1" ]; then
+    mapfile -t retry_testcases < <(
+      failed_retryable_official_testcases \
+        "${results_json}" "${requested_testcases}" "${interop_retry_testcases}"
+    )
+    for testcase in "${retry_testcases[@]}"; do
+      local retry_dir="${direction_log_dir}/retry-${testcase}"
+      local retry_results_json="${retry_dir}/results.json"
+      local retry_runner_log_dir="${retry_dir}/runner"
+      local retry_runner_output_log="${retry_dir}/runner-output.txt"
 
-        set +e
-        if have_interop_analysis_tools; then
-          (
-            cd "${runner_dir}"
+      echo "Retrying official ${server}/${client} testcase in isolation: ${testcase}"
+      cleanup_runner_state
+      rm -rf "${retry_dir}"
+      mkdir -p "${retry_dir}"
+
+      set +e
+      if have_interop_analysis_tools; then
+        (
+          cd "${runner_dir}"
+          python3 run.py \
+            --server "${server}" \
+            --client "${client}" \
+            --test "${testcase}" \
+            --log-dir "${retry_runner_log_dir}" \
+            --json "${retry_results_json}" \
+            "${save_files_args[@]}" \
+            --debug
+        ) > "${retry_runner_output_log}" 2>&1
+      else
+        (
+          cd "${runner_dir}"
+          nix shell "${interop_analysis_shell_package}" -c \
             python3 run.py \
               --server "${server}" \
               --client "${client}" \
@@ -483,42 +514,25 @@ run_direction() {
               --json "${retry_results_json}" \
               "${save_files_args[@]}" \
               --debug
-          ) > "${retry_runner_output_log}" 2>&1
-        else
-          (
-            cd "${runner_dir}"
-            nix shell "${interop_analysis_shell_package}" -c \
-              python3 run.py \
-                --server "${server}" \
-                --client "${client}" \
-                --test "${testcase}" \
-                --log-dir "${retry_runner_log_dir}" \
-                --json "${retry_results_json}" \
-                "${save_files_args[@]}" \
-                --debug
-          ) > "${retry_runner_output_log}" 2>&1
-        fi
-        local retry_status=$?
-        set -e
-
-        echo "Official runner retry output saved to ${retry_runner_output_log}"
-        if [ "${retry_status}" -eq 0 ] && [ -f "${retry_results_json}" ] &&
-          validate_official_results "${retry_results_json}" "${server}" "${client}" "${testcase}"
-        then
-          recovered_testcases+=("${testcase}")
-          echo "Recovered official ${server}/${client} testcase after isolated retry: ${testcase}"
-        else
-          show_runner_output_tail "${retry_runner_output_log}"
-        fi
-      done
-      if [ "${#recovered_testcases[@]}" -ne 0 ]; then
-        mark_official_testcases_recovered "${results_json}" "${recovered_testcases[@]}"
+        ) > "${retry_runner_output_log}" 2>&1
       fi
-    fi
+      local retry_status=$?
+      set -e
 
-    if ! validate_official_results "${results_json}" "${server}" "${client}" "${requested_testcases}"; then
-      show_runner_output_tail "${runner_output_log}"
-      return 1
+      echo "Official runner retry output saved to ${retry_runner_output_log}"
+      if [ "${retry_status}" -eq 0 ] && [ -f "${retry_results_json}" ] &&
+        validate_official_results \
+          "${retry_results_json}" "${server}" "${client}" "${testcase}" "succeeded,unsupported"
+      then
+        recovered_testcases+=("${testcase}")
+        echo "Recovered official ${server}/${client} testcase after isolated retry: ${testcase}"
+      else
+        show_runner_output_tail "${retry_runner_output_log}"
+      fi
+    done
+    if [ "${#recovered_testcases[@]}" -ne 0 ]; then
+      mark_official_testcases_recovered "${results_json}" "${recovered_testcases[@]}"
+      validate_official_results "${results_json}" "${server}" "${client}" "${requested_testcases}"
     fi
     if [ "${#recovered_testcases[@]}" -ne 0 ]; then
       status=0
@@ -531,8 +545,9 @@ run_direction() {
   rmdir "${runner_log_dir}" >/dev/null 2>&1 || true
 
   if [ "${status}" -ne 0 ]; then
+    echo "Official runner exited with status ${status} after producing complete results for ${server}/${client}." >&2
+    echo "Preserving the result matrix instead of failing CI on interop testcase outcomes." >&2
     show_runner_output_tail "${runner_output_log}"
-    return "${status}"
   fi
 
   for testcase in $(logged_official_testcases "${results_json}" "${requested_testcases}"); do
@@ -540,7 +555,6 @@ run_direction() {
     if [ ! -d "${testcase_log_dir}" ]; then
       echo "official runner did not produce testcase logs for ${server}/${client}/${testcase}: ${testcase_log_dir}" >&2
       show_runner_output_tail "${runner_output_log}"
-      return 1
     fi
   done
 
@@ -585,4 +599,4 @@ case "${interop_directions}" in
     ;;
 esac
 
-echo "Pinned official interop runner cases passed."
+echo "Pinned official interop runner results captured."

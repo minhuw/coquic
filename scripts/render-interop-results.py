@@ -24,6 +24,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--event-name", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--json-out")
+    parser.add_argument(
+        "--require-complete-sources",
+        action="store_true",
+        help="fail if any requested result source is missing",
+    )
     return parser.parse_args()
 
 
@@ -240,6 +245,16 @@ def write_json_payload(args: argparse.Namespace, sources: list[dict], rows: list
     output_path.write_text(json.dumps(output, indent=2) + "\n")
 
 
+def validate_complete_sources(sources: list[dict]) -> None:
+    missing = [
+        str(source.get("label", source.get("path", "unknown")))
+        for source in sources
+        if source.get("missing")
+    ]
+    if missing:
+        raise ValueError(f"missing required interop result sources: {', '.join(missing)}")
+
+
 def print_summary(sources: list[dict], rows: list[dict], event_name: str, commit: str) -> None:
     print("## Official QUIC Interop Results")
     print()
@@ -298,6 +313,8 @@ def main() -> int:
     args = parse_args()
     try:
         sources, rows = build_payload(args.result)
+        if args.require_complete_sources:
+            validate_complete_sources(sources)
         if args.json_out:
             write_json_payload(args, sources, rows)
         print_summary(sources, rows, args.event_name, args.commit)

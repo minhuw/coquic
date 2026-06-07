@@ -138,14 +138,6 @@ jobs:
           path: .interop-logs/interop-results-${{ matrix.peer }}.json
           if-no-files-found: error
 
-      - name: Fail On ${{ matrix.display_name }} Interop Errors
-        if: always()
-        run: |
-          if [ "${{ steps.run_interop.outcome }}" != "success" ]; then
-            echo "${{ matrix.display_name }} interop step finished with outcome: ${{ steps.run_interop.outcome }}" >&2
-            exit 1
-          fi
-
   interop-self:
     name: Self Official Runner
     runs-on: ubuntu-latest
@@ -220,14 +212,6 @@ jobs:
           path: .interop-logs/interop-results-self.json
           if-no-files-found: error
 
-      - name: Fail On self Interop Errors
-        if: always()
-        run: |
-          if [ "${{ steps.run_interop.outcome }}" != "success" ]; then
-            echo "self interop step finished with outcome: ${{ steps.run_interop.outcome }}" >&2
-            exit 1
-          fi
-
   publish-interop-results:
     name: Publish Interop Results
     runs-on: ubuntu-latest
@@ -266,10 +250,12 @@ jobs:
             --result self=.interop-results/downloaded/interop-results-self.json \
             --event-name "${GITHUB_EVENT_NAME}" \
             --commit "${GITHUB_SHA}" \
+            --require-complete-sources \
             --json-out .interop-results/interop-results.json >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Configure Demo SSH
         if: github.ref == 'refs/heads/main'
+        continue-on-error: true
         env:
           COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}
         run: |
@@ -284,6 +270,7 @@ jobs:
 
       - name: Upload Interop Results To Demo
         if: github.ref == 'refs/heads/main'
+        continue-on-error: true
         run: |
           if [ ! -f .interop-results/interop-results.json ]; then
             echo "missing .interop-results/interop-results.json" >&2
@@ -312,7 +299,7 @@ jobs:
             minhuw@coquic.minhuw.dev \
             "sudo install -m 644 /tmp/coquic-interop-results.json /opt/coquic-demo/current/app/public/interop-results.json && rm -f /tmp/coquic-interop-results.json"
 
-      - name: Fail On Interop Job Errors
+      - name: Fail On Interop Matrix Creation Errors
         if: always()
         run: |
           failed=0

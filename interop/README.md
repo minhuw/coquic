@@ -170,8 +170,10 @@ list through `interop/run-official.sh` in both directions for every configured
 peer.
 
 Official runner results marked `unsupported` are preserved in the summary and
-published matrix but do not fail the workflow. Results marked `failed`, missing
-requested results, or malformed runner output still fail the workflow.
+published matrix but do not fail the workflow. Results marked `failed` are also
+preserved in the published matrix and do not fail the workflow. Missing requested
+results, missing source snapshots, or malformed runner output still fail the
+workflow because they mean CI did not create a complete interop matrix.
 
 Known peer failures are not skipped. They are published as failures so the
 interop matrix reflects the official runner result, regardless of which endpoint

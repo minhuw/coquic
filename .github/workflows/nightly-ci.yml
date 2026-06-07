@@ -1,0 +1,30 @@
+name: Nightly CI
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 8 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  full-lint:
+    name: Full Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
+        with:
+          summarize: false
+
+      - name: Full Lint
+        env:
+          COQUIC_CLANG_TIDY_MODE: full
+        run: nix develop .#lint -c ./scripts/run-clang-tidy.sh --full

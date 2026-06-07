@@ -1,11 +1,8 @@
-name: Format / Lint
+name: Per-Commit CI
 
 on:
   pull_request:
   push:
-  workflow_dispatch:
-  schedule:
-    - cron: "17 8 * * *"
 
 permissions:
   contents: read
@@ -14,7 +11,6 @@ jobs:
   format:
     name: Format
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
 
     steps:
       - name: Checkout
@@ -33,7 +29,6 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
 
     steps:
       - name: Checkout
@@ -56,24 +51,3 @@ jobs:
             export COQUIC_CLANG_TIDY_DIFF_BASE
           fi
           nix develop .#lint -c ./scripts/run-clang-tidy.sh --diff
-
-  full-lint:
-    name: Full Lint
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
-        with:
-          summarize: false
-
-      - name: Full Lint
-        env:
-          COQUIC_CLANG_TIDY_MODE: full
-        run: nix develop .#lint -c ./scripts/run-clang-tidy.sh --full

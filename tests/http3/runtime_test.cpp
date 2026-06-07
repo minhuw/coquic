@@ -195,8 +195,8 @@ class ScopedTcpLoopbackListener {
 
 class ScopedHttpProxyUpstream {
   public:
-    ScopedHttpProxyUpstream(std::uint16_t port, std::string response)
-        : response_(std::move(response)), thread_([this, port] { run(port); }) {
+    explicit ScopedHttpProxyUpstream(std::string response)
+        : response_(std::move(response)), thread_([this] { run(); }) {
     }
 
     ~ScopedHttpProxyUpstream() {
@@ -212,12 +212,16 @@ class ScopedHttpProxyUpstream {
         return ready_.load(std::memory_order_acquire);
     }
 
+    std::uint16_t port() const {
+        return port_;
+    }
+
     std::string request_text() const {
         return request_text_;
     }
 
   private:
-    void run(std::uint16_t port) {
+    void run() {
         const int listen_socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_socket_fd < 0) {
             return;
@@ -233,14 +237,21 @@ class ScopedHttpProxyUpstream {
         sockaddr_in listen_address{};
         listen_address.sin_family = AF_INET;
         listen_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        listen_address.sin_port = htons(port);
+        listen_address.sin_port = htons(0);
         if (::bind(listen_socket_fd, reinterpret_cast<const sockaddr *>(&listen_address),
                    sizeof(listen_address)) != 0) {
+            return;
+        }
+        sockaddr_in bound_address{};
+        socklen_t bound_address_length = sizeof(bound_address);
+        if (::getsockname(listen_socket_fd, reinterpret_cast<sockaddr *>(&bound_address),
+                          &bound_address_length) != 0) {
             return;
         }
         if (::listen(listen_socket_fd, 1) != 0) {
             return;
         }
+        port_ = ntohs(bound_address.sin_port);
         ready_.store(true, std::memory_order_release);
 
         const int client_fd = ::accept(listen_socket_fd, nullptr, nullptr);
@@ -271,14 +282,15 @@ class ScopedHttpProxyUpstream {
 
     std::string response_;
     std::string request_text_;
+    std::uint16_t port_ = 0;
     std::atomic<bool> ready_ = false;
     std::thread thread_;
 };
 
 class ScopedSequentialHttpProxyUpstream {
   public:
-    ScopedSequentialHttpProxyUpstream(std::uint16_t port, std::vector<std::string> responses)
-        : responses_(std::move(responses)), thread_([this, port] { run(port); }) {
+    explicit ScopedSequentialHttpProxyUpstream(std::vector<std::string> responses)
+        : responses_(std::move(responses)), thread_([this] { run(); }) {
     }
 
     ~ScopedSequentialHttpProxyUpstream() {
@@ -295,8 +307,12 @@ class ScopedSequentialHttpProxyUpstream {
         return ready_.load(std::memory_order_acquire);
     }
 
+    std::uint16_t port() const {
+        return port_;
+    }
+
   private:
-    void run(std::uint16_t port) {
+    void run() {
         const int listen_socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_socket_fd < 0) {
             return;
@@ -312,14 +328,21 @@ class ScopedSequentialHttpProxyUpstream {
         sockaddr_in listen_address{};
         listen_address.sin_family = AF_INET;
         listen_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        listen_address.sin_port = htons(port);
+        listen_address.sin_port = htons(0);
         if (::bind(listen_socket_fd, reinterpret_cast<const sockaddr *>(&listen_address),
                    sizeof(listen_address)) != 0) {
+            return;
+        }
+        sockaddr_in bound_address{};
+        socklen_t bound_address_length = sizeof(bound_address);
+        if (::getsockname(listen_socket_fd, reinterpret_cast<sockaddr *>(&bound_address),
+                          &bound_address_length) != 0) {
             return;
         }
         if (::listen(listen_socket_fd, static_cast<int>(responses_.size())) != 0) {
             return;
         }
+        port_ = ntohs(bound_address.sin_port);
         ready_.store(true, std::memory_order_release);
 
         for (const auto &response : responses_) {
@@ -352,6 +375,7 @@ class ScopedSequentialHttpProxyUpstream {
     }
 
     std::vector<std::string> responses_;
+    std::uint16_t port_ = 0;
     std::atomic<bool> ready_ = false;
     std::thread thread_;
 };
@@ -2520,17 +2544,15 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCoversPathAndMimeBranches) {
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCanReverseProxyToHttpUpstream) {
-    const auto port = allocate_udp_loopback_port();
-    ASSERT_NE(port, 0);
-
-    ScopedHttpProxyUpstream upstream(port,
-                                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+    ScopedHttpProxyUpstream upstream("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
                                      "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
                                      "f\r\n<div>next</div>\r\n0\r\n\r\n");
     for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
     ASSERT_TRUE(upstream.ready());
+    const auto port = upstream.port();
+    ASSERT_NE(port, 0);
 
     const auto response = coquic::http3::runtime_server_response_for_test(
         coquic::http3::Http3RuntimeConfig{
@@ -2561,18 +2583,17 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCanReverseProxyToHttpUpstream) {
 }
 
 TEST(QuicHttp3RuntimeTest, ReverseProxyStreamingEmitsChunkedBodyPartsBeforeCompletion) {
-    const auto port = allocate_udp_loopback_port();
-    ASSERT_NE(port, 0);
-
-    ScopedHttpProxyUpstream upstream(port, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
-                                           "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
-                                           "b\r\ndata: one\n\n\r\n"
-                                           "b\r\ndata: two\n\n\r\n"
-                                           "0\r\n\r\n");
+    ScopedHttpProxyUpstream upstream("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                                     "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                                     "b\r\ndata: one\n\n\r\n"
+                                     "b\r\ndata: two\n\n\r\n"
+                                     "0\r\n\r\n");
     for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
     ASSERT_TRUE(upstream.ready());
+    const auto port = upstream.port();
+    ASSERT_NE(port, 0);
 
     std::vector<coquic::http3::Http3ResponsePart> parts;
     coquic::http3::stream_http_reverse_proxy_response(
@@ -2612,24 +2633,23 @@ TEST(QuicHttp3RuntimeTest, ReverseProxyStreamingEmitsChunkedBodyPartsBeforeCompl
 }
 
 TEST(QuicHttp3RuntimeTest, ReverseProxyStreamingCoversContentLengthCloseAndFailurePaths) {
-    const auto port = allocate_udp_loopback_port();
-    ASSERT_NE(port, 0);
-
-    ScopedSequentialHttpProxyUpstream upstream(
-        port, {
-                  "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                  "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody",
-                  "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose-body",
-                  "bad\r\n\r\n",
-                  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
-                  "4\r\nda",
-                  "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nhalf",
-                  "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody",
-              });
+    ScopedSequentialHttpProxyUpstream upstream({
+        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody",
+        "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose-body",
+        "bad\r\n\r\n",
+        std::string("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                    "Connection: close\r\n\r\n") +
+            "4\r\nda",
+        "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nhalf",
+        "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody",
+    });
     for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
     ASSERT_TRUE(upstream.ready());
+    const auto port = upstream.port();
+    ASSERT_NE(port, 0);
 
     const auto config = coquic::http3::Http3ReverseProxyConfig{
         .host = "127.0.0.1",
@@ -2732,21 +2752,20 @@ TEST(QuicHttp3RuntimeTest, ReverseProxyStreamingCoversContentLengthCloseAndFailu
 }
 
 TEST(QuicHttp3RuntimeTest, ReverseProxyFetchReturnsBadGatewayForMalformedUpstreamBodies) {
-    const auto port = allocate_udp_loopback_port();
-    ASSERT_NE(port, 0);
-
-    ScopedSequentialHttpProxyUpstream upstream(
-        port, {
-                  "HTTP/1.1 200 OK\r\nContent-Length: bad\r\nConnection: close\r\n\r\n",
-                  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
-                  "z\r\n",
-                  "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nhalf",
-                  "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose-body",
-              });
+    ScopedSequentialHttpProxyUpstream upstream({
+        "HTTP/1.1 200 OK\r\nContent-Length: bad\r\nConnection: close\r\n\r\n",
+        std::string("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                    "Connection: close\r\n\r\n") +
+            "z\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nhalf",
+        "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nclose-body",
+    });
     for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
     ASSERT_TRUE(upstream.ready());
+    const auto port = upstream.port();
+    ASSERT_NE(port, 0);
 
     const auto config = coquic::http3::Http3RuntimeConfig{
         .reverse_proxy =
@@ -2779,7 +2798,7 @@ TEST(QuicHttp3RuntimeTest, ReverseProxyFetchReturnsBadGatewayForMalformedUpstrea
 
 TEST(QuicHttp3RuntimeTest, ReverseProxyStreamingCoversAdditionalFailureEdges) {
     {
-        const auto port = allocate_udp_loopback_port();
+        const auto port = allocate_tcp_loopback_port();
         ASSERT_NE(port, 0);
 
         std::vector<coquic::http3::Http3ResponsePart> parts;
@@ -2816,23 +2835,22 @@ TEST(QuicHttp3RuntimeTest, ReverseProxyStreamingCoversAdditionalFailureEdges) {
         EXPECT_TRUE(parts.front().complete);
     }
 
-    const auto port = allocate_udp_loopback_port();
-    ASSERT_NE(port, 0);
-
     const std::string large_chunk(8192, 'x');
-    ScopedSequentialHttpProxyUpstream upstream(
-        port, {
-                  "HTTP/1.1 200 OK\r\nConnection: close\r\npartial-head",
-                  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
-                  "4\r\ndataxx",
-                  "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
-                      std::string("2000\r\n") + large_chunk + "\r\n0\r\n\r\n",
-                  "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-              });
+    ScopedSequentialHttpProxyUpstream upstream({
+        "HTTP/1.1 200 OK\r\nConnection: close\r\npartial-head",
+        std::string("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+                    "Connection: close\r\n\r\n") +
+            "4\r\ndataxx",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
+            std::string("2000\r\n") + large_chunk + "\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    });
     for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
     ASSERT_TRUE(upstream.ready());
+    const auto port = upstream.port();
+    ASSERT_NE(port, 0);
 
     const auto config = coquic::http3::Http3ReverseProxyConfig{
         .host = "127.0.0.1",
@@ -2906,16 +2924,14 @@ TEST(QuicHttp3RuntimeTest, ReverseProxyStreamingCoversAdditionalFailureEdges) {
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCanReverseProxyHeadWithContentLength) {
-    const auto port = allocate_udp_loopback_port();
-    ASSERT_NE(port, 0);
-
-    ScopedHttpProxyUpstream upstream(port,
-                                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+    ScopedHttpProxyUpstream upstream("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
                                      "Content-Length: 14775\r\nConnection: close\r\n\r\n");
     for (int attempt = 0; attempt < 50 && !upstream.ready(); ++attempt) {
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
     }
     ASSERT_TRUE(upstream.ready());
+    const auto port = upstream.port();
+    ASSERT_NE(port, 0);
 
     const auto response = coquic::http3::runtime_server_response_for_test(
         coquic::http3::Http3RuntimeConfig{
@@ -2942,7 +2958,7 @@ TEST(QuicHttp3RuntimeTest, RuntimeServerResponseCanReverseProxyHeadWithContentLe
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeServerResponseReturnsBadGatewayForMissingProxy) {
-    const auto port = allocate_udp_loopback_port();
+    const auto port = allocate_tcp_loopback_port();
     ASSERT_NE(port, 0);
 
     const auto response = coquic::http3::runtime_server_response_for_test(

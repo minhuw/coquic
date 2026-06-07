@@ -2502,9 +2502,12 @@
     @apply border-[rgba(31,138,101,0.28)] bg-[var(--success-soft)] text-[var(--ok)];
   }
 
-  .test-cell.unsupported,
-  .test-cell.unknown {
+  .test-cell.unsupported {
     @apply border-[rgba(141,109,0,0.3)] bg-[var(--warning-soft)] text-[var(--warning)];
+  }
+
+  .test-cell.unknown {
+    @apply border-[var(--line-strong)] bg-[var(--surface-2)] text-[var(--muted)];
   }
 
   .test-cell.failed {

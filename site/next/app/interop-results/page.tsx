@@ -35,6 +35,10 @@ export default function InteropPage() {
               <i style={{ '--legend-color': 'var(--danger)' } as React.CSSProperties} />
               failed
             </span>
+            <span>
+              <i style={{ '--legend-color': 'var(--muted)' } as React.CSSProperties} />
+              not reported
+            </span>
           </div>
         </div>
         <div className="compat-wrap">

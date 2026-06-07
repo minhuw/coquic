@@ -122,7 +122,7 @@ function resultToken(result) {
   if (isSkippedResult(result)) {
     return "n/a";
   }
-  return "-";
+  return "?";
 }
 
 function resultClass(result) {

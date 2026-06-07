@@ -482,6 +482,7 @@ static void apply_lsquic_settings(struct prog *prog, const config_t *cfg) {
     if (cfg->disable_pmtud) {
         prog->prog_settings.es_dplpmtud = 0;
     }
+    prog->prog_settings.es_rw_once = 1;
     if (strcmp(cfg->congestion_control, "cubic") == 0) {
         prog->prog_settings.es_cc_algo = 1;
     } else if (strcmp(cfg->congestion_control, "bbr") == 0) {
@@ -971,18 +972,32 @@ static void server_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
         }
     }
 
-    ssize_t nr = lsquic_stream_readf(stream, discard_readf, stream_ctx);
-    if ((nr >= 0 && stream_ctx->server.request_fin &&
-         stream_ctx->server.request_read >= stream_ctx->server.request_bytes) ||
-        (nr == 0 && stream_ctx->server.request_read >= stream_ctx->server.request_bytes)) {
+    int read_would_block = 0;
+    if (!stream_ctx->server.request_fin) {
+        ssize_t nr = lsquic_stream_readf(stream, discard_readf, stream_ctx);
+        if (nr == 0 && stream_ctx->server.request_read < stream_ctx->server.request_bytes) {
+            lsquic_conn_abort(lsquic_stream_conn(stream));
+            return;
+        }
+        if (nr == 0) {
+            stream_ctx->server.request_fin = 1;
+        }
+        if (nr < 0) {
+            if (errno != EWOULDBLOCK) {
+                lsquic_stream_close(stream);
+                return;
+            }
+            read_would_block = 1;
+        }
+    }
+    if (stream_ctx->server.request_read >= stream_ctx->server.request_bytes) {
         stream_ctx->server.ready_to_send = 1;
     }
     if (stream_ctx->server.ready_to_send) {
-        lsquic_stream_wantread(stream, 0);
-        lsquic_stream_shutdown(stream, 0);
+        if (stream_ctx->server.request_fin || read_would_block) {
+            lsquic_stream_wantread(stream, 0);
+        }
         lsquic_stream_wantwrite(stream, 1);
-    } else if (nr < 0 && errno != EWOULDBLOCK) {
-        lsquic_stream_close(stream);
     }
 }
 

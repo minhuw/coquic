@@ -83,8 +83,8 @@ SimpleStreamPacketSentCongestionResult NewRenoCongestionController::on_simple_st
     bytes_in_flight_ += bytes_sent;
     if (sent_after_recovery_boundary(
             AckedStreamPacketSample{
-                .congestion_send_sequence = congestion_send_sequence,
                 .sent_time = sent_time,
+                .congestion_send_sequence = congestion_send_sequence,
             },
             recovery_start_time_, recovery_start_sequence_) ||
         (recovery_start_sequence_ == std::nullopt && recovery_start_time_.has_value() &&

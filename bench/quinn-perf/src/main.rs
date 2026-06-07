@@ -990,7 +990,9 @@ fn start_one_crr(
     tokio::spawn(async move {
         let _permit = sem.acquire_owned().await.expect("semaphore closed");
         let result = async {
-            let connections = open_connections(&cfg, &start, 1).await?;
+            let connections = open_connections(&cfg, &start, 1)
+                .await
+                .map_err(|err| format!("quinn crr setup: {err}"))?;
             let conn = connections[0].conn.clone();
             let out = run_request_response_stream(conn, cfg.request_bytes).await;
             for c in connections {
@@ -1007,19 +1009,28 @@ fn start_one_crr(
                 message.received = received;
             }
             Err(err) => {
-                if !cfg.requests.set && err.to_string().contains("refused") {
+                let err = err.to_string();
+                if is_timed_crr_setup_error(&cfg, &err) {
                     counters
                         .skipped_setup_errors
                         .fetch_add(1, Ordering::Relaxed);
                     time::sleep(Duration::from_millis(2)).await;
                 } else {
-                    message.err = Some(err.to_string());
+                    message.err = Some(err);
                 }
             }
         }
         let _ = tx.send(message).await;
     });
     true
+}
+
+fn is_timed_crr_setup_error(cfg: &Config, err: &str) -> bool {
+    !cfg.requests.set
+        && err.starts_with("quinn crr setup:")
+        && (err.contains("refused")
+            || err.contains("deadline has elapsed")
+            || err.contains("timed out"))
 }
 
 async fn run_request_response_stream(

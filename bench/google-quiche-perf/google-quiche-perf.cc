@@ -58,11 +58,20 @@ using Clock = std::chrono::steady_clock;
 using Duration = std::chrono::microseconds;
 
 constexpr char kApplicationProtocol[] = "coquic-perf/1";
+constexpr uint32_t kPerfProtocolVersion = 3;
+constexpr quic::QuicStreamId kControlStreamId = 0;
+constexpr uint8_t kMessageSessionStart = 1;
+constexpr uint8_t kMessageSessionReady = 2;
+constexpr uint8_t kMessageSessionError = 3;
+constexpr uint8_t kModeCodeBulk = 0;
+constexpr uint8_t kModeCodeRr = 1;
+constexpr uint8_t kModeCodeCrr = 2;
+constexpr uint8_t kDirectionCodeUpload = 0;
+constexpr uint8_t kDirectionCodeDownload = 1;
 constexpr uint64_t kDefaultMaxRunRequests = 4096;
 constexpr uint64_t kConnectionWindow = 32ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kStreamWindow = 16ULL * 1024ULL * 1024ULL;
 constexpr uint32_t kMaxStreams = 1'000'000;
-constexpr size_t kRequestHeaderSize = 16;
 constexpr size_t kWriteChunkSize = 32 * 1024;
 constexpr Duration kDrainTimeout = Duration(2'000'000);
 
@@ -366,18 +375,192 @@ GoogleQuicheSocketAddress ResolveRemote(const Config &cfg) {
     return address;
 }
 
-void EncodeU64(std::array<char, kRequestHeaderSize> *header, size_t offset, uint64_t value) {
-    for (size_t i = 0; i < 8; ++i) {
-        (*header)[offset + i] = static_cast<char>((value >> (56 - i * 8)) & 0xff);
+uint64_t ScenarioRequestBytes(const Config &cfg) {
+    if (cfg.mode == "bulk" && cfg.direction == "upload") {
+        return std::max(cfg.request_bytes, cfg.response_bytes);
+    }
+    return cfg.request_bytes;
+}
+
+uint64_t ScenarioResponseBytes(const Config &cfg) {
+    if (cfg.mode == "bulk" && cfg.direction == "upload") {
+        return 0;
+    }
+    return cfg.response_bytes;
+}
+
+uint8_t ModeCode(const std::string &mode) {
+    if (mode == "rr") {
+        return kModeCodeRr;
+    }
+    if (mode == "crr") {
+        return kModeCodeCrr;
+    }
+    return kModeCodeBulk;
+}
+
+uint8_t DirectionCode(const std::string &direction) {
+    return direction == "upload" ? kDirectionCodeUpload : kDirectionCodeDownload;
+}
+
+void AppendU32(std::vector<char> *out, uint32_t value) {
+    out->push_back(static_cast<char>((value >> 24) & 0xffU));
+    out->push_back(static_cast<char>((value >> 16) & 0xffU));
+    out->push_back(static_cast<char>((value >> 8) & 0xffU));
+    out->push_back(static_cast<char>(value & 0xffU));
+}
+
+void AppendU64(std::vector<char> *out, uint64_t value) {
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        out->push_back(static_cast<char>((value >> shift) & 0xffU));
     }
 }
 
-uint64_t DecodeU64(const std::array<char, kRequestHeaderSize> &header, size_t offset) {
+uint32_t ReadU32(const char *bytes) {
+    return (static_cast<uint32_t>(static_cast<unsigned char>(bytes[0])) << 24) |
+           (static_cast<uint32_t>(static_cast<unsigned char>(bytes[1])) << 16) |
+           (static_cast<uint32_t>(static_cast<unsigned char>(bytes[2])) << 8) |
+           static_cast<uint32_t>(static_cast<unsigned char>(bytes[3]));
+}
+
+uint64_t ReadU64(const char *bytes) {
     uint64_t value = 0;
     for (size_t i = 0; i < 8; ++i) {
-        value = (value << 8) | static_cast<unsigned char>(header[offset + i]);
+        value = (value << 8) | static_cast<unsigned char>(bytes[i]);
     }
     return value;
+}
+
+std::vector<char> FrameControlMessage(uint8_t type, const std::vector<char> &payload) {
+    std::vector<char> out;
+    out.reserve(payload.size() + 5);
+    out.push_back(static_cast<char>(type));
+    AppendU32(&out, static_cast<uint32_t>(payload.size()));
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+uint64_t RrConnectionTarget(const Config &cfg) {
+    if (cfg.mode == "rr" && cfg.requests.set) {
+        return std::min(cfg.connections, cfg.requests.value);
+    }
+    return cfg.connections;
+}
+
+uint64_t RrRequestLimitForConnection(const Config &cfg, uint64_t connection_index) {
+    uint64_t connections = RrConnectionTarget(cfg);
+    if (connections == 0) {
+        return 0;
+    }
+    uint64_t base = cfg.requests.value / connections;
+    uint64_t remainder = cfg.requests.value % connections;
+    return base + static_cast<uint64_t>(connection_index < remainder);
+}
+
+bool CanStartRrRequest(const Config &cfg, uint64_t started,
+                       const std::vector<uint64_t> &started_by_connection,
+                       size_t connection_index) {
+    if (!cfg.requests.set) {
+        return true;
+    }
+    return started < cfg.requests.value &&
+           started_by_connection[connection_index] <
+               RrRequestLimitForConnection(cfg, static_cast<uint64_t>(connection_index));
+}
+
+Config ConfigWithRrRequestLimit(const Config &cfg, uint64_t connection_index) {
+    Config connection_cfg = cfg;
+    if (cfg.mode == "rr" && cfg.requests.set) {
+        connection_cfg.requests.value = RrRequestLimitForConnection(cfg, connection_index);
+        connection_cfg.requests.set = true;
+    }
+    return connection_cfg;
+}
+
+std::vector<char> EncodeSessionStart(const Config &cfg) {
+    std::vector<char> payload;
+    payload.reserve(79);
+    AppendU32(&payload, kPerfProtocolVersion);
+    payload.push_back(static_cast<char>(ModeCode(cfg.mode)));
+    payload.push_back(static_cast<char>(DirectionCode(cfg.direction)));
+    AppendU64(&payload, ScenarioRequestBytes(cfg));
+    AppendU64(&payload, ScenarioResponseBytes(cfg));
+    payload.push_back(
+        static_cast<char>((cfg.total_bytes.set ? 0x01 : 0) | (cfg.requests.set ? 0x02 : 0)));
+    AppendU64(&payload, cfg.total_bytes.value);
+    AppendU64(&payload, cfg.requests.value);
+    AppendU64(&payload, DurationMicros(cfg.warmup));
+    AppendU64(&payload, DurationMicros(cfg.duration));
+    AppendU64(&payload, cfg.streams);
+    AppendU64(&payload, cfg.connections);
+    AppendU64(&payload, cfg.requests_in_flight);
+    return FrameControlMessage(kMessageSessionStart, payload);
+}
+
+std::vector<char> EncodeSessionReady() {
+    std::vector<char> payload;
+    AppendU32(&payload, kPerfProtocolVersion);
+    return FrameControlMessage(kMessageSessionReady, payload);
+}
+
+std::vector<char> EncodeSessionError(std::string_view reason) {
+    std::vector<char> payload;
+    AppendU32(&payload, static_cast<uint32_t>(reason.size()));
+    payload.insert(payload.end(), reason.begin(), reason.end());
+    return FrameControlMessage(kMessageSessionError, payload);
+}
+
+struct PerfSessionStart {
+    bool started = false;
+    uint8_t mode = kModeCodeBulk;
+    uint8_t direction = kDirectionCodeDownload;
+    uint64_t request_bytes = 0;
+    uint64_t response_bytes = 0;
+    OptionalU64 total_bytes;
+    OptionalU64 requests;
+    uint64_t warmup_us = 0;
+    uint64_t duration_us = 0;
+    uint64_t streams = 1;
+    uint64_t connections = 1;
+    uint64_t requests_in_flight = 1;
+};
+
+absl::string_view ControlPayload(const std::vector<char> &frame, uint8_t *type) {
+    if (frame.size() < 5) {
+        throw std::runtime_error("short control frame");
+    }
+    uint32_t len = ReadU32(frame.data() + 1);
+    if (frame.size() < static_cast<size_t>(len) + 5) {
+        throw std::runtime_error("incomplete control frame");
+    }
+    *type = static_cast<uint8_t>(frame[0]);
+    return absl::string_view(frame.data() + 5, len);
+}
+
+PerfSessionStart DecodeSessionStart(absl::string_view payload) {
+    if (payload.size() != 79 || ReadU32(payload.data()) != kPerfProtocolVersion) {
+        throw std::runtime_error("malformed session_start");
+    }
+    PerfSessionStart start;
+    start.started = true;
+    start.mode = static_cast<uint8_t>(payload[4]);
+    start.direction = static_cast<uint8_t>(payload[5]);
+    start.request_bytes = ReadU64(payload.data() + 6);
+    start.response_bytes = ReadU64(payload.data() + 14);
+    uint8_t flags = static_cast<uint8_t>(payload[22]);
+    start.total_bytes = {ReadU64(payload.data() + 23), (flags & 0x01) != 0};
+    start.requests = {ReadU64(payload.data() + 31), (flags & 0x02) != 0};
+    start.warmup_us = ReadU64(payload.data() + 39);
+    start.duration_us = ReadU64(payload.data() + 47);
+    start.streams = ReadU64(payload.data() + 55);
+    start.connections = ReadU64(payload.data() + 63);
+    start.requests_in_flight = ReadU64(payload.data() + 71);
+    if ((start.mode != kModeCodeBulk && start.mode != kModeCodeRr && start.mode != kModeCodeCrr) ||
+        (start.direction != kDirectionCodeUpload && start.direction != kDirectionCodeDownload) ||
+        start.streams == 0 || start.connections == 0 || start.requests_in_flight == 0) {
+        throw std::runtime_error("malformed session_start");
+    }
+    return start;
 }
 
 absl::string_view ZeroChunk(size_t size) {
@@ -393,6 +576,7 @@ struct StreamCompletion {
 };
 
 class PerfClientSession;
+class PerfServerSession;
 
 class PerfStream : public quic::QuicStream {
   public:
@@ -401,24 +585,31 @@ class PerfStream : public quic::QuicStream {
 
     void StartClientRequest(uint64_t request_bytes, uint64_t response_bytes, bool counts,
                             Clock::time_point start);
+    void StartClientControl(std::vector<char> bytes);
+    void SetServerSession(PerfServerSession *server_session);
 
     void OnDataAvailable() override;
     void OnCanWriteNewData() override;
     void OnStreamReset(const quic::QuicRstStreamFrame &frame) override;
 
   private:
+    bool IsControl() const;
     size_t ConsumeServerBytes(absl::string_view data);
     size_t ConsumeClientBytes(absl::string_view data);
     void OnPeerFin();
     void SendMore();
+    void SendControl();
     void CompleteClientStream();
     void FailClientStream(std::string message);
 
     const bool is_server_;
+    quic::QuicStreamId stream_id_;
     PerfClientSession *client_session_;
-    std::array<char, kRequestHeaderSize> header_ = {};
-    size_t header_len_ = 0;
-    size_t header_sent_ = 0;
+    PerfServerSession *server_session_ = nullptr;
+    std::vector<char> control_in_;
+    std::vector<char> control_out_;
+    size_t control_sent_ = 0;
+    bool control_fin_ = false;
     uint64_t request_bytes_ = 0;
     uint64_t response_bytes_ = 0;
     uint64_t request_received_ = 0;
@@ -502,6 +693,9 @@ class PerfClientSession : public PerfSessionBase,
     }
 
     bool OpenRequest(uint64_t request_bytes, uint64_t response_bytes, bool counts) {
+        if (!session_ready_) {
+            return false;
+        }
         if (!CanOpenNextOutgoingBidirectionalStream()) {
             return false;
         }
@@ -512,6 +706,31 @@ class PerfClientSession : public PerfSessionBase,
         ++active_requests_;
         request_stream->StartClientRequest(request_bytes, response_bytes, counts, Clock::now());
         return true;
+    }
+
+    bool OpenControl(const Config &cfg) {
+        if (control_opened_ || !CanOpenNextOutgoingBidirectionalStream()) {
+            return session_ready_;
+        }
+        quic::QuicStreamId id = GetNextOutgoingBidirectionalStreamId();
+        if (id != kControlStreamId) {
+            OnStreamFailed("Google QUICHE opened an unexpected control stream id");
+            return false;
+        }
+        auto stream = std::make_unique<PerfStream>(id, this, /*is_server=*/false, this);
+        PerfStream *control_stream = stream.get();
+        ActivateStream(std::move(stream));
+        control_opened_ = true;
+        control_stream->StartClientControl(EncodeSessionStart(cfg));
+        return true;
+    }
+
+    void OnControlReady() {
+        session_ready_ = true;
+    }
+
+    bool session_ready() const {
+        return session_ready_;
     }
 
     void OnStreamComplete(uint64_t request_bytes, uint64_t received, bool counts,
@@ -602,6 +821,8 @@ class PerfClientSession : public PerfSessionBase,
     quic::QuicServerId server_id_;
     quic::QuicCryptoClientConfig *crypto_config_;
     uint64_t active_requests_ = 0;
+    bool control_opened_ = false;
+    bool session_ready_ = false;
     std::vector<StreamCompletion> completed_;
     std::string error_message_;
 };
@@ -619,6 +840,52 @@ class PerfServerSession : public PerfSessionBase {
           helper_(helper) {
     }
 
+    bool SessionStarted() const {
+        return session_start_.started;
+    }
+
+    uint64_t RequestBytes() const {
+        return session_start_.request_bytes;
+    }
+
+    bool AllowsVariableBulkUpload() const {
+        return session_start_.mode == kModeCodeBulk &&
+               session_start_.direction == kDirectionCodeUpload && session_start_.total_bytes.set;
+    }
+
+    uint64_t ResponseBytesForNextRequest() {
+        ++requests_completed_;
+        if (session_start_.mode == kModeCodeBulk &&
+            session_start_.direction == kDirectionCodeDownload && session_start_.total_bytes.set) {
+            uint64_t stream_index = requests_completed_ - 1;
+            uint64_t per_stream = session_start_.total_bytes.value / session_start_.streams;
+            uint64_t remainder = session_start_.total_bytes.value % session_start_.streams;
+            return per_stream + (stream_index < remainder ? 1 : 0);
+        }
+        if (session_start_.mode == kModeCodeBulk &&
+            session_start_.direction == kDirectionCodeUpload) {
+            return 0;
+        }
+        return session_start_.response_bytes;
+    }
+
+    std::vector<char> HandleControlFrame(const std::vector<char> &frame, bool *send_fin) {
+        *send_fin = false;
+        try {
+            uint8_t type = 0;
+            absl::string_view payload = ControlPayload(frame, &type);
+            if (type != kMessageSessionStart) {
+                *send_fin = true;
+                return EncodeSessionError("expected session_start");
+            }
+            session_start_ = DecodeSessionStart(payload);
+            return EncodeSessionReady();
+        } catch (const std::exception &ex) {
+            *send_fin = true;
+            return EncodeSessionError(ex.what());
+        }
+    }
+
   protected:
     std::unique_ptr<quic::QuicCryptoStream> CreateCryptoStream() override {
         return quic::CreateCryptoServerStream(crypto_config_, compressed_certs_cache_, this,
@@ -628,6 +895,7 @@ class PerfServerSession : public PerfSessionBase {
     quic::QuicStream *CreateIncomingStream(quic::QuicStreamId id) override {
         auto stream = std::make_unique<PerfStream>(id, this, /*is_server=*/true, nullptr);
         PerfStream *incoming_stream = stream.get();
+        incoming_stream->SetServerSession(this);
         ActivateStream(std::move(stream));
         return incoming_stream;
     }
@@ -636,12 +904,14 @@ class PerfServerSession : public PerfSessionBase {
     const quic::QuicCryptoServerConfig *crypto_config_;
     quic::QuicCompressedCertsCache *compressed_certs_cache_;
     quic::QuicCryptoServerStreamBase::Helper *helper_;
+    PerfSessionStart session_start_;
+    uint64_t requests_completed_ = 0;
 };
 
 PerfStream::PerfStream(quic::QuicStreamId id, quic::QuicSession *session, bool is_server,
                        PerfClientSession *client_session)
     : quic::QuicStream(id, session, /*is_static=*/false, quic::BIDIRECTIONAL),
-      is_server_(is_server), client_session_(client_session) {
+      is_server_(is_server), stream_id_(id), client_session_(client_session) {
 }
 
 void PerfStream::StartClientRequest(uint64_t request_bytes, uint64_t response_bytes, bool counts,
@@ -650,41 +920,70 @@ void PerfStream::StartClientRequest(uint64_t request_bytes, uint64_t response_by
     response_bytes_ = response_bytes;
     counts_ = counts;
     start_ = start;
-    EncodeU64(&header_, 0, request_bytes_);
-    EncodeU64(&header_, 8, response_bytes_);
     SendMore();
 }
 
-size_t PerfStream::ConsumeServerBytes(absl::string_view data) {
-    size_t consumed = 0;
-    while (consumed < data.size()) {
-        if (header_len_ < header_.size()) {
-            size_t chunk = std::min(header_.size() - header_len_, data.size() - consumed);
-            std::copy(data.begin() + consumed, data.begin() + consumed + chunk,
-                      header_.begin() + header_len_);
-            header_len_ += chunk;
-            consumed += chunk;
-            if (header_len_ == header_.size()) {
-                request_bytes_ = DecodeU64(header_, 0);
-                response_bytes_ = DecodeU64(header_, 8);
-            }
-            continue;
-        }
+void PerfStream::StartClientControl(std::vector<char> bytes) {
+    control_out_ = std::move(bytes);
+    control_fin_ = true;
+    SendMore();
+}
 
-        uint64_t remaining = request_bytes_ - request_received_;
-        if (remaining == 0) {
-            Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
-            return data.size();
-        }
-        size_t chunk = static_cast<size_t>(
-            std::min<uint64_t>(remaining, static_cast<uint64_t>(data.size() - consumed)));
-        request_received_ += chunk;
-        consumed += chunk;
+void PerfStream::SetServerSession(PerfServerSession *server_session) {
+    server_session_ = server_session;
+}
+
+bool PerfStream::IsControl() const {
+    return stream_id_ == kControlStreamId;
+}
+
+size_t PerfStream::ConsumeServerBytes(absl::string_view data) {
+    if (IsControl()) {
+        control_in_.insert(control_in_.end(), data.begin(), data.end());
+        return data.size();
     }
-    return consumed;
+    if (server_session_ == nullptr || !server_session_->SessionStarted()) {
+        Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
+        return data.size();
+    }
+    request_bytes_ = server_session_->RequestBytes();
+    request_received_ += data.size();
+    if (!server_session_->AllowsVariableBulkUpload() && request_received_ > request_bytes_) {
+        Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
+    }
+    return data.size();
 }
 
 size_t PerfStream::ConsumeClientBytes(absl::string_view data) {
+    if (IsControl()) {
+        control_in_.insert(control_in_.end(), data.begin(), data.end());
+        if (control_in_.size() >= 5) {
+            try {
+                uint8_t type = 0;
+                absl::string_view payload = ControlPayload(control_in_, &type);
+                if (type == kMessageSessionReady && payload.size() == 4 &&
+                    ReadU32(payload.data()) == kPerfProtocolVersion) {
+                    if (client_session_ != nullptr) {
+                        client_session_->OnControlReady();
+                    }
+                } else if (type == kMessageSessionError) {
+                    std::string reason = "Google QUICHE server reported session_error";
+                    if (payload.size() >= 4) {
+                        uint32_t len = ReadU32(payload.data());
+                        if (payload.size() == static_cast<size_t>(len) + 4) {
+                            reason.append(": ");
+                            reason.append(payload.data() + 4, len);
+                        }
+                    }
+                    FailClientStream(reason);
+                } else {
+                    FailClientStream("Google QUICHE received an unexpected control message");
+                }
+            } catch (const std::exception &) {
+            }
+        }
+        return data.size();
+    }
     uint64_t remaining = response_bytes_ - response_received_;
     if (static_cast<uint64_t>(data.size()) > remaining) {
         FailClientStream("Google QUICHE stream received more response bytes than requested");
@@ -717,11 +1016,28 @@ void PerfStream::OnDataAvailable() {
 }
 
 void PerfStream::OnPeerFin() {
+    if (IsControl()) {
+        if (is_server_) {
+            bool send_fin = false;
+            control_out_ = server_session_ == nullptr
+                               ? EncodeSessionError("missing server session")
+                               : server_session_->HandleControlFrame(control_in_, &send_fin);
+            control_fin_ = send_fin;
+            SendMore();
+        }
+        return;
+    }
     if (is_server_) {
-        if (header_len_ != header_.size() || request_received_ != request_bytes_) {
+        if (server_session_ == nullptr || !server_session_->SessionStarted()) {
             Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
             return;
         }
+        request_bytes_ = server_session_->RequestBytes();
+        if (!server_session_->AllowsVariableBulkUpload() && request_received_ != request_bytes_) {
+            Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
+            return;
+        }
+        response_bytes_ = server_session_->ResponseBytesForNextRequest();
         request_complete_ = true;
         SendMore();
         return;
@@ -735,7 +1051,25 @@ void PerfStream::OnPeerFin() {
     CompleteClientStream();
 }
 
+void PerfStream::SendControl() {
+    while (control_sent_ < control_out_.size() && CanWriteNewData()) {
+        size_t remaining = control_out_.size() - control_sent_;
+        size_t chunk = std::min(remaining, kWriteChunkSize);
+        bool send_fin = control_fin_ && control_sent_ + chunk == control_out_.size();
+        WriteOrBufferData(absl::string_view(control_out_.data() + control_sent_, chunk), send_fin,
+                          nullptr);
+        control_sent_ += chunk;
+        if (chunk == 0 || !CanWriteNewData()) {
+            break;
+        }
+    }
+}
+
 void PerfStream::SendMore() {
+    if (IsControl()) {
+        SendControl();
+        return;
+    }
     if (is_server_) {
         while (request_complete_ && !response_fin_sent_ && CanWriteNewData()) {
             uint64_t remaining = response_bytes_ - response_sent_;
@@ -754,18 +1088,6 @@ void PerfStream::SendMore() {
     }
 
     while (!request_fin_sent_ && CanWriteNewData()) {
-        if (header_sent_ < header_.size()) {
-            size_t chunk = std::min(header_.size() - header_sent_, kWriteChunkSize);
-            bool send_fin = header_sent_ + chunk == header_.size() && request_bytes_ == 0;
-            WriteOrBufferData(absl::string_view(header_.data() + header_sent_, chunk), send_fin,
-                              nullptr);
-            header_sent_ += chunk;
-            if (send_fin) {
-                request_fin_sent_ = true;
-            }
-            continue;
-        }
-
         uint64_t remaining = request_bytes_ - request_sent_;
         size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, kWriteChunkSize));
         bool send_fin = chunk == remaining;
@@ -810,6 +1132,11 @@ void PerfStream::FailClientStream(std::string message) {
         client_session_->OnStreamFailed(std::move(message));
     }
 }
+
+class PerfClient;
+
+void CheckClient(const PerfClient &client);
+std::vector<StreamCompletion> DriveClient(PerfClient *client);
 
 class PerfClient : public quic::QuicClientBase {
   public:
@@ -949,7 +1276,33 @@ ConnectClient(const Config &cfg, quic::QuicEventLoop *event_loop,
                       << client->session()->error_details();
         throw std::runtime_error(error_message.str());
     }
+    Clock::time_point ready_deadline = Clock::now() + Duration(10'000'000);
+    while (!client->perf_session()->session_ready() && Clock::now() < ready_deadline) {
+        CheckClient(*client);
+        if (!client->perf_session()->OpenControl(cfg)) {
+            (void)DriveClient(client.get());
+        } else {
+            (void)DriveClient(client.get());
+        }
+    }
+    CheckClient(*client);
+    if (!client->perf_session()->session_ready()) {
+        throw std::runtime_error("Google QUICHE session_ready timed out");
+    }
     return client;
+}
+
+std::vector<std::unique_ptr<PerfClient>>
+ConnectClients(const Config &cfg, quic::QuicEventLoop *event_loop, uint64_t count = 0) {
+    std::vector<std::unique_ptr<PerfClient>> clients;
+    if (count == 0) {
+        count = cfg.connections;
+    }
+    clients.reserve(static_cast<size_t>(count));
+    for (uint64_t i = 0; i < count; ++i) {
+        clients.push_back(ConnectClient(ConfigWithRrRequestLimit(cfg, i), event_loop));
+    }
+    return clients;
 }
 
 void CheckClient(const PerfClient &client) {
@@ -1009,28 +1362,28 @@ void DrainClient(PerfClient *client) {
 }
 
 void RunBulk(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_loop) {
-    uint64_t request_bytes = cfg.request_bytes;
-    uint64_t response_bytes = cfg.response_bytes;
-    if (cfg.direction == "upload") {
-        request_bytes = std::max(cfg.request_bytes, cfg.response_bytes);
-        response_bytes = 0;
-    }
-
-    auto client = ConnectClient(cfg, event_loop);
+    uint64_t request_bytes = ScenarioRequestBytes(cfg);
+    uint64_t response_bytes = ScenarioResponseBytes(cfg);
+    auto clients = ConnectClients(cfg, event_loop);
     if (cfg.total_bytes.set) {
         uint64_t per_stream = cfg.total_bytes.value / cfg.streams;
         uint64_t remainder = cfg.total_bytes.value % cfg.streams;
         for (uint64_t i = 0; i < cfg.streams; ++i) {
             uint64_t target = per_stream + (i < remainder ? 1 : 0);
-            for (const StreamCompletion &completion : OpenRequestOrThrow(
-                     client.get(), cfg.direction == "upload" ? target : request_bytes,
-                     cfg.direction == "upload" ? response_bytes : target, true)) {
+            PerfClient *client = clients[static_cast<size_t>(i % clients.size())].get();
+            for (const StreamCompletion &completion :
+                 OpenRequestOrThrow(client, cfg.direction == "upload" ? target : request_bytes,
+                                    cfg.direction == "upload" ? response_bytes : target, true)) {
                 AddCompletion(completion, counters, false, false);
             }
         }
-        while (client->perf_session()->active_requests() > 0) {
-            for (const StreamCompletion &completion : DriveClient(client.get())) {
-                AddCompletion(completion, counters, false, false);
+        while (std::any_of(clients.begin(), clients.end(), [](const auto &client) {
+            return client->perf_session()->active_requests() > 0;
+        })) {
+            for (auto &client : clients) {
+                for (const StreamCompletion &completion : DriveClient(client.get())) {
+                    AddCompletion(completion, counters, false, false);
+                }
             }
         }
         return;
@@ -1038,61 +1391,46 @@ void RunBulk(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_l
 
     Clock::time_point measure_start = Clock::now() + cfg.warmup;
     Clock::time_point deadline = measure_start + cfg.duration;
-    for (uint64_t i = 0; i < cfg.streams; ++i) {
-        for (const StreamCompletion &completion : OpenRequestOrThrow(
-                 client.get(), request_bytes, response_bytes, Clock::now() >= measure_start)) {
-            AddCompletion(completion, counters, false, false);
-        }
-    }
-    while (Clock::now() < deadline) {
-        for (const StreamCompletion &completion : DriveClient(client.get())) {
-            AddCompletion(completion, counters, false, false);
-        }
-        while (client->perf_session()->active_requests() < cfg.streams && Clock::now() < deadline) {
+    for (auto &client : clients) {
+        for (uint64_t i = 0; i < cfg.streams; ++i) {
             for (const StreamCompletion &completion : OpenRequestOrThrow(
                      client.get(), request_bytes, response_bytes, Clock::now() >= measure_start)) {
                 AddCompletion(completion, counters, false, false);
             }
         }
     }
-    DrainClient(client.get());
+    while (Clock::now() < deadline) {
+        for (auto &client : clients) {
+            for (const StreamCompletion &completion : DriveClient(client.get())) {
+                AddCompletion(completion, counters, false, false);
+            }
+        }
+        for (auto &client : clients) {
+            while (client->perf_session()->active_requests() < cfg.streams &&
+                   Clock::now() < deadline) {
+                for (const StreamCompletion &completion :
+                     OpenRequestOrThrow(client.get(), request_bytes, response_bytes,
+                                        Clock::now() >= measure_start)) {
+                    AddCompletion(completion, counters, false, false);
+                }
+            }
+        }
+    }
+    for (auto &client : clients) {
+        DrainClient(client.get());
+    }
 }
 
 void RunRr(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_loop) {
-    auto client = ConnectClient(cfg, event_loop);
+    auto clients = ConnectClients(cfg, event_loop, RrConnectionTarget(cfg));
     Clock::time_point measure_start = Clock::now() + cfg.warmup;
     Clock::time_point deadline = measure_start + cfg.duration;
     uint64_t started = 0;
-    while (client->perf_session()->active_requests() < cfg.requests_in_flight) {
-        for (const StreamCompletion &completion :
-             OpenRequestOrThrow(client.get(), cfg.request_bytes, cfg.response_bytes,
-                                cfg.requests.set || Clock::now() >= measure_start)) {
-            AddCompletion(completion, counters, true, true);
-        }
-        ++started;
-        if (cfg.requests.set && started >= cfg.requests.value) {
-            break;
-        }
-    }
-
-    for (;;) {
-        if (cfg.requests.set && started >= cfg.requests.value &&
-            client->perf_session()->active_requests() == 0) {
-            break;
-        }
-        if (!cfg.requests.set && Clock::now() >= deadline) {
-            break;
-        }
-
-        for (const StreamCompletion &completion : DriveClient(client.get())) {
-            AddCompletion(completion, counters, true, true);
-        }
-
+    std::vector<uint64_t> started_by_connection(clients.size(), 0);
+    for (size_t index = 0; index < clients.size(); ++index) {
+        auto &client = clients[index];
         while (client->perf_session()->active_requests() < cfg.requests_in_flight) {
-            if (cfg.requests.set && started >= cfg.requests.value) {
-                break;
-            }
-            if (!cfg.requests.set && Clock::now() >= deadline) {
+            if (!CanStartRrRequest(cfg, started, started_by_connection, index)) {
                 break;
             }
             for (const StreamCompletion &completion :
@@ -1101,9 +1439,49 @@ void RunRr(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_loo
                 AddCompletion(completion, counters, true, true);
             }
             ++started;
+            ++started_by_connection[index];
         }
     }
-    DrainClient(client.get());
+
+    for (;;) {
+        if (cfg.requests.set && started >= cfg.requests.value &&
+            std::all_of(clients.begin(), clients.end(), [](const auto &client) {
+                return client->perf_session()->active_requests() == 0;
+            })) {
+            break;
+        }
+        if (!cfg.requests.set && Clock::now() >= deadline) {
+            break;
+        }
+
+        for (auto &client : clients) {
+            for (const StreamCompletion &completion : DriveClient(client.get())) {
+                AddCompletion(completion, counters, true, true);
+            }
+        }
+
+        for (size_t index = 0; index < clients.size(); ++index) {
+            auto &client = clients[index];
+            while (client->perf_session()->active_requests() < cfg.requests_in_flight) {
+                if (!CanStartRrRequest(cfg, started, started_by_connection, index)) {
+                    break;
+                }
+                if (!cfg.requests.set && Clock::now() >= deadline) {
+                    break;
+                }
+                for (const StreamCompletion &completion :
+                     OpenRequestOrThrow(client.get(), cfg.request_bytes, cfg.response_bytes,
+                                        cfg.requests.set || Clock::now() >= measure_start)) {
+                    AddCompletion(completion, counters, true, true);
+                }
+                ++started;
+                ++started_by_connection[index];
+            }
+        }
+    }
+    for (auto &client : clients) {
+        DrainClient(client.get());
+    }
 }
 
 struct CrrClient {

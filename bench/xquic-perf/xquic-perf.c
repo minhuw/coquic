@@ -17,6 +17,16 @@
 #include <xquic/xquic.h>
 
 #define APPLICATION_PROTOCOL "coquic-perf/1"
+#define PERF_PROTOCOL_VERSION 3U
+#define MESSAGE_SESSION_START 1U
+#define MESSAGE_SESSION_READY 2U
+#define MESSAGE_SESSION_ERROR 3U
+#define MESSAGE_SESSION_COMPLETE 4U
+#define MODE_CODE_BULK 0U
+#define MODE_CODE_RR 1U
+#define MODE_CODE_CRR 2U
+#define DIRECTION_CODE_UPLOAD 0U
+#define DIRECTION_CODE_DOWNLOAD 1U
 #define MAX_DATAGRAM_SIZE 1350
 #define READ_CHUNK_SIZE 65536
 #define WRITE_CHUNK_SIZE 32768
@@ -116,11 +126,29 @@ typedef struct {
     uint64_t latency_us;
 } completed_stream_t;
 
+typedef struct {
+    int started;
+    uint8_t mode;
+    uint8_t direction;
+    uint64_t request_bytes;
+    uint64_t response_bytes;
+    optional_u64_t total_bytes;
+    optional_u64_t requests;
+    uint64_t warmup_us;
+    uint64_t duration_us;
+    uint64_t streams;
+    uint64_t connections;
+    uint64_t requests_in_flight;
+} perf_session_start_t;
+
 struct stream_ctx_s {
     conn_ctx_t *conn;
     xqc_stream_t *stream;
-    uint8_t header[16];
-    size_t header_len;
+    int is_control;
+    uint8_t *control_in;
+    size_t control_in_len;
+    size_t control_in_cap;
+    int send_fin_on_complete;
     uint64_t request_bytes;
     uint64_t response_bytes;
     uint64_t request_received;
@@ -147,6 +175,17 @@ struct conn_ctx_s {
     struct sockaddr_storage local_addr;
     socklen_t local_addrlen;
     int ready;
+    int session_ready;
+    int session_started;
+    int server_control_seen;
+    int server_complete_sent;
+    perf_session_start_t session_start;
+    stream_ctx_t *control_stream;
+    uint64_t server_bytes_sent;
+    uint64_t server_bytes_received;
+    uint64_t server_requests_completed;
+    uint64_t request_limit;
+    uint64_t started_requests;
     int closed;
     stream_ctx_t *streams;
     conn_ctx_t *next;
@@ -220,6 +259,200 @@ static void set_error(perf_ctx_t *ctx, const char *message) {
         snprintf(ctx->error_message, sizeof(ctx->error_message), "%s", message);
     }
 }
+
+static void encode_be32(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)((value >> 24) & 0xffU);
+    out[1] = (uint8_t)((value >> 16) & 0xffU);
+    out[2] = (uint8_t)((value >> 8) & 0xffU);
+    out[3] = (uint8_t)(value & 0xffU);
+}
+
+static uint32_t decode_be32(const uint8_t *in) {
+    return ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) | ((uint32_t)in[2] << 8) |
+           (uint32_t)in[3];
+}
+
+static void encode_be64(uint8_t *out, uint64_t value) {
+    for (int i = 7; i >= 0; --i) {
+        out[i] = (uint8_t)(value & 0xffU);
+        value >>= 8;
+    }
+}
+
+static uint64_t decode_be64(const uint8_t *bytes) {
+    uint64_t value = 0;
+    for (int i = 0; i < 8; ++i) {
+        value = (value << 8) | bytes[i];
+    }
+    return value;
+}
+
+static uint8_t mode_code(const char *mode) {
+    if (strcmp(mode, "rr") == 0) {
+        return MODE_CODE_RR;
+    }
+    if (strcmp(mode, "crr") == 0) {
+        return MODE_CODE_CRR;
+    }
+    return MODE_CODE_BULK;
+}
+
+static uint8_t direction_code(const char *direction) {
+    return strcmp(direction, "upload") == 0 ? DIRECTION_CODE_UPLOAD : DIRECTION_CODE_DOWNLOAD;
+}
+
+static uint8_t *frame_control_message(uint8_t type, const uint8_t *payload, uint32_t payload_len,
+                                      size_t *out_len) {
+    uint8_t *out = (uint8_t *)malloc((size_t)payload_len + 5);
+    if (out == NULL) {
+        return NULL;
+    }
+    out[0] = type;
+    encode_be32(out + 1, payload_len);
+    if (payload_len != 0) {
+        memcpy(out + 5, payload, payload_len);
+    }
+    *out_len = (size_t)payload_len + 5;
+    return out;
+}
+
+static uint64_t rr_connection_target(const config_t *cfg) {
+    if (strcmp(cfg->mode, "rr") == 0 && cfg->requests.set) {
+        return cfg->connections < cfg->requests.value ? cfg->connections : cfg->requests.value;
+    }
+    return cfg->connections;
+}
+
+static uint64_t rr_request_limit_for_connection(const config_t *cfg, uint64_t connection_index) {
+    uint64_t connections = rr_connection_target(cfg);
+    if (connections == 0) {
+        return 0;
+    }
+    uint64_t base = cfg->requests.value / connections;
+    uint64_t remainder = cfg->requests.value % connections;
+    return base + (connection_index < remainder ? 1 : 0);
+}
+
+static uint8_t *encode_session_start_message(const config_t *cfg, uint64_t request_limit,
+                                             size_t *out_len) {
+    uint8_t payload[79];
+    encode_be32(payload, PERF_PROTOCOL_VERSION);
+    payload[4] = mode_code(cfg->mode);
+    payload[5] = direction_code(cfg->direction);
+    encode_be64(payload + 6, cfg->request_bytes);
+    encode_be64(payload + 14, cfg->response_bytes);
+    payload[22] = (cfg->total_bytes.set ? 0x01 : 0) | (cfg->requests.set ? 0x02 : 0);
+    encode_be64(payload + 23, cfg->total_bytes.value);
+    encode_be64(payload + 31, cfg->requests.set ? request_limit : cfg->requests.value);
+    encode_be64(payload + 39, cfg->warmup_us);
+    encode_be64(payload + 47, cfg->duration_us);
+    encode_be64(payload + 55, cfg->streams);
+    encode_be64(payload + 63, cfg->connections);
+    encode_be64(payload + 71, cfg->requests_in_flight);
+    return frame_control_message(MESSAGE_SESSION_START, payload, sizeof(payload), out_len);
+}
+
+static uint8_t *encode_session_ready_message(size_t *out_len) {
+    uint8_t payload[4];
+    encode_be32(payload, PERF_PROTOCOL_VERSION);
+    return frame_control_message(MESSAGE_SESSION_READY, payload, sizeof(payload), out_len);
+}
+
+static uint8_t *encode_session_error_message(const char *reason, size_t *out_len) {
+    size_t reason_len = strlen(reason);
+    uint8_t *payload = (uint8_t *)malloc(reason_len + 4);
+    if (payload == NULL) {
+        return NULL;
+    }
+    encode_be32(payload, (uint32_t)reason_len);
+    memcpy(payload + 4, reason, reason_len);
+    uint8_t *out =
+        frame_control_message(MESSAGE_SESSION_ERROR, payload, (uint32_t)(reason_len + 4), out_len);
+    free(payload);
+    return out;
+}
+
+static uint8_t *encode_session_complete_message(uint64_t bytes_sent, uint64_t bytes_received,
+                                                uint64_t requests_completed, size_t *out_len) {
+    uint8_t payload[24];
+    encode_be64(payload, bytes_sent);
+    encode_be64(payload + 8, bytes_received);
+    encode_be64(payload + 16, requests_completed);
+    return frame_control_message(MESSAGE_SESSION_COMPLETE, payload, sizeof(payload), out_len);
+}
+
+static int decode_session_start_payload(const uint8_t *payload, size_t len,
+                                        perf_session_start_t *start) {
+    if (len != 79 || decode_be32(payload) != PERF_PROTOCOL_VERSION) {
+        return -1;
+    }
+    memset(start, 0, sizeof(*start));
+    start->started = 1;
+    start->mode = payload[4];
+    start->direction = payload[5];
+    start->request_bytes = decode_be64(payload + 6);
+    start->response_bytes = decode_be64(payload + 14);
+    uint8_t flags = payload[22];
+    start->total_bytes.value = decode_be64(payload + 23);
+    start->total_bytes.set = (flags & 0x01) != 0;
+    start->requests.value = decode_be64(payload + 31);
+    start->requests.set = (flags & 0x02) != 0;
+    start->warmup_us = decode_be64(payload + 39);
+    start->duration_us = decode_be64(payload + 47);
+    start->streams = decode_be64(payload + 55);
+    start->connections = decode_be64(payload + 63);
+    start->requests_in_flight = decode_be64(payload + 71);
+    if ((start->mode != MODE_CODE_BULK && start->mode != MODE_CODE_RR &&
+         start->mode != MODE_CODE_CRR) ||
+        (start->direction != DIRECTION_CODE_UPLOAD &&
+         start->direction != DIRECTION_CODE_DOWNLOAD) ||
+        start->streams == 0 || start->connections == 0 || start->requests_in_flight == 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static uint64_t server_response_bytes(const perf_session_start_t *start,
+                                      uint64_t requests_completed) {
+    if (start->mode == MODE_CODE_BULK && start->direction == DIRECTION_CODE_DOWNLOAD &&
+        start->total_bytes.set) {
+        uint64_t stream_index = requests_completed > 0 ? requests_completed - 1 : 0;
+        uint64_t per_stream = start->total_bytes.value / start->streams;
+        uint64_t remainder = start->total_bytes.value % start->streams;
+        return per_stream + (stream_index < remainder ? 1 : 0);
+    }
+    if (start->mode == MODE_CODE_BULK && start->direction == DIRECTION_CODE_DOWNLOAD) {
+        return start->response_bytes;
+    }
+    if (start->mode == MODE_CODE_RR || start->mode == MODE_CODE_CRR) {
+        return start->response_bytes;
+    }
+    return 0;
+}
+
+static int should_send_complete(conn_ctx_t *conn) {
+    const perf_session_start_t *start = &conn->session_start;
+    if (conn->server_complete_sent || !start->started) {
+        return 0;
+    }
+    return (start->mode == MODE_CODE_BULK && start->total_bytes.set &&
+            conn->server_requests_completed >= start->streams) ||
+           (start->mode == MODE_CODE_BULK && start->direction == DIRECTION_CODE_UPLOAD &&
+            conn->server_requests_completed >= start->streams) ||
+           (start->mode == MODE_CODE_RR && start->requests.set &&
+            conn->server_requests_completed >= start->requests.value);
+}
+
+static void set_stream_send_buffer(stream_ctx_t *s, uint8_t *buf, size_t len, int fin) {
+    free(s->send_buf);
+    s->send_buf = buf;
+    s->send_len = len;
+    s->sent = 0;
+    s->send_fin_on_complete = fin;
+    s->fin_sent = 0;
+}
+
+static stream_ctx_t *open_control_stream(perf_ctx_t *ctx, conn_ctx_t *conn);
 
 static void init_config(config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
@@ -463,6 +696,7 @@ static void remove_stream(conn_ctx_t *conn, stream_ctx_t *stream) {
         if (*slot == stream) {
             *slot = stream->next;
             free(stream->send_buf);
+            free(stream->control_in);
             free(stream);
             return;
         }
@@ -486,6 +720,7 @@ static void cleanup_ctx(perf_ctx_t *ctx) {
         while (stream != NULL) {
             stream_ctx_t *next_stream = stream->next;
             free(stream->send_buf);
+            free(stream->control_in);
             free(stream);
             stream = next_stream;
         }
@@ -517,12 +752,41 @@ static void push_completed(perf_ctx_t *ctx, completed_stream_t item) {
 static void try_stream_send(stream_ctx_t *stream) {
     while (!stream->fin_sent) {
         perf_ctx_t *ctx = stream->conn->ctx;
+        if (stream->is_control) {
+            size_t remaining = stream->send_len - stream->sent;
+            if (remaining == 0 && !stream->send_fin_on_complete) {
+                stream->fin_sent = 1;
+                return;
+            }
+            size_t chunk = remaining < WRITE_CHUNK_SIZE ? remaining : WRITE_CHUNK_SIZE;
+            uint8_t fin = stream->send_fin_on_complete && chunk == remaining;
+            uint8_t *base = stream->send_buf != NULL ? stream->send_buf + stream->sent : NULL;
+            ssize_t ret = xqc_stream_send(stream->stream, base, chunk, fin);
+            if (ret == -XQC_EAGAIN) {
+                return;
+            }
+            if (ret < 0) {
+                set_error(ctx, "xqc_stream_send failed");
+                return;
+            }
+            stream->sent += (size_t)ret;
+            if (fin && (size_t)ret == chunk) {
+                stream->fin_sent = 1;
+                return;
+            }
+            if (ret == 0) {
+                return;
+            }
+            continue;
+        }
+
         if (stream->conn->ctx->is_server) {
             uint64_t response_remaining = stream->response_bytes - stream->response_sent;
             size_t chunk = (size_t)(response_remaining < WRITE_CHUNK_SIZE ? response_remaining
                                                                           : WRITE_CHUNK_SIZE);
             uint8_t fin = response_remaining == chunk;
-            ssize_t ret = xqc_stream_send(stream->stream, stream->send_buf, chunk, fin);
+            uint8_t *base = stream->send_buf != NULL ? stream->send_buf : NULL;
+            ssize_t ret = xqc_stream_send(stream->stream, base, chunk, fin);
             if (ret == -XQC_EAGAIN) {
                 return;
             }
@@ -597,31 +861,103 @@ static xqc_int_t stream_read_notify(xqc_stream_t *stream, void *strm_user_data) 
             set_error(ctx, "xqc_stream_recv failed");
             return XQC_ERROR;
         }
-        if (ctx->is_server) {
-            size_t offset = 0;
-            if (s->header_len < sizeof(s->header)) {
-                size_t take = sizeof(s->header) - s->header_len;
-                if (take > (size_t)ret) {
-                    take = (size_t)ret;
+
+        if (s->is_control) {
+            if ((size_t)ret > 0) {
+                if (s->control_in_len + (size_t)ret > s->control_in_cap) {
+                    size_t next_cap = s->control_in_cap == 0 ? 128 : s->control_in_cap * 2;
+                    while (next_cap < s->control_in_len + (size_t)ret) {
+                        next_cap *= 2;
+                    }
+                    uint8_t *next = (uint8_t *)realloc(s->control_in, next_cap);
+                    if (next == NULL) {
+                        set_error(ctx, "xquic control allocation failed");
+                        return XQC_ERROR;
+                    }
+                    s->control_in = next;
+                    s->control_in_cap = next_cap;
                 }
-                memcpy(s->header + s->header_len, buf, take);
-                s->header_len += take;
-                offset += take;
-                if (s->header_len == sizeof(s->header)) {
-                    uint64_t req;
-                    uint64_t resp;
-                    memcpy(&req, s->header, sizeof(req));
-                    memcpy(&resp, s->header + sizeof(req), sizeof(resp));
-                    s->request_bytes = ntohll_local(req);
-                    s->response_bytes = ntohll_local(resp);
-                }
+                memcpy(s->control_in + s->control_in_len, buf, (size_t)ret);
+                s->control_in_len += (size_t)ret;
             }
-            s->request_received += (uint64_t)((size_t)ret - offset);
+            if (ctx->is_server) {
+                if (!fin) {
+                    continue;
+                }
+                size_t msg_len = 0;
+                if (s->control_in_len < 5 || s->control_in[0] != MESSAGE_SESSION_START ||
+                    s->control_in_len != (size_t)decode_be32(s->control_in + 1) + 5 ||
+                    decode_session_start_payload(s->control_in + 5, s->control_in_len - 5,
+                                                 &s->conn->session_start) != 0) {
+                    uint8_t *msg = encode_session_error_message("invalid session_start", &msg_len);
+                    if (msg == NULL) {
+                        set_error(ctx, "xquic session_error allocation failed");
+                        return XQC_ERROR;
+                    }
+                    set_stream_send_buffer(s, msg, msg_len, 1);
+                    try_stream_send(s);
+                    return XQC_OK;
+                }
+                s->conn->session_started = 1;
+                s->conn->control_stream = s;
+                uint8_t *msg = encode_session_ready_message(&msg_len);
+                if (msg == NULL) {
+                    set_error(ctx, "xquic session_ready allocation failed");
+                    return XQC_ERROR;
+                }
+                set_stream_send_buffer(s, msg, msg_len, 0);
+                try_stream_send(s);
+            } else {
+                if (s->control_in_len < 5) {
+                    continue;
+                }
+                uint32_t payload_len = decode_be32(s->control_in + 1);
+                if (s->control_in_len < (size_t)payload_len + 5) {
+                    continue;
+                }
+                if (s->control_in_len < 5) {
+                    set_error(ctx, "xquic short control message");
+                    return XQC_ERROR;
+                }
+                uint8_t type = s->control_in[0];
+                if (type == MESSAGE_SESSION_READY && payload_len == 4 &&
+                    decode_be32(s->control_in + 5) == PERF_PROTOCOL_VERSION) {
+                    s->conn->session_ready = 1;
+                } else if (type == MESSAGE_SESSION_ERROR) {
+                    set_error(ctx, "xquic server session_error");
+                    return XQC_ERROR;
+                } else if (type == MESSAGE_SESSION_COMPLETE) {
+                    s->conn->session_ready = 1;
+                } else {
+                    set_error(ctx, "xquic unexpected control message");
+                    return XQC_ERROR;
+                }
+                size_t frame_len = (size_t)payload_len + 5;
+                memmove(s->control_in, s->control_in + frame_len, s->control_in_len - frame_len);
+                s->control_in_len -= frame_len;
+            }
+            return XQC_OK;
+        }
+
+        if (ctx->is_server) {
+            if (!s->conn->session_started) {
+                continue;
+            }
+            s->request_bytes = s->conn->session_start.request_bytes;
+            s->request_received += (uint64_t)ret;
             if (fin) {
                 if (s->request_fin) {
                     return XQC_OK;
                 }
                 s->request_fin = 1;
+                if (s->request_received != s->request_bytes) {
+                    set_error(ctx, "xquic server received unexpected request byte count");
+                    return XQC_ERROR;
+                }
+                s->conn->server_bytes_received += s->request_received;
+                s->conn->server_requests_completed++;
+                s->response_bytes = server_response_bytes(&s->conn->session_start,
+                                                          s->conn->server_requests_completed);
                 s->send_len = (size_t)(s->response_bytes < WRITE_CHUNK_SIZE ? s->response_bytes
                                                                             : WRITE_CHUNK_SIZE);
                 if (s->response_bytes > 0) {
@@ -636,6 +972,20 @@ static xqc_int_t stream_read_notify(xqc_stream_t *stream, void *strm_user_data) 
                 }
                 s->sent = 0;
                 try_stream_send(s);
+                s->conn->server_bytes_sent += s->response_bytes;
+                if (should_send_complete(s->conn) && s->conn->control_stream != NULL) {
+                    size_t msg_len = 0;
+                    uint8_t *msg = encode_session_complete_message(
+                        s->conn->server_bytes_sent, s->conn->server_bytes_received,
+                        s->conn->server_requests_completed, &msg_len);
+                    if (msg == NULL) {
+                        set_error(ctx, "xquic session_complete allocation failed");
+                        return XQC_ERROR;
+                    }
+                    set_stream_send_buffer(s->conn->control_stream, msg, msg_len, 1);
+                    s->conn->server_complete_sent = 1;
+                    try_stream_send(s->conn->control_stream);
+                }
                 return XQC_OK;
             }
         } else {
@@ -674,6 +1024,11 @@ static xqc_int_t stream_create_notify(xqc_stream_t *stream, void *strm_user_data
         s = add_stream(conn);
         if (s == NULL) {
             return XQC_ERROR;
+        }
+        if (conn->ctx->is_server && !conn->server_control_seen && !conn->session_started) {
+            s->is_control = 1;
+            conn->server_control_seen = 1;
+            conn->control_stream = s;
         }
     }
     s->conn = conn;
@@ -1028,6 +1383,18 @@ static int open_connections(perf_ctx_t *ctx, uint64_t count) {
         if (ctx->error || conn == NULL) {
             return -1;
         }
+        conn->request_limit = rr_request_limit_for_connection(&ctx->cfg, i);
+        if (open_control_stream(ctx, conn) == NULL) {
+            return -1;
+        }
+        uint64_t deadline = now_us() + 10000000ULL;
+        while (!conn->session_ready && !ctx->error && now_us() < deadline) {
+            drive_once(ctx, deadline);
+        }
+        if (!conn->session_ready && !ctx->error) {
+            set_error(ctx, "xquic session_ready timed out");
+            return -1;
+        }
     }
     return 0;
 }
@@ -1041,6 +1408,34 @@ static conn_ctx_t *connection_at(perf_ctx_t *ctx, uint64_t index) {
         current++;
     }
     return NULL;
+}
+
+static stream_ctx_t *open_control_stream(perf_ctx_t *ctx, conn_ctx_t *conn) {
+    stream_ctx_t *s = add_stream(conn);
+    if (s == NULL) {
+        set_error(ctx, "xquic control stream allocation failed");
+        return NULL;
+    }
+    s->is_control = 1;
+    s->send_fin_on_complete = 1;
+    size_t msg_len = 0;
+    uint8_t *msg = encode_session_start_message(&ctx->cfg, conn->request_limit, &msg_len);
+    if (msg == NULL) {
+        remove_stream(conn, s);
+        set_error(ctx, "xquic session_start allocation failed");
+        return NULL;
+    }
+    set_stream_send_buffer(s, msg, msg_len, 1);
+    s->stream = xqc_stream_create(ctx->engine, &conn->cid, NULL, s);
+    if (s->stream == NULL) {
+        remove_stream(conn, s);
+        set_error(ctx, "xqc_stream_create control failed");
+        return NULL;
+    }
+    conn->control_stream = s;
+    try_stream_send(s);
+    xqc_engine_main_logic(ctx->engine);
+    return s;
 }
 
 static stream_ctx_t *open_request(perf_ctx_t *ctx, conn_ctx_t *conn, int counts,
@@ -1058,17 +1453,13 @@ static stream_ctx_t *open_request(perf_ctx_t *ctx, conn_ctx_t *conn, int counts,
     s->response_bytes = response_bytes;
     s->counts = counts;
     s->started_at = now_us();
-    s->send_len = (size_t)(16 + request_bytes);
+    s->send_len = (size_t)request_bytes;
     s->send_buf = (uint8_t *)malloc(s->send_len == 0 ? 1 : s->send_len);
     if (s->send_buf == NULL) {
         set_error(ctx, "xquic request allocation failed");
         return NULL;
     }
-    uint64_t req = htonll_local(request_bytes);
-    uint64_t res = htonll_local(response_bytes);
-    memcpy(s->send_buf, &req, sizeof(req));
-    memcpy(s->send_buf + sizeof(req), &res, sizeof(res));
-    memset(s->send_buf + 16, 0x5a, (size_t)request_bytes);
+    memset(s->send_buf, 0x5a, (size_t)request_bytes);
     s->stream = xqc_stream_create(ctx->engine, &conn->cid, NULL, s);
     if (s->stream == NULL) {
         set_error(ctx, "xqc_stream_create failed");
@@ -1084,7 +1475,9 @@ static size_t active_streams(perf_ctx_t *ctx) {
     size_t count = 0;
     for (conn_ctx_t *c = ctx->conns; c != NULL; c = c->next) {
         for (stream_ctx_t *s = c->streams; s != NULL; s = s->next) {
-            count++;
+            if (!s->is_control) {
+                count++;
+            }
         }
     }
     return count;
@@ -1093,9 +1486,36 @@ static size_t active_streams(perf_ctx_t *ctx) {
 static size_t active_streams_for_conn(conn_ctx_t *conn) {
     size_t count = 0;
     for (stream_ctx_t *s = conn->streams; s != NULL; s = s->next) {
-        count++;
+        if (!s->is_control) {
+            count++;
+        }
     }
     return count;
+}
+
+static void open_rr_refill(config_t *cfg, perf_ctx_t *ctx, uint64_t *started,
+                           uint64_t measure_start, uint64_t deadline) {
+    uint64_t connections = rr_connection_target(cfg);
+    for (uint64_t i = 0; !ctx->error && i < connections; ++i) {
+        conn_ctx_t *conn = connection_at(ctx, i);
+        while (conn != NULL && active_streams_for_conn(conn) < cfg->requests_in_flight) {
+            if (cfg->requests.set) {
+                if (*started >= cfg->requests.value) {
+                    return;
+                }
+                if (conn->started_requests >= conn->request_limit) {
+                    break;
+                }
+            }
+            if (!cfg->requests.set && now_us() >= deadline) {
+                return;
+            }
+            open_request(ctx, conn, cfg->requests.set || now_us() >= measure_start,
+                         cfg->request_bytes, cfg->response_bytes);
+            conn->started_requests++;
+            (*started)++;
+        }
+    }
 }
 
 static void append_latency(counters_t *c, uint64_t latency) {
@@ -1143,7 +1563,8 @@ static void run_timed_bulk_download(config_t *cfg, counters_t *c) {
         fprintf(stderr, "could not initialize xquic client\n");
         exit(1);
     }
-    if (!ctx->error && open_connections(ctx, cfg->connections) != 0) {
+    uint64_t connections = rr_connection_target(cfg);
+    if (!ctx->error && open_connections(ctx, connections) != 0) {
         set_error(ctx, "could not connect xquic client");
     }
     uint64_t measure_start = now_us() + cfg->warmup_us;
@@ -1217,15 +1638,7 @@ static void run_rr(config_t *cfg, counters_t *c) {
     uint64_t measure_start = now_us() + cfg->warmup_us;
     uint64_t deadline = measure_start + cfg->duration_us;
     uint64_t started = 0;
-    uint64_t target_active = cfg->requests_in_flight * cfg->connections;
-    uint64_t next_conn = 0;
-    while (!ctx->error && started < target_active &&
-           (!cfg->requests.set || started < cfg->requests.value)) {
-        conn_ctx_t *conn = connection_at(ctx, next_conn++ % cfg->connections);
-        open_request(ctx, conn, cfg->requests.set || now_us() >= measure_start, cfg->request_bytes,
-                     cfg->response_bytes);
-        started++;
-    }
+    open_rr_refill(cfg, ctx, &started, measure_start, deadline);
     while (!ctx->error) {
         if (!cfg->requests.set && now_us() >= deadline) {
             break;
@@ -1235,18 +1648,7 @@ static void run_rr(config_t *cfg, counters_t *c) {
         }
         drive_once(ctx, deadline);
         consume_completed(ctx, c, measure_start, 0);
-        while (active_streams(ctx) < target_active) {
-            if (cfg->requests.set && started >= cfg->requests.value) {
-                break;
-            }
-            if (!cfg->requests.set && now_us() >= deadline) {
-                break;
-            }
-            conn_ctx_t *conn = connection_at(ctx, next_conn++ % cfg->connections);
-            open_request(ctx, conn, cfg->requests.set || now_us() >= measure_start,
-                         cfg->request_bytes, cfg->response_bytes);
-            started++;
-        }
+        open_rr_refill(cfg, ctx, &started, measure_start, deadline);
     }
     if (ctx->error) {
         fprintf(stderr, "%s\n", ctx->error_message);

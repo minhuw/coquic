@@ -18,8 +18,19 @@ use tquic::TlsConfig;
 use tquic::TransportHandler;
 use tquic_tools::QuicSocket;
 
-const PROTOCOL_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 1;
+const PERF_PROTOCOL_VERSION: u32 = 3;
 const APPLICATION_PROTOCOL: &[u8] = b"coquic-perf/1";
+const CONTROL_STREAM_ID: u64 = 0;
+const MESSAGE_SESSION_START: u8 = 1;
+const MESSAGE_SESSION_READY: u8 = 2;
+const MESSAGE_SESSION_ERROR: u8 = 3;
+const MESSAGE_SESSION_COMPLETE: u8 = 4;
+const MODE_CODE_BULK: u8 = 0;
+const MODE_CODE_RR: u8 = 1;
+const MODE_CODE_CRR: u8 = 2;
+const DIRECTION_CODE_UPLOAD: u8 = 0;
+const DIRECTION_CODE_DOWNLOAD: u8 = 1;
 const MAX_BUF_SIZE: usize = 65_536;
 const READ_CHUNK_SIZE: usize = 65_536;
 const WRITE_CHUNK_SIZE: usize = 32 * 1024;
@@ -147,11 +158,18 @@ struct ClientConn {
     ready: bool,
     closing: bool,
     request_opened: bool,
+    request_limit: Option<u64>,
+    requests_started: u64,
+    control_stream: Option<u64>,
+    control_message: Vec<u8>,
+    control_sent: usize,
+    control_recv: Vec<u8>,
     streams: HashMap<u64, ClientStream>,
 }
 
-#[derive(Default)]
 struct ClientShared {
+    cfg: Config,
+    next_connection_position: u64,
     conns: HashMap<u64, ClientConn>,
     completed: VecDeque<CompletedStream>,
     active_streams: u64,
@@ -163,9 +181,45 @@ struct ClientHandler {
     shared: Rc<RefCell<ClientShared>>,
 }
 
+impl ClientShared {
+    fn new(cfg: &Config) -> Self {
+        Self {
+            cfg: cfg.clone(),
+            next_connection_position: 0,
+            conns: HashMap::new(),
+            completed: VecDeque::new(),
+            active_streams: 0,
+            started_requests: 0,
+            failure: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SessionStart {
+    mode: String,
+    direction: String,
+    request_bytes: u64,
+    response_bytes: u64,
+    total_bytes: OptionalU64,
+    requests: OptionalU64,
+    warmup: Duration,
+    duration: Duration,
+    streams: u64,
+    connections: u64,
+    requests_in_flight: u64,
+}
+
+#[derive(Default)]
+struct ControlMessage {
+    message_type: u8,
+    ready: bool,
+    error_reason: String,
+    start: Option<SessionStart>,
+}
+
+#[derive(Default)]
 struct ServerStream {
-    header: [u8; 16],
-    header_len: usize,
     request_bytes: u64,
     response_bytes: u64,
     request_received: u64,
@@ -173,22 +227,17 @@ struct ServerStream {
     response_fin: bool,
 }
 
-impl Default for ServerStream {
-    fn default() -> Self {
-        Self {
-            header: [0; 16],
-            header_len: 0,
-            request_bytes: 0,
-            response_bytes: 0,
-            request_received: 0,
-            response_sent: 0,
-            response_fin: false,
-        }
-    }
-}
-
 #[derive(Default)]
 struct ServerConn {
+    start: Option<SessionStart>,
+    control_bytes: Vec<u8>,
+    control_out: Vec<u8>,
+    control_sent: usize,
+    control_fin: bool,
+    bytes_sent: u64,
+    bytes_received: u64,
+    requests_completed: u64,
+    complete_sent: bool,
     streams: HashMap<u64, ServerStream>,
 }
 
@@ -372,6 +421,221 @@ fn parse_duration(value: &str) -> Result<Duration, AnyError> {
     Err(format!("invalid duration: {value}").into())
 }
 
+fn mode_code(mode: &str) -> u8 {
+    match mode {
+        MODE_RR => MODE_CODE_RR,
+        MODE_CRR => MODE_CODE_CRR,
+        _ => MODE_CODE_BULK,
+    }
+}
+
+fn direction_code(direction: &str) -> u8 {
+    if direction == DIRECTION_UPLOAD {
+        DIRECTION_CODE_UPLOAD
+    } else {
+        DIRECTION_CODE_DOWNLOAD
+    }
+}
+
+fn make_session_start(cfg: &Config) -> SessionStart {
+    make_session_start_with_request_limit(cfg, None)
+}
+
+fn make_session_start_with_request_limit(cfg: &Config, request_limit: Option<u64>) -> SessionStart {
+    SessionStart {
+        mode: cfg.mode.clone(),
+        direction: cfg.direction.clone(),
+        request_bytes: cfg.request_bytes,
+        response_bytes: cfg.response_bytes,
+        total_bytes: cfg.total_bytes,
+        requests: request_limit
+            .map(|value| OptionalU64 { value, set: true })
+            .unwrap_or(cfg.requests),
+        warmup: cfg.warmup,
+        duration: cfg.duration,
+        streams: cfg.streams,
+        connections: cfg.connections,
+        requests_in_flight: cfg.requests_in_flight,
+    }
+}
+
+fn frame_control_message(message_type: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + payload.len());
+    out.push(message_type);
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+fn append_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn encode_session_start(start: &SessionStart) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(79);
+    payload.extend_from_slice(&PERF_PROTOCOL_VERSION.to_be_bytes());
+    payload.push(mode_code(&start.mode));
+    payload.push(direction_code(&start.direction));
+    append_u64(&mut payload, start.request_bytes);
+    append_u64(&mut payload, start.response_bytes);
+    payload.push(
+        (if start.total_bytes.set { 0x01 } else { 0 })
+            | (if start.requests.set { 0x02 } else { 0 }),
+    );
+    append_u64(&mut payload, start.total_bytes.value);
+    append_u64(&mut payload, start.requests.value);
+    append_u64(&mut payload, start.warmup.as_micros() as u64);
+    append_u64(&mut payload, start.duration.as_micros() as u64);
+    append_u64(&mut payload, start.streams);
+    append_u64(&mut payload, start.connections);
+    append_u64(&mut payload, start.requests_in_flight);
+    frame_control_message(MESSAGE_SESSION_START, &payload)
+}
+
+fn encode_session_ready() -> Vec<u8> {
+    frame_control_message(MESSAGE_SESSION_READY, &PERF_PROTOCOL_VERSION.to_be_bytes())
+}
+
+fn encode_session_error(reason: &str) -> Vec<u8> {
+    let reason = reason.as_bytes();
+    let mut payload = Vec::with_capacity(4 + reason.len());
+    payload.extend_from_slice(&(reason.len() as u32).to_be_bytes());
+    payload.extend_from_slice(reason);
+    frame_control_message(MESSAGE_SESSION_ERROR, &payload)
+}
+
+fn encode_session_complete(
+    bytes_sent: u64,
+    bytes_received: u64,
+    requests_completed: u64,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(24);
+    append_u64(&mut payload, bytes_sent);
+    append_u64(&mut payload, bytes_received);
+    append_u64(&mut payload, requests_completed);
+    frame_control_message(MESSAGE_SESSION_COMPLETE, &payload)
+}
+
+fn decode_control_message(data: &[u8]) -> Result<ControlMessage, AnyError> {
+    if data.len() < 5 {
+        return Err("short control message".into());
+    }
+    let message_type = data[0];
+    let payload_len = u32::from_be_bytes(data[1..5].try_into().unwrap()) as usize;
+    if data.len() != payload_len + 5 {
+        return Err("malformed control message length".into());
+    }
+    let payload = &data[5..];
+    let mut msg = ControlMessage {
+        message_type,
+        ..ControlMessage::default()
+    };
+    match message_type {
+        MESSAGE_SESSION_START => {
+            if payload.len() != 79
+                || u32::from_be_bytes(payload[0..4].try_into().unwrap()) != PERF_PROTOCOL_VERSION
+            {
+                return Err("malformed session_start".into());
+            }
+            let mode = match payload[4] {
+                MODE_CODE_BULK => MODE_BULK,
+                MODE_CODE_RR => MODE_RR,
+                MODE_CODE_CRR => MODE_CRR,
+                _ => return Err("malformed session_start mode".into()),
+            };
+            let direction = match payload[5] {
+                DIRECTION_CODE_UPLOAD => DIRECTION_UPLOAD,
+                DIRECTION_CODE_DOWNLOAD => DIRECTION_DOWNLOAD,
+                _ => return Err("malformed session_start direction".into()),
+            };
+            let flags = payload[22];
+            let start = SessionStart {
+                mode: mode.to_string(),
+                direction: direction.to_string(),
+                request_bytes: u64::from_be_bytes(payload[6..14].try_into().unwrap()),
+                response_bytes: u64::from_be_bytes(payload[14..22].try_into().unwrap()),
+                total_bytes: OptionalU64 {
+                    value: u64::from_be_bytes(payload[23..31].try_into().unwrap()),
+                    set: flags & 0x01 != 0,
+                },
+                requests: OptionalU64 {
+                    value: u64::from_be_bytes(payload[31..39].try_into().unwrap()),
+                    set: flags & 0x02 != 0,
+                },
+                warmup: Duration::from_micros(u64::from_be_bytes(
+                    payload[39..47].try_into().unwrap(),
+                )),
+                duration: Duration::from_micros(u64::from_be_bytes(
+                    payload[47..55].try_into().unwrap(),
+                )),
+                streams: u64::from_be_bytes(payload[55..63].try_into().unwrap()),
+                connections: u64::from_be_bytes(payload[63..71].try_into().unwrap()),
+                requests_in_flight: u64::from_be_bytes(payload[71..79].try_into().unwrap()),
+            };
+            if start.streams == 0 || start.connections == 0 || start.requests_in_flight == 0 {
+                return Err("malformed session_start counts".into());
+            }
+            msg.start = Some(start);
+        }
+        MESSAGE_SESSION_READY => {
+            if payload.len() != 4
+                || u32::from_be_bytes(payload.try_into().unwrap()) != PERF_PROTOCOL_VERSION
+            {
+                return Err("malformed session_ready".into());
+            }
+            msg.ready = true;
+        }
+        MESSAGE_SESSION_ERROR => {
+            if payload.len() < 4 {
+                return Err("malformed session_error".into());
+            }
+            let len = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as usize;
+            if payload.len() != len + 4 {
+                return Err("malformed session_error length".into());
+            }
+            msg.error_reason = String::from_utf8_lossy(&payload[4..]).into_owned();
+        }
+        MESSAGE_SESSION_COMPLETE => {}
+        _ => return Err("unknown control message".into()),
+    }
+    Ok(msg)
+}
+
+fn server_response_bytes(start: &SessionStart, requests_completed: u64) -> u64 {
+    if start.mode == MODE_BULK && start.direction == DIRECTION_DOWNLOAD && start.total_bytes.set {
+        let stream_index = requests_completed.saturating_sub(1);
+        let per_stream = start.total_bytes.value / start.streams;
+        let remainder = start.total_bytes.value % start.streams;
+        return per_stream + u64::from(stream_index < remainder);
+    }
+    if start.mode == MODE_BULK && start.direction == DIRECTION_DOWNLOAD {
+        return start.response_bytes;
+    }
+    if start.mode == MODE_RR || start.mode == MODE_CRR {
+        return start.response_bytes;
+    }
+    0
+}
+
+fn should_send_complete(conn_state: &ServerConn) -> bool {
+    let Some(start) = &conn_state.start else {
+        return false;
+    };
+    if conn_state.complete_sent {
+        return false;
+    }
+    (start.mode == MODE_BULK
+        && start.direction == DIRECTION_DOWNLOAD
+        && start.total_bytes.set
+        && conn_state.requests_completed >= start.streams)
+        || (start.mode == MODE_BULK
+            && start.direction == DIRECTION_UPLOAD
+            && conn_state.requests_completed >= start.streams)
+        || (start.mode == MODE_RR
+            && start.requests.set
+            && conn_state.requests_completed >= start.requests.value)
+}
+
 fn run_server(cfg: Config) -> Result<(), AnyError> {
     let local: SocketAddr = format!("{}:{}", cfg.host, cfg.port).parse()?;
     let poll = mio::Poll::new()?;
@@ -415,7 +679,7 @@ fn run_client(cfg: &Config) -> Result<RunSummary, AnyError> {
         }
         MODE_RR => {
             let mut driver = new_client_driver(cfg)?;
-            open_connections(&mut driver, cfg.connections)?;
+            open_connections(&mut driver, rr_connection_target(cfg))?;
             let run_start = Instant::now();
             run_rr(cfg, &mut driver, &mut counters)?;
             if cfg.requests.set {
@@ -456,7 +720,7 @@ fn new_client_driver(cfg: &Config) -> Result<ClientDriver, AnyError> {
     let local = unspecified_addr(remote);
     let poll = mio::Poll::new()?;
     let sock = Rc::new(QuicSocket::new(&local, poll.registry())?);
-    let shared = Rc::new(RefCell::new(ClientShared::default()));
+    let shared = Rc::new(RefCell::new(ClientShared::new(cfg)));
     let handler = ClientHandler {
         shared: shared.clone(),
     };
@@ -604,27 +868,11 @@ fn run_timed_bulk(
 ) -> Result<(), AnyError> {
     let measure_start = Instant::now() + cfg.warmup;
     let measure_deadline = measure_start + cfg.duration;
-    let target_active = cfg.streams * cfg.connections;
-    let mut next_conn = 0_u64;
-    fill_bulk_streams(
-        cfg,
-        driver,
-        target_active,
-        measure_start,
-        measure_deadline,
-        &mut next_conn,
-    )?;
+    fill_bulk_streams(cfg, driver, measure_start, measure_deadline)?;
     while Instant::now() < measure_deadline {
         driver.io.process_once(DRIVE_TICK)?;
         drain_completed(driver, counters, false, Some(measure_deadline))?;
-        fill_bulk_streams(
-            cfg,
-            driver,
-            target_active,
-            measure_start,
-            measure_deadline,
-            &mut next_conn,
-        )?;
+        fill_bulk_streams(cfg, driver, measure_start, measure_deadline)?;
         check_client_failure(driver)?;
     }
     Ok(())
@@ -633,35 +881,32 @@ fn run_timed_bulk(
 fn fill_bulk_streams(
     cfg: &Config,
     driver: &mut ClientDriver,
-    target_active: u64,
     measure_start: Instant,
     measure_deadline: Instant,
-    next_conn: &mut u64,
 ) -> Result<(), AnyError> {
     let ready = ready_conn_indices(driver);
-    if ready.is_empty() {
-        return Ok(());
-    }
-    while active_streams(driver) < target_active && Instant::now() < measure_deadline {
-        let request_bytes = if cfg.direction == DIRECTION_UPLOAD {
-            cmp::max(cfg.request_bytes, cfg.response_bytes)
-        } else {
-            0
-        };
-        let response_bytes = if cfg.direction == DIRECTION_UPLOAD {
-            0
-        } else {
-            cfg.response_bytes
-        };
-        let conn_index = ready[(*next_conn as usize) % ready.len()];
-        *next_conn += 1;
-        open_request_stream(
-            driver,
-            conn_index,
-            request_bytes,
-            response_bytes,
-            Instant::now() >= measure_start,
-        )?;
+    for conn_index in ready {
+        while active_streams_for_conn(driver, conn_index) < cfg.streams
+            && Instant::now() < measure_deadline
+        {
+            let request_bytes = if cfg.direction == DIRECTION_UPLOAD {
+                cmp::max(cfg.request_bytes, cfg.response_bytes)
+            } else {
+                0
+            };
+            let response_bytes = if cfg.direction == DIRECTION_UPLOAD {
+                0
+            } else {
+                cfg.response_bytes
+            };
+            open_request_stream(
+                driver,
+                conn_index,
+                request_bytes,
+                response_bytes,
+                Instant::now() >= measure_start,
+            )?;
+        }
     }
     Ok(())
 }
@@ -673,30 +918,14 @@ fn run_rr(
 ) -> Result<(), AnyError> {
     let measure_start = Instant::now() + cfg.warmup;
     let measure_deadline = measure_start + cfg.duration;
-    let target_active = cfg.requests_in_flight * cfg.connections;
-    let mut next_conn = 0_u64;
-    fill_rr_streams(
-        cfg,
-        driver,
-        target_active,
-        measure_start,
-        measure_deadline,
-        &mut next_conn,
-    )?;
+    fill_rr_streams(cfg, driver, measure_start, measure_deadline)?;
     loop {
         if rr_done(cfg, driver, measure_deadline) {
             break;
         }
         driver.io.process_once(DRIVE_TICK)?;
         drain_completed(driver, counters, true, Some(measure_deadline))?;
-        fill_rr_streams(
-            cfg,
-            driver,
-            target_active,
-            measure_start,
-            measure_deadline,
-            &mut next_conn,
-        )?;
+        fill_rr_streams(cfg, driver, measure_start, measure_deadline)?;
         check_client_failure(driver)?;
     }
     Ok(())
@@ -705,33 +934,71 @@ fn run_rr(
 fn fill_rr_streams(
     cfg: &Config,
     driver: &mut ClientDriver,
-    target_active: u64,
     measure_start: Instant,
     measure_deadline: Instant,
-    next_conn: &mut u64,
 ) -> Result<(), AnyError> {
     let ready = ready_conn_indices(driver);
-    if ready.is_empty() {
-        return Ok(());
-    }
-    while active_streams(driver) < target_active {
-        if cfg.requests.set && started_requests(driver) >= cfg.requests.value {
-            break;
+    for conn_index in ready {
+        while active_streams_for_conn(driver, conn_index) < cfg.requests_in_flight {
+            if cfg.requests.set && started_requests(driver) >= cfg.requests.value {
+                return Ok(());
+            }
+            if !can_start_rr_request(cfg, driver, conn_index) {
+                break;
+            }
+            if !cfg.requests.set && Instant::now() >= measure_deadline {
+                return Ok(());
+            }
+            open_request_stream(
+                driver,
+                conn_index,
+                cfg.request_bytes,
+                cfg.response_bytes,
+                cfg.requests.set || Instant::now() >= measure_start,
+            )?;
         }
-        if !cfg.requests.set && Instant::now() >= measure_deadline {
-            break;
-        }
-        let conn_index = ready[(*next_conn as usize) % ready.len()];
-        *next_conn += 1;
-        open_request_stream(
-            driver,
-            conn_index,
-            cfg.request_bytes,
-            cfg.response_bytes,
-            cfg.requests.set || Instant::now() >= measure_start,
-        )?;
     }
     Ok(())
+}
+
+fn rr_connection_target(cfg: &Config) -> u64 {
+    if cfg.mode == MODE_RR && cfg.requests.set {
+        cfg.connections.min(cfg.requests.value)
+    } else {
+        cfg.connections
+    }
+}
+
+fn rr_request_limit_for_connection(cfg: &Config, connection_position: u64) -> Option<u64> {
+    if cfg.mode != MODE_RR || !cfg.requests.set {
+        return None;
+    }
+    let connections = rr_connection_target(cfg);
+    if connections == 0 {
+        return Some(0);
+    }
+    let base = cfg.requests.value / connections;
+    let remainder = cfg.requests.value % connections;
+    Some(base + u64::from(connection_position < remainder))
+}
+
+fn can_start_rr_request(cfg: &Config, driver: &ClientDriver, conn_index: u64) -> bool {
+    if !cfg.requests.set {
+        return true;
+    }
+    let shared = driver.shared.borrow();
+    if shared.started_requests >= cfg.requests.value {
+        return false;
+    }
+    shared
+        .conns
+        .get(&conn_index)
+        .map(|conn| {
+            conn.request_limit
+                .map(|limit| conn.requests_started < limit)
+                .unwrap_or(true)
+        })
+        .unwrap_or(false)
 }
 
 fn rr_done(cfg: &Config, driver: &ClientDriver, measure_deadline: Instant) -> bool {
@@ -868,6 +1135,7 @@ fn open_request_stream(
                 counts,
             },
         );
+        conn_state.requests_started += 1;
         shared.active_streams += 1;
         shared.started_requests += 1;
     }
@@ -939,6 +1207,16 @@ fn active_streams(driver: &ClientDriver) -> u64 {
     driver.shared.borrow().active_streams
 }
 
+fn active_streams_for_conn(driver: &ClientDriver, conn_index: u64) -> u64 {
+    driver
+        .shared
+        .borrow()
+        .conns
+        .get(&conn_index)
+        .map(|conn| conn.streams.len() as u64)
+        .unwrap_or(0)
+}
+
 fn started_requests(driver: &ClientDriver) -> u64 {
     driver.shared.borrow().started_requests
 }
@@ -1006,18 +1284,50 @@ impl EndpointDriver {
 impl TransportHandler for ClientHandler {
     fn on_conn_created(&mut self, conn: &mut Connection) {
         if let Some(index) = conn.index() {
-            self.shared
-                .borrow_mut()
-                .conns
-                .entry(index)
-                .or_insert_with(ClientConn::default);
+            let mut shared = self.shared.borrow_mut();
+            if !shared.conns.contains_key(&index) {
+                let position = shared.next_connection_position;
+                shared.next_connection_position += 1;
+                let request_limit = rr_request_limit_for_connection(&shared.cfg, position);
+                let control_message = encode_session_start(&make_session_start_with_request_limit(
+                    &shared.cfg,
+                    request_limit,
+                ));
+                shared.conns.insert(
+                    index,
+                    ClientConn {
+                        request_limit,
+                        control_message,
+                        ..ClientConn::default()
+                    },
+                );
+            }
         }
     }
 
     fn on_conn_established(&mut self, conn: &mut Connection) {
         if let Some(index) = conn.index() {
-            if let Some(state) = self.shared.borrow_mut().conns.get_mut(&index) {
-                state.ready = true;
+            let mut shared = self.shared.borrow_mut();
+            if let Some(state) = shared.conns.get_mut(&index) {
+                match conn.stream_bidi_new(0, false) {
+                    Ok(stream_id) if stream_id == CONTROL_STREAM_ID => {
+                        state.control_stream = Some(stream_id);
+                        let _ = conn.stream_want_read(stream_id, true);
+                        client_write_control(&mut shared, conn, stream_id);
+                    }
+                    Ok(stream_id) => {
+                        set_client_failure(
+                            &mut shared,
+                            format!("unexpected tquic control stream id {stream_id}"),
+                        );
+                    }
+                    Err(err) => {
+                        set_client_failure(
+                            &mut shared,
+                            format!("tquic control stream open failed: {err:?}"),
+                        );
+                    }
+                }
             }
         }
     }
@@ -1057,6 +1367,10 @@ impl TransportHandler for ClientHandler {
 }
 
 fn client_write_stream(shared: &mut ClientShared, conn: &mut Connection, stream_id: u64) {
+    if stream_id == CONTROL_STREAM_ID {
+        client_write_control(shared, conn, stream_id);
+        return;
+    }
     let Some(index) = conn.index() else {
         return;
     };
@@ -1066,11 +1380,11 @@ fn client_write_stream(shared: &mut ClientShared, conn: &mut Connection, stream_
     let Some(stream) = conn_state.streams.get_mut(&stream_id) else {
         return;
     };
-    let total = 16 + stream.request_bytes;
+    let total = stream.request_bytes;
     while stream.request_sent < total {
         let remaining = total - stream.request_sent;
         let chunk_len = cmp::min(WRITE_CHUNK_SIZE as u64, remaining) as usize;
-        let chunk = build_request_chunk(stream, chunk_len);
+        let chunk = vec![0x5a; chunk_len];
         let fin = stream.request_sent + chunk_len as u64 == total;
         match conn.stream_write(stream_id, Bytes::from(chunk), fin) {
             Ok(0) | Err(QuicError::Done) => {
@@ -1093,25 +1407,124 @@ fn client_write_stream(shared: &mut ClientShared, conn: &mut Connection, stream_
             }
         }
     }
+    if total == 0 {
+        match conn.stream_write(stream_id, Bytes::new(), true) {
+            Ok(_) => {}
+            Err(QuicError::Done) => {
+                let _ = conn.stream_want_write(stream_id, true);
+                return;
+            }
+            Err(err) => {
+                set_client_failure(
+                    shared,
+                    format!("tquic stream {stream_id} finish failed: {err:?}"),
+                );
+                return;
+            }
+        }
+    }
     let _ = conn.stream_want_write(stream_id, false);
 }
 
-fn build_request_chunk(stream: &ClientStream, chunk_len: usize) -> Vec<u8> {
-    let mut out = vec![0x5a; chunk_len];
-    let base = stream.request_sent;
-    for (i, byte) in out.iter_mut().enumerate() {
-        let absolute = base + i as u64;
-        if absolute < 8 {
-            *byte = ((stream.request_bytes >> (56 - absolute * 8)) & 0xff) as u8;
-        } else if absolute < 16 {
-            let shift = 56 - (absolute - 8) * 8;
-            *byte = ((stream.response_bytes >> shift) & 0xff) as u8;
+fn client_write_control(shared: &mut ClientShared, conn: &mut Connection, stream_id: u64) {
+    let Some(index) = conn.index() else {
+        return;
+    };
+    let Some(conn_state) = shared.conns.get_mut(&index) else {
+        return;
+    };
+    while conn_state.control_sent < conn_state.control_message.len() {
+        match conn.stream_write(
+            stream_id,
+            Bytes::copy_from_slice(&conn_state.control_message[conn_state.control_sent..]),
+            true,
+        ) {
+            Ok(0) | Err(QuicError::Done) => {
+                let _ = conn.stream_want_write(stream_id, true);
+                return;
+            }
+            Ok(written) => {
+                conn_state.control_sent += written;
+                if conn_state.control_sent < conn_state.control_message.len() {
+                    let _ = conn.stream_want_write(stream_id, true);
+                    return;
+                }
+            }
+            Err(err) => {
+                set_client_failure(
+                    shared,
+                    format!("tquic control stream write failed: {err:?}"),
+                );
+                return;
+            }
         }
     }
-    out
+    let _ = conn.stream_want_write(stream_id, false);
+}
+
+fn client_read_control(shared: &mut ClientShared, conn: &mut Connection, stream_id: u64) {
+    let Some(index) = conn.index() else {
+        return;
+    };
+    let mut failure = None;
+    let mut ready = false;
+    {
+        let Some(conn_state) = shared.conns.get_mut(&index) else {
+            return;
+        };
+        let mut buf = [0u8; READ_CHUNK_SIZE];
+        loop {
+            match conn.stream_read(stream_id, &mut buf) {
+                Ok((read, _fin)) => {
+                    if read != 0 {
+                        conn_state.control_recv.extend_from_slice(&buf[..read]);
+                    }
+                    if conn_state.control_recv.len() >= 5 {
+                        let len =
+                            u32::from_be_bytes(conn_state.control_recv[1..5].try_into().unwrap())
+                                as usize;
+                        if conn_state.control_recv.len() >= len + 5 {
+                            match decode_control_message(&conn_state.control_recv[..len + 5]) {
+                                Ok(msg)
+                                    if msg.message_type == MESSAGE_SESSION_READY && msg.ready =>
+                                {
+                                    ready = true;
+                                }
+                                Ok(msg) if msg.message_type == MESSAGE_SESSION_ERROR => {
+                                    failure =
+                                        Some(format!("server session error: {}", msg.error_reason));
+                                }
+                                Ok(_) => failure = Some("unexpected control message".to_string()),
+                                Err(err) => failure = Some(err.to_string()),
+                            }
+                        }
+                    }
+                    if read == 0 {
+                        break;
+                    }
+                }
+                Err(QuicError::Done) => break,
+                Err(err) => {
+                    failure = Some(format!("tquic control stream read failed: {err:?}"));
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(failure) = failure {
+        set_client_failure(shared, failure);
+    } else if ready {
+        if let Some(conn_state) = shared.conns.get_mut(&index) {
+            conn_state.ready = true;
+        }
+    }
 }
 
 fn client_read_stream(shared: &mut ClientShared, conn: &mut Connection, stream_id: u64) {
+    if stream_id == CONTROL_STREAM_ID {
+        client_read_control(shared, conn, stream_id);
+        return;
+    }
     let Some(index) = conn.index() else {
         return;
     };
@@ -1230,36 +1643,71 @@ fn server_read_stream(conns: &mut HashMap<u64, ServerConn>, conn: &mut Connectio
         return;
     };
     let conn_state = conns.entry(index).or_insert_with(ServerConn::default);
+    if stream_id == CONTROL_STREAM_ID {
+        let mut buf = [0u8; READ_CHUNK_SIZE];
+        loop {
+            match conn.stream_read(stream_id, &mut buf) {
+                Ok((read, fin)) => {
+                    if read != 0 {
+                        conn_state.control_bytes.extend_from_slice(&buf[..read]);
+                    }
+                    if fin {
+                        match decode_control_message(&conn_state.control_bytes) {
+                            Ok(msg) => {
+                                if let Some(start) = msg.start {
+                                    conn_state.start = Some(start);
+                                    conn_state.control_out = encode_session_ready();
+                                } else {
+                                    conn_state.control_out =
+                                        encode_session_error("expected session_start");
+                                    conn_state.control_fin = true;
+                                }
+                            }
+                            Err(_) => {
+                                conn_state.control_out =
+                                    encode_session_error("invalid session_start");
+                                conn_state.control_fin = true;
+                            }
+                        }
+                        let _ = conn.stream_want_write(stream_id, true);
+                        server_write_control(conns, conn, stream_id);
+                        return;
+                    }
+                    if read == 0 {
+                        break;
+                    }
+                }
+                Err(QuicError::Done) => break,
+                Err(_) => {
+                    let _ = conn.close(true, 1, b"control read failed");
+                    break;
+                }
+            }
+        }
+        return;
+    }
+    let Some(start) = conn_state.start.clone() else {
+        return;
+    };
     let stream = conn_state
         .streams
         .entry(stream_id)
         .or_insert_with(ServerStream::default);
+    stream.request_bytes = start.request_bytes;
     let mut buf = [0u8; READ_CHUNK_SIZE];
     loop {
         match conn.stream_read(stream_id, &mut buf) {
             Ok((read, fin)) => {
-                let mut offset = 0;
-                if stream.header_len < stream.header.len() {
-                    let take = cmp::min(stream.header.len() - stream.header_len, read);
-                    stream.header[stream.header_len..stream.header_len + take]
-                        .copy_from_slice(&buf[..take]);
-                    stream.header_len += take;
-                    offset += take;
-                    if stream.header_len == stream.header.len() {
-                        stream.request_bytes =
-                            u64::from_be_bytes(stream.header[..8].try_into().unwrap());
-                        stream.response_bytes =
-                            u64::from_be_bytes(stream.header[8..16].try_into().unwrap());
-                    }
-                }
-                stream.request_received += (read - offset) as u64;
+                stream.request_received += read as u64;
+                conn_state.bytes_received += read as u64;
                 if fin {
-                    if stream.header_len != stream.header.len()
-                        || stream.request_received != stream.request_bytes
-                    {
+                    if stream.request_received != stream.request_bytes {
                         let _ = conn.close(true, 1, b"bad request");
                         return;
                     }
+                    conn_state.requests_completed += 1;
+                    stream.response_bytes =
+                        server_response_bytes(&start, conn_state.requests_completed);
                     let _ = conn.stream_want_read(stream_id, false);
                     let _ = conn.stream_want_write(stream_id, true);
                     server_write_stream(conns, conn, stream_id);
@@ -1278,11 +1726,57 @@ fn server_read_stream(conns: &mut HashMap<u64, ServerConn>, conn: &mut Connectio
     }
 }
 
+fn server_write_control(
+    conns: &mut HashMap<u64, ServerConn>,
+    conn: &mut Connection,
+    stream_id: u64,
+) {
+    let Some(index) = conn.index() else {
+        return;
+    };
+    let Some(conn_state) = conns.get_mut(&index) else {
+        return;
+    };
+    while conn_state.control_sent < conn_state.control_out.len() {
+        let remaining = conn_state.control_out.len() - conn_state.control_sent;
+        let fin = conn_state.control_fin && remaining == conn_state.control_out.len();
+        match conn.stream_write(
+            stream_id,
+            Bytes::copy_from_slice(&conn_state.control_out[conn_state.control_sent..]),
+            fin,
+        ) {
+            Ok(0) | Err(QuicError::Done) => {
+                let _ = conn.stream_want_write(stream_id, true);
+                return;
+            }
+            Ok(written) => {
+                conn_state.control_sent += written;
+                if conn_state.control_sent < conn_state.control_out.len() {
+                    let _ = conn.stream_want_write(stream_id, true);
+                    return;
+                }
+            }
+            Err(_) => {
+                let _ = conn.close(true, 1, b"control write failed");
+                return;
+            }
+        }
+    }
+    if conn_state.control_fin {
+        let _ = conn.stream_write(stream_id, Bytes::new(), true);
+    }
+    let _ = conn.stream_want_write(stream_id, false);
+}
+
 fn server_write_stream(
     conns: &mut HashMap<u64, ServerConn>,
     conn: &mut Connection,
     stream_id: u64,
 ) {
+    if stream_id == CONTROL_STREAM_ID {
+        server_write_control(conns, conn, stream_id);
+        return;
+    }
     let Some(index) = conn.index() else {
         return;
     };
@@ -1310,6 +1804,7 @@ fn server_write_stream(
                 }
                 if fin {
                     stream.response_fin = true;
+                    conn_state.bytes_sent += stream.response_bytes;
                 }
             }
             Err(_) => {
@@ -1332,6 +1827,17 @@ fn server_write_stream(
         }
     }
     let _ = conn.stream_want_write(stream_id, false);
+    if !conn_state.complete_sent && should_send_complete(conn_state) {
+        conn_state.control_out = encode_session_complete(
+            conn_state.bytes_sent,
+            conn_state.bytes_received,
+            conn_state.requests_completed,
+        );
+        conn_state.control_sent = 0;
+        conn_state.control_fin = true;
+        conn_state.complete_sent = true;
+        let _ = conn.stream_want_write(CONTROL_STREAM_ID, true);
+    }
 }
 
 fn resolve_remote(host: &str, port: u16) -> Result<SocketAddr, AnyError> {
@@ -1359,7 +1865,7 @@ fn cmp_duration(a: Duration, b: Duration) -> Duration {
 
 fn new_run_summary(cfg: &Config) -> RunSummary {
     RunSummary {
-        schema_version: PROTOCOL_VERSION,
+        schema_version: SCHEMA_VERSION,
         status: "ok".to_string(),
         mode: cfg.mode.clone(),
         direction: cfg.direction.clone(),

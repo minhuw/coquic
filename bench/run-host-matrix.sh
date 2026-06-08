@@ -93,9 +93,9 @@ done
 case "${preset}" in
   smoke)
     runs=(
-      "socket bulk download 0 65536 65536 1 1 1 0ms 5s"
-      "socket rr stay 32 48 32 1 1 4 0ms 5s"
-      "socket crr stay 24 24 8 1 2 1 0ms 5s"
+      "socket bulk download 0 65536 none 1 1 1 0ms 5s"
+      "socket rr stay 32 48 none 1 1 4 0ms 5s"
+      "socket crr stay 24 24 none 1 2 1 0ms 5s"
     )
     ;;
   ci)
@@ -265,11 +265,6 @@ for congestion_control in "${congestion_control_list[@]}"; do
     read -r backend mode direction request_bytes response_bytes limit streams connections inflight warmup duration <<<"${run}"
     effective_connections="${connections}"
     effective_inflight="${inflight}"
-    if { [ "${client_impl}" = 'ngtcp2' ] || [ "${client_impl}" = 'neqo' ] || [ "${client_impl}" = 'quicly' ] || [ "${client_impl}" = 'lsquic' ]; } \
-      && [ "${client_impl}" = "${server_impl}" ] && [ "${mode}" = 'rr' ]; then
-      effective_connections=1
-      effective_inflight=$((inflight * connections))
-    fi
     if [ "${client_impl}" = 'coquic' ] && [ "${server_impl}" = 'coquic' ]; then
       run_name="${preset}-${congestion_control}-${backend}-${mode}-s${streams}-c${effective_connections}-q${effective_inflight}"
     else
@@ -381,12 +376,8 @@ for congestion_control in "${congestion_control_list[@]}"; do
 
     if [ "${mode}" = 'bulk' ]; then
       client_args+=(--direction "${direction}")
-      bulk_limit="${limit}"
-      if [ "${limit}" = 'none' ] && [ "${client_impl}" = 'msquic' ] && [ "${server_impl}" = 'msquic' ]; then
-        bulk_limit="${PERF_MSQUIC_BULK_TOTAL_BYTES:-134217728}"
-      fi
-      if [ "${bulk_limit}" != 'none' ]; then
-        client_args+=(--total-bytes "${bulk_limit}")
+      if [ "${limit}" != 'none' ]; then
+        client_args+=(--total-bytes "${limit}")
       fi
     elif [ "${limit}" != 'none' ]; then
       client_args+=(--requests "${limit}")

@@ -18,6 +18,18 @@
 #include "picosocks.h"
 
 #define APPLICATION_PROTOCOL "coquic-perf/1"
+#define PERF_PROTOCOL_VERSION 3U
+#define CONTROL_STREAM_ID 0ULL
+#define FIRST_DATA_STREAM_ID 4ULL
+#define MESSAGE_SESSION_START 1U
+#define MESSAGE_SESSION_READY 2U
+#define MESSAGE_SESSION_ERROR 3U
+#define MESSAGE_SESSION_COMPLETE 4U
+#define MODE_CODE_BULK 0U
+#define MODE_CODE_RR 1U
+#define MODE_CODE_CRR 2U
+#define DIRECTION_CODE_UPLOAD 0U
+#define DIRECTION_CODE_DOWNLOAD 1U
 #define TRANSFER_CONNECTION_WINDOW (32ULL * 1024ULL * 1024ULL)
 #define TRANSFER_STREAM_WINDOW (16ULL * 1024ULL * 1024ULL)
 #define WRITE_CHUNK_SIZE 32768U
@@ -93,14 +105,20 @@ typedef struct latency_summary_t {
 
 typedef struct stream_ctx_t {
     struct stream_ctx_t *next;
+    picoquic_cnx_t *cnx;
     uint64_t stream_id;
     int is_server;
     int counts;
     int request_fin;
     int response_fin;
     int closed;
-    uint8_t header[16];
-    size_t header_len;
+    uint8_t *control_out;
+    uint8_t *control_in;
+    size_t control_len;
+    size_t control_in_len;
+    size_t control_in_cap;
+    size_t control_sent;
+    int control_fin;
     uint64_t request_bytes;
     uint64_t response_bytes;
     uint64_t request_received;
@@ -109,6 +127,21 @@ typedef struct stream_ctx_t {
     uint64_t response_sent;
     uint64_t started_at;
 } stream_ctx_t;
+
+typedef struct perf_session_start_t {
+    int started;
+    uint8_t mode;
+    uint8_t direction;
+    uint64_t request_bytes;
+    uint64_t response_bytes;
+    optional_u64_t total_bytes;
+    optional_u64_t requests;
+    uint64_t warmup_us;
+    uint64_t duration_us;
+    uint64_t streams;
+    uint64_t connections;
+    uint64_t requests_in_flight;
+} perf_session_start_t;
 
 typedef struct app_ctx_t {
     config_t cfg;
@@ -120,6 +153,9 @@ typedef struct app_ctx_t {
     picoquic_cnx_t *cnx;
     picoquic_cnx_t **connections;
     uint8_t *connection_ready;
+    uint8_t *connection_control_opened;
+    uint64_t *connection_request_limit;
+    uint64_t *connection_requests_started;
     uint64_t connection_count;
     uint64_t ready_connections;
     uint64_t next_connection;
@@ -129,6 +165,11 @@ typedef struct app_ctx_t {
     uint64_t next_stream_rr;
     uint64_t measure_start;
     uint64_t measure_deadline;
+    perf_session_start_t session_start;
+    uint64_t server_bytes_sent;
+    uint64_t server_bytes_received;
+    uint64_t server_requests_completed;
+    int server_complete_sent;
     counters_t counters;
 } app_ctx_t;
 
@@ -455,6 +496,8 @@ static void remove_stream(app_ctx_t *app, stream_ctx_t *stream) {
     while (*pp != NULL) {
         if (*pp == stream) {
             *pp = stream->next;
+            free(stream->control_out);
+            free(stream->control_in);
             free(stream);
             return;
         }
@@ -465,25 +508,163 @@ static void remove_stream(app_ctx_t *app, stream_ctx_t *stream) {
 static void free_streams(app_ctx_t *app) {
     while (app->streams != NULL) {
         stream_ctx_t *next = app->streams->next;
+        free(app->streams->control_out);
+        free(app->streams->control_in);
         free(app->streams);
         app->streams = next;
     }
 }
 
-static void store_header(stream_ctx_t *s) {
-    for (int i = 0; i < 8; ++i) {
-        s->header[i] = (uint8_t)(s->request_bytes >> (56 - i * 8));
-        s->header[8 + i] = (uint8_t)(s->response_bytes >> (56 - i * 8));
-    }
-    s->header_len = 16;
+static void encode_be32(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)((value >> 24) & 0xffU);
+    out[1] = (uint8_t)((value >> 16) & 0xffU);
+    out[2] = (uint8_t)((value >> 8) & 0xffU);
+    out[3] = (uint8_t)(value & 0xffU);
 }
 
-static uint64_t load_be64(const uint8_t *bytes) {
+static uint32_t decode_be32(const uint8_t *in) {
+    return ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) | ((uint32_t)in[2] << 8) |
+           (uint32_t)in[3];
+}
+
+static void encode_be64(uint8_t *out, uint64_t value) {
+    for (int i = 7; i >= 0; --i) {
+        out[i] = (uint8_t)(value & 0xffU);
+        value >>= 8;
+    }
+}
+
+static uint64_t decode_be64(const uint8_t *bytes) {
     uint64_t value = 0;
     for (int i = 0; i < 8; ++i) {
         value = (value << 8) | bytes[i];
     }
     return value;
+}
+
+static uint8_t mode_code(const char *mode) {
+    if (strcmp(mode, "rr") == 0) {
+        return MODE_CODE_RR;
+    }
+    if (strcmp(mode, "crr") == 0) {
+        return MODE_CODE_CRR;
+    }
+    return MODE_CODE_BULK;
+}
+
+static uint8_t direction_code(const char *direction) {
+    return strcmp(direction, "upload") == 0 ? DIRECTION_CODE_UPLOAD : DIRECTION_CODE_DOWNLOAD;
+}
+
+static uint8_t *frame_control_message(uint8_t type, const uint8_t *payload, uint32_t payload_len,
+                                      size_t *out_len) {
+    uint8_t *out = (uint8_t *)malloc((size_t)payload_len + 5);
+    if (out == NULL) {
+        return NULL;
+    }
+    out[0] = type;
+    encode_be32(out + 1, payload_len);
+    if (payload_len != 0) {
+        memcpy(out + 5, payload, payload_len);
+    }
+    *out_len = (size_t)payload_len + 5;
+    return out;
+}
+
+static uint64_t rr_connection_target(const config_t *cfg) {
+    if (is_mode(cfg, "rr") && cfg->requests.set) {
+        return cfg->connections < cfg->requests.value ? cfg->connections : cfg->requests.value;
+    }
+    return cfg->connections;
+}
+
+static uint64_t rr_request_limit_for_connection(const config_t *cfg, uint64_t connection_index) {
+    uint64_t connections = rr_connection_target(cfg);
+    if (connections == 0) {
+        return 0;
+    }
+    uint64_t base = cfg->requests.value / connections;
+    uint64_t remainder = cfg->requests.value % connections;
+    return base + (connection_index < remainder ? 1 : 0);
+}
+
+static uint8_t *encode_session_start_message(const config_t *cfg, uint64_t request_limit,
+                                             size_t *out_len) {
+    uint8_t payload[79];
+    encode_be32(payload, PERF_PROTOCOL_VERSION);
+    payload[4] = mode_code(cfg->mode);
+    payload[5] = direction_code(cfg->direction);
+    encode_be64(payload + 6, cfg->request_bytes);
+    encode_be64(payload + 14, cfg->response_bytes);
+    payload[22] = (cfg->total_bytes.set ? 0x01 : 0) | (cfg->requests.set ? 0x02 : 0);
+    encode_be64(payload + 23, cfg->total_bytes.value);
+    encode_be64(payload + 31, cfg->requests.set ? request_limit : cfg->requests.value);
+    encode_be64(payload + 39, cfg->warmup_us);
+    encode_be64(payload + 47, cfg->duration_us);
+    encode_be64(payload + 55, cfg->streams);
+    encode_be64(payload + 63, cfg->connections);
+    encode_be64(payload + 71, cfg->requests_in_flight);
+    return frame_control_message(MESSAGE_SESSION_START, payload, sizeof(payload), out_len);
+}
+
+static uint8_t *encode_session_ready_message(size_t *out_len) {
+    uint8_t payload[4];
+    encode_be32(payload, PERF_PROTOCOL_VERSION);
+    return frame_control_message(MESSAGE_SESSION_READY, payload, sizeof(payload), out_len);
+}
+
+static uint8_t *encode_session_error_message(const char *reason, size_t *out_len) {
+    size_t reason_len = strlen(reason);
+    uint8_t *payload = (uint8_t *)malloc(reason_len + 4);
+    if (payload == NULL) {
+        return NULL;
+    }
+    encode_be32(payload, (uint32_t)reason_len);
+    memcpy(payload + 4, reason, reason_len);
+    uint8_t *out =
+        frame_control_message(MESSAGE_SESSION_ERROR, payload, (uint32_t)(reason_len + 4), out_len);
+    free(payload);
+    return out;
+}
+
+static uint8_t *encode_session_complete_message(uint64_t bytes_sent, uint64_t bytes_received,
+                                                uint64_t requests_completed, size_t *out_len) {
+    uint8_t payload[24];
+    encode_be64(payload, bytes_sent);
+    encode_be64(payload + 8, bytes_received);
+    encode_be64(payload + 16, requests_completed);
+    return frame_control_message(MESSAGE_SESSION_COMPLETE, payload, sizeof(payload), out_len);
+}
+
+static int decode_session_start_payload(const uint8_t *payload, size_t len,
+                                        perf_session_start_t *start) {
+    if (len != 79 || decode_be32(payload) != PERF_PROTOCOL_VERSION) {
+        return -1;
+    }
+    memset(start, 0, sizeof(*start));
+    start->started = 1;
+    start->mode = payload[4];
+    start->direction = payload[5];
+    start->request_bytes = decode_be64(payload + 6);
+    start->response_bytes = decode_be64(payload + 14);
+    uint8_t flags = payload[22];
+    start->total_bytes.value = decode_be64(payload + 23);
+    start->total_bytes.set = (flags & 0x01) != 0;
+    start->requests.value = decode_be64(payload + 31);
+    start->requests.set = (flags & 0x02) != 0;
+    start->warmup_us = decode_be64(payload + 39);
+    start->duration_us = decode_be64(payload + 47);
+    start->streams = decode_be64(payload + 55);
+    start->connections = decode_be64(payload + 63);
+    start->requests_in_flight = decode_be64(payload + 71);
+    if ((start->mode != MODE_CODE_BULK && start->mode != MODE_CODE_RR &&
+         start->mode != MODE_CODE_CRR) ||
+        (start->direction != DIRECTION_CODE_UPLOAD &&
+         start->direction != DIRECTION_CODE_DOWNLOAD) ||
+        start->streams == 0 || start->connections == 0 || start->requests_in_flight == 0) {
+        return -1;
+    }
+    return 0;
 }
 
 static int mark_connection_ready(app_ctx_t *app, picoquic_cnx_t *cnx) {
@@ -508,6 +689,25 @@ static picoquic_cnx_t *pick_connection(app_ctx_t *app) {
     return cnx;
 }
 
+static uint64_t active_streams_on_connection(app_ctx_t *app, picoquic_cnx_t *cnx) {
+    uint64_t active = 0;
+    for (stream_ctx_t *stream = app->streams; stream != NULL; stream = stream->next) {
+        if (!stream->is_server && stream->stream_id != CONTROL_STREAM_ID && stream->cnx == cnx) {
+            active++;
+        }
+    }
+    return active;
+}
+
+static uint64_t connection_index_for(app_ctx_t *app, picoquic_cnx_t *cnx) {
+    for (uint64_t i = 0; i < app->connection_count; ++i) {
+        if (app->connections[i] == cnx) {
+            return i;
+        }
+    }
+    return app->connection_count;
+}
+
 static int open_request_stream(app_ctx_t *app, uint64_t request_bytes, uint64_t response_bytes,
                                int counts) {
     picoquic_cnx_t *cnx = pick_connection(app);
@@ -521,10 +721,10 @@ static int open_request_stream(app_ctx_t *app, uint64_t request_bytes, uint64_t 
         return -1;
     }
     stream->counts = counts;
+    stream->cnx = cnx;
     stream->request_bytes = request_bytes;
     stream->response_bytes = response_bytes;
     stream->started_at = picoquic_current_time();
-    store_header(stream);
     if (picoquic_mark_active_stream(cnx, stream_id, 1, stream) != 0) {
         remove_stream(app, stream);
         set_error(app, "picoquic_mark_active_stream failed");
@@ -532,6 +732,32 @@ static int open_request_stream(app_ctx_t *app, uint64_t request_bytes, uint64_t 
     }
     app->active_streams++;
     app->started_requests++;
+    uint64_t index = connection_index_for(app, cnx);
+    if (index < app->connection_count) {
+        app->connection_requests_started[index]++;
+    }
+    return 0;
+}
+
+static int open_control_stream(app_ctx_t *app, picoquic_cnx_t *cnx) {
+    stream_ctx_t *stream = alloc_stream(app, CONTROL_STREAM_ID, 0);
+    if (stream == NULL) {
+        return -1;
+    }
+    uint64_t index = connection_index_for(app, cnx);
+    uint64_t request_limit = index < app->connection_count ? app->connection_request_limit[index]
+                                                           : app->cfg.requests.value;
+    stream->control_out =
+        encode_session_start_message(&app->cfg, request_limit, &stream->control_len);
+    stream->cnx = cnx;
+    stream->control_fin = 1;
+    if (stream->control_out == NULL ||
+        picoquic_add_to_stream_with_ctx(cnx, CONTROL_STREAM_ID, stream->control_out,
+                                        stream->control_len, 1, stream) != 0) {
+        remove_stream(app, stream);
+        set_error(app, "picoquic control stream open failed");
+        return -1;
+    }
     return 0;
 }
 
@@ -549,33 +775,45 @@ static int open_bulk_streams(app_ctx_t *app) {
         }
         return 0;
     }
-    uint64_t target_active = app->cfg.streams * app->connection_count;
-    while (app->active_streams < target_active) {
-        uint64_t now = picoquic_current_time();
-        if (now >= app->measure_deadline) {
-            break;
-        }
-        if (open_request_stream(app, 0, app->cfg.response_bytes, now >= app->measure_start) != 0) {
-            return -1;
+    for (uint64_t i = 0; i < app->connection_count; ++i) {
+        picoquic_cnx_t *cnx = app->connections[i];
+        while (active_streams_on_connection(app, cnx) < app->cfg.streams) {
+            uint64_t now = picoquic_current_time();
+            if (now >= app->measure_deadline) {
+                break;
+            }
+            app->next_connection = i;
+            if (open_request_stream(app, 0, app->cfg.response_bytes, now >= app->measure_start) !=
+                0) {
+                return -1;
+            }
         }
     }
     return 0;
 }
 
 static int open_rr_streams(app_ctx_t *app) {
-    uint64_t target_active = app->cfg.requests_in_flight * app->connection_count;
-    while (app->active_streams < target_active) {
-        uint64_t now = picoquic_current_time();
-        if (app->cfg.requests.set && app->started_requests >= app->cfg.requests.value) {
-            break;
-        }
-        if (!app->cfg.requests.set && now >= app->measure_deadline) {
-            break;
-        }
-        int counts = now >= app->measure_start;
-        if (open_request_stream(app, app->cfg.request_bytes, app->cfg.response_bytes, counts) !=
-            0) {
-            return -1;
+    for (uint64_t i = 0; i < app->connection_count; ++i) {
+        picoquic_cnx_t *cnx = app->connections[i];
+        while (active_streams_on_connection(app, cnx) < app->cfg.requests_in_flight) {
+            uint64_t now = picoquic_current_time();
+            if (app->cfg.requests.set) {
+                if (app->started_requests >= app->cfg.requests.value) {
+                    return 0;
+                }
+                if (app->connection_requests_started[i] >= app->connection_request_limit[i]) {
+                    break;
+                }
+            }
+            if (!app->cfg.requests.set && now >= app->measure_deadline) {
+                return 0;
+            }
+            int counts = now >= app->measure_start;
+            app->next_connection = i;
+            if (open_request_stream(app, app->cfg.request_bytes, app->cfg.response_bytes, counts) !=
+                0) {
+                return -1;
+            }
         }
     }
     return 0;
@@ -619,7 +857,23 @@ static void maybe_finish_client(app_ctx_t *app) {
 }
 
 static int provide_client_data(stream_ctx_t *stream, uint8_t *context, size_t length) {
-    uint64_t total = 16ULL + stream->request_bytes;
+    if (stream->stream_id == CONTROL_STREAM_ID) {
+        size_t remaining = stream->control_len > stream->control_sent
+                               ? stream->control_len - stream->control_sent
+                               : 0;
+        size_t to_send = remaining < length ? remaining : length;
+        int is_fin = to_send == remaining && stream->control_fin;
+        uint8_t *buffer = picoquic_provide_stream_data_buffer(context, to_send, is_fin, !is_fin);
+        if (buffer == NULL && to_send > 0) {
+            return -1;
+        }
+        if (to_send > 0) {
+            memcpy(buffer, stream->control_out + stream->control_sent, to_send);
+        }
+        stream->control_sent += to_send;
+        return 0;
+    }
+    uint64_t total = stream->request_bytes;
     uint64_t sent = stream->request_sent;
     uint64_t remaining = total > sent ? total - sent : 0;
     size_t to_send = remaining < (uint64_t)length ? (size_t)remaining : length;
@@ -628,28 +882,33 @@ static int provide_client_data(stream_ctx_t *stream, uint8_t *context, size_t le
     if (buffer == NULL && to_send > 0) {
         return -1;
     }
-    size_t offset = 0;
-    while (offset < to_send) {
-        uint64_t absolute = sent + offset;
-        if (absolute < 16ULL) {
-            size_t header_offset = (size_t)absolute;
-            size_t take = 16U - header_offset;
-            if (take > to_send - offset) {
-                take = to_send - offset;
-            }
-            memcpy(buffer + offset, stream->header + header_offset, take);
-            offset += take;
-        } else {
-            size_t take = to_send - offset;
-            memset(buffer + offset, 0x5a, take);
-            offset += take;
-        }
+    if (to_send > 0) {
+        memset(buffer, 0x5a, to_send);
     }
     stream->request_sent += to_send;
     return 0;
 }
 
 static int provide_server_data(stream_ctx_t *stream, uint8_t *context, size_t length) {
+    if (stream->stream_id == CONTROL_STREAM_ID) {
+        size_t remaining = stream->control_len > stream->control_sent
+                               ? stream->control_len - stream->control_sent
+                               : 0;
+        size_t to_send = remaining < length ? remaining : length;
+        int is_fin = to_send == remaining && stream->control_fin;
+        uint8_t *buffer = picoquic_provide_stream_data_buffer(context, to_send, is_fin, !is_fin);
+        if (buffer == NULL && to_send > 0) {
+            return -1;
+        }
+        if (to_send > 0) {
+            memcpy(buffer, stream->control_out + stream->control_sent, to_send);
+        }
+        stream->control_sent += to_send;
+        if (is_fin) {
+            stream->response_fin = 1;
+        }
+        return 0;
+    }
     uint64_t remaining = stream->response_bytes > stream->response_sent
                              ? stream->response_bytes - stream->response_sent
                              : 0;
@@ -665,8 +924,43 @@ static int provide_server_data(stream_ctx_t *stream, uint8_t *context, size_t le
     stream->response_sent += to_send;
     if (is_fin) {
         stream->response_fin = 1;
+        if (stream->stream_id != CONTROL_STREAM_ID && stream->is_server) {
+            /* Count once when the response body reaches FIN. */
+            stream->closed = 1;
+        }
     }
     return 0;
+}
+
+static uint64_t server_response_bytes(const app_ctx_t *app, uint64_t requests_completed) {
+    const perf_session_start_t *start = &app->session_start;
+    if (start->mode == MODE_CODE_BULK && start->direction == DIRECTION_CODE_DOWNLOAD &&
+        start->total_bytes.set) {
+        uint64_t stream_index = requests_completed ? requests_completed - 1 : 0;
+        uint64_t per_stream = start->total_bytes.value / start->streams;
+        uint64_t remainder = start->total_bytes.value % start->streams;
+        return per_stream + (stream_index < remainder ? 1 : 0);
+    }
+    if (start->mode == MODE_CODE_BULK && start->direction == DIRECTION_CODE_DOWNLOAD) {
+        return start->response_bytes;
+    }
+    if (start->mode == MODE_CODE_RR || start->mode == MODE_CODE_CRR) {
+        return start->response_bytes;
+    }
+    return 0;
+}
+
+static int should_send_complete(const app_ctx_t *app) {
+    const perf_session_start_t *start = &app->session_start;
+    if (!start->started || app->server_complete_sent) {
+        return 0;
+    }
+    return (start->mode == MODE_CODE_BULK && start->total_bytes.set &&
+            app->server_requests_completed >= start->streams) ||
+           (start->mode == MODE_CODE_BULK && start->direction == DIRECTION_CODE_UPLOAD &&
+            app->server_requests_completed >= start->streams) ||
+           (start->mode == MODE_CODE_RR && start->requests.set &&
+            app->server_requests_completed >= start->requests.value);
 }
 
 static int receive_server_stream(app_ctx_t *app, picoquic_cnx_t *cnx, uint64_t stream_id,
@@ -676,32 +970,64 @@ static int receive_server_stream(app_ctx_t *app, picoquic_cnx_t *cnx, uint64_t s
         if (stream == NULL) {
             return -1;
         }
+        stream->cnx = cnx;
         picoquic_set_app_stream_ctx(cnx, stream_id, stream);
     }
-    size_t offset = 0;
-    if (stream->header_len < sizeof(stream->header)) {
-        size_t take = sizeof(stream->header) - stream->header_len;
-        if (take > length) {
-            take = length;
+    if (stream_id == CONTROL_STREAM_ID) {
+        if (length != 0) {
+            if (stream->control_in_len + length > stream->control_in_cap) {
+                size_t new_cap = stream->control_in_cap ? stream->control_in_cap * 2 : 128;
+                while (new_cap < stream->control_in_len + length) {
+                    new_cap *= 2;
+                }
+                uint8_t *new_bytes = (uint8_t *)realloc(stream->control_in, new_cap);
+                if (new_bytes == NULL) {
+                    set_error(app, "out of memory reading control stream");
+                    return -1;
+                }
+                stream->control_in = new_bytes;
+                stream->control_in_cap = new_cap;
+            }
+            memcpy(stream->control_in + stream->control_in_len, bytes, length);
+            stream->control_in_len += length;
         }
-        memcpy(stream->header + stream->header_len, bytes, take);
-        stream->header_len += take;
-        offset += take;
-        if (stream->header_len == sizeof(stream->header)) {
-            stream->request_bytes = load_be64(stream->header);
-            stream->response_bytes = load_be64(stream->header + 8);
+        if (fin) {
+            stream->request_fin = 1;
+            size_t msg_len = 0;
+            if (stream->control_in_len < 5 || stream->control_in[0] != MESSAGE_SESSION_START ||
+                stream->control_in_len != (size_t)decode_be32(stream->control_in + 1) + 5 ||
+                decode_session_start_payload(stream->control_in + 5, stream->control_in_len - 5,
+                                             &app->session_start) != 0) {
+                stream->control_out =
+                    encode_session_error_message("invalid session_start", &msg_len);
+                stream->control_fin = 1;
+            } else {
+                stream->control_out = encode_session_ready_message(&msg_len);
+            }
+            stream->control_len = msg_len;
+            if (stream->control_out == NULL ||
+                picoquic_add_to_stream_with_ctx(cnx, stream_id, stream->control_out,
+                                                stream->control_len, stream->control_fin,
+                                                stream) != 0) {
+                set_error(app, "server failed to write control response");
+                return -1;
+            }
         }
+        return 0;
     }
-    stream->request_received += length - offset;
+    if (!app->session_start.started) {
+        return 0;
+    }
+    stream->request_bytes = app->session_start.request_bytes;
+    stream->request_received += length;
+    app->server_bytes_received += length;
     if (fin) {
-        if (stream->header_len != sizeof(stream->header)) {
-            set_error(app, "picoquic-perf malformed stream request header");
-            return -1;
-        }
         if (stream->request_received != stream->request_bytes) {
             set_error(app, "picoquic-perf request byte count mismatch");
             return -1;
         }
+        app->server_requests_completed++;
+        stream->response_bytes = server_response_bytes(app, app->server_requests_completed);
         stream->request_fin = 1;
         if (picoquic_mark_active_stream(cnx, stream_id, 1, stream) != 0) {
             set_error(app, "server failed to mark response stream active");
@@ -741,6 +1067,62 @@ static int complete_client_stream(app_ctx_t *app, picoquic_cnx_t *cnx, stream_ct
     return 0;
 }
 
+static int handle_client_control(app_ctx_t *app, picoquic_cnx_t *cnx, stream_ctx_t *stream,
+                                 uint8_t *bytes, size_t length, int fin) {
+    if (length != 0) {
+        if (stream->control_in_len + length > stream->control_in_cap) {
+            size_t new_cap = stream->control_in_cap ? stream->control_in_cap * 2 : 128;
+            while (new_cap < stream->control_in_len + length) {
+                new_cap *= 2;
+            }
+            uint8_t *new_bytes = (uint8_t *)realloc(stream->control_in, new_cap);
+            if (new_bytes == NULL) {
+                set_error(app, "out of memory reading client control");
+                return -1;
+            }
+            stream->control_in = new_bytes;
+            stream->control_in_cap = new_cap;
+        }
+        memcpy(stream->control_in + stream->control_in_len, bytes, length);
+        stream->control_in_len += length;
+    }
+    if (stream->control_in_len >= 5) {
+        uint32_t payload_len = decode_be32(stream->control_in + 1);
+        if (stream->control_in_len >= (size_t)payload_len + 5) {
+            if (stream->control_in[0] == MESSAGE_SESSION_READY && payload_len == 4 &&
+                decode_be32(stream->control_in + 5) == PERF_PROTOCOL_VERSION) {
+                if (mark_connection_ready(app, cnx) != 0) {
+                    set_error(app, "session_ready for unknown picoquic connection");
+                    return -1;
+                }
+                if (app->ready_connections == app->connection_count && !app->initial_opened) {
+                    if (app->measure_start == 0) {
+                        app->measure_start = picoquic_current_time() + app->cfg.warmup_us;
+                        app->measure_deadline = app->measure_start + app->cfg.duration_us;
+                    }
+                    app->initial_opened = 1;
+                    if (is_mode(&app->cfg, "bulk")) {
+                        return open_bulk_streams(app);
+                    }
+                    if (is_mode(&app->cfg, "rr")) {
+                        return open_rr_streams(app);
+                    }
+                }
+            } else if (stream->control_in[0] == MESSAGE_SESSION_ERROR) {
+                set_error(app, "server returned session_error");
+                return -1;
+            } else if (stream->control_in[0] == MESSAGE_SESSION_COMPLETE) {
+                return 0;
+            } else {
+                set_error(app, "unexpected picoquic control message");
+                return -1;
+            }
+        }
+    }
+    (void)fin;
+    return 0;
+}
+
 static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes, size_t length,
                         picoquic_call_back_event_t event, void *callback_ctx, void *v_stream_ctx) {
     app_ctx_t *app = (app_ctx_t *)callback_ctx;
@@ -753,26 +1135,22 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
     }
     if (event == picoquic_callback_almost_ready || event == picoquic_callback_ready) {
         if (app->is_client && !app->initial_opened) {
-            if (mark_connection_ready(app, cnx) != 0) {
+            int known = 0;
+            for (uint64_t i = 0; i < app->connection_count; ++i) {
+                if (app->connections[i] == cnx) {
+                    known = 1;
+                    if (!app->connection_control_opened[i]) {
+                        app->connection_control_opened[i] = 1;
+                        if (open_control_stream(app, cnx) != 0) {
+                            return -1;
+                        }
+                    }
+                    break;
+                }
+            }
+            if (!known) {
                 set_error(app, "ready callback for unknown picoquic connection");
                 return -1;
-            }
-            if (app->ready_connections < app->connection_count) {
-                return 0;
-            }
-            if (app->measure_start == 0) {
-                app->measure_start = picoquic_current_time() + app->cfg.warmup_us;
-                app->measure_deadline = app->measure_start + app->cfg.duration_us;
-            }
-            app->initial_opened = 1;
-            if (is_mode(&app->cfg, "bulk")) {
-                if (open_bulk_streams(app) != 0) {
-                    return -1;
-                }
-            } else if (is_mode(&app->cfg, "rr")) {
-                if (open_rr_streams(app) != 0) {
-                    return -1;
-                }
             }
         }
         return 0;
@@ -783,6 +1161,10 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
             if (stream == NULL) {
                 set_error(app, "client received stream data without context");
                 return -1;
+            }
+            if (stream_id == CONTROL_STREAM_ID) {
+                return handle_client_control(app, cnx, stream, bytes, length,
+                                             event == picoquic_callback_stream_fin);
             }
             stream->response_received += length;
             if (event == picoquic_callback_stream_fin) {
@@ -801,7 +1183,7 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
             return -1;
         }
         if (stream->is_server) {
-            if (!stream->request_fin) {
+            if (stream->stream_id != CONTROL_STREAM_ID && !stream->request_fin) {
                 return 0;
             }
             if (provide_server_data(stream, bytes, length) != 0) {
@@ -809,6 +1191,28 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
                 return -1;
             }
             if (stream->response_fin) {
+                if (stream->stream_id != CONTROL_STREAM_ID) {
+                    app->server_bytes_sent += stream->response_bytes;
+                    if (should_send_complete(app)) {
+                        stream_ctx_t *control = alloc_stream(app, CONTROL_STREAM_ID, 1);
+                        if (control == NULL) {
+                            return -1;
+                        }
+                        control->cnx = cnx;
+                        control->control_out = encode_session_complete_message(
+                            app->server_bytes_sent, app->server_bytes_received,
+                            app->server_requests_completed, &control->control_len);
+                        control->control_fin = 1;
+                        app->server_complete_sent = 1;
+                        if (control->control_out == NULL ||
+                            picoquic_add_to_stream_with_ctx(
+                                cnx, CONTROL_STREAM_ID, control->control_out, control->control_len,
+                                1, control) != 0) {
+                            set_error(app, "server failed to send session_complete");
+                            return -1;
+                        }
+                    }
+                }
                 picoquic_unlink_app_stream_ctx(cnx, stream_id);
                 remove_stream(app, stream);
             }
@@ -946,15 +1350,28 @@ static int connect_one_client(app_ctx_t *app, picoquic_quic_t *quic, uint64_t in
 }
 
 static int connect_clients(app_ctx_t *app, picoquic_quic_t *quic) {
-    app->connection_count = app->cfg.connections;
+    app->connection_count = rr_connection_target(&app->cfg);
     app->connections =
         (picoquic_cnx_t **)calloc((size_t)app->connection_count, sizeof(picoquic_cnx_t *));
     app->connection_ready = (uint8_t *)calloc((size_t)app->connection_count, sizeof(uint8_t));
-    if (app->connections == NULL || app->connection_ready == NULL) {
+    app->connection_control_opened =
+        (uint8_t *)calloc((size_t)app->connection_count, sizeof(uint8_t));
+    app->connection_request_limit =
+        (uint64_t *)calloc((size_t)app->connection_count, sizeof(uint64_t));
+    app->connection_requests_started =
+        (uint64_t *)calloc((size_t)app->connection_count, sizeof(uint64_t));
+    if (app->connections == NULL || app->connection_ready == NULL ||
+        app->connection_control_opened == NULL || app->connection_request_limit == NULL ||
+        app->connection_requests_started == NULL) {
         set_error(app, "out of memory allocating connection table");
         return -1;
     }
+    if (app->connection_count == 0) {
+        set_error(app, "no picoquic connections requested");
+        return -1;
+    }
     for (uint64_t i = 0; i < app->connection_count; ++i) {
+        app->connection_request_limit[i] = rr_request_limit_for_connection(&app->cfg, i);
         if (connect_one_client(app, quic, i) != 0) {
             return -1;
         }
@@ -999,8 +1416,14 @@ static int run_client_session(app_ctx_t *app) {
     free_streams(app);
     free(app->connections);
     free(app->connection_ready);
+    free(app->connection_control_opened);
+    free(app->connection_request_limit);
+    free(app->connection_requests_started);
     app->connections = NULL;
     app->connection_ready = NULL;
+    app->connection_control_opened = NULL;
+    app->connection_request_limit = NULL;
+    app->connection_requests_started = NULL;
     return app->failed ? -1 : 0;
 }
 
@@ -1010,14 +1433,21 @@ static int run_crr(const config_t *cfg, counters_t *counters) {
     uint64_t started = 0;
     while ((cfg->requests.set && started < cfg->requests.value) ||
            (!cfg->requests.set && picoquic_current_time() < measure_deadline)) {
+        uint64_t batch = cfg->connections;
+        if (cfg->requests.set && cfg->requests.value - started < batch) {
+            batch = cfg->requests.value - started;
+        }
+        if (batch == 0) {
+            break;
+        }
         app_ctx_t app;
         memset(&app, 0, sizeof(app));
         app.cfg = *cfg;
         app.cfg.mode = "rr";
         app.cfg.requests.set = 1;
-        app.cfg.requests.value = 1;
+        app.cfg.requests.value = batch;
         app.cfg.requests_in_flight = 1;
-        app.cfg.connections = 1;
+        app.cfg.connections = batch;
         app.cfg.warmup_us = 0;
         app.is_client = 1;
         app.measure_start = measure_start;
@@ -1041,7 +1471,7 @@ static int run_crr(const config_t *cfg, counters_t *counters) {
             }
         }
         free(app.counters.latencies.values);
-        started++;
+        started += batch;
     }
     return 0;
 }

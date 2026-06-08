@@ -44,7 +44,26 @@ std::optional<QuicPerfControlMessage> take_control_message(std::vector<std::byte
     return decode_perf_control_message(frame);
 }
 
-QuicPerfSessionStart make_session_start(const QuicPerfConfig &config) {
+std::size_t rr_connection_target(const QuicPerfConfig &config) {
+    if (config.mode == QuicPerfMode::rr && config.requests.has_value()) {
+        return std::min(config.connections, *config.requests);
+    }
+    return config.connections;
+}
+
+std::optional<std::size_t> request_limit_for_connection(const QuicPerfConfig &config,
+                                                        std::size_t connection_index) {
+    if (config.mode != QuicPerfMode::rr || !config.requests.has_value()) {
+        return std::nullopt;
+    }
+    const auto connections = rr_connection_target(config);
+    const auto base = *config.requests / connections;
+    const auto remainder = *config.requests % connections;
+    return base + (connection_index < remainder ? 1u : 0u);
+}
+
+QuicPerfSessionStart make_session_start(const QuicPerfConfig &config,
+                                        std::optional<std::size_t> request_limit) {
     return QuicPerfSessionStart{
         .protocol_version = kQuicPerfProtocolVersion,
         .mode = config.mode,
@@ -55,9 +74,12 @@ QuicPerfSessionStart make_session_start(const QuicPerfConfig &config) {
             config.total_bytes.has_value()
                 ? std::optional<std::uint64_t>{static_cast<std::uint64_t>(*config.total_bytes)}
                 : std::nullopt,
-        .requests = config.requests.has_value()
-                        ? std::optional<std::uint64_t>{static_cast<std::uint64_t>(*config.requests)}
-                        : std::nullopt,
+        .requests =
+            request_limit.has_value()
+                ? std::optional<std::uint64_t>{static_cast<std::uint64_t>(*request_limit)}
+                : (config.requests.has_value()
+                       ? std::optional<std::uint64_t>{static_cast<std::uint64_t>(*config.requests)}
+                       : std::nullopt),
         .warmup = config.warmup,
         .duration = config.duration,
         .streams = config.streams,
@@ -67,13 +89,10 @@ QuicPerfSessionStart make_session_start(const QuicPerfConfig &config) {
 }
 
 std::size_t initial_connection_target(const QuicPerfConfig &config) {
-    if (config.mode == QuicPerfMode::rr && config.requests.has_value()) {
-        return 1;
-    }
     if (config.mode == QuicPerfMode::crr) {
         return 0;
     }
-    return config.connections;
+    return rr_connection_target(config);
 }
 
 bool timed_bulk_download_drain_connection_complete(bool close_requested,
@@ -517,11 +536,14 @@ bool QuicPerfClient::handle_result(quic::QuicCoreResult result, quic::QuicCoreTi
     for (const auto &effect : result.effects) {
         if (const auto *lifecycle = std::get_if<quic::QuicCoreConnectionLifecycleEvent>(&effect)) {
             if (lifecycle->event == quic::QuicCoreConnectionLifecycle::created) {
-                connections_.insert_or_assign(lifecycle->connection,
-                                              ConnectionState{
-                                                  .handle = lifecycle->connection,
-                                                  .route_handle = primary_route_handle_,
-                                              });
+                const auto connection_index = connections_.size();
+                connections_.insert_or_assign(
+                    lifecycle->connection,
+                    ConnectionState{
+                        .handle = lifecycle->connection,
+                        .route_handle = primary_route_handle_,
+                        .request_limit = request_limit_for_connection(config_, connection_index),
+                    });
             } else if (lifecycle->event == quic::QuicCoreConnectionLifecycle::closed) {
                 auto it = connections_.find(lifecycle->connection);
                 if (it == connections_.end()) {
@@ -557,7 +579,8 @@ bool QuicPerfClient::handle_result(quic::QuicCoreResult result, quic::QuicCoreTi
                             quic::QuicCoreSendStreamData{
                                 .stream_id = kQuicPerfControlStreamId,
                                 .bytes = encode_perf_control_message(
-                                    QuicPerfControlMessage{make_session_start(config_)}),
+                                    QuicPerfControlMessage{make_session_start(
+                                        config_, connection_it->second.request_limit)}),
                                 .fin = true,
                             },
                     },
@@ -685,11 +708,14 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
                 return false;
             }
             if (const auto *complete = std::get_if<QuicPerfSessionComplete>(&*decoded)) {
-                summary_.server_bytes_sent = complete->bytes_sent;
-                summary_.server_bytes_received = complete->bytes_received;
-                summary_.server_requests_completed = complete->requests_completed;
-                if (!(timed_rr_mode() || timed_crr_mode())) {
-                    summary_.requests_completed = complete->requests_completed;
+                if (!connection.server_complete_counted) {
+                    summary_.server_bytes_sent += complete->bytes_sent;
+                    summary_.server_bytes_received += complete->bytes_received;
+                    summary_.server_requests_completed += complete->requests_completed;
+                    connection.server_complete_counted = true;
+                }
+                if (config_.mode == QuicPerfMode::bulk) {
+                    summary_.requests_completed = summary_.server_requests_completed;
                 }
                 connection.control_complete = true;
                 continue;
@@ -936,7 +962,9 @@ bool QuicPerfClient::maybe_issue_rr_requests(ConnectionState &connection,
     }
 
     while (connection.outstanding_requests.size() < config_.requests_in_flight &&
-           (!config_.requests.has_value() || requests_started_ < *config_.requests)) {
+           (!config_.requests.has_value() || requests_started_ < *config_.requests) &&
+           (!connection.request_limit.has_value() ||
+            connection.requests_started < *connection.request_limit)) {
         const auto stream_id = connection.next_stream_id;
         connection.next_stream_id = next_client_perf_stream_id(stream_id);
         const auto [request_it, inserted] = connection.outstanding_requests.emplace(
@@ -973,6 +1001,7 @@ bool QuicPerfClient::maybe_issue_rr_requests(ConnectionState &connection,
         }
 
         ++requests_started_;
+        ++connection.requests_started;
         connection.bytes_sent += config_.request_bytes;
         if (request_it->second.counts_toward_measurement) {
             summary_.bytes_sent += config_.request_bytes;

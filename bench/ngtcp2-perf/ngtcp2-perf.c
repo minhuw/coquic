@@ -27,6 +27,17 @@
 
 #define APPLICATION_PROTOCOL "coquic-perf/1"
 #define APPLICATION_PROTOCOL_WIRE "\x0d" APPLICATION_PROTOCOL
+#define PERF_PROTOCOL_VERSION 3U
+#define CONTROL_STREAM_ID 0LL
+#define MESSAGE_SESSION_START 1U
+#define MESSAGE_SESSION_READY 2U
+#define MESSAGE_SESSION_ERROR 3U
+#define MESSAGE_SESSION_COMPLETE 4U
+#define MODE_CODE_BULK 0U
+#define MODE_CODE_RR 1U
+#define MODE_CODE_CRR 2U
+#define DIRECTION_CODE_UPLOAD 0U
+#define DIRECTION_CODE_DOWNLOAD 1U
 #define DEFAULT_MAX_RUN_REQUESTS 4096ULL
 #define TRANSFER_CONNECTION_WINDOW (32ULL * 1024ULL * 1024ULL)
 #define TRANSFER_STREAM_WINDOW (16ULL * 1024ULL * 1024ULL)
@@ -118,13 +129,33 @@ typedef struct {
 
 typedef struct perf_conn perf_conn_t;
 
+typedef struct {
+    int started;
+    uint8_t mode;
+    uint8_t direction;
+    uint64_t request_bytes;
+    uint64_t response_bytes;
+    optional_u64_t total_bytes;
+    optional_u64_t requests;
+    uint64_t warmup_us;
+    uint64_t duration_us;
+    uint64_t streams;
+    uint64_t connections;
+    uint64_t requests_in_flight;
+} perf_session_start_t;
+
 typedef struct stream_ctx {
     struct stream_ctx *next;
     int64_t stream_id;
     perf_conn_t *conn;
-    uint8_t header[16];
-    size_t header_sent;
-    size_t header_read;
+    int is_control;
+    uint8_t *control_out;
+    size_t control_len;
+    size_t control_sent;
+    int control_fin;
+    uint8_t *control_in;
+    size_t control_in_len;
+    size_t control_in_cap;
     uint64_t request_bytes;
     uint64_t response_bytes;
     uint64_t request_sent;
@@ -136,6 +167,7 @@ typedef struct stream_ctx {
     int response_fin;
     int counted;
     int counts_latency;
+    int server_shape_set;
     int write_fin_sent;
     int server_ready_to_send;
 } stream_ctx_t;
@@ -164,6 +196,12 @@ struct perf_conn {
     uint64_t completed_requests;
     uint64_t started_at;
     counters_t *counters;
+    perf_session_start_t session_start;
+    int session_ready;
+    uint64_t server_bytes_sent;
+    uint64_t server_bytes_received;
+    uint64_t server_requests_completed;
+    int server_complete_sent;
 };
 
 typedef struct server_state {
@@ -453,6 +491,18 @@ static latency_summary_t summarize_latency(const latency_vec_t *latencies) {
     return summary;
 }
 
+static void encode_be32(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)((value >> 24) & 0xffU);
+    out[1] = (uint8_t)((value >> 16) & 0xffU);
+    out[2] = (uint8_t)((value >> 8) & 0xffU);
+    out[3] = (uint8_t)(value & 0xffU);
+}
+
+static uint32_t decode_be32(const uint8_t *in) {
+    return ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) | ((uint32_t)in[2] << 8) |
+           (uint32_t)in[3];
+}
+
 static uint64_t decode_be64(const uint8_t *bytes) {
     uint64_t value = 0;
     for (size_t i = 0; i < 8; ++i) {
@@ -466,6 +516,131 @@ static void encode_be64(uint8_t *bytes, uint64_t value) {
         bytes[i] = (uint8_t)(value & 0xff);
         value >>= 8;
     }
+}
+
+static uint8_t mode_code(const char *mode) {
+    if (strcmp(mode, "rr") == 0) {
+        return MODE_CODE_RR;
+    }
+    if (strcmp(mode, "crr") == 0) {
+        return MODE_CODE_CRR;
+    }
+    return MODE_CODE_BULK;
+}
+
+static uint8_t direction_code(const char *direction) {
+    return strcmp(direction, "upload") == 0 ? DIRECTION_CODE_UPLOAD : DIRECTION_CODE_DOWNLOAD;
+}
+
+static uint64_t rr_connection_target(const config_t *cfg) {
+    if (is_mode(cfg, "rr") && cfg->requests.set) {
+        return cfg->connections < cfg->requests.value ? cfg->connections : cfg->requests.value;
+    }
+    return cfg->connections;
+}
+
+static uint64_t rr_request_limit_for_connection(const config_t *cfg, uint64_t connection_index) {
+    uint64_t connections = rr_connection_target(cfg);
+    if (connections == 0) {
+        return 0;
+    }
+    uint64_t base = cfg->requests.value / connections;
+    uint64_t remainder = cfg->requests.value % connections;
+    return base + (connection_index < remainder ? 1 : 0);
+}
+
+static uint8_t *frame_control_message(uint8_t type, const uint8_t *payload, uint32_t payload_len,
+                                      size_t *out_len) {
+    uint8_t *out = malloc((size_t)payload_len + 5);
+    if (!out) {
+        return NULL;
+    }
+    out[0] = type;
+    encode_be32(out + 1, payload_len);
+    if (payload_len != 0) {
+        memcpy(out + 5, payload, payload_len);
+    }
+    *out_len = (size_t)payload_len + 5;
+    return out;
+}
+
+static uint8_t *encode_session_start_message(const config_t *cfg, uint64_t request_bytes,
+                                             uint64_t response_bytes, size_t *out_len) {
+    uint8_t payload[79];
+    encode_be32(payload, PERF_PROTOCOL_VERSION);
+    payload[4] = mode_code(cfg->mode);
+    payload[5] = direction_code(cfg->direction);
+    encode_be64(payload + 6, request_bytes);
+    encode_be64(payload + 14, response_bytes);
+    payload[22] = (cfg->total_bytes.set ? 0x01 : 0) | (cfg->requests.set ? 0x02 : 0);
+    encode_be64(payload + 23, cfg->total_bytes.value);
+    encode_be64(payload + 31, cfg->requests.value);
+    encode_be64(payload + 39, cfg->warmup_us);
+    encode_be64(payload + 47, cfg->duration_us);
+    encode_be64(payload + 55, cfg->streams);
+    encode_be64(payload + 63, cfg->connections);
+    encode_be64(payload + 71, cfg->requests_in_flight);
+    return frame_control_message(MESSAGE_SESSION_START, payload, sizeof(payload), out_len);
+}
+
+static uint8_t *encode_session_ready_message(size_t *out_len) {
+    uint8_t payload[4];
+    encode_be32(payload, PERF_PROTOCOL_VERSION);
+    return frame_control_message(MESSAGE_SESSION_READY, payload, sizeof(payload), out_len);
+}
+
+static uint8_t *encode_session_error_message(const char *reason, size_t *out_len) {
+    size_t reason_len = strlen(reason);
+    uint8_t *payload = malloc(reason_len + 4);
+    if (!payload) {
+        return NULL;
+    }
+    encode_be32(payload, (uint32_t)reason_len);
+    memcpy(payload + 4, reason, reason_len);
+    uint8_t *out =
+        frame_control_message(MESSAGE_SESSION_ERROR, payload, (uint32_t)(reason_len + 4), out_len);
+    free(payload);
+    return out;
+}
+
+static uint8_t *encode_session_complete_message(uint64_t bytes_sent, uint64_t bytes_received,
+                                                uint64_t requests_completed, size_t *out_len) {
+    uint8_t payload[24];
+    encode_be64(payload, bytes_sent);
+    encode_be64(payload + 8, bytes_received);
+    encode_be64(payload + 16, requests_completed);
+    return frame_control_message(MESSAGE_SESSION_COMPLETE, payload, sizeof(payload), out_len);
+}
+
+static int decode_session_start_payload(const uint8_t *payload, size_t len,
+                                        perf_session_start_t *start) {
+    if (len != 79 || decode_be32(payload) != PERF_PROTOCOL_VERSION) {
+        return -1;
+    }
+    memset(start, 0, sizeof(*start));
+    start->started = 1;
+    start->mode = payload[4];
+    start->direction = payload[5];
+    start->request_bytes = decode_be64(payload + 6);
+    start->response_bytes = decode_be64(payload + 14);
+    uint8_t flags = payload[22];
+    start->total_bytes.value = decode_be64(payload + 23);
+    start->total_bytes.set = (flags & 0x01) != 0;
+    start->requests.value = decode_be64(payload + 31);
+    start->requests.set = (flags & 0x02) != 0;
+    start->warmup_us = decode_be64(payload + 39);
+    start->duration_us = decode_be64(payload + 47);
+    start->streams = decode_be64(payload + 55);
+    start->connections = decode_be64(payload + 63);
+    start->requests_in_flight = decode_be64(payload + 71);
+    if ((start->mode != MODE_CODE_BULK && start->mode != MODE_CODE_RR &&
+         start->mode != MODE_CODE_CRR) ||
+        (start->direction != DIRECTION_CODE_UPLOAD &&
+         start->direction != DIRECTION_CODE_DOWNLOAD) ||
+        start->streams == 0 || start->connections == 0 || start->requests_in_flight == 0) {
+        return -1;
+    }
+    return 0;
 }
 
 static void set_failure(perf_conn_t *pc, const char *message) {
@@ -699,6 +874,8 @@ static void conn_remove_stream(perf_conn_t *pc, stream_ctx_t *stream) {
         if (*link == stream) {
             *link = stream->next;
             stream->next = NULL;
+            free(stream->control_out);
+            free(stream->control_in);
             free(stream);
             return;
         }
@@ -726,6 +903,7 @@ static int stream_open_cb(ngtcp2_conn *conn, int64_t stream_id, void *user_data)
     }
     stream->conn = pc;
     stream->stream_id = stream_id;
+    stream->is_control = stream_id == CONTROL_STREAM_ID;
     conn_add_stream(pc, stream);
     if (ngtcp2_conn_set_stream_user_data(conn, stream_id, stream) != 0) {
         return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -734,7 +912,7 @@ static int stream_open_cb(ngtcp2_conn *conn, int64_t stream_id, void *user_data)
 }
 
 static void maybe_count_client_stream(perf_conn_t *pc, stream_ctx_t *stream) {
-    if (pc->is_server || stream->counted || !stream->response_fin) {
+    if (pc->is_server || stream->is_control || stream->counted || !stream->response_fin) {
         return;
     }
     if (stream->response_received != stream->response_bytes) {
@@ -755,6 +933,134 @@ static void maybe_count_client_stream(perf_conn_t *pc, stream_ctx_t *stream) {
     }
 }
 
+static int append_control_bytes(perf_conn_t *pc, stream_ctx_t *stream, const uint8_t *data,
+                                size_t datalen) {
+    if (datalen == 0) {
+        return 0;
+    }
+    if (stream->control_in_len + datalen > stream->control_in_cap) {
+        size_t next = stream->control_in_cap ? stream->control_in_cap * 2 : 128;
+        while (next < stream->control_in_len + datalen) {
+            next *= 2;
+        }
+        uint8_t *bytes = realloc(stream->control_in, next);
+        if (!bytes) {
+            set_failure(pc, "out of memory reading control stream");
+            return -1;
+        }
+        stream->control_in = bytes;
+        stream->control_in_cap = next;
+    }
+    memcpy(stream->control_in + stream->control_in_len, data, datalen);
+    stream->control_in_len += datalen;
+    return 0;
+}
+
+static void replace_control_output(perf_conn_t *pc, stream_ctx_t *stream, uint8_t *message,
+                                   size_t len, int fin) {
+    (void)pc;
+    free(stream->control_out);
+    stream->control_out = message;
+    stream->control_len = len;
+    stream->control_sent = 0;
+    stream->control_fin = fin;
+    stream->write_fin_sent = 0;
+}
+
+static int handle_server_control(perf_conn_t *pc, stream_ctx_t *stream, const uint8_t *data,
+                                 size_t datalen) {
+    if (append_control_bytes(pc, stream, data, datalen) != 0) {
+        return -1;
+    }
+    if (stream->control_in_len < 5) {
+        return 0;
+    }
+    uint32_t payload_len = decode_be32(stream->control_in + 1);
+    if (stream->control_in_len < (size_t)payload_len + 5) {
+        return 0;
+    }
+
+    size_t msg_len = 0;
+    uint8_t *msg = NULL;
+    if (stream->control_in[0] != MESSAGE_SESSION_START ||
+        decode_session_start_payload(stream->control_in + 5, payload_len, &pc->session_start) !=
+            0) {
+        msg = encode_session_error_message("invalid session_start", &msg_len);
+        replace_control_output(pc, stream, msg, msg_len, 1);
+        if (!msg) {
+            set_failure(pc, "could not encode session_error");
+            return -1;
+        }
+        return 0;
+    }
+
+    msg = encode_session_ready_message(&msg_len);
+    replace_control_output(pc, stream, msg, msg_len, 0);
+    if (!msg) {
+        set_failure(pc, "could not encode session_ready");
+        return -1;
+    }
+    pc->session_ready = 1;
+    return 0;
+}
+
+static int handle_client_control(perf_conn_t *pc, stream_ctx_t *stream, const uint8_t *data,
+                                 size_t datalen) {
+    if (append_control_bytes(pc, stream, data, datalen) != 0) {
+        return -1;
+    }
+    if (stream->control_in_len < 5) {
+        return 0;
+    }
+    uint32_t payload_len = decode_be32(stream->control_in + 1);
+    if (stream->control_in_len < (size_t)payload_len + 5) {
+        return 0;
+    }
+    uint8_t type = stream->control_in[0];
+    const uint8_t *payload = stream->control_in + 5;
+    if (type == MESSAGE_SESSION_READY && payload_len == 4 &&
+        decode_be32(payload) == PERF_PROTOCOL_VERSION) {
+        pc->session_ready = 1;
+        return 0;
+    }
+    if (type == MESSAGE_SESSION_ERROR && payload_len >= 4) {
+        uint32_t reason_len = decode_be32(payload);
+        char reason[256];
+        size_t copy = reason_len < sizeof(reason) - 1 ? reason_len : sizeof(reason) - 1;
+        if (copy > payload_len - 4) {
+            copy = payload_len - 4;
+        }
+        memcpy(reason, payload + 4, copy);
+        reason[copy] = 0;
+        set_failure(pc, reason[0] ? reason : "ngtcp2 server reported session_error");
+        return -1;
+    }
+    if (type == MESSAGE_SESSION_COMPLETE) {
+        return 0;
+    }
+    set_failure(pc, "unexpected ngtcp2 control message");
+    return -1;
+}
+
+static void maybe_send_server_complete(perf_conn_t *pc) {
+    if (!pc->is_server || pc->server_complete_sent) {
+        return;
+    }
+    stream_ctx_t *control = conn_find_stream(pc, CONTROL_STREAM_ID);
+    if (!control || control->write_fin_sent) {
+        return;
+    }
+    size_t msg_len = 0;
+    uint8_t *msg = encode_session_complete_message(pc->server_bytes_sent, pc->server_bytes_received,
+                                                   pc->server_requests_completed, &msg_len);
+    if (!msg) {
+        set_failure(pc, "could not encode session_complete");
+        return;
+    }
+    replace_control_output(pc, control, msg, msg_len, 1);
+    pc->server_complete_sent = 1;
+}
+
 static int recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
                                uint64_t offset, const uint8_t *data, size_t datalen,
                                void *user_data, void *stream_user_data) {
@@ -768,33 +1074,35 @@ static int recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream
         return NGTCP2_ERR_CALLBACK_FAILURE;
     }
 
-    if (pc->is_server) {
-        size_t pos = 0;
-        if (stream->header_read < sizeof(stream->header)) {
-            size_t need = sizeof(stream->header) - stream->header_read;
-            size_t take = datalen < need ? datalen : need;
-            memcpy(stream->header + stream->header_read, data, take);
-            stream->header_read += take;
-            pos += take;
-            if (stream->header_read == sizeof(stream->header)) {
-                stream->request_bytes = decode_be64(stream->header);
-                stream->response_bytes = decode_be64(stream->header + 8);
-                if (stream->request_bytes == 0) {
-                    stream->server_ready_to_send = 1;
-                }
-            }
+    if (stream->is_control) {
+        int rv = pc->is_server ? handle_server_control(pc, stream, data, datalen)
+                               : handle_client_control(pc, stream, data, datalen);
+        if (rv != 0) {
+            return NGTCP2_ERR_CALLBACK_FAILURE;
         }
-        if (pos < datalen) {
-            stream->request_received += datalen - pos;
-            if (stream->header_read == sizeof(stream->header) &&
-                stream->request_received >= stream->request_bytes) {
-                stream->server_ready_to_send = 1;
-            }
+        ngtcp2_conn_extend_max_stream_offset(conn, stream_id, datalen);
+        ngtcp2_conn_extend_max_offset(conn, datalen);
+        return 0;
+    }
+
+    if (pc->is_server) {
+        if (!pc->session_start.started) {
+            set_failure(pc, "data stream opened before session_start");
+            return NGTCP2_ERR_CALLBACK_FAILURE;
+        }
+        if (!stream->server_shape_set) {
+            stream->request_bytes = pc->session_start.request_bytes;
+            stream->response_bytes = pc->session_start.response_bytes;
+            stream->server_shape_set = 1;
+        }
+        stream->request_received += datalen;
+        pc->server_bytes_received += datalen;
+        if (stream->request_received >= stream->request_bytes) {
+            stream->server_ready_to_send = 1;
         }
         if (flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
             stream->request_fin = 1;
-            if (stream->header_read == sizeof(stream->header) &&
-                stream->request_received >= stream->request_bytes) {
+            if (stream->request_received >= stream->request_bytes) {
                 stream->server_ready_to_send = 1;
             }
         }
@@ -994,6 +1302,8 @@ static int init_server_conn(perf_conn_t *pc, SSL_CTX *ssl_ctx, const ngtcp2_pkt_
 static void free_streams(stream_ctx_t *stream) {
     while (stream) {
         stream_ctx_t *next = stream->next;
+        free(stream->control_out);
+        free(stream->control_in);
         free(stream);
         stream = next;
     }
@@ -1053,6 +1363,30 @@ static int select_writable_stream(perf_conn_t *pc, int64_t *stream_id, ngtcp2_ve
     *flags = NGTCP2_WRITE_STREAM_FLAG_NONE;
 
     for (stream_ctx_t *stream = pc->streams; stream; stream = stream->next) {
+        if (stream->is_control) {
+            if (stream->write_fin_sent) {
+                continue;
+            }
+            if (stream->control_sent >= stream->control_len && !stream->control_fin) {
+                continue;
+            }
+            *stream_id = stream->stream_id;
+            if (stream->control_sent < stream->control_len) {
+                uint64_t left = stream->control_len - stream->control_sent;
+                size_t chunk = left > sizeof(zeros) ? sizeof(zeros) : (size_t)left;
+                datav->base = stream->control_out + stream->control_sent;
+                datav->len = chunk;
+                if (chunk == left && stream->control_fin) {
+                    *flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
+                }
+                return 1;
+            }
+            if (stream->control_fin) {
+                *flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
+                return 1;
+            }
+            continue;
+        }
         if (pc->is_server) {
             if (!stream->server_ready_to_send || stream->write_fin_sent) {
                 continue;
@@ -1076,11 +1410,6 @@ static int select_writable_stream(perf_conn_t *pc, int64_t *stream_id, ngtcp2_ve
             continue;
         }
         *stream_id = stream->stream_id;
-        if (stream->header_sent < sizeof(stream->header)) {
-            datav->base = stream->header + stream->header_sent;
-            datav->len = sizeof(stream->header) - stream->header_sent;
-            return 1;
-        }
         if (stream->request_sent < stream->request_bytes) {
             uint64_t left = stream->request_bytes - stream->request_sent;
             size_t chunk = left > sizeof(zeros) ? sizeof(zeros) : (size_t)left;
@@ -1107,18 +1436,18 @@ static void note_stream_write(perf_conn_t *pc, int64_t stream_id, ngtcp2_ssize w
         return;
     }
     uint64_t written = wdatalen > 0 ? (uint64_t)wdatalen : 0;
-    if (pc->is_server) {
+    if (stream->is_control) {
+        stream->control_sent += (size_t)written;
+    } else if (pc->is_server) {
         stream->response_sent += written;
+        pc->server_bytes_sent += written;
     } else {
-        uint64_t header_left = sizeof(stream->header) - stream->header_sent;
-        if (header_left > 0) {
-            uint64_t take = written < header_left ? written : header_left;
-            stream->header_sent += (size_t)take;
-            written -= take;
-        }
         stream->request_sent += written;
     }
     if ((flags & NGTCP2_WRITE_STREAM_FLAG_FIN) && (datalen == 0 || written >= datalen)) {
+        if (pc->is_server && !stream->is_control && !stream->write_fin_sent) {
+            ++pc->server_requests_completed;
+        }
         stream->write_fin_sent = 1;
     }
 }
@@ -1206,8 +1535,6 @@ static int open_request_stream(perf_conn_t *pc, uint64_t request_bytes, uint64_t
     stream->response_bytes = response_bytes;
     stream->started_at = now_us();
     stream->counts_latency = counts_latency;
-    encode_be64(stream->header, request_bytes);
-    encode_be64(stream->header + 8, response_bytes);
     int rv = ngtcp2_conn_open_bidi_stream(pc->conn, &stream->stream_id, stream);
     if (rv != 0) {
         free(stream);
@@ -1219,12 +1546,52 @@ static int open_request_stream(perf_conn_t *pc, uint64_t request_bytes, uint64_t
     return 0;
 }
 
-static int open_batch_streams(perf_conn_t *pc, uint64_t count, uint64_t request_bytes,
-                              uint64_t response_bytes, int counts_latency) {
-    while (pc->started_requests < count) {
-        if (open_request_stream(pc, request_bytes, response_bytes, counts_latency) != 0) {
+static int open_control_stream(perf_conn_t *pc, uint64_t request_bytes, uint64_t response_bytes) {
+    stream_ctx_t *stream = calloc(1, sizeof(*stream));
+    if (!stream) {
+        set_failure(pc, "out of memory");
+        return -1;
+    }
+    stream->conn = pc;
+    stream->is_control = 1;
+    stream->control_fin = 1;
+    stream->control_out =
+        encode_session_start_message(&pc->cfg, request_bytes, response_bytes, &stream->control_len);
+    if (!stream->control_out) {
+        free(stream);
+        set_failure(pc, "could not encode session_start");
+        return -1;
+    }
+    int rv = ngtcp2_conn_open_bidi_stream(pc->conn, &stream->stream_id, stream);
+    if (rv != 0) {
+        free(stream->control_out);
+        free(stream);
+        set_failure_liberr(pc, "ngtcp2_conn_open_bidi_stream control", rv);
+        return -1;
+    }
+    if (stream->stream_id != CONTROL_STREAM_ID) {
+        free(stream->control_out);
+        free(stream);
+        set_failure(pc, "unexpected ngtcp2 control stream id");
+        return -1;
+    }
+    conn_add_stream(pc, stream);
+    return 0;
+}
+
+static int ensure_session_ready(perf_conn_t *pc, uint64_t request_bytes, uint64_t response_bytes,
+                                uint64_t started_at) {
+    if (pc->session_ready) {
+        return 0;
+    }
+    if (ngtcp2_conn_get_handshake_completed(pc->conn) && !conn_find_stream(pc, CONTROL_STREAM_ID)) {
+        if (open_control_stream(pc, request_bytes, response_bytes) != 0) {
             return -1;
         }
+    }
+    if (now_us() - started_at > HANDSHAKE_TIMEOUT_US) {
+        set_failure(pc, "ngtcp2 session_ready timed out");
+        return -1;
     }
     return 0;
 }
@@ -1233,62 +1600,242 @@ static uint64_t active_requests(const perf_conn_t *pc) {
     return pc->started_requests - pc->completed_requests;
 }
 
-static int open_timed_bulk_streams(perf_conn_t *pc, uint64_t target_active, uint64_t request_bytes,
-                                   uint64_t response_bytes) {
-    while (active_requests(pc) < target_active) {
-        if (open_request_stream(pc, request_bytes, response_bytes, 0) != 0) {
-            return -1;
-        }
-    }
-    return 0;
-}
-
-static int open_timed_rr_streams(perf_conn_t *pc, uint64_t target_active, uint64_t request_bytes,
-                                 uint64_t response_bytes) {
-    while (active_requests(pc) < target_active) {
-        if (open_request_stream(pc, request_bytes, response_bytes, 1) != 0) {
-            return -1;
-        }
-    }
-    return 0;
-}
-
-static int drive_client_once(perf_conn_t *pc, uint64_t max_wait_us) {
-    if (conn_write(pc) != 0) {
+static int init_client_conn(const config_t *cfg, counters_t *counters, perf_conn_t **out,
+                            char *failure_reason, size_t failure_reason_len) {
+    perf_conn_t *pc = calloc(1, sizeof(*pc));
+    if (!pc) {
+        snprintf(failure_reason, failure_reason_len, "out of memory");
         return -1;
     }
+    pc->fd = -1;
+    pc->cfg = *cfg;
+    pc->counters = counters;
+    pc->started_at = now_us();
+    ngtcp2_ccerr_default(&pc->last_error);
+    if (create_client_socket(pc) != 0 || init_client_quic(pc) != 0) {
+        snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
+        free_conn(pc, 1);
+        return -1;
+    }
+    *out = pc;
+    return 0;
+}
 
+static int open_streams_to_active(perf_conn_t *pc, uint64_t target_active, uint64_t request_bytes,
+                                  uint64_t response_bytes, int counts_latency, uint64_t *started,
+                                  uint64_t limit) {
+    while (active_requests(pc) < target_active) {
+        if (started && limit != UINT64_MAX && *started >= limit) {
+            break;
+        }
+        if (open_request_stream(pc, request_bytes, response_bytes, counts_latency) != 0) {
+            return -1;
+        }
+        if (started) {
+            ++*started;
+        }
+    }
+    return 0;
+}
+
+static int wait_client_connections(perf_conn_t **conns, size_t count, uint64_t max_wait_us,
+                                   char *failure_reason, size_t failure_reason_len) {
     fd_set readfds;
     FD_ZERO(&readfds);
-    FD_SET(pc->fd, &readfds);
-    uint64_t now = ngtcp2_now();
-    ngtcp2_tstamp expiry = ngtcp2_conn_get_expiry(pc->conn);
+    int maxfd = -1;
     uint64_t timeout_us = max_wait_us;
-    if (expiry <= now) {
-        timeout_us = 0;
-    } else {
-        uint64_t delta = (uint64_t)((expiry - now) / 1000);
-        if (delta < timeout_us) {
-            timeout_us = delta;
+    uint64_t now = ngtcp2_now();
+    for (size_t i = 0; i < count; ++i) {
+        perf_conn_t *pc = conns[i];
+        if (!pc) {
+            continue;
         }
+        if (pc->fd >= FD_SETSIZE) {
+            snprintf(failure_reason, failure_reason_len,
+                     "ngtcp2 connection fd exceeds select limit");
+            return -1;
+        }
+        FD_SET(pc->fd, &readfds);
+        if (pc->fd > maxfd) {
+            maxfd = pc->fd;
+        }
+        ngtcp2_tstamp expiry = ngtcp2_conn_get_expiry(pc->conn);
+        if (expiry <= now) {
+            timeout_us = 0;
+        } else {
+            uint64_t delta = (uint64_t)((expiry - now) / 1000);
+            if (delta < timeout_us) {
+                timeout_us = delta;
+            }
+        }
+    }
+    if (maxfd < 0) {
+        return 0;
     }
     struct timeval tv;
     tv.tv_sec = (time_t)(timeout_us / 1000000ULL);
     tv.tv_usec = (suseconds_t)(timeout_us % 1000000ULL);
     int sret;
     do {
-        sret = select(pc->fd + 1, &readfds, NULL, NULL, &tv);
+        sret = select(maxfd + 1, &readfds, NULL, NULL, &tv);
     } while (sret == -1 && errno == EINTR);
-    if (sret > 0 && FD_ISSET(pc->fd, &readfds)) {
-        if (conn_read_client(pc) != 0) {
+    if (sret < 0) {
+        snprintf(failure_reason, failure_reason_len, "%s", strerror(errno));
+        return -1;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        perf_conn_t *pc = conns[i];
+        if (pc && FD_ISSET(pc->fd, &readfds) && conn_read_client(pc) != 0) {
+            snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
             return -1;
         }
     }
-    now = ngtcp2_now();
-    if (ngtcp2_conn_get_expiry(pc->conn) <= now) {
-        int rv = ngtcp2_conn_handle_expiry(pc->conn, now);
-        if (rv != 0) {
-            set_failure_liberr(pc, "ngtcp2_conn_handle_expiry", rv);
+    return 0;
+}
+
+static int drive_client_connections_once(perf_conn_t **conns, size_t count, uint64_t max_wait_us,
+                                         char *failure_reason, size_t failure_reason_len) {
+    for (size_t i = 0; i < count; ++i) {
+        perf_conn_t *pc = conns[i];
+        if (!pc) {
+            continue;
+        }
+        if (conn_write(pc) != 0) {
+            snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
+            return -1;
+        }
+        uint64_t now = ngtcp2_now();
+        if (ngtcp2_conn_get_expiry(pc->conn) <= now) {
+            int rv = ngtcp2_conn_handle_expiry(pc->conn, now);
+            if (rv != 0) {
+                set_failure_liberr(pc, "ngtcp2_conn_handle_expiry", rv);
+                snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
+                return -1;
+            }
+        }
+    }
+    return wait_client_connections(conns, count, max_wait_us, failure_reason, failure_reason_len);
+}
+
+static void free_client_connections(perf_conn_t **conns, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        if (conns[i]) {
+            free_conn(conns[i], 1);
+            conns[i] = NULL;
+        }
+    }
+}
+
+static int refill_rr_connections(perf_conn_t **conns, size_t count, const config_t *cfg,
+                                 uint64_t *started, uint64_t limit, uint64_t deadline,
+                                 char *failure_reason, size_t failure_reason_len) {
+    for (size_t i = 0; i < count; ++i) {
+        perf_conn_t *pc = conns[i];
+        if (!pc || !pc->session_ready) {
+            continue;
+        }
+        while (active_requests(pc) < cfg->requests_in_flight) {
+            if (limit != UINT64_MAX) {
+                if (*started >= limit) {
+                    return 0;
+                }
+                if (pc->started_requests >= rr_request_limit_for_connection(cfg, (uint64_t)i)) {
+                    break;
+                }
+            }
+            if (deadline != 0 && now_us() >= deadline) {
+                return 0;
+            }
+            if (open_request_stream(pc, cfg->request_bytes, cfg->response_bytes, 1) != 0) {
+                snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
+                return -1;
+            }
+            ++*started;
+        }
+    }
+    return 0;
+}
+
+static int all_connections_ready(perf_conn_t **conns, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        if (!conns[i] || !conns[i]->session_ready) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static uint64_t total_active_requests(perf_conn_t **conns, size_t count) {
+    uint64_t active = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (conns[i]) {
+            active += active_requests(conns[i]);
+        }
+    }
+    return active;
+}
+
+static uint64_t total_completed_requests(perf_conn_t **conns, size_t count) {
+    uint64_t completed = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (conns[i]) {
+            completed += conns[i]->completed_requests;
+        }
+    }
+    return completed;
+}
+
+static perf_conn_t **open_client_connections(const config_t *cfg, counters_t *counters,
+                                             uint64_t request_bytes, uint64_t response_bytes,
+                                             size_t *count, char *failure_reason,
+                                             size_t failure_reason_len) {
+    *count = (size_t)cfg->connections;
+    perf_conn_t **conns = calloc(*count, sizeof(conns[0]));
+    if (!conns) {
+        snprintf(failure_reason, failure_reason_len, "out of memory");
+        return NULL;
+    }
+    for (size_t i = 0; i < *count; ++i) {
+        config_t connection_cfg = *cfg;
+        if (is_mode(cfg, "rr") && cfg->requests.set) {
+            connection_cfg.requests.value = rr_request_limit_for_connection(cfg, (uint64_t)i);
+            connection_cfg.requests.set = 1;
+        }
+        if (init_client_conn(&connection_cfg, counters, &conns[i], failure_reason,
+                             failure_reason_len) != 0) {
+            free_client_connections(conns, *count);
+            free(conns);
+            return NULL;
+        }
+    }
+    uint64_t started_at = now_us();
+    while (!all_connections_ready(conns, *count)) {
+        for (size_t i = 0; i < *count; ++i) {
+            if (ensure_session_ready(conns[i], request_bytes, response_bytes, started_at) != 0) {
+                snprintf(failure_reason, failure_reason_len, "%s", conns[i]->failure_reason);
+                free_client_connections(conns, *count);
+                free(conns);
+                return NULL;
+            }
+        }
+        if (drive_client_connections_once(conns, *count, 100000, failure_reason,
+                                          failure_reason_len) != 0) {
+            free_client_connections(conns, *count);
+            free(conns);
+            return NULL;
+        }
+    }
+    return conns;
+}
+
+static int open_batch_distributed(perf_conn_t **conns, size_t count, uint64_t request_count,
+                                  uint64_t request_bytes, uint64_t response_bytes,
+                                  int counts_latency, char *failure_reason,
+                                  size_t failure_reason_len) {
+    for (uint64_t i = 0; i < request_count; ++i) {
+        perf_conn_t *pc = conns[i % count];
+        if (open_request_stream(pc, request_bytes, response_bytes, counts_latency) != 0) {
+            snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
             return -1;
         }
     }
@@ -1296,6 +1843,10 @@ static int drive_client_once(perf_conn_t *pc, uint64_t max_wait_us) {
 }
 
 static void send_connection_close(perf_conn_t *pc) {
+    if (pc->is_server) {
+        maybe_send_server_complete(pc);
+        (void)conn_write(pc);
+    }
     ngtcp2_path_storage ps;
     ngtcp2_path_storage_zero(&ps);
     ngtcp2_pkt_info pi;
@@ -1306,31 +1857,6 @@ static void send_connection_close(perf_conn_t *pc) {
     if (nwrite > 0) {
         send_packet_fd(pc->fd, NULL, 0, buf, (size_t)nwrite);
     }
-}
-
-static int start_single_crr_connection(const config_t *cfg, counters_t *counters,
-                                       perf_conn_t **slot, char *failure_reason,
-                                       size_t failure_reason_len) {
-    perf_conn_t *pc = calloc(1, sizeof(*pc));
-    if (!pc) {
-        snprintf(failure_reason, failure_reason_len, "out of memory");
-        return -1;
-    }
-    pc->fd = -1;
-    pc->cfg = *cfg;
-    pc->expected_requests = 1;
-    pc->started_at = now_us();
-    pc->counters = counters;
-    ngtcp2_ccerr_default(&pc->last_error);
-
-    if (create_client_socket(pc) != 0 || init_client_quic(pc) != 0) {
-        snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
-        free_conn(pc, 1);
-        return -1;
-    }
-
-    *slot = pc;
-    return 0;
 }
 
 static int crr_can_start_connection(const config_t *cfg, uint64_t started, uint64_t deadline) {
@@ -1350,97 +1876,9 @@ static size_t active_crr_connection_count(perf_conn_t **slots, size_t count) {
     return active;
 }
 
-static void free_crr_connections(perf_conn_t **slots, size_t count) {
-    for (size_t i = 0; i < count; ++i) {
-        if (slots[i]) {
-            free_conn(slots[i], 1);
-            slots[i] = NULL;
-        }
-    }
-}
-
-static int wait_crr_connections(perf_conn_t **slots, size_t count, uint64_t max_wait_us,
-                                char *failure_reason, size_t failure_reason_len) {
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    int maxfd = -1;
-    uint64_t timeout_us = max_wait_us;
-    uint64_t now = ngtcp2_now();
-
-    for (size_t i = 0; i < count; ++i) {
-        perf_conn_t *pc = slots[i];
-        if (!pc) {
-            continue;
-        }
-        if (pc->fd >= FD_SETSIZE) {
-            snprintf(failure_reason, failure_reason_len,
-                     "ngtcp2 CRR connection fd exceeds select limit");
-            return -1;
-        }
-        FD_SET(pc->fd, &readfds);
-        if (pc->fd > maxfd) {
-            maxfd = pc->fd;
-        }
-
-        ngtcp2_tstamp expiry = ngtcp2_conn_get_expiry(pc->conn);
-        if (expiry <= now) {
-            timeout_us = 0;
-        } else {
-            uint64_t delta = (uint64_t)((expiry - now) / 1000);
-            if (delta < timeout_us) {
-                timeout_us = delta;
-            }
-        }
-    }
-
-    if (maxfd < 0) {
-        return 0;
-    }
-
-    struct timeval tv;
-    tv.tv_sec = (time_t)(timeout_us / 1000000ULL);
-    tv.tv_usec = (suseconds_t)(timeout_us % 1000000ULL);
-    int sret;
-    do {
-        sret = select(maxfd + 1, &readfds, NULL, NULL, &tv);
-    } while (sret == -1 && errno == EINTR);
-    if (sret < 0) {
-        snprintf(failure_reason, failure_reason_len, "%s", strerror(errno));
-        return -1;
-    }
-    return 0;
-}
-
-static int drive_crr_connection(perf_conn_t *pc, uint64_t request_bytes, uint64_t response_bytes) {
-    if (pc->started_requests == 0 && ngtcp2_conn_get_handshake_completed(pc->conn)) {
-        if (open_batch_streams(pc, 1, request_bytes, response_bytes, 1) != 0) {
-            return -1;
-        }
-    }
-
-    if (drive_client_once(pc, 0) != 0) {
-        return -1;
-    }
-
-    if (pc->started_requests == 0 && now_us() - pc->started_at > HANDSHAKE_TIMEOUT_US) {
-        set_failure(pc, "ngtcp2 connection handshake timed out");
-        return -1;
-    }
-    if (now_us() - pc->started_at > BATCH_TIMEOUT_US) {
-        snprintf(pc->failure_reason, sizeof(pc->failure_reason),
-                 "ngtcp2-perf completed %" PRIu64 " of %" PRIu64 " requests",
-                 pc->completed_requests, pc->expected_requests);
-        pc->failed = 1;
-        return -1;
-    }
-
-    return 0;
-}
-
 static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t request_bytes,
                              uint64_t response_bytes, counters_t *counters, int counts_latency,
                              char *failure_reason, size_t failure_reason_len) {
-    /* Empty or oversized batches are normalized before allocating the client connection. */
     if (count == 0) {
         return 0;
     }
@@ -1448,124 +1886,83 @@ static int run_request_batch(const config_t *cfg, uint64_t count, uint64_t reque
         count = DEFAULT_MAX_RUN_REQUESTS;
     }
 
-    perf_conn_t *pc = calloc(1, sizeof(*pc));
-    if (!pc) {
-        snprintf(failure_reason, failure_reason_len, "out of memory");
+    size_t conn_count = 0;
+    perf_conn_t **conns = open_client_connections(cfg, counters, request_bytes, response_bytes,
+                                                  &conn_count, failure_reason, failure_reason_len);
+    if (!conns) {
         return -1;
     }
-    pc->fd = -1;
-    pc->cfg = *cfg;
-    pc->expected_requests = count;
-    pc->counters = counters;
-    ngtcp2_ccerr_default(&pc->last_error);
-
-    if (create_client_socket(pc) != 0 || init_client_quic(pc) != 0) {
-        snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
-        free_conn(pc, 1);
+    if (open_batch_distributed(conns, conn_count, count, request_bytes, response_bytes,
+                               counts_latency, failure_reason, failure_reason_len) != 0) {
+        free_client_connections(conns, conn_count);
+        free(conns);
         return -1;
     }
-
-    /* The batch loop opens streams after the handshake, drives I/O, and exits on timeout. */
-    uint64_t started_at = now_us();
-    int opened_streams = 0;
-    while (!pc->failed && pc->completed_requests < count &&
-           now_us() - started_at < BATCH_TIMEOUT_US) {
-        if (!opened_streams && ngtcp2_conn_get_handshake_completed(pc->conn)) {
-            if (open_batch_streams(pc, count, request_bytes, response_bytes, counts_latency) != 0) {
-                break;
-            }
-            opened_streams = 1;
+    uint64_t hard_deadline = now_us() + BATCH_TIMEOUT_US;
+    while (total_completed_requests(conns, conn_count) < count) {
+        if (now_us() >= hard_deadline) {
+            snprintf(failure_reason, failure_reason_len,
+                     "ngtcp2-perf completed %" PRIu64 " of %" PRIu64 " requests",
+                     total_completed_requests(conns, conn_count), count);
+            free_client_connections(conns, conn_count);
+            free(conns);
+            return -1;
         }
-
-        if (drive_client_once(pc, 100000) != 0) {
-            break;
-        }
-        if (!opened_streams && now_us() - started_at > HANDSHAKE_TIMEOUT_US) {
-            set_failure(pc, "ngtcp2 connection handshake timed out");
+        if (drive_client_connections_once(conns, conn_count, 100000, failure_reason,
+                                          failure_reason_len) != 0) {
             break;
         }
     }
-
-    if (!pc->failed && pc->completed_requests != count) {
-        snprintf(pc->failure_reason, sizeof(pc->failure_reason),
-                 "ngtcp2-perf completed %" PRIu64 " of %" PRIu64 " requests",
-                 pc->completed_requests, count);
-        pc->failed = 1;
+    int rc = total_completed_requests(conns, conn_count) == count ? 0 : -1;
+    if (rc == 0) {
+        for (size_t i = 0; i < conn_count; ++i) {
+            send_connection_close(conns[i]);
+        }
     }
-
-    /* Successful batches send CONNECTION_CLOSE so the peer can drain cleanly. */
-    if (!pc->failed) {
-        send_connection_close(pc);
-    }
-
-    int rc = pc->failed ? -1 : 0;
-    if (pc->failed) {
-        snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
-    }
-    free_conn(pc, 1);
+    free_client_connections(conns, conn_count);
+    free(conns);
     return rc;
 }
 
 static int run_timed_bulk(const config_t *cfg, uint64_t request_bytes, uint64_t response_bytes,
                           counters_t *counters, char *failure_reason, size_t failure_reason_len) {
-    perf_conn_t *pc = calloc(1, sizeof(*pc));
-    if (!pc) {
-        snprintf(failure_reason, failure_reason_len, "out of memory");
+    size_t conn_count = 0;
+    perf_conn_t **conns = open_client_connections(cfg, counters, request_bytes, response_bytes,
+                                                  &conn_count, failure_reason, failure_reason_len);
+    if (!conns) {
         return -1;
-    }
-    pc->fd = -1;
-    pc->cfg = *cfg;
-    pc->counters = counters;
-    ngtcp2_ccerr_default(&pc->last_error);
-
-    if (create_client_socket(pc) != 0 || init_client_quic(pc) != 0) {
-        snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
-        free_conn(pc, 1);
-        return -1;
-    }
-
-    uint64_t target_active = cfg->streams * cfg->connections;
-    if (target_active == 0) {
-        target_active = 1;
     }
     uint64_t started_at = now_us();
     uint64_t deadline = started_at + cfg->duration_us;
     uint64_t drain_deadline = deadline + DRAIN_TIMEOUT_US;
-    int opened_streams = 0;
-    while (!pc->failed) {
+    while (now_us() <= drain_deadline) {
         uint64_t now = now_us();
-        if (!opened_streams && ngtcp2_conn_get_handshake_completed(pc->conn)) {
-            opened_streams = 1;
-        }
-        if (opened_streams && now < deadline &&
-            open_timed_bulk_streams(pc, target_active, request_bytes, response_bytes) != 0) {
+        if (now < deadline) {
+            for (size_t i = 0; i < conn_count; ++i) {
+                if (open_streams_to_active(conns[i], cfg->streams, request_bytes, response_bytes, 0,
+                                           NULL, UINT64_MAX) != 0) {
+                    snprintf(failure_reason, failure_reason_len, "%s", conns[i]->failure_reason);
+                    free_client_connections(conns, conn_count);
+                    free(conns);
+                    return -1;
+                }
+            }
+        } else if (total_active_requests(conns, conn_count) == 0) {
             break;
         }
-        if (opened_streams && now >= deadline && active_requests(pc) == 0) {
-            break;
-        }
-        if (now >= drain_deadline) {
-            break;
-        }
-        if (!opened_streams && now - started_at > HANDSHAKE_TIMEOUT_US) {
-            set_failure(pc, "ngtcp2 connection handshake timed out");
-            break;
-        }
-        if (drive_client_once(pc, 100000) != 0) {
-            break;
+        if (drive_client_connections_once(conns, conn_count, 100000, failure_reason,
+                                          failure_reason_len) != 0) {
+            free_client_connections(conns, conn_count);
+            free(conns);
+            return -1;
         }
     }
-
-    if (!pc->failed) {
-        send_connection_close(pc);
+    for (size_t i = 0; i < conn_count; ++i) {
+        send_connection_close(conns[i]);
     }
-
-    int rc = pc->failed ? -1 : 0;
-    if (pc->failed) {
-        snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
-    }
-    free_conn(pc, 1);
-    return rc;
+    free_client_connections(conns, conn_count);
+    free(conns);
+    return 0;
 }
 
 static int run_bulk(const config_t *cfg, counters_t *counters, char *failure_reason,
@@ -1600,69 +1997,91 @@ static int run_bulk(const config_t *cfg, counters_t *counters, char *failure_rea
 static int run_rr(const config_t *cfg, counters_t *counters, char *failure_reason,
                   size_t failure_reason_len) {
     if (cfg->requests.set) {
-        return run_request_batch(cfg, cfg->requests.value, cfg->request_bytes, cfg->response_bytes,
-                                 counters, 1, failure_reason, failure_reason_len);
+        config_t request_cfg = *cfg;
+        request_cfg.connections = rr_connection_target(cfg);
+        size_t conn_count = 0;
+        perf_conn_t **conns =
+            open_client_connections(&request_cfg, counters, cfg->request_bytes, cfg->response_bytes,
+                                    &conn_count, failure_reason, failure_reason_len);
+        if (!conns) {
+            return -1;
+        }
+        uint64_t started = 0;
+        if (refill_rr_connections(conns, conn_count, cfg, &started, cfg->requests.value, 0,
+                                  failure_reason, failure_reason_len) != 0) {
+            free_client_connections(conns, conn_count);
+            free(conns);
+            return -1;
+        }
+        uint64_t hard_deadline = now_us() + BATCH_TIMEOUT_US;
+        while (total_completed_requests(conns, conn_count) < cfg->requests.value ||
+               total_active_requests(conns, conn_count) != 0) {
+            if (now_us() >= hard_deadline) {
+                snprintf(failure_reason, failure_reason_len,
+                         "ngtcp2-perf completed %" PRIu64 " of %" PRIu64 " requests",
+                         total_completed_requests(conns, conn_count), cfg->requests.value);
+                free_client_connections(conns, conn_count);
+                free(conns);
+                return -1;
+            }
+            if (drive_client_connections_once(conns, conn_count, 100000, failure_reason,
+                                              failure_reason_len) != 0 ||
+                refill_rr_connections(conns, conn_count, cfg, &started, cfg->requests.value, 0,
+                                      failure_reason, failure_reason_len) != 0) {
+                free_client_connections(conns, conn_count);
+                free(conns);
+                return -1;
+            }
+        }
+        for (size_t i = 0; i < conn_count; ++i) {
+            send_connection_close(conns[i]);
+        }
+        free_client_connections(conns, conn_count);
+        free(conns);
+        return 0;
     }
 
-    perf_conn_t *pc = calloc(1, sizeof(*pc));
-    if (!pc) {
-        snprintf(failure_reason, failure_reason_len, "out of memory");
+    size_t conn_count = 0;
+    perf_conn_t **conns =
+        open_client_connections(cfg, counters, cfg->request_bytes, cfg->response_bytes, &conn_count,
+                                failure_reason, failure_reason_len);
+    if (!conns) {
         return -1;
     }
-    pc->fd = -1;
-    pc->cfg = *cfg;
-    pc->counters = counters;
-    ngtcp2_ccerr_default(&pc->last_error);
-
-    if (create_client_socket(pc) != 0 || init_client_quic(pc) != 0) {
-        snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
-        free_conn(pc, 1);
-        return -1;
-    }
-
-    uint64_t target_active = cfg->requests_in_flight * cfg->connections;
-    if (target_active == 0) {
-        target_active = 1;
-    }
-    uint64_t started_at = now_us();
-    uint64_t deadline = started_at + cfg->duration_us;
+    uint64_t started = 0;
+    uint64_t deadline = now_us() + cfg->duration_us;
     uint64_t drain_deadline = deadline + DRAIN_TIMEOUT_US;
-    int opened_streams = 0;
-    while (!pc->failed) {
+    if (refill_rr_connections(conns, conn_count, cfg, &started, UINT64_MAX, deadline,
+                              failure_reason, failure_reason_len) != 0) {
+        free_client_connections(conns, conn_count);
+        free(conns);
+        return -1;
+    }
+    while (now_us() <= drain_deadline) {
         uint64_t now = now_us();
-        if (!opened_streams && ngtcp2_conn_get_handshake_completed(pc->conn)) {
-            opened_streams = 1;
-        }
-        if (opened_streams && now < deadline &&
-            open_timed_rr_streams(pc, target_active, cfg->request_bytes, cfg->response_bytes) !=
-                0) {
+        if (now < deadline) {
+            if (refill_rr_connections(conns, conn_count, cfg, &started, UINT64_MAX, deadline,
+                                      failure_reason, failure_reason_len) != 0) {
+                free_client_connections(conns, conn_count);
+                free(conns);
+                return -1;
+            }
+        } else if (total_active_requests(conns, conn_count) == 0) {
             break;
         }
-        if (opened_streams && now >= deadline && active_requests(pc) == 0) {
-            break;
-        }
-        if (now >= drain_deadline) {
-            break;
-        }
-        if (!opened_streams && now - started_at > HANDSHAKE_TIMEOUT_US) {
-            set_failure(pc, "ngtcp2 connection handshake timed out");
-            break;
-        }
-        if (drive_client_once(pc, 100000) != 0) {
-            break;
+        if (drive_client_connections_once(conns, conn_count, 100000, failure_reason,
+                                          failure_reason_len) != 0) {
+            free_client_connections(conns, conn_count);
+            free(conns);
+            return -1;
         }
     }
-
-    if (!pc->failed) {
-        send_connection_close(pc);
+    for (size_t i = 0; i < conn_count; ++i) {
+        send_connection_close(conns[i]);
     }
-
-    int rc = pc->failed ? -1 : 0;
-    if (pc->failed) {
-        snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
-    }
-    free_conn(pc, 1);
-    return rc;
+    free_client_connections(conns, conn_count);
+    free(conns);
+    return 0;
 }
 
 static int run_crr(const config_t *cfg, counters_t *counters, char *failure_reason,
@@ -1681,12 +2100,13 @@ static int run_crr(const config_t *cfg, counters_t *counters, char *failure_reas
             if (slots[i] || !crr_can_start_connection(cfg, started, deadline)) {
                 continue;
             }
-            if (start_single_crr_connection(cfg, counters, &slots[i], failure_reason,
-                                            failure_reason_len) != 0) {
-                free_crr_connections(slots, slot_count);
+            if (init_client_conn(cfg, counters, &slots[i], failure_reason, failure_reason_len) !=
+                0) {
+                free_client_connections(slots, slot_count);
                 free(slots);
                 return -1;
             }
+            slots[i]->expected_requests = 1;
             ++started;
         }
 
@@ -1699,10 +2119,17 @@ static int run_crr(const config_t *cfg, counters_t *counters, char *failure_reas
             if (!pc) {
                 continue;
             }
-            if (drive_crr_connection(pc, cfg->request_bytes, cfg->response_bytes) != 0 ||
-                pc->failed) {
+            if (ensure_session_ready(pc, cfg->request_bytes, cfg->response_bytes, pc->started_at) !=
+                0) {
                 snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
-                free_crr_connections(slots, slot_count);
+                free_client_connections(slots, slot_count);
+                free(slots);
+                return -1;
+            }
+            if (pc->session_ready && pc->started_requests == 0 &&
+                open_request_stream(pc, cfg->request_bytes, cfg->response_bytes, 1) != 0) {
+                snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
+                free_client_connections(slots, slot_count);
                 free(slots);
                 return -1;
             }
@@ -1717,9 +2144,9 @@ static int run_crr(const config_t *cfg, counters_t *counters, char *failure_reas
             !crr_can_start_connection(cfg, started, deadline)) {
             break;
         }
-        if (wait_crr_connections(slots, slot_count, 100000, failure_reason, failure_reason_len) !=
-            0) {
-            free_crr_connections(slots, slot_count);
+        if (drive_client_connections_once(slots, slot_count, 100000, failure_reason,
+                                          failure_reason_len) != 0) {
+            free_client_connections(slots, slot_count);
             free(slots);
             return -1;
         }

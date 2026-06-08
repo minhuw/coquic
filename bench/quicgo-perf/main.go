@@ -210,10 +210,11 @@ type bulkStreamResult struct {
 }
 
 type rrStreamResult struct {
-	counts   bool
-	latency  time.Duration
-	received uint64
-	err      error
+	connectionIndex uint64
+	counts          bool
+	latency         time.Duration
+	received        uint64
+	err             error
 }
 
 type serverSession struct {
@@ -509,7 +510,7 @@ func runClient(cfg config) (runSummary, error) {
 
 	var connections []connectionState
 	if cfg.mode != modeCRR {
-		connections, err = openConnections(context.Background(), dialer, cfg, start, cfg.connections)
+		connections, err = openConnections(context.Background(), dialer, cfg, start, rrConnectionTarget(cfg))
 		if err != nil {
 			return summary, err
 		}
@@ -623,6 +624,10 @@ func (d *clientDialer) Close() {
 func openConnections(ctx context.Context, dialer *clientDialer, cfg config, start sessionStart, count uint64) ([]connectionState, error) {
 	connections := make([]connectionState, 0, intCap(count))
 	for i := uint64(0); i < count; i++ {
+		connectionStart := start
+		if connectionStart.mode == modeRR && connectionStart.requests.set {
+			connectionStart.requests.value = rrRequestLimitForConnection(cfg, i)
+		}
 		conn, err := dialer.dialConnection(ctx, cfg)
 		if err != nil {
 			closeConnections(connections)
@@ -640,7 +645,7 @@ func openConnections(ctx context.Context, dialer *clientDialer, cfg config, star
 			closeConnections(connections)
 			return nil, fmt.Errorf("unexpected control stream id: %d", control.StreamID())
 		}
-		if _, err := control.Write(encodeSessionStart(start)); err != nil {
+		if _, err := control.Write(encodeSessionStart(connectionStart)); err != nil {
 			_ = conn.CloseWithError(0, "session_start failed")
 			closeConnections(connections)
 			return nil, fmt.Errorf("write session_start: %w", err)
@@ -833,20 +838,24 @@ func runRR(cfg config, connections []connectionState, counters *measuredCounters
 
 	resultCh := make(chan rrStreamResult, intCap(cfg.requestsInFlight*uint64(len(connections))+64))
 	active := uint64(0)
+	activeByConnection := make([]uint64, len(connections))
+	startedByConnection := make([]uint64, len(connections))
 	started := uint64(0)
-	nextConnection := uint64(0)
-	openNext := func(conn *quic.Conn, counts bool) {
+	openNext := func(index uint64, conn *quic.Conn, counts bool) {
 		atomic.AddUint64(&active, 1)
+		activeByConnection[index]++
 		atomic.AddUint64(&started, 1)
 		go func() {
 			latency, received, err := runRequestResponseStream(ctx, conn, cfg.requestBytes)
-			resultCh <- rrStreamResult{counts: counts, latency: latency, received: received, err: err}
+			resultCh <- rrStreamResult{connectionIndex: index, counts: counts, latency: latency, received: received, err: err}
 		}()
 	}
 
-	for _, c := range connections {
-		for i := uint64(0); i < cfg.requestsInFlight; i++ {
-			openNext(c.conn, cfg.requests.set || time.Now().After(measureStart))
+	for index, c := range connections {
+		for activeByConnection[index] < cfg.requestsInFlight &&
+			canStartRRRequest(cfg, started, startedByConnection, uint64(index)) {
+			openNext(uint64(index), c.conn, cfg.requests.set || time.Now().After(measureStart))
+			startedByConnection[index]++
 		}
 	}
 	for {
@@ -858,6 +867,7 @@ func runRR(cfg config, connections []connectionState, counters *measuredCounters
 		}
 		result := <-resultCh
 		atomic.AddUint64(&active, ^uint64(0))
+		activeByConnection[result.connectionIndex]--
 		if result.err != nil {
 			return result.err
 		}
@@ -869,20 +879,45 @@ func runRR(cfg config, connections []connectionState, counters *measuredCounters
 			counters.latencies = append(counters.latencies, result.latency)
 			counters.latencyMu.Unlock()
 		}
-		for atomic.LoadUint64(&active) < cfg.requestsInFlight*uint64(len(connections)) {
-			if cfg.requests.set && atomic.LoadUint64(&started) >= cfg.requests.value {
+		for activeByConnection[result.connectionIndex] < cfg.requestsInFlight {
+			if !canStartRRRequest(cfg, atomic.LoadUint64(&started), startedByConnection, result.connectionIndex) {
 				break
 			}
 			if !cfg.requests.set && time.Now().After(measureDeadline) {
 				break
 			}
-			c := connections[nextConnection%uint64(len(connections))]
-			nextConnection++
-			openNext(c.conn, cfg.requests.set || time.Now().After(measureStart))
+			c := connections[result.connectionIndex]
+			openNext(result.connectionIndex, c.conn, cfg.requests.set || time.Now().After(measureStart))
+			startedByConnection[result.connectionIndex]++
 		}
 	}
 	cancel()
 	return nil
+}
+
+func rrConnectionTarget(cfg config) uint64 {
+	if cfg.mode == modeRR && cfg.requests.set && cfg.requests.value < cfg.connections {
+		return cfg.requests.value
+	}
+	return cfg.connections
+}
+
+func rrRequestLimitForConnection(cfg config, connectionIndex uint64) uint64 {
+	connections := rrConnectionTarget(cfg)
+	base := cfg.requests.value / connections
+	remainder := cfg.requests.value % connections
+	if connectionIndex < remainder {
+		return base + 1
+	}
+	return base
+}
+
+func canStartRRRequest(cfg config, started uint64, startedByConnection []uint64, connectionIndex uint64) bool {
+	if !cfg.requests.set {
+		return true
+	}
+	return started < cfg.requests.value &&
+		startedByConnection[connectionIndex] < rrRequestLimitForConnection(cfg, connectionIndex)
 }
 
 func runCRR(cfg config, start sessionStart, counters *measuredCounters, dialer *clientDialer) error {

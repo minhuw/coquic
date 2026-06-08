@@ -278,6 +278,20 @@ TEST(QuicPerfRrTest, TimedModeUsesConfiguredInitialConnectionFanout) {
     EXPECT_EQ(initial_connection_target_for_test(client), 4u);
 }
 
+TEST(QuicPerfRrTest, BoundedModeUsesUsefulConfiguredConnectionFanout) {
+    QuicPerfConfig client{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::rr,
+        .connections = 4,
+        .requests = 8,
+    };
+
+    EXPECT_EQ(initial_connection_target_for_test(client), 4u);
+
+    client.requests = 2;
+    EXPECT_EQ(initial_connection_target_for_test(client), 2u);
+}
+
 TEST(QuicPerfRrTest, PrintsHumanReadableSummaryToStdout) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);

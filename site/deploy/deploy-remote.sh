@@ -551,8 +551,24 @@ preserve_runtime_public_file() {
   fi
   sudo install -m 644 "${source_path}" "${dest_path}"
 }
+preserve_runtime_public_dir() {
+  local entry="$1"
+  local source_path="${previous_app_public_dir}/${entry}"
+  local dest_path="${remote_release_dir}/app/public/${entry}"
+  if ! sudo test -d "${source_path}" || sudo test -d "${dest_path}"; then
+    return
+  fi
+  if sudo test -f "${source_path}/index.json" &&
+     sudo grep -Eq '"event_name"[[:space:]]*:[[:space:]]*"local_fake_preview"|"commit"[[:space:]]*:[[:space:]]*"fake-preview|fake://' "${source_path}/index.json"; then
+    echo "skipping preview runtime data directory: ${entry}" >&2
+    return
+  fi
+  sudo cp -a "${source_path}" "${dest_path}"
+}
 preserve_runtime_public_file "perf-results.json"
 preserve_runtime_public_file "perf-history.json"
+preserve_runtime_public_dir "perf-history"
+preserve_runtime_public_dir "perf-artifacts"
 preserve_runtime_public_file "interop-results.json"
 preserve_runtime_public_file "coverage-results.json"
 if sudo test -d "${previous_app_public_dir}/coverage" &&

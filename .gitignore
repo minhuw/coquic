@@ -35,6 +35,8 @@ site/next/tsconfig.tsbuildinfo
 demo/next/.next/
 site/next/public/perf-results.json
 site/next/public/perf-history.json
+site/next/public/perf-history/
+site/next/public/perf-artifacts/
 site/next/public/coverage-results.json
 site/next/public/interop-results.json
 site/next/public/coquic-wasm-quic.wasm

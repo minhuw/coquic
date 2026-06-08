@@ -19,6 +19,8 @@ server_js="${standalone_dir}/server.js"
 runtime_public_entries=(
   "perf-results.json"
   "perf-history.json"
+  "perf-history"
+  "perf-artifacts"
   "interop-results.json"
   "coverage-results.json"
   "coverage"

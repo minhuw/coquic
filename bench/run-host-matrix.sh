@@ -22,6 +22,11 @@ implementations_manifest="${PERF_IMPLEMENTATIONS_JSON:-${repo_root}/bench/implem
 library_version="${PERF_LIBRARY_VERSION:-}"
 nix_build_attempts="${PERF_NIX_BUILD_ATTEMPTS:-3}"
 nix_build_retry_delay_seconds="${PERF_NIX_BUILD_RETRY_DELAY_SECONDS:-10}"
+utilization_enabled="${PERF_UTILIZATION_ENABLED:-1}"
+stats_sample_interval_seconds="${PERF_STATS_SAMPLE_INTERVAL_SECONDS:-1}"
+profile_flamegraphs_enabled="${PERF_PROFILE_FLAMEGRAPHS:-0}"
+profile_frequency="${PERF_PROFILE_FREQUENCY:-99}"
+profile_use_sudo="${PERF_PROFILE_USE_SUDO:-0}"
 preset="smoke"
 network_name=''
 server_name=''
@@ -50,6 +55,12 @@ environment overrides:
   PERF_NIX_BUILD_ATTEMPTS    attempts for the perf image nix build (default: 3)
   PERF_NIX_BUILD_RETRY_DELAY_SECONDS
                              delay before retrying a failed image build (default: 10)
+  PERF_UTILIZATION_ENABLED   sample Docker CPU and memory stats (default: 1)
+  PERF_STATS_SAMPLE_INTERVAL_SECONDS
+                             Docker stats sample interval in seconds (default: 1)
+  PERF_PROFILE_FLAMEGRAPHS   record host perf flamegraphs for client/server when possible (default: 0)
+  PERF_PROFILE_FREQUENCY     perf sampling frequency in Hz (default: 99)
+  PERF_PROFILE_USE_SUDO      run host perf through passwordless sudo when recording container PIDs (default: 0)
 USAGE
 }
 
@@ -66,6 +77,137 @@ build_perf_image() {
     sleep "${nix_build_retry_delay_seconds}"
     attempt=$((attempt + 1))
   done
+}
+
+container_host_pid() {
+  local container_name="$1"
+  docker inspect -f '{{.State.Pid}}' "${container_name}" 2>/dev/null || true
+}
+
+monitor_docker_stats() {
+  local output_path="$1"
+  local interval_seconds="$2"
+  shift 2
+  local container_name
+  while :; do
+    for container_name in "$@"; do
+      if docker inspect "${container_name}" >/dev/null 2>&1; then
+        docker stats --no-stream --format '{{json .}}' "${container_name}" >> "${output_path}" 2>/dev/null || true
+      fi
+    done
+    sleep "${interval_seconds}"
+  done
+}
+
+write_profile_status() {
+  local status_path="$1"
+  local status="$2"
+  local reason="$3"
+  printf '%s\t%s\n' "${status}" "${reason}" > "${status_path}"
+}
+
+perf_command() {
+  if [ "${profile_use_sudo}" = "1" ]; then
+    sudo -n perf "$@"
+  else
+    perf "$@"
+  fi
+}
+
+start_perf_record() {
+  local container_name="$1"
+  local role="$2"
+  local data_path="$3"
+  local log_path="$4"
+  local status_path="$5"
+  local host_pid
+  STARTED_PERF_PID=''
+
+  if [ "${profile_flamegraphs_enabled}" != "1" ]; then
+    write_profile_status "${status_path}" "disabled" "PERF_PROFILE_FLAMEGRAPHS is not enabled"
+    return
+  fi
+  if ! command -v perf >/dev/null 2>&1; then
+    write_profile_status "${status_path}" "unavailable" "perf is not available on the runner"
+    return
+  fi
+  if [ "${profile_use_sudo}" = "1" ] && ! sudo -n true >/dev/null 2>&1; then
+    write_profile_status "${status_path}" "unavailable" "passwordless sudo is not available for perf"
+    return
+  fi
+
+  host_pid="$(container_host_pid "${container_name}")"
+  if ! [[ "${host_pid}" =~ ^[0-9]+$ ]] || [ "${host_pid}" -le 0 ]; then
+    write_profile_status "${status_path}" "unavailable" "unable to resolve ${role} container host pid"
+    return
+  fi
+
+  if [ "${profile_use_sudo}" = "1" ]; then
+    setsid sudo -n perf record -F "${profile_frequency}" -g -p "${host_pid}" -o "${data_path}" > "${log_path}" 2>&1 &
+  else
+    setsid perf record -F "${profile_frequency}" -g -p "${host_pid}" -o "${data_path}" > "${log_path}" 2>&1 &
+  fi
+  STARTED_PERF_PID="$!"
+  write_profile_status "${status_path}" "recording" "perf recording started for host pid ${host_pid}"
+}
+
+generate_flamegraph() {
+  local data_path="$1"
+  local svg_path="$2"
+  local title="$3"
+  local log_path="$4"
+  local script_path="${data_path}.script"
+  local folded_path="${data_path}.folded"
+
+  if [ ! -s "${data_path}" ]; then
+    echo "perf data is empty or missing: ${data_path}" >> "${log_path}"
+    return 1
+  fi
+  if command -v stackcollapse-perf.pl >/dev/null 2>&1 && command -v flamegraph.pl >/dev/null 2>&1; then
+    perf_command script -i "${data_path}" > "${script_path}" 2>> "${log_path}" &&
+      stackcollapse-perf.pl "${script_path}" > "${folded_path}" 2>> "${log_path}" &&
+      flamegraph.pl --title "${title}" "${folded_path}" > "${svg_path}" 2>> "${log_path}"
+  elif command -v inferno-collapse-perf >/dev/null 2>&1 && command -v inferno-flamegraph >/dev/null 2>&1; then
+    perf_command script -i "${data_path}" > "${script_path}" 2>> "${log_path}" &&
+      inferno-collapse-perf "${script_path}" > "${folded_path}" 2>> "${log_path}" &&
+      inferno-flamegraph --title "${title}" "${folded_path}" > "${svg_path}" 2>> "${log_path}"
+  else
+    echo "flamegraph tooling is unavailable; install stackcollapse-perf.pl and flamegraph.pl or inferno-flamegraph" >> "${log_path}"
+    return 1
+  fi
+}
+
+finish_perf_record() {
+  local recorder_pid="$1"
+  local data_path="$2"
+  local svg_path="$3"
+  local title="$4"
+  local log_path="$5"
+  local status_path="$6"
+  local current_status=''
+
+  if [ -n "${recorder_pid}" ]; then
+    if kill -0 "${recorder_pid}" >/dev/null 2>&1; then
+      kill -INT "-${recorder_pid}" >/dev/null 2>&1 || kill -INT "${recorder_pid}" >/dev/null 2>&1 || true
+    fi
+    wait "${recorder_pid}" >/dev/null 2>&1 || true
+  elif [ -f "${status_path}" ]; then
+    current_status="$(cut -f1 "${status_path}" 2>/dev/null || true)"
+    if [ "${current_status}" = "disabled" ] || [ "${current_status}" = "unavailable" ]; then
+      return
+    fi
+  fi
+
+  if [ -s "${svg_path}" ]; then
+    write_profile_status "${status_path}" "ok" "flamegraph generated"
+    return
+  fi
+  if generate_flamegraph "${data_path}" "${svg_path}" "${title}" "${log_path}"; then
+    write_profile_status "${status_path}" "ok" "flamegraph generated"
+  else
+    rm -f "${svg_path}"
+    write_profile_status "${status_path}" "unavailable" "perf data could not be converted to a flamegraph"
+  fi
 }
 
 while [ $# -gt 0 ]; do
@@ -173,7 +315,9 @@ if [ -z "${library_version}" ]; then
 fi
 
 rm -f "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log \
-  "${results_root}"/*.cid \
+  "${results_root}"/*.cid "${results_root}"/*.exit "${results_root}"/*.jsonl \
+  "${results_root}"/*.perf.data "${results_root}"/*.perf.data.* "${results_root}"/*.flamegraph.svg \
+  "${results_root}"/*.profile.status \
   "${environment_path}"
 
 cleanup_containers() {
@@ -244,6 +388,11 @@ docker network create --opt "com.docker.network.driver.mtu=${network_mtu}" "${ne
   echo "implementations_manifest=${implementations_manifest}"
   echo "library_version=${library_version}"
   echo "docker_env=${PERF_DOCKER_ENV:-}"
+  echo "utilization_enabled=${utilization_enabled}"
+  echo "stats_sample_interval_seconds=${stats_sample_interval_seconds}"
+  echo "profile_flamegraphs_enabled=${profile_flamegraphs_enabled}"
+  echo "profile_frequency=${profile_frequency}"
+  echo "profile_use_sudo=${profile_use_sudo}"
   echo
   docker version
   echo
@@ -279,6 +428,16 @@ for congestion_control in "${congestion_control_list[@]}"; do
     txt_path="${results_root}/${run_name}.txt"
     server_log_path="${results_root}/${run_name}.server.log"
     server_cid_path="${results_root}/${run_name}.server.cid"
+    client_log_path="${results_root}/${run_name}.client.log"
+    stats_path="${results_root}/${run_name}.stats.jsonl"
+    client_perf_data_path="${results_root}/${run_name}.client.perf.data"
+    server_perf_data_path="${results_root}/${run_name}.server.perf.data"
+    client_flamegraph_path="${results_root}/${run_name}.client.flamegraph.svg"
+    server_flamegraph_path="${results_root}/${run_name}.server.flamegraph.svg"
+    client_profile_log_path="${results_root}/${run_name}.client.perf.log"
+    server_profile_log_path="${results_root}/${run_name}.server.perf.log"
+    client_profile_status_path="${results_root}/${run_name}.client.profile.status"
+    server_profile_status_path="${results_root}/${run_name}.server.profile.status"
     client_name="coquic-perf-client-${preset}-${congestion_control}-${mode}-$$"
     server_name="coquic-perf-server-${preset}-${congestion_control}-${mode}-$$"
 
@@ -454,7 +613,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
         ;;
     esac
 
-    timeout --kill-after=5s "${run_timeout_seconds}s" docker run --rm \
+    timeout --kill-after=5s "${run_timeout_seconds}s" docker run -d \
       --name "${client_name}" \
       --network "${network_name}" \
       --cpuset-cpus "${client_cpus}" \
@@ -462,8 +621,40 @@ for congestion_control in "${congestion_control_list[@]}"; do
       -v "${results_root}:/results" \
       -v "${repo_root}/tests/fixtures:/certs:ro" \
       "${client_entrypoint[@]}" \
-      "${image_tag}" "${client_args[@]}" | tee "${txt_path}"
-    client_status=${PIPESTATUS[0]}
+      "${image_tag}" "${client_args[@]}" > "${results_root}/${run_name}.client.cid"
+    client_start_status=$?
+    client_status=125
+    stats_pid=''
+    client_perf_pid=''
+    server_perf_pid=''
+    if [ "${client_start_status}" -eq 0 ]; then
+      if [ "${utilization_enabled}" = "1" ]; then
+        monitor_docker_stats "${stats_path}" "${stats_sample_interval_seconds}" "${client_name}" "${server_name}" &
+        stats_pid="$!"
+      fi
+      start_perf_record "${client_name}" "client" "${client_perf_data_path}" "${client_profile_log_path}" "${client_profile_status_path}" || true
+      client_perf_pid="${STARTED_PERF_PID:-}"
+      start_perf_record "${server_name}" "server" "${server_perf_data_path}" "${server_profile_log_path}" "${server_profile_status_path}" || true
+      server_perf_pid="${STARTED_PERF_PID:-}"
+      timeout --kill-after=5s "${run_timeout_seconds}s" docker wait "${client_name}" > "${results_root}/${run_name}.client.exit" || true
+      if [ -s "${results_root}/${run_name}.client.exit" ]; then
+        client_status="$(tail -n 1 "${results_root}/${run_name}.client.exit")"
+      else
+        client_status=124
+        docker kill "${client_name}" >/dev/null 2>&1 || true
+      fi
+      if [ -n "${stats_pid}" ]; then
+        kill "${stats_pid}" >/dev/null 2>&1 || true
+        wait "${stats_pid}" >/dev/null 2>&1 || true
+      fi
+      finish_perf_record "${client_perf_pid}" "${client_perf_data_path}" "${client_flamegraph_path}" "${run_name} client" "${client_profile_log_path}" "${client_profile_status_path}"
+      finish_perf_record "${server_perf_pid}" "${server_perf_data_path}" "${server_flamegraph_path}" "${run_name} server" "${server_profile_log_path}" "${server_profile_status_path}"
+      docker logs "${client_name}" > "${client_log_path}" 2>&1 || true
+      cp "${client_log_path}" "${txt_path}"
+      cat "${txt_path}"
+    else
+      echo "client container failed to start for ${run_name}" | tee "${txt_path}" >&2
+    fi
     set -e
 
     docker logs "${server_name}" > "${server_log_path}" 2>&1 || true
@@ -483,7 +674,7 @@ for congestion_control in "${congestion_control_list[@]}"; do
   done
 done
 
-python3 - <<'PY' "${results_root}" "${manifest_path}" "${preset}" "${image_attr}" "${image_tag}" "${congestion_controls}" "${client_impl}" "${server_impl}" "${library_version}" "${implementations_manifest}"
+python3 - <<'PY' "${results_root}" "${manifest_path}" "${preset}" "${image_attr}" "${image_tag}" "${congestion_controls}" "${client_impl}" "${server_impl}" "${library_version}" "${implementations_manifest}" "${client_cpus}" "${server_cpus}"
 import json
 import pathlib
 import sys
@@ -499,15 +690,176 @@ server_impl = sys.argv[8]
 library_version = sys.argv[9]
 implementations_manifest = sys.argv[10]
 
+def cpuset_count(value):
+    count = 0
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = part.split("-", 1)
+            if start.isdigit() and end.isdigit() and int(end) >= int(start):
+                count += int(end) - int(start) + 1
+        elif part.isdigit():
+            count += 1
+    return max(count, 1)
+
+
+client_cpu_count = cpuset_count(sys.argv[11])
+server_cpu_count = cpuset_count(sys.argv[12])
+
+
+def parse_percent(value):
+    try:
+        return float(str(value).strip().rstrip("%"))
+    except ValueError:
+        return None
+
+
+def parse_memory_bytes(value):
+    units = {
+        "b": 1,
+        "kib": 1024,
+        "mib": 1024**2,
+        "gib": 1024**3,
+        "tib": 1024**4,
+        "kb": 1000,
+        "mb": 1000**2,
+        "gb": 1000**3,
+        "tb": 1000**4,
+    }
+    text = str(value).strip()
+    if not text:
+        return None
+    if "/" in text:
+        text = text.split("/", 1)[0].strip()
+    number = ""
+    unit = ""
+    for char in text:
+        if char.isdigit() or char in ".-":
+            number += char
+        elif not char.isspace():
+            unit += char
+    try:
+        parsed = float(number)
+    except ValueError:
+        return None
+    return int(parsed * units.get(unit.lower(), 1))
+
+
+def summarize(values):
+    if not values:
+        return {}
+    ordered = sorted(values)
+    return {
+        "avg": sum(values) / len(values),
+        "max": max(values),
+        "p50": ordered[len(ordered) // 2],
+        "samples": len(values),
+    }
+
+
+def load_stats(path, client_name_fragment, server_name_fragment):
+    grouped = {
+        "client": {"cpu": [], "mem": []},
+        "server": {"cpu": [], "mem": []},
+    }
+    if not path.exists():
+        return {}
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            sample = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        name = str(sample.get("Name") or sample.get("Container") or "")
+        role = None
+        if "client" in name:
+            role = "client"
+        elif "server" in name:
+            role = "server"
+        elif client_name_fragment in name:
+            role = "client"
+        elif server_name_fragment in name:
+            role = "server"
+        if role is None:
+            continue
+        cpu = parse_percent(sample.get("CPUPerc"))
+        if cpu is not None:
+            grouped[role]["cpu"].append(cpu)
+        mem = parse_memory_bytes(sample.get("MemUsage"))
+        if mem is not None:
+            grouped[role]["mem"].append(mem)
+    output = {}
+    for role, samples in grouped.items():
+        cpu = summarize(samples["cpu"])
+        mem = summarize(samples["mem"])
+        if not cpu and not mem:
+            continue
+        cpu_count = client_cpu_count if role == "client" else server_cpu_count
+        role_output = {}
+        if cpu:
+            role_output.update(
+                {
+                    "cpu_percent_avg": cpu["avg"],
+                    "cpu_percent_max": cpu["max"],
+                    "cpu_percent_p50": cpu["p50"],
+                    "cpu_limit": cpu_count,
+                    "cpu_utilization_avg": cpu["avg"] / (100.0 * cpu_count),
+                    "cpu_utilization_max": cpu["max"] / (100.0 * cpu_count),
+                    "samples": cpu["samples"],
+                }
+            )
+        if mem:
+            role_output.update(
+                {
+                    "memory_bytes_avg": mem["avg"],
+                    "memory_bytes_max": mem["max"],
+                }
+            )
+        output[role] = role_output
+    return output
+
+
+def load_profile_status(path):
+    if not path.exists():
+        return {"status": "unavailable", "reason": "profile status was not recorded"}
+    status, _, reason = path.read_text(errors="replace").partition("\t")
+    return {"status": status.strip() or "unavailable", "reason": reason.strip()}
+
+
+def profile_entry(role, base_name):
+    svg_name = f"{base_name}.{role}.flamegraph.svg"
+    log_name = f"{base_name}.{role}.perf.log"
+    status = load_profile_status(root / f"{base_name}.{role}.profile.status")
+    entry = dict(status)
+    if (root / svg_name).exists():
+        entry["svg_file"] = svg_name
+    if (root / log_name).exists():
+        entry["log_file"] = log_name
+    return entry
+
 runs = []
 for path in sorted(root.glob('*.json')):
     if path.name == manifest_path.name:
         continue
     record = json.loads(path.read_text())
     record['result_file'] = path.name
+    base_name = path.stem
     txt_path = path.with_suffix('.txt')
     if txt_path.exists():
         record['summary_file'] = txt_path.name
+    stats_path = root / f"{base_name}.stats.jsonl"
+    if stats_path.exists():
+        record['stats_file'] = stats_path.name
+        stats = load_stats(stats_path, "client", "server")
+        if stats:
+            record['utilization'] = stats
+    profiles = {
+        "client": profile_entry("client", base_name),
+        "server": profile_entry("server", base_name),
+    }
+    if any(profile.get("status") != "disabled" or profile.get("svg_file") for profile in profiles.values()):
+        record['profiles'] = profiles
     runs.append(record)
 
 manifest = {

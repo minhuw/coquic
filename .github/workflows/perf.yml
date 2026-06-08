@@ -244,6 +244,9 @@ jobs:
           PERF_CONGESTION_CONTROLS: ${{ matrix.congestion_controls }}
           PERF_IMAGE_ATTR: ${{ matrix.image_attr }}
           PERF_IMAGE_TAG: ${{ matrix.image_tag }}
+          PERF_UTILIZATION_ENABLED: "1"
+          PERF_PROFILE_FLAMEGRAPHS: "1"
+          PERF_PROFILE_FREQUENCY: "99"
         run: bash bench/run-host-matrix.sh --preset ci
 
       - name: Publish ${{ matrix.display_name }} Perf Summary
@@ -268,7 +271,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: perf-artifacts-${{ matrix.label }}
-          path: .bench-results/${{ matrix.label }}
+          path: |
+            .bench-results/${{ matrix.label }}/*.flamegraph.svg
+            .bench-results/${{ matrix.label }}/*.perf.log
+            .bench-results/${{ matrix.label }}/*.stats.jsonl
           include-hidden-files: true
           if-no-files-found: warn
 
@@ -302,6 +308,13 @@ jobs:
           path: .bench-results/downloaded
           merge-multiple: true
 
+      - name: Download Perf Run Artifacts
+        if: needs.perf-config.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: perf-artifacts-*
+          path: .bench-results/downloaded-artifacts
+
       - name: Merge Perf Result Snapshots
         if: needs.perf-config.result == 'success'
         run: |
@@ -329,6 +342,20 @@ jobs:
             --event-name "${GITHUB_EVENT_NAME}" \
             --commit "${GITHUB_SHA}" \
             --json-out .bench-results/perf-results.json >> "${GITHUB_STEP_SUMMARY}"
+          rm -rf .bench-results/perf-artifacts
+          mkdir -p .bench-results/perf-artifacts
+          for artifact_dir in .bench-results/downloaded-artifacts/perf-artifacts-*; do
+            [ -d "${artifact_dir}" ] || continue
+            label="${artifact_dir##*/perf-artifacts-}"
+            find "${artifact_dir}" \
+              -maxdepth 1 \
+              -type f \
+              \( -name '*.flamegraph.svg' -o -name '*.perf.log' -o -name '*.stats.jsonl' \) \
+              -print0 |
+              while IFS= read -r -d '' file; do
+                install -D -m 644 "${file}" ".bench-results/perf-artifacts/${label}/$(basename "${file}")"
+              done
+          done
 
       - name: Configure Demo SSH
         if: github.ref == 'refs/heads/main' && needs.perf-config.result == 'success' && needs.perf-impl.result == 'success'
@@ -352,6 +379,7 @@ jobs:
             exit 1
           fi
           mkdir -p .bench-results/history
+          rm -rf .bench-results/perf-history
           ssh \
             -p 22 \
             -i "${RUNNER_TEMP}/coquic-demo.key" \
@@ -362,12 +390,30 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
             minhuw@coquic.minhuw.dev \
-            "if sudo test -f /opt/coquic-demo/current/app/public/perf-history.json; then sudo cat /opt/coquic-demo/current/app/public/perf-history.json; fi" \
-            > .bench-results/history/perf-history.json
+            "if sudo test -f /opt/coquic-demo/current/app/public/perf-history/index.json; then sudo cat /opt/coquic-demo/current/app/public/perf-history/index.json; fi" \
+            > .bench-results/history/index.json
+          if [ ! -s .bench-results/history/index.json ]; then
+            ssh \
+              -p 22 \
+              -i "${RUNNER_TEMP}/coquic-demo.key" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=10 \
+              -o ServerAliveInterval=10 \
+              -o ServerAliveCountMax=3 \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+              minhuw@coquic.minhuw.dev \
+              "if sudo test -f /opt/coquic-demo/current/app/public/perf-history.json; then sudo cat /opt/coquic-demo/current/app/public/perf-history.json; fi" \
+              > .bench-results/history/perf-history.json
+          fi
           python3 scripts/update-perf-history.py \
             --snapshot .bench-results/perf-results.json \
+            --history-index .bench-results/history/index.json \
             --history .bench-results/history/perf-history.json \
-            --json-out .bench-results/perf-history.json
+            --out-dir .bench-results/perf-history \
+            --run-id "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          tar -C .bench-results/perf-history -cf .bench-results/perf-history.tar .
+          tar -C .bench-results -cf .bench-results/perf-artifacts.tar perf-artifacts
           scp \
             -P 22 \
             -i "${RUNNER_TEMP}/coquic-demo.key" \
@@ -388,8 +434,19 @@ jobs:
             -o ServerAliveCountMax=3 \
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
-            .bench-results/perf-history.json \
-            minhuw@coquic.minhuw.dev:/tmp/coquic-perf-history.json
+            .bench-results/perf-history.tar \
+            minhuw@coquic.minhuw.dev:/tmp/coquic-perf-history.tar
+          scp \
+            -P 22 \
+            -i "${RUNNER_TEMP}/coquic-demo.key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=10 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            .bench-results/perf-artifacts.tar \
+            minhuw@coquic.minhuw.dev:/tmp/coquic-perf-artifacts.tar
           ssh \
             -p 22 \
             -i "${RUNNER_TEMP}/coquic-demo.key" \
@@ -400,7 +457,36 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
             minhuw@coquic.minhuw.dev \
-            "sudo install -m 644 /tmp/coquic-perf-results.json /opt/coquic-demo/current/app/public/perf-results.json && sudo install -m 644 /tmp/coquic-perf-history.json /opt/coquic-demo/current/app/public/perf-history.json && rm -f /tmp/coquic-perf-results.json /tmp/coquic-perf-history.json"
+            "set -eu
+            history_dir=/opt/coquic-demo/current/app/public/perf-history
+            artifacts_dir=/opt/coquic-demo/current/app/public/perf-artifacts
+            tmp_history=\$(mktemp -d)
+            tmp_artifacts=\$(mktemp -d)
+            trap 'rm -rf \"\${tmp_history}\" \"\${tmp_artifacts}\"' EXIT
+            tar -xf /tmp/coquic-perf-history.tar -C \"\${tmp_history}\"
+            tar -xf /tmp/coquic-perf-artifacts.tar -C \"\${tmp_artifacts}\"
+            sudo install -d -m 755 \"\${history_dir}\"
+            sudo rm -rf \"\${artifacts_dir}\"
+            sudo install -d -m 755 \"\${artifacts_dir}\"
+            if [ -d \"\${tmp_artifacts}/perf-artifacts\" ]; then
+              sudo cp -a \"\${tmp_artifacts}/perf-artifacts/.\" \"\${artifacts_dir}/\"
+            fi
+            for file in \"\${tmp_history}\"/*.json; do
+              [ -f \"\${file}\" ] || continue
+              sudo install -m 644 \"\${file}\" \"\${history_dir}/\"
+            done
+            if [ -f \"\${tmp_history}/.keep.txt\" ]; then
+              sudo find \"\${history_dir}\" -maxdepth 1 -type f -name '*.json' ! -name 'index.json' -print |
+                while IFS= read -r file; do
+                  base=\$(basename \"\${file}\")
+                  if ! grep -Fxq -- \"\${base}\" \"\${tmp_history}/.keep.txt\"; then
+                    sudo rm -f -- \"\${file}\"
+                  fi
+                done
+            fi
+            sudo install -m 644 /tmp/coquic-perf-results.json /opt/coquic-demo/current/app/public/perf-results.json
+            sudo rm -f /opt/coquic-demo/current/app/public/perf-history.json
+            rm -f /tmp/coquic-perf-results.json /tmp/coquic-perf-history.tar /tmp/coquic-perf-artifacts.tar"
 
       - name: Fail On Perf Job Errors
         if: always()

@@ -1836,6 +1836,8 @@ EOF
           pkgs.uv
           pkgs.qdrant
           pkgs.wireshark
+          pkgs.linuxPackages.perf
+          pkgs.flamegraph
         ];
       };
       lintShell = mkCoquicShell {

@@ -152,6 +152,42 @@ def result_display(manifest_path: Path, record: dict) -> str:
     return result_file
 
 
+def artifact_display(manifest_path: Path, record: dict, field_name: str) -> str:
+    value = record.get(field_name)
+    if value in (None, ""):
+        return ""
+    value = str(value)
+    parent = manifest_path.parent.name
+    if parent and parent != ".bench-results" and "/" not in value:
+        return f"{parent}/{value}"
+    return value
+
+
+def copy_object(record: dict, field_name: str) -> dict:
+    value = record.get(field_name)
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def normalize_profiles(manifest_path: Path, record: dict) -> dict:
+    profiles = copy_object(record, "profiles")
+    normalized = {}
+    for role in ("client", "server"):
+        profile = profiles.get(role)
+        if not isinstance(profile, dict):
+            continue
+        entry = dict(profile)
+        for file_field in ("svg_file", "log_file"):
+            if entry.get(file_field):
+                parent = manifest_path.parent.name
+                value = str(entry[file_field])
+                if parent and parent != ".bench-results" and "/" not in value:
+                    entry[file_field] = f"{parent}/{value}"
+        normalized[role] = entry
+    return normalized
+
+
 def row_from_run(label: str, manifest_path: Path, manifest: dict, record: dict) -> dict:
     if not isinstance(record, dict):
         raise ValueError("each run must be an object")
@@ -175,6 +211,9 @@ def row_from_run(label: str, manifest_path: Path, manifest: dict, record: dict) 
         "p99_us": latency_number(record, "p99_us"),
         "skipped_setup_errors": int(number(record, "skipped_setup_errors", 0.0)),
         "result": result_display(manifest_path, record),
+        "stats_file": artifact_display(manifest_path, record, "stats_file"),
+        "utilization": copy_object(record, "utilization"),
+        "profiles": normalize_profiles(manifest_path, record),
         "failure_reason": str(record.get("failure_reason", "")),
     }
 

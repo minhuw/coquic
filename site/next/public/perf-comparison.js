@@ -181,10 +181,39 @@ const implementationMeta = {
 };
 
 const iconPaths = {
+  info: [
+    { name: "circle", attrs: { cx: "12", cy: "12", r: "9" } },
+    { name: "path", attrs: { d: "M12 10v6" } },
+    { name: "path", attrs: { d: "M12 7.5h.01" } },
+  ],
+  maximize: [
+    { name: "path", attrs: { d: "M8 3H3v5" } },
+    { name: "path", attrs: { d: "M3 3l6.5 6.5" } },
+    { name: "path", attrs: { d: "M16 3h5v5" } },
+    { name: "path", attrs: { d: "M21 3l-6.5 6.5" } },
+    { name: "path", attrs: { d: "M8 21H3v-5" } },
+    { name: "path", attrs: { d: "M3 21l6.5-6.5" } },
+    { name: "path", attrs: { d: "M16 21h5v-5" } },
+    { name: "path", attrs: { d: "M21 21l-6.5-6.5" } },
+  ],
+  minimize: [
+    { name: "path", attrs: { d: "M4 14h6v6" } },
+    { name: "path", attrs: { d: "M10 20 3.5 13.5" } },
+    { name: "path", attrs: { d: "M20 14h-6v6" } },
+    { name: "path", attrs: { d: "m14 20 6.5-6.5" } },
+    { name: "path", attrs: { d: "M4 10h6V4" } },
+    { name: "path", attrs: { d: "M10 4 3.5 10.5" } },
+    { name: "path", attrs: { d: "M20 10h-6V4" } },
+    { name: "path", attrs: { d: "m14 4 6.5 6.5" } },
+  ],
   warning: [
     { name: "path", attrs: { d: "M12 3 2.8 19h18.4L12 3Z" } },
     { name: "path", attrs: { d: "M12 8v5" } },
     { name: "path", attrs: { d: "M12 16.5h.01" } },
+  ],
+  x: [
+    { name: "path", attrs: { d: "M6 6l12 12" } },
+    { name: "path", attrs: { d: "M18 6 6 18" } },
   ],
 };
 
@@ -218,6 +247,9 @@ const modeConfig = {
 let activeSnapshot = fallbackPerfSnapshot;
 let activeHistory = { schema_version: 1, generated_at: "unavailable", snapshots: [] };
 let activePlotMode = "bulk";
+const perfHistorySnapshotLimit = 180;
+let perfDetailTrigger = null;
+let perfFlamegraphFullscreenButton = null;
 const activePlotFilters = {
   languages: new Set(),
   vendors: new Set(),
@@ -232,6 +264,35 @@ function formatNumber(value, decimals = 3) {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   });
+}
+
+function formatPercent(value, decimals = 1) {
+  if (!Number.isFinite(Number(value))) {
+    return "-";
+  }
+  return `${formatNumber(Number(value) * 100, decimals)}%`;
+}
+
+function formatCpuPercent(value, decimals = 1) {
+  if (!Number.isFinite(Number(value))) {
+    return "-";
+  }
+  return `${formatNumber(Number(value), decimals)}%`;
+}
+
+function formatBytes(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return "-";
+  }
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let scaled = number;
+  let unitIndex = 0;
+  while (scaled >= 1024 && unitIndex < units.length - 1) {
+    scaled /= 1024;
+    unitIndex += 1;
+  }
+  return `${formatNumber(scaled, unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 function implementationInfo(implementation) {
@@ -628,6 +689,312 @@ function renderPlotFilters(mode) {
   return filters;
 }
 
+function roleUtilization(row, role) {
+  const utilization = row.utilization && typeof row.utilization === "object" ? row.utilization[role] : null;
+  return utilization && typeof utilization === "object" ? utilization : {};
+}
+
+function profileFor(row, role) {
+  const profiles = row.profiles && typeof row.profiles === "object" ? row.profiles[role] : null;
+  return profiles && typeof profiles === "object" ? profiles : {};
+}
+
+function artifactUrl(path) {
+  if (!path) {
+    return "";
+  }
+  return `./perf-artifacts/${path}`;
+}
+
+function renderDetailStatCell(label, value, detail = "") {
+  const cell = document.createElement("span");
+  cell.className = "perf-detail-stat";
+  const key = document.createElement("small");
+  key.textContent = label;
+  const strong = document.createElement("strong");
+  strong.textContent = value;
+  cell.append(key, strong);
+  if (detail) {
+    const meta = document.createElement("em");
+    meta.textContent = detail;
+    cell.append(meta);
+  }
+  return cell;
+}
+
+function renderDetailUtilizationRows(util) {
+  const cpuRow = document.createElement("div");
+  cpuRow.className = "utilization-metric-row";
+  const cpuLabel = document.createElement("span");
+  cpuLabel.className = "utilization-metric-row-label";
+  cpuLabel.textContent = "CPU";
+  cpuRow.append(
+    cpuLabel,
+    renderDetailStatCell("avg", formatPercent(util.cpu_utilization_avg), `${formatCpuPercent(util.cpu_percent_avg)} raw`),
+    renderDetailStatCell("max", formatPercent(util.cpu_utilization_max), `${formatCpuPercent(util.cpu_percent_max)} raw`),
+  );
+
+  const memoryRow = document.createElement("div");
+  memoryRow.className = "utilization-metric-row";
+  const memoryLabel = document.createElement("span");
+  memoryLabel.className = "utilization-metric-row-label";
+  memoryLabel.textContent = "Memory";
+  memoryRow.append(
+    memoryLabel,
+    renderDetailStatCell("avg", formatBytes(util.memory_bytes_avg), util.samples ? `${util.samples} samples` : ""),
+    renderDetailStatCell("max", formatBytes(util.memory_bytes_max), "peak"),
+  );
+
+  return [cpuRow, memoryRow];
+}
+
+function profileLabel(row, role) {
+  const profile = profileFor(row, role);
+  if (profile.svg_file) {
+    return "flamegraph ready";
+  }
+  return profile.status || "unavailable";
+}
+
+function hasPerfDetails(row) {
+  return Object.keys(roleUtilization(row, "client")).length
+    || Object.keys(roleUtilization(row, "server")).length
+    || Object.keys(profileFor(row, "client")).length
+    || Object.keys(profileFor(row, "server")).length;
+}
+
+function metricDisplayName(row) {
+  const config = modeConfig[row.mode] || modeConfig.bulk;
+  const value = Number(row[config.metric]);
+  return `${formatNumber(value, config.decimals)} ${config.unit}`;
+}
+
+function rowDisplayName(row) {
+  return row.implementation === "coquic" && row.congestion_control ? `coquic[${row.congestion_control}]` : row.implementation;
+}
+
+function closeFlamegraphFullscreen(restoreFocus = true) {
+  const card = document.querySelector(".detail-profile-card.flamegraph-fullscreen");
+  if (!card) {
+    return false;
+  }
+  card.classList.remove("flamegraph-fullscreen");
+  document.body.classList.remove("perf-flamegraph-fullscreen-open");
+
+  const button = card.querySelector(".detail-flamegraph-fullscreen-button");
+  if (button) {
+    const label = button.dataset.flamegraphLabel || "flamegraph";
+    button.setAttribute("aria-label", `Expand ${label}`);
+    button.setAttribute("title", "Expand flamegraph");
+    button.setAttribute("aria-pressed", "false");
+    button.replaceChildren(makeIcon("maximize"));
+    if (restoreFocus) {
+      button.focus({ preventScroll: true });
+    }
+  } else if (restoreFocus && perfFlamegraphFullscreenButton) {
+    perfFlamegraphFullscreenButton.focus({ preventScroll: true });
+  }
+  perfFlamegraphFullscreenButton = null;
+  return true;
+}
+
+function toggleFlamegraphFullscreen(card, button) {
+  if (card.classList.contains("flamegraph-fullscreen")) {
+    closeFlamegraphFullscreen();
+    return;
+  }
+
+  closeFlamegraphFullscreen(false);
+  card.classList.add("flamegraph-fullscreen");
+  document.body.classList.add("perf-flamegraph-fullscreen-open");
+  perfFlamegraphFullscreenButton = button;
+
+  const label = button.dataset.flamegraphLabel || "flamegraph";
+  button.setAttribute("aria-label", `Collapse ${label}`);
+  button.setAttribute("title", "Collapse flamegraph");
+  button.setAttribute("aria-pressed", "true");
+  button.replaceChildren(makeIcon("minimize"));
+  button.focus({ preventScroll: true });
+}
+
+function renderDetailProfileLink(row, role) {
+  const profile = profileFor(row, role);
+  const item = document.createElement("div");
+  item.className = "detail-profile-card";
+  const title = document.createElement("div");
+  title.className = "detail-profile-title";
+  const label = document.createElement("strong");
+  label.textContent = role;
+  const status = document.createElement("span");
+  status.textContent = profileLabel(row, role);
+  title.append(label, status);
+
+  const links = document.createElement("div");
+  links.className = "detail-profile-links";
+  let flamegraphPreview = null;
+  if (profile.svg_file) {
+    item.classList.add("has-flamegraph");
+    const flamegraphLabel = `${rowDisplayName(row)} ${role} flamegraph`;
+    const flamegraphUrl = artifactUrl(profile.svg_file);
+    flamegraphPreview = document.createElement("div");
+    flamegraphPreview.className = "detail-flamegraph";
+
+    const frame = document.createElement("iframe");
+    frame.className = "detail-flamegraph-frame";
+    frame.src = flamegraphUrl;
+    frame.title = flamegraphLabel;
+    frame.loading = "lazy";
+    flamegraphPreview.append(frame);
+
+    const fullscreen = document.createElement("button");
+    fullscreen.type = "button";
+    fullscreen.className = "detail-flamegraph-fullscreen-button";
+    fullscreen.dataset.flamegraphLabel = flamegraphLabel;
+    fullscreen.setAttribute("aria-label", `Expand ${flamegraphLabel}`);
+    fullscreen.setAttribute("aria-pressed", "false");
+    fullscreen.title = "Expand flamegraph";
+    fullscreen.append(makeIcon("maximize"));
+    fullscreen.addEventListener("click", () => toggleFlamegraphFullscreen(item, fullscreen));
+    flamegraphPreview.append(fullscreen);
+
+    const openSvg = document.createElement("a");
+    openSvg.href = flamegraphUrl;
+    decorateExternalLink(openSvg, `${row.implementation} ${role} flamegraph`);
+    openSvg.textContent = "Open SVG";
+    links.append(openSvg);
+  }
+  if (profile.log_file) {
+    const log = document.createElement("a");
+    log.href = artifactUrl(profile.log_file);
+    decorateExternalLink(log, `${row.implementation} ${role} perf log`);
+    log.textContent = "Perf log";
+    links.append(log);
+  }
+  if (!links.children.length) {
+    const empty = document.createElement("span");
+    empty.textContent = profile.reason || "No profile artifact for this endpoint.";
+    links.append(empty);
+  }
+  item.append(title);
+  if (flamegraphPreview) {
+    item.append(flamegraphPreview);
+  }
+  item.append(links);
+  return item;
+}
+
+function renderPerfDetailModal(row) {
+  document.querySelector(".perf-detail-backdrop")?.remove();
+  const backdrop = document.createElement("div");
+  backdrop.className = "perf-detail-backdrop open";
+  backdrop.setAttribute("role", "presentation");
+
+  const modal = document.createElement("section");
+  modal.className = "perf-detail-modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-labelledby", "perf-detail-title");
+
+  const head = document.createElement("div");
+  head.className = "perf-detail-head";
+  const titleWrap = document.createElement("div");
+  const title = document.createElement("h2");
+  title.id = "perf-detail-title";
+  title.textContent = `${rowDisplayName(row)} details`;
+  const subtitle = document.createElement("span");
+  subtitle.textContent = `${modeConfig[row.mode]?.title || row.mode} | ${row.congestion_control || "default"} | ${libraryVersionLabel(row)}`;
+  titleWrap.append(title, subtitle);
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "perf-detail-close";
+  close.setAttribute("aria-label", "Close performance details");
+  close.append(makeIcon("x"));
+  close.addEventListener("click", () => closePerfDetailModal());
+  head.append(titleWrap, close);
+
+  const body = document.createElement("div");
+  body.className = "perf-detail-body";
+  const summary = document.createElement("div");
+  summary.className = "perf-detail-summary";
+  summary.append(
+    renderDetailStatCell("metric", metricDisplayName(row), modeConfig[row.mode]?.metricLabel || "selected"),
+    renderDetailStatCell("elapsed", `${row.elapsed_ms} ms`),
+    renderDetailStatCell("p50", `${formatNumber(row.p50_us, 0)} us`),
+    renderDetailStatCell("p99", `${formatNumber(row.p99_us, 0)} us`),
+  );
+
+  const utilizationSection = document.createElement("section");
+  utilizationSection.className = "perf-detail-section";
+  const utilizationTitle = document.createElement("h3");
+  utilizationTitle.textContent = "Endpoint Utilization";
+  const utilizationGrid = document.createElement("div");
+  utilizationGrid.className = "perf-detail-utilization";
+  for (const role of ["client", "server"]) {
+    const util = roleUtilization(row, role);
+    const card = document.createElement("article");
+    card.className = "perf-detail-endpoint";
+    const roleTitle = document.createElement("h4");
+    roleTitle.textContent = role;
+    const metrics = document.createElement("div");
+    metrics.className = "perf-detail-metrics";
+    metrics.append(...renderDetailUtilizationRows(util));
+    card.append(roleTitle, metrics);
+    utilizationGrid.append(card);
+  }
+  utilizationSection.append(utilizationTitle, utilizationGrid);
+
+  const profileSection = document.createElement("section");
+  profileSection.className = "perf-detail-section";
+  const profileTitle = document.createElement("h3");
+  profileTitle.textContent = "Perf Flamegraphs";
+  const profileGrid = document.createElement("div");
+  profileGrid.className = "perf-detail-profiles";
+  profileGrid.append(renderDetailProfileLink(row, "client"), renderDetailProfileLink(row, "server"));
+  profileSection.append(profileTitle, profileGrid);
+
+  body.append(summary, utilizationSection, profileSection);
+  modal.append(head, body);
+  backdrop.append(modal);
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) {
+      closePerfDetailModal();
+    }
+  });
+  document.body.append(backdrop);
+  document.body.classList.add("perf-detail-open");
+  close.focus();
+}
+
+function closePerfDetailModal(restoreFocus = true) {
+  closeFlamegraphFullscreen(false);
+  const existing = document.querySelector(".perf-detail-backdrop");
+  if (existing) {
+    existing.remove();
+  }
+  document.body.classList.remove("perf-detail-open");
+  if (restoreFocus && perfDetailTrigger) {
+    perfDetailTrigger.focus();
+  }
+  perfDetailTrigger = null;
+}
+
+function openPerfDetail(row, trigger) {
+  perfDetailTrigger = trigger;
+  renderPerfDetailModal(row);
+}
+
+function renderPerfDetailButton(row) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "bar-detail-button";
+  button.disabled = !hasPerfDetails(row);
+  button.title = button.disabled ? "No utilization or profile metadata for this run" : "Show utilization and flamegraph details";
+  button.setAttribute("aria-label", `Show utilization and flamegraph details for ${rowDisplayName(row)}`);
+  button.append(makeIcon("info"));
+  button.addEventListener("click", () => openPerfDetail(row, button));
+  return button;
+}
+
 function renderBarplot(mode) {
   const config = modeConfig[mode];
   const unfilteredRows = leaderboardRows(mode, { applyFilters: false });
@@ -690,7 +1057,9 @@ function renderBarplot(mode) {
 
       const metricValue = document.createElement("div");
       metricValue.className = "bar-value";
-      metricValue.textContent = `${formatNumber(value, config.decimals)} ${config.unit}`;
+      const metricText = document.createElement("span");
+      metricText.textContent = `${formatNumber(value, config.decimals)} ${config.unit}`;
+      metricValue.append(metricText, renderPerfDetailButton(row));
 
       element.append(rankBadge, label, track, metricValue);
       return element;
@@ -989,6 +1358,68 @@ function renderAll() {
   renderPlots();
 }
 
+function isSafePerfHistoryPath(path) {
+  return typeof path === "string" && /^[0-9A-Za-z._-]+\.json$/.test(path) && path !== "index.json";
+}
+
+function normalizeHistorySnapshot(snapshot, metadata = {}) {
+  if (!snapshot || !Array.isArray(snapshot.rows) || !Array.isArray(snapshot.sources)) {
+    return null;
+  }
+  return {
+    ...snapshot,
+    date: snapshot.date || metadata.date || dateFromGeneratedAt(snapshot.generated_at || metadata.generated_at),
+    generated_at: snapshot.generated_at || metadata.generated_at,
+    event_name: snapshot.event_name || metadata.event_name,
+    commit: snapshot.commit || metadata.commit,
+  };
+}
+
+async function loadPerfHistoryFromIndex() {
+  const response = await fetch("./perf-history/index.json", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const index = await response.json();
+  if (!index || !Array.isArray(index.snapshots)) {
+    throw new Error("invalid perf-history/index.json");
+  }
+  const entries = index.snapshots.filter((entry) => entry && isSafePerfHistoryPath(entry.path)).slice(-perfHistorySnapshotLimit);
+  const loaded = await Promise.all(
+    entries.map(async (entry) => {
+      try {
+        const snapshotResponse = await fetch(`./perf-history/${entry.path}`, { cache: "force-cache" });
+        if (!snapshotResponse.ok) {
+          throw new Error(`HTTP ${snapshotResponse.status}`);
+        }
+        return normalizeHistorySnapshot(await snapshotResponse.json(), entry);
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return {
+    schema_version: 1,
+    generated_at: index.generated_at || "unavailable",
+    snapshots: loaded.filter(Boolean),
+  };
+}
+
+async function loadLegacyPerfHistory() {
+  const response = await fetch("./perf-history.json", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const history = await response.json();
+  if (!Array.isArray(history.snapshots)) {
+    throw new Error("invalid perf-history.json");
+  }
+  return {
+    ...history,
+    snapshots: history.snapshots.map((snapshot) => normalizeHistorySnapshot(snapshot)).filter(Boolean),
+  };
+}
+
 async function loadLiveData() {
   try {
     const response = await fetch("./perf-results.json", { cache: "no-store" });
@@ -1004,19 +1435,31 @@ async function loadLiveData() {
     activeSnapshot = fallbackPerfSnapshot;
   }
   try {
-    const response = await fetch("./perf-history.json", { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+    activeHistory = await loadPerfHistoryFromIndex();
+    if (!activeHistory.snapshots.length) {
+      activeHistory = await loadLegacyPerfHistory();
     }
-    const history = await response.json();
-    if (!Array.isArray(history.snapshots)) {
-      throw new Error("invalid perf-history.json");
-    }
-    activeHistory = history;
   } catch {
-    activeHistory = { schema_version: 1, generated_at: "unavailable", snapshots: [] };
+    try {
+      activeHistory = await loadLegacyPerfHistory();
+    } catch {
+      activeHistory = { schema_version: 1, generated_at: "unavailable", snapshots: [] };
+    }
   }
   renderAll();
 }
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") {
+    return;
+  }
+  if (closeFlamegraphFullscreen()) {
+    event.preventDefault();
+    return;
+  }
+  if (document.querySelector(".perf-detail-backdrop")) {
+    closePerfDetailModal();
+  }
+});
 
 loadLiveData();

@@ -2048,12 +2048,68 @@
   }
 
   .bar-value {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    min-width: 0;
     color: var(--ink);
     font-family: var(--font-mono);
     font-size: 12px;
     font-variant-numeric: tabular-nums;
     line-height: 1;
     text-align: right;
+  }
+
+  .bar-value > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .bar-detail-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--muted);
+    background: var(--surface);
+    cursor: pointer;
+    transition:
+      border-color 180ms ease,
+      color 180ms ease,
+      background 180ms ease;
+  }
+
+  .bar-detail-button:hover,
+  .bar-detail-button:focus-visible {
+    border-color: color-mix(in srgb, var(--primary) 38%, var(--line));
+    color: var(--primary-active);
+    background: var(--primary-soft);
+    outline: none;
+  }
+
+  .bar-detail-button:disabled {
+    color: var(--muted);
+    background: var(--surface-2);
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  .bar-detail-button .meta-icon-svg,
+  .perf-detail-close .meta-icon-svg,
+  .detail-flamegraph-fullscreen-button .meta-icon-svg {
+    width: 15px;
+    height: 15px;
+    fill: none;
+    stroke: currentcolor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
 
   .identity-group {
@@ -2390,6 +2446,350 @@
     padding: 0 6px;
   }
 
+  .perf-detail-open,
+  .perf-flamegraph-fullscreen-open {
+    overflow: hidden;
+  }
+
+  .perf-detail-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: grid;
+    place-items: center;
+    padding: 18px;
+    background: var(--modal-backdrop);
+  }
+
+  .perf-detail-modal {
+    display: flex;
+    flex-direction: column;
+    width: min(1120px, 100%);
+    max-height: min(900px, 92vh);
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--bg);
+    box-shadow: 0 24px 90px var(--shadow-modal);
+  }
+
+  .perf-detail-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .perf-detail-head h2 {
+    color: var(--ink);
+    font-size: 15px;
+    font-weight: 850;
+    line-height: 1.2;
+  }
+
+  .perf-detail-head span {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.3;
+  }
+
+  .perf-detail-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 36px;
+    height: 36px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--ink);
+    background: var(--surface-2);
+    cursor: pointer;
+  }
+
+  .perf-detail-close:hover,
+  .perf-detail-close:focus-visible {
+    border-color: color-mix(in srgb, var(--primary) 38%, var(--line));
+    color: var(--primary-active);
+    outline: none;
+  }
+
+  .perf-detail-body {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+    overflow: auto;
+    padding: 16px;
+  }
+
+  .perf-detail-summary,
+  .perf-detail-utilization,
+  .perf-detail-profiles {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .perf-detail-summary {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--surface);
+  }
+
+  .perf-detail-section {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+    padding-top: 14px;
+    border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  }
+
+  .perf-detail-section h3 {
+    color: var(--ink);
+    font-size: 13px;
+    font-weight: 850;
+    line-height: 1.2;
+  }
+
+  .perf-detail-utilization,
+  .perf-detail-profiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .perf-detail-endpoint,
+  .detail-profile-card {
+    display: grid;
+    gap: 9px;
+    min-width: 0;
+  }
+
+  .detail-profile-card.has-flamegraph {
+    grid-template-rows: auto minmax(220px, auto) auto;
+  }
+
+  .perf-detail-endpoint h4,
+  .detail-profile-title strong {
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .perf-detail-metrics {
+    display: grid;
+    gap: 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--surface);
+  }
+
+  .utilization-metric-row {
+    display: grid;
+    grid-template-columns: 72px repeat(2, minmax(0, 1fr));
+    min-width: 0;
+  }
+
+  .utilization-metric-row + .utilization-metric-row {
+    border-top: 1px solid var(--line);
+  }
+
+  .utilization-metric-row-label {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    min-height: 44px;
+    padding: 8px;
+    border-right: 1px solid var(--line);
+    color: var(--muted);
+    background: var(--surface-2);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 850;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  .perf-detail-stat {
+    display: grid;
+    align-content: center;
+    gap: 3px;
+    min-width: 0;
+    min-height: 44px;
+    padding: 8px;
+  }
+
+  .perf-detail-stat + .perf-detail-stat,
+  .utilization-metric-row .perf-detail-stat + .perf-detail-stat {
+    border-left: 1px solid var(--line);
+  }
+
+  .perf-detail-stat small {
+    overflow: hidden;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-weight: 850;
+    line-height: 1;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .perf-detail-stat strong {
+    overflow: hidden;
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 850;
+    line-height: 1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .perf-detail-stat em {
+    overflow: hidden;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 9px;
+    font-style: normal;
+    line-height: 1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .detail-profile-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .detail-profile-title span {
+    overflow: hidden;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .detail-flamegraph {
+    position: relative;
+    min-width: 0;
+    height: clamp(220px, 34vh, 360px);
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #fff;
+  }
+
+  .detail-flamegraph-frame {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #fff;
+  }
+
+  .detail-flamegraph-fullscreen-button {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    border: 1px solid color-mix(in srgb, var(--line-strong) 78%, #000);
+    border-radius: 7px;
+    color: var(--ink);
+    background: color-mix(in srgb, #fff 90%, var(--surface));
+    box-shadow: 0 10px 28px rgb(2 6 23 / 18%);
+    cursor: pointer;
+    transition:
+      border-color 180ms ease,
+      color 180ms ease,
+      background 180ms ease,
+      transform 180ms ease;
+  }
+
+  .detail-flamegraph-fullscreen-button:hover,
+  .detail-flamegraph-fullscreen-button:focus-visible {
+    border-color: color-mix(in srgb, var(--primary) 45%, var(--line));
+    color: var(--primary-active);
+    background: #fff;
+    outline: none;
+    transform: translateY(-1px);
+  }
+
+  .detail-profile-card.flamegraph-fullscreen {
+    position: fixed;
+    inset: 12px;
+    z-index: 100;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    padding: 12px;
+    background: var(--bg);
+    box-shadow: 0 28px 110px var(--shadow-modal);
+  }
+
+  .detail-profile-card.flamegraph-fullscreen .detail-flamegraph {
+    height: auto;
+    min-height: 0;
+  }
+
+  .detail-profile-card.flamegraph-fullscreen .detail-flamegraph-fullscreen-button {
+    top: 10px;
+    right: 10px;
+  }
+
+  .detail-profile-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .detail-profile-links a,
+  .detail-profile-links span {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    min-width: 0;
+    padding: 0;
+    color: var(--primary-active);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 850;
+    line-height: 1.2;
+    text-decoration: none;
+  }
+
+  .detail-profile-links span {
+    color: var(--muted);
+    font-weight: 700;
+    line-height: 1.3;
+  }
+
+  .detail-profile-links a:hover,
+  .detail-profile-links a:focus-visible {
+    color: var(--primary);
+    text-decoration: underline;
+    outline: none;
+  }
+
   .interop-head {
     @apply flex flex-col gap-4 border-b border-[var(--line)] bg-[var(--surface)] p-4 md:flex-row md:items-center md:justify-between;
   }
@@ -2577,6 +2977,11 @@
     .bar-row .bar-value {
       grid-area: auto;
     }
+
+    .perf-detail-summary {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
   }
 }
 
@@ -2720,7 +3125,27 @@
     }
 
     .bar-value {
+      justify-content: flex-start;
       text-align: left;
+    }
+
+    .perf-detail-backdrop {
+      align-items: stretch;
+      padding: 10px;
+    }
+
+    .perf-detail-modal {
+      max-height: calc(100vh - 20px);
+    }
+
+    .perf-detail-head {
+      align-items: flex-start;
+    }
+
+    .perf-detail-summary,
+    .perf-detail-utilization,
+    .perf-detail-profiles {
+      grid-template-columns: 1fr;
     }
 
     .bar-name-row {
@@ -2735,6 +3160,10 @@
 
     .trend-family-chip {
       max-width: 88px;
+    }
+
+    .utilization-metric-row {
+      grid-template-columns: 64px repeat(2, minmax(0, 1fr));
     }
   }
 }

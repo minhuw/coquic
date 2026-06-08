@@ -1938,7 +1938,10 @@ EOF
         perf-image-neqo-quictls-musl = quictlsMuslNeqoPerfImage;
         perf-profile-tools = pkgs.symlinkJoin {
           name = "coquic-perf-profile-tools";
-          paths = [ pkgs.flamegraph ];
+          paths = [
+            pkgs.flamegraph
+            pkgs.perf
+          ];
         };
         quicgo-perf-client = quicgoPerfClient;
         coquic-rust-perf-client = coquicRustPerfClient;

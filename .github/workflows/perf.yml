@@ -236,12 +236,14 @@ jobs:
       - name: Check Perf Profiling Tools
         run: |
           set -euo pipefail
+          tools_path="$(nix build --no-link --print-out-paths .#perf-profile-tools)"
+          printf "%s/bin\n" "${tools_path}" >> "${GITHUB_PATH}"
           if [ -x /usr/bin/perf ]; then
             perf_bin=/usr/bin/perf
           else
-            perf_bin="$(command -v perf || true)"
+            perf_bin="${tools_path}/bin/perf"
           fi
-          if [ -z "${perf_bin}" ]; then
+          if [ ! -x "${perf_bin}" ]; then
             echo "perf is required for PERF_PROFILE_FLAMEGRAPHS=1" >&2
             exit 1
           fi
@@ -255,8 +257,6 @@ jobs:
             echo "passwordless sudo cannot execute ${perf_bin}" >&2
             exit 1
           fi
-          tools_path="$(nix build --no-link --print-out-paths .#perf-profile-tools)"
-          printf "%s/bin\n" "${tools_path}" >> "${GITHUB_PATH}"
           printf "PERF_PROFILE_PERF_BIN=%s\n" "${perf_bin}" >> "${GITHUB_ENV}"
           "${tools_path}/bin/stackcollapse-perf.pl" --help >/dev/null 2>&1 || true
           "${tools_path}/bin/flamegraph.pl" --help >/dev/null 2>&1 || true

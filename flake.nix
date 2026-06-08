@@ -1936,6 +1936,10 @@ EOF
         perf-image-ngtcp2-quictls-musl = quictlsMuslNgtcp2PerfImage;
         perf-image-lsquic-quictls-musl = quictlsMuslLsquicPerfImage;
         perf-image-neqo-quictls-musl = quictlsMuslNeqoPerfImage;
+        perf-profile-tools = pkgs.symlinkJoin {
+          name = "coquic-perf-profile-tools";
+          paths = [ pkgs.flamegraph ];
+        };
         quicgo-perf-client = quicgoPerfClient;
         coquic-rust-perf-client = coquicRustPerfClient;
         coquic-python-perf-client = coquicPythonPerfClient;

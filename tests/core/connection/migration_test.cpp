@@ -817,7 +817,7 @@ TEST(QuicCoreTest, ServerPathChallengeOnCurrentPathKeepsPeerConnectionId) {
     EXPECT_EQ(destination_connection_ids_value.front(), bytes_from_ints({0xaa, 0xab}));
 }
 
-TEST(QuicCoreTest, PathChallengeReplenishesLocalConnectionIdPool) {
+TEST(QuicCoreTest, PathChallengeWithFullLocalConnectionIdPoolDoesNotIssueReplacement) {
     auto connection = make_connected_server_connection();
     connection.paths_.clear();
     connection.last_validated_path_id_ = 3;
@@ -839,15 +839,11 @@ TEST(QuicCoreTest, PathChallengeReplenishesLocalConnectionIdPool) {
     ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
         connection, 3, {coquic::quic::PathChallengeFrame{.data = inbound_challenge}}));
 
-    ASSERT_EQ(connection.pending_new_connection_id_frames_.size(), 1u);
-    auto replacement = connection.pending_new_connection_id_frames_.front();
-    EXPECT_EQ(replacement.sequence_number, 8u);
-    EXPECT_EQ(replacement.retire_prior_to, 1u);
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
     ASSERT_TRUE(connection.local_connection_ids_.contains(0));
     EXPECT_FALSE(connection.local_connection_ids_.at(0).retired);
-    EXPECT_TRUE(connection.local_connection_ids_.at(0).retirement_requested);
+    EXPECT_FALSE(connection.local_connection_ids_.at(0).retirement_requested);
 
-    bool saw_new_connection_id = false;
     bool saw_path_response = false;
     for (std::int64_t tick = 1; tick <= 3; ++tick) {
         auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(tick));
@@ -859,18 +855,15 @@ TEST(QuicCoreTest, PathChallengeReplenishesLocalConnectionIdPool) {
         ASSERT_EQ(packets.size(), 1u);
         const auto *packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
         ASSERT_NE(packet, nullptr);
-        saw_new_connection_id |= std::ranges::any_of(packet->frames, [](const auto &frame) {
-            const auto *new_connection_id = std::get_if<coquic::quic::NewConnectionIdFrame>(&frame);
-            return new_connection_id != nullptr && new_connection_id->sequence_number == 8 &&
-                   new_connection_id->retire_prior_to == 1;
-        });
+        EXPECT_FALSE(std::ranges::any_of(packet->frames, [](const auto &frame) {
+            return std::holds_alternative<coquic::quic::NewConnectionIdFrame>(frame);
+        }));
         saw_path_response |= std::ranges::any_of(packet->frames, [&](const auto &frame) {
             const auto *response = std::get_if<coquic::quic::PathResponseFrame>(&frame);
             return response != nullptr && response->data == inbound_challenge;
         });
     }
 
-    EXPECT_TRUE(saw_new_connection_id);
     EXPECT_TRUE(saw_path_response);
 }
 

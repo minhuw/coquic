@@ -5,6 +5,7 @@ build/
 out/
 .pre-commit-config.yaml
 .worktrees/
+.cache/
 coverage/
 !site/next/app/coverage/
 .rag/

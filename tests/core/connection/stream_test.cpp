@@ -859,6 +859,100 @@ TEST(QuicCoreTest, StreamReceiveEffectCarriesFin) {
               (coquic::quic::test::StreamPayload{0, "hello", true}));
 }
 
+TEST(QuicCoreTest, SmallStreamSendKeepsFinWithData) {
+    auto connection = make_connected_client_connection();
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("hello"), true)
+            .has_value());
+
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets[0]);
+    ASSERT_NE(application, nullptr);
+
+    auto stream_it =
+        std::find_if(application->frames.begin(), application->frames.end(), [](auto &frame) {
+            return std::holds_alternative<coquic::quic::StreamFrame>(frame);
+        });
+    ASSERT_NE(stream_it, application->frames.end());
+
+    const auto &stream = std::get<coquic::quic::StreamFrame>(*stream_it);
+    EXPECT_EQ(stream.stream_id, 0u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(stream.stream_data), "hello");
+    EXPECT_TRUE(stream.fin);
+}
+
+TEST(QuicCoreTest, LargeStreamSendSplitsSmallTerminalDataFin) {
+    auto connection = make_connected_client_connection();
+    constexpr std::size_t kMinimumInitialDatagramSizeForTest = 1200;
+    connection.config_.transport.pmtud_enabled = false;
+    connection.config_.max_outbound_datagram_size = kMinimumInitialDatagramSizeForTest;
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.max_udp_payload_size = kMinimumInitialDatagramSizeForTest;
+    connection.congestion_controller_.congestion_window_ = std::uint64_t{64} * 1024u;
+
+    constexpr std::size_t kPayloadSize = 1300;
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, std::vector<std::byte>(kPayloadSize, std::byte{0x61}), true)
+            .has_value());
+
+    auto first = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first.empty());
+    auto first_packets = decode_sender_datagram(connection, first);
+    ASSERT_EQ(first_packets.size(), 1u);
+    auto *first_application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&first_packets[0]);
+    ASSERT_NE(first_application, nullptr);
+    auto first_stream_it = std::find_if(
+        first_application->frames.begin(), first_application->frames.end(),
+        [](auto &frame) { return std::holds_alternative<coquic::quic::StreamFrame>(frame); });
+    ASSERT_NE(first_stream_it, first_application->frames.end());
+    const auto &first_stream = std::get<coquic::quic::StreamFrame>(*first_stream_it);
+    EXPECT_FALSE(first_stream.fin);
+    ASSERT_FALSE(first_stream.stream_data.empty());
+
+    auto terminal_data = connection.drain_outbound_datagram(coquic::quic::test::test_time(1),
+                                                            /*continue_paced_burst=*/true);
+    ASSERT_FALSE(terminal_data.empty());
+    EXPECT_LT(terminal_data.size(), kMinimumInitialDatagramSizeForTest);
+    auto terminal_packets = decode_sender_datagram(connection, terminal_data);
+    ASSERT_EQ(terminal_packets.size(), 1u);
+    auto *terminal_application =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&terminal_packets[0]);
+    ASSERT_NE(terminal_application, nullptr);
+    auto terminal_stream_it = std::find_if(
+        terminal_application->frames.begin(), terminal_application->frames.end(),
+        [](auto &frame) { return std::holds_alternative<coquic::quic::StreamFrame>(frame); });
+    ASSERT_NE(terminal_stream_it, terminal_application->frames.end());
+    const auto &terminal_stream = std::get<coquic::quic::StreamFrame>(*terminal_stream_it);
+    ASSERT_TRUE(terminal_stream.offset.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(terminal_stream.offset) +
+                  terminal_stream.stream_data.size(),
+              kPayloadSize);
+    EXPECT_FALSE(terminal_stream.fin);
+    ASSERT_FALSE(terminal_stream.stream_data.empty());
+
+    auto fin_only = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(fin_only.empty());
+    auto fin_packets = decode_sender_datagram(connection, fin_only);
+    ASSERT_EQ(fin_packets.size(), 1u);
+    auto *fin_application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&fin_packets[0]);
+    ASSERT_NE(fin_application, nullptr);
+    auto fin_stream_it = std::find_if(
+        fin_application->frames.begin(), fin_application->frames.end(),
+        [](auto &frame) { return std::holds_alternative<coquic::quic::StreamFrame>(frame); });
+    ASSERT_NE(fin_stream_it, fin_application->frames.end());
+    const auto &fin_stream = std::get<coquic::quic::StreamFrame>(*fin_stream_it);
+    EXPECT_EQ(fin_stream.stream_id, 0u);
+    ASSERT_TRUE(fin_stream.offset.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(fin_stream.offset), kPayloadSize);
+    EXPECT_TRUE(fin_stream.fin);
+    EXPECT_TRUE(fin_stream.stream_data.empty());
+}
+
 TEST(QuicCoreTest, StreamReceiveEffectCarriesFinWhenQueuedAfterOutstandingData) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());

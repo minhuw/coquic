@@ -9,6 +9,40 @@ struct PendingPathValidationFrames {
     std::optional<PathChallengeFrame> challenge;
 };
 
+bool path_validation_challenge_needs_minimum_datagram(
+    const PendingPathValidationFrames &path_validation_frames,
+    const std::map<QuicPathId, PathState> &paths) {
+    if (!path_validation_frames.challenge.has_value()) {
+        return false;
+    }
+    const auto path = paths.find(path_validation_frames.path_id);
+    return path != paths.end() && !path->second.validated;
+}
+
+bool stream_terminal_data_fin_can_be_split(const StreamFrameSendFragment &fragment,
+                                           std::size_t datagram_size_limit,
+                                           std::size_t datagram_size) {
+    if (!fragment.fin || fragment.bytes.empty()) {
+        return false;
+    }
+    if (datagram_size_limit < kMinimumInitialDatagramSize ||
+        datagram_size >= kMinimumInitialDatagramSize) {
+        return false;
+    }
+    return saturating_add(fragment.offset, fragment.bytes.size()) >= kMinimumInitialDatagramSize;
+}
+
+void mark_stream_terminal_fin_pending(std::map<std::uint64_t, StreamState> &streams,
+                                      std::uint64_t stream_id) {
+    const auto stream = streams.find(stream_id);
+    if (stream == streams.end()) {
+        return;
+    }
+    if (stream->second.send_fin_state == StreamSendFinState::sent) {
+        stream->second.send_fin_state = StreamSendFinState::pending;
+    }
+}
+
 std::span<const Frame> selectable_application_crypto_frames(bool send_application_close_only,
                                                             const std::vector<Frame> &frames) {
     if (send_application_close_only) {
@@ -506,6 +540,30 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
                               serialized_packet_length.error());
             mark_failed();
             break;
+        }
+        if (fragments.size() == 1 &&
+            stream_terminal_data_fin_can_be_split(fragments.front(), max_outbound_datagram_size,
+                                                  datagram.size())) {
+            fragments.front().fin = false;
+            fragments.front().prime_stream_frame_header_cache();
+            mark_stream_terminal_fin_pending(streams_, fragments.front().stream_id);
+
+            datagram.clear();
+            if (send_profile_enabled()) {
+                ++send_profile_counters().serialize_calls;
+            }
+            COQUIC_SEND_PROFILE_TIMER(split_serialize_timer, serialize_ns);
+            serialized_packet_length = append_protected_one_rtt_stream_fragment_packet_to_datagram(
+                datagram, outbound_spin_bit_for_path(current_send_path_id_),
+                application_write_key_phase_, destination_connection_id,
+                kDefaultInitialPacketNumberLength, packet_number, fragments.front(),
+                serialize_context.value());
+            if (!serialized_packet_length.has_value()) {
+                log_codec_failure("append_split_fin_one_rtt_packet_to_datagram",
+                                  serialized_packet_length.error());
+                mark_failed();
+                break;
+            }
         }
         if (datagram.empty() || datagram.size() > max_outbound_datagram_size) {
             mark_failed();
@@ -2513,6 +2571,39 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 candidate_frames, stream_fragments, application_close_frame.has_value(),
                 application_space_.next_send_packet_number, application_write_key_phase_);
         };
+        const auto pad_path_validation_candidate_to_minimum_datagram =
+            [&](CodecResult<SerializedProtectedDatagram> &candidate,
+                const PendingPathValidationFrames &path_validation_frames,
+                std::span<const Frame> candidate_frames,
+                std::span<const StreamFrameSendFragment> stream_fragments,
+                bool has_application_close, std::uint64_t candidate_packet_number,
+                bool write_key_phase, std::size_t datagram_size_limit) -> bool {
+            if (!candidate.has_value()) {
+                return true;
+            }
+            if (!path_validation_challenge_needs_minimum_datagram(path_validation_frames, paths_)) {
+                return true;
+            }
+            if (datagram_size_limit < kMinimumInitialDatagramSize ||
+                candidate.value().bytes.size() >= kMinimumInitialDatagramSize) {
+                return true;
+            }
+
+            auto frames_with_padding =
+                std::vector<Frame>(candidate_frames.begin(), candidate_frames.end());
+            std::size_t padding_length =
+                kMinimumInitialDatagramSize - candidate.value().bytes.size();
+            if (!maybe_add_pmtu_probe_padding(padding_length, frames_with_padding,
+                                              padding_length)) {
+                return true;
+            }
+            return retry_padded_pmtu_probe_serialization(
+                candidate, frames_with_padding, kMinimumInitialDatagramSize, padding_length, [&] {
+                    return serialize_application_candidate_from_frames(
+                        frames_with_padding, stream_fragments, has_application_close,
+                        candidate_packet_number, write_key_phase);
+                });
+        };
         const auto estimate_application_candidate_size_from_frames =
             [&](std::span<const Frame> candidate_frames,
                 std::span<const StreamFrameSendFragment> stream_fragments,
@@ -2990,6 +3081,28 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 probe_stream_fragments, std::nullopt, std::nullopt, include_ping);
             if (!datagram.has_value()) {
                 return fail_datagram_send(has_pending_tracked_packet());
+            }
+            if (path_validation_challenge_needs_minimum_datagram(probe_path_validation_frames,
+                                                                 paths_) &&
+                !probe_packet.is_pmtu_probe) {
+                std::vector<Frame> probe_crypto_frames;
+                append_application_crypto_frames(probe_crypto_frames, probe_crypto_ranges);
+                std::vector<Frame> probe_frames_for_padding;
+                const auto probe_frame_span = build_application_candidate_frames(
+                    probe_frames_for_padding, application_space_.received_packets,
+                    probe_crypto_frames, probe_packet.has_handshake_done, probe_ack_frame,
+                    probe_max_data_frame, {}, {}, {}, probe_path_validation_frames,
+                    probe_max_stream_data_frames, probe_packet.max_streams_frames,
+                    probe_packet.reset_stream_frames, probe_packet.stop_sending_frames,
+                    probe_packet.data_blocked_frame, probe_packet.stream_data_blocked_frames,
+                    std::nullopt, std::nullopt, include_ping);
+                if (!pad_path_validation_candidate_to_minimum_datagram(
+                        datagram, probe_path_validation_frames, probe_frame_span,
+                        probe_stream_fragments, /*has_application_close=*/false,
+                        application_space_.next_send_packet_number, application_write_key_phase_,
+                        pmtu_probe_datagram_size_limit)) {
+                    return fail_datagram_send(has_pending_tracked_packet());
+                }
             }
             const auto pad_probe_datagram_to_target =
                 [&](CodecResult<SerializedProtectedDatagram> &candidate,
@@ -3782,6 +3895,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 }
                 return fail_datagram_send(has_pending_tracked_packet());
             }
+            if (!pad_path_validation_candidate_to_minimum_datagram(
+                    candidate_application_datagram, application_path_validation_frames,
+                    application_candidate_frames.current(), stream_fragments,
+                    application_close_frame.has_value(), application_space_.next_send_packet_number,
+                    application_write_key_phase_, max_outbound_datagram_size)) {
+                return fail_datagram_send(has_pending_tracked_packet());
+            }
             if (selected_ack_frame.has_value() &&
                 candidate_application_datagram.value().bytes.size() > max_outbound_datagram_size) {
                 if (send_profile_enabled()) {
@@ -3919,6 +4039,14 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                             candidate_application_datagram)) {
                         return fail_datagram_send(has_pending_tracked_packet());
                     }
+                    if (!pad_path_validation_candidate_to_minimum_datagram(
+                            candidate_application_datagram, application_path_validation_frames,
+                            application_candidate_frames.current(), stream_fragments,
+                            application_close_frame.has_value(),
+                            application_space_.next_send_packet_number,
+                            application_write_key_phase_, max_outbound_datagram_size)) {
+                        return fail_datagram_send(has_pending_tracked_packet());
+                    }
                     static_cast<void>(
                         trim_candidate_to_fit(candidate_application_datagram, stream_fragments));
                 }
@@ -3976,6 +4104,15 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     }
                     return;
                 }
+                if (!pad_path_validation_candidate_to_minimum_datagram(
+                        candidate_application_datagram, application_path_validation_frames,
+                        application_candidate_frames.current(), stream_fragments,
+                        application_close_frame.has_value(),
+                        application_space_.next_send_packet_number, application_write_key_phase_,
+                        max_outbound_datagram_size)) {
+                    fail_datagram_send(has_pending_tracked_packet());
+                    return;
+                }
                 static_cast<void>(
                     trim_candidate_to_fit(candidate_application_datagram, stream_fragments));
             };
@@ -4007,6 +4144,32 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 return candidate_application_datagram.value().bytes.size() <=
                        max_outbound_datagram_size;
             };
+            const auto split_small_terminal_stream_fin_candidate = [&]() -> bool {
+                if (!candidate_application_datagram.has_value() || stream_fragments.empty()) {
+                    return true;
+                }
+                if (!stream_terminal_data_fin_can_be_split(
+                        stream_fragments.back(), max_outbound_datagram_size,
+                        candidate_application_datagram.value().bytes.size())) {
+                    return true;
+                }
+
+                auto &last_fragment = stream_fragments.back();
+                const auto stream_id = last_fragment.stream_id;
+                last_fragment.fin = false;
+                last_fragment.prime_stream_frame_header_cache();
+                mark_stream_terminal_fin_pending(streams_, stream_id);
+
+                candidate_application_datagram = serialize_application_profiled(
+                    application_candidate_frames.current(), stream_fragments,
+                    application_close_frame.has_value(), application_space_.next_send_packet_number,
+                    application_write_key_phase_);
+                if (!candidate_application_datagram.has_value()) {
+                    return false;
+                }
+                return candidate_application_datagram.value().bytes.size() <=
+                       max_outbound_datagram_size;
+            };
             const auto mark_application_close_unusable = [&]() {
                 if (!send_application_close_only) {
                     return;
@@ -4026,6 +4189,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 }
                 candidate_datagram_size = datagram_size_or_zero(candidate_application_datagram);
             }
+            if (!split_small_terminal_stream_fin_candidate()) {
+                return fail_datagram_send(has_pending_tracked_packet());
+            }
+            candidate_datagram_size = datagram_size_or_zero(candidate_application_datagram);
             if (candidate_datagram_size > max_outbound_datagram_size &&
                 retry_application_close_without_reason()) {
                 candidate_datagram_size = datagram_size_or_zero(candidate_application_datagram);

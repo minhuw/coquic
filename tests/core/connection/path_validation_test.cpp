@@ -628,6 +628,7 @@ TEST(QuicCoreTest, PathChallengeQueuesMatchingPathResponseOnSamePath) {
     auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(datagram.empty());
     EXPECT_EQ(connection.last_drained_path_id(), 9u);
+    EXPECT_GE(datagram.size(), 1200u);
 }
 
 TEST(QuicCoreTest, FirstServerResponseToProbingPacketOnNewPathAlsoIncludesPathChallenge) {
@@ -646,6 +647,7 @@ TEST(QuicCoreTest, FirstServerResponseToProbingPacketOnNewPathAlsoIncludesPathCh
     auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(datagram.empty());
     EXPECT_EQ(connection.last_drained_path_id(), 9u);
+    EXPECT_GE(datagram.size(), 1200u);
 
     auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
@@ -1619,6 +1621,7 @@ TEST(QuicCoreTest, PtoOnUnvalidatedMigratedPathRearmsPathChallenge) {
     auto first_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(first_datagram.empty());
     EXPECT_EQ(connection.last_drained_path_id(), 9u);
+    EXPECT_GE(first_datagram.size(), 1200u);
 
     auto first_packets = decode_sender_datagram(connection, first_datagram);
     ASSERT_EQ(first_packets.size(), 1u);
@@ -1639,6 +1642,7 @@ TEST(QuicCoreTest, PtoOnUnvalidatedMigratedPathRearmsPathChallenge) {
     auto second_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1000));
     ASSERT_FALSE(second_datagram.empty());
     EXPECT_EQ(connection.last_drained_path_id(), 9u);
+    EXPECT_GE(second_datagram.size(), 1200u);
 
     auto second_packets = decode_sender_datagram(connection, second_datagram);
     ASSERT_EQ(second_packets.size(), 1u);

@@ -940,39 +940,7 @@ void QuicConnection::issue_path_probe_replacement_connection_id() {
     if (count_unretired_connection_ids_without_pending_retirement(local_connection_ids_) <
         peer_limit) {
         issue_spare_connection_ids();
-        return;
     }
-
-    const auto oldest_reusable = std::find_if(
-        local_connection_ids_.begin(), local_connection_ids_.end(), [](const auto &entry) {
-            return !entry.second.retired && !entry.second.retirement_requested;
-        });
-
-    auto retire_prior_to = oldest_reusable->first + 1;
-    auto sequence_number = next_local_connection_id_sequence_++;
-    auto connection_id = make_issued_connection_id(config_.source_connection_id, sequence_number);
-    auto stateless_reset_token =
-        make_stateless_reset_token(connection_id, sequence_number, config_.stateless_reset_secret);
-    local_connection_ids_[sequence_number] = LocalConnectionIdRecord{
-        .sequence_number = sequence_number,
-        .connection_id = connection_id,
-        .stateless_reset_token = stateless_reset_token,
-    };
-    for (auto &[existing_sequence_number, record] : local_connection_ids_) {
-        if (existing_sequence_number >= retire_prior_to) {
-            continue;
-        }
-        if (!record.retired) {
-            record.retirement_requested = true;
-        }
-    }
-    note_endpoint_route_state_changed();
-    pending_new_connection_id_frames_.push_back(NewConnectionIdFrame{
-        .sequence_number = sequence_number,
-        .retire_prior_to = retire_prior_to,
-        .connection_id = connection_id,
-        .stateless_reset_token = stateless_reset_token,
-    });
 }
 
 std::optional<std::uint64_t>

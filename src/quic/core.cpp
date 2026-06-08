@@ -2250,6 +2250,21 @@ COQUIC_NO_PROFILE void QuicCore::refresh_server_connection_routes(ConnectionEntr
         connection_id_routes_[key] = entry.handle;
         active_connection_id_keys.push_back(std::move(key));
     }
+    if (entry.connection->config_.role == EndpointRole::server &&
+        entry.connection->config_.retry_source_connection_id.has_value() &&
+        entry.connection->config_.original_destination_connection_id.has_value()) {
+        auto key = connection_id_key(*entry.connection->config_.original_destination_connection_id);
+        const auto key_already_active =
+            std::find(active_connection_id_keys.begin(), active_connection_id_keys.end(), key) !=
+            active_connection_id_keys.end();
+        const auto existing_route = connection_id_routes_.find(key);
+        if (!key.empty() && !key_already_active &&
+            (existing_route == connection_id_routes_.end() ||
+             existing_route->second == entry.handle)) {
+            connection_id_routes_[key] = entry.handle;
+            active_connection_id_keys.push_back(std::move(key));
+        }
+    }
 
     for (const auto &existing_key : entry.active_connection_id_keys) {
         if (std::find(active_connection_id_keys.begin(), active_connection_id_keys.end(),

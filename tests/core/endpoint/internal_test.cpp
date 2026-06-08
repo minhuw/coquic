@@ -576,6 +576,38 @@ TEST(QuicCoreEndpointInternalTest, ClientEndpointRoutesShortHeaderByFullLocalCon
               std::optional<QuicConnectionHandle>{1u});
 }
 
+TEST(QuicCoreEndpointInternalTest, RetryAcceptedServerRoutesOriginalDestinationCidAlias) {
+    QuicCore endpoint(make_server_endpoint_config());
+
+    auto config = coquic::quic::test::make_server_core_config();
+    config.source_connection_id = bytes_from_ints({0x53, 0x28, 0xab, 0x16, 0x7a, 0x22, 0xb1, 0xc2});
+    config.initial_destination_connection_id = config.source_connection_id;
+    config.original_destination_connection_id =
+        bytes_from_ints({0xe1, 0xbb, 0x00, 0x5c, 0x56, 0xd0, 0x0c, 0x3f});
+    config.retry_source_connection_id = config.source_connection_id;
+
+    auto entry = QuicCore::ConnectionEntry{
+        .handle = 7,
+        .connection = std::make_unique<QuicConnection>(std::move(config)),
+    };
+    endpoint.refresh_server_connection_routes(entry);
+    endpoint.connections_.emplace(entry.handle, std::move(entry));
+
+    auto original_destination_short_header = QuicCore::parse_endpoint_datagram(
+        bytes_from_ints({0x40, 0xe1, 0xbb, 0x00, 0x5c, 0x56, 0xd0, 0x0c, 0x3f, 0xff}));
+    ASSERT_TRUE(original_destination_short_header.has_value());
+    EXPECT_EQ(endpoint.find_endpoint_connection_for_datagram(
+                  optional_ref_or_terminate(original_destination_short_header)),
+              std::optional<QuicConnectionHandle>{7u});
+
+    auto retry_source_short_header = QuicCore::parse_endpoint_datagram(
+        bytes_from_ints({0x40, 0x53, 0x28, 0xab, 0x16, 0x7a, 0x22, 0xb1, 0xc2, 0xff}));
+    ASSERT_TRUE(retry_source_short_header.has_value());
+    EXPECT_EQ(endpoint.find_endpoint_connection_for_datagram(
+                  optional_ref_or_terminate(retry_source_short_header)),
+              std::optional<QuicConnectionHandle>{7u});
+}
+
 TEST(QuicCoreEndpointInternalTest, ConnectionCommandDrainsPendingEndpointEffects) {
     QuicCore endpoint(make_client_endpoint_config());
     static_cast<void>(endpoint.advance_endpoint(

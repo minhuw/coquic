@@ -27,6 +27,7 @@ stats_sample_interval_seconds="${PERF_STATS_SAMPLE_INTERVAL_SECONDS:-1}"
 profile_flamegraphs_enabled="${PERF_PROFILE_FLAMEGRAPHS:-0}"
 profile_frequency="${PERF_PROFILE_FREQUENCY:-99}"
 profile_use_sudo="${PERF_PROFILE_USE_SUDO:-0}"
+profile_perf_bin="${PERF_PROFILE_PERF_BIN:-}"
 preset="smoke"
 network_name=''
 server_name=''
@@ -61,6 +62,7 @@ environment overrides:
   PERF_PROFILE_FLAMEGRAPHS   record host perf flamegraphs for client/server when possible (default: 0)
   PERF_PROFILE_FREQUENCY     perf sampling frequency in Hz (default: 99)
   PERF_PROFILE_USE_SUDO      run host perf through passwordless sudo when recording container PIDs (default: 0)
+  PERF_PROFILE_PERF_BIN      explicit perf binary path or command name (default: resolved from PATH)
 USAGE
 }
 
@@ -106,11 +108,28 @@ write_profile_status() {
   printf '%s\t%s\n' "${status}" "${reason}" > "${status_path}"
 }
 
+resolve_perf_bin() {
+  if [ -n "${profile_perf_bin}" ]; then
+    case "${profile_perf_bin}" in
+      */*)
+        [ -x "${profile_perf_bin}" ] && printf '%s\n' "${profile_perf_bin}"
+        ;;
+      *)
+        command -v -- "${profile_perf_bin}"
+        ;;
+    esac
+    return
+  fi
+  command -v perf
+}
+
 perf_command() {
+  local perf_bin
+  perf_bin="$(resolve_perf_bin)" || return 127
   if [ "${profile_use_sudo}" = "1" ]; then
-    sudo -n perf "$@"
+    sudo -n "${perf_bin}" "$@"
   else
-    perf "$@"
+    "${perf_bin}" "$@"
   fi
 }
 
@@ -121,18 +140,23 @@ start_perf_record() {
   local log_path="$4"
   local status_path="$5"
   local host_pid
+  local perf_bin
   STARTED_PERF_PID=''
 
   if [ "${profile_flamegraphs_enabled}" != "1" ]; then
     write_profile_status "${status_path}" "disabled" "PERF_PROFILE_FLAMEGRAPHS is not enabled"
     return
   fi
-  if ! command -v perf >/dev/null 2>&1; then
+  if ! perf_bin="$(resolve_perf_bin)"; then
     write_profile_status "${status_path}" "unavailable" "perf is not available on the runner"
     return
   fi
   if [ "${profile_use_sudo}" = "1" ] && ! sudo -n true >/dev/null 2>&1; then
     write_profile_status "${status_path}" "unavailable" "passwordless sudo is not available for perf"
+    return
+  fi
+  if [ "${profile_use_sudo}" = "1" ] && ! sudo -n "${perf_bin}" --version >/dev/null 2>&1; then
+    write_profile_status "${status_path}" "unavailable" "passwordless sudo cannot execute perf"
     return
   fi
 
@@ -143,9 +167,9 @@ start_perf_record() {
   fi
 
   if [ "${profile_use_sudo}" = "1" ]; then
-    setsid sudo -n perf record -F "${profile_frequency}" -g -p "${host_pid}" -o "${data_path}" > "${log_path}" 2>&1 &
+    setsid sudo -n "${perf_bin}" record -F "${profile_frequency}" -g -p "${host_pid}" -o "${data_path}" > "${log_path}" 2>&1 &
   else
-    setsid perf record -F "${profile_frequency}" -g -p "${host_pid}" -o "${data_path}" > "${log_path}" 2>&1 &
+    setsid "${perf_bin}" record -F "${profile_frequency}" -g -p "${host_pid}" -o "${data_path}" > "${log_path}" 2>&1 &
   fi
   STARTED_PERF_PID="$!"
   write_profile_status "${status_path}" "recording" "perf recording started for host pid ${host_pid}"

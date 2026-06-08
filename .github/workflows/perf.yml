@@ -233,6 +233,42 @@ jobs:
         run: |
           docker version
 
+      - name: Check Perf Profiling Tools
+        run: |
+          nix develop -c bash -lc '
+            set -euo pipefail
+            if [ -x /usr/bin/perf ]; then
+              perf_bin=/usr/bin/perf
+            else
+              perf_bin="$(command -v perf || true)"
+            fi
+            if [ -z "${perf_bin}" ]; then
+              echo "perf is required for PERF_PROFILE_FLAMEGRAPHS=1" >&2
+              exit 1
+            fi
+            echo "perf: ${perf_bin}"
+            "${perf_bin}" --version
+            if ! sudo -n true >/dev/null 2>&1; then
+              echo "passwordless sudo is required for host perf profiling" >&2
+              exit 1
+            fi
+            if ! sudo -n "${perf_bin}" --version >/dev/null 2>&1; then
+              echo "passwordless sudo cannot execute ${perf_bin}" >&2
+              exit 1
+            fi
+            if command -v stackcollapse-perf.pl >/dev/null 2>&1 &&
+               command -v flamegraph.pl >/dev/null 2>&1; then
+              echo "flamegraph: $(command -v flamegraph.pl)"
+            elif command -v inferno-collapse-perf >/dev/null 2>&1 &&
+                 command -v inferno-flamegraph >/dev/null 2>&1; then
+              echo "inferno-flamegraph: $(command -v inferno-flamegraph)"
+            else
+              echo "flamegraph tooling is required" >&2
+              exit 1
+            fi
+            printf "PERF_PROFILE_PERF_BIN=%s\n" "${perf_bin}" >> "${GITHUB_ENV}"
+          '
+
       - name: Run ${{ matrix.display_name }} Perf CI Matrix
         id: run_perf
         continue-on-error: true
@@ -247,7 +283,8 @@ jobs:
           PERF_UTILIZATION_ENABLED: "1"
           PERF_PROFILE_FLAMEGRAPHS: "1"
           PERF_PROFILE_FREQUENCY: "99"
-        run: bash bench/run-host-matrix.sh --preset ci
+          PERF_PROFILE_USE_SUDO: "1"
+        run: nix develop -c bash bench/run-host-matrix.sh --preset ci
 
       - name: Publish ${{ matrix.display_name }} Perf Summary
         if: always()
@@ -486,7 +523,66 @@ jobs:
             fi
             sudo install -m 644 /tmp/coquic-perf-results.json /opt/coquic-demo/current/app/public/perf-results.json
             sudo rm -f /opt/coquic-demo/current/app/public/perf-history.json
+            sudo systemctl restart coquic-demo.service
+            sudo systemctl is-active --quiet coquic-demo.service
             rm -f /tmp/coquic-perf-results.json /tmp/coquic-perf-history.tar /tmp/coquic-perf-artifacts.tar"
+
+      - name: Verify Published Perf Results
+        if: github.ref == 'refs/heads/main' && needs.perf-config.result == 'success' && needs.perf-impl.result == 'success'
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import time
+          import urllib.request
+
+          base = "https://coquic.minhuw.dev"
+          expected_commit = os.environ["GITHUB_SHA"]
+          latest_snapshot_path = None
+          last_error = None
+
+          for _ in range(30):
+              try:
+                  profiles_ok = 0
+                  with urllib.request.urlopen(f"{base}/perf-results.json", timeout=15) as response:
+                      results = json.load(response)
+                  with urllib.request.urlopen(f"{base}/perf-history/index.json", timeout=15) as response:
+                      index = json.load(response)
+                  if results.get("commit") != expected_commit:
+                      raise RuntimeError(
+                          f"perf-results.json has commit {results.get('commit')}, expected {expected_commit}"
+                      )
+                  snapshots = index.get("snapshots")
+                  if not isinstance(snapshots, list) or not snapshots:
+                      raise RuntimeError("perf-history/index.json has no snapshots")
+                  latest = snapshots[-1]
+                  latest_snapshot_path = latest.get("path")
+                  if not isinstance(latest_snapshot_path, str) or not latest_snapshot_path.endswith(".json"):
+                      raise RuntimeError("perf-history latest snapshot path is invalid")
+                  with urllib.request.urlopen(f"{base}/perf-history/{latest_snapshot_path}", timeout=15) as response:
+                      snapshot = json.load(response)
+                  if snapshot.get("commit") != expected_commit:
+                      raise RuntimeError(
+                          f"latest perf-history snapshot has commit {snapshot.get('commit')}, expected {expected_commit}"
+                      )
+                  for row in results.get("rows", []):
+                      for run in row.get("runs", []):
+                          for profile in (run.get("profiles") or {}).values():
+                              if profile.get("status") == "ok":
+                                  profiles_ok += 1
+                  if profiles_ok == 0:
+                      raise RuntimeError("published perf results contain no successful flamegraph profiles")
+                  break
+              except Exception as exc:
+                  last_error = exc
+                  time.sleep(2)
+          else:
+              print(f"published perf verification failed: {last_error}", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"verified published perf results: latest_snapshot={latest_snapshot_path}, ok_profiles={profiles_ok}")
+          PY
 
       - name: Fail On Perf Job Errors
         if: always()

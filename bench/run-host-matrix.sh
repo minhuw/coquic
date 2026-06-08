@@ -28,6 +28,7 @@ profile_flamegraphs_enabled="${PERF_PROFILE_FLAMEGRAPHS:-0}"
 profile_frequency="${PERF_PROFILE_FREQUENCY:-99}"
 profile_use_sudo="${PERF_PROFILE_USE_SUDO:-0}"
 profile_perf_bin="${PERF_PROFILE_PERF_BIN:-}"
+profile_docker_image="${PERF_PROFILE_DOCKER_IMAGE:-}"
 preset="smoke"
 network_name=''
 server_name=''
@@ -63,6 +64,7 @@ environment overrides:
   PERF_PROFILE_FREQUENCY     perf sampling frequency in Hz (default: 99)
   PERF_PROFILE_USE_SUDO      run host perf through passwordless sudo when recording container PIDs (default: 0)
   PERF_PROFILE_PERF_BIN      explicit perf binary path or command name (default: resolved from PATH)
+  PERF_PROFILE_DOCKER_IMAGE  run perf record in this privileged --pid=host helper image
 USAGE
 }
 
@@ -141,7 +143,9 @@ start_perf_record() {
   local status_path="$5"
   local host_pid
   local perf_bin
+  local recorder_name
   STARTED_PERF_PID=''
+  STARTED_PERF_CONTAINER=''
 
   if [ "${profile_flamegraphs_enabled}" != "1" ]; then
     write_profile_status "${status_path}" "disabled" "PERF_PROFILE_FLAMEGRAPHS is not enabled"
@@ -166,7 +170,19 @@ start_perf_record() {
     return
   fi
 
-  if [ "${profile_use_sudo}" = "1" ]; then
+  if [ -n "${profile_docker_image}" ]; then
+    recorder_name="${container_name}-${role}-perf-record"
+    docker rm -f "${recorder_name}" >/dev/null 2>&1 || true
+    setsid docker run --rm \
+      --name "${recorder_name}" \
+      --privileged \
+      --pid=host \
+      -v "${results_root}:${results_root}" \
+      -w "${results_root}" \
+      "${profile_docker_image}" \
+      record -F "${profile_frequency}" -g -p "${host_pid}" -o "${data_path}" > "${log_path}" 2>&1 &
+    STARTED_PERF_CONTAINER="${recorder_name}"
+  elif [ "${profile_use_sudo}" = "1" ]; then
     setsid sudo -n "${perf_bin}" record -F "${profile_frequency}" -g -p "${host_pid}" -o "${data_path}" > "${log_path}" 2>&1 &
   else
     setsid "${perf_bin}" record -F "${profile_frequency}" -g -p "${host_pid}" -o "${data_path}" > "${log_path}" 2>&1 &
@@ -203,15 +219,18 @@ generate_flamegraph() {
 
 finish_perf_record() {
   local recorder_pid="$1"
-  local data_path="$2"
-  local svg_path="$3"
-  local title="$4"
-  local log_path="$5"
-  local status_path="$6"
+  local recorder_container="$2"
+  local data_path="$3"
+  local svg_path="$4"
+  local title="$5"
+  local log_path="$6"
+  local status_path="$7"
   local current_status=''
 
   if [ -n "${recorder_pid}" ]; then
-    if kill -0 "${recorder_pid}" >/dev/null 2>&1; then
+    if [ -n "${recorder_container}" ]; then
+      docker kill --signal INT "${recorder_container}" >/dev/null 2>&1 || true
+    elif kill -0 "${recorder_pid}" >/dev/null 2>&1; then
       kill -INT "-${recorder_pid}" >/dev/null 2>&1 || kill -INT "${recorder_pid}" >/dev/null 2>&1 || true
     fi
     wait "${recorder_pid}" >/dev/null 2>&1 || true
@@ -346,10 +365,10 @@ rm -f "${results_root}"/*.json "${results_root}"/*.txt "${results_root}"/*.log \
 
 cleanup_containers() {
   if [ -n "${client_name}" ]; then
-    docker rm -f "${client_name}" >/dev/null 2>&1 || true
+    docker rm -f "${client_name}" "${client_name}-client-perf-record" >/dev/null 2>&1 || true
   fi
   if [ -n "${server_name}" ]; then
-    docker rm -f "${server_name}" >/dev/null 2>&1 || true
+    docker rm -f "${server_name}" "${server_name}-server-perf-record" >/dev/null 2>&1 || true
   fi
 }
 
@@ -417,6 +436,7 @@ docker network create --opt "com.docker.network.driver.mtu=${network_mtu}" "${ne
   echo "profile_flamegraphs_enabled=${profile_flamegraphs_enabled}"
   echo "profile_frequency=${profile_frequency}"
   echo "profile_use_sudo=${profile_use_sudo}"
+  echo "profile_docker_image=${profile_docker_image}"
   echo
   docker version
   echo
@@ -650,7 +670,9 @@ for congestion_control in "${congestion_control_list[@]}"; do
     client_status=125
     stats_pid=''
     client_perf_pid=''
+    client_perf_container=''
     server_perf_pid=''
+    server_perf_container=''
     if [ "${client_start_status}" -eq 0 ]; then
       if [ "${utilization_enabled}" = "1" ]; then
         monitor_docker_stats "${stats_path}" "${stats_sample_interval_seconds}" "${client_name}" "${server_name}" &
@@ -658,8 +680,10 @@ for congestion_control in "${congestion_control_list[@]}"; do
       fi
       start_perf_record "${client_name}" "client" "${client_perf_data_path}" "${client_profile_log_path}" "${client_profile_status_path}" || true
       client_perf_pid="${STARTED_PERF_PID:-}"
+      client_perf_container="${STARTED_PERF_CONTAINER:-}"
       start_perf_record "${server_name}" "server" "${server_perf_data_path}" "${server_profile_log_path}" "${server_profile_status_path}" || true
       server_perf_pid="${STARTED_PERF_PID:-}"
+      server_perf_container="${STARTED_PERF_CONTAINER:-}"
       timeout --kill-after=5s "${run_timeout_seconds}s" docker wait "${client_name}" > "${results_root}/${run_name}.client.exit" || true
       if [ -s "${results_root}/${run_name}.client.exit" ]; then
         client_status="$(tail -n 1 "${results_root}/${run_name}.client.exit")"
@@ -671,8 +695,8 @@ for congestion_control in "${congestion_control_list[@]}"; do
         kill "${stats_pid}" >/dev/null 2>&1 || true
         wait "${stats_pid}" >/dev/null 2>&1 || true
       fi
-      finish_perf_record "${client_perf_pid}" "${client_perf_data_path}" "${client_flamegraph_path}" "${run_name} client" "${client_profile_log_path}" "${client_profile_status_path}"
-      finish_perf_record "${server_perf_pid}" "${server_perf_data_path}" "${server_flamegraph_path}" "${run_name} server" "${server_profile_log_path}" "${server_profile_status_path}"
+      finish_perf_record "${client_perf_pid}" "${client_perf_container}" "${client_perf_data_path}" "${client_flamegraph_path}" "${run_name} client" "${client_profile_log_path}" "${client_profile_status_path}"
+      finish_perf_record "${server_perf_pid}" "${server_perf_container}" "${server_perf_data_path}" "${server_flamegraph_path}" "${run_name} server" "${server_profile_log_path}" "${server_profile_status_path}"
       docker logs "${client_name}" > "${client_log_path}" 2>&1 || true
       cp "${client_log_path}" "${txt_path}"
       cat "${txt_path}"
@@ -682,8 +706,8 @@ for congestion_control in "${congestion_control_list[@]}"; do
     set -e
 
     docker logs "${server_name}" > "${server_log_path}" 2>&1 || true
-    docker rm -f "${server_name}" >/dev/null 2>&1 || true
-    docker rm -f "${client_name}" >/dev/null 2>&1 || true
+    docker rm -f "${server_name}" "${server_name}-server-perf-record" >/dev/null 2>&1 || true
+    docker rm -f "${client_name}" "${client_name}-client-perf-record" >/dev/null 2>&1 || true
 
     if [ ! -f "${results_root}/result.json" ]; then
       echo "missing JSON result for ${run_name}: ${results_root}/result.json" >&2

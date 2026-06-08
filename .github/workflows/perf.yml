@@ -237,12 +237,10 @@ jobs:
         run: |
           set -euo pipefail
           tools_path="$(nix build --no-link --print-out-paths .#perf-profile-tools)"
+          recorder_image_path="$(nix build --no-link --print-out-paths .#perf-profile-image)"
+          docker load -i "${recorder_image_path}" >/dev/null
           printf "%s/bin\n" "${tools_path}" >> "${GITHUB_PATH}"
-          if [ -x /usr/bin/perf ]; then
-            perf_bin=/usr/bin/perf
-          else
-            perf_bin="${tools_path}/bin/perf"
-          fi
+          perf_bin="${tools_path}/bin/perf"
           if [ ! -x "${perf_bin}" ]; then
             echo "perf is required for PERF_PROFILE_FLAMEGRAPHS=1" >&2
             exit 1
@@ -258,9 +256,11 @@ jobs:
             exit 1
           fi
           printf "PERF_PROFILE_PERF_BIN=%s\n" "${perf_bin}" >> "${GITHUB_ENV}"
+          printf "PERF_PROFILE_DOCKER_IMAGE=coquic-perf-profile-recorder:latest\n" >> "${GITHUB_ENV}"
           "${tools_path}/bin/stackcollapse-perf.pl" --help >/dev/null 2>&1 || true
           "${tools_path}/bin/flamegraph.pl" --help >/dev/null 2>&1 || true
           echo "flamegraph: ${tools_path}/bin/flamegraph.pl"
+          echo "recorder image: coquic-perf-profile-recorder:latest"
 
       - name: Run ${{ matrix.display_name }} Perf CI Matrix
         id: run_perf
@@ -559,13 +559,21 @@ jobs:
                       raise RuntimeError(
                           f"latest perf-history snapshot has commit {snapshot.get('commit')}, expected {expected_commit}"
                       )
+                  sample_svg_path = None
                   for row in results.get("rows", []):
-                      for run in row.get("runs", []):
-                          for profile in (run.get("profiles") or {}).values():
-                              if profile.get("status") == "ok":
-                                  profiles_ok += 1
+                      for profile in (row.get("profiles") or {}).values():
+                          if profile.get("status") == "ok":
+                              profiles_ok += 1
+                              if sample_svg_path is None:
+                                  sample_svg_path = profile.get("svg_file")
                   if profiles_ok == 0:
                       raise RuntimeError("published perf results contain no successful flamegraph profiles")
+                  if not isinstance(sample_svg_path, str) or not sample_svg_path.endswith(".svg"):
+                      raise RuntimeError("published perf results do not reference a flamegraph SVG")
+                  with urllib.request.urlopen(f"{base}/perf-artifacts/{sample_svg_path}", timeout=15) as response:
+                      sample = response.read(4096)
+                  if response.status != 200 or b"<svg" not in sample:
+                      raise RuntimeError(f"published flamegraph SVG is not readable: {sample_svg_path}")
                   break
               except Exception as exc:
                   last_error = exc
@@ -574,7 +582,7 @@ jobs:
               print(f"published perf verification failed: {last_error}", file=sys.stderr)
               sys.exit(1)
 
-          print(f"verified published perf results: latest_snapshot={latest_snapshot_path}, ok_profiles={profiles_ok}")
+          print(f"verified published perf results: latest_snapshot={latest_snapshot_path}, ok_profiles={profiles_ok}, sample_svg={sample_svg_path}")
           PY
 
       - name: Fail On Perf Job Errors

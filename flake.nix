@@ -1628,6 +1628,17 @@ EOF
           WorkingDir = "/";
         };
       };
+      perfProfileImage = pkgs.dockerTools.buildLayeredImage {
+        name = "coquic-perf-profile-recorder";
+        tag = "latest";
+        contents = [
+          pkgs.perf
+        ];
+        config = {
+          Entrypoint = [ "${pkgs.perf}/bin/perf" ];
+          WorkingDir = "/";
+        };
+      };
       mkQuictlsMuslPerfImage =
         name: perfClients:
         pkgs.dockerTools.buildLayeredImage {
@@ -1943,6 +1954,7 @@ EOF
             pkgs.perf
           ];
         };
+        perf-profile-image = perfProfileImage;
         quicgo-perf-client = quicgoPerfClient;
         coquic-rust-perf-client = coquicRustPerfClient;
         coquic-python-perf-client = coquicPythonPerfClient;

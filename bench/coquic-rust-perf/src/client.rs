@@ -40,10 +40,13 @@ struct ConnectionState {
     outstanding_requests: HashMap<StreamId, OutstandingRequest>,
     active_bulk_streams: HashMap<StreamId, bool>,
     next_stream_id: StreamId,
+    request_limit: Option<usize>,
+    requests_started: usize,
+    server_complete_counted: bool,
 }
 
 impl ConnectionState {
-    fn new(_handle: ConnectionHandle) -> Self {
+    fn new(_handle: ConnectionHandle, request_limit: Option<usize>) -> Self {
         Self {
             session_ready: false,
             control_complete: false,
@@ -52,6 +55,9 @@ impl ConnectionState {
             outstanding_requests: HashMap::new(),
             active_bulk_streams: HashMap::new(),
             next_stream_id: FIRST_DATA_STREAM_ID,
+            request_limit,
+            requests_started: 0,
+            server_complete_counted: false,
         }
     }
 }
@@ -237,9 +243,12 @@ impl Client<'_> {
             match effect {
                 OwnedEffect::ConnectionLifecycleEvent { connection, event } => match event {
                     Lifecycle::Created => {
+                        let connection_index = self.connections.len();
+                        let request_limit =
+                            request_limit_for_connection(&self.config, connection_index);
                         self.connections
                             .entry(connection)
-                            .or_insert_with(|| ConnectionState::new(connection));
+                            .or_insert_with(|| ConnectionState::new(connection, request_limit));
                     }
                     Lifecycle::Closed => {
                         if self.config.mode == Mode::Crr {
@@ -258,11 +267,15 @@ impl Client<'_> {
                     }
                     StateChange::HandshakeReady => {
                         if self.connections.contains_key(&connection) {
+                            let request_limit = self
+                                .connections
+                                .get(&connection)
+                                .and_then(|state| state.request_limit);
                             commands.push(ClientCommand::SendStream {
                                 connection,
                                 stream_id: CONTROL_STREAM_ID,
                                 bytes: encode_control_message(&ControlMessage::SessionStart(
-                                    self.make_session_start(),
+                                    self.make_session_start(request_limit),
                                 )),
                                 fin: true,
                             });
@@ -330,15 +343,18 @@ impl Client<'_> {
                         bytes_received,
                         requests_completed,
                     }) => {
-                        self.summary.server_counters = ServerCounters {
-                            bytes_sent,
-                            bytes_received,
-                            requests_completed,
-                        };
-                        if !(self.timed_rr_mode() || self.timed_crr_mode()) {
-                            self.summary.requests_completed = requests_completed;
-                        }
                         if let Some(state) = self.connections.get_mut(&connection) {
+                            if !state.server_complete_counted {
+                                self.summary.server_counters.bytes_sent += bytes_sent;
+                                self.summary.server_counters.bytes_received += bytes_received;
+                                self.summary.server_counters.requests_completed +=
+                                    requests_completed;
+                                state.server_complete_counted = true;
+                            }
+                            if self.config.mode == Mode::Bulk {
+                                self.summary.requests_completed =
+                                    self.summary.server_counters.requests_completed;
+                            }
                             state.control_complete = true;
                         }
                     }
@@ -591,6 +607,16 @@ impl Client<'_> {
                 .requests
                 .map(|requests| self.requests_started < requests)
                 .unwrap_or(true)
+            && self
+                .connections
+                .get(&connection)
+                .map(|state| {
+                    state
+                        .request_limit
+                        .map(|limit| state.requests_started < limit)
+                        .unwrap_or(true)
+                })
+                .unwrap_or(false)
         {
             commands.extend(self.issue_request(connection, now)?);
             self.requests_started += 1;
@@ -648,6 +674,7 @@ impl Client<'_> {
                 counts_toward_measurement,
             },
         );
+        state.requests_started += 1;
         if counts_toward_measurement {
             self.summary.bytes_sent += self.config.request_bytes as u64;
         }
@@ -968,12 +995,10 @@ impl Client<'_> {
     }
 
     fn initial_connection_target(&self) -> usize {
-        if self.config.mode == Mode::Rr && self.config.requests.is_some() {
-            1
-        } else if self.config.mode == Mode::Crr {
+        if self.config.mode == Mode::Crr {
             0
         } else {
-            self.config.connections
+            rr_connection_target(&self.config)
         }
     }
 
@@ -987,7 +1012,7 @@ impl Client<'_> {
         config
     }
 
-    fn make_session_start(&self) -> SessionStart {
+    fn make_session_start(&self, request_limit: Option<usize>) -> SessionStart {
         SessionStart {
             protocol_version: PROTOCOL_VERSION,
             mode: self.config.mode,
@@ -995,7 +1020,9 @@ impl Client<'_> {
             request_bytes: self.config.request_bytes as u64,
             response_bytes: self.config.response_bytes as u64,
             total_bytes: self.config.total_bytes.map(|value| value as u64),
-            requests: self.config.requests.map(|value| value as u64),
+            requests: request_limit
+                .or(self.config.requests)
+                .map(|value| value as u64),
             warmup: self.config.warmup,
             duration: self.config.duration,
             streams: self.config.streams as u64,
@@ -1013,6 +1040,26 @@ impl Client<'_> {
         state.next_stream_id = next_client_stream_id(stream_id);
         Ok(stream_id)
     }
+}
+
+fn request_limit_for_connection(config: &PerfConfig, connection_index: usize) -> Option<usize> {
+    if config.mode != Mode::Rr {
+        return None;
+    }
+    let requests = config.requests?;
+    let connections = rr_connection_target(config);
+    let base = requests / connections;
+    let remainder = requests % connections;
+    Some(base + usize::from(connection_index < remainder))
+}
+
+fn rr_connection_target(config: &PerfConfig) -> usize {
+    if config.mode == Mode::Rr {
+        if let Some(requests) = config.requests {
+            return config.connections.min(requests);
+        }
+    }
+    config.connections
 }
 
 fn make_payload(bytes: usize) -> Vec<u8> {

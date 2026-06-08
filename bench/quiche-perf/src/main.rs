@@ -10,6 +10,7 @@ use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
+const PROTOCOL_VERSION: u32 = 3;
 const APPLICATION_PROTOCOL: &[u8] = b"coquic-perf/1";
 const MAX_DATAGRAM_SIZE: usize = 1350;
 const TRANSFER_CONNECTION_WINDOW: u64 = 32 * 1024 * 1024;
@@ -25,6 +26,12 @@ const MODE_CRR: &str = "crr";
 const DIRECTION_UPLOAD: &str = "upload";
 const DIRECTION_DOWNLOAD: &str = "download";
 const DIRECTION_STAY: &str = "stay";
+const CONTROL_STREAM_ID: u64 = 0;
+const FIRST_DATA_STREAM_ID: u64 = 4;
+const MESSAGE_SESSION_START: u8 = 1;
+const MESSAGE_SESSION_READY: u8 = 2;
+const MESSAGE_SESSION_ERROR: u8 = 3;
+const MESSAGE_SESSION_COMPLETE: u8 = 4;
 
 type AnyError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -74,6 +81,44 @@ struct CompletedStream {
     request_bytes: u64,
     received: u64,
     latency: Duration,
+}
+
+#[derive(Clone)]
+struct SessionStart {
+    mode: String,
+    direction: String,
+    request_bytes: u64,
+    response_bytes: u64,
+    total_bytes: OptionalU64,
+    requests: OptionalU64,
+    warmup: Duration,
+    duration: Duration,
+    streams: u64,
+    connections: u64,
+    requests_in_flight: u64,
+}
+
+#[derive(Default, Clone, Copy)]
+struct SessionComplete {
+    bytes_sent: u64,
+    bytes_received: u64,
+    requests_completed: u64,
+}
+
+#[derive(Default)]
+struct ControlMessage {
+    message_type: u8,
+    ready: bool,
+    error_reason: String,
+    start: Option<SessionStart>,
+    complete: SessionComplete,
+}
+
+struct ControlStream {
+    received: Vec<u8>,
+    send_buf: Vec<u8>,
+    sent: usize,
+    fin_sent: bool,
 }
 
 #[derive(Serialize)]
@@ -141,6 +186,7 @@ struct QuicheClient {
     events: Events,
     socket: UdpSocket,
     conn: Connection,
+    control: ControlStream,
     out: [u8; MAX_DATAGRAM_SIZE],
     buf: [u8; READ_CHUNK_SIZE],
     next_stream_id: u64,
@@ -154,8 +200,6 @@ struct CrrClient {
 }
 
 struct ServerStream {
-    header: [u8; 16],
-    header_len: usize,
     request_bytes: u64,
     response_bytes: u64,
     request_received: u64,
@@ -166,7 +210,28 @@ struct ServerStream {
 
 struct ServerClient {
     conn: Connection,
+    control: Option<ControlStream>,
+    start: Option<SessionStart>,
+    bytes_sent: u64,
+    bytes_received: u64,
+    requests_completed: u64,
+    complete_sent: bool,
     streams: HashMap<u64, ServerStream>,
+}
+
+impl ControlStream {
+    fn new(send_buf: Vec<u8>) -> Self {
+        Self {
+            received: Vec::new(),
+            send_buf,
+            sent: 0,
+            fin_sent: false,
+        }
+    }
+
+    fn new_empty() -> Self {
+        Self::new(Vec::new())
+    }
 }
 
 fn main() {
@@ -404,6 +469,12 @@ fn run_server(cfg: &Config) -> Result<(), AnyError> {
                     scid.clone(),
                     ServerClient {
                         conn,
+                        control: None,
+                        start: None,
+                        bytes_sent: 0,
+                        bytes_received: 0,
+                        requests_completed: 0,
+                        complete_sent: false,
                         streams: HashMap::new(),
                     },
                 );
@@ -439,11 +510,20 @@ fn handle_server_client(client: &mut ServerClient) -> Result<(), AnyError> {
         loop {
             match client.conn.stream_recv(stream_id, &mut buf) {
                 Ok((read, fin)) => {
-                    let state = client
-                        .streams
-                        .entry(stream_id)
-                        .or_insert_with(ServerStream::new);
-                    state.receive(&buf[..read], fin)?;
+                    if stream_id == CONTROL_STREAM_ID {
+                        handle_server_control(client, &buf[..read], fin)?;
+                    } else if let Some(start) = client.start.clone() {
+                        let state = client
+                            .streams
+                            .entry(stream_id)
+                            .or_insert_with(|| ServerStream::new(&start));
+                        state.receive(&buf[..read], fin)?;
+                        client.bytes_received += read as u64;
+                        if fin {
+                            client.requests_completed += 1;
+                            prepare_server_response(client, stream_id)?;
+                        }
+                    }
                 }
                 Err(quiche::Error::Done) => break,
                 Err(err) => return Err(err.into()),
@@ -453,8 +533,17 @@ fn handle_server_client(client: &mut ServerClient) -> Result<(), AnyError> {
 
     let writable: Vec<u64> = client.conn.writable().collect();
     for stream_id in writable {
-        if let Some(state) = client.streams.get_mut(&stream_id) {
+        if stream_id == CONTROL_STREAM_ID {
+            if let Some(control) = &mut client.control {
+                write_control(&mut client.conn, stream_id, control)?;
+            }
+        } else if let Some(state) = client.streams.get_mut(&stream_id) {
+            let before = state.response_sent;
             state.write_response(&mut client.conn, stream_id)?;
+            client.bytes_sent += state.response_sent - before;
+            if state.response_fin {
+                maybe_send_session_complete(client)?;
+            }
         }
     }
     let ready: Vec<u64> = client
@@ -463,8 +552,18 @@ fn handle_server_client(client: &mut ServerClient) -> Result<(), AnyError> {
         .filter_map(|(id, state)| (state.request_fin && !state.response_fin).then_some(*id))
         .collect();
     for stream_id in ready {
-        if let Some(state) = client.streams.get_mut(&stream_id) {
+        let sent = if let Some(state) = client.streams.get_mut(&stream_id) {
+            let before = state.response_sent;
             state.write_response(&mut client.conn, stream_id)?;
+            state.response_sent - before
+        } else {
+            0
+        };
+        client.bytes_sent += sent;
+        if let Some(state) = client.streams.get(&stream_id) {
+            if state.response_fin {
+                maybe_send_session_complete(client)?;
+            }
         }
     }
     client
@@ -473,12 +572,112 @@ fn handle_server_client(client: &mut ServerClient) -> Result<(), AnyError> {
     Ok(())
 }
 
+fn handle_server_control(
+    client: &mut ServerClient,
+    bytes: &[u8],
+    fin: bool,
+) -> Result<(), AnyError> {
+    let control = client.control.get_or_insert_with(ControlStream::new_empty);
+    control.received.extend_from_slice(bytes);
+    if !fin {
+        return Ok(());
+    }
+
+    let msg = match decode_control_message(&control.received) {
+        Ok(msg) => msg,
+        Err(err) => {
+            control.send_buf = encode_session_error(&format!("{err}"));
+            control.sent = 0;
+            control.fin_sent = false;
+            write_control(&mut client.conn, CONTROL_STREAM_ID, control)?;
+            return Ok(());
+        }
+    };
+    let Some(start) = msg.start else {
+        control.send_buf = encode_session_error("expected session_start");
+        control.sent = 0;
+        control.fin_sent = false;
+        write_control(&mut client.conn, CONTROL_STREAM_ID, control)?;
+        return Ok(());
+    };
+    validate_session_start(&start)?;
+    client.start = Some(start);
+    control.send_buf = encode_session_ready();
+    control.sent = 0;
+    control.fin_sent = false;
+    write_control(&mut client.conn, CONTROL_STREAM_ID, control)?;
+    Ok(())
+}
+
+fn prepare_server_response(client: &mut ServerClient, stream_id: u64) -> Result<(), AnyError> {
+    let Some(start) = &client.start else {
+        return Ok(());
+    };
+    let Some(state) = client.streams.get_mut(&stream_id) else {
+        return Ok(());
+    };
+    state.response_bytes = server_response_bytes(start, client.requests_completed);
+    state.write_response(&mut client.conn, stream_id)?;
+    client.bytes_sent += state.response_sent;
+    if state.response_fin {
+        maybe_send_session_complete(client)?;
+    }
+    Ok(())
+}
+
+fn server_response_bytes(start: &SessionStart, requests_completed: u64) -> u64 {
+    if start.mode == MODE_BULK && start.direction == DIRECTION_DOWNLOAD && start.total_bytes.set {
+        let stream_index = requests_completed.saturating_sub(1);
+        let per_stream = start.total_bytes.value / start.streams;
+        let remainder = start.total_bytes.value % start.streams;
+        return per_stream + u64::from(stream_index < remainder);
+    }
+    if start.mode == MODE_BULK && start.direction == DIRECTION_DOWNLOAD {
+        return start.response_bytes;
+    }
+    if start.mode == MODE_RR || start.mode == MODE_CRR {
+        return start.response_bytes;
+    }
+    0
+}
+
+fn maybe_send_session_complete(client: &mut ServerClient) -> Result<(), AnyError> {
+    if client.complete_sent {
+        return Ok(());
+    }
+    let Some(start) = &client.start else {
+        return Ok(());
+    };
+    let complete = (start.mode == MODE_BULK
+        && start.total_bytes.set
+        && client.requests_completed >= start.streams)
+        || (start.mode == MODE_BULK
+            && start.direction == DIRECTION_UPLOAD
+            && client.requests_completed >= start.streams)
+        || (start.mode == MODE_RR
+            && start.requests.set
+            && client.requests_completed >= start.requests.value);
+    if !complete {
+        return Ok(());
+    }
+    client.complete_sent = true;
+    if let Some(control) = &mut client.control {
+        control.send_buf = encode_session_complete(SessionComplete {
+            bytes_sent: client.bytes_sent,
+            bytes_received: client.bytes_received,
+            requests_completed: client.requests_completed,
+        });
+        control.sent = 0;
+        control.fin_sent = false;
+        write_control(&mut client.conn, CONTROL_STREAM_ID, control)?;
+    }
+    Ok(())
+}
+
 impl ServerStream {
-    fn new() -> Self {
+    fn new(start: &SessionStart) -> Self {
         Self {
-            header: [0; 16],
-            header_len: 0,
-            request_bytes: 0,
+            request_bytes: start.request_bytes,
             response_bytes: 0,
             request_received: 0,
             request_fin: false,
@@ -487,21 +686,15 @@ impl ServerStream {
         }
     }
 
-    fn receive(&mut self, mut bytes: &[u8], fin: bool) -> Result<(), AnyError> {
-        if self.header_len < self.header.len() {
-            let take = cmp::min(self.header.len() - self.header_len, bytes.len());
-            self.header[self.header_len..self.header_len + take].copy_from_slice(&bytes[..take]);
-            self.header_len += take;
-            bytes = &bytes[take..];
-            if self.header_len == self.header.len() {
-                self.request_bytes = u64::from_be_bytes(self.header[0..8].try_into().unwrap());
-                self.response_bytes = u64::from_be_bytes(self.header[8..16].try_into().unwrap());
-            }
-        }
+    fn receive(&mut self, bytes: &[u8], fin: bool) -> Result<(), AnyError> {
         self.request_received += bytes.len() as u64;
         if fin {
-            if self.header_len != self.header.len() {
-                return Err("quiche-perf malformed stream request header".into());
+            if self.request_received != self.request_bytes {
+                return Err(format!(
+                    "stream request received {} bytes, expected {}",
+                    self.request_received, self.request_bytes
+                )
+                .into());
             }
             self.request_fin = true;
         }
@@ -558,18 +751,19 @@ fn flush_server_packets(
 fn run_client(cfg: &Config, summary: &mut RunSummary) -> Result<(), AnyError> {
     let run_start = Instant::now();
     let mut counters = Counters::default();
+    let start = make_session_start(cfg);
     let elapsed = match cfg.mode.as_str() {
         MODE_BULK => {
             if cfg.direction == DIRECTION_DOWNLOAD && !cfg.total_bytes.set {
-                run_timed_bulk_download(cfg, &mut counters)?;
+                run_timed_bulk_download(cfg, &start, &mut counters)?;
                 cfg.duration
             } else {
-                run_fixed_bulk(cfg, &mut counters)?;
+                run_fixed_bulk(cfg, &start, &mut counters)?;
                 run_start.elapsed()
             }
         }
         MODE_RR => {
-            run_rr(cfg, &mut counters)?;
+            run_rr(cfg, &start, &mut counters)?;
             if cfg.requests.set {
                 run_start.elapsed()
             } else {
@@ -600,84 +794,85 @@ fn run_client(cfg: &Config, summary: &mut RunSummary) -> Result<(), AnyError> {
     Ok(())
 }
 
-fn run_timed_bulk_download(cfg: &Config, counters: &mut Counters) -> Result<(), AnyError> {
-    let mut client = QuicheClient::connect(cfg)?;
+fn run_timed_bulk_download(
+    cfg: &Config,
+    start: &SessionStart,
+    counters: &mut Counters,
+) -> Result<(), AnyError> {
+    let mut clients = open_connections(cfg, start, cfg.connections)?;
     let measure_start = Instant::now() + cfg.warmup;
     let measure_deadline = measure_start + cfg.duration;
-    for _ in 0..cfg.streams {
-        client.open_request(false, 0, cfg.response_bytes)?;
+    for client in &mut clients {
+        for _ in 0..cfg.streams {
+            client.open_request(false, 0, cfg.response_bytes)?;
+        }
     }
     while Instant::now() < measure_deadline {
-        for completed in client.drive(Some(measure_deadline))? {
-            if completed.counts && Instant::now() >= measure_start {
-                counters.bytes_received += completed.received;
+        for client in &mut clients {
+            for completed in client.drive(Some(measure_deadline))? {
+                if completed.counts && Instant::now() >= measure_start {
+                    counters.bytes_received += completed.received;
+                }
             }
         }
-        while client.streams.len() < int_cap(cfg.streams) && Instant::now() < measure_deadline {
-            client.open_request(Instant::now() >= measure_start, 0, cfg.response_bytes)?;
+        for client in &mut clients {
+            while client.streams.len() < int_cap(cfg.streams) && Instant::now() < measure_deadline {
+                client.open_request(Instant::now() >= measure_start, 0, cfg.response_bytes)?;
+            }
         }
     }
-    client.drain(DRAIN_TIMEOUT)?;
+    for client in &mut clients {
+        client.drain(DRAIN_TIMEOUT)?;
+    }
     Ok(())
 }
 
-fn run_fixed_bulk(cfg: &Config, counters: &mut Counters) -> Result<(), AnyError> {
+fn run_fixed_bulk(
+    cfg: &Config,
+    start: &SessionStart,
+    counters: &mut Counters,
+) -> Result<(), AnyError> {
     if !cfg.total_bytes.set {
         return Err("fixed bulk requires --total-bytes for quiche client".into());
     }
-    let mut client = QuicheClient::connect(cfg)?;
+    let mut clients = open_connections(cfg, start, cfg.connections)?;
     let per_stream = cfg.total_bytes.value / cfg.streams;
     let remainder = cfg.total_bytes.value % cfg.streams;
     for i in 0..cfg.streams {
         let target = per_stream + u64::from(i < remainder);
+        let client_index = (i as usize) % clients.len();
+        let client = &mut clients[client_index];
         if cfg.direction == DIRECTION_UPLOAD {
             client.open_request(true, target, 0)?;
         } else {
             client.open_request(true, 0, target)?;
         }
     }
-    while !client.streams.is_empty() {
-        for completed in client.drive(None)? {
-            counters.bytes_sent += completed.request_bytes;
-            counters.bytes_received += completed.received;
+    while clients.iter().any(|client| !client.streams.is_empty()) {
+        let mut made_progress = false;
+        for client in &mut clients {
+            for completed in client.drive(Some(Instant::now()))? {
+                made_progress = true;
+                counters.bytes_sent += completed.request_bytes;
+                counters.bytes_received += completed.received;
+            }
+        }
+        if !made_progress {
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
     Ok(())
 }
 
-fn run_rr(cfg: &Config, counters: &mut Counters) -> Result<(), AnyError> {
-    let mut client = QuicheClient::connect(cfg)?;
+fn run_rr(cfg: &Config, start: &SessionStart, counters: &mut Counters) -> Result<(), AnyError> {
+    let mut clients = open_connections(cfg, start, rr_connection_target(cfg))?;
     let measure_start = Instant::now() + cfg.warmup;
     let measure_deadline = measure_start + cfg.duration;
     let mut started = 0_u64;
-    while client.streams.len() < int_cap(cfg.requests_in_flight) {
-        client.open_request(
-            cfg.requests.set || Instant::now() >= measure_start,
-            cfg.request_bytes,
-            cfg.response_bytes,
-        )?;
-        started += 1;
-    }
-    loop {
-        if !cfg.requests.set && Instant::now() >= measure_deadline {
-            break;
-        }
-        if cfg.requests.set && started >= cfg.requests.value && client.streams.is_empty() {
-            break;
-        }
-        for completed in client.drive(Some(measure_deadline))? {
-            if completed.counts && Instant::now() >= measure_start {
-                counters.bytes_sent += completed.request_bytes;
-                counters.bytes_received += completed.received;
-                counters.requests_completed += 1;
-                counters.latencies.push(completed.latency);
-            }
-        }
+    let mut started_by_connection = vec![0_u64; clients.len()];
+    for (index, client) in clients.iter_mut().enumerate() {
         while client.streams.len() < int_cap(cfg.requests_in_flight) {
-            if cfg.requests.set && started >= cfg.requests.value {
-                break;
-            }
-            if !cfg.requests.set && Instant::now() >= measure_deadline {
+            if !can_start_rr_request(cfg, started, &started_by_connection, index) {
                 break;
             }
             client.open_request(
@@ -686,13 +881,92 @@ fn run_rr(cfg: &Config, counters: &mut Counters) -> Result<(), AnyError> {
                 cfg.response_bytes,
             )?;
             started += 1;
+            started_by_connection[index] += 1;
         }
     }
-    client.drain(DRAIN_TIMEOUT)?;
+    loop {
+        if !cfg.requests.set && Instant::now() >= measure_deadline {
+            break;
+        }
+        if cfg.requests.set
+            && started >= cfg.requests.value
+            && clients.iter().all(|client| client.streams.is_empty())
+        {
+            break;
+        }
+        let mut made_progress = false;
+        for client in &mut clients {
+            for completed in client.drive(Some(Instant::now()))? {
+                made_progress = true;
+                if completed.counts && Instant::now() >= measure_start {
+                    counters.bytes_sent += completed.request_bytes;
+                    counters.bytes_received += completed.received;
+                    counters.requests_completed += 1;
+                    counters.latencies.push(completed.latency);
+                }
+            }
+        }
+        for (index, client) in clients.iter_mut().enumerate() {
+            while client.streams.len() < int_cap(cfg.requests_in_flight) {
+                if !can_start_rr_request(cfg, started, &started_by_connection, index) {
+                    break;
+                }
+                if !cfg.requests.set && Instant::now() >= measure_deadline {
+                    break;
+                }
+                client.open_request(
+                    cfg.requests.set || Instant::now() >= measure_start,
+                    cfg.request_bytes,
+                    cfg.response_bytes,
+                )?;
+                started += 1;
+                started_by_connection[index] += 1;
+            }
+        }
+        if !made_progress {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    for client in &mut clients {
+        client.drain(DRAIN_TIMEOUT)?;
+    }
     Ok(())
 }
 
+fn rr_connection_target(cfg: &Config) -> u64 {
+    if cfg.mode == MODE_RR && cfg.requests.set {
+        cfg.connections.min(cfg.requests.value)
+    } else {
+        cfg.connections
+    }
+}
+
+fn rr_request_limit_for_connection(cfg: &Config, connection_index: u64) -> u64 {
+    let connections = rr_connection_target(cfg);
+    if connections == 0 {
+        return 0;
+    }
+    let base = cfg.requests.value / connections;
+    let remainder = cfg.requests.value % connections;
+    base + u64::from(connection_index < remainder)
+}
+
+fn can_start_rr_request(
+    cfg: &Config,
+    started: u64,
+    started_by_connection: &[u64],
+    connection_index: usize,
+) -> bool {
+    if !cfg.requests.set {
+        return true;
+    }
+    started < cfg.requests.value
+        && started_by_connection[connection_index]
+            < rr_request_limit_for_connection(cfg, connection_index as u64)
+}
+
 fn run_crr(cfg: &Config, counters: &mut Counters) -> Result<(), AnyError> {
+    let start = make_session_start(cfg);
     let measure_start = Instant::now() + cfg.warmup;
     let measure_deadline = measure_start + cfg.duration;
     let connect_deadline = measure_deadline + DRAIN_TIMEOUT;
@@ -706,6 +980,7 @@ fn run_crr(cfg: &Config, counters: &mut Counters) -> Result<(), AnyError> {
         connect_deadline,
         &mut started,
         &mut clients,
+        &start,
     )?;
 
     while (cfg.requests.set && started < cfg.requests.value)
@@ -778,6 +1053,7 @@ fn run_crr(cfg: &Config, counters: &mut Counters) -> Result<(), AnyError> {
             connect_deadline,
             &mut started,
             &mut clients,
+            &start,
         )?;
 
         if clients.is_empty() {
@@ -803,6 +1079,7 @@ fn fill_crr_clients(
     connect_deadline: Instant,
     started: &mut u64,
     clients: &mut Vec<CrrClient>,
+    start: &SessionStart,
 ) -> Result<(), AnyError> {
     while clients.len() < int_cap(cfg.connections) {
         if cfg.requests.set && *started >= cfg.requests.value {
@@ -811,7 +1088,7 @@ fn fill_crr_clients(
         if !cfg.requests.set && Instant::now() >= measure_deadline {
             break;
         }
-        match open_crr_client(cfg, measure_start, connect_deadline) {
+        match open_crr_client(cfg, start, measure_start, connect_deadline) {
             Ok(client) => {
                 clients.push(client);
                 *started += 1;
@@ -832,10 +1109,11 @@ fn fill_crr_clients(
 
 fn open_crr_client(
     cfg: &Config,
+    start: &SessionStart,
     measure_start: Instant,
     _connect_deadline: Instant,
 ) -> Result<CrrClient, AnyError> {
-    let client = QuicheClient::start_connecting(cfg)?;
+    let client = QuicheClient::start_connecting(cfg, start)?;
     let counts = cfg.requests.set || Instant::now() >= measure_start;
     Ok(CrrClient {
         client,
@@ -845,14 +1123,18 @@ fn open_crr_client(
 }
 
 impl QuicheClient {
-    fn connect(cfg: &Config) -> Result<Self, AnyError> {
+    fn connect(cfg: &Config, start: &SessionStart) -> Result<Self, AnyError> {
         let deadline = Instant::now() + Duration::from_secs(10);
-        Self::connect_until(cfg, deadline)
+        Self::connect_until(cfg, start, deadline)
     }
 
-    fn connect_until(cfg: &Config, deadline: Instant) -> Result<Self, AnyError> {
-        let mut client = Self::start_connecting(cfg)?;
-        while !client.conn.is_established() {
+    fn connect_until(
+        cfg: &Config,
+        start: &SessionStart,
+        deadline: Instant,
+    ) -> Result<Self, AnyError> {
+        let mut client = Self::start_connecting(cfg, start)?;
+        while !client.control_ready() {
             client.drive(Some(deadline))?;
             if client.conn.is_closed() {
                 return Err("quiche connection closed during handshake".into());
@@ -864,7 +1146,7 @@ impl QuicheClient {
         Ok(client)
     }
 
-    fn start_connecting(cfg: &Config) -> Result<Self, AnyError> {
+    fn start_connecting(cfg: &Config, start: &SessionStart) -> Result<Self, AnyError> {
         let peer_addr = resolve_remote(&cfg.host, cfg.port)?;
         let std_socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
         std_socket.set_nonblocking(true)?;
@@ -891,11 +1173,13 @@ impl QuicheClient {
             events: Events::with_capacity(1024),
             socket,
             conn,
+            control: ControlStream::new(encode_session_start(start)),
             out: [0; MAX_DATAGRAM_SIZE],
             buf: [0; READ_CHUNK_SIZE],
-            next_stream_id: 0,
+            next_stream_id: FIRST_DATA_STREAM_ID,
             streams: HashMap::new(),
         };
+        client.try_send_control()?;
         client.flush()?;
         Ok(client)
     }
@@ -908,10 +1192,7 @@ impl QuicheClient {
     ) -> Result<(), AnyError> {
         let stream_id = self.next_stream_id;
         self.next_stream_id += 4;
-        let mut send_buf = Vec::with_capacity(16 + int_cap(request_bytes));
-        send_buf.extend_from_slice(&request_bytes.to_be_bytes());
-        send_buf.extend_from_slice(&response_bytes.to_be_bytes());
-        send_buf.resize(send_buf.len() + int_cap(request_bytes), 0x5a);
+        let send_buf = vec![0x5a; int_cap(request_bytes)];
         self.streams.insert(
             stream_id,
             ClientStream {
@@ -950,6 +1231,8 @@ impl QuicheClient {
             self.conn.on_timeout();
         }
 
+        self.try_send_control()?;
+
         'read: loop {
             let (len, from) = match self.socket.recv_from(&mut self.buf) {
                 Ok(v) => v,
@@ -965,7 +1248,11 @@ impl QuicheClient {
 
         let writable: Vec<u64> = self.conn.writable().collect();
         for stream_id in writable {
-            self.try_send_stream(stream_id)?;
+            if stream_id == CONTROL_STREAM_ID {
+                self.try_send_control()?;
+            } else {
+                self.try_send_stream(stream_id)?;
+            }
         }
 
         let mut completed = Vec::new();
@@ -975,7 +1262,20 @@ impl QuicheClient {
                 .conn
                 .stream_recv(stream_id, &mut self.buf[..READ_CHUNK_SIZE])
             {
-                if let Some(state) = self.streams.get_mut(&stream_id) {
+                if stream_id == CONTROL_STREAM_ID {
+                    self.control.received.extend_from_slice(&self.buf[..read]);
+                    if fin {
+                        let msg = decode_control_message(&self.control.received)?;
+                        if msg.message_type == MESSAGE_SESSION_ERROR {
+                            return Err(
+                                format!("server session error: {}", msg.error_reason).into()
+                            );
+                        }
+                        if msg.message_type != MESSAGE_SESSION_READY || !msg.ready {
+                            return Err("unexpected control message while waiting for ready".into());
+                        }
+                    }
+                } else if let Some(state) = self.streams.get_mut(&stream_id) {
                     state.received += read as u64;
                     if fin {
                         if state.received != state.response_bytes {
@@ -999,6 +1299,17 @@ impl QuicheClient {
         }
         self.flush()?;
         Ok(completed)
+    }
+
+    fn control_ready(&self) -> bool {
+        match decode_control_message(&self.control.received) {
+            Ok(msg) => msg.message_type == MESSAGE_SESSION_READY && msg.ready,
+            Err(_) => false,
+        }
+    }
+
+    fn try_send_control(&mut self) -> Result<(), AnyError> {
+        write_control(&mut self.conn, CONTROL_STREAM_ID, &mut self.control)
     }
 
     fn drain(&mut self, duration: Duration) -> Result<(), AnyError> {
@@ -1058,6 +1369,254 @@ fn resolve_remote(host: &str, port: u16) -> Result<SocketAddr, AnyError> {
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| format!("unable to resolve {host}:{port}").into())
+}
+
+fn open_connections(
+    cfg: &Config,
+    start: &SessionStart,
+    count: u64,
+) -> Result<Vec<QuicheClient>, AnyError> {
+    let mut clients = Vec::with_capacity(int_cap(count));
+    for index in 0..count {
+        let mut connection_start = start.clone();
+        if cfg.mode == MODE_RR && cfg.requests.set {
+            connection_start.requests = OptionalU64 {
+                value: rr_request_limit_for_connection(cfg, index),
+                set: true,
+            };
+        }
+        clients.push(QuicheClient::connect(cfg, &connection_start)?);
+    }
+    Ok(clients)
+}
+
+fn make_session_start(cfg: &Config) -> SessionStart {
+    SessionStart {
+        mode: cfg.mode.clone(),
+        direction: cfg.direction.clone(),
+        request_bytes: cfg.request_bytes,
+        response_bytes: cfg.response_bytes,
+        total_bytes: cfg.total_bytes,
+        requests: cfg.requests,
+        warmup: cfg.warmup,
+        duration: cfg.duration,
+        streams: cfg.streams,
+        connections: cfg.connections,
+        requests_in_flight: cfg.requests_in_flight,
+    }
+}
+
+fn validate_session_start(start: &SessionStart) -> Result<(), AnyError> {
+    if ![MODE_BULK, MODE_RR, MODE_CRR].contains(&start.mode.as_str()) {
+        return Err("malformed session_start mode".into());
+    }
+    if ![DIRECTION_UPLOAD, DIRECTION_DOWNLOAD].contains(&start.direction.as_str()) {
+        return Err("malformed session_start direction".into());
+    }
+    if start.streams == 0 || start.connections == 0 || start.requests_in_flight == 0 {
+        return Err("malformed session_start counts".into());
+    }
+    Ok(())
+}
+
+fn write_control(
+    conn: &mut Connection,
+    stream_id: u64,
+    control: &mut ControlStream,
+) -> Result<(), AnyError> {
+    while !control.fin_sent {
+        let remaining = &control.send_buf[control.sent..];
+        let chunk = cmp::min(remaining.len(), WRITE_CHUNK_SIZE);
+        let fin = control.sent + chunk == control.send_buf.len();
+        match conn.stream_send(stream_id, &remaining[..chunk], fin) {
+            Ok(written) => {
+                control.sent += written;
+                if fin && written == chunk {
+                    control.fin_sent = true;
+                    break;
+                }
+                if written == 0 {
+                    break;
+                }
+            }
+            Err(quiche::Error::Done) => break,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
+fn decode_control_message(data: &[u8]) -> Result<ControlMessage, AnyError> {
+    if data.len() < 5 {
+        return Err("short control message".into());
+    }
+    let message_type = data[0];
+    let len = u32::from_be_bytes(data[1..5].try_into().unwrap()) as usize;
+    if data[5..].len() != len {
+        return Err("malformed control message length".into());
+    }
+    let payload = &data[5..];
+    let mut msg = ControlMessage {
+        message_type,
+        ..ControlMessage::default()
+    };
+    match message_type {
+        MESSAGE_SESSION_START => {
+            if payload.len() != 79 {
+                return Err("malformed session_start".into());
+            }
+            let version = u32::from_be_bytes(payload[0..4].try_into().unwrap());
+            if version != PROTOCOL_VERSION {
+                return Err(format!("unsupported protocol version: {version}").into());
+            }
+            let flags = payload[22];
+            let start = SessionStart {
+                mode: mode_from_code(payload[4]).to_string(),
+                direction: direction_from_code(payload[5]).to_string(),
+                request_bytes: u64::from_be_bytes(payload[6..14].try_into().unwrap()),
+                response_bytes: u64::from_be_bytes(payload[14..22].try_into().unwrap()),
+                total_bytes: OptionalU64 {
+                    value: u64::from_be_bytes(payload[23..31].try_into().unwrap()),
+                    set: flags & 0x01 != 0,
+                },
+                requests: OptionalU64 {
+                    value: u64::from_be_bytes(payload[31..39].try_into().unwrap()),
+                    set: flags & 0x02 != 0,
+                },
+                warmup: Duration::from_micros(u64::from_be_bytes(
+                    payload[39..47].try_into().unwrap(),
+                )),
+                duration: Duration::from_micros(u64::from_be_bytes(
+                    payload[47..55].try_into().unwrap(),
+                )),
+                streams: u64::from_be_bytes(payload[55..63].try_into().unwrap()),
+                connections: u64::from_be_bytes(payload[63..71].try_into().unwrap()),
+                requests_in_flight: u64::from_be_bytes(payload[71..79].try_into().unwrap()),
+            };
+            validate_session_start(&start)?;
+            msg.start = Some(start);
+        }
+        MESSAGE_SESSION_READY => {
+            if payload.len() != 4 {
+                return Err("malformed session_ready".into());
+            }
+            msg.ready = u32::from_be_bytes(payload[0..4].try_into().unwrap()) == PROTOCOL_VERSION;
+        }
+        MESSAGE_SESSION_ERROR => {
+            if payload.len() < 4 {
+                return Err("malformed session_error".into());
+            }
+            let len = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as usize;
+            if payload[4..].len() != len {
+                return Err("malformed session_error length".into());
+            }
+            msg.error_reason = String::from_utf8(payload[4..].to_vec())?;
+        }
+        MESSAGE_SESSION_COMPLETE => {
+            if payload.len() != 24 {
+                return Err("malformed session_complete".into());
+            }
+            msg.complete = SessionComplete {
+                bytes_sent: u64::from_be_bytes(payload[0..8].try_into().unwrap()),
+                bytes_received: u64::from_be_bytes(payload[8..16].try_into().unwrap()),
+                requests_completed: u64::from_be_bytes(payload[16..24].try_into().unwrap()),
+            };
+        }
+        _ => return Err(format!("unknown control message type {message_type}").into()),
+    }
+    Ok(msg)
+}
+
+fn encode_session_start(start: &SessionStart) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(79);
+    append_u32(&mut payload, PROTOCOL_VERSION);
+    payload.push(mode_code(&start.mode));
+    payload.push(direction_code(&start.direction));
+    append_u64(&mut payload, start.request_bytes);
+    append_u64(&mut payload, start.response_bytes);
+    let mut flags = 0_u8;
+    if start.total_bytes.set {
+        flags |= 0x01;
+    }
+    if start.requests.set {
+        flags |= 0x02;
+    }
+    payload.push(flags);
+    append_u64(&mut payload, start.total_bytes.value);
+    append_u64(&mut payload, start.requests.value);
+    append_u64(&mut payload, start.warmup.as_micros() as u64);
+    append_u64(&mut payload, start.duration.as_micros() as u64);
+    append_u64(&mut payload, start.streams);
+    append_u64(&mut payload, start.connections);
+    append_u64(&mut payload, start.requests_in_flight);
+    frame_control_message(MESSAGE_SESSION_START, payload)
+}
+
+fn encode_session_ready() -> Vec<u8> {
+    let mut payload = Vec::with_capacity(4);
+    append_u32(&mut payload, PROTOCOL_VERSION);
+    frame_control_message(MESSAGE_SESSION_READY, payload)
+}
+
+fn encode_session_error(reason: &str) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(4 + reason.len());
+    append_u32(&mut payload, reason.len() as u32);
+    payload.extend_from_slice(reason.as_bytes());
+    frame_control_message(MESSAGE_SESSION_ERROR, payload)
+}
+
+fn encode_session_complete(complete: SessionComplete) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(24);
+    append_u64(&mut payload, complete.bytes_sent);
+    append_u64(&mut payload, complete.bytes_received);
+    append_u64(&mut payload, complete.requests_completed);
+    frame_control_message(MESSAGE_SESSION_COMPLETE, payload)
+}
+
+fn frame_control_message(message_type: u8, payload: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + payload.len());
+    out.push(message_type);
+    append_u32(&mut out, payload.len() as u32);
+    out.extend_from_slice(&payload);
+    out
+}
+
+fn append_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn append_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn mode_code(mode: &str) -> u8 {
+    match mode {
+        MODE_RR => 1,
+        MODE_CRR => 2,
+        _ => 0,
+    }
+}
+
+fn mode_from_code(code: u8) -> &'static str {
+    match code {
+        1 => MODE_RR,
+        2 => MODE_CRR,
+        _ => MODE_BULK,
+    }
+}
+
+fn direction_code(direction: &str) -> u8 {
+    match direction {
+        DIRECTION_UPLOAD => 0,
+        _ => 1,
+    }
+}
+
+fn direction_from_code(code: u8) -> &'static str {
+    match code {
+        0 => DIRECTION_UPLOAD,
+        _ => DIRECTION_DOWNLOAD,
+    }
 }
 
 fn new_run_summary(cfg: &Config) -> RunSummary {

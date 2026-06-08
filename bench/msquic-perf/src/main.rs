@@ -130,6 +130,7 @@ struct ClientMsQuicContext {
 
 #[derive(Default)]
 struct RRStreamResult {
+    connection_index: usize,
     counts: bool,
     skipped_setup: bool,
     latency: Duration,
@@ -507,7 +508,8 @@ async fn run_client(cfg: &Config) -> Result<RunSummary, AnyError> {
     let client_context = Arc::new(client_msquic_context(cfg)?);
     let mut connections = Vec::new();
     if cfg.mode != MODE_CRR {
-        connections = open_connections(cfg, &start, cfg.connections, &client_context).await?;
+        connections =
+            open_connections(cfg, &start, rr_connection_target(cfg), &client_context).await?;
     }
 
     let counters = Arc::new(MeasuredCounters::default());
@@ -687,7 +689,11 @@ async fn open_connections(
     context: &ClientMsQuicContext,
 ) -> Result<Vec<ConnectionState>, AnyError> {
     let mut out = Vec::with_capacity(int_cap(count));
-    for _ in 0..count {
+    for index in 0..count {
+        let mut connection_start = start.clone();
+        if connection_start.mode == MODE_RR && connection_start.requests.set {
+            connection_start.requests.value = rr_request_limit_for_connection(cfg, index);
+        }
         let conn = Connection::new(&context.registration)?;
         timeout_result(
             "msquic connection start",
@@ -700,7 +706,7 @@ async fn open_connections(
         timeout_result(
             "msquic control stream write",
             SETUP_TIMEOUT,
-            control.write_all(&encode_session_start(start)),
+            control.write_all(&encode_session_start(&connection_start)),
         )
         .await?;
         timeout_result(
@@ -935,12 +941,16 @@ async fn run_rr(
         cfg.requests_in_flight * connections.len() as u64 + 64,
     ));
     let active = Arc::new(AtomicU64::new(0));
+    let mut active_by_connection = vec![0_u64; connections.len()];
+    let mut started_by_connection = vec![0_u64; connections.len()];
     let started = AtomicU64::new(0);
-    let mut next_connection = 0_u64;
 
-    for c in connections {
-        for _ in 0..cfg.requests_in_flight {
+    for (index, c) in connections.iter().enumerate() {
+        while active_by_connection[index] < cfg.requests_in_flight
+            && can_start_rr_request(cfg, &started, &started_by_connection, index)
+        {
             open_rr_stream(
+                index,
                 c.conn.clone(),
                 cfg.request_bytes,
                 cfg.requests.set || Instant::now() > measure_start,
@@ -948,6 +958,8 @@ async fn run_rr(
                 active.clone(),
                 &started,
             );
+            active_by_connection[index] += 1;
+            started_by_connection[index] += 1;
         }
     }
 
@@ -963,6 +975,7 @@ async fn run_rr(
         }
         let result = rx.recv().await.ok_or("rr result channel closed")?;
         active.fetch_sub(1, Ordering::Relaxed);
+        active_by_connection[result.connection_index] -= 1;
         if let Some(err) = result.err {
             return Err(err.into());
         }
@@ -978,16 +991,21 @@ async fn run_rr(
             counters.requests_completed.fetch_add(1, Ordering::Relaxed);
             counters.latencies.lock().await.push(result.latency);
         }
-        while active.load(Ordering::Relaxed) < cfg.requests_in_flight * connections.len() as u64 {
-            if cfg.requests.set && started.load(Ordering::Relaxed) >= cfg.requests.value {
+        while active_by_connection[result.connection_index] < cfg.requests_in_flight {
+            if !can_start_rr_request(
+                cfg,
+                &started,
+                &started_by_connection,
+                result.connection_index,
+            ) {
                 break;
             }
             if !cfg.requests.set && Instant::now() > measure_deadline {
                 break;
             }
-            let c = &connections[(next_connection as usize) % connections.len()];
-            next_connection += 1;
+            let c = &connections[result.connection_index];
             open_rr_stream(
+                result.connection_index,
                 c.conn.clone(),
                 cfg.request_bytes,
                 cfg.requests.set || Instant::now() > measure_start,
@@ -995,12 +1013,44 @@ async fn run_rr(
                 active.clone(),
                 &started,
             );
+            active_by_connection[result.connection_index] += 1;
+            started_by_connection[result.connection_index] += 1;
         }
     }
     Ok(())
 }
 
+fn rr_connection_target(cfg: &Config) -> u64 {
+    if cfg.mode == MODE_RR && cfg.requests.set {
+        cfg.connections.min(cfg.requests.value)
+    } else {
+        cfg.connections
+    }
+}
+
+fn rr_request_limit_for_connection(cfg: &Config, connection_index: u64) -> u64 {
+    let connections = rr_connection_target(cfg);
+    let base = cfg.requests.value / connections;
+    let remainder = cfg.requests.value % connections;
+    base + u64::from(connection_index < remainder)
+}
+
+fn can_start_rr_request(
+    cfg: &Config,
+    started: &AtomicU64,
+    started_by_connection: &[u64],
+    connection_index: usize,
+) -> bool {
+    if !cfg.requests.set {
+        return true;
+    }
+    started.load(Ordering::Relaxed) < cfg.requests.value
+        && started_by_connection[connection_index]
+            < rr_request_limit_for_connection(cfg, connection_index as u64)
+}
+
 fn open_rr_stream(
+    connection_index: usize,
     conn: Connection,
     request_bytes: u64,
     counts: bool,
@@ -1015,6 +1065,7 @@ fn open_rr_stream(
         let _ = tx
             .send(match result {
                 Ok((latency, received)) => RRStreamResult {
+                    connection_index,
                     counts,
                     skipped_setup: false,
                     latency,
@@ -1022,6 +1073,7 @@ fn open_rr_stream(
                     err: None,
                 },
                 Err(err) => RRStreamResult {
+                    connection_index,
                     counts,
                     skipped_setup: false,
                     latency: Duration::ZERO,

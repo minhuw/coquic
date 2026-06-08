@@ -48,6 +48,9 @@ class ConnectionState {
     this.outstandingRequests = new Map();
     this.activeBulkStreams = new Map();
     this.nextStreamId = FIRST_DATA_STREAM_ID;
+    this.requestLimit = null;
+    this.requestsStarted = 0;
+    this.serverCompleteCounted = false;
   }
 }
 
@@ -208,8 +211,11 @@ class Client {
       if (effect.kind === "connection_lifecycle_event") {
         if (effect.event === Lifecycle.CREATED) {
           const connection = Number(effect.connection);
+          const connectionIndex = this.connections.size;
           if (!this.connections.has(connection)) {
-            this.connections.set(connection, new ConnectionState());
+            const state = new ConnectionState();
+            state.requestLimit = requestLimitForConnection(this.config, connectionIndex);
+            this.connections.set(connection, state);
           }
         } else if (effect.event === Lifecycle.CLOSED) {
           const connection = Number(effect.connection);
@@ -230,11 +236,14 @@ class Client {
           effect.change === StateChange.HANDSHAKE_READY &&
           this.connections.has(Number(effect.connection))
         ) {
+          const connection = Number(effect.connection);
           commands.push(
             new SendStreamCommand(
-              Number(effect.connection),
+              connection,
               CONTROL_STREAM_ID,
-              encodeControlMessage(this.makeSessionStart()),
+              encodeControlMessage(
+                this.makeSessionStart(this.connections.get(connection).requestLimit),
+              ),
               true,
             ),
           );
@@ -307,13 +316,14 @@ class Client {
       throw new PerfError(message.reason);
     }
     if (message instanceof SessionComplete) {
-      this.summary.server_counters = {
-        bytes_sent: message.bytesSent,
-        bytes_received: message.bytesReceived,
-        requests_completed: message.requestsCompleted,
-      };
+      if (!state.serverCompleteCounted) {
+        this.summary.server_counters.bytes_sent += message.bytesSent;
+        this.summary.server_counters.bytes_received += message.bytesReceived;
+        this.summary.server_counters.requests_completed += message.requestsCompleted;
+        state.serverCompleteCounted = true;
+      }
       if (this.config.mode === Mode.BULK) {
-        this.summary.requests_completed = message.requestsCompleted;
+        this.summary.requests_completed = this.summary.server_counters.requests_completed;
       }
       state.controlComplete = true;
       return [];
@@ -473,7 +483,8 @@ class Client {
 
     while (
       state.outstandingRequests.size < this.config.requestsInFlight &&
-      (this.config.requests == null || this.requestsStarted < this.config.requests)
+      (this.config.requests == null || this.requestsStarted < this.config.requests) &&
+      (state.requestLimit == null || state.requestsStarted < state.requestLimit)
     ) {
       commands.push(...this.issueRequest(connection, now));
       this.requestsStarted += 1;
@@ -512,6 +523,7 @@ class Client {
       throw new PerfError("request for unknown connection");
     }
     state.outstandingRequests.set(streamId, new OutstandingRequest(now, counts));
+    state.requestsStarted += 1;
     if (counts) {
       this.summary.bytes_sent += this.config.requestBytes;
     }
@@ -792,13 +804,10 @@ class Client {
   }
 
   initialConnectionTarget() {
-    if (this.config.mode === Mode.RR && this.config.requests != null) {
-      return 1;
-    }
     if (this.config.mode === Mode.CRR) {
       return 0;
     }
-    return this.config.connections;
+    return rrConnectionTarget(this.config);
   }
 
   makeClientConfig(index) {
@@ -811,7 +820,7 @@ class Client {
     return config;
   }
 
-  makeSessionStart() {
+  makeSessionStart(requestLimit = null) {
     return new SessionStart({
       protocolVersion: PROTOCOL_VERSION,
       mode: this.config.mode,
@@ -819,7 +828,7 @@ class Client {
       requestBytes: this.config.requestBytes,
       responseBytes: this.config.responseBytes,
       totalBytes: this.config.totalBytes,
-      requests: this.config.requests,
+      requests: requestLimit ?? this.config.requests,
       warmup: this.config.warmup,
       duration: this.config.duration,
       streams: this.config.streams,
@@ -841,6 +850,23 @@ class Client {
 
 function makePayload(size) {
   return Buffer.alloc(size, 0x5a);
+}
+
+function requestLimitForConnection(config, connectionIndex) {
+  if (config.mode !== Mode.RR || config.requests == null) {
+    return null;
+  }
+  const connections = rrConnectionTarget(config);
+  const base = Math.floor(config.requests / connections);
+  const remainder = config.requests % connections;
+  return base + (connectionIndex < remainder ? 1 : 0);
+}
+
+function rrConnectionTarget(config) {
+  if (config.mode === Mode.RR && config.requests != null) {
+    return Math.min(config.connections, config.requests);
+  }
+  return config.connections;
 }
 
 function makeConnectionId(prefix, sequence) {

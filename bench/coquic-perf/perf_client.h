@@ -67,6 +67,9 @@ class QuicPerfClient {
         std::uint64_t next_stream_id = kQuicPerfFirstDataStreamId;
         std::uint64_t bytes_sent = 0;
         std::uint64_t bytes_received = 0;
+        std::optional<std::size_t> request_limit;
+        std::size_t requests_started = 0;
+        bool server_complete_counted = false;
     };
 
     bool open_initial_connection(quic::QuicCoreTimePoint now);

@@ -30,20 +30,24 @@ type outstandingRequest struct {
 }
 
 type connectionState struct {
-	sessionReady        bool
-	controlComplete     bool
-	closeRequested      bool
-	controlBytes        []byte
-	outstandingRequests map[coquic.StreamID]outstandingRequest
-	activeBulkStreams   map[coquic.StreamID]bool
-	nextStreamID        coquic.StreamID
+	sessionReady          bool
+	controlComplete       bool
+	closeRequested        bool
+	controlBytes          []byte
+	outstandingRequests   map[coquic.StreamID]outstandingRequest
+	activeBulkStreams     map[coquic.StreamID]bool
+	nextStreamID          coquic.StreamID
+	requestLimit          *uint64
+	requestsStarted       uint64
+	serverCompleteCounted bool
 }
 
-func newConnectionState() *connectionState {
+func newConnectionState(requestLimit *uint64) *connectionState {
 	return &connectionState{
 		outstandingRequests: make(map[coquic.StreamID]outstandingRequest),
 		activeBulkStreams:   make(map[coquic.StreamID]bool),
 		nextStreamID:        coquic.StreamID(protocol.FirstDataStreamID),
+		requestLimit:        requestLimit,
 	}
 }
 
@@ -267,8 +271,11 @@ func (c *Client) collectResultCommands(result *coquic.QueryResult, now coquic.Ti
 		case coquic.EffectConnectionLifecycleEvent:
 			switch effect.Lifecycle {
 			case coquic.LifecycleCreated:
+				connectionIndex := uint64(len(c.connections))
 				if _, ok := c.connections[effect.Connection]; !ok {
-					c.connections[effect.Connection] = newConnectionState()
+					c.connections[effect.Connection] = newConnectionState(
+						c.requestLimitForConnection(connectionIndex),
+					)
 				}
 			case coquic.LifecycleClosed:
 				if c.config.Mode == config.ModeCRR {
@@ -288,8 +295,10 @@ func (c *Client) collectResultCommands(result *coquic.QueryResult, now coquic.Ti
 						kind:       commandSendStream,
 						connection: effect.Connection,
 						streamID:   coquic.StreamID(protocol.ControlStreamID),
-						bytes:      protocol.EncodeControlMessage(c.makeSessionStart()),
-						fin:        true,
+						bytes: protocol.EncodeControlMessage(
+							c.makeSessionStart(c.connections[effect.Connection].requestLimit),
+						),
+						fin: true,
 					})
 				}
 			}
@@ -375,13 +384,14 @@ func (c *Client) handleControlMessage(
 		state.controlComplete = true
 		return nil, fmt.Errorf("%s", value.Reason)
 	case protocol.SessionComplete:
-		c.summary.ServerCounters = metrics.ServerCounters{
-			BytesSent:         value.BytesSent,
-			BytesReceived:     value.BytesReceived,
-			RequestsCompleted: value.RequestsCompleted,
+		if !state.serverCompleteCounted {
+			c.summary.ServerCounters.BytesSent += value.BytesSent
+			c.summary.ServerCounters.BytesReceived += value.BytesReceived
+			c.summary.ServerCounters.RequestsCompleted += value.RequestsCompleted
+			state.serverCompleteCounted = true
 		}
-		if !(c.timedRRMode() || c.timedCRRMode()) {
-			c.summary.RequestsCompleted = value.RequestsCompleted
+		if c.config.Mode == config.ModeBulk {
+			c.summary.RequestsCompleted = c.summary.ServerCounters.RequestsCompleted
 		}
 		state.controlComplete = true
 		return nil, nil
@@ -604,7 +614,8 @@ func (c *Client) maybeIssueRRRequests(connection coquic.ConnectionHandle, now co
 
 	commands := make([]clientCommand, 0)
 	for uint64(len(state.outstandingRequests)) < c.config.RequestsInFlight &&
-		(c.config.Requests == nil || c.requestsStarted < *c.config.Requests) {
+		(c.config.Requests == nil || c.requestsStarted < *c.config.Requests) &&
+		(state.requestLimit == nil || state.requestsStarted < *state.requestLimit) {
 		next, err := c.issueRequest(connection, now)
 		if err != nil {
 			return nil, err
@@ -648,6 +659,7 @@ func (c *Client) issueRequest(connection coquic.ConnectionHandle, now coquic.Tim
 		startedAt:               now,
 		countsTowardMeasurement: counts,
 	}
+	state.requestsStarted++
 	if counts {
 		c.summary.BytesSent += c.config.RequestBytes
 	}
@@ -989,11 +1001,29 @@ func (c *Client) runComplete() bool {
 }
 
 func (c *Client) initialConnectionTarget() uint64 {
-	if c.config.Mode == config.ModeRR && c.config.Requests != nil {
-		return 1
-	}
 	if c.config.Mode == config.ModeCRR {
 		return 0
+	}
+	return c.rrConnectionTarget()
+}
+
+func (c *Client) requestLimitForConnection(connectionIndex uint64) *uint64 {
+	if c.config.Mode != config.ModeRR || c.config.Requests == nil {
+		return nil
+	}
+	connections := c.rrConnectionTarget()
+	base := *c.config.Requests / connections
+	remainder := *c.config.Requests % connections
+	if connectionIndex < remainder {
+		base++
+	}
+	limit := base
+	return &limit
+}
+
+func (c *Client) rrConnectionTarget() uint64 {
+	if c.config.Mode == config.ModeRR && c.config.Requests != nil && *c.config.Requests < c.config.Connections {
+		return *c.config.Requests
 	}
 	return c.config.Connections
 }
@@ -1008,7 +1038,11 @@ func (c *Client) makeClientConfig(index uint64) coquic.ClientConfig {
 	return clientConfig
 }
 
-func (c *Client) makeSessionStart() protocol.SessionStart {
+func (c *Client) makeSessionStart(requestLimit *uint64) protocol.SessionStart {
+	requests := cloneOptional(c.config.Requests)
+	if requestLimit != nil {
+		requests = cloneOptional(requestLimit)
+	}
 	return protocol.SessionStart{
 		ProtocolVersion:  protocol.ProtocolVersion,
 		Mode:             c.config.Mode,
@@ -1016,7 +1050,7 @@ func (c *Client) makeSessionStart() protocol.SessionStart {
 		RequestBytes:     c.config.RequestBytes,
 		ResponseBytes:    c.config.ResponseBytes,
 		TotalBytes:       cloneOptional(c.config.TotalBytes),
-		Requests:         cloneOptional(c.config.Requests),
+		Requests:         requests,
 		Warmup:           c.config.Warmup,
 		Duration:         c.config.Duration,
 		Streams:          c.config.Streams,

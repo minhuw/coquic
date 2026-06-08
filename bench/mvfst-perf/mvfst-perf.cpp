@@ -56,6 +56,16 @@ using Duration = std::chrono::nanoseconds;
 namespace {
 
 constexpr std::string_view kApplicationProtocol = "coquic-perf/1";
+constexpr uint32_t kPerfProtocolVersion = 3;
+constexpr quic::StreamId kControlStreamId = 0;
+constexpr uint8_t kMessageSessionStart = 1;
+constexpr uint8_t kMessageSessionReady = 2;
+constexpr uint8_t kMessageSessionError = 3;
+constexpr uint8_t kModeCodeBulk = 0;
+constexpr uint8_t kModeCodeRr = 1;
+constexpr uint8_t kModeCodeCrr = 2;
+constexpr uint8_t kDirectionCodeUpload = 0;
+constexpr uint8_t kDirectionCodeDownload = 1;
 constexpr uint64_t kTransferConnectionWindow = 32ull * 1024ull * 1024ull;
 constexpr uint64_t kTransferStreamWindow = 16ull * 1024ull * 1024ull;
 constexpr size_t kWriteChunkSize = 32 * 1024;
@@ -151,16 +161,20 @@ struct CompletedStream {
     Duration latency{Duration::zero()};
 };
 
-uint64_t htonll(uint64_t value) {
-    static_assert(sizeof(uint64_t) == 8);
-    uint32_t high = htonl(static_cast<uint32_t>(value >> 32));
-    uint32_t low = htonl(static_cast<uint32_t>(value & 0xffffffffu));
-    return (static_cast<uint64_t>(low) << 32) | high;
-}
-
-uint64_t ntohll(uint64_t value) {
-    return htonll(value);
-}
+struct PerfSessionStart {
+    bool started{false};
+    uint8_t mode{kModeCodeBulk};
+    uint8_t direction{kDirectionCodeDownload};
+    uint64_t requestBytes{0};
+    uint64_t responseBytes{0};
+    OptionalU64 totalBytes;
+    OptionalU64 requests;
+    uint64_t warmupUs{0};
+    uint64_t durationUs{0};
+    uint64_t streams{1};
+    uint64_t connections{1};
+    uint64_t requestsInFlight{1};
+};
 
 size_t intCap(uint64_t value) {
     return static_cast<size_t>(std::min<uint64_t>(value, std::numeric_limits<size_t>::max()));
@@ -488,9 +502,183 @@ void emitSummary(const RunSummary &summary, const std::optional<std::string> &js
     out << "\n}\n";
 }
 
+uint8_t modeCode(const std::string &mode) {
+    if (mode == kModeRr) {
+        return kModeCodeRr;
+    }
+    if (mode == kModeCrr) {
+        return kModeCodeCrr;
+    }
+    return kModeCodeBulk;
+}
+
+uint8_t directionCode(const std::string &direction) {
+    return direction == kDirectionUpload ? kDirectionCodeUpload : kDirectionCodeDownload;
+}
+
+uint64_t scenarioRequestBytes(const Config &cfg) {
+    if (cfg.mode == kModeBulk && cfg.direction == kDirectionUpload) {
+        return std::max(cfg.requestBytes, cfg.responseBytes);
+    }
+    return cfg.requestBytes;
+}
+
+uint64_t scenarioResponseBytes(const Config &cfg) {
+    if (cfg.mode == kModeBulk && cfg.direction == kDirectionUpload) {
+        return 0;
+    }
+    return cfg.responseBytes;
+}
+
+void appendU32(std::vector<uint8_t> &out, uint32_t value) {
+    out.push_back(static_cast<uint8_t>((value >> 24) & 0xffu));
+    out.push_back(static_cast<uint8_t>((value >> 16) & 0xffu));
+    out.push_back(static_cast<uint8_t>((value >> 8) & 0xffu));
+    out.push_back(static_cast<uint8_t>(value & 0xffu));
+}
+
+void appendU64(std::vector<uint8_t> &out, uint64_t value) {
+    for (int shift = 56; shift >= 0; shift -= 8) {
+        out.push_back(static_cast<uint8_t>((value >> shift) & 0xffu));
+    }
+}
+
+uint32_t readU32(const uint8_t *bytes) {
+    return (static_cast<uint32_t>(bytes[0]) << 24) | (static_cast<uint32_t>(bytes[1]) << 16) |
+           (static_cast<uint32_t>(bytes[2]) << 8) | static_cast<uint32_t>(bytes[3]);
+}
+
+uint64_t readU64(const uint8_t *bytes) {
+    uint64_t value = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        value = (value << 8) | bytes[i];
+    }
+    return value;
+}
+
+std::vector<uint8_t> frameControlMessage(uint8_t type, const std::vector<uint8_t> &payload) {
+    std::vector<uint8_t> out;
+    out.reserve(payload.size() + 5);
+    out.push_back(type);
+    appendU32(out, static_cast<uint32_t>(payload.size()));
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+uint64_t rrConnectionTarget(const Config &cfg) {
+    if (cfg.mode == kModeRr && cfg.requests.set) {
+        return std::min(cfg.connections, cfg.requests.value);
+    }
+    return cfg.connections;
+}
+
+uint64_t rrRequestLimitForConnection(const Config &cfg, uint64_t connectionIndex) {
+    uint64_t connections = rrConnectionTarget(cfg);
+    if (connections == 0) {
+        return 0;
+    }
+    uint64_t base = cfg.requests.value / connections;
+    uint64_t remainder = cfg.requests.value % connections;
+    return base + static_cast<uint64_t>(connectionIndex < remainder);
+}
+
+bool canStartRrRequest(const Config &cfg, uint64_t started,
+                       const std::vector<uint64_t> &startedByConnection, size_t connectionIndex) {
+    if (!cfg.requests.set) {
+        return true;
+    }
+    return started < cfg.requests.value &&
+           startedByConnection[connectionIndex] <
+               rrRequestLimitForConnection(cfg, static_cast<uint64_t>(connectionIndex));
+}
+
+Config configWithRrRequestLimit(const Config &cfg, uint64_t connectionIndex) {
+    Config connectionCfg = cfg;
+    if (cfg.mode == kModeRr && cfg.requests.set) {
+        connectionCfg.requests.value = rrRequestLimitForConnection(cfg, connectionIndex);
+        connectionCfg.requests.set = true;
+    }
+    return connectionCfg;
+}
+
+std::vector<uint8_t> encodeSessionStart(const Config &cfg) {
+    std::vector<uint8_t> payload;
+    payload.reserve(79);
+    appendU32(payload, kPerfProtocolVersion);
+    payload.push_back(modeCode(cfg.mode));
+    payload.push_back(directionCode(cfg.direction));
+    appendU64(payload, scenarioRequestBytes(cfg));
+    appendU64(payload, scenarioResponseBytes(cfg));
+    payload.push_back(
+        static_cast<uint8_t>((cfg.totalBytes.set ? 0x01 : 0) | (cfg.requests.set ? 0x02 : 0)));
+    appendU64(payload, cfg.totalBytes.value);
+    appendU64(payload, cfg.requests.value);
+    appendU64(payload, durationMicros(cfg.warmup));
+    appendU64(payload, durationMicros(cfg.duration));
+    appendU64(payload, cfg.streams);
+    appendU64(payload, cfg.connections);
+    appendU64(payload, cfg.requestsInFlight);
+    return frameControlMessage(kMessageSessionStart, payload);
+}
+
+std::vector<uint8_t> encodeSessionReady() {
+    std::vector<uint8_t> payload;
+    appendU32(payload, kPerfProtocolVersion);
+    return frameControlMessage(kMessageSessionReady, payload);
+}
+
+std::vector<uint8_t> encodeSessionError(const std::string &reason) {
+    std::vector<uint8_t> payload;
+    appendU32(payload, static_cast<uint32_t>(reason.size()));
+    payload.insert(payload.end(), reason.begin(), reason.end());
+    return frameControlMessage(kMessageSessionError, payload);
+}
+
+std::vector<uint8_t> decodeControlFrame(const std::vector<uint8_t> &input, uint8_t &type) {
+    if (input.size() < 5) {
+        throw std::runtime_error("short control frame");
+    }
+    uint32_t len = readU32(input.data() + 1);
+    if (input.size() < static_cast<size_t>(len) + 5) {
+        throw std::runtime_error("incomplete control frame");
+    }
+    type = input[0];
+    return std::vector<uint8_t>(input.begin() + 5,
+                                input.begin() + static_cast<std::ptrdiff_t>(len) + 5);
+}
+
+PerfSessionStart decodeSessionStart(const std::vector<uint8_t> &payload) {
+    if (payload.size() != 79 || readU32(payload.data()) != kPerfProtocolVersion) {
+        throw std::runtime_error("malformed session_start");
+    }
+    PerfSessionStart start;
+    start.started = true;
+    start.mode = payload[4];
+    start.direction = payload[5];
+    start.requestBytes = readU64(payload.data() + 6);
+    start.responseBytes = readU64(payload.data() + 14);
+    uint8_t flags = payload[22];
+    start.totalBytes = {readU64(payload.data() + 23), (flags & 0x01) != 0};
+    start.requests = {readU64(payload.data() + 31), (flags & 0x02) != 0};
+    start.warmupUs = readU64(payload.data() + 39);
+    start.durationUs = readU64(payload.data() + 47);
+    start.streams = readU64(payload.data() + 55);
+    start.connections = readU64(payload.data() + 63);
+    start.requestsInFlight = readU64(payload.data() + 71);
+    if ((start.mode != kModeCodeBulk && start.mode != kModeCodeRr && start.mode != kModeCodeCrr) ||
+        (start.direction != kDirectionCodeUpload && start.direction != kDirectionCodeDownload) ||
+        start.streams == 0 || start.connections == 0 || start.requestsInFlight == 0) {
+        throw std::runtime_error("malformed session_start");
+    }
+    return start;
+}
+
 struct ServerStreamState {
-    uint8_t header[16]{};
-    size_t headerLen{0};
+    bool isControl{false};
+    std::vector<uint8_t> controlIn;
+    std::vector<uint8_t> controlOut;
+    size_t controlSent{0};
+    bool controlFin{false};
     uint64_t requestBytes{0};
     uint64_t responseBytes{0};
     uint64_t requestReceived{0};
@@ -516,7 +704,18 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
     }
 
     void onNewBidirectionalStream(quic::StreamId id) noexcept override {
-        streams_.try_emplace(id);
+        auto &state = streams_[id];
+        state.isControl = id == kControlStreamId;
+        if (!state.isControl && !session_.started) {
+            if (sock_) {
+                sock_->close(quic::QuicError(quic::ApplicationErrorCode(1),
+                                             "data stream before session_start"));
+            }
+            return;
+        }
+        if (!state.isControl) {
+            state.requestBytes = session_.requestBytes;
+        }
         auto res = sock_->setReadCallback(id, this);
         if (res.hasError()) {
             std::cerr << "mvfst server setReadCallback failed\n";
@@ -545,31 +744,47 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
             auto &server_stream_state = streams_[id];
             quic::BufPtr data = std::move(readData->first);
             bool eof = readData->second;
+            if (server_stream_state.isControl) {
+                if (data) {
+                    auto range = data->coalesce();
+                    server_stream_state.controlIn.insert(server_stream_state.controlIn.end(),
+                                                         range.begin(), range.end());
+                }
+                if (eof && server_stream_state.controlOut.empty()) {
+                    try {
+                        uint8_t type = 0;
+                        std::vector<uint8_t> payload =
+                            decodeControlFrame(server_stream_state.controlIn, type);
+                        if (type != kMessageSessionStart) {
+                            throw std::runtime_error("expected session_start");
+                        }
+                        session_ = decodeSessionStart(payload);
+                        server_stream_state.controlOut = encodeSessionReady();
+                        server_stream_state.controlFin = false;
+                    } catch (const std::exception &ex) {
+                        server_stream_state.controlOut = encodeSessionError(ex.what());
+                        server_stream_state.controlFin = true;
+                    }
+                    writeControl(id, server_stream_state);
+                }
+                return;
+            }
             if (data) {
                 auto range = data->coalesce();
-                const uint8_t *bytes = range.data();
-                size_t len = range.size();
-                if (server_stream_state.headerLen < sizeof(server_stream_state.header)) {
-                    size_t take = std::min(
-                        sizeof(server_stream_state.header) - server_stream_state.headerLen, len);
-                    std::memcpy(server_stream_state.header + server_stream_state.headerLen, bytes,
-                                take);
-                    server_stream_state.headerLen += take;
-                    bytes += take;
-                    len -= take;
-                    if (server_stream_state.headerLen == sizeof(server_stream_state.header)) {
-                        uint64_t req = 0;
-                        uint64_t res = 0;
-                        std::memcpy(&req, server_stream_state.header, sizeof(req));
-                        std::memcpy(&res, server_stream_state.header + sizeof(req), sizeof(res));
-                        server_stream_state.requestBytes = ntohll(req);
-                        server_stream_state.responseBytes = ntohll(res);
-                    }
-                }
-                server_stream_state.requestReceived += len;
+                server_stream_state.requestReceived += range.size();
             }
             if (eof) {
                 server_stream_state.requestFin = true;
+                bool variableBulkUpload = session_.mode == kModeCodeBulk &&
+                                          session_.direction == kDirectionCodeUpload &&
+                                          session_.totalBytes.set;
+                if (!variableBulkUpload &&
+                    server_stream_state.requestReceived != server_stream_state.requestBytes) {
+                    sock_->close(quic::QuicError(quic::ApplicationErrorCode(1),
+                                                 "unexpected request byte count"));
+                    return;
+                }
+                server_stream_state.responseBytes = responseBytesForNextRequest();
                 writeResponse(id, server_stream_state);
                 auto cb = sock_->setReadCallback(id, nullptr);
                 if (cb.hasError()) {
@@ -588,7 +803,11 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
     void onStreamWriteReady(quic::StreamId id, uint64_t) noexcept override {
         auto iter = streams_.find(id);
         if (iter != streams_.end()) {
-            writeResponse(id, iter->second);
+            if (iter->second.isControl) {
+                writeControl(id, iter->second);
+            } else {
+                writeResponse(id, iter->second);
+            }
         }
     }
 
@@ -597,6 +816,40 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
     }
 
   private:
+    void writeControl(quic::StreamId id, ServerStreamState &state) noexcept {
+        while (state.controlSent < state.controlOut.size()) {
+            size_t remaining = state.controlOut.size() - state.controlSent;
+            size_t chunk = std::min(remaining, kWriteChunkSize);
+            auto data =
+                folly::IOBuf::copyBuffer(state.controlOut.data() + state.controlSent, chunk);
+            bool eof = state.controlFin && state.controlSent + chunk == state.controlOut.size();
+            auto res = sock_->writeChain(id, std::move(data), eof, nullptr);
+            if (res.hasError()) {
+                auto notify = sock_->notifyPendingWriteOnStream(id, this);
+                if (notify.hasError()) {
+                    std::cerr << "mvfst server notifyPendingWriteOnStream failed\n";
+                }
+                return;
+            }
+            state.controlSent += chunk;
+        }
+    }
+
+    uint64_t responseBytesForNextRequest() noexcept {
+        ++requestsCompleted_;
+        if (session_.mode == kModeCodeBulk && session_.direction == kDirectionCodeDownload &&
+            session_.totalBytes.set) {
+            uint64_t streamIndex = requestsCompleted_ - 1;
+            uint64_t perStream = session_.totalBytes.value / session_.streams;
+            uint64_t remainder = session_.totalBytes.value % session_.streams;
+            return perStream + static_cast<uint64_t>(streamIndex < remainder);
+        }
+        if (session_.mode == kModeCodeBulk && session_.direction == kDirectionCodeUpload) {
+            return 0;
+        }
+        return session_.responseBytes;
+    }
+
     void writeResponse(quic::StreamId id, ServerStreamState &state) noexcept {
         if (!state.requestFin || state.responseFin) {
             return;
@@ -632,6 +885,8 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
 
     folly::EventBase *evb_;
     std::shared_ptr<quic::QuicSocket> sock_;
+    PerfSessionStart session_;
+    uint64_t requestsCompleted_{0};
     std::map<quic::StreamId, ServerStreamState> streams_;
 };
 
@@ -684,10 +939,13 @@ void runServer(const Config &cfg) {
 }
 
 struct ClientStreamState {
-    std::vector<uint8_t> sendBuf;
+    bool isControl{false};
+    std::vector<uint8_t> controlOut;
+    std::vector<uint8_t> controlIn;
     size_t sent{0};
     uint64_t requestBytes{0};
     uint64_t responseBytes{0};
+    uint64_t requestSent{0};
     uint64_t received{0};
     bool counts{false};
     bool finSent{false};
@@ -730,6 +988,9 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
         if (!connected_) {
             throw std::runtime_error(error_.empty() ? "mvfst handshake timed out" : error_);
         }
+        lock.unlock();
+        openControlStream();
+        waitSessionReady();
     }
 
     std::vector<CompletedStream> takeCompleted() {
@@ -741,12 +1002,12 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
 
     bool hasStreams() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return !streams_.empty();
+        return activeRequestStreamsLocked() != 0;
     }
 
     size_t streamCount() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return streams_.size();
+        return activeRequestStreamsLocked();
     }
 
     bool isConnected() const {
@@ -786,6 +1047,10 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
 
     void openRequest(bool counts, uint64_t requestBytes, uint64_t responseBytes) {
         evb_->runInEventBaseThreadAndWait([&, counts, requestBytes, responseBytes] {
+            if (!sessionReady_) {
+                setError("mvfst session is not ready");
+                return;
+            }
             auto idResult = client_->createBidirectionalStream();
             if (idResult.hasError()) {
                 setError("mvfst createBidirectionalStream failed");
@@ -797,11 +1062,6 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
             state.responseBytes = responseBytes;
             state.counts = counts;
             state.start = Clock::now();
-            uint64_t req = htonll(requestBytes);
-            uint64_t res = htonll(responseBytes);
-            state.sendBuf.resize(16 + intCap(requestBytes), 0x5a);
-            std::memcpy(state.sendBuf.data(), &req, sizeof(req));
-            std::memcpy(state.sendBuf.data() + sizeof(req), &res, sizeof(res));
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 streams_.emplace(streamId, std::move(state));
@@ -831,9 +1091,10 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
             std::unique_lock<std::mutex> lock(mutex_);
             cond_.wait_until(lock, deadline, [&] {
                 return !completed_.empty() || !error_.empty() ||
-                       (waitForCompletion ? streams_.empty() : false);
+                       (waitForCompletion ? activeRequestStreamsLocked() == 0 : false);
             });
-            bool shouldDrain = (waitForCompletion && streams_.empty()) || Clock::now() >= deadline;
+            bool shouldDrain = (waitForCompletion && activeRequestStreamsLocked() == 0) ||
+                               Clock::now() >= deadline;
             lock.unlock();
             if (shouldDrain) {
                 return takeCompleted();
@@ -893,11 +1154,23 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                     return;
                 }
                 if (data) {
-                    iter->second.received += data->computeChainDataLength();
+                    if (iter->second.isControl) {
+                        auto range = data->coalesce();
+                        iter->second.controlIn.insert(iter->second.controlIn.end(), range.begin(),
+                                                      range.end());
+                        handleControlLocked(iter->second);
+                    } else {
+                        iter->second.received += data->computeChainDataLength();
+                    }
                 }
                 if (eof) {
-                    if (iter->second.received != iter->second.responseBytes) {
+                    if (iter->second.isControl) {
+                        streams_.erase(iter);
+                        done = true;
+                    } else if (iter->second.received != iter->second.responseBytes) {
                         error_ = "mvfst stream received unexpected byte count";
+                        streams_.erase(iter);
+                        done = true;
                     } else {
                         completed.counts = iter->second.counts;
                         completed.requestBytes = iter->second.requestBytes;
@@ -934,10 +1207,100 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
     }
 
   private:
+    size_t activeRequestStreamsLocked() const {
+        size_t count = 0;
+        for (const auto &[_, stream] : streams_) {
+            if (!stream.isControl) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
     void setError(std::string message) noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         if (error_.empty()) {
             error_ = std::move(message);
+        }
+        cond_.notify_all();
+    }
+
+    void openControlStream() {
+        evb_->runInEventBaseThreadAndWait([&] {
+            auto idResult = client_->createBidirectionalStream();
+            if (idResult.hasError()) {
+                setError("mvfst create control stream failed");
+                return;
+            }
+            quic::StreamId streamId = *idResult;
+            if (streamId != kControlStreamId) {
+                setError("mvfst unexpected control stream id");
+                return;
+            }
+            ClientStreamState state;
+            state.isControl = true;
+            state.controlOut = encodeSessionStart(cfg_);
+            state.start = Clock::now();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                streams_.emplace(streamId, std::move(state));
+            }
+            auto cb = client_->setReadCallback(streamId, this);
+            if (cb.hasError()) {
+                setError("mvfst setReadCallback for control failed");
+                return;
+            }
+            sendStream(streamId);
+        });
+    }
+
+    void waitSessionReady() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cond_.wait_for(lock, std::chrono::seconds(10),
+                       [&] { return sessionReady_ || !error_.empty(); });
+        if (!sessionReady_) {
+            throw std::runtime_error(error_.empty() ? "mvfst session_ready timed out" : error_);
+        }
+    }
+
+    void handleControlLocked(ClientStreamState &state) {
+        if (state.controlIn.size() < 5) {
+            return;
+        }
+        uint32_t payloadLen = readU32(state.controlIn.data() + 1);
+        if (state.controlIn.size() < static_cast<size_t>(payloadLen) + 5) {
+            return;
+        }
+        uint8_t type = 0;
+        std::vector<uint8_t> payload;
+        try {
+            payload = decodeControlFrame(state.controlIn, type);
+        } catch (const std::exception &ex) {
+            if (error_.empty()) {
+                error_ = ex.what();
+            }
+            cond_.notify_all();
+            return;
+        }
+        if (type == kMessageSessionReady && payload.size() == 4 &&
+            readU32(payload.data()) == kPerfProtocolVersion) {
+            sessionReady_ = true;
+            cond_.notify_all();
+            return;
+        }
+        if (type == kMessageSessionError) {
+            if (payload.size() >= 4) {
+                uint32_t len = readU32(payload.data());
+                if (payload.size() == static_cast<size_t>(len) + 4) {
+                    error_ = "mvfst server reported session_error: " +
+                             std::string(payload.begin() + 4, payload.end());
+                }
+            }
+            if (error_.empty()) {
+                error_ = "mvfst server reported session_error";
+            }
+        } else {
+            error_ = "mvfst received unexpected control message";
         }
         cond_.notify_all();
     }
@@ -954,11 +1317,25 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                     }
                     snapshot = iter->second;
                 }
-                size_t remaining = snapshot.sendBuf.size() - snapshot.sent;
-                size_t chunk = std::min(remaining, kWriteChunkSize);
-                bool eof = chunk == remaining;
-                auto data =
-                    folly::IOBuf::copyBuffer(snapshot.sendBuf.data() + snapshot.sent, chunk);
+                size_t chunk = 0;
+                bool eof = false;
+                quic::BufPtr data;
+                if (snapshot.isControl) {
+                    size_t remaining = snapshot.controlOut.size() - snapshot.sent;
+                    chunk = std::min(remaining, kWriteChunkSize);
+                    eof = chunk == remaining;
+                    data =
+                        folly::IOBuf::copyBuffer(snapshot.controlOut.data() + snapshot.sent, chunk);
+                } else {
+                    uint64_t remaining = snapshot.requestBytes - snapshot.requestSent;
+                    chunk = static_cast<size_t>(std::min<uint64_t>(remaining, kWriteChunkSize));
+                    eof = chunk == remaining;
+                    data = chunk == 0 ? nullptr : folly::IOBuf::create(chunk);
+                    if (chunk != 0) {
+                        std::memset(data->writableData(), 0x5a, chunk);
+                        data->append(chunk);
+                    }
+                }
                 auto res = client_->writeChain(id, std::move(data), eof, nullptr);
                 if (res.hasError()) {
                     auto notify = client_->notifyPendingWriteOnStream(id, this);
@@ -973,7 +1350,11 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                     if (iter == streams_.end()) {
                         return;
                     }
-                    iter->second.sent += chunk;
+                    if (iter->second.isControl) {
+                        iter->second.sent += chunk;
+                    } else {
+                        iter->second.requestSent += chunk;
+                    }
                     if (eof) {
                         iter->second.finSent = true;
                     }
@@ -995,6 +1376,7 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
     mutable std::mutex mutex_;
     std::condition_variable cond_;
     bool connected_{false};
+    bool sessionReady_{false};
     std::string error_;
     std::map<quic::StreamId, ClientStreamState> streams_;
     std::vector<CompletedStream> completed_;
@@ -1005,6 +1387,18 @@ std::unique_ptr<MvfstClient> connectClient(const Config &cfg) {
     client->start();
     client->waitConnected();
     return client;
+}
+
+std::vector<std::unique_ptr<MvfstClient>> connectClients(const Config &cfg, uint64_t count = 0) {
+    if (count == 0) {
+        count = cfg.connections;
+    }
+    std::vector<std::unique_ptr<MvfstClient>> clients;
+    clients.reserve(intCap(count));
+    for (uint64_t i = 0; i < count; ++i) {
+        clients.push_back(connectClient(configWithRrRequestLimit(cfg, i)));
+    }
+    return clients;
 }
 
 void collectCompleted(const std::vector<CompletedStream> &completed, Counters &counters,
@@ -1020,88 +1414,144 @@ void collectCompleted(const std::vector<CompletedStream> &completed, Counters &c
 }
 
 void runTimedBulkDownload(const Config &cfg, Counters &counters) {
-    auto client = connectClient(cfg);
+    auto clients = connectClients(cfg);
     auto measureStart = Clock::now() + cfg.warmup;
     auto deadline = measureStart + cfg.duration;
-    for (uint64_t i = 0; i < cfg.streams; ++i) {
-        client->openRequest(false, 0, cfg.responseBytes);
+    for (auto &client : clients) {
+        for (uint64_t i = 0; i < cfg.streams; ++i) {
+            client->openRequest(false, scenarioRequestBytes(cfg), scenarioResponseBytes(cfg));
+        }
     }
     while (Clock::now() < deadline) {
-        for (const auto &completed : client->driveUntil(deadline, false)) {
-            if (completed.counts && Clock::now() >= measureStart) {
-                counters.bytesReceived += completed.received;
+        for (auto &client : clients) {
+            for (const auto &completed : client->driveUntil(deadline, false)) {
+                if (completed.counts && Clock::now() >= measureStart) {
+                    counters.bytesReceived += completed.received;
+                }
             }
         }
-        while (client->isConnected() && Clock::now() < deadline) {
-            if (client->streamCount() < intCap(cfg.streams)) {
-                client->openRequest(Clock::now() >= measureStart, 0, cfg.responseBytes);
-            } else {
-                break;
+        for (auto &client : clients) {
+            while (client->isConnected() && Clock::now() < deadline) {
+                if (client->streamCount() < intCap(cfg.streams)) {
+                    client->openRequest(Clock::now() >= measureStart, scenarioRequestBytes(cfg),
+                                        scenarioResponseBytes(cfg));
+                } else {
+                    break;
+                }
             }
         }
     }
-    client->driveUntil(Clock::now() + kDrainTimeout, false);
+    for (auto &client : clients) {
+        client->driveUntil(Clock::now() + kDrainTimeout, false);
+    }
 }
 
 void runFixedBulk(const Config &cfg, Counters &counters) {
     if (!cfg.totalBytes.set) {
         throw std::runtime_error("fixed bulk requires --total-bytes for mvfst client");
     }
-    auto client = connectClient(cfg);
+    auto clients = connectClients(cfg);
     auto deadline = Clock::now() + cfg.duration + kDrainTimeout;
     uint64_t perStream = cfg.totalBytes.value / cfg.streams;
     uint64_t remainder = cfg.totalBytes.value % cfg.streams;
     for (uint64_t i = 0; i < cfg.streams; ++i) {
         uint64_t target = perStream + static_cast<uint64_t>(i < remainder);
+        auto &client = clients[(i % clients.size())];
         if (cfg.direction == kDirectionUpload) {
             client->openRequest(true, target, 0);
         } else {
-            client->openRequest(true, 0, target);
+            client->openRequest(true, scenarioRequestBytes(cfg), target);
         }
     }
-    while (client->hasStreams()) {
+    while (std::any_of(clients.begin(), clients.end(),
+                       [](const auto &client) { return client->hasStreams(); })) {
         if (Clock::now() >= deadline) {
             throw std::runtime_error("mvfst fixed bulk timed out waiting for stream completion");
         }
-        for (const auto &completed : client->driveUntil(
-                 std::min(Clock::now() + std::chrono::seconds(10), deadline), true)) {
-            counters.bytesSent += completed.requestBytes;
-            counters.bytesReceived += completed.received;
+        auto waitDeadline = std::min(Clock::now() + std::chrono::seconds(10), deadline);
+        for (auto &client : clients) {
+            for (const auto &completed : client->driveUntil(waitDeadline, true)) {
+                counters.bytesSent += completed.requestBytes;
+                counters.bytesReceived += completed.received;
+            }
         }
     }
 }
 
 void runRr(const Config &cfg, Counters &counters) {
-    auto client = connectClient(cfg);
+    auto clients = connectClients(cfg, rrConnectionTarget(cfg));
     auto measureStart = Clock::now() + cfg.warmup;
     auto deadline = measureStart + cfg.duration;
     uint64_t started = 0;
-    while (started < cfg.requestsInFlight) {
-        client->openRequest(cfg.requests.set || Clock::now() >= measureStart, cfg.requestBytes,
-                            cfg.responseBytes);
-        ++started;
-    }
-    for (;;) {
-        if (!cfg.requests.set && Clock::now() >= deadline) {
-            break;
-        }
-        if (cfg.requests.set && started >= cfg.requests.value && !client->hasStreams()) {
-            break;
-        }
-        collectCompleted(client->driveUntil(deadline, false), counters, measureStart);
-        while (started < cfg.requests.value || !cfg.requests.set) {
-            if (cfg.requests.set && started >= cfg.requests.value) {
-                break;
-            }
-            if (!cfg.requests.set && Clock::now() >= deadline) {
-                break;
-            }
-            if (client->streamCount() >= intCap(cfg.requestsInFlight)) {
+    std::vector<uint64_t> startedByConnection(clients.size(), 0);
+    for (size_t index = 0; index < clients.size(); ++index) {
+        auto &client = clients[index];
+        while (client->streamCount() < intCap(cfg.requestsInFlight)) {
+            if (!canStartRrRequest(cfg, started, startedByConnection, index)) {
                 break;
             }
             client->openRequest(cfg.requests.set || Clock::now() >= measureStart, cfg.requestBytes,
                                 cfg.responseBytes);
             ++started;
+            ++startedByConnection[index];
+        }
+    }
+    for (;;) {
+        if (!cfg.requests.set && Clock::now() >= deadline) {
+            break;
+        }
+        if (cfg.requests.set && started >= cfg.requests.value &&
+            std::none_of(clients.begin(), clients.end(),
+                         [](const auto &client) { return client->hasStreams(); })) {
+            break;
+        }
+        for (auto &client : clients) {
+            collectCompleted(client->driveUntil(deadline, false), counters, measureStart);
+        }
+        for (size_t index = 0; index < clients.size(); ++index) {
+            auto &client = clients[index];
+            while (client->streamCount() < intCap(cfg.requestsInFlight)) {
+                if (!canStartRrRequest(cfg, started, startedByConnection, index)) {
+                    break;
+                }
+                if (!cfg.requests.set && Clock::now() >= deadline) {
+                    break;
+                }
+                client->openRequest(cfg.requests.set || Clock::now() >= measureStart,
+                                    cfg.requestBytes, cfg.responseBytes);
+                ++started;
+                ++startedByConnection[index];
+            }
+        }
+    }
+}
+
+struct MvfstCrrClient {
+    std::unique_ptr<MvfstClient> client;
+    bool requestOpened{false};
+    bool counts{false};
+};
+
+void fillCrrClients(const Config &cfg, Counters &counters, Clock::time_point measureStart,
+                    Clock::time_point deadline, uint64_t &started,
+                    std::vector<MvfstCrrClient> &clients) {
+    while (clients.size() < intCap(cfg.connections)) {
+        if (cfg.requests.set && started >= cfg.requests.value) {
+            break;
+        }
+        if (!cfg.requests.set && Clock::now() >= deadline) {
+            break;
+        }
+        try {
+            bool counts = cfg.requests.set || Clock::now() >= measureStart;
+            clients.push_back({connectClient(cfg), false, counts});
+            ++started;
+        } catch (const std::exception &) {
+            if (cfg.requests.set) {
+                throw;
+            }
+            counters.skippedSetupErrors += 1;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
 }
@@ -1110,30 +1560,28 @@ void runCrr(const Config &cfg, Counters &counters) {
     auto measureStart = Clock::now() + cfg.warmup;
     auto deadline = measureStart + cfg.duration;
     uint64_t started = 0;
-    while (!cfg.requests.set || started < cfg.requests.value) {
-        if (!cfg.requests.set && Clock::now() >= deadline) {
-            break;
-        }
-        try {
-            auto client = connectClient(cfg);
-            bool counts = cfg.requests.set || Clock::now() >= measureStart;
-            client->openRequest(counts, cfg.requestBytes, cfg.responseBytes);
-            while (client->hasStreams()) {
-                auto waitDeadline =
-                    std::min(Clock::now() + std::chrono::seconds(10), deadline + kDrainTimeout);
-                if (Clock::now() >= waitDeadline) {
-                    throw std::runtime_error("mvfst crr timed out waiting for stream completion");
-                }
-                collectCompleted(client->driveUntil(waitDeadline, true), counters, measureStart);
+    std::vector<MvfstCrrClient> clients;
+    clients.reserve(intCap(cfg.connections));
+    fillCrrClients(cfg, counters, measureStart, deadline, started, clients);
+    while (!clients.empty() || (cfg.requests.set && started < cfg.requests.value) ||
+           (!cfg.requests.set && Clock::now() < deadline)) {
+        size_t index = 0;
+        while (index < clients.size()) {
+            auto &entry = clients[index];
+            if (!entry.requestOpened) {
+                entry.client->openRequest(entry.counts, cfg.requestBytes, cfg.responseBytes);
+                entry.requestOpened = true;
             }
-            ++started;
-        } catch (const std::exception &ex) {
-            if (cfg.requests.set) {
-                throw;
+            auto waitDeadline =
+                std::min(Clock::now() + std::chrono::seconds(10), deadline + kDrainTimeout);
+            collectCompleted(entry.client->driveUntil(waitDeadline, true), counters, measureStart);
+            if (entry.requestOpened && !entry.client->hasStreams()) {
+                clients.erase(clients.begin() + static_cast<std::ptrdiff_t>(index));
+                continue;
             }
-            counters.skippedSetupErrors += 1;
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            ++index;
         }
+        fillCrrClients(cfg, counters, measureStart, deadline, started, clients);
     }
 }
 

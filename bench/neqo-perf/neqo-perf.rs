@@ -23,6 +23,17 @@ use nss::{init, init_db, AllowZeroRtt, AntiReplay, AuthenticationStatus};
 use tokio::{net::UdpSocket, time};
 
 const APPLICATION_PROTOCOL: &str = "coquic-perf/1";
+const PERF_PROTOCOL_VERSION: u32 = 3;
+const CONTROL_STREAM_ID: u64 = 0;
+const MESSAGE_SESSION_START: u8 = 1;
+const MESSAGE_SESSION_READY: u8 = 2;
+const MESSAGE_SESSION_ERROR: u8 = 3;
+const MESSAGE_SESSION_COMPLETE: u8 = 4;
+const MODE_CODE_BULK: u8 = 0;
+const MODE_CODE_RR: u8 = 1;
+const MODE_CODE_CRR: u8 = 2;
+const DIRECTION_CODE_UPLOAD: u8 = 0;
+const DIRECTION_CODE_DOWNLOAD: u8 = 1;
 const DEFAULT_MAX_RUN_REQUESTS: u64 = 4096;
 const TRANSFER_CONNECTION_WINDOW: u64 = 32 * 1024 * 1024;
 const TRANSFER_STREAM_WINDOW: u64 = 16 * 1024 * 1024;
@@ -145,11 +156,32 @@ struct RequestShape {
     counts_latency: bool,
 }
 
+#[derive(Clone)]
+struct SessionStart {
+    mode: String,
+    direction: String,
+    request_bytes: u64,
+    response_bytes: u64,
+    total_bytes: OptionalU64,
+    requests: OptionalU64,
+    warmup: Duration,
+    duration: Duration,
+    streams: u64,
+    connections: u64,
+    requests_in_flight: u64,
+}
+
+#[derive(Default)]
+struct ControlMessage {
+    message_type: u8,
+    ready: bool,
+    error_reason: String,
+    start: Option<SessionStart>,
+}
+
 struct ClientStream {
     request_bytes: u64,
     response_bytes: u64,
-    header: [u8; 16],
-    header_sent: usize,
     request_sent: u64,
     response_received: u64,
     started_at: Instant,
@@ -165,17 +197,37 @@ struct ClientBatch {
     started_requests: u64,
     completed_requests: u64,
     shape: RequestShape,
+    control_stream: Option<StreamId>,
+    control_out: Vec<u8>,
+    control_sent: usize,
+    control_recv: Vec<u8>,
+    control_closed: bool,
+    session_ready: bool,
     streams: HashMap<StreamId, ClientStream>,
 }
 
 impl ClientBatch {
-    fn new(target_requests: u64, shape: RequestShape) -> Self {
+    fn new(cfg: &Config, target_requests: u64, shape: RequestShape) -> Self {
         Self {
             target_requests,
             max_active_requests: None,
             started_requests: 0,
             completed_requests: 0,
             shape,
+            control_stream: None,
+            control_out: encode_session_start(&make_session_start_from_shape(
+                cfg,
+                shape,
+                if cfg.mode == "rr" && target_requests != u64::MAX {
+                    Some(target_requests)
+                } else {
+                    None
+                },
+            )),
+            control_sent: 0,
+            control_recv: Vec::new(),
+            control_closed: false,
+            session_ready: false,
             streams: HashMap::new(),
         }
     }
@@ -204,10 +256,14 @@ impl ClientBatch {
                     }
                 }
                 ConnectionEvent::StateChange(State::Connected)
-                | ConnectionEvent::StateChange(State::Confirmed)
-                | ConnectionEvent::SendStreamCreatable {
+                | ConnectionEvent::StateChange(State::Confirmed) => {
+                    self.open_control(conn)?;
+                    self.open_streams(conn)?;
+                }
+                ConnectionEvent::SendStreamCreatable {
                     stream_type: StreamType::BiDi,
                 } => {
+                    self.open_control(conn)?;
                     self.open_streams(conn)?;
                 }
                 ConnectionEvent::NewStream { .. } => {}
@@ -248,12 +304,35 @@ impl ClientBatch {
             }
         }
         if conn.state().connected() {
+            self.open_control(conn)?;
             self.open_streams(conn)?;
         }
         Ok(())
     }
 
+    fn open_control(&mut self, conn: &mut Connection) -> Result<(), String> {
+        if self.control_stream.is_some() {
+            return Ok(());
+        }
+        match conn.stream_create(StreamType::BiDi) {
+            Ok(stream_id) => {
+                if stream_id.as_u64() != CONTROL_STREAM_ID {
+                    return Err(format!("unexpected neqo control stream id: {stream_id}"));
+                }
+                self.control_stream = Some(stream_id);
+                self.write_control(conn)?;
+            }
+            Err(neqo_transport::Error::StreamLimit)
+            | Err(neqo_transport::Error::ConnectionState) => {}
+            Err(err) => return Err(format!("neqo control stream_create failed: {err}")),
+        }
+        Ok(())
+    }
+
     fn open_streams(&mut self, conn: &mut Connection) -> Result<(), String> {
+        if !self.session_ready {
+            return Ok(());
+        }
         while self.started_requests < self.target_requests {
             if let Some(max_active_requests) = self.max_active_requests {
                 if self.active_requests() >= max_active_requests {
@@ -262,16 +341,11 @@ impl ClientBatch {
             }
             match conn.stream_create(StreamType::BiDi) {
                 Ok(stream_id) => {
-                    let mut header = [0; 16];
-                    encode_be64(&mut header[..8], self.shape.request_bytes);
-                    encode_be64(&mut header[8..], self.shape.response_bytes);
                     self.streams.insert(
                         stream_id,
                         ClientStream {
                             request_bytes: self.shape.request_bytes,
                             response_bytes: self.shape.response_bytes,
-                            header,
-                            header_sent: 0,
                             request_sent: 0,
                             response_received: 0,
                             started_at: Instant::now(),
@@ -295,6 +369,9 @@ impl ClientBatch {
     }
 
     fn write_stream(&mut self, conn: &mut Connection, stream_id: StreamId) -> Result<(), String> {
+        if self.control_stream == Some(stream_id) {
+            return self.write_control(conn);
+        }
         let Some(stream) = self.streams.get_mut(&stream_id) else {
             return Ok(());
         };
@@ -303,17 +380,6 @@ impl ClientBatch {
         }
 
         loop {
-            if stream.header_sent < stream.header.len() {
-                let sent = conn
-                    .stream_send(stream_id, &stream.header[stream.header_sent..])
-                    .map_err(|err| format!("neqo stream_send header failed: {err}"))?;
-                if sent == 0 {
-                    return Ok(());
-                }
-                stream.header_sent += sent;
-                continue;
-            }
-
             if stream.request_sent < stream.request_bytes {
                 let left = stream.request_bytes - stream.request_sent;
                 let chunk = left.min(WRITE_CHUNK_SIZE as u64) as usize;
@@ -334,12 +400,37 @@ impl ClientBatch {
         }
     }
 
+    fn write_control(&mut self, conn: &mut Connection) -> Result<(), String> {
+        let Some(stream_id) = self.control_stream else {
+            return Ok(());
+        };
+        if self.control_closed {
+            return Ok(());
+        }
+        while self.control_sent < self.control_out.len() {
+            let sent = conn
+                .stream_send(stream_id, &self.control_out[self.control_sent..])
+                .map_err(|err| format!("neqo control stream_send failed: {err}"))?;
+            if sent == 0 {
+                return Ok(());
+            }
+            self.control_sent += sent;
+        }
+        conn.stream_close_send(stream_id)
+            .map_err(|err| format!("neqo control stream_close_send failed: {err}"))?;
+        self.control_closed = true;
+        Ok(())
+    }
+
     fn read_stream(
         &mut self,
         conn: &mut Connection,
         stream_id: StreamId,
         counters: &mut Counters,
     ) -> Result<(), String> {
+        if self.control_stream == Some(stream_id) {
+            return self.read_control(conn, stream_id);
+        }
         let Some(stream) = self.streams.get_mut(&stream_id) else {
             return Ok(());
         };
@@ -387,12 +478,46 @@ impl ClientBatch {
         }
         Ok(())
     }
+
+    fn read_control(&mut self, conn: &mut Connection, stream_id: StreamId) -> Result<(), String> {
+        let mut buf = [0u8; 1024];
+        loop {
+            let (read, fin) = match conn.stream_recv(stream_id, &mut buf) {
+                Ok(result) => result,
+                Err(neqo_transport::Error::NoMoreData) => break,
+                Err(err) => return Err(format!("neqo control stream_recv failed: {err}")),
+            };
+            if read > 0 {
+                self.control_recv.extend_from_slice(&buf[..read]);
+            }
+            if fin || read == 0 {
+                break;
+            }
+        }
+        if self.control_recv.len() >= 5 {
+            let payload_len =
+                u32::from_be_bytes(self.control_recv[1..5].try_into().unwrap()) as usize;
+            if self.control_recv.len() >= payload_len + 5 {
+                let msg = decode_control_message(&self.control_recv)?;
+                match msg.message_type {
+                    MESSAGE_SESSION_READY if msg.ready => {
+                        self.session_ready = true;
+                        self.open_streams(conn)?;
+                    }
+                    MESSAGE_SESSION_ERROR => {
+                        return Err(format!("neqo server session_error: {}", msg.error_reason));
+                    }
+                    MESSAGE_SESSION_COMPLETE => {}
+                    _ => return Err("unexpected neqo control message".to_string()),
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
 struct ServerStream {
-    header: [u8; 16],
-    header_read: usize,
     request_bytes: u64,
     response_bytes: u64,
     request_received: u64,
@@ -400,11 +525,22 @@ struct ServerStream {
     writable: bool,
     ready_to_send: bool,
     send_closed: bool,
+    shape_set: bool,
+}
+
+#[derive(Default)]
+struct ServerConnState {
+    session: Option<SessionStart>,
+    control_recv: Vec<u8>,
+    control_out: Vec<u8>,
+    control_sent: usize,
+    control_fin: bool,
+    streams: HashMap<StreamId, ServerStream>,
 }
 
 struct PerfServer {
     server: Server,
-    streams: HashMap<StreamId, ServerStream>,
+    conns: HashMap<neqo_transport::server::ConnectionRef, ServerConnState>,
 }
 
 impl PerfServer {
@@ -425,7 +561,7 @@ impl PerfServer {
         )?;
         Ok(Self {
             server,
-            streams: HashMap::new(),
+            conns: HashMap::new(),
         })
     }
 
@@ -437,6 +573,7 @@ impl PerfServer {
         #[allow(clippy::mutable_key_type)]
         let active = self.server.active_connections();
         for conn_ref in active {
+            self.conns.entry(conn_ref.clone()).or_default();
             loop {
                 let event = match conn_ref.borrow_mut().next_event() {
                     Some(event) => event,
@@ -444,20 +581,35 @@ impl PerfServer {
                 };
                 match event {
                     ConnectionEvent::NewStream { stream_id } => {
-                        self.streams.entry(stream_id).or_default();
+                        let conn_state = self.conns.entry(conn_ref.clone()).or_default();
+                        if stream_id.as_u64() != CONTROL_STREAM_ID {
+                            conn_state.streams.entry(stream_id).or_default();
+                        }
                     }
                     ConnectionEvent::RecvStreamReadable { stream_id } => {
                         self.read_stream(stream_id, &conn_ref)?;
                         self.write_stream(stream_id, &conn_ref)?;
                     }
                     ConnectionEvent::SendStreamWritable { stream_id } => {
-                        self.streams.entry(stream_id).or_default().writable = true;
+                        if stream_id.as_u64() == CONTROL_STREAM_ID {
+                            // control writability is handled below
+                        } else {
+                            self.conns
+                                .entry(conn_ref.clone())
+                                .or_default()
+                                .streams
+                                .entry(stream_id)
+                                .or_default()
+                                .writable = true;
+                        }
                         self.write_stream(stream_id, &conn_ref)?;
                     }
                     ConnectionEvent::RecvStreamReset { stream_id, .. }
                     | ConnectionEvent::SendStreamComplete { stream_id }
                     | ConnectionEvent::SendStreamStopSending { stream_id, .. } => {
-                        self.streams.remove(&stream_id);
+                        if let Some(conn_state) = self.conns.get_mut(&conn_ref) {
+                            conn_state.streams.remove(&stream_id);
+                        }
                     }
                     ConnectionEvent::StateChange(State::Connected)
                     | ConnectionEvent::StateChange(State::Confirmed)
@@ -483,7 +635,19 @@ impl PerfServer {
         stream_id: StreamId,
         conn_ref: &neqo_transport::server::ConnectionRef,
     ) -> Result<(), String> {
-        let stream = self.streams.entry(stream_id).or_default();
+        if stream_id.as_u64() == CONTROL_STREAM_ID {
+            return self.read_control(stream_id, conn_ref);
+        }
+        let conn_state = self.conns.entry(conn_ref.clone()).or_default();
+        let Some(session) = conn_state.session.clone() else {
+            return Err("neqo data stream opened before session_start".to_string());
+        };
+        let stream = conn_state.streams.entry(stream_id).or_default();
+        if !stream.shape_set {
+            stream.request_bytes = session.request_bytes;
+            stream.response_bytes = session.response_bytes;
+            stream.shape_set = true;
+        }
         let mut buf = [0u8; 8192];
         loop {
             let (read, fin) = match conn_ref.borrow_mut().stream_recv(stream_id, &mut buf) {
@@ -495,40 +659,58 @@ impl PerfServer {
                 break;
             }
 
-            let mut pos = 0;
-            if stream.header_read < stream.header.len() && read > 0 {
-                let needed = stream.header.len() - stream.header_read;
-                let take = needed.min(read);
-                stream.header[stream.header_read..stream.header_read + take]
-                    .copy_from_slice(&buf[..take]);
-                stream.header_read += take;
-                pos += take;
-                if stream.header_read == stream.header.len() {
-                    stream.request_bytes = decode_be64(&stream.header[..8]);
-                    stream.response_bytes = decode_be64(&stream.header[8..]);
-                    if stream.request_bytes == 0 {
-                        stream.ready_to_send = true;
-                    }
-                }
+            stream.request_received += read as u64;
+            if stream.request_received >= stream.request_bytes {
+                stream.ready_to_send = true;
             }
-
-            if pos < read {
-                stream.request_received += (read - pos) as u64;
-                if stream.header_read == stream.header.len()
-                    && stream.request_received >= stream.request_bytes
-                {
-                    stream.ready_to_send = true;
-                }
-            }
-
-            if fin
-                && stream.header_read == stream.header.len()
-                && stream.request_received >= stream.request_bytes
-            {
+            if fin && stream.request_received >= stream.request_bytes {
                 stream.ready_to_send = true;
             }
             if read == 0 {
                 break;
+            }
+        }
+        Ok(())
+    }
+
+    fn read_control(
+        &mut self,
+        stream_id: StreamId,
+        conn_ref: &neqo_transport::server::ConnectionRef,
+    ) -> Result<(), String> {
+        let conn_state = self.conns.entry(conn_ref.clone()).or_default();
+        let mut buf = [0u8; 1024];
+        loop {
+            let (read, fin) = match conn_ref.borrow_mut().stream_recv(stream_id, &mut buf) {
+                Ok(result) => result,
+                Err(neqo_transport::Error::NoMoreData) => break,
+                Err(err) => return Err(format!("neqo server control stream_recv failed: {err}")),
+            };
+            if read > 0 {
+                conn_state.control_recv.extend_from_slice(&buf[..read]);
+            }
+            if fin || read == 0 {
+                break;
+            }
+        }
+        if conn_state.control_recv.len() >= 5 {
+            let payload_len =
+                u32::from_be_bytes(conn_state.control_recv[1..5].try_into().unwrap()) as usize;
+            if conn_state.control_recv.len() >= payload_len + 5 {
+                match decode_control_message(&conn_state.control_recv) {
+                    Ok(msg) if msg.message_type == MESSAGE_SESSION_START => {
+                        conn_state.session = msg.start;
+                        conn_state.control_out = encode_session_ready();
+                        conn_state.control_sent = 0;
+                        conn_state.control_fin = false;
+                    }
+                    Ok(_) | Err(_) => {
+                        conn_state.control_out = encode_session_error("invalid session_start");
+                        conn_state.control_sent = 0;
+                        conn_state.control_fin = true;
+                    }
+                }
+                self.write_control(stream_id, conn_ref)?;
             }
         }
         Ok(())
@@ -539,7 +721,13 @@ impl PerfServer {
         stream_id: StreamId,
         conn_ref: &neqo_transport::server::ConnectionRef,
     ) -> Result<(), String> {
-        let Some(stream) = self.streams.get_mut(&stream_id) else {
+        if stream_id.as_u64() == CONTROL_STREAM_ID {
+            return self.write_control(stream_id, conn_ref);
+        }
+        let Some(conn_state) = self.conns.get_mut(conn_ref) else {
+            return Ok(());
+        };
+        let Some(stream) = conn_state.streams.get_mut(&stream_id) else {
             return Ok(());
         };
         if !stream.ready_to_send || !stream.writable || stream.send_closed {
@@ -567,9 +755,42 @@ impl PerfServer {
                 .stream_close_send(stream_id)
                 .map_err(|err| format!("neqo server stream_close_send failed: {err}"))?;
             stream.send_closed = true;
-            self.streams.remove(&stream_id);
+            conn_state.streams.remove(&stream_id);
             return Ok(());
         }
+    }
+
+    fn write_control(
+        &mut self,
+        stream_id: StreamId,
+        conn_ref: &neqo_transport::server::ConnectionRef,
+    ) -> Result<(), String> {
+        let Some(conn_state) = self.conns.get_mut(conn_ref) else {
+            return Ok(());
+        };
+        if conn_state.control_out.is_empty() {
+            return Ok(());
+        }
+        while conn_state.control_sent < conn_state.control_out.len() {
+            let sent = conn_ref
+                .borrow_mut()
+                .stream_send(
+                    stream_id,
+                    &conn_state.control_out[conn_state.control_sent..],
+                )
+                .map_err(|err| format!("neqo server control stream_send failed: {err}"))?;
+            if sent == 0 {
+                return Ok(());
+            }
+            conn_state.control_sent += sent;
+        }
+        if conn_state.control_fin {
+            conn_ref
+                .borrow_mut()
+                .stream_close_send(stream_id)
+                .map_err(|err| format!("neqo server control stream_close_send failed: {err}"))?;
+        }
+        Ok(())
     }
 }
 
@@ -759,6 +980,167 @@ fn bind_addr_for(remote: SocketAddr) -> SocketAddr {
     }
 }
 
+fn mode_code(mode: &str) -> u8 {
+    match mode {
+        "rr" => MODE_CODE_RR,
+        "crr" => MODE_CODE_CRR,
+        _ => MODE_CODE_BULK,
+    }
+}
+
+fn direction_code(direction: &str) -> u8 {
+    if direction == "upload" {
+        DIRECTION_CODE_UPLOAD
+    } else {
+        DIRECTION_CODE_DOWNLOAD
+    }
+}
+
+fn make_session_start_from_shape(
+    cfg: &Config,
+    shape: RequestShape,
+    request_limit: Option<u64>,
+) -> SessionStart {
+    SessionStart {
+        mode: cfg.mode.clone(),
+        direction: cfg.direction.clone(),
+        request_bytes: shape.request_bytes,
+        response_bytes: shape.response_bytes,
+        total_bytes: cfg.total_bytes,
+        requests: request_limit
+            .map(|value| OptionalU64 { value, set: true })
+            .unwrap_or(cfg.requests),
+        warmup: cfg.warmup,
+        duration: cfg.duration,
+        streams: cfg.streams,
+        connections: cfg.connections,
+        requests_in_flight: cfg.requests_in_flight,
+    }
+}
+
+fn encode_session_start(start: &SessionStart) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(79);
+    payload.extend_from_slice(&PERF_PROTOCOL_VERSION.to_be_bytes());
+    payload.push(mode_code(&start.mode));
+    payload.push(direction_code(&start.direction));
+    payload.extend_from_slice(&start.request_bytes.to_be_bytes());
+    payload.extend_from_slice(&start.response_bytes.to_be_bytes());
+    payload.push(
+        (if start.total_bytes.set { 0x01 } else { 0 })
+            | (if start.requests.set { 0x02 } else { 0 }),
+    );
+    payload.extend_from_slice(&start.total_bytes.value.to_be_bytes());
+    payload.extend_from_slice(&start.requests.value.to_be_bytes());
+    payload.extend_from_slice(&(start.warmup.as_micros() as u64).to_be_bytes());
+    payload.extend_from_slice(&(start.duration.as_micros() as u64).to_be_bytes());
+    payload.extend_from_slice(&start.streams.to_be_bytes());
+    payload.extend_from_slice(&start.connections.to_be_bytes());
+    payload.extend_from_slice(&start.requests_in_flight.to_be_bytes());
+    frame_control_message(MESSAGE_SESSION_START, &payload)
+}
+
+fn frame_control_message(message_type: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + payload.len());
+    out.push(message_type);
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+fn encode_session_ready() -> Vec<u8> {
+    frame_control_message(MESSAGE_SESSION_READY, &PERF_PROTOCOL_VERSION.to_be_bytes())
+}
+
+fn encode_session_error(reason: &str) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(4 + reason.len());
+    payload.extend_from_slice(&(reason.len() as u32).to_be_bytes());
+    payload.extend_from_slice(reason.as_bytes());
+    frame_control_message(MESSAGE_SESSION_ERROR, &payload)
+}
+
+fn decode_control_message(data: &[u8]) -> Result<ControlMessage, String> {
+    if data.len() < 5 {
+        return Err("short control message".to_string());
+    }
+    let message_type = data[0];
+    let payload_len = u32::from_be_bytes(data[1..5].try_into().unwrap()) as usize;
+    if data.len() != payload_len + 5 {
+        return Err("malformed control message length".to_string());
+    }
+    let payload = &data[5..];
+    let mut msg = ControlMessage {
+        message_type,
+        ..ControlMessage::default()
+    };
+    match message_type {
+        MESSAGE_SESSION_START => {
+            if payload.len() != 79
+                || u32::from_be_bytes(payload[0..4].try_into().unwrap()) != PERF_PROTOCOL_VERSION
+            {
+                return Err("malformed session_start".to_string());
+            }
+            let mode = match payload[4] {
+                MODE_CODE_BULK => "bulk",
+                MODE_CODE_RR => "rr",
+                MODE_CODE_CRR => "crr",
+                _ => return Err("malformed session_start mode".to_string()),
+            };
+            let direction = match payload[5] {
+                DIRECTION_CODE_UPLOAD => "upload",
+                DIRECTION_CODE_DOWNLOAD => "download",
+                _ => return Err("malformed session_start direction".to_string()),
+            };
+            let flags = payload[22];
+            let start = SessionStart {
+                mode: mode.to_string(),
+                direction: direction.to_string(),
+                request_bytes: u64::from_be_bytes(payload[6..14].try_into().unwrap()),
+                response_bytes: u64::from_be_bytes(payload[14..22].try_into().unwrap()),
+                total_bytes: OptionalU64 {
+                    value: u64::from_be_bytes(payload[23..31].try_into().unwrap()),
+                    set: flags & 0x01 != 0,
+                },
+                requests: OptionalU64 {
+                    value: u64::from_be_bytes(payload[31..39].try_into().unwrap()),
+                    set: flags & 0x02 != 0,
+                },
+                warmup: Duration::from_micros(u64::from_be_bytes(
+                    payload[39..47].try_into().unwrap(),
+                )),
+                duration: Duration::from_micros(u64::from_be_bytes(
+                    payload[47..55].try_into().unwrap(),
+                )),
+                streams: u64::from_be_bytes(payload[55..63].try_into().unwrap()),
+                connections: u64::from_be_bytes(payload[63..71].try_into().unwrap()),
+                requests_in_flight: u64::from_be_bytes(payload[71..79].try_into().unwrap()),
+            };
+            if start.streams == 0 || start.connections == 0 || start.requests_in_flight == 0 {
+                return Err("malformed session_start counts".to_string());
+            }
+            msg.start = Some(start);
+        }
+        MESSAGE_SESSION_READY => {
+            if payload.len() != 4 {
+                return Err("malformed session_ready".to_string());
+            }
+            msg.ready = u32::from_be_bytes(payload.try_into().unwrap()) == PERF_PROTOCOL_VERSION;
+        }
+        MESSAGE_SESSION_ERROR => {
+            if payload.len() < 4 {
+                return Err("malformed session_error".to_string());
+            }
+            let len = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as usize;
+            if payload.len() != len + 4 {
+                return Err("malformed session_error length".to_string());
+            }
+            msg.error_reason = String::from_utf8_lossy(&payload[4..]).into_owned();
+        }
+        MESSAGE_SESSION_COMPLETE => {}
+        _ => return Err("unknown control message".to_string()),
+    }
+    Ok(msg)
+}
+
 fn listen_addr(cfg: &Config) -> Result<SocketAddr, AnyError> {
     let host = if cfg.host == "0.0.0.0" {
         "0.0.0.0".to_string()
@@ -885,65 +1267,23 @@ async fn run_request_batch(
         return Ok(());
     }
     let count = count.min(DEFAULT_MAX_RUN_REQUESTS);
-    init().map_err(|err| format!("neqo NSS init failed: {err}"))?;
-
-    let remote_addr =
-        resolve_remote(&cfg.host, cfg.port).map_err(|err| format!("resolve failed: {err}"))?;
-    let std_socket = StdUdpSocket::bind(bind_addr_for(remote_addr))
-        .map_err(|err| format!("socket bind failed: {err}"))?;
-    std_socket
-        .connect(remote_addr)
-        .map_err(|err| format!("socket connect failed: {err}"))?;
-    std_socket
-        .set_nonblocking(true)
-        .map_err(|err| format!("socket nonblocking failed: {err}"))?;
-    let local_addr = std_socket
-        .local_addr()
-        .map_err(|err| format!("socket local_addr failed: {err}"))?;
-    let socket = UdpSocket::from_std(std_socket)
-        .map_err(|err| format!("tokio socket setup failed: {err}"))?;
-
-    let cid_mgr = Rc::new(RefCell::new(EmptyConnectionIdGenerator::default()));
-    let mut conn = Connection::new_client(
-        cfg.server_name.clone(),
-        &[APPLICATION_PROTOCOL],
-        cid_mgr,
-        local_addr,
-        remote_addr,
-        connection_params(cfg),
-        Instant::now(),
-    )
-    .map_err(|err| format!("neqo client connection failed: {err}"))?;
-
-    let mut batch = ClientBatch::new(count, shape);
+    let mut clients = open_client_batches(cfg, count, shape).await?;
+    distribute_batch_requests(&mut clients, count);
     let started = Instant::now();
-    while !batch.is_done() && started.elapsed() < BATCH_TIMEOUT {
-        batch.handle_events(&mut conn, counters)?;
-        let next_timeout = drain_client_output(&mut conn, &socket)
-            .await
-            .map_err(|err| format!("neqo output failed: {err}"))?;
-        if batch.is_done() {
+    while total_completed(&clients) < count && started.elapsed() < BATCH_TIMEOUT {
+        drive_batches(&mut clients, counters).await?;
+        if total_completed(&clients) >= count {
             break;
         }
-        if !conn.state().connected() && started.elapsed() > HANDSHAKE_TIMEOUT {
-            return Err("neqo connection handshake timed out".to_string());
-        }
-        wait_socket(&socket, next_timeout)
-            .await
-            .map_err(|err| format!("neqo socket wait failed: {err}"))?;
-        drain_client_socket(&socket, &mut conn, local_addr)
-            .await
-            .map_err(|err| format!("neqo socket read failed: {err}"))?;
     }
-
-    if batch.is_done() {
-        conn.close(Instant::now(), 0, "done");
-        let _ = drain_client_output(&mut conn, &socket).await;
+    if total_completed(&clients) >= count {
+        close_batches(&mut clients).await;
         Ok(())
     } else {
         Err(format!(
             "neqo-perf completed {} of {} requests",
-            batch.completed_requests, count
+            total_completed(&clients),
+            count
         ))
     }
 }
@@ -982,42 +1322,159 @@ async fn connect_client(cfg: &Config) -> Result<(UdpSocket, SocketAddr, Connecti
     Ok((socket, local_addr, conn))
 }
 
+struct NeqoClientBatch {
+    socket: UdpSocket,
+    local_addr: SocketAddr,
+    conn: Connection,
+    batch: ClientBatch,
+}
+
+async fn open_client_batches(
+    cfg: &Config,
+    target_requests: u64,
+    shape: RequestShape,
+) -> Result<Vec<NeqoClientBatch>, String> {
+    let mut clients = Vec::new();
+    let count = if cfg.mode == "rr" && cfg.requests.set {
+        rr_connection_target(cfg)
+    } else {
+        cfg.connections
+    };
+    for index in 0..count {
+        let (socket, local_addr, conn) = connect_client(cfg).await?;
+        let connection_target = if cfg.mode == "rr" && cfg.requests.set {
+            rr_request_limit_for_connection(cfg, index)
+        } else {
+            target_requests
+        };
+        clients.push(NeqoClientBatch {
+            socket,
+            local_addr,
+            conn,
+            batch: ClientBatch::new(cfg, connection_target, shape),
+        });
+    }
+    let started = Instant::now();
+    while clients.iter().any(|client| !client.batch.session_ready) {
+        drive_batches(&mut clients, &mut Counters::default()).await?;
+        if started.elapsed() > HANDSHAKE_TIMEOUT {
+            return Err("neqo session_ready timed out".to_string());
+        }
+    }
+    Ok(clients)
+}
+
+fn distribute_batch_requests(clients: &mut [NeqoClientBatch], count: u64) {
+    if clients
+        .iter()
+        .map(|client| client.batch.target_requests)
+        .sum::<u64>()
+        == count
+    {
+        return;
+    }
+    for client in clients.iter_mut() {
+        client.batch.target_requests = 0;
+        client.batch.started_requests = 0;
+    }
+    for i in 0..count {
+        let index = (i as usize) % clients.len();
+        clients[index].batch.target_requests += 1;
+    }
+}
+
+fn total_completed(clients: &[NeqoClientBatch]) -> u64 {
+    clients
+        .iter()
+        .map(|client| client.batch.completed_requests)
+        .sum()
+}
+
+fn total_active(clients: &[NeqoClientBatch]) -> u64 {
+    clients
+        .iter()
+        .map(|client| client.batch.active_requests())
+        .sum()
+}
+
+async fn drive_batches(
+    clients: &mut [NeqoClientBatch],
+    counters: &mut Counters,
+) -> Result<(), String> {
+    let mut next_timeout = None;
+    for client in clients.iter_mut() {
+        client.batch.handle_events(&mut client.conn, counters)?;
+        let timeout = drain_client_output(&mut client.conn, &client.socket)
+            .await
+            .map_err(|err| format!("neqo output failed: {err}"))?;
+        next_timeout = next_timeout.or(timeout);
+    }
+    for client in clients.iter_mut() {
+        drain_client_socket(&client.socket, &mut client.conn, client.local_addr)
+            .await
+            .map_err(|err| format!("neqo socket read failed: {err}"))?;
+    }
+    if total_active(clients) > 0 || clients.iter().any(|client| !client.batch.session_ready) {
+        if let Some(first) = clients.first() {
+            wait_socket(&first.socket, next_timeout)
+                .await
+                .map_err(|err| format!("neqo socket wait failed: {err}"))?;
+        }
+    }
+    Ok(())
+}
+
+async fn close_batches(clients: &mut [NeqoClientBatch]) {
+    for client in clients {
+        client.conn.close(Instant::now(), 0, "done");
+        let _ = drain_client_output(&mut client.conn, &client.socket).await;
+    }
+}
+
+fn rr_connection_target(cfg: &Config) -> u64 {
+    if cfg.mode == "rr" && cfg.requests.set {
+        cfg.connections.min(cfg.requests.value)
+    } else {
+        cfg.connections
+    }
+}
+
+fn rr_request_limit_for_connection(cfg: &Config, connection_index: u64) -> u64 {
+    let connections = rr_connection_target(cfg);
+    if connections == 0 {
+        return 0;
+    }
+    let base = cfg.requests.value / connections;
+    let remainder = cfg.requests.value % connections;
+    base + u64::from(connection_index < remainder)
+}
+
 async fn run_timed_bulk(
     cfg: &Config,
     shape: RequestShape,
     counters: &mut Counters,
 ) -> Result<(), String> {
-    let (socket, local_addr, mut conn) = connect_client(cfg).await?;
-    let mut batch = ClientBatch::new(u64::MAX, shape);
-    batch.max_active_requests = Some((cfg.streams * cfg.connections).max(1));
+    let mut clients = open_client_batches(cfg, u64::MAX, shape).await?;
+    for client in &mut clients {
+        client.batch.max_active_requests = Some(cfg.streams.max(1));
+    }
 
     let started = Instant::now();
     let deadline = started + cfg.duration;
     let drain_deadline = deadline + DRAIN_TIMEOUT;
     while Instant::now() < drain_deadline {
         if Instant::now() >= deadline {
-            batch.target_requests = batch.started_requests;
+            for client in &mut clients {
+                client.batch.target_requests = client.batch.started_requests;
+            }
         }
-        batch.handle_events(&mut conn, counters)?;
-        let next_timeout = drain_client_output(&mut conn, &socket)
-            .await
-            .map_err(|err| format!("neqo output failed: {err}"))?;
-        if Instant::now() >= deadline && batch.active_requests() == 0 {
+        drive_batches(&mut clients, counters).await?;
+        if Instant::now() >= deadline && total_active(&clients) == 0 {
             break;
         }
-        if !conn.state().connected() && started.elapsed() > HANDSHAKE_TIMEOUT {
-            return Err("neqo connection handshake timed out".to_string());
-        }
-        wait_socket(&socket, next_timeout)
-            .await
-            .map_err(|err| format!("neqo socket wait failed: {err}"))?;
-        drain_client_socket(&socket, &mut conn, local_addr)
-            .await
-            .map_err(|err| format!("neqo socket read failed: {err}"))?;
     }
 
-    conn.close(Instant::now(), 0, "done");
-    let _ = drain_client_output(&mut conn, &socket).await;
+    close_batches(&mut clients).await;
     Ok(())
 }
 
@@ -1059,37 +1516,27 @@ async fn run_rr(cfg: &Config, counters: &mut Counters) -> Result<(), String> {
         return run_request_batch(cfg, cfg.requests.value, shape, counters).await;
     }
 
-    let (socket, local_addr, mut conn) = connect_client(cfg).await?;
-    let mut batch = ClientBatch::new(u64::MAX, shape);
-    batch.max_active_requests = Some((cfg.requests_in_flight * cfg.connections).max(1));
+    let mut clients = open_client_batches(cfg, u64::MAX, shape).await?;
+    for client in &mut clients {
+        client.batch.max_active_requests = Some(cfg.requests_in_flight.max(1));
+    }
 
     let started = Instant::now();
     let deadline = started + cfg.duration;
     let drain_deadline = deadline + DRAIN_TIMEOUT;
     while Instant::now() < drain_deadline {
         if Instant::now() >= deadline {
-            batch.target_requests = batch.started_requests;
+            for client in &mut clients {
+                client.batch.target_requests = client.batch.started_requests;
+            }
         }
-        batch.handle_events(&mut conn, counters)?;
-        let next_timeout = drain_client_output(&mut conn, &socket)
-            .await
-            .map_err(|err| format!("neqo output failed: {err}"))?;
-        if Instant::now() >= deadline && batch.active_requests() == 0 {
+        drive_batches(&mut clients, counters).await?;
+        if Instant::now() >= deadline && total_active(&clients) == 0 {
             break;
         }
-        if !conn.state().connected() && started.elapsed() > HANDSHAKE_TIMEOUT {
-            return Err("neqo connection handshake timed out".to_string());
-        }
-        wait_socket(&socket, next_timeout)
-            .await
-            .map_err(|err| format!("neqo socket wait failed: {err}"))?;
-        drain_client_socket(&socket, &mut conn, local_addr)
-            .await
-            .map_err(|err| format!("neqo socket read failed: {err}"))?;
     }
 
-    conn.close(Instant::now(), 0, "done");
-    let _ = drain_client_output(&mut conn, &socket).await;
+    close_batches(&mut clients).await;
     Ok(())
 }
 

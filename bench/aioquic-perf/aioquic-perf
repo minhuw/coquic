@@ -16,6 +16,7 @@ from aioquic.quic.configuration import QuicConfiguration
 
 
 APPLICATION_PROTOCOL = "coquic-perf/1"
+PROTOCOL_VERSION = 3
 TRANSFER_CONNECTION_WINDOW = 32 * 1024 * 1024
 TRANSFER_STREAM_WINDOW = 16 * 1024 * 1024
 READ_CHUNK_SIZE = 64 * 1024
@@ -29,6 +30,11 @@ MODE_CRR = "crr"
 DIRECTION_UPLOAD = "upload"
 DIRECTION_DOWNLOAD = "download"
 DIRECTION_STAY = "stay"
+CONTROL_STREAM_ID = 0
+MESSAGE_SESSION_START = 1
+MESSAGE_SESSION_READY = 2
+MESSAGE_SESSION_ERROR = 3
+MESSAGE_SESSION_COMPLETE = 4
 
 
 @dataclass
@@ -78,12 +84,56 @@ class CompletedStream:
     request_bytes: int
     received: int
     latency: float
+    connection_index: int = 0
+
+
+@dataclass
+class SessionStart:
+    mode: str
+    direction: str
+    request_bytes: int
+    response_bytes: int
+    streams: int
+    connections: int
+    requests_in_flight: int
+    requests: OptionalU64 = field(default_factory=OptionalU64)
+    total_bytes: OptionalU64 = field(default_factory=OptionalU64)
+    warmup: float = 0.0
+    duration: float = 0.0
+
+
+@dataclass
+class SessionComplete:
+    bytes_sent: int = 0
+    bytes_received: int = 0
+    requests_completed: int = 0
+
+
+@dataclass
+class ControlMessage:
+    message_type: int
+    ready: bool = False
+    error_reason: str = ""
+    start: Optional[SessionStart] = None
+    complete: SessionComplete = field(default_factory=SessionComplete)
 
 
 @dataclass
 class OpenConnection:
     protocol: QuicConnectionProtocol
     manager: object
+    control_reader: asyncio.StreamReader
+    control_writer: asyncio.StreamWriter
+
+
+@dataclass
+class ServerSession:
+    start: SessionStart
+    control_writer: asyncio.StreamWriter
+    bytes_sent: int = 0
+    bytes_received: int = 0
+    requests_completed: int = 0
+    complete_sent: bool = False
 
 
 def parse_duration(value: str) -> float:
@@ -195,8 +245,10 @@ def quic_config(cfg: Config, is_client: bool) -> QuicConfiguration:
 
 
 async def run_server(cfg: Config) -> None:
+    sessions: dict[QuicConnectionProtocol, ServerSession] = {}
+
     def stream_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        asyncio.create_task(handle_server_stream(reader, writer))
+        asyncio.create_task(handle_server_stream(reader, writer, sessions))
 
     server = await serve(
         cfg.host,
@@ -211,18 +263,46 @@ async def run_server(cfg: Config) -> None:
 
 
 async def handle_server_stream(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    sessions: dict[QuicConnectionProtocol, ServerSession],
 ) -> None:
     try:
-        header = await reader.readexactly(16)
-        request_bytes = int.from_bytes(header[:8], "big")
-        response_bytes = int.from_bytes(header[8:], "big")
-        remaining = request_bytes
-        while remaining > 0:
-            data = await reader.read(min(READ_CHUNK_SIZE, remaining))
+        stream_id = writer.get_extra_info("stream_id")
+        protocol = writer.transport.protocol
+        if stream_id == CONTROL_STREAM_ID:
+            data = await read_all(reader)
+            msg = decode_control_message(data)
+            if msg.start is None:
+                writer.write(encode_session_error("expected session_start"))
+                writer.write_eof()
+                await writer.drain()
+                return
+            validate_session_start(msg.start)
+            sessions[protocol] = ServerSession(start=msg.start, control_writer=writer)
+            writer.write(encode_session_ready())
+            await writer.drain()
+            return
+
+        session = sessions.get(protocol)
+        if session is None:
+            await read_all(reader)
+            writer.write_eof()
+            await writer.drain()
+            return
+        received = 0
+        while True:
+            data = await reader.read(READ_CHUNK_SIZE)
             if not data:
                 break
-            remaining -= len(data)
+            received += len(data)
+        if received != session.start.request_bytes:
+            raise RuntimeError(
+                f"aioquic server received {received} bytes, expected {session.start.request_bytes}"
+            )
+        session.bytes_received += received
+        session.requests_completed += 1
+        response_bytes = server_response_bytes(session.start, session.requests_completed)
         payload = b"\x5a" * WRITE_CHUNK_SIZE
         remaining = response_bytes
         while remaining > 0:
@@ -232,6 +312,8 @@ async def handle_server_stream(
             remaining -= chunk
         writer.write_eof()
         await writer.drain()
+        session.bytes_sent += response_bytes
+        await maybe_send_session_complete(session)
     except Exception:
         try:
             writer.close()
@@ -254,15 +336,16 @@ async def open_connection(cfg: Config):
 async def run_client(cfg: Config) -> dict:
     started = time.monotonic()
     counters = Counters()
+    start = make_session_start(cfg)
     if cfg.mode == MODE_BULK:
         if cfg.direction == DIRECTION_DOWNLOAD and not cfg.total_bytes.set:
-            await run_timed_bulk_download(cfg, counters)
+            await run_timed_bulk_download(cfg, start, counters)
             elapsed = cfg.duration
         else:
-            await run_fixed_bulk(cfg, counters)
+            await run_fixed_bulk(cfg, start, counters)
             elapsed = time.monotonic() - started
     elif cfg.mode == MODE_RR:
-        await run_rr(cfg, counters)
+        await run_rr(cfg, start, counters)
         elapsed = time.monotonic() - started if cfg.requests.set else cfg.duration
     elif cfg.mode == MODE_CRR:
         await run_crr(cfg, counters)
@@ -286,10 +369,12 @@ async def run_client(cfg: Config) -> dict:
     return summary
 
 
-async def run_timed_bulk_download(cfg: Config, counters: Counters) -> None:
+async def run_timed_bulk_download(
+    cfg: Config, start: SessionStart, counters: Counters
+) -> None:
     measure_start = time.monotonic() + cfg.warmup
     measure_deadline = measure_start + cfg.duration
-    connections = await open_connections(cfg)
+    connections = await open_connections(cfg, start)
     tasks: set[asyncio.Task[CompletedStream]] = set()
     try:
         protocols = [connection.protocol for connection in connections]
@@ -334,15 +419,15 @@ async def run_timed_bulk_download(cfg: Config, counters: Counters) -> None:
         await close_connections(connections)
 
 
-async def run_fixed_bulk(cfg: Config, counters: Counters) -> None:
+async def run_fixed_bulk(cfg: Config, start: SessionStart, counters: Counters) -> None:
     if not cfg.total_bytes.set:
         raise RuntimeError("fixed bulk requires --total-bytes for aioquic client")
-    connections = await open_connections(cfg)
+    connections = await open_connections(cfg, start)
     try:
         protocols = [connection.protocol for connection in connections]
-        task_count = cfg.streams * cfg.connections
-        per_stream = cfg.total_bytes.value // task_count
-        remainder = cfg.total_bytes.value % task_count
+        task_count = cfg.streams
+        per_stream = cfg.total_bytes.value // cfg.streams
+        remainder = cfg.total_bytes.value % cfg.streams
         tasks = []
         for i in range(task_count):
             target = per_stream + (1 if i < remainder else 0)
@@ -366,26 +451,40 @@ async def run_fixed_bulk(cfg: Config, counters: Counters) -> None:
         await close_connections(connections)
 
 
-async def run_rr(cfg: Config, counters: Counters) -> None:
+async def run_rr(cfg: Config, start: SessionStart, counters: Counters) -> None:
     measure_start = time.monotonic() + cfg.warmup
     measure_deadline = measure_start + cfg.duration
-    connections = await open_connections(cfg)
+    connections = await open_connections(cfg, start, rr_connection_target(cfg))
     started = 0
     tasks: set[asyncio.Task[CompletedStream]] = set()
     try:
         protocols = [connection.protocol for connection in connections]
-        while len(tasks) < cfg.requests_in_flight:
-            tasks.add(
-                asyncio.create_task(
+        active_by_conn = [0] * len(protocols)
+        started_by_conn = [0] * len(protocols)
+
+        def maybe_start_on_connection(index: int) -> None:
+            nonlocal started
+            while active_by_conn[index] < cfg.requests_in_flight:
+                if not can_start_rr_request(cfg, started, started_by_conn, index):
+                    break
+                if not cfg.requests.set and time.monotonic() >= measure_deadline:
+                    break
+                task = asyncio.create_task(
                     run_stream(
-                        protocols[started % len(protocols)],
+                        protocols[index],
                         cfg.requests.set or time.monotonic() >= measure_start,
                         cfg.request_bytes,
                         cfg.response_bytes,
+                        index,
                     )
                 )
-            )
-            started += 1
+                tasks.add(task)
+                active_by_conn[index] += 1
+                started_by_conn[index] += 1
+                started += 1
+
+        for index in range(len(protocols)):
+            maybe_start_on_connection(index)
         while True:
             if cfg.requests.set and started >= cfg.requests.value and not tasks:
                 break
@@ -398,27 +497,13 @@ async def run_rr(cfg: Config, counters: Counters) -> None:
             )
             for task in done:
                 completed = task.result()
+                active_by_conn[completed.connection_index] -= 1
                 if completed.counts and time.monotonic() >= measure_start:
                     counters.bytes_sent += completed.request_bytes
                     counters.bytes_received += completed.received
                     counters.requests_completed += 1
                     counters.latencies.append(completed.latency)
-            while len(tasks) < cfg.requests_in_flight:
-                if cfg.requests.set and started >= cfg.requests.value:
-                    break
-                if not cfg.requests.set and time.monotonic() >= measure_deadline:
-                    break
-                tasks.add(
-                    asyncio.create_task(
-                        run_stream(
-                            protocols[started % len(protocols)],
-                            cfg.requests.set or time.monotonic() >= measure_start,
-                            cfg.request_bytes,
-                            cfg.response_bytes,
-                        )
-                    )
-                )
-                started += 1
+                maybe_start_on_connection(completed.connection_index)
         await drain_tasks(tasks)
     finally:
         await close_connections(connections)
@@ -461,19 +546,53 @@ async def run_crr(cfg: Config, counters: Counters) -> None:
 
 
 async def run_crr_once(cfg: Config, counts: bool) -> CompletedStream:
-    async with open_connection(cfg) as protocol:
+    manager = open_connection(cfg)
+    protocol = await asyncio.wait_for(manager.__aenter__(), timeout=HANDSHAKE_TIMEOUT)
+    try:
+        reader, writer = await protocol.create_stream()
+        writer.write(encode_session_start(make_session_start(cfg)))
+        writer.write_eof()
+        await writer.drain()
+        await wait_for_ready(reader)
         return await run_stream(protocol, counts, cfg.request_bytes, cfg.response_bytes)
+    finally:
+        protocol.close()
+        await manager.__aexit__(None, None, None)
 
 
-async def open_connections(cfg: Config) -> list[OpenConnection]:
+async def open_connections(
+    cfg: Config, start: SessionStart, count: int | None = None
+) -> list[OpenConnection]:
     managers = []
     connections = []
+    if count is None:
+        count = cfg.connections
     try:
-        for _ in range(cfg.connections):
+        for index in range(count):
+            connection_start = start
+            if cfg.mode == MODE_RR and cfg.requests.set:
+                connection_start = replace(
+                    start,
+                    requests=OptionalU64(
+                        rr_request_limit_for_connection(cfg, index), True
+                    ),
+                )
             manager = open_connection(cfg)
             protocol = await asyncio.wait_for(manager.__aenter__(), timeout=HANDSHAKE_TIMEOUT)
+            control_reader, control_writer = await protocol.create_stream()
+            control_writer.write(encode_session_start(connection_start))
+            control_writer.write_eof()
+            await control_writer.drain()
+            await wait_for_ready(control_reader)
             managers.append(manager)
-            connections.append(OpenConnection(protocol=protocol, manager=manager))
+            connections.append(
+                OpenConnection(
+                    protocol=protocol,
+                    manager=manager,
+                    control_reader=control_reader,
+                    control_writer=control_writer,
+                )
+            )
         return connections
     except Exception:
         for manager in managers:
@@ -483,18 +602,22 @@ async def open_connections(cfg: Config) -> list[OpenConnection]:
 
 async def close_connections(connections: list[OpenConnection]) -> None:
     for connection in connections:
+        connection.control_writer.close()
         connection.protocol.close()
     for connection in connections:
         await connection.manager.__aexit__(None, None, None)
 
 
 async def run_stream(
-    protocol: QuicConnectionProtocol, counts: bool, request_bytes: int, response_bytes: int
+    protocol: QuicConnectionProtocol,
+    counts: bool,
+    request_bytes: int,
+    response_bytes: int,
+    connection_index: int = 0,
 ) -> CompletedStream:
     started = time.monotonic()
     reader, writer = await protocol.create_stream()
     try:
-        writer.write(request_bytes.to_bytes(8, "big") + response_bytes.to_bytes(8, "big"))
         payload = b"\x5a" * WRITE_CHUNK_SIZE
         remaining = request_bytes
         while remaining > 0:
@@ -520,6 +643,7 @@ async def run_stream(
         request_bytes=request_bytes,
         received=received,
         latency=time.monotonic() - started,
+        connection_index=connection_index,
     )
 
 
@@ -531,6 +655,263 @@ async def drain_tasks(tasks: set[asyncio.Task]) -> None:
     except asyncio.TimeoutError:
         for task in tasks:
             task.cancel()
+
+
+async def read_all(reader: asyncio.StreamReader) -> bytes:
+    chunks = []
+    while True:
+        data = await reader.read(READ_CHUNK_SIZE)
+        if not data:
+            break
+        chunks.append(data)
+    return b"".join(chunks)
+
+
+async def wait_for_ready(reader: asyncio.StreamReader) -> None:
+    data = await asyncio.wait_for(read_control_frame(reader), timeout=HANDSHAKE_TIMEOUT)
+    msg = decode_control_message(data)
+    if msg.message_type == MESSAGE_SESSION_ERROR:
+        raise RuntimeError(f"server session error: {msg.error_reason}")
+    if msg.message_type != MESSAGE_SESSION_READY or not msg.ready:
+        raise RuntimeError("unexpected control message while waiting for ready")
+
+
+async def read_control_frame(reader: asyncio.StreamReader) -> bytes:
+    header = await reader.readexactly(5)
+    size = int.from_bytes(header[1:5], "big")
+    payload = await reader.readexactly(size)
+    return header + payload
+
+
+def make_session_start(cfg: Config) -> SessionStart:
+    return SessionStart(
+        mode=cfg.mode,
+        direction=cfg.direction,
+        request_bytes=cfg.request_bytes,
+        response_bytes=cfg.response_bytes,
+        total_bytes=cfg.total_bytes,
+        requests=cfg.requests,
+        warmup=cfg.warmup,
+        duration=cfg.duration,
+        streams=cfg.streams,
+        connections=cfg.connections,
+        requests_in_flight=cfg.requests_in_flight,
+    )
+
+
+def rr_connection_target(cfg: Config) -> int:
+    if cfg.mode == MODE_RR and cfg.requests.set:
+        return min(cfg.connections, cfg.requests.value)
+    return cfg.connections
+
+
+def rr_request_limit_for_connection(cfg: Config, connection_index: int) -> int:
+    connections = rr_connection_target(cfg)
+    if connections == 0:
+        return 0
+    base = cfg.requests.value // connections
+    remainder = cfg.requests.value % connections
+    return base + (1 if connection_index < remainder else 0)
+
+
+def can_start_rr_request(
+    cfg: Config,
+    started: int,
+    started_by_conn: list[int],
+    connection_index: int,
+) -> bool:
+    if not cfg.requests.set:
+        return True
+    return (
+        started < cfg.requests.value
+        and started_by_conn[connection_index]
+        < rr_request_limit_for_connection(cfg, connection_index)
+    )
+
+
+def validate_session_start(start: SessionStart) -> None:
+    if start.mode not in (MODE_BULK, MODE_RR, MODE_CRR):
+        raise RuntimeError("malformed session_start mode")
+    if start.direction not in (DIRECTION_UPLOAD, DIRECTION_DOWNLOAD):
+        raise RuntimeError("malformed session_start direction")
+    if start.streams <= 0 or start.connections <= 0 or start.requests_in_flight <= 0:
+        raise RuntimeError("malformed session_start counts")
+
+
+def server_response_bytes(start: SessionStart, requests_completed: int) -> int:
+    if start.mode == MODE_BULK and start.direction == DIRECTION_DOWNLOAD and start.total_bytes.set:
+        stream_index = requests_completed - 1
+        per_stream = start.total_bytes.value // start.streams
+        remainder = start.total_bytes.value % start.streams
+        return per_stream + (1 if stream_index < remainder else 0)
+    if start.mode == MODE_BULK and start.direction == DIRECTION_DOWNLOAD:
+        return start.response_bytes
+    if start.mode in (MODE_RR, MODE_CRR):
+        return start.response_bytes
+    return 0
+
+
+async def maybe_send_session_complete(session: ServerSession) -> None:
+    if session.complete_sent:
+        return
+    start = session.start
+    complete = (
+        start.mode == MODE_BULK
+        and start.total_bytes.set
+        and session.requests_completed >= start.streams
+    ) or (
+        start.mode == MODE_BULK
+        and start.direction == DIRECTION_UPLOAD
+        and session.requests_completed >= start.streams
+    ) or (
+        start.mode == MODE_RR
+        and start.requests.set
+        and session.requests_completed >= start.requests.value
+    )
+    if not complete:
+        return
+    session.complete_sent = True
+    session.control_writer.write(
+        encode_session_complete(
+            SessionComplete(
+                bytes_sent=session.bytes_sent,
+                bytes_received=session.bytes_received,
+                requests_completed=session.requests_completed,
+            )
+        )
+    )
+    session.control_writer.write_eof()
+    await session.control_writer.drain()
+
+
+def decode_control_message(data: bytes) -> ControlMessage:
+    if len(data) < 5:
+        raise RuntimeError("short control message")
+    message_type = data[0]
+    size = int.from_bytes(data[1:5], "big")
+    payload = data[5:]
+    if len(payload) != size:
+        raise RuntimeError("malformed control message length")
+    msg = ControlMessage(message_type=message_type)
+    if message_type == MESSAGE_SESSION_START:
+        if len(payload) != 79:
+            raise RuntimeError("malformed session_start")
+        version = int.from_bytes(payload[0:4], "big")
+        if version != PROTOCOL_VERSION:
+            raise RuntimeError(f"unsupported protocol version: {version}")
+        flags = payload[22]
+        start = SessionStart(
+            mode=mode_from_code(payload[4]),
+            direction=direction_from_code(payload[5]),
+            request_bytes=int.from_bytes(payload[6:14], "big"),
+            response_bytes=int.from_bytes(payload[14:22], "big"),
+            total_bytes=OptionalU64(
+                int.from_bytes(payload[23:31], "big"), bool(flags & 0x01)
+            ),
+            requests=OptionalU64(
+                int.from_bytes(payload[31:39], "big"), bool(flags & 0x02)
+            ),
+            warmup=int.from_bytes(payload[39:47], "big") / 1_000_000,
+            duration=int.from_bytes(payload[47:55], "big") / 1_000_000,
+            streams=int.from_bytes(payload[55:63], "big"),
+            connections=int.from_bytes(payload[63:71], "big"),
+            requests_in_flight=int.from_bytes(payload[71:79], "big"),
+        )
+        validate_session_start(start)
+        msg.start = start
+    elif message_type == MESSAGE_SESSION_READY:
+        if len(payload) != 4:
+            raise RuntimeError("malformed session_ready")
+        msg.ready = int.from_bytes(payload, "big") == PROTOCOL_VERSION
+    elif message_type == MESSAGE_SESSION_ERROR:
+        if len(payload) < 4:
+            raise RuntimeError("malformed session_error")
+        length = int.from_bytes(payload[0:4], "big")
+        if len(payload[4:]) != length:
+            raise RuntimeError("malformed session_error length")
+        msg.error_reason = payload[4:].decode()
+    elif message_type == MESSAGE_SESSION_COMPLETE:
+        if len(payload) != 24:
+            raise RuntimeError("malformed session_complete")
+        msg.complete = SessionComplete(
+            bytes_sent=int.from_bytes(payload[0:8], "big"),
+            bytes_received=int.from_bytes(payload[8:16], "big"),
+            requests_completed=int.from_bytes(payload[16:24], "big"),
+        )
+    else:
+        raise RuntimeError(f"unknown control message type {message_type}")
+    return msg
+
+
+def encode_session_start(start: SessionStart) -> bytes:
+    flags = 0
+    if start.total_bytes.set:
+        flags |= 0x01
+    if start.requests.set:
+        flags |= 0x02
+    payload = bytearray()
+    payload += PROTOCOL_VERSION.to_bytes(4, "big")
+    payload.append(mode_code(start.mode))
+    payload.append(direction_code(start.direction))
+    payload += start.request_bytes.to_bytes(8, "big")
+    payload += start.response_bytes.to_bytes(8, "big")
+    payload.append(flags)
+    payload += start.total_bytes.value.to_bytes(8, "big")
+    payload += start.requests.value.to_bytes(8, "big")
+    payload += int(start.warmup * 1_000_000).to_bytes(8, "big")
+    payload += int(start.duration * 1_000_000).to_bytes(8, "big")
+    payload += start.streams.to_bytes(8, "big")
+    payload += start.connections.to_bytes(8, "big")
+    payload += start.requests_in_flight.to_bytes(8, "big")
+    return frame_control_message(MESSAGE_SESSION_START, bytes(payload))
+
+
+def encode_session_ready() -> bytes:
+    return frame_control_message(MESSAGE_SESSION_READY, PROTOCOL_VERSION.to_bytes(4, "big"))
+
+
+def encode_session_error(reason: str) -> bytes:
+    encoded = reason.encode()
+    return frame_control_message(
+        MESSAGE_SESSION_ERROR, len(encoded).to_bytes(4, "big") + encoded
+    )
+
+
+def encode_session_complete(complete: SessionComplete) -> bytes:
+    payload = (
+        complete.bytes_sent.to_bytes(8, "big")
+        + complete.bytes_received.to_bytes(8, "big")
+        + complete.requests_completed.to_bytes(8, "big")
+    )
+    return frame_control_message(MESSAGE_SESSION_COMPLETE, payload)
+
+
+def frame_control_message(message_type: int, payload: bytes) -> bytes:
+    return bytes([message_type]) + len(payload).to_bytes(4, "big") + payload
+
+
+def mode_code(mode: str) -> int:
+    if mode == MODE_RR:
+        return 1
+    if mode == MODE_CRR:
+        return 2
+    return 0
+
+
+def mode_from_code(code: int) -> str:
+    if code == 1:
+        return MODE_RR
+    if code == 2:
+        return MODE_CRR
+    return MODE_BULK
+
+
+def direction_code(direction: str) -> int:
+    return 0 if direction == DIRECTION_UPLOAD else 1
+
+
+def direction_from_code(code: int) -> str:
+    return DIRECTION_UPLOAD if code == 0 else DIRECTION_DOWNLOAD
 
 
 def new_run_summary(cfg: Config) -> dict:

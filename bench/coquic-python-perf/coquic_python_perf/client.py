@@ -53,6 +53,9 @@ class ConnectionState:
     outstanding_requests: dict[int, OutstandingRequest] = field(default_factory=dict)
     active_bulk_streams: dict[int, bool] = field(default_factory=dict)
     next_stream_id: int = FIRST_DATA_STREAM_ID
+    request_limit: int | None = None
+    requests_started: int = 0
+    server_complete_counted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +214,15 @@ class Client:
         for effect in effects:
             if effect.kind == "connection_lifecycle_event":
                 if effect.event == coquic.Lifecycle.CREATED:
-                    self.connections.setdefault(effect.connection, ConnectionState())
+                    connection_index = len(self.connections)
+                    self.connections.setdefault(
+                        effect.connection,
+                        ConnectionState(
+                            request_limit=request_limit_for_connection(
+                                self.config, connection_index
+                            )
+                        ),
+                    )
                 elif effect.event == coquic.Lifecycle.CLOSED:
                     if self.config.mode == Mode.CRR:
                         self.connections.pop(effect.connection, None)
@@ -233,7 +244,11 @@ class Client:
                         SendStreamCommand(
                             connection=effect.connection,
                             stream_id=CONTROL_STREAM_ID,
-                            bytes=encode_control_message(self.make_session_start()),
+                            bytes=encode_control_message(
+                                self.make_session_start(
+                                    self.connections[effect.connection].request_limit
+                                )
+                            ),
                             fin=True,
                         )
                     )
@@ -304,13 +319,15 @@ class Client:
             state.control_complete = True
             raise PerfError(message.reason)
         if isinstance(message, SessionComplete):
-            self.summary.server_counters = ServerCounters(
-                bytes_sent=message.bytes_sent,
-                bytes_received=message.bytes_received,
-                requests_completed=message.requests_completed,
-            )
+            if not state.server_complete_counted:
+                self.summary.server_counters.bytes_sent += message.bytes_sent
+                self.summary.server_counters.bytes_received += message.bytes_received
+                self.summary.server_counters.requests_completed += message.requests_completed
+                state.server_complete_counted = True
             if self.config.mode == Mode.BULK:
-                self.summary.requests_completed = message.requests_completed
+                self.summary.requests_completed = (
+                    self.summary.server_counters.requests_completed
+                )
             state.control_complete = True
             return []
         raise PerfError("client received unexpected session_start")
@@ -471,6 +488,9 @@ class Client:
 
         while len(state.outstanding_requests) < self.config.requests_in_flight and (
             self.config.requests is None or self.requests_started < self.config.requests
+        ) and (
+            state.request_limit is None
+            or state.requests_started < state.request_limit
         ):
             commands.extend(self.issue_request(connection, now))
             self.requests_started += 1
@@ -505,6 +525,7 @@ class Client:
         if state is None:
             raise PerfError("request for unknown connection")
         state.outstanding_requests[stream_id] = OutstandingRequest(now, counts)
+        state.requests_started += 1
         if counts:
             self.summary.bytes_sent += self.config.request_bytes
         return [
@@ -736,11 +757,9 @@ class Client:
         )
 
     def initial_connection_target(self) -> int:
-        if self.config.mode == Mode.RR and self.config.requests is not None:
-            return 1
         if self.config.mode == Mode.CRR:
             return 0
-        return self.config.connections
+        return rr_connection_target(self.config)
 
     def make_client_config(self, index: int) -> coquic.quic.ClientConfig:
         sequence = index + 1
@@ -751,7 +770,7 @@ class Client:
         config.core.server_name = self.config.server_name.encode()
         return config
 
-    def make_session_start(self) -> SessionStart:
+    def make_session_start(self, request_limit: int | None = None) -> SessionStart:
         return SessionStart(
             protocol_version=PROTOCOL_VERSION,
             mode=self.config.mode,
@@ -759,7 +778,7 @@ class Client:
             request_bytes=self.config.request_bytes,
             response_bytes=self.config.response_bytes,
             total_bytes=self.config.total_bytes,
-            requests=self.config.requests,
+            requests=request_limit if request_limit is not None else self.config.requests,
             warmup=self.config.warmup,
             duration=self.config.duration,
             streams=self.config.streams,
@@ -778,6 +797,21 @@ class Client:
 
 def make_payload(size: int) -> bytes:
     return b"\x5a" * size
+
+
+def request_limit_for_connection(config: PerfConfig, connection_index: int) -> int | None:
+    if config.mode != Mode.RR or config.requests is None:
+        return None
+    connections = rr_connection_target(config)
+    base = config.requests // connections
+    remainder = config.requests % connections
+    return base + (1 if connection_index < remainder else 0)
+
+
+def rr_connection_target(config: PerfConfig) -> int:
+    if config.mode == Mode.RR and config.requests is not None:
+        return min(config.connections, config.requests)
+    return config.connections
 
 
 def make_connection_id(prefix: int, sequence: int) -> bytes:

@@ -22,7 +22,17 @@
 #include "prog.h"
 #include "test_cert.h"
 
-#define APPLICATION_PROTOCOL "perf"
+#define APPLICATION_PROTOCOL "coquic-perf/1"
+#define PERF_PROTOCOL_VERSION 3U
+#define CONTROL_STREAM_ID 0ULL
+#define MESSAGE_SESSION_START 1U
+#define MESSAGE_SESSION_READY 2U
+#define MESSAGE_SESSION_ERROR 3U
+#define MODE_CODE_BULK 0U
+#define MODE_CODE_RR 1U
+#define MODE_CODE_CRR 2U
+#define DIRECTION_CODE_UPLOAD 0U
+#define DIRECTION_CODE_DOWNLOAD 1U
 #define DEFAULT_MAX_RUN_REQUESTS 4096ULL
 #define TRANSFER_CONNECTION_WINDOW (32U * 1024U * 1024U)
 #define TRANSFER_STREAM_WINDOW (16U * 1024U * 1024U)
@@ -113,21 +123,47 @@ typedef struct {
 
 typedef struct client_state client_state_t;
 
+typedef struct {
+    int started;
+    uint8_t mode;
+    uint8_t direction;
+    uint64_t request_bytes;
+    uint64_t response_bytes;
+    optional_u64_t total_bytes;
+    optional_u64_t requests;
+    uint64_t warmup_us;
+    uint64_t duration_us;
+    uint64_t streams;
+    uint64_t connections;
+    uint64_t requests_in_flight;
+} perf_session_start_t;
+
 struct lsquic_conn_ctx {
     client_state_t *state;
     lsquic_conn_t *conn;
     struct service_port *sport;
     uint64_t active_streams;
+    uint64_t started_requests;
+    uint64_t request_limit;
     int ready;
+    int control_opened;
+    int session_ready;
     int closing;
+    perf_session_start_t session_start;
     struct lsquic_conn_ctx *next;
 };
 
 struct lsquic_stream_ctx {
     client_state_t *state;
     struct lsquic_conn_ctx *conn_ctx;
-    uint8_t header[16];
-    size_t header_sent;
+    int is_control;
+    uint8_t *control_out;
+    uint8_t *control_in;
+    size_t control_len;
+    size_t control_sent;
+    size_t control_in_len;
+    size_t control_in_cap;
+    int control_fin;
     uint64_t request_bytes;
     uint64_t response_bytes;
     uint64_t request_sent;
@@ -136,14 +172,13 @@ struct lsquic_stream_ctx {
     int counts_latency;
     int completed;
     struct {
-        uint8_t header[16];
-        size_t header_read;
         uint64_t request_bytes;
         uint64_t response_bytes;
         uint64_t request_read;
         uint64_t response_left;
         int request_fin;
         int ready_to_send;
+        int shape_set;
     } server;
 };
 
@@ -161,6 +196,7 @@ struct client_state {
     uint64_t started_requests;
     uint64_t active_streams;
     uint64_t pending_streams;
+    uint64_t pending_control_streams;
     uint64_t active_conns;
     uint64_t pending_conns;
     uint64_t measure_start_us;
@@ -192,6 +228,9 @@ static uint64_t now_us(void) {
 static uint64_t duration_millis(uint64_t usec) {
     return usec / 1000ULL;
 }
+
+static uint64_t scenario_request_bytes(const config_t *cfg);
+static uint64_t scenario_response_bytes(const config_t *cfg);
 
 static uint64_t parse_u64(const char *text, const char *name) {
     char *end = NULL;
@@ -383,10 +422,23 @@ static config_t parse_args(int argc, char **argv) {
     return cfg;
 }
 
-static uint64_t encode_be64(uint64_t value) {
-    uint64_t high = htonl((uint32_t)(value >> 32));
-    uint64_t low = htonl((uint32_t)(value & 0xffffffffu));
-    return (low << 32) | high;
+static void encode_be32(uint8_t out[4], uint32_t value) {
+    out[0] = (uint8_t)((value >> 24) & 0xffU);
+    out[1] = (uint8_t)((value >> 16) & 0xffU);
+    out[2] = (uint8_t)((value >> 8) & 0xffU);
+    out[3] = (uint8_t)(value & 0xffU);
+}
+
+static uint32_t decode_be32(const uint8_t in[4]) {
+    return ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) | ((uint32_t)in[2] << 8) |
+           (uint32_t)in[3];
+}
+
+static void encode_bytes_be64(uint8_t out[8], uint64_t value) {
+    for (int i = 7; i >= 0; --i) {
+        out[i] = (uint8_t)(value & 0xffU);
+        value >>= 8;
+    }
 }
 
 static uint64_t decode_be64(const uint8_t bytes[8]) {
@@ -395,6 +447,104 @@ static uint64_t decode_be64(const uint8_t bytes[8]) {
         value = (value << 8) | bytes[i];
     }
     return value;
+}
+
+static uint8_t mode_code(const char *mode) {
+    if (strcmp(mode, "rr") == 0) {
+        return MODE_CODE_RR;
+    }
+    if (strcmp(mode, "crr") == 0) {
+        return MODE_CODE_CRR;
+    }
+    return MODE_CODE_BULK;
+}
+
+static uint8_t direction_code(const char *direction) {
+    return strcmp(direction, "upload") == 0 ? DIRECTION_CODE_UPLOAD : DIRECTION_CODE_DOWNLOAD;
+}
+
+static uint8_t *frame_control_message(uint8_t type, const uint8_t *payload, uint32_t payload_len,
+                                      size_t *out_len) {
+    uint8_t *out = malloc((size_t)payload_len + 5);
+    if (out == NULL) {
+        return NULL;
+    }
+    out[0] = type;
+    encode_be32(out + 1, payload_len);
+    if (payload_len != 0) {
+        memcpy(out + 5, payload, payload_len);
+    }
+    *out_len = (size_t)payload_len + 5;
+    return out;
+}
+
+static uint8_t *encode_session_start_message(const config_t *cfg, size_t *out_len) {
+    uint8_t payload[79];
+    encode_be32(payload, PERF_PROTOCOL_VERSION);
+    payload[4] = mode_code(cfg->mode);
+    payload[5] = direction_code(cfg->direction);
+    encode_bytes_be64(payload + 6, scenario_request_bytes(cfg));
+    encode_bytes_be64(payload + 14, scenario_response_bytes(cfg));
+    payload[22] = (cfg->total_bytes.set ? 0x01 : 0) | (cfg->requests.set ? 0x02 : 0);
+    encode_bytes_be64(payload + 23, cfg->total_bytes.value);
+    encode_bytes_be64(payload + 31, cfg->requests.value);
+    encode_bytes_be64(payload + 39, cfg->warmup_us);
+    encode_bytes_be64(payload + 47, cfg->duration_us);
+    encode_bytes_be64(payload + 55, cfg->streams);
+    encode_bytes_be64(payload + 63, cfg->connections);
+    encode_bytes_be64(payload + 71, cfg->requests_in_flight);
+    return frame_control_message(MESSAGE_SESSION_START, payload, sizeof(payload), out_len);
+}
+
+static uint8_t *encode_session_ready_message(size_t *out_len) {
+    uint8_t payload[4];
+    encode_be32(payload, PERF_PROTOCOL_VERSION);
+    return frame_control_message(MESSAGE_SESSION_READY, payload, sizeof(payload), out_len);
+}
+
+static uint8_t *encode_session_error_message(const char *reason, size_t *out_len) {
+    size_t reason_len = strlen(reason);
+    uint8_t *payload = malloc(reason_len + 4);
+    if (payload == NULL) {
+        return NULL;
+    }
+    encode_be32(payload, (uint32_t)reason_len);
+    memcpy(payload + 4, reason, reason_len);
+    uint8_t *out =
+        frame_control_message(MESSAGE_SESSION_ERROR, payload, (uint32_t)(reason_len + 4), out_len);
+    free(payload);
+    return out;
+}
+
+static int decode_session_start_payload(const uint8_t *payload, size_t len,
+                                        perf_session_start_t *start) {
+    if (len != 79 || decode_be32(payload) != PERF_PROTOCOL_VERSION) {
+        return -1;
+    }
+    memset(start, 0, sizeof(*start));
+    start->started = 1;
+    start->mode = payload[4];
+    start->direction = payload[5];
+    start->request_bytes = decode_be64(payload + 6);
+    start->response_bytes = decode_be64(payload + 14);
+    uint8_t flags = payload[22];
+    start->total_bytes.value = decode_be64(payload + 23);
+    start->total_bytes.set = (flags & 0x01) != 0;
+    start->requests.value = decode_be64(payload + 31);
+    start->requests.set = (flags & 0x02) != 0;
+    start->warmup_us = decode_be64(payload + 39);
+    start->duration_us = decode_be64(payload + 47);
+    start->streams = decode_be64(payload + 55);
+    start->connections = decode_be64(payload + 63);
+    start->requests_in_flight = decode_be64(payload + 71);
+    if ((start->mode != MODE_CODE_BULK && start->mode != MODE_CODE_RR &&
+         start->mode != MODE_CODE_CRR) ||
+        (start->direction != DIRECTION_CODE_UPLOAD &&
+         start->direction != DIRECTION_CODE_DOWNLOAD) ||
+        start->streams == 0 || start->connections == 0 || start->requests_in_flight == 0) {
+        return -1;
+    }
+    return 0;
 }
 
 static void latency_push(latency_vec_t *vec, uint64_t value) {
@@ -463,7 +613,6 @@ static uint64_t ceil_div(uint64_t numerator, uint64_t denominator) {
 }
 
 static uint64_t inflight_limit(const config_t *cfg);
-
 static void apply_lsquic_settings(struct prog *prog, const config_t *cfg) {
     prog->prog_settings.es_init_max_data = TRANSFER_CONNECTION_WINDOW;
     prog->prog_settings.es_init_max_stream_data_bidi_local = TRANSFER_STREAM_WINDOW;
@@ -532,6 +681,23 @@ static uint64_t per_conn_stream_limit(const config_t *cfg) {
     return cfg->requests_in_flight ? cfg->requests_in_flight : 1;
 }
 
+static uint64_t rr_connection_target(const config_t *cfg) {
+    if (is_mode(cfg, "rr") && cfg->requests.set) {
+        return cfg->connections < cfg->requests.value ? cfg->connections : cfg->requests.value;
+    }
+    return cfg->connections;
+}
+
+static uint64_t rr_request_limit_for_connection(const config_t *cfg, uint64_t connection_index) {
+    uint64_t connections = rr_connection_target(cfg);
+    if (connections == 0) {
+        return 0;
+    }
+    uint64_t base = cfg->requests.value / connections;
+    uint64_t remainder = cfg->requests.value % connections;
+    return base + (connection_index < remainder ? 1 : 0);
+}
+
 static int should_start_request(const client_state_t *state) {
     if (state->stop_starting) {
         return 0;
@@ -559,9 +725,12 @@ static void maybe_finish_client(client_state_t *state);
 static void try_open_streams_on_conn(client_state_t *state, struct lsquic_conn_ctx *conn_ctx) {
     const uint64_t global_limit = inflight_limit(&state->cfg);
     const uint64_t conn_limit = per_conn_stream_limit(&state->cfg);
-    while (conn_ctx->ready && !conn_ctx->closing && should_start_request(state) &&
+    while (conn_ctx->ready && conn_ctx->session_ready && !conn_ctx->closing &&
+           should_start_request(state) &&
            state->active_streams + state->pending_streams < global_limit &&
            conn_ctx->active_streams < conn_limit &&
+           (!is_mode(&state->cfg, "rr") || !state->cfg.requests.set ||
+            conn_ctx->started_requests < conn_ctx->request_limit) &&
            lsquic_conn_n_avail_streams(conn_ctx->conn) > 0) {
         ++state->pending_streams;
         lsquic_conn_make_stream(conn_ctx->conn);
@@ -574,6 +743,19 @@ static void try_open_streams(client_state_t *state) {
         try_open_streams_on_conn(state, conn_ctx);
         conn_ctx = conn_ctx->next;
     }
+}
+
+static int open_client_control_stream(client_state_t *state, struct lsquic_conn_ctx *conn_ctx) {
+    if (conn_ctx->control_opened || conn_ctx->closing || !conn_ctx->ready) {
+        return 0;
+    }
+    if (lsquic_conn_n_avail_streams(conn_ctx->conn) <= 0) {
+        return 0;
+    }
+    ++state->pending_control_streams;
+    conn_ctx->control_opened = 1;
+    lsquic_conn_make_stream(conn_ctx->conn);
+    return 0;
 }
 
 static int add_client_sport(client_state_t *state, uint64_t index, const char *service) {
@@ -725,6 +907,7 @@ static lsquic_conn_ctx_t *client_on_new_conn(void *stream_if_ctx, lsquic_conn_t 
     conn_ctx->state = state;
     conn_ctx->conn = conn;
     conn_ctx->sport = lsquic_conn_get_peer_ctx(conn, NULL);
+    conn_ctx->request_limit = rr_request_limit_for_connection(&state->cfg, state->active_conns);
     conn_ctx->next = state->conns;
     state->conns = conn_ctx;
     ++state->active_conns;
@@ -759,7 +942,10 @@ static lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, lsquic_str
     DEBUG_LOG(
         "client new stream stream=%p pending=%" PRIu64 " started=%" PRIu64 " target=%" PRIu64 "\n",
         (void *)stream, state->pending_streams, state->started_requests, state->target_requests);
-    if (state->pending_streams > 0) {
+    if ((uint64_t)lsquic_stream_id(stream) == CONTROL_STREAM_ID &&
+        state->pending_control_streams > 0) {
+        --state->pending_control_streams;
+    } else if (state->pending_streams > 0) {
         --state->pending_streams;
     }
     if (!stream || !should_start_request(state)) {
@@ -777,18 +963,41 @@ static lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, lsquic_str
     }
     stream_ctx->state = state;
     stream_ctx->conn_ctx = conn_ctx;
+    if ((uint64_t)lsquic_stream_id(stream) == CONTROL_STREAM_ID) {
+        stream_ctx->is_control = 1;
+        stream_ctx->control_fin = 1;
+        config_t connection_cfg = state->cfg;
+        if (is_mode(&state->cfg, "rr") && state->cfg.requests.set && conn_ctx) {
+            connection_cfg.requests.value = conn_ctx->request_limit;
+            connection_cfg.requests.set = 1;
+        }
+        stream_ctx->control_out =
+            encode_session_start_message(&connection_cfg, &stream_ctx->control_len);
+        if (stream_ctx->control_out == NULL) {
+            set_failure(state, "could not encode lsquic session_start");
+            free(stream_ctx);
+            lsquic_stream_close(stream);
+            maybe_finish_client(state);
+            return NULL;
+        }
+        lsquic_stream_wantwrite(stream, 1);
+        return stream_ctx;
+    }
+    if (conn_ctx && !conn_ctx->session_ready) {
+        lsquic_stream_close(stream);
+        free(stream_ctx);
+        maybe_finish_client(state);
+        return NULL;
+    }
     stream_ctx->request_bytes = scenario_request_bytes(&state->cfg);
     stream_ctx->response_bytes = scenario_response_bytes(&state->cfg);
     stream_ctx->counts_latency = !is_mode(&state->cfg, "bulk");
     stream_ctx->started_at = now_us();
-    uint64_t be_request = encode_be64(stream_ctx->request_bytes);
-    uint64_t be_response = encode_be64(stream_ctx->response_bytes);
-    memcpy(stream_ctx->header, &be_request, sizeof(be_request));
-    memcpy(stream_ctx->header + sizeof(be_request), &be_response, sizeof(be_response));
     ++state->started_requests;
     ++state->active_streams;
     if (conn_ctx) {
         ++conn_ctx->active_streams;
+        ++conn_ctx->started_requests;
     }
     lsquic_stream_wantwrite(stream, 1);
     return stream_ctx;
@@ -796,22 +1005,32 @@ static lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, lsquic_str
 
 static void client_on_write(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     struct lsquic_stream_ctx *stream_ctx = h;
-    DEBUG_LOG("client write stream=%" PRIu64 " header=%zu request=%" PRIu64 "/%" PRIu64 "\n",
-              (uint64_t)lsquic_stream_id(stream), stream_ctx->header_sent, stream_ctx->request_sent,
+    DEBUG_LOG("client write stream=%" PRIu64 " request=%" PRIu64 "/%" PRIu64 "\n",
+              (uint64_t)lsquic_stream_id(stream), stream_ctx->request_sent,
               stream_ctx->request_bytes);
     static const uint8_t zeros[WRITE_CHUNK_SIZE] = {0};
-    while (stream_ctx->header_sent < sizeof(stream_ctx->header)) {
-        ssize_t nw = lsquic_stream_write(stream, stream_ctx->header + stream_ctx->header_sent,
-                                         sizeof(stream_ctx->header) - stream_ctx->header_sent);
-        if (nw > 0) {
-            stream_ctx->header_sent += (size_t)nw;
-        } else if (nw < 0 && errno != EWOULDBLOCK) {
-            set_failure(stream_ctx->state, strerror(errno));
-            lsquic_stream_close(stream);
-            return;
-        } else {
-            return;
+    if (stream_ctx->is_control) {
+        while (stream_ctx->control_sent < stream_ctx->control_len) {
+            ssize_t nw =
+                lsquic_stream_write(stream, stream_ctx->control_out + stream_ctx->control_sent,
+                                    stream_ctx->control_len - stream_ctx->control_sent);
+            if (nw > 0) {
+                stream_ctx->control_sent += (size_t)nw;
+            } else if (nw < 0 && errno != EWOULDBLOCK) {
+                set_failure(stream_ctx->state, strerror(errno));
+                lsquic_stream_close(stream);
+                return;
+            } else {
+                return;
+            }
         }
+        lsquic_stream_wantwrite(stream, 0);
+        (void)lsquic_stream_flush(stream);
+        if (stream_ctx->control_fin) {
+            lsquic_stream_shutdown(stream, 1);
+        }
+        lsquic_stream_wantread(stream, 1);
+        return;
     }
     while (stream_ctx->request_sent < stream_ctx->request_bytes) {
         uint64_t left = stream_ctx->request_bytes - stream_ctx->request_sent;
@@ -834,6 +1053,57 @@ static void client_on_write(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
 
 static void client_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     struct lsquic_stream_ctx *stream_ctx = h;
+    if (stream_ctx->is_control) {
+        uint8_t buf[1024];
+        for (;;) {
+            ssize_t nr = lsquic_stream_read(stream, buf, sizeof(buf));
+            if (nr > 0) {
+                if (stream_ctx->control_in_len + (size_t)nr > stream_ctx->control_in_cap) {
+                    size_t next = stream_ctx->control_in_cap ? stream_ctx->control_in_cap * 2 : 128;
+                    while (next < stream_ctx->control_in_len + (size_t)nr) {
+                        next *= 2;
+                    }
+                    uint8_t *new_bytes = realloc(stream_ctx->control_in, next);
+                    if (!new_bytes) {
+                        set_failure(stream_ctx->state,
+                                    "out of memory reading lsquic control stream");
+                        lsquic_stream_close(stream);
+                        return;
+                    }
+                    stream_ctx->control_in = new_bytes;
+                    stream_ctx->control_in_cap = next;
+                }
+                memcpy(stream_ctx->control_in + stream_ctx->control_in_len, buf, (size_t)nr);
+                stream_ctx->control_in_len += (size_t)nr;
+            } else if (nr == 0) {
+                lsquic_stream_wantread(stream, 0);
+                return;
+            } else if (errno == EWOULDBLOCK) {
+                break;
+            } else {
+                set_failure(stream_ctx->state, strerror(errno));
+                lsquic_stream_close(stream);
+                return;
+            }
+        }
+        if (stream_ctx->control_in_len >= 5) {
+            uint32_t payload_len = decode_be32(stream_ctx->control_in + 1);
+            if (stream_ctx->control_in_len >= (size_t)payload_len + 5) {
+                if (stream_ctx->control_in[0] == MESSAGE_SESSION_READY && payload_len == 4 &&
+                    decode_be32(stream_ctx->control_in + 5) == PERF_PROTOCOL_VERSION) {
+                    if (stream_ctx->conn_ctx) {
+                        stream_ctx->conn_ctx->session_ready = 1;
+                        try_open_streams_on_conn(stream_ctx->state, stream_ctx->conn_ctx);
+                    }
+                } else if (stream_ctx->control_in[0] == MESSAGE_SESSION_ERROR) {
+                    set_failure(stream_ctx->state, "lsquic server reported session_error");
+                } else {
+                    set_failure(stream_ctx->state, "unexpected lsquic control message");
+                }
+            }
+        }
+        return;
+    }
     DEBUG_LOG("client read stream=%" PRIu64 " response=%" PRIu64 "/%" PRIu64 "\n",
               (uint64_t)lsquic_stream_id(stream), stream_ctx->response_read,
               stream_ctx->response_bytes);
@@ -863,6 +1133,13 @@ static void client_on_close(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     DEBUG_LOG("client close completed=%d response=%" PRIu64 "/%" PRIu64 "\n", stream_ctx->completed,
               stream_ctx->response_read, stream_ctx->response_bytes);
     client_state_t *state = stream_ctx->state;
+    if (stream_ctx->is_control) {
+        free(stream_ctx->control_out);
+        free(stream_ctx->control_in);
+        free(stream_ctx);
+        maybe_finish_client(state);
+        return;
+    }
     if (stream_ctx->completed) {
         state->counters.bytes_sent += stream_ctx->request_bytes;
         state->counters.bytes_received += stream_ctx->response_bytes;
@@ -881,6 +1158,8 @@ static void client_on_close(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
         stream_ctx->conn_ctx->closing = 1;
         lsquic_conn_close(stream_ctx->conn_ctx->conn);
     }
+    free(stream_ctx->control_out);
+    free(stream_ctx->control_in);
     free(stream_ctx);
     maybe_finish_client(state);
 }
@@ -897,7 +1176,7 @@ static void client_on_hsk_done(lsquic_conn_t *conn, enum lsquic_hsk_status statu
         lsquic_conn_close(conn);
         return;
     }
-    try_open_streams_on_conn(conn_ctx->state, conn_ctx);
+    open_client_control_stream(conn_ctx->state, conn_ctx);
 }
 
 const struct lsquic_stream_if client_stream_if = {
@@ -912,12 +1191,18 @@ const struct lsquic_stream_if client_stream_if = {
 
 static lsquic_conn_ctx_t *server_on_new_conn(void *stream_if_ctx, lsquic_conn_t *conn) {
     (void)stream_if_ctx;
-    (void)conn;
-    return NULL;
+    struct lsquic_conn_ctx *conn_ctx = calloc(1, sizeof(*conn_ctx));
+    if (!conn_ctx) {
+        perror("calloc");
+        exit(1);
+    }
+    conn_ctx->conn = conn;
+    return conn_ctx;
 }
 
 static void server_on_conn_closed(lsquic_conn_t *conn) {
-    (void)conn;
+    struct lsquic_conn_ctx *conn_ctx = lsquic_conn_get_ctx(conn);
+    free(conn_ctx);
 }
 
 static lsquic_stream_ctx_t *server_on_new_stream(void *stream_if_ctx, lsquic_stream_t *stream) {
@@ -928,73 +1213,101 @@ static lsquic_stream_ctx_t *server_on_new_stream(void *stream_if_ctx, lsquic_str
         perror("calloc");
         exit(1);
     }
+    stream_ctx->conn_ctx = lsquic_conn_get_ctx(lsquic_stream_conn(stream));
+    stream_ctx->is_control = (uint64_t)lsquic_stream_id(stream) == CONTROL_STREAM_ID;
     lsquic_stream_wantread(stream, 1);
     return stream_ctx;
 }
 
-static size_t discard_readf(void *user_data, const unsigned char *buf, size_t count, int fin) {
-    struct lsquic_stream_ctx *stream_ctx = user_data;
-    (void)buf;
-    stream_ctx->server.request_read += count;
-    if (fin) {
-        stream_ctx->server.request_fin = 1;
-    }
-    return count;
-}
-
 static void server_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     struct lsquic_stream_ctx *stream_ctx = h;
-    DEBUG_LOG("server read stream=%" PRIu64 " header=%zu left=%" PRIu64 "\n",
-              (uint64_t)lsquic_stream_id(stream), stream_ctx->server.header_read,
-              stream_ctx->server.response_left);
-    while (stream_ctx->server.header_read < sizeof(stream_ctx->server.header)) {
-        size_t need = sizeof(stream_ctx->server.header) - stream_ctx->server.header_read;
-        ssize_t nr = lsquic_stream_read(
-            stream, stream_ctx->server.header + stream_ctx->server.header_read, need);
-        if (nr > 0) {
-            stream_ctx->server.header_read += (size_t)nr;
-            if (stream_ctx->server.header_read == sizeof(stream_ctx->server.header)) {
-                stream_ctx->server.request_bytes = decode_be64(stream_ctx->server.header);
-                stream_ctx->server.response_bytes = decode_be64(stream_ctx->server.header + 8);
-                stream_ctx->server.response_left = stream_ctx->server.response_bytes;
-                if (stream_ctx->server.request_bytes == 0) {
-                    stream_ctx->server.ready_to_send = 1;
+    if (stream_ctx->is_control) {
+        uint8_t buf[1024];
+        for (;;) {
+            ssize_t nr = lsquic_stream_read(stream, buf, sizeof(buf));
+            if (nr > 0) {
+                if (stream_ctx->control_in_len + (size_t)nr > stream_ctx->control_in_cap) {
+                    size_t next = stream_ctx->control_in_cap ? stream_ctx->control_in_cap * 2 : 128;
+                    while (next < stream_ctx->control_in_len + (size_t)nr) {
+                        next *= 2;
+                    }
+                    uint8_t *new_bytes = realloc(stream_ctx->control_in, next);
+                    if (!new_bytes) {
+                        lsquic_stream_close(stream);
+                        return;
+                    }
+                    stream_ctx->control_in = new_bytes;
+                    stream_ctx->control_in_cap = next;
                 }
+                memcpy(stream_ctx->control_in + stream_ctx->control_in_len, buf, (size_t)nr);
+                stream_ctx->control_in_len += (size_t)nr;
+            } else if (nr == 0) {
+                break;
+            } else if (errno == EWOULDBLOCK) {
+                break;
+            } else {
+                lsquic_stream_close(stream);
+                return;
             }
+        }
+        if (stream_ctx->control_in_len >= 5) {
+            uint32_t payload_len = decode_be32(stream_ctx->control_in + 1);
+            if (stream_ctx->control_in_len >= (size_t)payload_len + 5) {
+                size_t msg_len = 0;
+                if (stream_ctx->control_in[0] == MESSAGE_SESSION_START && stream_ctx->conn_ctx &&
+                    decode_session_start_payload(stream_ctx->control_in + 5, payload_len,
+                                                 &stream_ctx->conn_ctx->session_start) == 0) {
+                    stream_ctx->conn_ctx->session_ready = 1;
+                    stream_ctx->control_out = encode_session_ready_message(&msg_len);
+                    stream_ctx->control_fin = 0;
+                } else {
+                    stream_ctx->control_out =
+                        encode_session_error_message("invalid session_start", &msg_len);
+                    stream_ctx->control_fin = 1;
+                }
+                stream_ctx->control_len = msg_len;
+                if (stream_ctx->control_out == NULL) {
+                    lsquic_stream_close(stream);
+                    return;
+                }
+                lsquic_stream_wantwrite(stream, 1);
+            }
+        }
+        return;
+    }
+    DEBUG_LOG("server read stream=%" PRIu64 " left=%" PRIu64 "\n",
+              (uint64_t)lsquic_stream_id(stream), stream_ctx->server.response_left);
+    if (!stream_ctx->conn_ctx || !stream_ctx->conn_ctx->session_start.started) {
+        lsquic_conn_abort(lsquic_stream_conn(stream));
+        return;
+    }
+    if (!stream_ctx->server.shape_set) {
+        stream_ctx->server.request_bytes = stream_ctx->conn_ctx->session_start.request_bytes;
+        stream_ctx->server.response_bytes = stream_ctx->conn_ctx->session_start.response_bytes;
+        stream_ctx->server.response_left = stream_ctx->server.response_bytes;
+        stream_ctx->server.shape_set = 1;
+    }
+    for (;;) {
+        uint8_t buf[8192];
+        ssize_t nr = lsquic_stream_read(stream, buf, sizeof(buf));
+        if (nr > 0) {
+            stream_ctx->server.request_read += (uint64_t)nr;
         } else if (nr == 0) {
-            lsquic_conn_abort(lsquic_stream_conn(stream));
-            return;
+            stream_ctx->server.request_fin = 1;
+            break;
         } else if (errno == EWOULDBLOCK) {
-            return;
+            break;
         } else {
             lsquic_stream_close(stream);
             return;
         }
     }
 
-    int read_would_block = 0;
-    if (!stream_ctx->server.request_fin) {
-        ssize_t nr = lsquic_stream_readf(stream, discard_readf, stream_ctx);
-        if (nr == 0 && stream_ctx->server.request_read < stream_ctx->server.request_bytes) {
-            lsquic_conn_abort(lsquic_stream_conn(stream));
-            return;
-        }
-        if (nr == 0) {
-            stream_ctx->server.request_fin = 1;
-        }
-        if (nr < 0) {
-            if (errno != EWOULDBLOCK) {
-                lsquic_stream_close(stream);
-                return;
-            }
-            read_would_block = 1;
-        }
-    }
     if (stream_ctx->server.request_read >= stream_ctx->server.request_bytes) {
         stream_ctx->server.ready_to_send = 1;
     }
     if (stream_ctx->server.ready_to_send) {
-        if (stream_ctx->server.request_fin || read_would_block) {
+        if (stream_ctx->server.request_fin) {
             lsquic_stream_wantread(stream, 0);
         }
         lsquic_stream_wantwrite(stream, 1);
@@ -1003,6 +1316,27 @@ static void server_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
 
 static void server_on_write(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     struct lsquic_stream_ctx *stream_ctx = h;
+    if (stream_ctx->is_control) {
+        while (stream_ctx->control_sent < stream_ctx->control_len) {
+            ssize_t nw =
+                lsquic_stream_write(stream, stream_ctx->control_out + stream_ctx->control_sent,
+                                    stream_ctx->control_len - stream_ctx->control_sent);
+            if (nw > 0) {
+                stream_ctx->control_sent += (size_t)nw;
+            } else if (nw < 0 && errno != EWOULDBLOCK) {
+                lsquic_stream_close(stream);
+                return;
+            } else {
+                return;
+            }
+        }
+        lsquic_stream_wantwrite(stream, 0);
+        (void)lsquic_stream_flush(stream);
+        if (stream_ctx->control_fin) {
+            lsquic_stream_shutdown(stream, 1);
+        }
+        return;
+    }
     DEBUG_LOG("server write stream=%" PRIu64 " left=%" PRIu64 "\n",
               (uint64_t)lsquic_stream_id(stream), stream_ctx->server.response_left);
     static const uint8_t zeros[WRITE_CHUNK_SIZE] = {0};
@@ -1026,7 +1360,12 @@ static void server_on_write(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
 
 static void server_on_close(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     DEBUG_LOG("server close stream=%" PRIu64 "\n", (uint64_t)lsquic_stream_id(stream));
-    free(h);
+    struct lsquic_stream_ctx *stream_ctx = h;
+    if (stream_ctx) {
+        free(stream_ctx->control_out);
+        free(stream_ctx->control_in);
+    }
+    free(stream_ctx);
 }
 
 const struct lsquic_stream_if server_stream_if = {
@@ -1266,7 +1605,8 @@ static run_summary_t run_client(const config_t *cfg) {
         }
     }
 
-    uint64_t initial_connections = is_mode(cfg, "crr") ? cfg->connections : cfg->connections;
+    uint64_t initial_connections =
+        is_mode(cfg, "rr") ? rr_connection_target(cfg) : cfg->connections;
     for (uint64_t i = 0; i < initial_connections && should_start_request(&state); ++i) {
         if (start_client_connection(&state) != 0) {
             break;
@@ -1274,6 +1614,10 @@ static run_summary_t run_client(const config_t *cfg) {
     }
     if (!state.failed) {
         prog_run(&state.prog);
+    }
+    if (!state.failed && !state.bounded && !is_mode(cfg, "bulk") &&
+        state.counters.requests_completed == 0) {
+        set_failure(&state, "timed request-response run completed zero requests");
     }
     uint64_t elapsed_us = now_us() - state.measure_start_us;
     if (!state.bounded && !state.failed) {

@@ -962,6 +962,141 @@ TEST(QuicCoreTest, PeerMigrationKeepsPendingSendPathDespiteOldPathTraffic) {
     EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
 }
 
+TEST(QuicCoreTest, PeerMigrationFollowsHigherNumberedPacketBackToValidatedPath) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.note_inbound_application_packet_for_path(3, 89);
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{coquic::quic::PingFrame{}},
+                        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/7, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/100)
+                    .has_value());
+    ASSERT_EQ(connection.current_send_path_id_, 7u);
+    ASSERT_TRUE(connection.paths_.contains(7));
+    EXPECT_FALSE(connection.paths_.at(7).validated);
+    ASSERT_TRUE(connection.paths_.at(7).largest_inbound_application_packet_number.has_value());
+    EXPECT_EQ(connection.paths_.at(7).largest_inbound_application_packet_number, 100u);
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{coquic::quic::PingFrame{}},
+                        coquic::quic::test::test_time(2), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/3, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/101)
+                    .has_value());
+
+    EXPECT_EQ(connection.current_send_path_id_, 3u);
+    EXPECT_EQ(connection.previous_path_id_, 7u);
+}
+
+TEST(QuicCoreTest, PeerMigrationRebindBouncePreservesOutstandingChallenge) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.note_inbound_application_packet_for_path(3, 100);
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{coquic::quic::PingFrame{}},
+                        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/7, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/101)
+                    .has_value());
+    ASSERT_EQ(connection.current_send_path_id_, 7u);
+    ASSERT_TRUE(connection.paths_.contains(7));
+    ASSERT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+    const auto first_challenge =
+        optional_ref_or_terminate(connection.paths_.at(7).outstanding_challenge);
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{coquic::quic::PingFrame{}},
+                        coquic::quic::test::test_time(2), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/3, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/102)
+                    .has_value());
+    ASSERT_EQ(connection.current_send_path_id_, 3u);
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{coquic::quic::PingFrame{}},
+                        coquic::quic::test::test_time(3), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/7, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/103)
+                    .has_value());
+    ASSERT_EQ(connection.current_send_path_id_, 7u);
+    ASSERT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(connection.paths_.at(7).outstanding_challenge),
+              first_challenge);
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{
+                            coquic::quic::PathResponseFrame{.data = first_challenge},
+                        },
+                        coquic::quic::test::test_time(4), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/7, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/104)
+                    .has_value());
+
+    EXPECT_TRUE(connection.paths_.at(7).validated);
+    EXPECT_FALSE(connection.paths_.at(7).outstanding_challenge.has_value());
+    EXPECT_EQ(connection.last_validated_path_id_, 7u);
+}
+
+TEST(QuicCoreTest, PeerMigrationLatePathResponseValidatesAbandonedPath) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.note_inbound_application_packet_for_path(3, 100);
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{coquic::quic::PingFrame{}},
+                        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/7, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/101)
+                    .has_value());
+    ASSERT_EQ(connection.current_send_path_id_, 7u);
+    ASSERT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+    const auto outstanding_challenge =
+        optional_ref_or_terminate(connection.paths_.at(7).outstanding_challenge);
+
+    connection.paths_.at(7).validation_deadline = coquic::quic::test::test_time(2);
+    connection.on_timeout(coquic::quic::test::test_time(3));
+
+    EXPECT_EQ(connection.current_send_path_id_, 3u);
+    EXPECT_FALSE(connection.paths_.at(7).challenge_pending);
+    ASSERT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(connection.paths_.at(7).outstanding_challenge),
+              outstanding_challenge);
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{
+                            coquic::quic::PathResponseFrame{.data = outstanding_challenge},
+                        },
+                        coquic::quic::test::test_time(4), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/7, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/102)
+                    .has_value());
+
+    EXPECT_TRUE(connection.paths_.at(7).validated);
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_EQ(connection.last_validated_path_id_, 7u);
+    EXPECT_FALSE(connection.paths_.at(7).outstanding_challenge.has_value());
+}
+
 TEST(QuicCoreTest, PreferredAddressMigrationUsesPreferredAddressConnectionId) {
     auto connection = make_connected_client_connection();
     connection.paths_.clear();

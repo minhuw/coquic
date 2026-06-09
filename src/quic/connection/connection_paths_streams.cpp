@@ -606,12 +606,16 @@ void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_lo
         return;
     }
     auto &path = ensure_path_state(path_id);
+    const bool validation_already_underway =
+        !path.validated && path.outstanding_challenge.has_value();
     path.validated = false;
     path.is_current_send_path = true;
     set_path_peer_connection_id_sequence(path, *peer_connection_id_sequence);
     path.challenge_pending = true;
     path.validation_initiated_locally = initiated_locally;
-    path.outstanding_challenge = next_path_challenge_data(path_id);
+    if (!validation_already_underway) {
+        path.outstanding_challenge = next_path_challenge_data(path_id);
+    }
     path.validation_deadline = now + path_validation_timeout_period();
     current_send_path_id_ = path_id;
 }
@@ -2423,7 +2427,10 @@ bool QuicConnection::should_keep_current_send_path_for_inbound_non_probing(
         *packet_number < *current->largest_inbound_application_packet_number) {
         return true;
     }
-    if (path_state_is_validating(current) && path_state_is_validated(inbound)) {
+    if (path_state_is_validating(current) && path_state_is_validated(inbound) &&
+        (!packet_number.has_value() ||
+         !current->largest_inbound_application_packet_number.has_value() ||
+         *packet_number < *current->largest_inbound_application_packet_number)) {
         return true;
     }
 

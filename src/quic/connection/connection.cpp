@@ -1081,7 +1081,6 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
         current.is_current_send_path = false;
         current.challenge_pending = false;
         current.validation_initiated_locally = false;
-        current.outstanding_challenge.reset();
         current.validation_deadline.reset();
         previous_path_id_ = current_send_path_id_;
         current_send_path_id_ = last_validated_path_id_;

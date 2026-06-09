@@ -27,10 +27,12 @@ typedef uint16_t coquic_http3_error_code_t;
 #define COQUIC_HTTP3_ERROR_REQUEST_CANCELLED 0x010cu
 #define COQUIC_HTTP3_ERROR_REQUEST_INCOMPLETE 0x010du
 #define COQUIC_HTTP3_ERROR_MESSAGE_ERROR 0x010eu
+#define COQUIC_HTTP3_ERROR_CONNECT_ERROR 0x010fu
 #define COQUIC_HTTP3_ERROR_VERSION_FALLBACK 0x0110u
 #define COQUIC_HTTP3_ERROR_QPACK_DECOMPRESSION_FAILED 0x0200u
 #define COQUIC_HTTP3_ERROR_QPACK_ENCODER_STREAM_ERROR 0x0201u
 #define COQUIC_HTTP3_ERROR_QPACK_DECODER_STREAM_ERROR 0x0202u
+#define COQUIC_HTTP3_ERROR_DATAGRAM_ERROR 0x0033u
 
 typedef struct coquic_http3_optional_u64 {
     uint8_t has_value;
@@ -42,11 +44,15 @@ typedef struct coquic_http3_settings {
     uint64_t qpack_max_table_capacity;
     uint64_t qpack_blocked_streams;
     coquic_http3_optional_u64_t max_field_section_size;
+    uint8_t enable_connect_protocol;
+    uint8_t h3_datagram;
 } coquic_http3_settings_t;
 
 typedef struct coquic_http3_client_config {
     size_t size;
     coquic_http3_settings_t local_settings;
+    uint8_t has_remembered_peer_settings;
+    coquic_http3_settings_t remembered_peer_settings;
 } coquic_http3_client_config_t;
 
 typedef struct coquic_http3_server_config {
@@ -79,6 +85,9 @@ typedef struct coquic_http3_request_head {
     coquic_http3_optional_u64_t content_length;
     const coquic_http3_field_t *headers;
     size_t headers_count;
+    uint8_t has_protocol;
+    const char *protocol;
+    size_t protocol_length;
 } coquic_http3_request_head_t;
 
 typedef struct coquic_http3_response_head {
@@ -102,6 +111,8 @@ typedef struct coquic_http3_request_head_view {
     coquic_bytes_view_t scheme;
     coquic_bytes_view_t authority;
     coquic_bytes_view_t path;
+    uint8_t has_protocol;
+    coquic_bytes_view_t protocol;
     coquic_http3_optional_u64_t content_length;
     const coquic_http3_field_view_t *headers;
     size_t headers_count;
@@ -142,6 +153,31 @@ typedef struct coquic_http3_client_request_error_event {
     uint64_t application_error_code;
 } coquic_http3_client_request_error_event_t;
 
+typedef struct coquic_http3_client_push_response_event {
+    coquic_stream_id_t request_stream_id;
+    uint64_t push_id;
+    coquic_http3_request_head_view_t request;
+    coquic_http3_response_view_t response;
+} coquic_http3_client_push_response_event_t;
+
+typedef struct coquic_http3_client_push_error_event {
+    uint64_t push_id;
+    uint8_t has_request;
+    coquic_http3_request_head_view_t request;
+    uint64_t application_error_code;
+} coquic_http3_client_push_error_event_t;
+
+typedef struct coquic_http3_priority_update_event {
+    uint64_t id;
+    uint8_t push;
+    coquic_bytes_view_t priority_field_value;
+} coquic_http3_priority_update_event_t;
+
+typedef struct coquic_http3_datagram_event {
+    coquic_stream_id_t stream_id;
+    coquic_bytes_view_t payload;
+} coquic_http3_datagram_event_t;
+
 typedef struct coquic_http3_server_request_cancelled_event {
     coquic_stream_id_t stream_id;
     uint8_t has_head;
@@ -173,6 +209,23 @@ COQUIC_FFI_API void coquic_http3_client_destroy(coquic_http3_client_t *client);
 COQUIC_FFI_API coquic_status_t coquic_http3_client_submit_request(
     coquic_http3_client_t *client, const coquic_http3_request_t *request,
     coquic_stream_id_t *out_stream_id, coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_client_submit_max_push_id(
+    coquic_http3_client_t *client, uint64_t push_id, coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_client_cancel_push(coquic_http3_client_t *client,
+                                                               uint64_t push_id,
+                                                               coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_client_submit_priority_update_for_request(
+    coquic_http3_client_t *client, coquic_stream_id_t stream_id, const char *priority_field_value,
+    size_t priority_field_value_length, coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_client_submit_priority_update_for_push(
+    coquic_http3_client_t *client, uint64_t push_id, const char *priority_field_value,
+    size_t priority_field_value_length, coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_client_submit_datagram(coquic_http3_client_t *client,
+                                                                   coquic_stream_id_t stream_id,
+                                                                   coquic_bytes_t payload,
+                                                                   coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_client_abort_connect_stream(
+    coquic_http3_client_t *client, coquic_stream_id_t stream_id, coquic_http3_error_t *out_error);
 COQUIC_FFI_API coquic_status_t
 coquic_http3_client_on_quic_result(coquic_http3_client_t *client, const coquic_result_t *result,
                                    coquic_time_us_t now, coquic_http3_client_update_t **out_update);
@@ -196,6 +249,26 @@ coquic_http3_client_update_request_error_count(const coquic_http3_client_update_
 COQUIC_FFI_API coquic_status_t coquic_http3_client_update_request_error_at(
     const coquic_http3_client_update_t *update, size_t index,
     coquic_http3_client_request_error_event_t *out_event);
+COQUIC_FFI_API size_t
+coquic_http3_client_update_push_response_count(const coquic_http3_client_update_t *update);
+COQUIC_FFI_API coquic_status_t coquic_http3_client_update_push_response_at(
+    const coquic_http3_client_update_t *update, size_t index,
+    coquic_http3_client_push_response_event_t *out_event);
+COQUIC_FFI_API size_t
+coquic_http3_client_update_push_error_count(const coquic_http3_client_update_t *update);
+COQUIC_FFI_API coquic_status_t
+coquic_http3_client_update_push_error_at(const coquic_http3_client_update_t *update, size_t index,
+                                         coquic_http3_client_push_error_event_t *out_event);
+COQUIC_FFI_API size_t
+coquic_http3_client_update_priority_update_count(const coquic_http3_client_update_t *update);
+COQUIC_FFI_API coquic_status_t coquic_http3_client_update_priority_update_at(
+    const coquic_http3_client_update_t *update, size_t index,
+    coquic_http3_priority_update_event_t *out_event);
+COQUIC_FFI_API size_t
+coquic_http3_client_update_datagram_count(const coquic_http3_client_update_t *update);
+COQUIC_FFI_API coquic_status_t
+coquic_http3_client_update_datagram_at(const coquic_http3_client_update_t *update, size_t index,
+                                       coquic_http3_datagram_event_t *out_event);
 COQUIC_FFI_API uint8_t
 coquic_http3_client_update_has_pending_work(const coquic_http3_client_update_t *update);
 COQUIC_FFI_API uint8_t
@@ -206,6 +279,37 @@ coquic_http3_client_update_handled_local_error(const coquic_http3_client_update_
 COQUIC_FFI_API coquic_status_t coquic_http3_server_create(
     const coquic_http3_server_config_t *config, coquic_http3_server_t **out_server);
 COQUIC_FFI_API void coquic_http3_server_destroy(coquic_http3_server_t *server);
+COQUIC_FFI_API coquic_status_t coquic_http3_server_submit_push_promise(
+    coquic_http3_server_t *server, coquic_stream_id_t request_stream_id,
+    const coquic_http3_request_head_t *head, uint64_t *out_push_id,
+    coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_server_submit_push_response_head(
+    coquic_http3_server_t *server, uint64_t push_id, const coquic_http3_response_head_t *head,
+    coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_server_submit_push_response_body(
+    coquic_http3_server_t *server, uint64_t push_id, coquic_bytes_t body, uint8_t fin,
+    coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_server_submit_push_response_trailers(
+    coquic_http3_server_t *server, uint64_t push_id, const coquic_http3_field_t *trailers,
+    size_t trailers_count, uint8_t fin, coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_server_finish_push_response(
+    coquic_http3_server_t *server, uint64_t push_id, uint8_t enforce_content_length,
+    coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_server_cancel_push(coquic_http3_server_t *server,
+                                                               uint64_t push_id,
+                                                               coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_server_submit_priority_update_for_request(
+    coquic_http3_server_t *server, coquic_stream_id_t stream_id, const char *priority_field_value,
+    size_t priority_field_value_length, coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_server_submit_priority_update_for_push(
+    coquic_http3_server_t *server, uint64_t push_id, const char *priority_field_value,
+    size_t priority_field_value_length, coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_server_submit_datagram(coquic_http3_server_t *server,
+                                                                   coquic_stream_id_t stream_id,
+                                                                   coquic_bytes_t payload,
+                                                                   coquic_http3_error_t *out_error);
+COQUIC_FFI_API coquic_status_t coquic_http3_server_abort_connect_stream(
+    coquic_http3_server_t *server, coquic_stream_id_t stream_id, coquic_http3_error_t *out_error);
 COQUIC_FFI_API coquic_status_t
 coquic_http3_server_on_quic_result(coquic_http3_server_t *server, const coquic_result_t *result,
                                    coquic_time_us_t now, coquic_http3_server_update_t **out_update);
@@ -224,6 +328,16 @@ coquic_http3_server_update_request_cancelled_count(const coquic_http3_server_upd
 COQUIC_FFI_API coquic_status_t coquic_http3_server_update_request_cancelled_at(
     const coquic_http3_server_update_t *update, size_t index,
     coquic_http3_server_request_cancelled_event_t *out_event);
+COQUIC_FFI_API size_t
+coquic_http3_server_update_priority_update_count(const coquic_http3_server_update_t *update);
+COQUIC_FFI_API coquic_status_t coquic_http3_server_update_priority_update_at(
+    const coquic_http3_server_update_t *update, size_t index,
+    coquic_http3_priority_update_event_t *out_event);
+COQUIC_FFI_API size_t
+coquic_http3_server_update_datagram_count(const coquic_http3_server_update_t *update);
+COQUIC_FFI_API coquic_status_t
+coquic_http3_server_update_datagram_at(const coquic_http3_server_update_t *update, size_t index,
+                                       coquic_http3_datagram_event_t *out_event);
 COQUIC_FFI_API uint8_t
 coquic_http3_server_update_has_pending_work(const coquic_http3_server_update_t *update);
 COQUIC_FFI_API uint8_t

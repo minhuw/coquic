@@ -37,10 +37,12 @@ enum class ErrorCode : std::uint16_t {
     request_cancelled = 0x010c,
     request_incomplete = 0x010d,
     message_error = 0x010e,
+    connect_error = 0x010f,
     version_fallback = 0x0110,
     qpack_decompression_failed = 0x0200,
     qpack_encoder_stream_error = 0x0201,
     qpack_decoder_stream_error = 0x0202,
+    datagram_error = 0x0033,
 };
 
 struct Error {
@@ -92,6 +94,8 @@ struct Settings {
     std::uint64_t qpack_max_table_capacity = 4096;
     std::uint64_t qpack_blocked_streams = 16;
     std::optional<std::uint64_t> max_field_section_size = 64 * 1024;
+    bool enable_connect_protocol = false;
+    bool h3_datagram = false;
 };
 
 struct RequestHead {
@@ -99,6 +103,7 @@ struct RequestHead {
     std::string scheme;
     std::string authority;
     std::string path;
+    std::optional<std::string> protocol;
     std::optional<std::uint64_t> content_length;
     Headers headers;
 };
@@ -124,6 +129,7 @@ struct Response {
 
 struct ClientConfig {
     Settings local_settings;
+    std::optional<Settings> remembered_peer_settings;
 };
 
 struct ClientResponseEvent {
@@ -138,10 +144,38 @@ struct ClientRequestErrorEvent {
     std::uint64_t application_error_code = 0;
 };
 
+struct ClientPushResponseEvent {
+    StreamId request_stream_id = 0;
+    std::uint64_t push_id = 0;
+    RequestHead request;
+    Response response;
+};
+
+struct ClientPushErrorEvent {
+    std::uint64_t push_id = 0;
+    std::optional<RequestHead> request;
+    std::uint64_t application_error_code = 0;
+};
+
+struct PriorityUpdateEvent {
+    std::uint64_t id = 0;
+    bool push = false;
+    std::string priority_field_value;
+};
+
+struct DatagramEvent {
+    StreamId stream_id = 0;
+    std::vector<std::byte> payload;
+};
+
 struct ClientUpdate {
     std::vector<core::ConnectionInput> quic_inputs;
     std::vector<ClientResponseEvent> responses;
     std::vector<ClientRequestErrorEvent> request_errors;
+    std::vector<ClientPushResponseEvent> pushed_responses;
+    std::vector<ClientPushErrorEvent> push_errors;
+    std::vector<PriorityUpdateEvent> priority_updates;
+    std::vector<DatagramEvent> datagrams;
     bool has_pending_work = false;
     bool terminal_failure = false;
     bool handled_local_error = false;
@@ -158,6 +192,14 @@ class Client {
     Client &operator=(Client &&) noexcept;
 
     Result<StreamId> submit_request(const Request &request);
+    Result<bool> submit_max_push_id(std::uint64_t push_id);
+    Result<bool> cancel_push(std::uint64_t push_id);
+    Result<bool> submit_priority_update_for_request(StreamId stream_id,
+                                                    std::string priority_field_value);
+    Result<bool> submit_priority_update_for_push(std::uint64_t push_id,
+                                                 std::string priority_field_value);
+    Result<bool> submit_datagram(StreamId stream_id, std::span<const std::byte> payload);
+    Result<bool> abort_connect_stream(StreamId stream_id);
     ClientUpdate on_quic_result(const core::Result &result, TimePoint now);
     ClientUpdate poll(TimePoint now);
     bool has_failed() const;
@@ -185,6 +227,8 @@ struct ServerRequestCancelledEvent {
 struct ServerUpdate {
     std::vector<core::ConnectionInput> quic_inputs;
     std::vector<ServerRequestCancelledEvent> request_cancelled;
+    std::vector<PriorityUpdateEvent> priority_updates;
+    std::vector<DatagramEvent> datagrams;
     bool has_pending_work = false;
     bool terminal_failure = false;
     bool handled_local_error = false;
@@ -202,6 +246,20 @@ class Server {
 
     ServerUpdate on_quic_result(const core::Result &result, TimePoint now);
     ServerUpdate poll(TimePoint now);
+    Result<std::uint64_t> submit_push_promise(StreamId request_stream_id, const RequestHead &head);
+    Result<bool> submit_push_response_head(std::uint64_t push_id, const ResponseHead &head);
+    Result<bool> submit_push_response_body(std::uint64_t push_id, std::span<const std::byte> body,
+                                           bool fin = false);
+    Result<bool> submit_push_response_trailers(std::uint64_t push_id,
+                                               std::span<const Field> trailers, bool fin = true);
+    Result<bool> finish_push_response(std::uint64_t push_id, bool enforce_content_length = true);
+    Result<bool> cancel_push(std::uint64_t push_id);
+    Result<bool> submit_priority_update_for_request(StreamId stream_id,
+                                                    std::string priority_field_value);
+    Result<bool> submit_priority_update_for_push(std::uint64_t push_id,
+                                                 std::string priority_field_value);
+    Result<bool> submit_datagram(StreamId stream_id, std::span<const std::byte> payload);
+    Result<bool> abort_connect_stream(StreamId stream_id);
     bool has_failed() const;
 
   private:

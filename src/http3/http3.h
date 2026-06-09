@@ -36,10 +36,12 @@ enum class Http3ErrorCode : std::uint16_t {
     request_cancelled = 0x010c,
     request_incomplete = 0x010d,
     message_error = 0x010e,
+    connect_error = 0x010f,
     version_fallback = 0x0110,
     qpack_decompression_failed = 0x0200,
     qpack_encoder_stream_error = 0x0201,
     qpack_decoder_stream_error = 0x0202,
+    datagram_error = 0x0033,
 };
 
 struct Http3Error {
@@ -98,6 +100,7 @@ struct Http3RequestHead {
     std::string scheme;
     std::string authority;
     std::string path;
+    std::optional<std::string> protocol;
     std::optional<std::uint64_t> content_length;
     Http3Headers headers;
 };
@@ -182,16 +185,67 @@ struct Http3PeerResponseResetEvent {
     std::uint64_t application_error_code = 0;
 };
 
+struct Http3PeerPushPromiseEvent {
+    std::uint64_t request_stream_id = 0;
+    std::uint64_t push_id = 0;
+    Http3RequestHead head;
+};
+
+struct Http3PeerPushResponseHeadEvent {
+    std::uint64_t push_id = 0;
+    Http3ResponseHead head;
+};
+
+struct Http3PeerPushResponseBodyEvent {
+    std::uint64_t push_id = 0;
+    std::vector<std::byte> body;
+};
+
+struct Http3PeerPushResponseTrailersEvent {
+    std::uint64_t push_id = 0;
+    Http3Headers trailers;
+};
+
+struct Http3PeerPushResponseCompleteEvent {
+    std::uint64_t push_id = 0;
+};
+
+struct Http3PeerPushCancelledEvent {
+    std::uint64_t push_id = 0;
+};
+
+struct Http3PeerPushResetEvent {
+    std::uint64_t push_id = 0;
+    std::uint64_t application_error_code = 0;
+};
+
+struct Http3PriorityUpdateEvent {
+    std::uint64_t id = 0;
+    bool push = false;
+    std::string priority_field_value;
+};
+
+struct Http3DatagramEvent {
+    std::uint64_t stream_id = 0;
+    std::vector<std::byte> payload;
+};
+
 using Http3EndpointEvent = std::variant<
     Http3PeerRequestHeadEvent, Http3PeerRequestBodyEvent, Http3PeerRequestTrailersEvent,
     Http3PeerRequestCompleteEvent, Http3PeerRequestResetEvent, Http3PeerInformationalResponseEvent,
     Http3PeerResponseHeadEvent, Http3PeerResponseBodyEvent, Http3PeerResponseTrailersEvent,
-    Http3PeerResponseCompleteEvent, Http3PeerResponseResetEvent>;
+    Http3PeerResponseCompleteEvent, Http3PeerResponseResetEvent, Http3PeerPushPromiseEvent,
+    Http3PeerPushResponseHeadEvent, Http3PeerPushResponseBodyEvent,
+    Http3PeerPushResponseTrailersEvent, Http3PeerPushResponseCompleteEvent,
+    Http3PeerPushCancelledEvent, Http3PeerPushResetEvent, Http3PriorityUpdateEvent,
+    Http3DatagramEvent>;
 
 struct Http3SettingsSnapshot {
     std::uint64_t qpack_max_table_capacity = 4096;
     std::uint64_t qpack_blocked_streams = 16;
     std::optional<std::uint64_t> max_field_section_size = 64 * 1024;
+    bool enable_connect_protocol = false;
+    bool h3_datagram = false;
 };
 
 struct Http3EndpointUpdate {

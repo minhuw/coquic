@@ -14,6 +14,7 @@ shift
 binary="${COQUIC_FUZZ_OUT_DIR:-$repo_root/.fuzz/bin}/$target"
 input_dir="${COQUIC_FUZZ_CORPUS_DIR:-$repo_root/.fuzz/corpus}/$target"
 output_dir="${COQUIC_AFL_OUTPUT_DIR:-$repo_root/.fuzz/afl/$target}"
+dictionary="$repo_root/fuzz/dicts/$target.dict"
 
 if [ ! -x "$binary" ]; then
   "$repo_root/scripts/build-fuzzers.sh"
@@ -33,4 +34,9 @@ if [ ! -t 1 ]; then
   export AFL_NO_UI="${AFL_NO_UI:-1}"
 fi
 
-exec afl-fuzz -m none -i "$input_dir" -o "$output_dir" "$@" -- "$binary" @@
+afl_args=(-m none -i "$input_dir" -o "$output_dir")
+if [ -f "$dictionary" ]; then
+  afl_args+=(-x "$dictionary")
+fi
+
+exec afl-fuzz "${afl_args[@]}" "$@" -- "$binary" @@

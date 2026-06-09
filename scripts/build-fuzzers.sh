@@ -5,6 +5,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out_dir="${COQUIC_FUZZ_OUT_DIR:-$repo_root/.fuzz/bin}"
 cxx="${CXX:-}"
 
+source "$repo_root/scripts/fuzz-targets.sh"
+
 if command -v afl-clang-lto++ >/dev/null 2>&1; then
   cxx="${COQUIC_AFL_CXX:-afl-clang-lto++}"
 elif command -v afl-clang-fast++ >/dev/null 2>&1; then
@@ -33,6 +35,10 @@ if [ -n "$sanitizers" ]; then
   common_flags+=("-fsanitize=$sanitizers")
 fi
 
+if [ "${COQUIC_FUZZ_COVERAGE:-0}" = "1" ]; then
+  common_flags+=(-fprofile-instr-generate -fcoverage-mapping)
+fi
+
 common_sources=(
   "$repo_root/src/quic/codec/buffer.cpp"
   "$repo_root/src/quic/codec/frame.cpp"
@@ -43,7 +49,6 @@ common_sources=(
 
 transport_sources=(
   "$repo_root/src/quic/transport/transport_parameters.cpp"
-  "$repo_root/fuzz/src/fuzz_support.cpp"
 )
 
 build_target() {
@@ -58,9 +63,22 @@ build_target() {
     -o "$out_dir/$name"
 }
 
-build_target fuzz_varint
-build_target fuzz_frame
-build_target fuzz_plaintext_packet
-build_target fuzz_transport_parameters "${transport_sources[@]}"
+build_seed_generator() {
+  printf 'building generate_corpus\n'
+  "$cxx" "${common_flags[@]}" \
+    "$repo_root/fuzz/src/generate_corpus.cpp" \
+    "${common_sources[@]}" \
+    "${transport_sources[@]}" \
+    -o "$out_dir/generate_corpus"
+}
+
+for target in "${COQUIC_FUZZ_TARGETS[@]}"; do
+  if [ "$target" = "fuzz_transport_parameters" ]; then
+    build_target "$target" "${transport_sources[@]}"
+  else
+    build_target "$target"
+  fi
+done
+build_seed_generator
 
 printf 'built fuzzers in %s\n' "$out_dir"

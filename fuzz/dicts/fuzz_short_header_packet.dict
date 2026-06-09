@@ -1,0 +1,17 @@
+# Short-header packet constants.
+short_header="\x40"
+short_spin="\x60"
+short_key_phase="\x44"
+short_pn_1="\x40"
+short_pn_2="\x41"
+short_pn_3="\x42"
+short_pn_4="\x43"
+greased_short="\x00"
+frame_padding="\x00"
+frame_ping="\x01"
+frame_ack="\x02"
+frame_stream="\x0f"
+frame_datagram="\x31"
+dcid_aa="\xaa"
+dcid_deadbeef="\xde\xad\xbe\xef"
+

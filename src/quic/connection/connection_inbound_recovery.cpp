@@ -3,6 +3,17 @@
 
 namespace coquic::quic {
 
+namespace {
+
+TlsAdapter *optional_tls_pointer(std::optional<TlsAdapter> &tls) {
+    if (!tls.has_value()) {
+        return nullptr;
+    }
+    return &*tls;
+}
+
+} // namespace
+
 CodecResult<ConnectionId> QuicConnection::peek_client_initial_destination_connection_id(
     std::span<const std::byte> bytes) const {
     BufferReader reader(bytes);
@@ -802,7 +813,8 @@ CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
             continue;
         }
 
-        if (!tls_.has_value()) {
+        auto *tls = optional_tls_pointer(tls_);
+        if (tls == nullptr) {
             return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
         }
 
@@ -814,7 +826,7 @@ CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
             }
         }
 
-        const auto provided = tls_->provide(level, contiguous_bytes.value());
+        const auto provided = tls->provide(level, contiguous_bytes.value());
         if (!provided.has_value()) {
             return provided;
         }
@@ -876,7 +888,8 @@ CodecResult<bool> QuicConnection::process_inbound_received_crypto(
             continue;
         }
 
-        if (!tls_.has_value()) {
+        auto *tls = optional_tls_pointer(tls_);
+        if (tls == nullptr) {
             return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
         }
 
@@ -888,7 +901,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_crypto(
             }
         }
 
-        const auto provided = tls_->provide(level, contiguous_bytes.value().span());
+        const auto provided = tls->provide(level, contiguous_bytes.value().span());
         if (!provided.has_value()) {
             return provided;
         }
@@ -2536,13 +2549,14 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 continue;
             }
 
-            if (!tls_.has_value()) {
+            auto *tls = optional_tls_pointer(tls_);
+            if (tls == nullptr) {
                 return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                   0);
             }
 
             const auto provided =
-                tls_->provide(EncryptionLevel::application, contiguous_bytes.value());
+                tls->provide(EncryptionLevel::application, contiguous_bytes.value());
             if (!provided.has_value()) {
                 return provided;
             }
@@ -3029,13 +3043,14 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 continue;
             }
 
-            if (!tls_.has_value()) {
+            auto *tls = optional_tls_pointer(tls_);
+            if (tls == nullptr) {
                 return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state,
                                                   0);
             }
 
             const auto provided =
-                tls_->provide(EncryptionLevel::application, contiguous_bytes.value().span());
+                tls->provide(EncryptionLevel::application, contiguous_bytes.value().span());
             if (!provided.has_value()) {
                 return provided;
             }

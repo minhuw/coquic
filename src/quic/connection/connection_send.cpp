@@ -4187,7 +4187,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 if (!candidate_application_datagram.has_value()) {
                     return fallback_to_existing_packets_or_ack_only(/*require_due_ack_only=*/false);
                 }
-                candidate_datagram_size = datagram_size_or_zero(candidate_application_datagram);
             }
             if (!split_small_terminal_stream_fin_candidate()) {
                 return fail_datagram_send(has_pending_tracked_packet());

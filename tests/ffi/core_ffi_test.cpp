@@ -1,8 +1,10 @@
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <type_traits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -39,6 +41,11 @@ std::array<std::byte, N> byte_array(std::initializer_list<std::uint8_t> values) 
         out[index++] = static_cast<std::byte>(value);
     }
     return out;
+}
+
+template <typename Enum>
+Enum enum_value_from_underlying_for_tests(std::underlying_type_t<Enum> value) {
+    return std::bit_cast<Enum>(value);
 }
 
 void expect_bytes(coquic_bytes_view_t actual, std::initializer_list<std::uint8_t> expected) {
@@ -1033,7 +1040,7 @@ TEST(CoquicCoreFfiTest, ResultAccessorsExposeRemainingEnumVariants) {
             .connection = 14,
             .route_handle = std::nullopt,
             .bytes = {},
-            .ecn = static_cast<coquic::core::EcnCodepoint>(99),
+            .ecn = enum_value_from_underlying_for_tests<coquic::core::EcnCodepoint>(99),
             .is_pmtu_probe = false,
         },
         coquic::core::StateEvent{
@@ -1042,7 +1049,7 @@ TEST(CoquicCoreFfiTest, ResultAccessorsExposeRemainingEnumVariants) {
         },
         coquic::core::StateEvent{
             .connection = 15,
-            .change = static_cast<coquic::core::StateChange>(99),
+            .change = enum_value_from_underlying_for_tests<coquic::core::StateChange>(99),
         },
         coquic::core::StateEvent{
             .connection = 5,
@@ -1054,7 +1061,7 @@ TEST(CoquicCoreFfiTest, ResultAccessorsExposeRemainingEnumVariants) {
         },
         coquic::core::ConnectionLifecycleEvent{
             .connection = 16,
-            .event = static_cast<coquic::core::Lifecycle>(99),
+            .event = enum_value_from_underlying_for_tests<coquic::core::Lifecycle>(99),
         },
         coquic::core::ZeroRttStatusEvent{
             .connection = 7,
@@ -1074,7 +1081,7 @@ TEST(CoquicCoreFfiTest, ResultAccessorsExposeRemainingEnumVariants) {
         },
         coquic::core::ZeroRttStatusEvent{
             .connection = 17,
-            .status = static_cast<coquic::core::ZeroRttStatus>(99),
+            .status = enum_value_from_underlying_for_tests<coquic::core::ZeroRttStatus>(99),
         },
         coquic::core::PacketInspection{
             .connection = 11,
@@ -1083,7 +1090,8 @@ TEST(CoquicCoreFfiTest, ResultAccessorsExposeRemainingEnumVariants) {
         },
         coquic::core::PacketInspection{
             .connection = 18,
-            .direction = static_cast<coquic::core::PacketInspectionDirection>(99),
+            .direction =
+                enum_value_from_underlying_for_tests<coquic::core::PacketInspectionDirection>(99),
             .packet_type = coquic::core::PacketInspectionPacketType::initial,
         },
         coquic::core::PacketInspection{
@@ -1099,7 +1107,8 @@ TEST(CoquicCoreFfiTest, ResultAccessorsExposeRemainingEnumVariants) {
         coquic::core::PacketInspection{
             .connection = 19,
             .direction = coquic::core::PacketInspectionDirection::outbound,
-            .packet_type = static_cast<coquic::core::PacketInspectionPacketType>(99),
+            .packet_type =
+                enum_value_from_underlying_for_tests<coquic::core::PacketInspectionPacketType>(99),
         },
     };
 

@@ -388,7 +388,11 @@ Http3Result<std::uint64_t> parse_content_length_value(std::string_view value) {
         }
     }
 
-    return Http3Result<std::uint64_t>::success(*parsed_value);
+    if (!parsed_value.has_value()) {
+        return http3_failure<std::uint64_t>(Http3ErrorCode::message_error,
+                                            "invalid content-length header");
+    }
+    return Http3Result<std::uint64_t>::success(parsed_value.value());
 }
 
 template <typename T> Http3Result<T> validate_field_wire_syntax(const Http3Field &field) {

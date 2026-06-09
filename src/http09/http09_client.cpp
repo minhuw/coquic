@@ -115,7 +115,11 @@ QuicHttp09ClientEndpoint::poll(QuicCoreTimePoint /*now*/) {
                     break;
                 }
 
-                queue_request_send(*take_next_request_to_issue());
+                const auto request = take_next_request_to_issue();
+                if (!request.has_value()) {
+                    break;
+                }
+                queue_request_send(request.value());
             } while (batch_resumed_requests);
         }
     }

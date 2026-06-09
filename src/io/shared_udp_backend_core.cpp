@@ -748,17 +748,23 @@ struct RecordedSetSockOptForTests {
         int value = 0;
     };
 
+    struct ExpectedCall {
+        int level = 0;
+        int name = 0;
+        int value = 0;
+    };
+
     std::vector<Call> calls;
 };
 
 thread_local RecordedSetSockOptForTests g_recorded_setsockopt_for_tests;
 
-COQUIC_NO_PROFILE bool
-recorded_setsockopt_call_matches_for_tests(const RecordedSetSockOptForTests::Call &call, int level,
-                                           int name, int value) {
-    bool matched = call.level == level;
-    matched = matched & (call.name == name);
-    matched = matched & (call.value == value);
+COQUIC_NO_PROFILE bool recorded_setsockopt_call_matches_for_tests(
+    const RecordedSetSockOptForTests::Call &call,
+    const RecordedSetSockOptForTests::ExpectedCall &expected) {
+    bool matched = call.level == expected.level;
+    matched = matched & (call.name == expected.name);
+    matched = matched & (call.value == expected.value);
     return matched;
 }
 
@@ -801,11 +807,15 @@ COQUIC_NO_PROFILE bool socket_io_backend_configures_linux_ecn_socket_options_for
     const int fd = internal::open_udp_socket(AF_INET6);
     const bool opened = fd == 41;
     const auto has_call = [](int level, int name, int value) {
+        const RecordedSetSockOptForTests::ExpectedCall expected{
+            .level = level,
+            .name = name,
+            .value = value,
+        };
         return std::any_of(g_recorded_setsockopt_for_tests.calls.begin(),
                            g_recorded_setsockopt_for_tests.calls.end(),
                            [&](const RecordedSetSockOptForTests::Call &call) {
-                               return recorded_setsockopt_call_matches_for_tests(call, level, name,
-                                                                                 value);
+                               return recorded_setsockopt_call_matches_for_tests(call, expected);
                            });
     };
     constexpr int kExpectedUdpSocketBufferBytes = 4 * 1024 * 1024;

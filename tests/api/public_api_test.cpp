@@ -307,7 +307,7 @@ TEST(CoquicPublicApiTest, QuicDefaultConnectionReportsLocalError) {
     EXPECT_EQ(connection.handle(), 0u);
 
     const auto payload = bytes({0x68});
-    for (auto result :
+    for (const auto &result :
          {connection.advance(coquic::core::RequestKeyUpdate{}, coquic::quic::TimePoint{}),
           connection.send_stream(0, payload, false, coquic::quic::TimePoint{}),
           connection.send_datagram(payload, coquic::quic::TimePoint{}),
@@ -316,8 +316,9 @@ TEST(CoquicPublicApiTest, QuicDefaultConnectionReportsLocalError) {
           connection.close(3, "closed", coquic::quic::TimePoint{}),
           connection.request_key_update(coquic::quic::TimePoint{})}) {
         ASSERT_TRUE(result.local_error.has_value());
-        EXPECT_FALSE(result.local_error->connection.has_value());
-        EXPECT_EQ(result.local_error->code, coquic::core::LocalErrorCode::unsupported_operation);
+        EXPECT_EQ(result.local_error.value_or(coquic::core::LocalError{}).connection, std::nullopt);
+        EXPECT_EQ(result.local_error.value_or(coquic::core::LocalError{}).code,
+                  coquic::core::LocalErrorCode::unsupported_operation);
     }
 
     coquic::quic::Stream stream;
@@ -360,7 +361,7 @@ TEST(CoquicPublicApiTest, QuicConnectOnServerEndpointReturnsInvalidConnection) {
     EXPECT_FALSE(connected.connection);
     EXPECT_EQ(connected.connection.handle(), 0u);
     ASSERT_TRUE(connected.result.local_error.has_value());
-    EXPECT_EQ(connected.result.local_error->code,
+    EXPECT_EQ(connected.result.local_error.value_or(coquic::core::LocalError{}).code,
               coquic::core::LocalErrorCode::unsupported_operation);
     EXPECT_TRUE(coquic::core::lifecycle_events(connected.result).empty());
 }

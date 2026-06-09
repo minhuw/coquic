@@ -323,10 +323,11 @@ int bootstrap_ssl_write(SSL *ssl, const void *buffer, int buffer_size) {
 void bootstrap_stream_http_reverse_proxy_response(
     const Http3ReverseProxyConfig &config, const Http3Request &request,
     const std::function<bool(Http3ResponsePart)> &emit) {
-    if (bootstrap_test_hooks().forced_stream_proxy_parts.has_value()) {
-        for (auto part : *bootstrap_test_hooks().forced_stream_proxy_parts) {
+    auto &hooks = bootstrap_test_hooks();
+    if (hooks.forced_stream_proxy_parts.has_value()) {
+        for (auto part : hooks.forced_stream_proxy_parts.value()) {
             const bool accepted = emit(std::move(part));
-            if (!accepted && !bootstrap_test_hooks().forced_stream_proxy_ignores_emit_result) {
+            if (!accepted && !hooks.forced_stream_proxy_ignores_emit_result) {
                 break;
             }
         }
@@ -337,8 +338,9 @@ void bootstrap_stream_http_reverse_proxy_response(
 
 Http3Response bootstrap_fetch_http_reverse_proxy_response(const Http3ReverseProxyConfig &config,
                                                           const Http3Request &request) {
-    if (bootstrap_test_hooks().forced_fetch_proxy_response.has_value()) {
-        return *bootstrap_test_hooks().forced_fetch_proxy_response;
+    auto &hooks = bootstrap_test_hooks();
+    if (hooks.forced_fetch_proxy_response.has_value()) {
+        return hooks.forced_fetch_proxy_response.value();
     }
     return fetch_http_reverse_proxy_response(config, request);
 }

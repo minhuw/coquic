@@ -1869,7 +1869,7 @@ TEST(QuicHttp3ServerTest, PeerStopSendingCancelsPendingDeferredResponse) {
 TEST(QuicHttp3ServerTest, DeferredResponsePollFailureClearsAndCancelsPendingWork) {
     std::vector<std::uint64_t> cancelled;
     http3::Http3ServerEndpoint endpoint(http3::Http3ServerConfig{
-        .deferred_request_handler = [](std::uint64_t, http3::Http3Request) { return true; },
+        .deferred_request_handler = [](std::uint64_t, const http3::Http3Request &) { return true; },
         .deferred_response_handler =
             [](std::uint64_t stream_id) -> std::optional<http3::Http3Response> {
             if (stream_id != 0) {
@@ -1930,7 +1930,7 @@ TEST(QuicHttp3ServerTest, DeferredResponsePollFailureClearsAndCancelsPendingWork
 TEST(QuicHttp3ServerTest, DeferredResponsePartPollFailureClearsAndCancelsPendingWork) {
     std::vector<std::uint64_t> cancelled;
     http3::Http3ServerEndpoint endpoint(http3::Http3ServerConfig{
-        .deferred_request_handler = [](std::uint64_t, http3::Http3Request) { return true; },
+        .deferred_request_handler = [](std::uint64_t, const http3::Http3Request &) { return true; },
         .deferred_response_part_handler =
             [](std::uint64_t stream_id) -> std::optional<http3::Http3ResponsePart> {
             if (stream_id != 0) {

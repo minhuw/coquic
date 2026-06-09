@@ -328,6 +328,7 @@ decode_long_header_fields(BufferReader &reader, std::uint32_t version,
 
     const auto packet_payload_bytes = payload_length.value() - packet_number_length;
     const auto packet_number = read_packet_number(reader, packet_number_length).value();
+    const auto payload_start_offset = reader.offset();
     const auto payload = reader.read_exact(static_cast<std::size_t>(packet_payload_bytes)).value();
 
     if (payload.empty()) {
@@ -341,11 +342,13 @@ decode_long_header_fields(BufferReader &reader, std::uint32_t version,
         const auto decoded = deserialize_frame(payload.subspan(payload_offset));
         if (!decoded.has_value()) {
             return CodecResult<DecodedLongHeaderFields>::failure(
-                decoded.error().code, reader.offset() + payload_offset + decoded.error().offset);
+                decoded.error().code,
+                payload_start_offset + payload_offset + decoded.error().offset);
         }
         if (!frame_allowed_in_packet_type(decoded.value().frame, protected_packet_type)) {
             return CodecResult<DecodedLongHeaderFields>::failure(
-                CodecErrorCode::frame_not_allowed_in_packet_type, reader.offset() + payload_offset);
+                CodecErrorCode::frame_not_allowed_in_packet_type,
+                payload_start_offset + payload_offset);
         }
 
         frames.push_back(decoded.value().frame);
@@ -666,14 +669,15 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
                                                             reader.offset());
         }
 
+        const auto payload_start_offset = reader.offset();
         const auto payload = reader.read_exact(reader.remaining()).value();
         std::vector<Frame> frames;
         for (std::size_t payload_offset = 0; payload_offset < payload.size();) {
             const auto decoded = deserialize_frame(payload.subspan(payload_offset));
             if (!decoded.has_value()) {
-                return CodecResult<PacketDecodeResult>::failure(decoded.error().code,
-                                                                reader.offset() + payload_offset +
-                                                                    decoded.error().offset);
+                return CodecResult<PacketDecodeResult>::failure(
+                    decoded.error().code,
+                    payload_start_offset + payload_offset + decoded.error().offset);
             }
             frames.push_back(decoded.value().frame);
             payload_offset += decoded.value().bytes_consumed;

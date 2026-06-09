@@ -55,6 +55,16 @@ void expect_packet_decode_error(const std::vector<std::byte> &bytes,
                                code);
 }
 
+void expect_packet_decode_error_at(std::span<const std::byte> bytes,
+                                   const coquic::quic::DeserializeOptions &options,
+                                   CodecErrorCode code, std::size_t offset) {
+    const auto decoded = coquic::quic::deserialize_packet(bytes, options);
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(decoded.error().code, code);
+    EXPECT_EQ(decoded.error().offset, offset);
+    EXPECT_LE(decoded.error().offset, bytes.size());
+}
+
 void expect_packet_serialize_error(const Packet &packet, CodecErrorCode code) {
     const auto encoded = coquic::quic::serialize_packet(packet);
     ASSERT_FALSE(encoded.has_value());
@@ -440,6 +450,31 @@ TEST(QuicPacketTest, RejectsReservedBitsInPlaintextPacketImage) {
     auto decoded = coquic::quic::deserialize_packet(bytes, {});
     ASSERT_FALSE(decoded.has_value());
     EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_reserved_bits);
+}
+
+TEST(QuicPacketTest, ReportsLongHeaderFrameDecodeErrorAtPayloadOffset) {
+    const std::array<std::byte, 17> bytes{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
+        std::byte{0x02}, std::byte{0xaa}, std::byte{0xbb}, std::byte{0x01}, std::byte{0xcc},
+        std::byte{0x00}, std::byte{0x05}, std::byte{0x01}, std::byte{0xd6}, std::byte{0x00},
+        std::byte{0x01}, std::byte{0x42},
+    };
+
+    expect_packet_decode_error_at(as_span(bytes), {}, CodecErrorCode::truncated_input,
+                                  std::size_t{14});
+}
+
+TEST(QuicPacketTest, ReportsShortHeaderFrameDecodeErrorAtPayloadOffset) {
+    const std::array<std::byte, 7> bytes{
+        std::byte{0x40}, std::byte{0xaa}, std::byte{0x01}, std::byte{0xd6},
+        std::byte{0x00}, std::byte{0x01}, std::byte{0x42},
+    };
+
+    expect_packet_decode_error_at(as_span(bytes),
+                                  coquic::quic::DeserializeOptions{
+                                      .one_rtt_destination_connection_id_length = 1,
+                                  },
+                                  CodecErrorCode::truncated_input, std::size_t{4});
 }
 
 TEST(QuicPacketTest, RejectsLongHeaderConnectionIdOverLimit) {

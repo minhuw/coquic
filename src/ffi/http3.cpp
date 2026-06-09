@@ -13,6 +13,7 @@
 #include <new>
 #include <optional>
 #include <ranges>
+#include <span>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -48,15 +49,26 @@ using TimePoint = coquic::core::TimePoint;
 constexpr std::size_t kHttp3SettingsSizeV1 =
     offsetof(coquic_http3_settings_t, max_field_section_size) +
     sizeof(coquic_http3_settings_t::max_field_section_size);
+constexpr std::size_t kHttp3SettingsSizeV2 =
+    offsetof(coquic_http3_settings_t, h3_datagram) + sizeof(coquic_http3_settings_t::h3_datagram);
 constexpr std::size_t kHttp3ClientConfigSizeV1 =
     offsetof(coquic_http3_client_config_t, local_settings) +
     sizeof(coquic_http3_client_config_t::local_settings);
+constexpr std::size_t kHttp3ClientConfigSizeV2 =
+    offsetof(coquic_http3_client_config_t, remembered_peer_settings) +
+    sizeof(coquic_http3_client_config_t::remembered_peer_settings);
 constexpr std::size_t kHttp3ServerConfigSizeV1 =
     offsetof(coquic_http3_server_config_t, local_settings) +
     sizeof(coquic_http3_server_config_t::local_settings);
 constexpr std::size_t kHttp3RequestHeadSizeV1 =
     offsetof(coquic_http3_request_head_t, headers_count) +
     sizeof(coquic_http3_request_head_t::headers_count);
+constexpr std::size_t kHttp3RequestHeadSizeV2 =
+    offsetof(coquic_http3_request_head_t, protocol_length) +
+    sizeof(coquic_http3_request_head_t::protocol_length);
+constexpr std::size_t kHttp3ResponseHeadSizeV1 =
+    offsetof(coquic_http3_response_head_t, headers_count) +
+    sizeof(coquic_http3_response_head_t::headers_count);
 constexpr std::size_t kHttp3RequestSizeV1 = offsetof(coquic_http3_request_t, trailers_count) +
                                             sizeof(coquic_http3_request_t::trailers_count);
 
@@ -158,6 +170,8 @@ coquic_http3_request_head_view_t head_view(const coquic::http3::RequestHead &hea
         .scheme = bytes_view(head.scheme),
         .authority = bytes_view(head.authority),
         .path = bytes_view(head.path),
+        .has_protocol = static_cast<std::uint8_t>(head.protocol.has_value() ? 1 : 0),
+        .protocol = head.protocol.has_value() ? bytes_view(*head.protocol) : coquic_bytes_view_t{},
         .content_length = from_optional(head.content_length),
         .headers = headers.data(),
         .headers_count = headers.size(),
@@ -262,6 +276,62 @@ struct StoredClientRequestErrorEvent {
     }
 };
 
+struct StoredClientPushResponseEvent {
+    StoredRequestHeadView request;
+    StoredResponseView response;
+    coquic_http3_client_push_response_event_t view{};
+
+    explicit StoredClientPushResponseEvent(const coquic::http3::ClientPushResponseEvent &event)
+        : request(event.request), response(event.response),
+          view{
+              .request_stream_id = event.request_stream_id,
+              .push_id = event.push_id,
+              .request = request.view,
+              .response = response.view,
+          } {
+    }
+};
+
+struct StoredClientPushErrorEvent {
+    std::optional<StoredRequestHeadView> request;
+    coquic_http3_client_push_error_event_t view{};
+
+    explicit StoredClientPushErrorEvent(const coquic::http3::ClientPushErrorEvent &event) {
+        if (event.request.has_value()) {
+            request.emplace(*event.request);
+        }
+        view = coquic_http3_client_push_error_event_t{
+            .push_id = event.push_id,
+            .has_request = static_cast<std::uint8_t>(request.has_value() ? 1 : 0),
+            .request = request.has_value() ? request->view : coquic_http3_request_head_view_t{},
+            .application_error_code = event.application_error_code,
+        };
+    }
+};
+
+struct StoredPriorityUpdateEvent {
+    coquic_http3_priority_update_event_t view{};
+
+    explicit StoredPriorityUpdateEvent(const coquic::http3::PriorityUpdateEvent &event)
+        : view{
+              .id = event.id,
+              .push = static_cast<std::uint8_t>(event.push ? 1 : 0),
+              .priority_field_value = bytes_view(event.priority_field_value),
+          } {
+    }
+};
+
+struct StoredDatagramEvent {
+    coquic_http3_datagram_event_t view{};
+
+    explicit StoredDatagramEvent(const coquic::http3::DatagramEvent &event)
+        : view{
+              .stream_id = event.stream_id,
+              .payload = bytes_view(event.payload),
+          } {
+    }
+};
+
 struct StoredServerRequestCancelledEvent {
     std::optional<StoredRequestHeadView> head;
     std::vector<coquic_http3_field_view_t> trailers;
@@ -290,6 +360,9 @@ coquic::http3::Settings to_cpp(coquic_http3_settings_t settings) {
         .qpack_max_table_capacity = settings.qpack_max_table_capacity,
         .qpack_blocked_streams = settings.qpack_blocked_streams,
         .max_field_section_size = to_optional(settings.max_field_section_size),
+        .enable_connect_protocol =
+            settings.size >= kHttp3SettingsSizeV2 && settings.enable_connect_protocol != 0,
+        .h3_datagram = settings.size >= kHttp3SettingsSizeV2 && settings.h3_datagram != 0,
     };
 }
 
@@ -309,11 +382,24 @@ coquic::http3::Headers to_headers(const coquic_http3_field_t *fields, std::size_
 }
 
 coquic::http3::RequestHead to_cpp(const coquic_http3_request_head_t &head) {
+    std::optional<std::string> protocol;
+    if (head.size >= kHttp3RequestHeadSizeV2 && head.has_protocol != 0) {
+        protocol = to_string(head.protocol, head.protocol_length);
+    }
     return coquic::http3::RequestHead{
         .method = to_string(head.method, head.method_length),
         .scheme = to_string(head.scheme, head.scheme_length),
         .authority = to_string(head.authority, head.authority_length),
         .path = to_string(head.path, head.path_length),
+        .protocol = std::move(protocol),
+        .content_length = to_optional(head.content_length),
+        .headers = to_headers(head.headers, head.headers_count),
+    };
+}
+
+coquic::http3::ResponseHead to_cpp(const coquic_http3_response_head_t &head) {
+    return coquic::http3::ResponseHead{
+        .status = head.status,
         .content_length = to_optional(head.content_length),
         .headers = to_headers(head.headers, head.headers_count),
     };
@@ -329,6 +415,17 @@ coquic::http3::Request to_cpp(const coquic_http3_request_t &request) {
 
 bool valid_settings(const coquic_http3_settings_t &settings) {
     return settings.size >= kHttp3SettingsSizeV1;
+}
+
+bool valid_remembered_settings(const coquic_http3_client_config_t &config) {
+    if (config.size < kHttp3ClientConfigSizeV2 || config.has_remembered_peer_settings == 0) {
+        return true;
+    }
+    return valid_settings(config.remembered_peer_settings);
+}
+
+bool valid_response_head(const coquic_http3_response_head_t &head) {
+    return head.size >= kHttp3ResponseHeadSizeV1;
 }
 
 bool valid_request(const coquic_http3_request_t &request) {
@@ -508,12 +605,32 @@ struct coquic_http3_client_update {
         for (const auto &event : update.request_errors) {
             request_errors.emplace_back(event);
         }
+        pushed_responses.reserve(update.pushed_responses.size());
+        for (const auto &event : update.pushed_responses) {
+            pushed_responses.emplace_back(event);
+        }
+        push_errors.reserve(update.push_errors.size());
+        for (const auto &event : update.push_errors) {
+            push_errors.emplace_back(event);
+        }
+        priority_updates.reserve(update.priority_updates.size());
+        for (const auto &event : update.priority_updates) {
+            priority_updates.emplace_back(event);
+        }
+        datagrams.reserve(update.datagrams.size());
+        for (const auto &event : update.datagrams) {
+            datagrams.emplace_back(event);
+        }
     }
 
     coquic::http3::ClientUpdate update;
     std::vector<coquic_connection_input_t> inputs;
     std::vector<StoredClientResponseEvent> responses;
     std::vector<StoredClientRequestErrorEvent> request_errors;
+    std::vector<StoredClientPushResponseEvent> pushed_responses;
+    std::vector<StoredClientPushErrorEvent> push_errors;
+    std::vector<StoredPriorityUpdateEvent> priority_updates;
+    std::vector<StoredDatagramEvent> datagrams;
 };
 
 struct coquic_http3_server_update {
@@ -523,11 +640,21 @@ struct coquic_http3_server_update {
         for (const auto &event : update.request_cancelled) {
             request_cancelled.emplace_back(event);
         }
+        priority_updates.reserve(update.priority_updates.size());
+        for (const auto &event : update.priority_updates) {
+            priority_updates.emplace_back(event);
+        }
+        datagrams.reserve(update.datagrams.size());
+        for (const auto &event : update.datagrams) {
+            datagrams.emplace_back(event);
+        }
     }
 
     coquic::http3::ServerUpdate update;
     std::vector<coquic_connection_input_t> inputs;
     std::vector<StoredServerRequestCancelledEvent> request_cancelled;
+    std::vector<StoredPriorityUpdateEvent> priority_updates;
+    std::vector<StoredDatagramEvent> datagrams;
 };
 
 extern "C" {
@@ -542,6 +669,9 @@ void coquic_http3_settings_init(coquic_http3_settings_t *settings) {
         .qpack_max_table_capacity = defaults.qpack_max_table_capacity,
         .qpack_blocked_streams = defaults.qpack_blocked_streams,
         .max_field_section_size = from_optional(defaults.max_field_section_size),
+        .enable_connect_protocol =
+            static_cast<std::uint8_t>(defaults.enable_connect_protocol ? 1 : 0),
+        .h3_datagram = static_cast<std::uint8_t>(defaults.h3_datagram ? 1 : 0),
     };
 }
 
@@ -554,6 +684,8 @@ void coquic_http3_client_config_init(coquic_http3_client_config_t *config) {
     *config = coquic_http3_client_config_t{
         .size = sizeof(coquic_http3_client_config_t),
         .local_settings = settings,
+        .has_remembered_peer_settings = 0,
+        .remembered_peer_settings = settings,
     };
 }
 
@@ -596,12 +728,17 @@ coquic_status_t coquic_http3_client_create(const coquic_http3_client_config_t *c
         *out_client = nullptr;
     }
     if (config == nullptr || out_client == nullptr || config->size < kHttp3ClientConfigSizeV1 ||
-        !valid_settings(config->local_settings)) {
+        !valid_settings(config->local_settings) || !valid_remembered_settings(*config)) {
         return COQUIC_STATUS_INVALID_ARGUMENT;
     }
     return ffi_guard([&] {
+        std::optional<coquic::http3::Settings> remembered_peer_settings;
+        if (config->size >= kHttp3ClientConfigSizeV2 && config->has_remembered_peer_settings != 0) {
+            remembered_peer_settings = to_cpp(config->remembered_peer_settings);
+        }
         *out_client = new coquic_http3_client(coquic::http3::ClientConfig{
             .local_settings = to_cpp(config->local_settings),
+            .remembered_peer_settings = remembered_peer_settings,
         });
     });
 }
@@ -627,6 +764,100 @@ coquic_status_t coquic_http3_client_submit_request(coquic_http3_client_t *client
         if (submitted.has_value()) {
             *out_stream_id = submitted.value();
         } else {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_client_submit_max_push_id(coquic_http3_client_t *client,
+                                                       uint64_t push_id,
+                                                       coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (client == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto submitted = client->client.submit_max_push_id(push_id);
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_client_cancel_push(coquic_http3_client_t *client, uint64_t push_id,
+                                                coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (client == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto submitted = client->client.cancel_push(push_id);
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_client_submit_priority_update_for_request(
+    coquic_http3_client_t *client, coquic_stream_id_t stream_id, const char *priority_field_value,
+    size_t priority_field_value_length, coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (client == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto submitted = client->client.submit_priority_update_for_request(
+            stream_id, to_string(priority_field_value, priority_field_value_length));
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_client_submit_priority_update_for_push(
+    coquic_http3_client_t *client, uint64_t push_id, const char *priority_field_value,
+    size_t priority_field_value_length, coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (client == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto submitted = client->client.submit_priority_update_for_push(
+            push_id, to_string(priority_field_value, priority_field_value_length));
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_client_submit_datagram(coquic_http3_client_t *client,
+                                                    coquic_stream_id_t stream_id,
+                                                    coquic_bytes_t payload,
+                                                    coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (client == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        const auto bytes = to_vector(payload);
+        auto submitted =
+            client->client.submit_datagram(stream_id, std::span<const std::byte>(bytes));
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_client_abort_connect_stream(coquic_http3_client_t *client,
+                                                         coquic_stream_id_t stream_id,
+                                                         coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (client == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto submitted = client->client.abort_connect_stream(stream_id);
+        if (!submitted.has_value()) {
             write_error(submitted.error(), out_error);
         }
     });
@@ -716,6 +947,65 @@ coquic_http3_client_update_request_error_at(const coquic_http3_client_update_t *
     return COQUIC_STATUS_OK;
 }
 
+size_t coquic_http3_client_update_push_response_count(const coquic_http3_client_update_t *update) {
+    return update == nullptr ? 0 : update->pushed_responses.size();
+}
+
+coquic_status_t
+coquic_http3_client_update_push_response_at(const coquic_http3_client_update_t *update,
+                                            size_t index,
+                                            coquic_http3_client_push_response_event_t *out_event) {
+    if (update == nullptr || out_event == nullptr || index >= update->pushed_responses.size()) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    *out_event = update->pushed_responses[index].view;
+    return COQUIC_STATUS_OK;
+}
+
+size_t coquic_http3_client_update_push_error_count(const coquic_http3_client_update_t *update) {
+    return update == nullptr ? 0 : update->push_errors.size();
+}
+
+coquic_status_t
+coquic_http3_client_update_push_error_at(const coquic_http3_client_update_t *update, size_t index,
+                                         coquic_http3_client_push_error_event_t *out_event) {
+    if (update == nullptr || out_event == nullptr || index >= update->push_errors.size()) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    *out_event = update->push_errors[index].view;
+    return COQUIC_STATUS_OK;
+}
+
+size_t
+coquic_http3_client_update_priority_update_count(const coquic_http3_client_update_t *update) {
+    return update == nullptr ? 0 : update->priority_updates.size();
+}
+
+coquic_status_t
+coquic_http3_client_update_priority_update_at(const coquic_http3_client_update_t *update,
+                                              size_t index,
+                                              coquic_http3_priority_update_event_t *out_event) {
+    if (update == nullptr || out_event == nullptr || index >= update->priority_updates.size()) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    *out_event = update->priority_updates[index].view;
+    return COQUIC_STATUS_OK;
+}
+
+size_t coquic_http3_client_update_datagram_count(const coquic_http3_client_update_t *update) {
+    return update == nullptr ? 0 : update->datagrams.size();
+}
+
+coquic_status_t coquic_http3_client_update_datagram_at(const coquic_http3_client_update_t *update,
+                                                       size_t index,
+                                                       coquic_http3_datagram_event_t *out_event) {
+    if (update == nullptr || out_event == nullptr || index >= update->datagrams.size()) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    *out_event = update->datagrams[index].view;
+    return COQUIC_STATUS_OK;
+}
+
 uint8_t coquic_http3_client_update_has_pending_work(const coquic_http3_client_update_t *update) {
     return update != nullptr && update->update.has_pending_work ? 1 : 0;
 }
@@ -746,6 +1036,177 @@ coquic_status_t coquic_http3_server_create(const coquic_http3_server_config_t *c
 
 void coquic_http3_server_destroy(coquic_http3_server_t *server) {
     delete server;
+}
+
+coquic_status_t coquic_http3_server_submit_push_promise(coquic_http3_server_t *server,
+                                                        coquic_stream_id_t request_stream_id,
+                                                        const coquic_http3_request_head_t *head,
+                                                        uint64_t *out_push_id,
+                                                        coquic_http3_error_t *out_error) {
+    if (out_push_id != nullptr) {
+        *out_push_id = 0;
+    }
+    clear_error(out_error);
+    if (server == nullptr || head == nullptr || head->size < kHttp3RequestHeadSizeV1 ||
+        out_push_id == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto submitted = server->server.submit_push_promise(request_stream_id, to_cpp(*head));
+        if (submitted.has_value()) {
+            *out_push_id = submitted.value();
+        } else {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t
+coquic_http3_server_submit_push_response_head(coquic_http3_server_t *server, uint64_t push_id,
+                                              const coquic_http3_response_head_t *head,
+                                              coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (server == nullptr || head == nullptr || !valid_response_head(*head)) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto submitted = server->server.submit_push_response_head(push_id, to_cpp(*head));
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_server_submit_push_response_body(coquic_http3_server_t *server,
+                                                              uint64_t push_id, coquic_bytes_t body,
+                                                              uint8_t fin,
+                                                              coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (server == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        const auto bytes = to_vector(body);
+        auto submitted = server->server.submit_push_response_body(
+            push_id, std::span<const std::byte>(bytes), fin != 0);
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+// NOLINTBEGIN(bugprone-easily-swappable-parameters)
+coquic_status_t coquic_http3_server_submit_push_response_trailers(
+    coquic_http3_server_t *server, uint64_t push_id, const coquic_http3_field_t *trailers,
+    size_t trailers_count, uint8_t fin, coquic_http3_error_t *out_error) {
+    // NOLINTEND(bugprone-easily-swappable-parameters)
+    clear_error(out_error);
+    if (server == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto trailer_fields = to_headers(trailers, trailers_count);
+        auto submitted = server->server.submit_push_response_trailers(
+            push_id, std::span<const coquic::http3::Field>(trailer_fields), fin != 0);
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_server_finish_push_response(coquic_http3_server_t *server,
+                                                         uint64_t push_id,
+                                                         uint8_t enforce_content_length,
+                                                         coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (server == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto submitted = server->server.finish_push_response(push_id, enforce_content_length != 0);
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_server_cancel_push(coquic_http3_server_t *server, uint64_t push_id,
+                                                coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (server == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto submitted = server->server.cancel_push(push_id);
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_server_submit_priority_update_for_request(
+    coquic_http3_server_t *server, coquic_stream_id_t stream_id, const char *priority_field_value,
+    size_t priority_field_value_length, coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (server == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto submitted = server->server.submit_priority_update_for_request(
+            stream_id, to_string(priority_field_value, priority_field_value_length));
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_server_submit_priority_update_for_push(
+    coquic_http3_server_t *server, uint64_t push_id, const char *priority_field_value,
+    size_t priority_field_value_length, coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (server == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto submitted = server->server.submit_priority_update_for_push(
+            push_id, to_string(priority_field_value, priority_field_value_length));
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_server_submit_datagram(coquic_http3_server_t *server,
+                                                    coquic_stream_id_t stream_id,
+                                                    coquic_bytes_t payload,
+                                                    coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (server == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        const auto bytes = to_vector(payload);
+        auto submitted =
+            server->server.submit_datagram(stream_id, std::span<const std::byte>(bytes));
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
+}
+
+coquic_status_t coquic_http3_server_abort_connect_stream(coquic_http3_server_t *server,
+                                                         coquic_stream_id_t stream_id,
+                                                         coquic_http3_error_t *out_error) {
+    clear_error(out_error);
+    if (server == nullptr) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    return ffi_guard([&] {
+        auto submitted = server->server.abort_connect_stream(stream_id);
+        if (!submitted.has_value()) {
+            write_error(submitted.error(), out_error);
+        }
+    });
 }
 
 coquic_status_t coquic_http3_server_on_quic_result(coquic_http3_server_t *server,
@@ -815,6 +1276,36 @@ coquic_status_t coquic_http3_server_update_request_cancelled_at(
         return COQUIC_STATUS_INVALID_ARGUMENT;
     }
     *out_event = update->request_cancelled[index].view;
+    return COQUIC_STATUS_OK;
+}
+
+size_t
+coquic_http3_server_update_priority_update_count(const coquic_http3_server_update_t *update) {
+    return update == nullptr ? 0 : update->priority_updates.size();
+}
+
+coquic_status_t
+coquic_http3_server_update_priority_update_at(const coquic_http3_server_update_t *update,
+                                              size_t index,
+                                              coquic_http3_priority_update_event_t *out_event) {
+    if (update == nullptr || out_event == nullptr || index >= update->priority_updates.size()) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    *out_event = update->priority_updates[index].view;
+    return COQUIC_STATUS_OK;
+}
+
+size_t coquic_http3_server_update_datagram_count(const coquic_http3_server_update_t *update) {
+    return update == nullptr ? 0 : update->datagrams.size();
+}
+
+coquic_status_t coquic_http3_server_update_datagram_at(const coquic_http3_server_update_t *update,
+                                                       size_t index,
+                                                       coquic_http3_datagram_event_t *out_event) {
+    if (update == nullptr || out_event == nullptr || index >= update->datagrams.size()) {
+        return COQUIC_STATUS_INVALID_ARGUMENT;
+    }
+    *out_event = update->datagrams[index].view;
     return COQUIC_STATUS_OK;
 }
 

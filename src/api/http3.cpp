@@ -24,6 +24,8 @@ namespace {
         .qpack_max_table_capacity = settings.qpack_max_table_capacity,
         .qpack_blocked_streams = settings.qpack_blocked_streams,
         .max_field_section_size = settings.max_field_section_size,
+        .enable_connect_protocol = settings.enable_connect_protocol,
+        .h3_datagram = settings.h3_datagram,
     };
 }
 
@@ -32,6 +34,8 @@ Settings from_internal(const ::coquic::http3::Http3SettingsSnapshot &settings) {
         .qpack_max_table_capacity = settings.qpack_max_table_capacity,
         .qpack_blocked_streams = settings.qpack_blocked_streams,
         .max_field_section_size = settings.max_field_section_size,
+        .enable_connect_protocol = settings.enable_connect_protocol,
+        .h3_datagram = settings.h3_datagram,
     };
 }
 
@@ -71,6 +75,7 @@ Headers from_internal(const ::coquic::http3::Http3Headers &headers) {
         .scheme = head.scheme,
         .authority = head.authority,
         .path = head.path,
+        .protocol = head.protocol,
         .content_length = head.content_length,
         .headers = to_internal(head.headers),
     };
@@ -82,6 +87,7 @@ RequestHead from_internal(const ::coquic::http3::Http3RequestHead &head) {
         .scheme = head.scheme,
         .authority = head.authority,
         .path = head.path,
+        .protocol = head.protocol,
         .content_length = head.content_length,
         .headers = from_internal(head.headers),
     };
@@ -152,6 +158,21 @@ Error from_internal(const ::coquic::http3::Http3Error &error) {
         .code = from_internal(error.code),
         .detail = error.detail,
         .stream_id = error.stream_id,
+    };
+}
+
+PriorityUpdateEvent from_internal(const ::coquic::http3::Http3PriorityUpdateEvent &event) {
+    return PriorityUpdateEvent{
+        .id = event.id,
+        .push = event.push,
+        .priority_field_value = event.priority_field_value,
+    };
+}
+
+DatagramEvent from_internal(const ::coquic::http3::Http3DatagramEvent &event) {
+    return DatagramEvent{
+        .stream_id = event.stream_id,
+        .payload = event.payload,
     };
 }
 
@@ -229,6 +250,11 @@ connection_inputs_from(std::vector<::coquic::quic::QuicCoreInput> inputs) {
                     .bytes = value.bytes,
                     .fin = value.fin,
                 };
+            } else if constexpr (std::is_same_v<T, core::ReceiveDatagramData>) {
+                return ::coquic::quic::QuicCoreReceiveDatagramData{
+                    .connection = value.connection,
+                    .bytes = value.bytes,
+                };
             } else if constexpr (std::is_same_v<T, core::PeerResetStream>) {
                 return ::coquic::quic::QuicCorePeerResetStream{
                     .connection = value.connection,
@@ -253,6 +279,22 @@ connection_inputs_from(std::vector<::coquic::quic::QuicCoreInput> inputs) {
                 return ::coquic::quic::QuicCoreStateEvent{
                     .connection = value.connection,
                     .change = change,
+                };
+            } else if constexpr (std::is_same_v<T, core::ZeroRttStatusEvent>) {
+                ::coquic::quic::QuicZeroRttStatus status =
+                    ::coquic::quic::QuicZeroRttStatus::not_attempted;
+                if (value.status == core::ZeroRttStatus::unavailable) {
+                    status = ::coquic::quic::QuicZeroRttStatus::unavailable;
+                } else if (value.status == core::ZeroRttStatus::attempted) {
+                    status = ::coquic::quic::QuicZeroRttStatus::attempted;
+                } else if (value.status == core::ZeroRttStatus::accepted) {
+                    status = ::coquic::quic::QuicZeroRttStatus::accepted;
+                } else if (value.status == core::ZeroRttStatus::rejected) {
+                    status = ::coquic::quic::QuicZeroRttStatus::rejected;
+                }
+                return ::coquic::quic::QuicCoreZeroRttStatusEvent{
+                    .connection = value.connection,
+                    .status = status,
                 };
             } else {
                 return ::coquic::quic::QuicCoreConnectionLifecycleEvent{
@@ -340,6 +382,33 @@ ClientUpdate from_internal(::coquic::http3::Http3ClientEndpointUpdate update) {
             .application_error_code = event.application_error_code,
         });
     }
+    out.pushed_responses.reserve(update.push_events.size());
+    for (const auto &event : update.push_events) {
+        out.pushed_responses.push_back(ClientPushResponseEvent{
+            .request_stream_id = event.request_stream_id,
+            .push_id = event.push_id,
+            .request = from_internal(event.request),
+            .response = from_internal(event.response),
+        });
+    }
+    out.push_errors.reserve(update.push_error_events.size());
+    for (const auto &event : update.push_error_events) {
+        out.push_errors.push_back(ClientPushErrorEvent{
+            .push_id = event.push_id,
+            .request = event.request.has_value()
+                           ? std::optional<RequestHead>(from_internal(*event.request))
+                           : std::nullopt,
+            .application_error_code = event.application_error_code,
+        });
+    }
+    out.priority_updates.reserve(update.priority_update_events.size());
+    for (const auto &event : update.priority_update_events) {
+        out.priority_updates.push_back(from_internal(event));
+    }
+    out.datagrams.reserve(update.datagram_events.size());
+    for (const auto &event : update.datagram_events) {
+        out.datagrams.push_back(from_internal(event));
+    }
     return out;
 }
 
@@ -361,6 +430,14 @@ ServerUpdate from_internal(::coquic::http3::Http3ServerEndpointUpdate update) {
             .application_error_code = event.application_error_code,
         });
     }
+    out.priority_updates.reserve(update.priority_update_events.size());
+    for (const auto &event : update.priority_update_events) {
+        out.priority_updates.push_back(from_internal(event));
+    }
+    out.datagrams.reserve(update.datagram_events.size());
+    for (const auto &event : update.datagram_events) {
+        out.datagrams.push_back(from_internal(event));
+    }
     return out;
 }
 
@@ -373,6 +450,11 @@ class Client::Impl {
     explicit Impl(const ClientConfig &config)
         : client(::coquic::http3::Http3ClientConfig{
               .local_settings = to_internal(config.local_settings),
+              .remembered_peer_settings =
+                  config.remembered_peer_settings.has_value()
+                      ? std::optional<::coquic::http3::Http3SettingsSnapshot>(
+                            to_internal(*config.remembered_peer_settings))
+                      : std::nullopt,
           }) {
     }
 
@@ -394,6 +476,58 @@ Result<StreamId> Client::submit_request(const Request &request) {
         return Result<StreamId>(from_internal(submitted.error()));
     }
     return Result<StreamId>(submitted.value());
+}
+
+Result<bool> Client::submit_max_push_id(std::uint64_t push_id) {
+    auto submitted = impl_->client.submit_max_push_id(push_id);
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Client::cancel_push(std::uint64_t push_id) {
+    auto submitted = impl_->client.cancel_push(push_id);
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Client::submit_priority_update_for_request(StreamId stream_id,
+                                                        std::string priority_field_value) {
+    auto submitted = impl_->client.submit_priority_update_for_request(
+        stream_id, std::move(priority_field_value));
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Client::submit_priority_update_for_push(std::uint64_t push_id,
+                                                     std::string priority_field_value) {
+    auto submitted =
+        impl_->client.submit_priority_update_for_push(push_id, std::move(priority_field_value));
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Client::submit_datagram(StreamId stream_id, std::span<const std::byte> payload) {
+    auto submitted = impl_->client.submit_datagram(stream_id, payload);
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Client::abort_connect_stream(StreamId stream_id) {
+    auto submitted = impl_->client.abort_connect_stream(stream_id);
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
 }
 
 ClientUpdate Client::on_quic_result(const core::Result &result, TimePoint now) {
@@ -431,6 +565,97 @@ ServerUpdate Server::on_quic_result(const core::Result &result, TimePoint now) {
 
 ServerUpdate Server::poll(TimePoint now) {
     return from_internal(impl_->server.poll(now));
+}
+
+Result<std::uint64_t> Server::submit_push_promise(StreamId request_stream_id,
+                                                  const RequestHead &head) {
+    auto submitted = impl_->server.submit_push_promise(request_stream_id, to_internal(head));
+    if (!submitted.has_value()) {
+        return Result<std::uint64_t>(from_internal(submitted.error()));
+    }
+    return Result<std::uint64_t>(submitted.value());
+}
+
+Result<bool> Server::submit_push_response_head(std::uint64_t push_id, const ResponseHead &head) {
+    auto submitted = impl_->server.submit_push_response_head(push_id, to_internal(head));
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Server::submit_push_response_body(std::uint64_t push_id,
+                                               std::span<const std::byte> body, bool fin) {
+    auto submitted = impl_->server.submit_push_response_body(push_id, body, fin);
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Server::submit_push_response_trailers(std::uint64_t push_id,
+                                                   std::span<const Field> trailers, bool fin) {
+    auto internal_trailers = std::vector<::coquic::http3::Http3Field>{};
+    internal_trailers.reserve(trailers.size());
+    std::ranges::transform(trailers, std::back_inserter(internal_trailers),
+                           [](const auto &field) { return to_internal(field); });
+    auto submitted = impl_->server.submit_push_response_trailers(push_id, internal_trailers, fin);
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Server::finish_push_response(std::uint64_t push_id, bool enforce_content_length) {
+    auto submitted = impl_->server.finish_push_response(push_id, enforce_content_length);
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Server::cancel_push(std::uint64_t push_id) {
+    auto submitted = impl_->server.cancel_push(push_id);
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Server::submit_priority_update_for_request(StreamId stream_id,
+                                                        std::string priority_field_value) {
+    auto submitted = impl_->server.submit_priority_update_for_request(
+        stream_id, std::move(priority_field_value));
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Server::submit_priority_update_for_push(std::uint64_t push_id,
+                                                     std::string priority_field_value) {
+    auto submitted =
+        impl_->server.submit_priority_update_for_push(push_id, std::move(priority_field_value));
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Server::submit_datagram(StreamId stream_id, std::span<const std::byte> payload) {
+    auto submitted = impl_->server.submit_datagram(stream_id, payload);
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
+}
+
+Result<bool> Server::abort_connect_stream(StreamId stream_id) {
+    auto submitted = impl_->server.abort_connect_stream(stream_id);
+    if (!submitted.has_value()) {
+        return Result<bool>(from_internal(submitted.error()));
+    }
+    return Result<bool>(submitted.value());
 }
 
 bool Server::has_failed() const {

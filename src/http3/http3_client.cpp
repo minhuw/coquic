@@ -58,6 +58,7 @@ Http3ClientEndpoint::Http3ClientEndpoint(Http3ClientConfig config)
     : config_(config), connection_(Http3ConnectionConfig{
                            .role = Http3ConnectionRole::client,
                            .local_settings = config_.local_settings,
+                           .remembered_peer_settings = config_.remembered_peer_settings,
                        }) {
 }
 
@@ -106,6 +107,7 @@ Http3ClientEndpointUpdate Http3ClientEndpoint::on_core_result(const quic::QuicCo
         pending_requests_.clear();
         active_requests_.clear();
         pending_responses_.clear();
+        pending_push_responses_.clear();
         return make_failure_update(/*handled_local_error=*/true);
     }
 
@@ -116,6 +118,7 @@ Http3ClientEndpointUpdate Http3ClientEndpoint::on_core_result(const quic::QuicCo
         pending_requests_.clear();
         active_requests_.clear();
         pending_responses_.clear();
+        pending_push_responses_.clear();
         return update;
     }
     if (!handle_connection_events(update, connection_update.events)) {
@@ -142,6 +145,7 @@ Http3ClientEndpointUpdate Http3ClientEndpoint::poll(quic::QuicCoreTimePoint now)
                 pending_requests_.clear();
                 active_requests_.clear();
                 pending_responses_.clear();
+                pending_push_responses_.clear();
                 return make_failure_update();
             }
             active_requests_.insert_or_assign(pending.stream_id, std::move(pending.request));
@@ -155,6 +159,7 @@ Http3ClientEndpointUpdate Http3ClientEndpoint::poll(quic::QuicCoreTimePoint now)
         pending_requests_.clear();
         active_requests_.clear();
         pending_responses_.clear();
+        pending_push_responses_.clear();
         return update;
     }
     if (!handle_connection_events(update, connection_update.events)) {
@@ -169,9 +174,87 @@ bool Http3ClientEndpoint::has_failed() const {
     return failed_;
 }
 
+Http3Result<bool> Http3ClientEndpoint::submit_max_push_id(std::uint64_t push_id) {
+    if (failed_) {
+        return Http3Result<bool>::failure(Http3Error{
+            .code = Http3ErrorCode::general_protocol_error,
+            .detail = "client endpoint has failed",
+        });
+    }
+    return connection_.submit_max_push_id(push_id);
+}
+
+Http3Result<bool> Http3ClientEndpoint::cancel_push(std::uint64_t push_id) {
+    if (failed_) {
+        return Http3Result<bool>::failure(Http3Error{
+            .code = Http3ErrorCode::general_protocol_error,
+            .detail = "client endpoint has failed",
+        });
+    }
+    return connection_.cancel_push(push_id);
+}
+
+Http3Result<bool>
+Http3ClientEndpoint::submit_priority_update_for_request(std::uint64_t stream_id,
+                                                        std::string priority_field_value) {
+    if (failed_) {
+        return Http3Result<bool>::failure(Http3Error{
+            .code = Http3ErrorCode::general_protocol_error,
+            .detail = "client endpoint has failed",
+        });
+    }
+    return connection_.submit_priority_update_for_request(stream_id,
+                                                          std::move(priority_field_value));
+}
+
+Http3Result<bool>
+Http3ClientEndpoint::submit_priority_update_for_push(std::uint64_t push_id,
+                                                     std::string priority_field_value) {
+    if (failed_) {
+        return Http3Result<bool>::failure(Http3Error{
+            .code = Http3ErrorCode::general_protocol_error,
+            .detail = "client endpoint has failed",
+        });
+    }
+    return connection_.submit_priority_update_for_push(push_id, std::move(priority_field_value));
+}
+
+Http3Result<bool> Http3ClientEndpoint::submit_datagram(std::uint64_t stream_id,
+                                                       std::span<const std::byte> payload) {
+    if (failed_) {
+        return Http3Result<bool>::failure(Http3Error{
+            .code = Http3ErrorCode::general_protocol_error,
+            .detail = "client endpoint has failed",
+            .stream_id = stream_id,
+        });
+    }
+    return connection_.submit_datagram(stream_id, payload);
+}
+
+Http3Result<bool> Http3ClientEndpoint::abort_connect_stream(std::uint64_t stream_id) {
+    if (failed_) {
+        return Http3Result<bool>::failure(Http3Error{
+            .code = Http3ErrorCode::general_protocol_error,
+            .detail = "client endpoint has failed",
+            .stream_id = stream_id,
+        });
+    }
+    return connection_.abort_connect_stream(stream_id);
+}
+
 bool Http3ClientEndpoint::handle_connection_events(Http3ClientEndpointUpdate &update,
                                                    std::span<const Http3EndpointEvent> events) {
     for (const auto &event : events) {
+        if (const auto *priority = std::get_if<Http3PriorityUpdateEvent>(&event)) {
+            update.priority_update_events.push_back(*priority);
+            continue;
+        }
+
+        if (const auto *datagram = std::get_if<Http3DatagramEvent>(&event)) {
+            update.datagram_events.push_back(*datagram);
+            continue;
+        }
+
         if (const auto *interim = std::get_if<Http3PeerInformationalResponseEvent>(&event)) {
             pending_responses_[interim->stream_id].interim_heads.push_back(interim->head);
             continue;
@@ -209,6 +292,86 @@ bool Http3ClientEndpoint::handle_connection_events(Http3ClientEndpointUpdate &up
             continue;
         }
 
+        if (const auto *promise = std::get_if<Http3PeerPushPromiseEvent>(&event)) {
+            auto &pending = pending_push_responses_[promise->push_id];
+            pending.request_stream_id = promise->request_stream_id;
+            pending.request = promise->head;
+            continue;
+        }
+
+        if (const auto *head = std::get_if<Http3PeerPushResponseHeadEvent>(&event)) {
+            pending_push_responses_[head->push_id].head = head->head;
+            continue;
+        }
+
+        if (const auto *body = std::get_if<Http3PeerPushResponseBodyEvent>(&event)) {
+            auto &pending = pending_push_responses_[body->push_id];
+            pending.body.insert(pending.body.end(), body->body.begin(), body->body.end());
+            continue;
+        }
+
+        if (const auto *trailers = std::get_if<Http3PeerPushResponseTrailersEvent>(&event)) {
+            pending_push_responses_[trailers->push_id].trailers = trailers->trailers;
+            continue;
+        }
+
+        if (const auto *cancelled = std::get_if<Http3PeerPushCancelledEvent>(&event)) {
+            auto pending = pending_push_responses_.find(cancelled->push_id);
+            update.push_error_events.push_back(Http3ClientPushErrorEvent{
+                .push_id = cancelled->push_id,
+                .request = pending != pending_push_responses_.end() ? pending->second.request
+                                                                    : std::nullopt,
+                .application_error_code =
+                    static_cast<std::uint64_t>(Http3ErrorCode::request_cancelled),
+            });
+            if (pending != pending_push_responses_.end()) {
+                pending_push_responses_.erase(pending);
+            }
+            continue;
+        }
+
+        if (const auto *reset = std::get_if<Http3PeerPushResetEvent>(&event)) {
+            auto pending = pending_push_responses_.find(reset->push_id);
+            update.push_error_events.push_back(Http3ClientPushErrorEvent{
+                .push_id = reset->push_id,
+                .request = pending != pending_push_responses_.end() ? pending->second.request
+                                                                    : std::nullopt,
+                .application_error_code = reset->application_error_code,
+            });
+            if (pending != pending_push_responses_.end()) {
+                pending_push_responses_.erase(pending);
+            }
+            continue;
+        }
+
+        if (const auto *push_complete = std::get_if<Http3PeerPushResponseCompleteEvent>(&event)) {
+            const auto response_it = pending_push_responses_.find(push_complete->push_id);
+            if (response_it == pending_push_responses_.end() ||
+                !response_it->second.head.has_value()) {
+                failed_ = true;
+                pending_requests_.clear();
+                active_requests_.clear();
+                pending_responses_.clear();
+                pending_push_responses_.clear();
+                return false;
+            }
+
+            auto response_head = std::move(response_it->second.head).value_or(Http3ResponseHead{});
+            update.push_events.push_back(Http3ClientPushResponseEvent{
+                .request_stream_id = response_it->second.request_stream_id.value_or(0),
+                .push_id = push_complete->push_id,
+                .request = std::move(response_it->second.request).value_or(Http3RequestHead{}),
+                .response =
+                    Http3Response{
+                        .head = std::move(response_head),
+                        .body = std::move(response_it->second.body),
+                        .trailers = std::move(response_it->second.trailers),
+                    },
+            });
+            pending_push_responses_.erase(response_it);
+            continue;
+        }
+
         const auto *complete = std::get_if<Http3PeerResponseCompleteEvent>(&event);
         if (complete == nullptr) {
             continue;
@@ -222,6 +385,7 @@ bool Http3ClientEndpoint::handle_connection_events(Http3ClientEndpointUpdate &up
             pending_requests_.clear();
             active_requests_.clear();
             pending_responses_.clear();
+            pending_push_responses_.clear();
             return false;
         }
 

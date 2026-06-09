@@ -26,11 +26,17 @@ inline constexpr std::uint64_t kHttp3FrameTypeSettings = 0x04;
 inline constexpr std::uint64_t kHttp3FrameTypePushPromise = 0x05;
 inline constexpr std::uint64_t kHttp3FrameTypeGoaway = 0x07;
 inline constexpr std::uint64_t kHttp3FrameTypeMaxPushId = 0x0d;
+inline constexpr std::uint64_t kHttp3FrameTypePriorityUpdateRequestStream = 0x0f0700;
+inline constexpr std::uint64_t kHttp3FrameTypePriorityUpdatePushId = 0x0f0701;
 
 inline constexpr std::uint64_t kHttp3SettingsQpackMaxTableCapacity = 0x01;
 inline constexpr std::uint64_t kHttp3SettingsMaxFieldSectionSize = 0x06;
 inline constexpr std::uint64_t kHttp3SettingsQpackBlockedStreams = 0x07;
+inline constexpr std::uint64_t kHttp3SettingsEnableConnectProtocol = 0x08;
+inline constexpr std::uint64_t kHttp3SettingsH3Datagram = 0x33;
 inline constexpr std::uint64_t kHttp3SettingsReservedGrease = 0x21;
+
+inline constexpr std::uint64_t kHttp3CapsuleTypeDatagram = 0x00;
 
 struct Http3Setting {
     std::uint64_t id = 0;
@@ -82,6 +88,14 @@ struct Http3MaxPushIdFrame {
     bool operator==(const Http3MaxPushIdFrame &) const = default;
 };
 
+struct Http3PriorityUpdateFrame {
+    std::uint64_t frame_type = kHttp3FrameTypePriorityUpdateRequestStream;
+    std::uint64_t prioritized_element_id = 0;
+    std::string priority_field_value;
+
+    bool operator==(const Http3PriorityUpdateFrame &) const = default;
+};
+
 struct Http3UnknownFrame {
     std::uint64_t type = 0;
     std::vector<std::byte> payload;
@@ -89,9 +103,9 @@ struct Http3UnknownFrame {
     bool operator==(const Http3UnknownFrame &) const = default;
 };
 
-using Http3Frame =
-    std::variant<Http3DataFrame, Http3HeadersFrame, Http3CancelPushFrame, Http3SettingsFrame,
-                 Http3PushPromiseFrame, Http3GoawayFrame, Http3MaxPushIdFrame, Http3UnknownFrame>;
+using Http3Frame = std::variant<Http3DataFrame, Http3HeadersFrame, Http3CancelPushFrame,
+                                Http3SettingsFrame, Http3PushPromiseFrame, Http3GoawayFrame,
+                                Http3MaxPushIdFrame, Http3PriorityUpdateFrame, Http3UnknownFrame>;
 
 struct Http3DecodedFrame {
     Http3Frame frame;
@@ -107,11 +121,40 @@ struct Http3ConnectionState {
     std::optional<std::uint64_t> remote_qpack_decoder_stream_id;
     bool local_settings_sent = false;
     bool remote_settings_received = false;
+    bool zero_rtt_accepted = false;
     std::optional<std::uint64_t> goaway_id;
+    std::optional<std::uint64_t> local_goaway_id;
+    std::optional<std::uint64_t> local_max_push_id;
+    std::optional<std::uint64_t> peer_max_push_id;
+    std::uint64_t next_local_push_id = 0;
+};
+
+struct Http3Datagram {
+    std::uint64_t stream_id = 0;
+    std::vector<std::byte> payload;
+
+    bool operator==(const Http3Datagram &) const = default;
+};
+
+struct Http3Capsule {
+    std::uint64_t type = 0;
+    std::vector<std::byte> payload;
+
+    bool operator==(const Http3Capsule &) const = default;
+};
+
+struct Http3DecodedCapsule {
+    Http3Capsule capsule;
+    std::size_t bytes_consumed = 0;
 };
 
 quic::CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &frame);
 quic::CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> bytes);
+quic::CodecResult<std::vector<std::byte>>
+serialize_http3_datagram(std::uint64_t stream_id, std::span<const std::byte> payload);
+quic::CodecResult<Http3Datagram> parse_http3_datagram(std::span<const std::byte> bytes);
+quic::CodecResult<std::vector<std::byte>> serialize_http3_capsule(const Http3Capsule &capsule);
+quic::CodecResult<Http3DecodedCapsule> parse_http3_capsule(std::span<const std::byte> bytes);
 quic::CodecResult<quic::VarIntDecoded>
 parse_http3_uni_stream_type(std::span<const std::byte> bytes);
 quic::CodecResult<std::vector<std::byte>>

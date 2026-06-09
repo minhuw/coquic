@@ -394,6 +394,74 @@ TEST(QuicHttp3ServerTest, BuffersRequestUntilCompleteThenDispatchesCustomHandler
     EXPECT_TRUE(sends[2].fin);
 }
 
+TEST(QuicHttp3ServerTest, ConnectStreamHandlerReceivesBodyBeforeRequestFin) {
+    bool accepted = false;
+    bool completed = false;
+    std::vector<std::byte> received_body;
+    std::size_t response_parts = 0;
+    coquic::http3::Http3ServerEndpoint endpoint(coquic::http3::Http3ServerConfig{
+        .deferred_response_part_handler =
+            [&](std::uint64_t stream_id) -> std::optional<coquic::http3::Http3ResponsePart> {
+            if (stream_id != 0u || response_parts++ > 0u) {
+                return std::nullopt;
+            }
+            return coquic::http3::Http3ResponsePart{
+                .head = coquic::http3::Http3ResponseHead{.status = 200},
+                .body = bytes_from_text("pong"),
+            };
+        },
+        .connect_request_handler =
+            [&](std::uint64_t stream_id, const coquic::http3::Http3RequestHead &head) {
+                accepted = stream_id == 0u && head.method == "CONNECT" &&
+                           head.authority == "example.test:443";
+                return accepted;
+            },
+        .connect_body_handler =
+            [&](std::uint64_t stream_id, std::vector<std::byte> chunk) {
+                EXPECT_EQ(stream_id, 0u);
+                received_body.insert(received_body.end(), chunk.begin(), chunk.end());
+            },
+        .connect_complete_handler = [&](std::uint64_t stream_id) { completed = stream_id == 0u; },
+    });
+
+    prime_server_transport(endpoint);
+
+    std::array connect_fields{
+        coquic::http3::Http3Field{":method", "CONNECT"},
+        coquic::http3::Http3Field{":authority", "example.test:443"},
+    };
+
+    auto head_update =
+        endpoint.on_core_result(receive_result(0, headers_frame_bytes(0, connect_fields)),
+                                coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(head_update.terminal_failure);
+    EXPECT_TRUE(accepted);
+    EXPECT_EQ(coquic::http3::Http3ServerEndpointTestAccess::pending_request_count(endpoint, 0), 0u);
+    EXPECT_EQ(
+        coquic::http3::Http3ServerEndpointTestAccess::pending_deferred_response_count(endpoint, 0),
+        1u);
+
+    auto body_update = endpoint.on_core_result(receive_result(0, data_frame_bytes("ping")),
+                                               coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(body_update.terminal_failure);
+    EXPECT_EQ(received_body, bytes_from_text("ping"));
+
+    auto response_update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(response_update);
+    ASSERT_EQ(sends.size(), 2u);
+    EXPECT_EQ(sends[0].stream_id, 0u);
+    EXPECT_FALSE(sends[0].fin);
+    EXPECT_EQ(sends[1].stream_id, 0u);
+    EXPECT_EQ(data_frame_payload_text(sends[1].bytes), "pong");
+    EXPECT_FALSE(sends[1].fin);
+
+    auto complete_update = endpoint.on_core_result(receive_result(0, data_frame_bytes("!"), true),
+                                                   coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(complete_update.terminal_failure);
+    EXPECT_EQ(received_body, bytes_from_text("ping!"));
+    EXPECT_TRUE(completed);
+}
+
 TEST(QuicHttp3ServerTest, DefaultEchoRouteReturnsRequestBody) {
     coquic::http3::Http3ServerEndpoint endpoint;
 

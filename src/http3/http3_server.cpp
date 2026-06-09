@@ -367,9 +367,28 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
     bool dispatched_response = false;
     std::unordered_set<std::uint64_t> ignored_request_streams;
     for (const auto &event : connection_update.events) {
+        if (const auto *priority = std::get_if<Http3PriorityUpdateEvent>(&event)) {
+            update.priority_update_events.push_back(*priority);
+            continue;
+        }
+
+        if (const auto *datagram = std::get_if<Http3DatagramEvent>(&event)) {
+            update.datagram_events.push_back(*datagram);
+            continue;
+        }
+
         if (const auto *head = std::get_if<Http3PeerRequestHeadEvent>(&event)) {
             auto &pending = pending_requests_[head->stream_id];
             pending.head = head->head;
+
+            if (head->head.method == "CONNECT" && config_.connect_request_handler &&
+                config_.connect_request_handler(head->stream_id, head->head)) {
+                streaming_connect_streams_.insert(head->stream_id);
+                pending_deferred_responses_.insert_or_assign(
+                    head->stream_id, PendingDeferredResponse{.head = head->head});
+                pending_requests_.erase(head->stream_id);
+                continue;
+            }
 
             std::optional<Http3Response> response;
             if (config_.request_head_handler) {
@@ -397,6 +416,13 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
 
         // Body chunks are buffered unless an upload route crosses its configured byte limit.
         if (const auto *body = std::get_if<Http3PeerRequestBodyEvent>(&event)) {
+            if (streaming_connect_streams_.contains(body->stream_id)) {
+                if (config_.connect_body_handler) {
+                    config_.connect_body_handler(body->stream_id, body->body);
+                }
+                continue;
+            }
+
             if (ignored_request_streams.contains(body->stream_id)) {
                 continue;
             }
@@ -436,6 +462,14 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
 
         // Trailers remain attached to the pending request until completion dispatches a response.
         if (const auto *trailers = std::get_if<Http3PeerRequestTrailersEvent>(&event)) {
+            if (streaming_connect_streams_.contains(trailers->stream_id)) {
+                failed_ = true;
+                pending_requests_.clear();
+                streaming_connect_streams_.clear();
+                cancel_pending_deferred_responses();
+                return make_failure_update();
+            }
+
             if (ignored_request_streams.contains(trailers->stream_id)) {
                 continue;
             }
@@ -452,6 +486,11 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
 
         // Reset events report application cancellation unless the stream was already ignored.
         if (const auto *reset = std::get_if<Http3PeerRequestResetEvent>(&event)) {
+            if (streaming_connect_streams_.erase(reset->stream_id) > 0u) {
+                cancel_pending_deferred_response(reset->stream_id);
+                continue;
+            }
+
             if (cancel_pending_deferred_response(reset->stream_id)) {
                 continue;
             }
@@ -487,6 +526,13 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::on_core_result(const quic::QuicCo
         }
 
         const auto pending_it = pending_requests_.find(complete->stream_id);
+        if (streaming_connect_streams_.erase(complete->stream_id) > 0u) {
+            if (config_.connect_complete_handler) {
+                config_.connect_complete_handler(complete->stream_id);
+            }
+            continue;
+        }
+
         if (ignored_request_streams.contains(complete->stream_id)) {
             pending_requests_.erase(complete->stream_id);
             continue;
@@ -617,7 +663,67 @@ Http3ServerEndpointUpdate Http3ServerEndpoint::poll(quic::QuicCoreTimePoint now)
         pending_requests_.clear();
         cancel_pending_deferred_responses();
     }
+    for (const auto &event : connection_update.events) {
+        if (const auto *priority = std::get_if<Http3PriorityUpdateEvent>(&event)) {
+            update.priority_update_events.push_back(*priority);
+        } else if (const auto *datagram = std::get_if<Http3DatagramEvent>(&event)) {
+            update.datagram_events.push_back(*datagram);
+        }
+    }
     return update;
+}
+
+Http3Result<std::uint64_t> Http3ServerEndpoint::submit_push_promise(std::uint64_t request_stream_id,
+                                                                    const Http3RequestHead &head) {
+    return connection_.submit_push_promise(request_stream_id, head);
+}
+
+Http3Result<bool> Http3ServerEndpoint::submit_push_response_head(std::uint64_t push_id,
+                                                                 const Http3ResponseHead &head) {
+    return connection_.submit_push_response_head(push_id, head);
+}
+
+Http3Result<bool> Http3ServerEndpoint::submit_push_response_body(std::uint64_t push_id,
+                                                                 std::span<const std::byte> body,
+                                                                 bool fin) {
+    return connection_.submit_push_response_body(push_id, body, fin);
+}
+
+Http3Result<bool>
+Http3ServerEndpoint::submit_push_response_trailers(std::uint64_t push_id,
+                                                   std::span<const Http3Field> trailers, bool fin) {
+    return connection_.submit_push_response_trailers(push_id, trailers, fin);
+}
+
+Http3Result<bool> Http3ServerEndpoint::finish_push_response(std::uint64_t push_id,
+                                                            bool enforce_content_length) {
+    return connection_.finish_push_response(push_id, enforce_content_length);
+}
+
+Http3Result<bool> Http3ServerEndpoint::cancel_push(std::uint64_t push_id) {
+    return connection_.cancel_push(push_id);
+}
+
+Http3Result<bool>
+Http3ServerEndpoint::submit_priority_update_for_request(std::uint64_t stream_id,
+                                                        std::string priority_field_value) {
+    return connection_.submit_priority_update_for_request(stream_id,
+                                                          std::move(priority_field_value));
+}
+
+Http3Result<bool>
+Http3ServerEndpoint::submit_priority_update_for_push(std::uint64_t push_id,
+                                                     std::string priority_field_value) {
+    return connection_.submit_priority_update_for_push(push_id, std::move(priority_field_value));
+}
+
+Http3Result<bool> Http3ServerEndpoint::submit_datagram(std::uint64_t stream_id,
+                                                       std::span<const std::byte> payload) {
+    return connection_.submit_datagram(stream_id, payload);
+}
+
+Http3Result<bool> Http3ServerEndpoint::abort_connect_stream(std::uint64_t stream_id) {
+    return connection_.abort_connect_stream(stream_id);
 }
 
 bool Http3ServerEndpoint::has_failed() const {
@@ -631,12 +737,14 @@ bool Http3ServerEndpoint::has_pending_deferred_responses() const {
 bool Http3ServerEndpoint::cancel_pending_deferred_response(std::uint64_t stream_id) {
     const auto deferred_it = pending_deferred_responses_.find(stream_id);
     if (deferred_it == pending_deferred_responses_.end()) {
+        streaming_connect_streams_.erase(stream_id);
         return false;
     }
     if (config_.deferred_request_cancel_handler) {
         config_.deferred_request_cancel_handler(stream_id);
     }
     pending_deferred_responses_.erase(deferred_it);
+    streaming_connect_streams_.erase(stream_id);
     return true;
 }
 
@@ -660,6 +768,7 @@ void Http3ServerEndpoint::cancel_pending_deferred_responses() {
         }
     }
     pending_deferred_responses_.clear();
+    streaming_connect_streams_.clear();
 }
 
 Http3ServerEndpointUpdate server_make_failure_update_for_test(bool handled_local_error) {

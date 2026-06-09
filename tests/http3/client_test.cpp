@@ -149,6 +149,26 @@ std::vector<std::byte> goaway_frame_bytes(std::uint64_t id) {
     return frame.has_value() ? frame.value() : std::vector<std::byte>{};
 }
 
+std::vector<std::byte> max_push_id_frame_bytes(std::uint64_t push_id) {
+    const auto frame = coquic::http3::serialize_http3_frame(coquic::http3::Http3Frame{
+        coquic::http3::Http3MaxPushIdFrame{
+            .push_id = push_id,
+        },
+    });
+    EXPECT_TRUE(frame.has_value());
+    return frame.has_value() ? frame.value() : std::vector<std::byte>{};
+}
+
+std::vector<std::byte> cancel_push_frame_bytes(std::uint64_t push_id) {
+    const auto frame = coquic::http3::serialize_http3_frame(coquic::http3::Http3Frame{
+        coquic::http3::Http3CancelPushFrame{
+            .push_id = push_id,
+        },
+    });
+    EXPECT_TRUE(frame.has_value());
+    return frame.has_value() ? frame.value() : std::vector<std::byte>{};
+}
+
 void prime_client_transport(coquic::http3::Http3ClientEndpoint &endpoint) {
     auto transport_update =
         endpoint.on_core_result(handshake_ready_result(), coquic::quic::QuicCoreTimePoint{});
@@ -617,6 +637,123 @@ TEST(QuicHttp3ClientTest, QueuedEventsCoverInformationalAndIgnoredClientIncompat
     EXPECT_EQ(queued_events_update.events[0].response.body, bytes_from_text("pong"));
     EXPECT_EQ(queued_events_update.events[0].response.trailers,
               (coquic::http3::Http3Headers{{"etag", "done"}}));
+}
+
+TEST(QuicHttp3ClientTest, QueuedPushEventsEmitCompletedPushResponse) {
+    coquic::http3::Http3ClientEndpoint endpoint;
+
+    prime_client_transport(endpoint);
+
+    auto &connection = coquic::http3::Http3ClientEndpointTestAccess::connection(endpoint);
+    coquic::http3::Http3ConnectionTestAccess::queue_event(connection,
+                                                          coquic::http3::Http3PeerPushPromiseEvent{
+                                                              .request_stream_id = 0,
+                                                              .push_id = 7,
+                                                              .head =
+                                                                  {
+                                                                      .method = "GET",
+                                                                      .scheme = "https",
+                                                                      .authority = "example.test",
+                                                                      .path = "/style.css",
+                                                                  },
+                                                          });
+    coquic::http3::Http3ConnectionTestAccess::queue_event(
+        connection, coquic::http3::Http3PeerPushResponseHeadEvent{
+                        .push_id = 7,
+                        .head =
+                            {
+                                .status = 200,
+                                .content_length = 4,
+                            },
+                    });
+    coquic::http3::Http3ConnectionTestAccess::queue_event(
+        connection, coquic::http3::Http3PeerPushResponseBodyEvent{
+                        .push_id = 7,
+                        .body = bytes_from_text("body"),
+                    });
+    coquic::http3::Http3ConnectionTestAccess::queue_event(
+        connection, coquic::http3::Http3PeerPushResponseTrailersEvent{
+                        .push_id = 7,
+                        .trailers = {{"etag", "done"}},
+                    });
+    coquic::http3::Http3ConnectionTestAccess::queue_event(
+        connection, coquic::http3::Http3PeerPushResponseCompleteEvent{
+                        .push_id = 7,
+                    });
+
+    auto update =
+        endpoint.on_core_result(coquic::quic::QuicCoreResult{}, coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(update.terminal_failure);
+    ASSERT_EQ(update.push_events.size(), 1u);
+    EXPECT_EQ(update.push_events[0].request_stream_id, 0u);
+    EXPECT_EQ(update.push_events[0].push_id, 7u);
+    EXPECT_EQ(update.push_events[0].request.path, "/style.css");
+    EXPECT_EQ(update.push_events[0].response.head.status, 200u);
+    EXPECT_EQ(update.push_events[0].response.body, bytes_from_text("body"));
+    EXPECT_EQ(update.push_events[0].response.trailers,
+              (coquic::http3::Http3Headers{{"etag", "done"}}));
+}
+
+TEST(QuicHttp3ClientTest, QueuedPushCancelEmitsPushError) {
+    coquic::http3::Http3ClientEndpoint endpoint;
+
+    prime_client_transport(endpoint);
+
+    auto &connection = coquic::http3::Http3ClientEndpointTestAccess::connection(endpoint);
+    coquic::http3::Http3ConnectionTestAccess::queue_event(connection,
+                                                          coquic::http3::Http3PeerPushPromiseEvent{
+                                                              .request_stream_id = 0,
+                                                              .push_id = 2,
+                                                              .head =
+                                                                  {
+                                                                      .method = "GET",
+                                                                      .scheme = "https",
+                                                                      .authority = "example.test",
+                                                                      .path = "/cancelled.css",
+                                                                  },
+                                                          });
+    coquic::http3::Http3ConnectionTestAccess::queue_event(
+        connection, coquic::http3::Http3PeerPushCancelledEvent{
+                        .push_id = 2,
+                    });
+
+    auto update =
+        endpoint.on_core_result(coquic::quic::QuicCoreResult{}, coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(update.terminal_failure);
+    ASSERT_EQ(update.push_error_events.size(), 1u);
+    EXPECT_EQ(update.push_error_events[0].push_id, 2u);
+    const auto request = update.push_error_events[0].request;
+    if (!request.has_value()) {
+        FAIL() << "expected push error to include the promised request";
+        return;
+    }
+    EXPECT_EQ(request.value().path, "/cancelled.css");
+    EXPECT_EQ(update.push_error_events[0].application_error_code,
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_cancelled));
+}
+
+TEST(QuicHttp3ClientTest, SubmitMaxPushIdAndCancelPushQueueControlFrames) {
+    coquic::http3::Http3ClientEndpoint endpoint;
+
+    prime_client_transport(endpoint);
+    EXPECT_FALSE(endpoint
+                     .on_core_result(receive_result(3, settings_stream_bytes()),
+                                     coquic::quic::QuicCoreTimePoint{})
+                     .terminal_failure);
+
+    ASSERT_TRUE(endpoint.submit_max_push_id(0).has_value());
+    auto max_update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
+    auto max_sends = send_stream_inputs_from(max_update);
+    ASSERT_EQ(max_sends.size(), 1u);
+    EXPECT_EQ(max_sends[0].stream_id, 2u);
+    EXPECT_EQ(max_sends[0].bytes, max_push_id_frame_bytes(0));
+
+    ASSERT_TRUE(endpoint.cancel_push(0).has_value());
+    auto cancel_update = endpoint.poll(coquic::quic::QuicCoreTimePoint{});
+    auto cancel_sends = send_stream_inputs_from(cancel_update);
+    ASSERT_EQ(cancel_sends.size(), 1u);
+    EXPECT_EQ(cancel_sends[0].stream_id, 2u);
+    EXPECT_EQ(cancel_sends[0].bytes, cancel_push_frame_bytes(0));
 }
 
 TEST(QuicHttp3ClientTest, QueuedCompleteWithoutActiveRequestFailsOnCoreResult) {

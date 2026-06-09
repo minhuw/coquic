@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <type_traits>
 #include <unordered_set>
@@ -125,6 +126,26 @@ serialize_http3_push_promise_frame(const Http3PushPromiseFrame &frame) {
     writer.write_bytes(encoded_push_id.value());
     writer.write_bytes(frame.field_section);
     return serialize_http3_payload_frame(kHttp3FrameTypePushPromise, writer.bytes());
+}
+
+CodecResult<std::vector<std::byte>>
+serialize_http3_priority_update_frame(const Http3PriorityUpdateFrame &frame) {
+    if (frame.frame_type != kHttp3FrameTypePriorityUpdateRequestStream &&
+        frame.frame_type != kHttp3FrameTypePriorityUpdatePushId) {
+        return codec_failure<std::vector<std::byte>>(CodecErrorCode::http3_parse_error, 0);
+    }
+
+    const auto encoded_id = encode_varint(frame.prioritized_element_id);
+    if (!encoded_id.has_value()) {
+        return codec_failure<std::vector<std::byte>>(encoded_id.error().code,
+                                                     encoded_id.error().offset);
+    }
+
+    BufferWriter writer;
+    writer.write_bytes(encoded_id.value());
+    writer.write_bytes(std::as_bytes(std::span<const char>(frame.priority_field_value.data(),
+                                                           frame.priority_field_value.size())));
+    return serialize_http3_payload_frame(frame.frame_type, writer.bytes());
 }
 
 bool header_name_has_uppercase(std::string_view name) {
@@ -314,6 +335,15 @@ bool authority_is_valid(std::string_view authority) {
     return true;
 }
 
+bool priority_field_value_is_valid(std::string_view value) {
+    for (const unsigned char ch : value) {
+        if (ch < 0x20u || ch > 0x7eu) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool later_field_named(std::span<const Http3Field> fields, std::size_t start,
                        std::string_view name) {
     for (std::size_t index = start; index < fields.size(); ++index) {
@@ -433,6 +463,11 @@ CodecResult<std::vector<std::byte>> serialize_http3_frame(const Http3Frame &fram
                                                         typed_frame.push_id);
         }
 
+        CodecResult<std::vector<std::byte>>
+        operator()(const Http3PriorityUpdateFrame &typed_frame) const {
+            return serialize_http3_priority_update_frame(typed_frame);
+        }
+
         CodecResult<std::vector<std::byte>> operator()(const Http3UnknownFrame &typed_frame) const {
             BufferWriter writer;
             if (const auto error =
@@ -548,6 +583,26 @@ CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> byte
         frame = Http3MaxPushIdFrame{
             .push_id = push_id.value(),
         };
+    } else if (frame_type.value() == kHttp3FrameTypePriorityUpdateRequestStream ||
+               frame_type.value() == kHttp3FrameTypePriorityUpdatePushId) {
+        BufferReader payload_reader(payload);
+        const auto prioritized_element_id = read_varint(payload_reader);
+        if (!prioritized_element_id.has_value()) {
+            return codec_failure<Http3DecodedFrame>(prioritized_element_id.error().code,
+                                                    prioritized_element_id.error().offset);
+        }
+        const auto priority_value = payload.subspan(payload_reader.offset());
+        const auto priority_field_value = std::string(
+            reinterpret_cast<const char *>(priority_value.data()), priority_value.size());
+        if (!priority_field_value_is_valid(priority_field_value)) {
+            return codec_failure<Http3DecodedFrame>(CodecErrorCode::http3_parse_error,
+                                                    payload_reader.offset());
+        }
+        frame = Http3PriorityUpdateFrame{
+            .frame_type = frame_type.value(),
+            .prioritized_element_id = prioritized_element_id.value(),
+            .priority_field_value = priority_field_value,
+        };
     } else {
         frame = Http3UnknownFrame{
             .type = frame_type.value(),
@@ -557,6 +612,92 @@ CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> byte
 
     return CodecResult<Http3DecodedFrame>::success(Http3DecodedFrame{
         .frame = std::move(frame),
+        .bytes_consumed = reader.offset(),
+    });
+}
+
+CodecResult<std::vector<std::byte>> serialize_http3_datagram(std::uint64_t stream_id,
+                                                             std::span<const std::byte> payload) {
+    if ((stream_id & 0x03u) != 0u) {
+        return codec_failure<std::vector<std::byte>>(CodecErrorCode::http3_parse_error, 0);
+    }
+
+    const auto encoded_quarter_stream_id = encode_varint(stream_id / 4u);
+    if (!encoded_quarter_stream_id.has_value()) {
+        return codec_failure<std::vector<std::byte>>(encoded_quarter_stream_id.error().code,
+                                                     encoded_quarter_stream_id.error().offset);
+    }
+
+    BufferWriter writer;
+    writer.write_bytes(encoded_quarter_stream_id.value());
+    writer.write_bytes(payload);
+    return CodecResult<std::vector<std::byte>>::success(writer.bytes());
+}
+
+CodecResult<Http3Datagram> parse_http3_datagram(std::span<const std::byte> bytes) {
+    BufferReader reader(bytes);
+    const auto quarter_stream_id = read_varint(reader);
+    if (!quarter_stream_id.has_value()) {
+        return codec_failure<Http3Datagram>(quarter_stream_id.error().code,
+                                            quarter_stream_id.error().offset);
+    }
+    if (quarter_stream_id.value() > std::numeric_limits<std::uint64_t>::max() / 4u) {
+        return codec_failure<Http3Datagram>(CodecErrorCode::http3_parse_error, reader.offset());
+    }
+
+    const auto payload = bytes.subspan(reader.offset());
+    return CodecResult<Http3Datagram>::success(Http3Datagram{
+        .stream_id = quarter_stream_id.value() * 4u,
+        .payload = std::vector<std::byte>(payload.begin(), payload.end()),
+    });
+}
+
+CodecResult<std::vector<std::byte>> serialize_http3_capsule(const Http3Capsule &capsule) {
+    const auto encoded_type = encode_varint(capsule.type);
+    if (!encoded_type.has_value()) {
+        return codec_failure<std::vector<std::byte>>(encoded_type.error().code,
+                                                     encoded_type.error().offset);
+    }
+    const auto encoded_length = encode_varint(capsule.payload.size());
+    if (!encoded_length.has_value()) {
+        return codec_failure<std::vector<std::byte>>(encoded_length.error().code,
+                                                     encoded_length.error().offset);
+    }
+
+    BufferWriter writer;
+    writer.write_bytes(encoded_type.value());
+    writer.write_bytes(encoded_length.value());
+    writer.write_bytes(capsule.payload);
+    return CodecResult<std::vector<std::byte>>::success(writer.bytes());
+}
+
+CodecResult<Http3DecodedCapsule> parse_http3_capsule(std::span<const std::byte> bytes) {
+    BufferReader reader(bytes);
+
+    const auto capsule_type = read_varint(reader);
+    if (!capsule_type.has_value()) {
+        return codec_failure<Http3DecodedCapsule>(capsule_type.error().code,
+                                                  capsule_type.error().offset);
+    }
+
+    const auto capsule_length = read_varint(reader);
+    if (!capsule_length.has_value()) {
+        return codec_failure<Http3DecodedCapsule>(capsule_length.error().code,
+                                                  capsule_length.error().offset);
+    }
+    if (capsule_length.value() > reader.remaining()) {
+        return codec_failure<Http3DecodedCapsule>(CodecErrorCode::http3_parse_error,
+                                                  reader.offset());
+    }
+
+    const auto payload =
+        reader.read_exact(static_cast<std::size_t>(capsule_length.value())).value();
+    return CodecResult<Http3DecodedCapsule>::success(Http3DecodedCapsule{
+        .capsule =
+            Http3Capsule{
+                .type = capsule_type.value(),
+                .payload = std::vector<std::byte>(payload.begin(), payload.end()),
+            },
         .bytes_consumed = reader.offset(),
     });
 }
@@ -626,6 +767,12 @@ Http3Result<bool> validate_http3_settings_frame(const Http3SettingsFrame &frame)
             return http3_failure<bool>(Http3ErrorCode::settings_error,
                                        "reserved setting identifier");
         }
+        if ((setting.id == kHttp3SettingsEnableConnectProtocol ||
+             setting.id == kHttp3SettingsH3Datagram) &&
+            setting.value > 1u) {
+            return http3_failure<bool>(Http3ErrorCode::settings_error,
+                                       "invalid boolean setting value");
+        }
     }
 
     return Http3Result<bool>::success(true);
@@ -647,6 +794,7 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
     bool saw_scheme = false;
     bool saw_authority = false;
     bool saw_path = false;
+    bool saw_protocol = false;
 
     for (std::size_t field_index = 0; field_index < fields.size(); ++field_index) {
         const auto &field = fields[field_index];
@@ -754,13 +902,36 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
             head.path = field.value;
             continue;
         }
+        if (field.name == ":protocol") {
+            if (saw_protocol) {
+                return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
+                                                       "duplicate request pseudo header");
+            }
+            saw_protocol = true;
+            if (field.value.empty()) {
+                return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
+                                                       "empty :protocol pseudo header");
+            }
+            head.protocol = field.value;
+            continue;
+        }
 
         return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                "unexpected request pseudo header");
     }
 
     if (head.method == "CONNECT") {
-        if (!saw_authority || head.authority.empty() || saw_scheme || saw_path) {
+        if (head.protocol.has_value()) {
+            if (!saw_scheme || !saw_path) {
+                return http3_failure<Http3RequestHead>(
+                    Http3ErrorCode::message_error,
+                    "malformed extended connect request pseudo headers");
+            }
+        } else if (saw_scheme || saw_path) {
+            return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
+                                                   "malformed connect request pseudo headers");
+        }
+        if (!saw_authority || head.authority.empty()) {
             return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                    "malformed connect request pseudo headers");
         }
@@ -773,6 +944,11 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
                                                    "mismatched :authority and host");
         }
         return Http3Result<Http3RequestHead>::success(std::move(head));
+    }
+
+    if (head.protocol.has_value()) {
+        return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
+                                               ":protocol requires CONNECT");
     }
 
     if (head.method.empty() || head.scheme.empty() || head.path.empty()) {
@@ -901,6 +1077,9 @@ bool http3_frame_allowed_on_control_stream(Http3ConnectionRole role, const Http3
         std::holds_alternative<Http3GoawayFrame>(frame) ||
         std::holds_alternative<Http3CancelPushFrame>(frame)) {
         return true;
+    }
+    if (std::holds_alternative<Http3PriorityUpdateFrame>(frame)) {
+        return role == Http3ConnectionRole::server;
     }
     if (std::holds_alternative<Http3MaxPushIdFrame>(frame)) {
         return role == Http3ConnectionRole::server;

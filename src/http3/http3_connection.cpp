@@ -219,6 +219,10 @@ bool is_informational_response(std::uint16_t status) {
     return status >= 100u && status < 200u;
 }
 
+bool response_status_forbids_body(std::uint16_t status) {
+    return is_informational_response(status) || status == 204u || status == 304u;
+}
+
 std::vector<Http3Field> response_fields_from_head(const Http3ResponseHead &head) {
     std::vector<Http3Field> fields;
     fields.reserve(head.headers.size() + 2u);
@@ -247,7 +251,13 @@ std::vector<Http3Field> request_fields_from_head(const Http3RequestHead &head) {
         .name = ":authority",
         .value = head.authority,
     });
-    if (head.method != "CONNECT") {
+    if (head.protocol.has_value()) {
+        fields.push_back(Http3Field{
+            .name = ":protocol",
+            .value = *head.protocol,
+        });
+    }
+    if (head.method != "CONNECT" || head.protocol.has_value()) {
         fields.push_back(Http3Field{
             .name = ":scheme",
             .value = head.scheme,
@@ -284,6 +294,18 @@ std::vector<Http3Setting> settings_from_snapshot(const Http3SettingsSnapshot &se
         .id = kHttp3SettingsQpackBlockedStreams,
         .value = settings.qpack_blocked_streams,
     });
+    if (settings.enable_connect_protocol) {
+        values.push_back(Http3Setting{
+            .id = kHttp3SettingsEnableConnectProtocol,
+            .value = 1,
+        });
+    }
+    if (settings.h3_datagram) {
+        values.push_back(Http3Setting{
+            .id = kHttp3SettingsH3Datagram,
+            .value = 1,
+        });
+    }
     values.push_back(Http3Setting{
         .id = kHttp3SettingsReservedGrease,
         .value = 0,
@@ -315,16 +337,57 @@ std::optional<std::size_t> complete_http3_frame_size(std::span<const std::byte> 
     return header_size + static_cast<std::size_t>(length.value().value);
 }
 
+std::optional<std::uint64_t> complete_push_stream_id(std::span<const std::byte> bytes) {
+    const auto decoded = decode_varint_bytes(bytes);
+    if (!decoded.has_value()) {
+        return std::nullopt;
+    }
+    return decoded.value().value;
+}
+
+std::optional<std::size_t> complete_push_stream_id_size(std::span<const std::byte> bytes) {
+    const auto decoded = decode_varint_bytes(bytes);
+    if (!decoded.has_value()) {
+        return std::nullopt;
+    }
+    return decoded.value().bytes_consumed;
+}
+
+bool headers_equal(const Http3Headers &lhs, const Http3Headers &rhs) {
+    return lhs == rhs;
+}
+
+bool settings_frame_contains_value(const Http3SettingsFrame &frame, std::uint64_t id,
+                                   std::uint64_t value) {
+    return std::any_of(
+        frame.settings.begin(), frame.settings.end(),
+        [=](const Http3Setting &setting) { return setting.id == id && setting.value == value; });
+}
+
+bool request_stream_id_is_valid(std::uint64_t stream_id) {
+    return (stream_id & 0x03u) == 0u;
+}
+
+bool priority_field_value_is_connection_safe(std::string_view value) {
+    for (const unsigned char ch : value) {
+        if (ch < 0x20u || ch > 0x7eu) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 Http3Connection::Http3Connection(Http3ConnectionConfig config)
     : config_(config),
-      peer_settings_{
+      peer_settings_{config_.remembered_peer_settings.value_or(Http3SettingsSnapshot{
           .qpack_max_table_capacity = 0,
           .qpack_blocked_streams = 0,
           .max_field_section_size = std::nullopt,
-      },
-      encoder_{}, decoder_{} {
+      })},
+      remembered_peer_settings_{config_.remembered_peer_settings}, encoder_{}, decoder_{},
+      next_local_uni_stream_id_{config_.role == Http3ConnectionRole::client ? 2u : 3u} {
     encoder_.peer_settings = qpack_settings_from_snapshot(peer_settings_);
     decoder_.local_settings = qpack_settings_from_snapshot(config_.local_settings);
 }
@@ -361,6 +424,11 @@ Http3EndpointUpdate Http3Connection::on_core_result(const quic::QuicCoreResult &
             continue;
         }
 
+        if (const auto *datagram = std::get_if<quic::QuicCoreReceiveDatagramData>(&effect)) {
+            handle_receive_datagram_data(*datagram);
+            continue;
+        }
+
         if (const auto *reset = std::get_if<quic::QuicCorePeerResetStream>(&effect)) {
             handle_peer_reset_stream(*reset);
             continue;
@@ -368,6 +436,31 @@ Http3EndpointUpdate Http3Connection::on_core_result(const quic::QuicCoreResult &
 
         if (const auto *stop = std::get_if<quic::QuicCorePeerStopSending>(&effect)) {
             handle_peer_stop_sending(*stop);
+            continue;
+        }
+
+        if (const auto *zero_rtt = std::get_if<quic::QuicCoreZeroRttStatusEvent>(&effect)) {
+            if (zero_rtt->status == quic::QuicZeroRttStatus::accepted) {
+                state_.zero_rtt_accepted = true;
+                if (remote_settings_frame_.has_value() && remembered_peer_settings_.has_value() &&
+                    !validate_zero_rtt_settings_compatibility(*remote_settings_frame_,
+                                                              *remembered_peer_settings_)) {
+                    queue_connection_close(Http3ErrorCode::settings_error,
+                                           "zero-rtt settings are incompatible");
+                }
+            } else if (zero_rtt->status == quic::QuicZeroRttStatus::rejected ||
+                       zero_rtt->status == quic::QuicZeroRttStatus::unavailable ||
+                       zero_rtt->status == quic::QuicZeroRttStatus::not_attempted) {
+                state_.zero_rtt_accepted = false;
+                if (!state_.remote_settings_received && remembered_peer_settings_.has_value()) {
+                    peer_settings_ = Http3SettingsSnapshot{
+                        .qpack_max_table_capacity = 0,
+                        .qpack_blocked_streams = 0,
+                        .max_field_section_size = std::nullopt,
+                    };
+                    encoder_.peer_settings = qpack_settings_from_snapshot(peer_settings_);
+                }
+            }
             continue;
         }
     }
@@ -419,6 +512,10 @@ Http3Result<bool> Http3Connection::submit_request_head(std::uint64_t stream_id,
     if (request.request_finished) {
         return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
                                          "request stream already finished", stream_id);
+    }
+    if (head.protocol.has_value() && !peer_settings_.enable_connect_protocol) {
+        return local_http3_failure<bool>(Http3ErrorCode::settings_error,
+                                         "peer does not enable extended connect", stream_id);
     }
 
     auto fields = request_fields_from_head(head);
@@ -749,9 +846,11 @@ Http3Result<bool> Http3Connection::submit_response_head(std::uint64_t stream_id,
     if (!informational) {
         response.final_response_started = true;
         response.expected_content_length = head.content_length;
+        response.response_body_forbidden = response_status_forbids_body(head.status);
         if (response.connect_request && head.status >= 200u && head.status < 300u) {
             response.connect_response = true;
             response.expected_content_length.reset();
+            response.response_body_forbidden = false;
         }
     }
 
@@ -805,6 +904,11 @@ Http3Result<bool> Http3Connection::submit_response_body(std::uint64_t stream_id,
     if (!response.final_response_started) {
         return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
                                          "response body before final response headers", stream_id);
+    }
+    if (response.response_body_forbidden) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "response body is not permitted for this status",
+                                         stream_id);
     }
     if (response.trailers_sent) {
         return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
@@ -876,6 +980,11 @@ Http3Result<bool> Http3Connection::submit_response_trailers(std::uint64_t stream
     if (!response.final_response_started) {
         return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
                                          "response trailers before final response headers",
+                                         stream_id);
+    }
+    if (response.response_body_forbidden) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "response trailers are not permitted for this status",
                                          stream_id);
     }
     if (response.trailers_sent) {
@@ -953,7 +1062,8 @@ Http3Result<bool> Http3Connection::finish_response(std::uint64_t stream_id,
         return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
                                          "final response headers not sent", stream_id);
     }
-    if (enforce_content_length && response.expected_content_length.has_value() &&
+    if (enforce_content_length && !response.response_body_forbidden &&
+        response.expected_content_length.has_value() &&
         response.body_bytes_sent != *response.expected_content_length) {
         return local_http3_failure<bool>(Http3ErrorCode::message_error,
                                          "response body does not match content-length", stream_id);
@@ -961,6 +1071,566 @@ Http3Result<bool> Http3Connection::finish_response(std::uint64_t stream_id,
 
     response.finished = true;
     queue_send(stream_id, std::span<const std::byte>{}, true);
+    return Http3Result<bool>::success(true);
+}
+
+Http3Result<bool> Http3Connection::submit_max_push_id(std::uint64_t push_id) {
+    if (closed_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "connection is closed");
+    }
+    if (config_.role != Http3ConnectionRole::client) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "max push id sending requires client role");
+    }
+    if (!transport_ready_ || !state_.local_control_stream_id.has_value()) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "transport is not ready");
+    }
+    if (state_.local_max_push_id.has_value() && push_id < *state_.local_max_push_id) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error, "max push id cannot be reduced");
+    }
+
+    state_.local_max_push_id = push_id;
+    queue_serialized_frame(*state_.local_control_stream_id,
+                           Http3Frame{Http3MaxPushIdFrame{.push_id = push_id}});
+    return Http3Result<bool>::success(true);
+}
+
+Http3Result<std::uint64_t> Http3Connection::submit_push_promise(std::uint64_t request_stream_id,
+                                                                const Http3RequestHead &head) {
+    if (closed_) {
+        return local_http3_failure<std::uint64_t>(Http3ErrorCode::general_protocol_error,
+                                                  "connection is closed", request_stream_id);
+    }
+    if (config_.role != Http3ConnectionRole::server) {
+        return local_http3_failure<std::uint64_t>(Http3ErrorCode::general_protocol_error,
+                                                  "push promise sending requires server role",
+                                                  request_stream_id);
+    }
+    if (!transport_ready_) {
+        return local_http3_failure<std::uint64_t>(Http3ErrorCode::general_protocol_error,
+                                                  "transport is not ready", request_stream_id);
+    }
+    if (!state_.peer_max_push_id.has_value()) {
+        return local_http3_failure<std::uint64_t>(
+            Http3ErrorCode::id_error, "peer has not enabled server push", request_stream_id);
+    }
+
+    const auto response_it = local_response_streams_.find(request_stream_id);
+    if (response_it == local_response_streams_.end()) {
+        return local_http3_failure<std::uint64_t>(
+            Http3ErrorCode::frame_unexpected, "request stream is not available", request_stream_id);
+    }
+    if (response_it->second.finished || response_it->second.trailers_sent) {
+        return local_http3_failure<std::uint64_t>(Http3ErrorCode::frame_unexpected,
+                                                  "push promise after response completion",
+                                                  request_stream_id);
+    }
+
+    const auto push_id = state_.next_local_push_id;
+    if (push_id > *state_.peer_max_push_id) {
+        return local_http3_failure<std::uint64_t>(
+            Http3ErrorCode::id_error, "peer max push id is exhausted", request_stream_id);
+    }
+    if (state_.goaway_id.has_value()) {
+        return local_http3_failure<std::uint64_t>(Http3ErrorCode::request_rejected,
+                                                  "peer goaway prevents issuing a new push",
+                                                  request_stream_id);
+    }
+
+    auto fields = request_fields_from_head(head);
+    if (const auto validated = validate_http3_request_headers(fields); !validated.has_value()) {
+        return Http3Result<std::uint64_t>::failure(validated.error());
+    }
+    if (peer_settings_.max_field_section_size.has_value() &&
+        field_section_exceeds_limit(fields, *peer_settings_.max_field_section_size)) {
+        return local_http3_failure<std::uint64_t>(
+            Http3ErrorCode::message_error,
+            "push promise field section exceeds peer max field section size", request_stream_id);
+    }
+
+    const auto encoded = encode_http3_field_section(encoder_, request_stream_id, fields).value();
+    if (!encoded.encoder_instructions.empty()) {
+        if (!state_.local_qpack_encoder_stream_id.has_value()) {
+            return local_http3_failure<std::uint64_t>(Http3ErrorCode::general_protocol_error,
+                                                      "local qpack encoder stream is unavailable",
+                                                      request_stream_id);
+        }
+        queue_send(*state_.local_qpack_encoder_stream_id, encoded.encoder_instructions);
+    }
+
+    auto field_section = encoded.prefix;
+    field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
+    queue_serialized_frame(request_stream_id, Http3Frame{
+                                                  Http3PushPromiseFrame{
+                                                      .push_id = push_id,
+                                                      .field_section = std::move(field_section),
+                                                  },
+                                              });
+
+    local_pushes_.insert_or_assign(push_id, LocalPushState{
+                                                .push_id = push_id,
+                                                .request_stream_id = request_stream_id,
+                                                .promised_head = head,
+                                            });
+    state_.next_local_push_id = push_id + 1u;
+    return Http3Result<std::uint64_t>::success(push_id);
+}
+
+Http3Result<bool> Http3Connection::submit_push_response_head(std::uint64_t push_id,
+                                                             const Http3ResponseHead &head) {
+    if (closed_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "connection is closed");
+    }
+    if (config_.role != Http3ConnectionRole::server) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "push response sending requires server role");
+    }
+    if (!transport_ready_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "transport is not ready");
+    }
+
+    const auto push_it = local_pushes_.find(push_id);
+    if (push_it == local_pushes_.end()) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error, "push id is not available");
+    }
+    auto &push = push_it->second;
+    if (push.cancelled) {
+        return local_http3_failure<bool>(Http3ErrorCode::request_cancelled,
+                                         "push has been cancelled");
+    }
+    if (push.finished) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "push response already finished");
+    }
+    if (push.trailers_sent) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "push response trailers already sent");
+    }
+    const bool informational = is_informational_response(head.status);
+    if (push.final_response_started && !informational) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "final push response already sent");
+    }
+
+    if (!push.push_stream_id.has_value()) {
+        create_local_push_stream(push);
+    }
+    if (!push.push_stream_id.has_value()) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error, "push stream is not available");
+    }
+    const auto push_stream_id = push.push_stream_id.value();
+
+    auto fields = response_fields_from_head(head);
+    if (const auto validated = validate_http3_response_headers(fields); !validated.has_value()) {
+        return Http3Result<bool>::failure(validated.error());
+    }
+    if (peer_settings_.max_field_section_size.has_value() &&
+        field_section_exceeds_limit(fields, *peer_settings_.max_field_section_size)) {
+        return local_http3_failure<bool>(
+            Http3ErrorCode::message_error,
+            "push response field section exceeds peer max field section size", push_stream_id);
+    }
+
+    const auto encoded = encode_http3_field_section(encoder_, push_stream_id, fields).value();
+    if (!encoded.encoder_instructions.empty()) {
+        if (!state_.local_qpack_encoder_stream_id.has_value()) {
+            return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                             "local qpack encoder stream is unavailable",
+                                             push_stream_id);
+        }
+        queue_send(*state_.local_qpack_encoder_stream_id, encoded.encoder_instructions);
+    }
+
+    auto field_section = encoded.prefix;
+    field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
+    queue_serialized_frame(push_stream_id, Http3Frame{
+                                               Http3HeadersFrame{
+                                                   .field_section = std::move(field_section),
+                                               },
+                                           });
+    if (!informational) {
+        push.final_response_started = true;
+        push.expected_content_length = head.content_length;
+        push.response_body_forbidden = response_status_forbids_body(head.status);
+    }
+
+    return Http3Result<bool>::success(true);
+}
+
+Http3Result<bool> Http3Connection::submit_push_response_body(std::uint64_t push_id,
+                                                             std::span<const std::byte> body,
+                                                             bool fin) {
+    if (closed_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "connection is closed");
+    }
+    if (config_.role != Http3ConnectionRole::server) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "push response sending requires server role");
+    }
+    if (!transport_ready_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "transport is not ready");
+    }
+
+    const auto push_it = local_pushes_.find(push_id);
+    if (push_it == local_pushes_.end()) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error, "push stream is not available");
+    }
+    const auto maybe_push_stream_id = push_it->second.push_stream_id;
+    if (!maybe_push_stream_id.has_value()) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error, "push stream is not available");
+    }
+    const auto push_stream_id = *maybe_push_stream_id;
+    auto &push = push_it->second;
+    if (push.cancelled) {
+        return local_http3_failure<bool>(Http3ErrorCode::request_cancelled,
+                                         "push has been cancelled", push_stream_id);
+    }
+    if (push.finished) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "push response already finished", push_stream_id);
+    }
+    if (!push.final_response_started) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "push response body before final response headers",
+                                         push_stream_id);
+    }
+    if (push.response_body_forbidden) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "push response body is not permitted for this status",
+                                         push_stream_id);
+    }
+    if (push.trailers_sent) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "push response trailers already sent", push_stream_id);
+    }
+
+    if (body.size() > std::numeric_limits<std::uint64_t>::max() - push.body_bytes_sent) {
+        return local_http3_failure<bool>(Http3ErrorCode::message_error,
+                                         "push response body exceeds content-length",
+                                         push_stream_id);
+    }
+    const auto new_total = push.body_bytes_sent + static_cast<std::uint64_t>(body.size());
+    if (push.expected_content_length.has_value() && new_total > *push.expected_content_length) {
+        return local_http3_failure<bool>(Http3ErrorCode::message_error,
+                                         "push response body exceeds content-length",
+                                         push_stream_id);
+    }
+    if (fin && push.expected_content_length.has_value() &&
+        new_total != *push.expected_content_length) {
+        return local_http3_failure<bool>(Http3ErrorCode::message_error,
+                                         "push response body does not match content-length",
+                                         push_stream_id);
+    }
+
+    queue_serialized_frame(push_stream_id,
+                           Http3Frame{
+                               Http3DataFrame{
+                                   .payload = std::vector<std::byte>(body.begin(), body.end()),
+                               },
+                           },
+                           fin);
+    push.body_bytes_sent = new_total;
+    push.finished = fin;
+    return Http3Result<bool>::success(true);
+}
+
+Http3Result<bool>
+Http3Connection::submit_push_response_trailers(std::uint64_t push_id,
+                                               std::span<const Http3Field> trailers, bool fin) {
+    if (closed_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "connection is closed");
+    }
+    if (config_.role != Http3ConnectionRole::server) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "push response sending requires server role");
+    }
+    if (!transport_ready_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "transport is not ready");
+    }
+
+    const auto push_it = local_pushes_.find(push_id);
+    if (push_it == local_pushes_.end()) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error, "push stream is not available");
+    }
+    const auto maybe_push_stream_id = push_it->second.push_stream_id;
+    if (!maybe_push_stream_id.has_value()) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error, "push stream is not available");
+    }
+    const auto push_stream_id = *maybe_push_stream_id;
+    auto &push = push_it->second;
+    if (push.cancelled) {
+        return local_http3_failure<bool>(Http3ErrorCode::request_cancelled,
+                                         "push has been cancelled", push_stream_id);
+    }
+    if (push.finished) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "push response already finished", push_stream_id);
+    }
+    if (!push.final_response_started) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "push response trailers before final response headers",
+                                         push_stream_id);
+    }
+    if (push.response_body_forbidden) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "push response trailers are not permitted for this status",
+                                         push_stream_id);
+    }
+    if (push.trailers_sent) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "push response trailers already sent", push_stream_id);
+    }
+    if (push.expected_content_length.has_value() &&
+        push.body_bytes_sent != *push.expected_content_length) {
+        return local_http3_failure<bool>(Http3ErrorCode::message_error,
+                                         "push response body does not match content-length",
+                                         push_stream_id);
+    }
+
+    const auto validated = validate_http3_trailers(trailers);
+    if (!validated.has_value()) {
+        return Http3Result<bool>::failure(validated.error());
+    }
+    if (peer_settings_.max_field_section_size.has_value() &&
+        field_section_exceeds_limit(validated.value(), *peer_settings_.max_field_section_size)) {
+        return local_http3_failure<bool>(
+            Http3ErrorCode::message_error,
+            "push response trailers exceed peer max field section size", push_stream_id);
+    }
+
+    const auto encoded =
+        encode_http3_field_section(encoder_, push_stream_id, validated.value()).value();
+    if (!encoded.encoder_instructions.empty()) {
+        if (!state_.local_qpack_encoder_stream_id.has_value()) {
+            return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                             "local qpack encoder stream is unavailable",
+                                             push_stream_id);
+        }
+        queue_send(*state_.local_qpack_encoder_stream_id, encoded.encoder_instructions);
+    }
+
+    auto field_section = encoded.prefix;
+    field_section.insert(field_section.end(), encoded.payload.begin(), encoded.payload.end());
+    queue_serialized_frame(push_stream_id,
+                           Http3Frame{
+                               Http3HeadersFrame{
+                                   .field_section = std::move(field_section),
+                               },
+                           },
+                           fin);
+    push.trailers_sent = true;
+    push.finished = fin;
+    return Http3Result<bool>::success(true);
+}
+
+Http3Result<bool> Http3Connection::finish_push_response(std::uint64_t push_id,
+                                                        bool enforce_content_length) {
+    if (closed_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "connection is closed");
+    }
+    if (config_.role != Http3ConnectionRole::server) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "push response sending requires server role");
+    }
+    if (!transport_ready_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "transport is not ready");
+    }
+
+    const auto push_it = local_pushes_.find(push_id);
+    if (push_it == local_pushes_.end()) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error, "push stream is not available");
+    }
+    const auto maybe_push_stream_id = push_it->second.push_stream_id;
+    if (!maybe_push_stream_id.has_value()) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error, "push stream is not available");
+    }
+    const auto push_stream_id = *maybe_push_stream_id;
+    auto &push = push_it->second;
+    if (push.cancelled) {
+        return local_http3_failure<bool>(Http3ErrorCode::request_cancelled,
+                                         "push has been cancelled", push_stream_id);
+    }
+    if (push.finished) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "push response already finished", push_stream_id);
+    }
+    if (!push.final_response_started) {
+        return local_http3_failure<bool>(Http3ErrorCode::frame_unexpected,
+                                         "final push response headers not sent", push_stream_id);
+    }
+    if (enforce_content_length && !push.response_body_forbidden &&
+        push.expected_content_length.has_value() &&
+        push.body_bytes_sent != *push.expected_content_length) {
+        return local_http3_failure<bool>(Http3ErrorCode::message_error,
+                                         "push response body does not match content-length",
+                                         push_stream_id);
+    }
+
+    push.finished = true;
+    queue_send(push_stream_id, std::span<const std::byte>{}, true);
+    return Http3Result<bool>::success(true);
+}
+
+Http3Result<bool> Http3Connection::cancel_push(std::uint64_t push_id) {
+    if (closed_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "connection is closed");
+    }
+    if (!transport_ready_ || !state_.local_control_stream_id.has_value()) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "transport is not ready");
+    }
+    if (config_.role == Http3ConnectionRole::client) {
+        if (!state_.local_max_push_id.has_value() || push_id > *state_.local_max_push_id) {
+            return local_http3_failure<bool>(Http3ErrorCode::id_error,
+                                             "cancel push references unavailable push id");
+        }
+        if (auto push_it = peer_pushes_.find(push_id); push_it != peer_pushes_.end()) {
+            push_it->second.cancelled = true;
+            if (push_it->second.push_stream_id.has_value()) {
+                pending_core_inputs_.push_back(quic::QuicCoreStopSending{
+                    .stream_id = *push_it->second.push_stream_id,
+                    .application_error_code =
+                        static_cast<std::uint64_t>(Http3ErrorCode::request_cancelled),
+                });
+            }
+        }
+    } else if (!state_.peer_max_push_id.has_value() || push_id > *state_.peer_max_push_id) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error,
+                                         "cancel push references unavailable push id");
+    }
+
+    queue_serialized_frame(*state_.local_control_stream_id,
+                           Http3Frame{Http3CancelPushFrame{.push_id = push_id}});
+    return Http3Result<bool>::success(true);
+}
+
+Http3Result<bool> Http3Connection::submit_goaway(std::uint64_t id) {
+    if (closed_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "connection is closed");
+    }
+    if (!transport_ready_ || !state_.local_control_stream_id.has_value()) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "transport is not ready");
+    }
+    if (config_.role == Http3ConnectionRole::server && ((id & 0x03u) != 0u)) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error,
+                                         "invalid server goaway stream id");
+    }
+    if (state_.local_goaway_id.has_value() && id > *state_.local_goaway_id) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error,
+                                         "local goaway identifier cannot increase");
+    }
+
+    state_.local_goaway_id = id;
+    queue_serialized_frame(*state_.local_control_stream_id, Http3Frame{Http3GoawayFrame{.id = id}});
+    return Http3Result<bool>::success(true);
+}
+
+Http3Result<bool>
+Http3Connection::submit_priority_update_for_request(std::uint64_t stream_id,
+                                                    std::string priority_field_value) {
+    if (closed_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "connection is closed", stream_id);
+    }
+    if (!transport_ready_ || !state_.local_control_stream_id.has_value()) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "transport is not ready", stream_id);
+    }
+    if (!request_stream_id_is_valid(stream_id)) {
+        return local_http3_failure<bool>(Http3ErrorCode::id_error,
+                                         "priority update references invalid request stream id",
+                                         stream_id);
+    }
+    if (!priority_field_value_is_connection_safe(priority_field_value)) {
+        return local_http3_failure<bool>(Http3ErrorCode::message_error,
+                                         "invalid priority field value", stream_id);
+    }
+
+    queue_serialized_frame(*state_.local_control_stream_id,
+                           Http3Frame{Http3PriorityUpdateFrame{
+                               .frame_type = kHttp3FrameTypePriorityUpdateRequestStream,
+                               .prioritized_element_id = stream_id,
+                               .priority_field_value = std::move(priority_field_value),
+                           }});
+    return Http3Result<bool>::success(true);
+}
+
+Http3Result<bool>
+Http3Connection::submit_priority_update_for_push(std::uint64_t push_id,
+                                                 std::string priority_field_value) {
+    if (closed_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "connection is closed");
+    }
+    if (!transport_ready_ || !state_.local_control_stream_id.has_value()) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "transport is not ready");
+    }
+    if (!priority_field_value_is_connection_safe(priority_field_value)) {
+        return local_http3_failure<bool>(Http3ErrorCode::message_error,
+                                         "invalid priority field value");
+    }
+
+    queue_serialized_frame(*state_.local_control_stream_id,
+                           Http3Frame{Http3PriorityUpdateFrame{
+                               .frame_type = kHttp3FrameTypePriorityUpdatePushId,
+                               .prioritized_element_id = push_id,
+                               .priority_field_value = std::move(priority_field_value),
+                           }});
+    return Http3Result<bool>::success(true);
+}
+
+Http3Result<bool> Http3Connection::submit_datagram(std::uint64_t stream_id,
+                                                   std::span<const std::byte> payload) {
+    if (closed_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "connection is closed", stream_id);
+    }
+    if (!transport_ready_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "transport is not ready", stream_id);
+    }
+    if (!config_.local_settings.h3_datagram || !peer_settings_.h3_datagram) {
+        return local_http3_failure<bool>(Http3ErrorCode::datagram_error,
+                                         "h3 datagram is not enabled", stream_id);
+    }
+
+    const auto serialized = serialize_http3_datagram(stream_id, payload);
+    if (!serialized.has_value()) {
+        return local_http3_failure<bool>(Http3ErrorCode::datagram_error,
+                                         "invalid h3 datagram stream id", stream_id);
+    }
+
+    pending_core_inputs_.push_back(quic::QuicCoreSendDatagramData{
+        .bytes = serialized.value(),
+    });
+    return Http3Result<bool>::success(true);
+}
+
+Http3Result<bool> Http3Connection::abort_connect_stream(std::uint64_t stream_id) {
+    if (closed_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "connection is closed", stream_id);
+    }
+    if (!transport_ready_) {
+        return local_http3_failure<bool>(Http3ErrorCode::general_protocol_error,
+                                         "transport is not ready", stream_id);
+    }
+
+    queue_stream_error(stream_id, Http3ErrorCode::connect_error);
     return Http3Result<bool>::success(true);
 }
 
@@ -1004,9 +1674,9 @@ void Http3Connection::queue_startup_streams() {
         return;
     }
 
-    const auto control_stream_id = next_local_uni_stream_id();
-    const auto encoder_stream_id = control_stream_id + 4u;
-    const auto decoder_stream_id = encoder_stream_id + 4u;
+    const auto control_stream_id = allocate_local_uni_stream_id();
+    const auto encoder_stream_id = allocate_local_uni_stream_id();
+    const auto decoder_stream_id = allocate_local_uni_stream_id();
 
     const auto control_stream =
         serialize_http3_control_stream(settings_from_snapshot(config_.local_settings));
@@ -1096,6 +1766,29 @@ void Http3Connection::queue_stream_error(std::uint64_t stream_id, Http3ErrorCode
     });
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+void Http3Connection::queue_push_stream_error(std::uint64_t stream_id, std::uint64_t push_id,
+                                              Http3ErrorCode code) {
+    if (closed_) {
+        return;
+    }
+
+    const auto push = peer_pushes_.find(push_id);
+    if (push != peer_pushes_.end()) {
+        if (push->second.blocked_field_section.has_value()) {
+            cancel_http3_qpack_stream(decoder_, stream_id).value();
+            push->second.blocked_field_section.reset();
+            flush_qpack_decoder_instructions();
+        }
+        peer_pushes_.erase(push);
+    }
+    peer_uni_streams_.erase(stream_id);
+    pending_core_inputs_.push_back(quic::QuicCoreStopSending{
+        .stream_id = stream_id,
+        .application_error_code = static_cast<std::uint64_t>(code),
+    });
+}
+
 void Http3Connection::handle_receive_stream_data(const quic::QuicCoreReceiveStreamData &received) {
     const auto payload = received.payload();
     const auto info = classify_stream_id(received.stream_id, endpoint_role(config_.role));
@@ -1127,6 +1820,26 @@ void Http3Connection::handle_receive_stream_data(const quic::QuicCoreReceiveStre
     }
 }
 
+void Http3Connection::handle_receive_datagram_data(
+    const quic::QuicCoreReceiveDatagramData &received) {
+    if (!config_.local_settings.h3_datagram || !peer_settings_.h3_datagram) {
+        queue_connection_close(Http3ErrorCode::datagram_error,
+                               "received h3 datagram without negotiated support");
+        return;
+    }
+
+    const auto parsed = parse_http3_datagram(received.payload());
+    if (!parsed.has_value()) {
+        queue_connection_close(Http3ErrorCode::datagram_error, "invalid h3 datagram payload");
+        return;
+    }
+
+    pending_events_.push_back(Http3DatagramEvent{
+        .stream_id = parsed.value().stream_id,
+        .payload = parsed.value().payload,
+    });
+}
+
 void Http3Connection::handle_peer_reset_stream(const quic::QuicCorePeerResetStream &reset) {
     if (is_remote_critical_stream(reset.stream_id)) {
         queue_connection_close(Http3ErrorCode::closed_critical_stream,
@@ -1137,6 +1850,21 @@ void Http3Connection::handle_peer_reset_stream(const quic::QuicCorePeerResetStre
     peer_uni_streams_.erase(reset.stream_id);
     terminated_peer_request_streams_.erase(reset.stream_id);
     local_response_streams_.erase(reset.stream_id);
+
+    for (auto push_it = peer_pushes_.begin(); push_it != peer_pushes_.end(); ++push_it) {
+        if (push_it->second.push_stream_id == reset.stream_id) {
+            if (push_it->second.blocked_field_section.has_value()) {
+                cancel_http3_qpack_stream(decoder_, reset.stream_id).value();
+                flush_qpack_decoder_instructions();
+            }
+            pending_events_.push_back(Http3PeerPushResetEvent{
+                .push_id = push_it->first,
+                .application_error_code = reset.application_error_code,
+            });
+            peer_pushes_.erase(push_it);
+            return;
+        }
+    }
 
     const auto local_request = local_request_streams_.find(reset.stream_id);
     if (local_request != local_request_streams_.end()) {
@@ -1176,15 +1904,25 @@ void Http3Connection::handle_peer_stop_sending(const quic::QuicCorePeerStopSendi
     }
 
     const auto response = local_response_streams_.find(stop.stream_id);
-    if (response == local_response_streams_.end()) {
+    if (response != local_response_streams_.end()) {
+        pending_core_inputs_.push_back(quic::QuicCoreResetStream{
+            .stream_id = stop.stream_id,
+            .application_error_code = stop.application_error_code,
+        });
+        local_response_streams_.erase(response);
         return;
     }
 
-    pending_core_inputs_.push_back(quic::QuicCoreResetStream{
-        .stream_id = stop.stream_id,
-        .application_error_code = stop.application_error_code,
-    });
-    local_response_streams_.erase(response);
+    for (auto &push : local_pushes_) {
+        if (push.second.push_stream_id == stop.stream_id) {
+            pending_core_inputs_.push_back(quic::QuicCoreResetStream{
+                .stream_id = stop.stream_id,
+                .application_error_code = stop.application_error_code,
+            });
+            push.second.cancelled = true;
+            return;
+        }
+    }
 }
 
 void Http3Connection::handle_peer_bidi_stream(std::uint64_t stream_id,
@@ -1238,6 +1976,8 @@ void Http3Connection::handle_peer_uni_stream_data(std::uint64_t stream_id,
 
     if (kind == PeerUniStreamKind::control) {
         process_control_stream(stream_id, stream);
+    } else if (kind == PeerUniStreamKind::push) {
+        process_push_stream(stream_id, stream);
     } else if (kind == PeerUniStreamKind::qpack_encoder) {
         process_qpack_encoder_stream(stream_id, stream);
     } else if (kind == PeerUniStreamKind::qpack_decoder) {
@@ -1252,6 +1992,15 @@ void Http3Connection::handle_peer_uni_stream_data(std::uint64_t stream_id,
 
     if (kind == PeerUniStreamKind::ignored) {
         peer_uni_streams_.erase(stream_id);
+        return;
+    }
+
+    if (kind == PeerUniStreamKind::push) {
+        if (stream.push_id.has_value()) {
+            finalize_push_stream(stream_id, *stream.push_id);
+        } else {
+            peer_uni_streams_.erase(stream_id);
+        }
         return;
     }
 
@@ -1280,12 +2029,12 @@ void Http3Connection::register_peer_uni_stream(std::uint64_t stream_id, std::uin
     }
 
     if (stream_type == static_cast<std::uint64_t>(Http3UniStreamType::push)) {
-        queue_connection_close(config_.role == Http3ConnectionRole::server
-                                   ? Http3ErrorCode::stream_creation_error
-                                   : Http3ErrorCode::id_error,
-                               config_.role == Http3ConnectionRole::server
-                                   ? "client-initiated push stream is not permitted"
-                                   : "push stream received without enabled push id");
+        if (config_.role == Http3ConnectionRole::server) {
+            queue_connection_close(Http3ErrorCode::stream_creation_error,
+                                   "client-initiated push stream is not permitted");
+            return;
+        }
+        stream.kind = PeerUniStreamKind::push;
         return;
     }
 
@@ -1373,6 +2122,7 @@ void Http3Connection::process_qpack_encoder_stream(std::uint64_t stream_id,
         for (const auto &field_section : decoded.value()) {
             handle_unblocked_request_field_section(field_section);
             handle_unblocked_response_field_section(field_section);
+            handle_unblocked_push_field_section(field_section);
             if (closed_) {
                 return;
             }
@@ -1409,6 +2159,74 @@ void Http3Connection::process_qpack_decoder_stream(std::uint64_t stream_id,
         stream.buffer.erase(stream.buffer.begin(),
                             stream.buffer.begin() +
                                 static_cast<std::ptrdiff_t>(instruction.bytes_consumed));
+    }
+}
+
+void Http3Connection::process_push_stream(std::uint64_t stream_id, PeerUniStreamState &stream) {
+    if (closed_) {
+        return;
+    }
+
+    if (!stream.push_id.has_value()) {
+        const auto push_id_size = complete_push_stream_id_size(stream.buffer);
+        if (!push_id_size.has_value()) {
+            return;
+        }
+        const auto push_id = complete_push_stream_id(stream.buffer);
+        if (!push_id.has_value()) {
+            queue_connection_close(Http3ErrorCode::id_error, "invalid push stream push id");
+            return;
+        }
+        if (!state_.local_max_push_id.has_value() || *push_id > *state_.local_max_push_id) {
+            queue_connection_close(Http3ErrorCode::id_error,
+                                   "push stream references unavailable push id");
+            return;
+        }
+
+        auto &push = peer_pushes_[*push_id];
+        if (push.push_stream_id.has_value()) {
+            queue_connection_close(Http3ErrorCode::id_error, "duplicate push stream id");
+            return;
+        }
+        push.push_id = *push_id;
+        push.push_stream_id = stream_id;
+        stream.push_id = push_id;
+        stream.buffer.erase(stream.buffer.begin(),
+                            stream.buffer.begin() + static_cast<std::ptrdiff_t>(*push_id_size));
+    }
+
+    const auto push_id = *stream.push_id;
+    while (!closed_) {
+        const auto push_it = peer_pushes_.find(push_id);
+        if (push_it == peer_pushes_.end() || push_it->second.blocked_field_section.has_value()) {
+            return;
+        }
+        if (stream.buffer.empty()) {
+            return;
+        }
+
+        const auto frame_size = complete_http3_frame_size(stream.buffer);
+        if (!frame_size.has_value()) {
+            return;
+        }
+
+        const auto parsed =
+            parse_http3_frame(std::span<const std::byte>(stream.buffer.data(), *frame_size));
+        if (!parsed.has_value()) {
+            queue_connection_close(Http3ErrorCode::frame_error, "invalid http3 frame");
+            return;
+        }
+        if (!http3_frame_allowed_on_request_stream(parsed.value().frame)) {
+            queue_connection_close(Http3ErrorCode::frame_unexpected,
+                                   "frame is not permitted on the push stream");
+            return;
+        }
+
+        const auto frame = parsed.value().frame;
+        stream.buffer.erase(stream.buffer.begin(),
+                            stream.buffer.begin() +
+                                static_cast<std::ptrdiff_t>(parsed.value().bytes_consumed));
+        handle_push_stream_frame(stream_id, push_id, frame);
     }
 }
 
@@ -1468,7 +2286,8 @@ void Http3Connection::process_response_stream(std::uint64_t stream_id) {
     while (!closed_) {
         const auto request = local_request_streams_.find(stream_id);
         if (request == local_request_streams_.end() ||
-            request->second.blocked_field_section.has_value()) {
+            request->second.blocked_field_section.has_value() ||
+            request->second.blocked_push_promise_id.has_value()) {
             return;
         }
 
@@ -1541,9 +2360,69 @@ void Http3Connection::handle_response_frame(std::uint64_t stream_id, const Http3
         return;
     }
 
+    if (const auto *promise = std::get_if<Http3PushPromiseFrame>(&frame)) {
+        if (!state_.local_max_push_id.has_value() || promise->push_id > *state_.local_max_push_id) {
+            queue_connection_close(Http3ErrorCode::id_error,
+                                   "push promise references unavailable push id");
+            return;
+        }
+
+        const auto request = local_request_streams_.find(stream_id);
+        if (request == local_request_streams_.end()) {
+            return;
+        }
+        if (request->second.response_trailers_received || request->second.connect_response) {
+            queue_connection_close(Http3ErrorCode::frame_unexpected,
+                                   "push promise after response trailers is not permitted");
+            return;
+        }
+
+        const auto prefix_size = complete_qpack_field_section_prefix_size(promise->field_section);
+        if (!prefix_size.has_value() || *prefix_size == 0) {
+            queue_connection_close(Http3ErrorCode::qpack_decompression_failed,
+                                   "invalid qpack field section prefix");
+            return;
+        }
+
+        const auto decoded = decode_http3_field_section(
+            decoder_, stream_id,
+            std::span<const std::byte>(promise->field_section.data(), *prefix_size),
+            std::span<const std::byte>(promise->field_section.data() + *prefix_size,
+                                       promise->field_section.size() - *prefix_size));
+        auto &push = peer_pushes_[promise->push_id];
+        push.push_id = promise->push_id;
+        push.request_stream_id = stream_id;
+        if (!decoded.has_value()) {
+            queue_connection_close(decoded.error().code, decoded.error().detail);
+            return;
+        }
+        if (decoded.value().status == Http3QpackDecodeStatus::blocked) {
+            push.blocked_field_section = PushFieldSectionKind::promise_headers;
+            request->second.blocked_push_promise_id = promise->push_id;
+            return;
+        }
+
+        apply_push_field_section(stream_id, promise->push_id, PushFieldSectionKind::promise_headers,
+                                 decoded.value().headers);
+        return;
+    }
+}
+
+void Http3Connection::handle_push_stream_frame(std::uint64_t stream_id, std::uint64_t push_id,
+                                               const Http3Frame &frame) {
+    if (const auto *headers = std::get_if<Http3HeadersFrame>(&frame)) {
+        handle_push_response_headers_frame(stream_id, push_id, *headers);
+        return;
+    }
+
+    if (const auto *data = std::get_if<Http3DataFrame>(&frame)) {
+        handle_push_response_data_frame(stream_id, push_id, *data);
+        return;
+    }
+
     if (std::holds_alternative<Http3PushPromiseFrame>(frame)) {
-        queue_connection_close(Http3ErrorCode::id_error,
-                               "push promise received without enabled push id");
+        queue_connection_close(Http3ErrorCode::frame_unexpected,
+                               "push promise is not permitted on push stream");
     }
 }
 
@@ -1689,6 +2568,51 @@ void Http3Connection::handle_response_headers_frame(std::uint64_t stream_id,
     apply_response_field_section(stream_id, kind, decoded.value().headers);
 }
 
+void Http3Connection::handle_push_response_headers_frame(std::uint64_t stream_id,
+                                                         std::uint64_t push_id,
+                                                         const Http3HeadersFrame &frame) {
+    const auto push = peer_pushes_.find(push_id);
+    if (push == peer_pushes_.end()) {
+        return;
+    }
+    if (push->second.cancelled) {
+        return;
+    }
+
+    PushFieldSectionKind kind = PushFieldSectionKind::response_headers;
+    if (push->second.final_response_received) {
+        if (push->second.response_trailers_received) {
+            queue_connection_close(Http3ErrorCode::frame_unexpected,
+                                   "headers frame after push response trailers is not permitted");
+            return;
+        }
+        kind = PushFieldSectionKind::response_trailers;
+    }
+
+    const auto prefix_size = complete_qpack_field_section_prefix_size(frame.field_section);
+    if (!prefix_size.has_value() || *prefix_size == 0) {
+        queue_connection_close(Http3ErrorCode::qpack_decompression_failed,
+                               "invalid qpack field section prefix");
+        return;
+    }
+
+    const auto decoded = decode_http3_field_section(
+        decoder_, stream_id, std::span<const std::byte>(frame.field_section.data(), *prefix_size),
+        std::span<const std::byte>(frame.field_section.data() + *prefix_size,
+                                   frame.field_section.size() - *prefix_size));
+    if (!decoded.has_value()) {
+        queue_connection_close(decoded.error().code, decoded.error().detail);
+        return;
+    }
+
+    if (decoded.value().status == Http3QpackDecodeStatus::blocked) {
+        push->second.blocked_field_section = kind;
+        return;
+    }
+
+    apply_push_field_section(stream_id, push_id, kind, decoded.value().headers);
+}
+
 void Http3Connection::handle_response_data_frame(std::uint64_t stream_id,
                                                  const Http3DataFrame &frame) {
     const auto request = local_request_streams_.find(stream_id);
@@ -1704,6 +2628,11 @@ void Http3Connection::handle_response_data_frame(std::uint64_t stream_id,
     if (request->second.head_request) {
         queue_connection_close(Http3ErrorCode::frame_unexpected,
                                "data frame on response to HEAD request is not permitted");
+        return;
+    }
+    if (request->second.response_body_forbidden) {
+        queue_connection_close(Http3ErrorCode::frame_unexpected,
+                               "data frame on response without a body is not permitted");
         return;
     }
     if (request->second.connect_response) {
@@ -1744,6 +2673,56 @@ void Http3Connection::handle_response_data_frame(std::uint64_t stream_id,
     }
 }
 
+void Http3Connection::handle_push_response_data_frame(std::uint64_t stream_id,
+                                                      std::uint64_t push_id,
+                                                      const Http3DataFrame &frame) {
+    const auto push = peer_pushes_.find(push_id);
+    if (push == peer_pushes_.end()) {
+        return;
+    }
+    if (push->second.cancelled) {
+        return;
+    }
+
+    if (!push->second.final_response_received) {
+        queue_connection_close(Http3ErrorCode::frame_unexpected,
+                               "data frame before push response headers is not permitted");
+        return;
+    }
+    if (push->second.response_body_forbidden) {
+        queue_connection_close(Http3ErrorCode::frame_unexpected,
+                               "data frame on push response without a body is not permitted");
+        return;
+    }
+    if (push->second.response_trailers_received) {
+        queue_connection_close(Http3ErrorCode::frame_unexpected,
+                               "data frame after push response trailers is not permitted");
+        return;
+    }
+
+    if (frame.payload.size() >
+        std::numeric_limits<std::uint64_t>::max() - push->second.response_body_bytes_received) {
+        queue_push_stream_error(stream_id, push_id, Http3ErrorCode::message_error);
+        return;
+    }
+
+    const auto new_total = push->second.response_body_bytes_received +
+                           static_cast<std::uint64_t>(frame.payload.size());
+    if (push->second.expected_response_content_length.has_value() &&
+        new_total > *push->second.expected_response_content_length) {
+        queue_push_stream_error(stream_id, push_id, Http3ErrorCode::message_error);
+        return;
+    }
+
+    push->second.response_body_bytes_received = new_total;
+    if (!frame.payload.empty()) {
+        pending_events_.push_back(Http3PeerPushResponseBodyEvent{
+            .push_id = push_id,
+            .body = frame.payload,
+        });
+    }
+}
+
 void Http3Connection::apply_request_field_section(std::uint64_t stream_id,
                                                   RequestFieldSectionKind kind,
                                                   Http3Headers headers) {
@@ -1762,6 +2741,10 @@ void Http3Connection::apply_request_field_section(std::uint64_t stream_id,
         auto head = validate_http3_request_headers(headers);
         if (!head.has_value()) {
             queue_stream_error(stream_id, head.error().code);
+            return;
+        }
+        if (head.value().protocol.has_value() && !config_.local_settings.enable_connect_protocol) {
+            queue_stream_error(stream_id, Http3ErrorCode::settings_error);
             return;
         }
 
@@ -1827,10 +2810,12 @@ void Http3Connection::apply_response_field_section(std::uint64_t stream_id,
 
         request->second.final_response_received = true;
         request->second.expected_response_content_length = head.value().content_length;
+        request->second.response_body_forbidden = response_status_forbids_body(head.value().status);
         if (request->second.connect_request && head.value().status >= 200u &&
             head.value().status < 300u) {
             request->second.connect_response = true;
             request->second.expected_response_content_length.reset();
+            request->second.response_body_forbidden = false;
         }
         pending_events_.push_back(Http3PeerResponseHeadEvent{
             .stream_id = stream_id,
@@ -1854,6 +2839,97 @@ void Http3Connection::apply_response_field_section(std::uint64_t stream_id,
     request->second.response_trailers_received = true;
     pending_events_.push_back(Http3PeerResponseTrailersEvent{
         .stream_id = stream_id,
+        .trailers = std::move(trailers.value()),
+    });
+}
+
+void Http3Connection::apply_push_field_section(std::uint64_t stream_id, std::uint64_t push_id,
+                                               PushFieldSectionKind kind, Http3Headers headers) {
+    const auto push = peer_pushes_.find(push_id);
+    if (push == peer_pushes_.end()) {
+        return;
+    }
+    if (push->second.cancelled) {
+        return;
+    }
+
+    if (kind == PushFieldSectionKind::promise_headers) {
+        if (config_.local_settings.max_field_section_size.has_value() &&
+            field_section_exceeds_limit(headers, *config_.local_settings.max_field_section_size)) {
+            queue_stream_error(stream_id, Http3ErrorCode::message_error);
+            return;
+        }
+
+        auto head = validate_http3_request_headers(headers);
+        if (!head.has_value()) {
+            queue_stream_error(stream_id, head.error().code);
+            return;
+        }
+
+        if (push->second.promised_head.has_value()) {
+            const auto existing_fields =
+                request_fields_from_head(push->second.promised_head.value());
+            const auto new_fields = request_fields_from_head(head.value());
+            if (!headers_equal(existing_fields, new_fields)) {
+                queue_connection_close(Http3ErrorCode::general_protocol_error,
+                                       "duplicate push promise headers differ");
+                return;
+            }
+            return;
+        }
+
+        push->second.request_stream_id = stream_id;
+        push->second.promised_head = head.value();
+        pending_events_.push_back(Http3PeerPushPromiseEvent{
+            .request_stream_id = stream_id,
+            .push_id = push_id,
+            .head = std::move(head.value()),
+        });
+        return;
+    }
+
+    if (kind == PushFieldSectionKind::response_headers) {
+        if (config_.local_settings.max_field_section_size.has_value() &&
+            field_section_exceeds_limit(headers, *config_.local_settings.max_field_section_size)) {
+            queue_push_stream_error(stream_id, push_id, Http3ErrorCode::message_error);
+            return;
+        }
+
+        auto head = validate_http3_response_headers(headers);
+        if (!head.has_value()) {
+            queue_push_stream_error(stream_id, push_id, head.error().code);
+            return;
+        }
+
+        if (is_informational_response(head.value().status)) {
+            return;
+        }
+
+        push->second.final_response_received = true;
+        push->second.expected_response_content_length = head.value().content_length;
+        push->second.response_body_forbidden = response_status_forbids_body(head.value().status);
+        pending_events_.push_back(Http3PeerPushResponseHeadEvent{
+            .push_id = push_id,
+            .head = std::move(head.value()),
+        });
+        return;
+    }
+
+    auto trailers = validate_http3_trailers(headers);
+    if (!trailers.has_value()) {
+        queue_push_stream_error(stream_id, push_id, trailers.error().code);
+        return;
+    }
+    if (config_.local_settings.max_field_section_size.has_value() &&
+        field_section_exceeds_limit(trailers.value(),
+                                    *config_.local_settings.max_field_section_size)) {
+        queue_push_stream_error(stream_id, push_id, Http3ErrorCode::message_error);
+        return;
+    }
+
+    push->second.response_trailers_received = true;
+    pending_events_.push_back(Http3PeerPushResponseTrailersEvent{
+        .push_id = push_id,
         .trailers = std::move(trailers.value()),
     });
 }
@@ -1892,6 +2968,52 @@ void Http3Connection::handle_unblocked_response_field_section(
     process_response_stream(decoded.stream_id);
 }
 
+void Http3Connection::handle_unblocked_push_field_section(const Http3DecodedFieldSection &decoded) {
+    std::optional<std::uint64_t> push_id;
+    for (const auto &[candidate_id, push] : peer_pushes_) {
+        if (push.blocked_field_section.has_value() && push.push_stream_id == decoded.stream_id) {
+            push_id = candidate_id;
+            break;
+        }
+        if (push.blocked_field_section == PushFieldSectionKind::promise_headers &&
+            push.request_stream_id == decoded.stream_id) {
+            push_id = candidate_id;
+            break;
+        }
+    }
+    if (!push_id.has_value()) {
+        return;
+    }
+
+    auto push_it = peer_pushes_.find(*push_id);
+    if (push_it == peer_pushes_.end()) {
+        return;
+    }
+    const auto maybe_kind = push_it->second.blocked_field_section;
+    if (!maybe_kind.has_value()) {
+        return;
+    }
+    const auto kind = *maybe_kind;
+    push_it->second.blocked_field_section.reset();
+    if (kind == PushFieldSectionKind::promise_headers) {
+        if (auto request_it = local_request_streams_.find(decoded.stream_id);
+            request_it != local_request_streams_.end()) {
+            request_it->second.blocked_push_promise_id.reset();
+        }
+    }
+    apply_push_field_section(decoded.stream_id, *push_id, kind, decoded.headers);
+    if (kind == PushFieldSectionKind::response_headers ||
+        kind == PushFieldSectionKind::response_trailers) {
+        auto stream_it = peer_uni_streams_.find(decoded.stream_id);
+        if (stream_it != peer_uni_streams_.end()) {
+            process_push_stream(decoded.stream_id, stream_it->second);
+        }
+    } else if (const auto request_stream_id = push_it->second.request_stream_id;
+               request_stream_id.has_value()) {
+        process_response_stream(*request_stream_id);
+    }
+}
+
 void Http3Connection::finalize_request_stream(std::uint64_t stream_id) {
     const auto request = peer_request_streams_.find(stream_id);
     if (request == peer_request_streams_.end()) {
@@ -1924,7 +3046,7 @@ void Http3Connection::finalize_response_stream(std::uint64_t stream_id) {
         queue_stream_error(stream_id, Http3ErrorCode::message_error);
         return;
     }
-    if (!request->second.head_request &&
+    if (!request->second.head_request && !request->second.response_body_forbidden &&
         request->second.expected_response_content_length.has_value() &&
         request->second.response_body_bytes_received !=
             *request->second.expected_response_content_length) {
@@ -1936,6 +3058,36 @@ void Http3Connection::finalize_response_stream(std::uint64_t stream_id) {
         .stream_id = stream_id,
     });
     local_request_streams_.erase(request);
+}
+
+void Http3Connection::finalize_push_stream(std::uint64_t stream_id, std::uint64_t push_id) {
+    const auto push = peer_pushes_.find(push_id);
+    if (push == peer_pushes_.end()) {
+        peer_uni_streams_.erase(stream_id);
+        return;
+    }
+    if (push->second.cancelled) {
+        peer_pushes_.erase(push);
+        peer_uni_streams_.erase(stream_id);
+        return;
+    }
+    if (!push->second.final_response_received) {
+        queue_push_stream_error(stream_id, push_id, Http3ErrorCode::message_error);
+        return;
+    }
+    if (!push->second.response_body_forbidden &&
+        push->second.expected_response_content_length.has_value() &&
+        push->second.response_body_bytes_received !=
+            *push->second.expected_response_content_length) {
+        queue_push_stream_error(stream_id, push_id, Http3ErrorCode::message_error);
+        return;
+    }
+
+    pending_events_.push_back(Http3PeerPushResponseCompleteEvent{
+        .push_id = push_id,
+    });
+    peer_pushes_.erase(push);
+    peer_uni_streams_.erase(stream_id);
 }
 
 void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3Frame &frame) {
@@ -1953,7 +3105,15 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
             return;
         }
 
+        if (state_.zero_rtt_accepted && remembered_peer_settings_.has_value() &&
+            !validate_zero_rtt_settings_compatibility(*settings, *remembered_peer_settings_)) {
+            queue_connection_close(Http3ErrorCode::settings_error,
+                                   "zero-rtt settings are incompatible");
+            return;
+        }
+
         apply_remote_settings(*settings);
+        remote_settings_frame_ = *settings;
         state_.remote_settings_received = true;
         return;
     }
@@ -1983,13 +3143,104 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
         state_.goaway_id = goaway->id;
     }
 
-    if (std::holds_alternative<Http3CancelPushFrame>(frame)) {
-        queue_connection_close(Http3ErrorCode::id_error,
-                               "cancel push references unavailable push id");
-        return;
+    if (const auto *max_push_id = std::get_if<Http3MaxPushIdFrame>(&frame)) {
+        if (state_.peer_max_push_id.has_value() &&
+            max_push_id->push_id < *state_.peer_max_push_id) {
+            queue_connection_close(Http3ErrorCode::id_error, "peer max push id decreased");
+            return;
+        }
+        state_.peer_max_push_id = max_push_id->push_id;
+    }
+
+    if (const auto *cancel = std::get_if<Http3CancelPushFrame>(&frame)) {
+        if (config_.role == Http3ConnectionRole::client) {
+            if (!state_.local_max_push_id.has_value() ||
+                cancel->push_id > *state_.local_max_push_id) {
+                queue_connection_close(Http3ErrorCode::id_error,
+                                       "cancel push references unavailable push id");
+                return;
+            }
+            if (auto push_it = peer_pushes_.find(cancel->push_id); push_it != peer_pushes_.end()) {
+                push_it->second.cancelled = true;
+            }
+            pending_events_.push_back(Http3PeerPushCancelledEvent{.push_id = cancel->push_id});
+            return;
+        }
+
+        if (!state_.peer_max_push_id.has_value() || cancel->push_id > *state_.peer_max_push_id) {
+            queue_connection_close(Http3ErrorCode::id_error,
+                                   "cancel push references unavailable push id");
+            return;
+        }
+        auto push_it = local_pushes_.find(cancel->push_id);
+        if (push_it == local_pushes_.end()) {
+            queue_connection_close(Http3ErrorCode::id_error,
+                                   "cancel push references unpromised push id");
+            return;
+        }
+        push_it->second.cancelled = true;
+        if (push_it->second.push_stream_id.has_value()) {
+            pending_core_inputs_.push_back(quic::QuicCoreResetStream{
+                .stream_id = *push_it->second.push_stream_id,
+                .application_error_code =
+                    static_cast<std::uint64_t>(Http3ErrorCode::request_cancelled),
+            });
+        }
+    }
+
+    if (const auto *priority = std::get_if<Http3PriorityUpdateFrame>(&frame)) {
+        pending_events_.push_back(Http3PriorityUpdateEvent{
+            .id = priority->prioritized_element_id,
+            .push = priority->frame_type == kHttp3FrameTypePriorityUpdatePushId,
+            .priority_field_value = priority->priority_field_value,
+        });
     }
 
     (void)stream_id;
+}
+
+bool Http3Connection::validate_zero_rtt_settings_compatibility(
+    const Http3SettingsFrame &frame, const Http3SettingsSnapshot &settings) {
+    Http3SettingsSnapshot updated{
+        .qpack_max_table_capacity = 0,
+        .qpack_blocked_streams = 0,
+        .max_field_section_size = std::nullopt,
+    };
+    bool saw_max_field_section_size = false;
+    for (const auto &setting : frame.settings) {
+        if (setting.id == kHttp3SettingsQpackMaxTableCapacity) {
+            updated.qpack_max_table_capacity = setting.value;
+        } else if (setting.id == kHttp3SettingsQpackBlockedStreams) {
+            updated.qpack_blocked_streams = setting.value;
+        } else if (setting.id == kHttp3SettingsMaxFieldSectionSize) {
+            updated.max_field_section_size = setting.value;
+            saw_max_field_section_size = true;
+        } else if (setting.id == kHttp3SettingsEnableConnectProtocol) {
+            updated.enable_connect_protocol = setting.value != 0u;
+        } else if (setting.id == kHttp3SettingsH3Datagram) {
+            updated.h3_datagram = setting.value != 0u;
+        }
+    }
+
+    if (updated.qpack_max_table_capacity < settings.qpack_max_table_capacity ||
+        updated.qpack_blocked_streams < settings.qpack_blocked_streams) {
+        return false;
+    }
+    if (settings.max_field_section_size.has_value()) {
+        if (!saw_max_field_section_size || !updated.max_field_section_size.has_value() ||
+            *updated.max_field_section_size < *settings.max_field_section_size) {
+            return false;
+        }
+    }
+    if (settings.enable_connect_protocol &&
+        !settings_frame_contains_value(frame, kHttp3SettingsEnableConnectProtocol, 1)) {
+        return false;
+    }
+    if (settings.h3_datagram &&
+        !settings_frame_contains_value(frame, kHttp3SettingsH3Datagram, 1)) {
+        return false;
+    }
+    return true;
 }
 
 void Http3Connection::apply_remote_settings(const Http3SettingsFrame &frame) {
@@ -2001,11 +3252,29 @@ void Http3Connection::apply_remote_settings(const Http3SettingsFrame &frame) {
             updated.qpack_blocked_streams = setting.value;
         } else if (setting.id == kHttp3SettingsMaxFieldSectionSize) {
             updated.max_field_section_size = setting.value;
+        } else if (setting.id == kHttp3SettingsEnableConnectProtocol) {
+            updated.enable_connect_protocol = setting.value != 0u;
+        } else if (setting.id == kHttp3SettingsH3Datagram) {
+            updated.h3_datagram = setting.value != 0u;
         }
     }
 
     peer_settings_ = updated;
     encoder_.peer_settings = qpack_settings_from_snapshot(peer_settings_);
+}
+
+void Http3Connection::create_local_push_stream(LocalPushState &push) {
+    if (push.push_stream_id.has_value()) {
+        return;
+    }
+
+    const auto stream_id = allocate_local_uni_stream_id();
+    push.push_stream_id = stream_id;
+
+    auto prefix = serialize_http3_uni_stream_prefix(Http3UniStreamType::push).value();
+    const auto encoded_push_id = quic::encode_varint(push.push_id).value();
+    prefix.insert(prefix.end(), encoded_push_id.begin(), encoded_push_id.end());
+    queue_send(stream_id, prefix);
 }
 
 void Http3Connection::queue_send(std::uint64_t stream_id, std::span<const std::byte> bytes,
@@ -2036,7 +3305,13 @@ void Http3Connection::queue_serialized_frame(std::uint64_t stream_id, const Http
 }
 
 std::uint64_t Http3Connection::next_local_uni_stream_id() const {
-    return config_.role == Http3ConnectionRole::client ? 2u : 3u;
+    return next_local_uni_stream_id_;
+}
+
+std::uint64_t Http3Connection::allocate_local_uni_stream_id() {
+    const auto stream_id = next_local_uni_stream_id_;
+    next_local_uni_stream_id_ += 4u;
+    return stream_id;
 }
 
 bool Http3Connection::is_remote_critical_stream(std::uint64_t stream_id) const {

@@ -272,6 +272,72 @@ std::vector<std::byte> goaway_frame_bytes(std::uint64_t id) {
     return frame.has_value() ? frame.value() : std::vector<std::byte>{};
 }
 
+std::vector<std::byte> max_push_id_frame_bytes(std::uint64_t push_id) {
+    const auto frame = coquic::http3::serialize_http3_frame(coquic::http3::Http3Frame{
+        coquic::http3::Http3MaxPushIdFrame{
+            .push_id = push_id,
+        },
+    });
+    EXPECT_TRUE(frame.has_value());
+    return frame.has_value() ? frame.value() : std::vector<std::byte>{};
+}
+
+std::vector<std::byte> cancel_push_frame_bytes(std::uint64_t push_id) {
+    const auto frame = coquic::http3::serialize_http3_frame(coquic::http3::Http3Frame{
+        coquic::http3::Http3CancelPushFrame{
+            .push_id = push_id,
+        },
+    });
+    EXPECT_TRUE(frame.has_value());
+    return frame.has_value() ? frame.value() : std::vector<std::byte>{};
+}
+
+std::vector<std::byte> push_stream_bytes(std::uint64_t push_id,
+                                         std::span<const std::byte> payload = {}) {
+    auto bytes =
+        coquic::http3::serialize_http3_uni_stream_prefix(coquic::http3::Http3UniStreamType::push)
+            .value();
+    const auto encoded_push_id = coquic::quic::encode_varint(push_id).value();
+    bytes.insert(bytes.end(), encoded_push_id.begin(), encoded_push_id.end());
+    bytes.insert(bytes.end(), payload.begin(), payload.end());
+    return bytes;
+}
+
+// NOLINTBEGIN(bugprone-easily-swappable-parameters)
+std::vector<std::byte>
+push_promise_frame_bytes(coquic::http3::Http3QpackEncoderContext &encoder, std::uint64_t stream_id,
+                         std::uint64_t push_id, std::span<const coquic::http3::Http3Field> fields,
+                         std::vector<std::byte> *encoder_instructions = nullptr) {
+    // NOLINTEND(bugprone-easily-swappable-parameters)
+    const auto encoded = coquic::http3::encode_http3_field_section(encoder, stream_id, fields);
+    EXPECT_TRUE(encoded.has_value());
+    if (!encoded.has_value()) {
+        return {};
+    }
+
+    if (encoder_instructions != nullptr) {
+        *encoder_instructions = encoded.value().encoder_instructions;
+    }
+
+    auto field_section = encoded.value().prefix;
+    field_section.insert(field_section.end(), encoded.value().payload.begin(),
+                         encoded.value().payload.end());
+    const auto frame = coquic::http3::serialize_http3_frame(coquic::http3::Http3Frame{
+        coquic::http3::Http3PushPromiseFrame{
+            .push_id = push_id,
+            .field_section = std::move(field_section),
+        },
+    });
+    EXPECT_TRUE(frame.has_value());
+    return frame.has_value() ? frame.value() : std::vector<std::byte>{};
+}
+
+std::vector<std::byte> push_promise_frame_bytes(std::uint64_t stream_id, std::uint64_t push_id,
+                                                std::span<const coquic::http3::Http3Field> fields) {
+    coquic::http3::Http3QpackEncoderContext encoder;
+    return push_promise_frame_bytes(encoder, stream_id, push_id, fields);
+}
+
 std::vector<std::byte> encoder_stream_bytes(std::initializer_list<std::uint8_t> values) {
     auto bytes = bytes_from_ints({0x02});
     const auto payload = bytes_from_ints(values);

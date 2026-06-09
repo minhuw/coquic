@@ -149,32 +149,35 @@ TEST(QuicHttp3ConnectionTest, RejectsSecondPeerControlStream) {
               static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::stream_creation_error));
 }
 
-TEST(QuicHttp3ConnectionTest, RejectsPeerPushStreamsWhenPushIsUnavailable) {
-    {
-        coquic::http3::Http3Connection server(coquic::http3::Http3ConnectionConfig{
-            .role = coquic::http3::Http3ConnectionRole::server,
-        });
+TEST(QuicHttp3ConnectionTest, RejectsClientInitiatedPushStreamsOnServerRole) {
+    coquic::http3::Http3Connection server(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+    });
 
-        const auto update = server.on_core_result(receive_result(2, bytes_from_ints({0x01})),
-                                                  coquic::quic::QuicCoreTimePoint{});
-        const auto close = close_input_from(update);
+    const auto update = server.on_core_result(receive_result(2, bytes_from_ints({0x01})),
+                                              coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
 
-        EXPECT_EQ(close_application_error_code(close),
-                  static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::stream_creation_error));
-    }
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::stream_creation_error));
+}
 
-    {
-        coquic::http3::Http3Connection client(coquic::http3::Http3ConnectionConfig{
-            .role = coquic::http3::Http3ConnectionRole::client,
-        });
+TEST(QuicHttp3ConnectionTest, RejectsPeerPushStreamAboveAdvertisedMaxPushId) {
+    coquic::http3::Http3Connection client(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
 
-        const auto update = client.on_core_result(receive_result(3, bytes_from_ints({0x01})),
-                                                  coquic::quic::QuicCoreTimePoint{});
-        const auto close = close_input_from(update);
+    prime_client_transport(client);
+    receive_peer_settings(client, {});
+    ASSERT_TRUE(client.submit_max_push_id(0).has_value());
+    static_cast<void>(client.poll(coquic::quic::QuicCoreTimePoint{}));
 
-        EXPECT_EQ(close_application_error_code(close),
-                  static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::id_error));
-    }
+    const auto update = client.on_core_result(receive_result(3, push_stream_bytes(1)),
+                                              coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
+
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::id_error));
 }
 
 TEST(QuicHttp3ConnectionTest, ReservedPeerControlFrameMapsToFrameUnexpected) {
@@ -740,6 +743,150 @@ TEST(QuicHttp3ConnectionTest, MalformedMaxPushIdPayloadOnControlStreamMapsToFram
 
     EXPECT_EQ(close_application_error_code(close),
               static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::frame_error));
+}
+
+TEST(QuicHttp3ConnectionTest, ClientSubmitMaxPushIdQueuesControlFrameAndForbidsReduction) {
+    coquic::http3::Http3Connection client(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+    });
+
+    prime_client_transport(client);
+    receive_peer_settings(client, {});
+
+    ASSERT_TRUE(client.submit_max_push_id(3).has_value());
+    auto update = client.poll(coquic::quic::QuicCoreTimePoint{});
+    const auto sends = send_stream_inputs_from(update);
+
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends[0].stream_id, 2u);
+    EXPECT_EQ(sends[0].bytes, max_push_id_frame_bytes(3));
+    EXPECT_EQ(client.state().local_max_push_id, std::optional<std::uint64_t>(3u));
+
+    auto reduced = client.submit_max_push_id(2);
+    ASSERT_FALSE(reduced.has_value());
+    EXPECT_EQ(reduced.error().code, coquic::http3::Http3ErrorCode::id_error);
+}
+
+TEST(QuicHttp3ConnectionTest, ServerStoresPeerMaxPushIdAndRejectsReduction) {
+    coquic::http3::Http3Connection server(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+    });
+
+    receive_peer_settings(server, {});
+
+    auto first = server.on_core_result(receive_result(2, max_push_id_frame_bytes(4)),
+                                       coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(first).has_value());
+    EXPECT_EQ(server.state().peer_max_push_id, std::optional<std::uint64_t>(4u));
+
+    auto second = server.on_core_result(receive_result(2, max_push_id_frame_bytes(2)),
+                                        coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(second);
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::id_error));
+}
+
+TEST(QuicHttp3ConnectionTest, SubmitGoawayQueuesFrameAndForbidsIncrease) {
+    coquic::http3::Http3Connection server(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+    });
+
+    prime_server_transport(server);
+
+    ASSERT_TRUE(server.submit_goaway(8).has_value());
+    auto first = server.poll(coquic::quic::QuicCoreTimePoint{});
+    const auto first_sends = send_stream_inputs_from(first);
+
+    ASSERT_EQ(first_sends.size(), 1u);
+    EXPECT_EQ(first_sends[0].stream_id, 3u);
+    EXPECT_EQ(first_sends[0].bytes, goaway_frame_bytes(8));
+    EXPECT_EQ(server.state().local_goaway_id, std::optional<std::uint64_t>(8u));
+
+    ASSERT_TRUE(server.submit_goaway(4).has_value());
+    auto second = server.poll(coquic::quic::QuicCoreTimePoint{});
+    const auto second_sends = send_stream_inputs_from(second);
+    ASSERT_EQ(second_sends.size(), 1u);
+    EXPECT_EQ(second_sends[0].bytes, goaway_frame_bytes(4));
+
+    auto increased = server.submit_goaway(12);
+    ASSERT_FALSE(increased.has_value());
+    EXPECT_EQ(increased.error().code, coquic::http3::Http3ErrorCode::id_error);
+}
+
+TEST(QuicHttp3ConnectionTest, PeerGoawayPreventsServerFromPromisingNewPushes) {
+    coquic::http3::Http3Connection server(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+    });
+
+    prime_server_transport(server);
+    receive_peer_settings(server, {});
+    static_cast<void>(server.on_core_result(receive_result(2, max_push_id_frame_bytes(4)),
+                                            coquic::quic::QuicCoreTimePoint{}));
+    static_cast<void>(server.on_core_result(receive_result(2, goaway_frame_bytes(4)),
+                                            coquic::quic::QuicCoreTimePoint{}));
+    receive_completed_get_request(server, 0);
+
+    auto promised = server.submit_push_promise(0, coquic::http3::Http3RequestHead{
+                                                      .method = "GET",
+                                                      .scheme = "https",
+                                                      .authority = "example.test",
+                                                      .path = "/push",
+                                                  });
+    ASSERT_FALSE(promised.has_value());
+    EXPECT_EQ(promised.error().code, coquic::http3::Http3ErrorCode::request_rejected);
+}
+
+TEST(QuicHttp3ConnectionTest, ServerHandlesClientCancelPushForLocalPush) {
+    coquic::http3::Http3Connection server(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+    });
+
+    prime_server_transport(server);
+    receive_peer_settings(server, {});
+    static_cast<void>(server.on_core_result(receive_result(2, max_push_id_frame_bytes(0)),
+                                            coquic::quic::QuicCoreTimePoint{}));
+    receive_completed_get_request(server, 0);
+
+    ASSERT_TRUE(server
+                    .submit_push_promise(0,
+                                         coquic::http3::Http3RequestHead{
+                                             .method = "GET",
+                                             .scheme = "https",
+                                             .authority = "example.test",
+                                             .path = "/push",
+                                         })
+                    .has_value());
+    ASSERT_TRUE(server
+                    .submit_push_response_head(0,
+                                               coquic::http3::Http3ResponseHead{
+                                                   .status = 200,
+                                               })
+                    .has_value());
+    static_cast<void>(server.poll(coquic::quic::QuicCoreTimePoint{}));
+
+    const auto update = server.on_core_result(receive_result(2, cancel_push_frame_bytes(0)),
+                                              coquic::quic::QuicCoreTimePoint{});
+    const auto resets = reset_stream_inputs_from(update);
+    ASSERT_EQ(resets.size(), 1u);
+    EXPECT_EQ(resets[0].stream_id, 15u);
+    EXPECT_EQ(resets[0].application_error_code,
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::request_cancelled));
+}
+
+TEST(QuicHttp3ConnectionTest, ServerRejectsCancelPushForUnpromisedPush) {
+    coquic::http3::Http3Connection server(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::server,
+    });
+
+    receive_peer_settings(server, {});
+    static_cast<void>(server.on_core_result(receive_result(2, max_push_id_frame_bytes(2)),
+                                            coquic::quic::QuicCoreTimePoint{}));
+
+    const auto update = server.on_core_result(receive_result(2, cancel_push_frame_bytes(1)),
+                                              coquic::quic::QuicCoreTimePoint{});
+    const auto close = close_input_from(update);
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::id_error));
 }
 
 TEST(QuicHttp3ConnectionTest, BuffersFragmentedPeerQpackEncoderInstructions) {

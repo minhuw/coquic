@@ -310,6 +310,15 @@ TEST(QuicHttp3ProtocolTest, EncodesAndDecodesDataAndHeadersFrames) {
         coquic::http3::Http3ConnectionRole::client, Http3Frame{Http3SettingsFrame{}}));
     EXPECT_TRUE(coquic::http3::http3_frame_allowed_on_control_stream(
         coquic::http3::Http3ConnectionRole::client, Http3Frame{Http3GoawayFrame{.id = 0}}));
+    const auto priority_update = Http3Frame{coquic::http3::Http3PriorityUpdateFrame{
+        .frame_type = coquic::http3::kHttp3FrameTypePriorityUpdateRequestStream,
+        .prioritized_element_id = 0,
+        .priority_field_value = "u=1",
+    }};
+    EXPECT_TRUE(coquic::http3::http3_frame_allowed_on_control_stream(
+        coquic::http3::Http3ConnectionRole::server, priority_update));
+    EXPECT_FALSE(coquic::http3::http3_frame_allowed_on_control_stream(
+        coquic::http3::Http3ConnectionRole::client, priority_update));
     EXPECT_FALSE(coquic::http3::http3_frame_allowed_on_control_stream(
         coquic::http3::Http3ConnectionRole::client,
         Http3Frame{Http3HeadersFrame{.field_section = {}}}));

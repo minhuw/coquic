@@ -8,6 +8,7 @@
 #include <optional>
 #include <span>
 
+#include "src/quic/cca/common.h"
 #include "src/quic/transport/recovery.h"
 
 namespace coquic::quic {
@@ -20,7 +21,15 @@ class BbrCongestionController { // NOLINT(clang-analyzer-optin.performance.Paddi
 
     bool can_send_ack_eliciting(std::size_t bytes) const;
     std::optional<QuicCoreTimePoint> next_send_time(std::size_t bytes) const;
+    SimpleStreamPacketSentCongestionResult on_simple_stream_packet_sent(std::size_t bytes_sent,
+                                                                        QuicCoreTimePoint sent_time,
+                                                                        bool app_limited);
     void on_packet_sent(SentPacketRecord &packet);
+    void on_simple_stream_packets_acked(std::span<const AckedStreamPacketSample> packets,
+                                        bool app_limited, QuicCoreTimePoint now,
+                                        const RecoveryRttState &rtt_state);
+    void on_simple_stream_packets_acked(const AckedStreamPacketAggregate &packets, bool app_limited,
+                                        QuicCoreTimePoint now, const RecoveryRttState &rtt_state);
     void on_packets_acked(std::span<const SentPacketRecord> packets, bool app_limited,
                           QuicCoreTimePoint now, const RecoveryRttState &rtt_state);
     void on_packets_discarded(std::span<const SentPacketRecord> packets);
@@ -70,6 +79,11 @@ class BbrCongestionController { // NOLINT(clang-analyzer-optin.performance.Paddi
     void handle_restart_from_idle(QuicCoreTimePoint now);
     RateSample generate_rate_sample(std::span<const SentPacketRecord> packets, bool app_limited,
                                     QuicCoreTimePoint now, const RecoveryRttState &rtt_state);
+    RateSample generate_rate_sample(std::span<const AckedStreamPacketSample> packets,
+                                    bool app_limited, QuicCoreTimePoint now,
+                                    const RecoveryRttState &rtt_state);
+    void on_rate_sample_acked(RateSample &rs, QuicCoreTimePoint now,
+                              const RecoveryRttState &rtt_state);
     void mark_connection_app_limited();
     void maybe_mark_connection_app_limited(bool no_pending_data);
     void update_round(std::uint64_t prior_delivered);

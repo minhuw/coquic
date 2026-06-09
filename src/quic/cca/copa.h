@@ -7,6 +7,7 @@
 #include <span>
 #include <utility>
 
+#include "src/quic/cca/common.h"
 #include "src/quic/transport/recovery.h"
 
 namespace coquic::quic {
@@ -19,8 +20,16 @@ class CopaCongestionController {
 
     bool can_send_ack_eliciting(std::size_t bytes) const;
     std::optional<QuicCoreTimePoint> next_send_time(std::size_t bytes) const;
+    SimpleStreamPacketSentCongestionResult on_simple_stream_packet_sent(std::size_t bytes_sent,
+                                                                        QuicCoreTimePoint sent_time,
+                                                                        bool app_limited);
     void on_packet_sent(std::size_t bytes_sent, bool ack_eliciting);
     void on_packet_sent(SentPacketRecord &packet);
+    void on_simple_stream_packets_acked(std::span<const AckedStreamPacketSample> packets,
+                                        bool app_limited, QuicCoreTimePoint now,
+                                        const RecoveryRttState &rtt_state);
+    void on_simple_stream_packets_acked(const AckedStreamPacketAggregate &packets, bool app_limited,
+                                        QuicCoreTimePoint now, const RecoveryRttState &rtt_state);
     void on_packets_acked(std::span<const SentPacketRecord> packets, bool app_limited);
     void on_packets_acked(std::span<const SentPacketRecord> packets, bool app_limited,
                           QuicCoreTimePoint now, const RecoveryRttState &rtt_state);
@@ -81,6 +90,8 @@ class CopaCongestionController {
     void consume_pacing_budget(std::size_t bytes, QuicCoreTimePoint now);
     void update_rtt_model(const RecoveryRttState &rtt_state);
     void update_rtt_model(const RecoveryRttState &rtt_state, QuicCoreTimePoint now);
+    void apply_acked_bytes(std::size_t acked_bytes, bool exit_recovery, QuicCoreTimePoint now,
+                           const RecoveryRttState &rtt_state);
     CopaTarget target_window() const;
     void update_velocity(QuicCoreTimePoint now);
     void grow_slow_start(std::size_t acked_bytes, const CopaTarget &target);

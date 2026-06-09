@@ -461,6 +461,11 @@ sent_packet_record_from_simple_stream_packet(const SimpleStreamSentPacketRecord 
         .bytes_in_flight = declared_lost ? 0 : packet.bytes_in_flight,
         .path_id = packet.path_id,
         .ecn = packet.ecn,
+        .delivered = packet.delivered,
+        .delivered_time = packet.delivered_time,
+        .first_sent_time = packet.first_sent_time,
+        .tx_in_flight = packet.tx_in_flight,
+        .lost = packet.lost,
         .app_limited = packet.app_limited,
         .protection_key_update_generation = packet.protection_key_update_generation,
     };

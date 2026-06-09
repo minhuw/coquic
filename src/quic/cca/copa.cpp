@@ -159,6 +159,15 @@ std::optional<QuicCoreTimePoint> CopaCongestionController::next_send_time(std::s
            congestion_pacing_delay_for_deficit(bytes - budget, pacing_rate_bytes_per_second_);
 }
 
+SimpleStreamPacketSentCongestionResult CopaCongestionController::on_simple_stream_packet_sent(
+    std::size_t bytes_sent, QuicCoreTimePoint sent_time, bool app_limited) {
+    bytes_in_flight_ = congestion_saturating_add(bytes_in_flight_, bytes_sent);
+    consume_pacing_budget(bytes_sent, sent_time);
+    return SimpleStreamPacketSentCongestionResult{
+        .app_limited = app_limited,
+    };
+}
+
 void CopaCongestionController::on_packet_sent(std::size_t bytes_sent, bool ack_eliciting) {
     if (!ack_eliciting) {
         return;
@@ -205,6 +214,59 @@ void CopaCongestionController::on_packets_acked(std::span<const SentPacketRecord
         acked_bytes = congestion_saturating_add(acked_bytes, packet.bytes_in_flight);
     }
 
+    apply_acked_bytes(acked_bytes, exit_recovery, now, rtt_state);
+}
+
+void CopaCongestionController::on_simple_stream_packets_acked(
+    std::span<const AckedStreamPacketSample> packets, bool app_limited, QuicCoreTimePoint now,
+    const RecoveryRttState &rtt_state) {
+    static_cast<void>(app_limited);
+    const auto recovery_boundary = recovery_start_time_;
+    bool exit_recovery = false;
+    std::size_t acked_bytes = 0;
+
+    for (const auto &packet : packets) {
+        bytes_in_flight_ = packet.bytes_in_flight > bytes_in_flight_
+                               ? 0
+                               : bytes_in_flight_ - packet.bytes_in_flight;
+
+        const bool in_batch_recovery =
+            recovery_boundary.has_value() && packet.sent_time <= *recovery_boundary;
+        if (recovery_boundary.has_value() && !in_batch_recovery) {
+            exit_recovery = true;
+        }
+        if (in_batch_recovery || packet.app_limited) {
+            continue;
+        }
+        acked_bytes = congestion_saturating_add(acked_bytes, packet.bytes_in_flight);
+    }
+
+    apply_acked_bytes(acked_bytes, exit_recovery, now, rtt_state);
+}
+
+void CopaCongestionController::on_simple_stream_packets_acked(
+    const AckedStreamPacketAggregate &packets, bool app_limited, QuicCoreTimePoint now,
+    const RecoveryRttState &rtt_state) {
+    static_cast<void>(app_limited);
+    if (packets.empty()) {
+        apply_acked_bytes(/*acked_bytes=*/0, /*exit_recovery=*/false, now, rtt_state);
+        return;
+    }
+
+    const auto recovery_boundary = recovery_start_time_;
+    const bool in_batch_recovery =
+        recovery_boundary.has_value() && packets.latest_sent_time <= *recovery_boundary;
+    bytes_in_flight_ =
+        packets.bytes_in_flight > bytes_in_flight_ ? 0 : bytes_in_flight_ - packets.bytes_in_flight;
+    const bool exit_recovery =
+        recovery_boundary.has_value() && packets.latest_sent_time > *recovery_boundary;
+    apply_acked_bytes(in_batch_recovery ? 0 : packets.bytes_in_flight, exit_recovery, now,
+                      rtt_state);
+}
+
+void CopaCongestionController::apply_acked_bytes(std::size_t acked_bytes, bool exit_recovery,
+                                                 QuicCoreTimePoint now,
+                                                 const RecoveryRttState &rtt_state) {
     update_rtt_model(rtt_state, now);
     if (acked_bytes == 0 || !latest_rtt_.has_value()) {
         if (exit_recovery) {

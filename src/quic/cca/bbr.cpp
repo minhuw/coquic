@@ -81,6 +81,33 @@ std::optional<QuicCoreTimePoint> BbrCongestionController::next_send_time(std::si
     return *pacing_budget_timestamp_ + congestion_pacing_delay_for_deficit(bytes - budget, rate);
 }
 
+SimpleStreamPacketSentCongestionResult BbrCongestionController::on_simple_stream_packet_sent(
+    std::size_t bytes_sent, QuicCoreTimePoint sent_time, bool app_limited) {
+    maybe_mark_connection_app_limited(app_limited);
+    const auto packet_app_limited = is_app_limited();
+    handle_restart_from_idle(sent_time);
+    if (!first_sent_time_.has_value() || bytes_in_flight_ == 0) {
+        first_sent_time_ = sent_time;
+        delivered_time_ = sent_time;
+    }
+
+    const auto packet_first_sent_time = first_sent_time_.value_or(sent_time);
+    const auto packet_delivered_time = delivered_time_.value_or(sent_time);
+    const auto packet_delivered = total_delivered_;
+    const auto packet_tx_in_flight = bytes_in_flight_ + bytes_sent;
+    const auto packet_lost = total_lost_;
+    bytes_in_flight_ += bytes_sent;
+    consume_pacing_budget(bytes_sent, sent_time);
+    return SimpleStreamPacketSentCongestionResult{
+        .delivered = packet_delivered,
+        .delivered_time = packet_delivered_time,
+        .first_sent_time = packet_first_sent_time,
+        .tx_in_flight = packet_tx_in_flight,
+        .lost = packet_lost,
+        .app_limited = packet_app_limited,
+    };
+}
+
 void BbrCongestionController::on_packet_sent(SentPacketRecord &packet) {
     if (!packet.ack_eliciting) {
         return;
@@ -108,6 +135,29 @@ void BbrCongestionController::on_packets_acked(std::span<const SentPacketRecord>
                                                const RecoveryRttState &rtt_state) {
     static_cast<void>(app_limited);
     auto rs = generate_rate_sample(packets, app_limited, now, rtt_state);
+    on_rate_sample_acked(rs, now, rtt_state);
+}
+
+void BbrCongestionController::on_simple_stream_packets_acked(
+    std::span<const AckedStreamPacketSample> packets, bool app_limited, QuicCoreTimePoint now,
+    const RecoveryRttState &rtt_state) {
+    static_cast<void>(app_limited);
+    auto rs = generate_rate_sample(packets, app_limited, now, rtt_state);
+    on_rate_sample_acked(rs, now, rtt_state);
+}
+
+void BbrCongestionController::on_simple_stream_packets_acked(
+    const AckedStreamPacketAggregate &packets, bool app_limited, QuicCoreTimePoint now,
+    const RecoveryRttState &rtt_state) {
+    static_cast<void>(packets);
+    static_cast<void>(app_limited);
+    static_cast<void>(now);
+    static_cast<void>(rtt_state);
+}
+
+void BbrCongestionController::on_rate_sample_acked(RateSample &rs, QuicCoreTimePoint now,
+                                                   const RecoveryRttState &rtt_state) {
+    static_cast<void>(rtt_state);
     if (rs.has_spurious_loss) {
         handle_spurious_loss_detection(now);
         rs.exit_loss_recovery = true;
@@ -313,6 +363,82 @@ BbrCongestionController::generate_rate_sample(std::span<const SentPacketRecord> 
     }
     rs.delivery_rate_bytes_per_second = congestion_sample_bandwidth_bytes_per_second(
         *sample_packet, total_delivered_, now, min_rtt_);
+    return rs;
+}
+
+BbrCongestionController::RateSample
+BbrCongestionController::generate_rate_sample(std::span<const AckedStreamPacketSample> packets,
+                                              bool app_limited, QuicCoreTimePoint now,
+                                              const RecoveryRttState &rtt_state) {
+    static_cast<void>(app_limited);
+    RateSample rs;
+    const AckedStreamPacketSample *sample_packet = nullptr;
+
+    for (const auto &packet : packets) {
+        rs.newly_acked += packet.bytes_in_flight;
+        bytes_in_flight_ = packet.bytes_in_flight > bytes_in_flight_
+                               ? 0
+                               : bytes_in_flight_ - packet.bytes_in_flight;
+        if (packet.bytes_in_flight == 0) {
+            continue;
+        }
+        const auto sample_sent_time =
+            sample_packet != nullptr ? sample_packet->sent_time : QuicCoreTimePoint::min();
+        const auto sample_packet_number =
+            sample_packet != nullptr ? sample_packet->packet_number : 0;
+        const bool newer_sample = (sample_packet == nullptr) ||
+                                  (packet.sent_time > sample_sent_time) ||
+                                  ((packet.sent_time == sample_sent_time) &&
+                                   (packet.packet_number > sample_packet_number));
+        if (newer_sample) {
+            sample_packet = &packet;
+        }
+        if (packet.sent_time > recovery_start_time_.value_or(packet.sent_time)) {
+            rs.exit_loss_recovery = true;
+        }
+    }
+
+    total_delivered_ += rs.newly_acked;
+    if (is_app_limited() && total_delivered_ > app_limited_until_delivered_) {
+        app_limited_until_delivered_ = 0;
+    }
+    delivered_time_ = now;
+    if (sample_packet != nullptr) {
+        first_sent_time_ = sample_packet->sent_time;
+    } else if (bytes_in_flight_ == 0) {
+        first_sent_time_ = now;
+    }
+
+    rs.has_newly_acked = sample_packet != nullptr;
+    if (sample_packet == nullptr) {
+        return rs;
+    }
+
+    rs.prior_delivered = sample_packet->delivered;
+    rs.delivered = total_delivered_ - sample_packet->delivered;
+    rs.tx_in_flight = sample_packet->tx_in_flight;
+    rs.is_app_limited = sample_packet->app_limited || mode_ == Mode::probe_rtt;
+    if (rtt_state.latest_rtt.has_value()) {
+        rs.rtt = *rtt_state.latest_rtt;
+    } else if (rtt_state.min_rtt.has_value()) {
+        rs.rtt = *rtt_state.min_rtt;
+    }
+
+    SentPacketRecord sample{
+        .packet_number = sample_packet->packet_number,
+        .sent_time = sample_packet->sent_time,
+        .ack_eliciting = true,
+        .in_flight = true,
+        .bytes_in_flight = sample_packet->bytes_in_flight,
+        .delivered = sample_packet->delivered,
+        .delivered_time = sample_packet->delivered_time,
+        .first_sent_time = sample_packet->first_sent_time,
+        .tx_in_flight = sample_packet->tx_in_flight,
+        .lost = sample_packet->lost,
+        .app_limited = sample_packet->app_limited,
+    };
+    rs.delivery_rate_bytes_per_second =
+        congestion_sample_bandwidth_bytes_per_second(sample, total_delivered_, now, min_rtt_);
     return rs;
 }
 

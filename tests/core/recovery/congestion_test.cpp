@@ -266,9 +266,13 @@ TEST(QuicCongestionTest, WrapperDebugMetricsAndDispatchCoverColdBranches) {
 
     EXPECT_EQ(copa.send_window(), 24000u);
     EXPECT_TRUE(copa.next_send_time(/*bytes=*/2400).has_value());
-    copa.on_simple_stream_packets_acked(empty_stream_samples, /*app_limited=*/false,
-                                        coquic::quic::test::test_time(2),
-                                        coquic::quic::RecoveryRttState{});
+    copa.on_simple_stream_packets_acked(
+        empty_stream_samples, /*app_limited=*/false, coquic::quic::test::test_time(2),
+        coquic::quic::RecoveryRttState{
+            .latest_adjusted_rtt_sample = std::chrono::milliseconds{200},
+            .min_rtt_sample = std::chrono::milliseconds{100},
+            .smoothed_rtt = std::chrono::milliseconds{200},
+        });
     auto copa_packet =
         make_sent_packet(/*packet_number=*/40, /*ack_eliciting=*/true, /*in_flight=*/true,
                          /*bytes_in_flight=*/1200, coquic::quic::test::test_time(3));
@@ -2068,6 +2072,50 @@ TEST(QuicCongestionTest, CopaPacingBudgetAndAckGuardsCoverColdPaths) {
                                 });
     EXPECT_FALSE(controller.latest_rtt_.has_value());
     EXPECT_FALSE(controller.min_rtt_.has_value());
+}
+
+TEST(QuicCongestionTest, CopaSimpleStreamSendAndAckMatchesFullPacketPath) {
+    CopaCongestionController full(/*max_datagram_size=*/1200);
+    CopaCongestionController simple(/*max_datagram_size=*/1200);
+
+    std::array<SentPacketRecord, 20> full_packets{};
+    std::array<coquic::quic::AckedStreamPacketSample, 20> simple_samples{};
+    for (std::size_t index = 0; index < full_packets.size(); ++index) {
+        const auto packet_number = static_cast<std::uint64_t>(index + 1);
+        const auto sent_time = coquic::quic::test::test_time(static_cast<std::int64_t>(index + 1));
+        auto packet = make_sent_packet(packet_number, /*ack_eliciting=*/true,
+                                       /*in_flight=*/true, /*bytes_in_flight=*/1200, sent_time);
+        full.on_packet_sent(packet);
+        full_packets[index] = packet;
+
+        const auto sent = simple.on_simple_stream_packet_sent(
+            /*bytes_sent=*/1200, sent_time, /*app_limited=*/false);
+        simple_samples[index] = coquic::quic::AckedStreamPacketSample{
+            .packet_number = packet_number,
+            .sent_time = sent_time,
+            .bytes_in_flight = 1200,
+            .app_limited = sent.app_limited,
+        };
+    }
+
+    const auto ack_time = coquic::quic::test::test_time(120);
+    const coquic::quic::RecoveryRttState rtt_state{
+        .latest_rtt_sample = std::chrono::milliseconds{120},
+        .latest_adjusted_rtt_sample = std::chrono::milliseconds{120},
+        .min_rtt_sample = std::chrono::milliseconds{100},
+        .smoothed_rtt = std::chrono::milliseconds{120},
+    };
+    full.on_packets_acked(full_packets, /*app_limited=*/false, ack_time, rtt_state);
+    simple.on_simple_stream_packets_acked(simple_samples, /*app_limited=*/false, ack_time,
+                                          rtt_state);
+
+    EXPECT_EQ(simple.bytes_in_flight(), full.bytes_in_flight());
+    EXPECT_EQ(simple.congestion_window(), full.congestion_window());
+    EXPECT_EQ(simple.slow_start_, full.slow_start_);
+    EXPECT_EQ(simple.startup_probe_complete_, full.startup_probe_complete_);
+    EXPECT_EQ(simple.latest_rtt_, full.latest_rtt_);
+    EXPECT_EQ(simple.min_rtt_, full.min_rtt_);
+    EXPECT_EQ(simple.unjittered_rtt_, full.unjittered_rtt_);
 }
 
 TEST(QuicCongestionTest, CopaTargetRttAndVelocityBranchesAreCovered) {
@@ -3945,6 +3993,60 @@ TEST(QuicCongestionTest, BbrAckLossAndIdleColdBranches) {
     auto before = app_limited.app_limited_until_delivered_;
     app_limited.maybe_mark_connection_app_limited(/*no_pending_data=*/true);
     EXPECT_EQ(app_limited.app_limited_until_delivered_, before);
+}
+
+TEST(QuicCongestionTest, BbrSimpleStreamSendAndAckMatchesFullPacketPath) {
+    BbrCongestionController full(/*max_datagram_size=*/1200);
+    BbrCongestionController simple(/*max_datagram_size=*/1200);
+
+    std::array<SentPacketRecord, 2> full_packets{};
+    std::array<coquic::quic::AckedStreamPacketSample, 2> simple_samples{};
+    for (std::size_t index = 0; index < full_packets.size(); ++index) {
+        const auto packet_number = static_cast<std::uint64_t>(index + 1);
+        const auto sent_time = coquic::quic::test::test_time(static_cast<std::int64_t>(10 + index));
+        auto packet = make_sent_packet(packet_number, /*ack_eliciting=*/true,
+                                       /*in_flight=*/true, /*bytes_in_flight=*/1200, sent_time);
+        full.on_packet_sent(packet);
+        full_packets[index] = packet;
+
+        const auto sent = simple.on_simple_stream_packet_sent(
+            /*bytes_sent=*/1200, sent_time, /*app_limited=*/false);
+        simple_samples[index] = coquic::quic::AckedStreamPacketSample{
+            .packet_number = packet_number,
+            .sent_time = sent_time,
+            .bytes_in_flight = 1200,
+            .delivered = sent.delivered,
+            .delivered_time = sent.delivered_time,
+            .first_sent_time = sent.first_sent_time,
+            .tx_in_flight = sent.tx_in_flight,
+            .lost = sent.lost,
+            .app_limited = sent.app_limited,
+        };
+
+        EXPECT_EQ(simple_samples[index].delivered, full_packets[index].delivered);
+        EXPECT_EQ(simple_samples[index].delivered_time, full_packets[index].delivered_time);
+        EXPECT_EQ(simple_samples[index].first_sent_time, full_packets[index].first_sent_time);
+        EXPECT_EQ(simple_samples[index].tx_in_flight, full_packets[index].tx_in_flight);
+        EXPECT_EQ(simple_samples[index].lost, full_packets[index].lost);
+        EXPECT_EQ(simple_samples[index].app_limited, full_packets[index].app_limited);
+    }
+
+    const auto ack_time = coquic::quic::test::test_time(120);
+    const coquic::quic::RecoveryRttState rtt_state{
+        .latest_rtt = std::chrono::milliseconds{100},
+        .min_rtt = std::chrono::milliseconds{100},
+        .smoothed_rtt = std::chrono::milliseconds{100},
+    };
+    full.on_packets_acked(full_packets, /*app_limited=*/false, ack_time, rtt_state);
+    simple.on_simple_stream_packets_acked(simple_samples, /*app_limited=*/false, ack_time,
+                                          rtt_state);
+
+    EXPECT_EQ(simple.bytes_in_flight(), full.bytes_in_flight());
+    EXPECT_EQ(simple.total_delivered_, full.total_delivered_);
+    EXPECT_EQ(simple.round_count_, full.round_count_);
+    EXPECT_EQ(simple.congestion_window(), full.congestion_window());
+    EXPECT_EQ(simple.max_bandwidth_bytes_per_second_, full.max_bandwidth_bytes_per_second_);
+    EXPECT_EQ(simple.bandwidth_bytes_per_second_, full.bandwidth_bytes_per_second_);
 }
 
 TEST(QuicCongestionTest, DiscardedPacketsOnlyReduceBbrBytesInFlight) {

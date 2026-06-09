@@ -86,6 +86,11 @@ struct SimpleStreamSentPacketRecord {
     std::size_t bytes_in_flight = 0;
     QuicPathId path_id = 0;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+    std::uint64_t delivered = 0;
+    QuicCoreTimePoint delivered_time{};
+    QuicCoreTimePoint first_sent_time{};
+    std::size_t tx_in_flight = 0;
+    std::uint64_t lost = 0;
     bool app_limited = false;
     std::uint64_t protection_key_update_generation = 0;
 };
@@ -97,6 +102,12 @@ struct AckedStreamPacketSample {
     std::size_t bytes_in_flight = 0;
     QuicPathId path_id = 0;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+    std::uint64_t delivered = 0;
+    QuicCoreTimePoint delivered_time{};
+    QuicCoreTimePoint first_sent_time{};
+    std::size_t tx_in_flight = 0;
+    std::uint64_t lost = 0;
+    bool app_limited = false;
 };
 
 struct AckedStreamPacketAggregate {

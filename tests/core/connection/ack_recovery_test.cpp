@@ -1,7 +1,33 @@
 #include <gtest/gtest.h>
 #include "tests/support/core/connection_ack_test_support.h"
+#include "src/quic/connection/connection_internal.h"
 
 namespace {
+
+TEST(QuicCoreTest, SimpleStreamFastPathEligibilityIncludesImplementedControllers) {
+    using Algorithm = coquic::quic::QuicCongestionControlAlgorithm;
+    for (const auto algorithm :
+         {Algorithm::newreno, Algorithm::cubic, Algorithm::bbr, Algorithm::copa}) {
+        EXPECT_TRUE(coquic::quic::simple_stream_congestion_batch_algorithm_is_supported(algorithm));
+        EXPECT_TRUE(coquic::quic::simple_stream_ack_sample_collection_is_eligible(
+            /*has_late_acked_packets=*/false, /*has_lost_packets=*/false,
+            coquic::quic::EndpointRole::server, /*qlog_enabled=*/false,
+            /*packet_trace_enabled=*/false, algorithm));
+        EXPECT_TRUE(coquic::quic::simple_stream_ack_fast_path_is_eligible(
+            /*has_late_acked_packets=*/false, /*has_acked_packets=*/false,
+            coquic::quic::EndpointRole::server, /*qlog_enabled=*/false,
+            /*packet_trace_enabled=*/false, algorithm));
+    }
+
+    EXPECT_TRUE(
+        coquic::quic::simple_stream_congestion_ack_aggregation_is_supported(Algorithm::newreno));
+    EXPECT_TRUE(
+        coquic::quic::simple_stream_congestion_ack_aggregation_is_supported(Algorithm::cubic));
+    EXPECT_FALSE(
+        coquic::quic::simple_stream_congestion_ack_aggregation_is_supported(Algorithm::bbr));
+    EXPECT_FALSE(
+        coquic::quic::simple_stream_congestion_ack_aggregation_is_supported(Algorithm::copa));
+}
 
 TEST(QuicCoreTest, TimeoutRunsLossDetectionAndArmsPtoProbe) {
     auto connection = make_connected_client_connection();

@@ -3050,7 +3050,9 @@ inline COQUIC_NO_PROFILE bool simple_stream_ack_sample_collection_is_eligible(
         return false;
     }
     return algorithm == QuicCongestionControlAlgorithm::newreno ||
-           algorithm == QuicCongestionControlAlgorithm::cubic;
+           algorithm == QuicCongestionControlAlgorithm::cubic ||
+           algorithm == QuicCongestionControlAlgorithm::bbr ||
+           algorithm == QuicCongestionControlAlgorithm::copa;
 }
 
 inline COQUIC_NO_PROFILE bool simple_stream_ack_fast_path_is_eligible(
@@ -3063,11 +3065,21 @@ inline COQUIC_NO_PROFILE bool simple_stream_ack_fast_path_is_eligible(
         return false;
     }
     return algorithm == QuicCongestionControlAlgorithm::newreno ||
-           algorithm == QuicCongestionControlAlgorithm::cubic;
+           algorithm == QuicCongestionControlAlgorithm::cubic ||
+           algorithm == QuicCongestionControlAlgorithm::bbr ||
+           algorithm == QuicCongestionControlAlgorithm::copa;
 }
 
 inline COQUIC_NO_PROFILE bool
 simple_stream_congestion_batch_algorithm_is_supported(QuicCongestionControlAlgorithm algorithm) {
+    return algorithm == QuicCongestionControlAlgorithm::newreno ||
+           algorithm == QuicCongestionControlAlgorithm::cubic ||
+           algorithm == QuicCongestionControlAlgorithm::bbr ||
+           algorithm == QuicCongestionControlAlgorithm::copa;
+}
+
+inline COQUIC_NO_PROFILE bool
+simple_stream_congestion_ack_aggregation_is_supported(QuicCongestionControlAlgorithm algorithm) {
     return algorithm == QuicCongestionControlAlgorithm::newreno ||
            algorithm == QuicCongestionControlAlgorithm::cubic;
 }
@@ -3848,6 +3860,12 @@ inline AckedStreamPacketSample make_acked_stream_packet_sample(const SentPacketR
         .bytes_in_flight = packet.bytes_in_flight,
         .path_id = packet.path_id,
         .ecn = packet.ecn,
+        .delivered = packet.delivered,
+        .delivered_time = packet.delivered_time,
+        .first_sent_time = packet.first_sent_time,
+        .tx_in_flight = packet.tx_in_flight,
+        .lost = packet.lost,
+        .app_limited = packet.app_limited,
     };
 }
 

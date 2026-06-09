@@ -179,7 +179,9 @@ QuicCongestionController::on_simple_stream_packet_sent(std::size_t bytes_sent,
         [&](auto &controller) -> std::optional<SimpleStreamPacketSentCongestionResult> {
             using Controller = std::decay_t<decltype(controller)>;
             if constexpr (std::is_same_v<Controller, NewRenoCongestionController> ||
-                          std::is_same_v<Controller, CubicCongestionController>) {
+                          std::is_same_v<Controller, CubicCongestionController> ||
+                          std::is_same_v<Controller, BbrCongestionController> ||
+                          std::is_same_v<Controller, CopaCongestionController>) {
                 return controller.on_simple_stream_packet_sent(bytes_sent, sent_time, app_limited);
             } else {
                 static_cast<void>(bytes_sent);
@@ -208,7 +210,9 @@ void QuicCongestionController::on_simple_stream_packets_acked(
         [&](auto &controller) {
             using Controller = std::decay_t<decltype(controller)>;
             if constexpr (std::is_same_v<Controller, NewRenoCongestionController> ||
-                          std::is_same_v<Controller, CubicCongestionController>) {
+                          std::is_same_v<Controller, CubicCongestionController> ||
+                          std::is_same_v<Controller, BbrCongestionController> ||
+                          std::is_same_v<Controller, CopaCongestionController>) {
                 controller.on_simple_stream_packets_acked(packets, app_limited, now, rtt_state);
             } else {
                 static_cast<void>(packets);
@@ -227,7 +231,9 @@ void QuicCongestionController::on_simple_stream_packets_acked(
         [&](auto &controller) {
             using Controller = std::decay_t<decltype(controller)>;
             if constexpr (std::is_same_v<Controller, NewRenoCongestionController> ||
-                          std::is_same_v<Controller, CubicCongestionController>) {
+                          std::is_same_v<Controller, CubicCongestionController> ||
+                          std::is_same_v<Controller, BbrCongestionController> ||
+                          std::is_same_v<Controller, CopaCongestionController>) {
                 controller.on_simple_stream_packets_acked(packets, app_limited, now, rtt_state);
             } else {
                 static_cast<void>(packets);

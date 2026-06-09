@@ -1385,6 +1385,11 @@ void QuicConnection::track_sent_simple_stream_packet(PacketSpaceState &packet_sp
             congestion_controller_.on_packet_sent(record);
             congestion_result = SimpleStreamPacketSentCongestionResult{
                 .congestion_send_sequence = record.congestion_send_sequence,
+                .delivered = record.delivered,
+                .delivered_time = record.delivered_time,
+                .first_sent_time = record.first_sent_time,
+                .tx_in_flight = record.tx_in_flight,
+                .lost = record.lost,
                 .app_limited = record.app_limited,
             };
         }
@@ -1412,6 +1417,11 @@ void QuicConnection::track_sent_simple_stream_packet(PacketSpaceState &packet_sp
         .bytes_in_flight = packet.bytes_in_flight,
         .path_id = packet.path_id,
         .ecn = packet.ecn,
+        .delivered = congestion.delivered,
+        .delivered_time = congestion.delivered_time,
+        .first_sent_time = congestion.first_sent_time,
+        .tx_in_flight = congestion.tx_in_flight,
+        .lost = congestion.lost,
         .app_limited = congestion.app_limited,
         .protection_key_update_generation = packet.protection_key_update_generation,
     };
@@ -1502,6 +1512,11 @@ void QuicConnection::track_precongested_simple_stream_packets(
             .bytes_in_flight = packet.bytes_in_flight,
             .path_id = packet.path_id,
             .ecn = packet.ecn,
+            .delivered = congestion->delivered,
+            .delivered_time = congestion->delivered_time,
+            .first_sent_time = congestion->first_sent_time,
+            .tx_in_flight = congestion->tx_in_flight,
+            .lost = congestion->lost,
             .app_limited = congestion->app_limited,
             .protection_key_update_generation = packet.protection_key_update_generation,
         };
@@ -1553,7 +1568,8 @@ bool QuicConnection::try_retire_simple_stream_acked_packets_fast_path(
         return false;
     }
 
-    bool can_use_aggregate_ack = true;
+    bool can_use_aggregate_ack =
+        simple_stream_congestion_ack_aggregation_is_supported(congestion_controller_.algorithm());
     for (const auto handle : handles) {
         const auto *packet = packet_space.recovery.simple_stream_packet_for_handle(handle);
         if (packet == nullptr || !packet->first_stream_frame_metadata.has_value() ||
@@ -1681,6 +1697,12 @@ bool QuicConnection::try_retire_simple_stream_acked_packets_fast_path(
                 .bytes_in_flight = packet->bytes_in_flight,
                 .path_id = packet->path_id,
                 .ecn = packet->ecn,
+                .delivered = packet->delivered,
+                .delivered_time = packet->delivered_time,
+                .first_sent_time = packet->first_sent_time,
+                .tx_in_flight = packet->tx_in_flight,
+                .lost = packet->lost,
+                .app_limited = packet->app_limited,
             });
         }
         const auto first_stream_frame_metadata = packet->first_stream_frame_metadata;
@@ -1715,6 +1737,12 @@ bool QuicConnection::try_retire_simple_stream_acked_packet(
             .bytes_in_flight = simple_packet->bytes_in_flight,
             .path_id = simple_packet->path_id,
             .ecn = simple_packet->ecn,
+            .delivered = simple_packet->delivered,
+            .delivered_time = simple_packet->delivered_time,
+            .first_sent_time = simple_packet->first_sent_time,
+            .tx_in_flight = simple_packet->tx_in_flight,
+            .lost = simple_packet->lost,
+            .app_limited = simple_packet->app_limited,
         };
         auto snapshot = use_lightweight_sample ? SentPacketRecord{}
                                                : sent_packet_record_from_simple_stream_packet(

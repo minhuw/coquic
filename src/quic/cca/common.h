@@ -61,6 +61,11 @@ class HyStartPlusPlus {
 
 struct SimpleStreamPacketSentCongestionResult {
     std::uint64_t congestion_send_sequence = 0;
+    std::uint64_t delivered = 0;
+    QuicCoreTimePoint delivered_time{};
+    QuicCoreTimePoint first_sent_time{};
+    std::size_t tx_in_flight = 0;
+    std::uint64_t lost = 0;
     bool app_limited = false;
 };
 

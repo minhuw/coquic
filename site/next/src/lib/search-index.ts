@@ -1,6 +1,6 @@
 import { generatedDocSearchItems } from '@/generated/site-search-docs';
 
-export type SiteSearchKind = 'page' | 'docs' | 'tool' | 'dashboard' | 'scenario';
+export type SiteSearchKind = 'page' | 'docs' | 'blog' | 'tool' | 'dashboard' | 'scenario';
 
 export type SiteSearchItem = {
   id: string;
@@ -41,6 +41,15 @@ const routeItems: SiteSearchItem[] = [
     description: 'Browse CoQUIC documentation and API guides.',
     kind: 'docs',
     keywords: ['documentation', 'api', 'guide', 'reference'],
+  },
+  {
+    id: 'route-blog',
+    title: 'Blog',
+    href: '/blog',
+    section: 'Project',
+    description: 'Read CoQUIC project notes, implementation updates, interop findings, and benchmark observations.',
+    kind: 'blog',
+    keywords: ['blog', 'posts', 'updates', 'release notes', 'implementation notes', 'interop', 'benchmark'],
   },
   {
     id: 'route-workbench',

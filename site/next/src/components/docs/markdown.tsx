@@ -19,9 +19,10 @@ interface MarkdownProps {
   markdown: string;
   currentSlug: string[];
   skipFirstH1?: boolean;
+  resolveHref?: (href: string, currentSlug: readonly string[]) => string;
 }
 
-export async function Markdown({ markdown, currentSlug, skipFirstH1 = false }: MarkdownProps) {
+export async function Markdown({ markdown, currentSlug, skipFirstH1 = false, resolveHref = hrefForDocLink }: MarkdownProps) {
   let skippedH1 = false;
   const parsedBlocks = parseMarkdown(markdown).filter((block) => {
     if (skipFirstH1 && !skippedH1 && block.type === 'heading' && block.depth === 1) {
@@ -34,7 +35,7 @@ export async function Markdown({ markdown, currentSlug, skipFirstH1 = false }: M
 
   return (
     <div className="docs-markdown">
-      {blocks.map((block, index) => renderBlock(block, index, currentSlug))}
+      {blocks.map((block, index) => renderBlock(block, index, currentSlug, { resolveHref }))}
     </div>
   );
 }
@@ -43,7 +44,7 @@ function renderBlock(
   block: RenderBlock,
   index: number,
   currentSlug: readonly string[],
-  options: { inFunctionCard?: boolean } = {},
+  options: { inFunctionCard?: boolean; resolveHref: (href: string, currentSlug: readonly string[]) => string },
 ) {
   if (block.type === 'functionCard') {
     return (
@@ -52,11 +53,11 @@ function renderBlock(
           <a className="docs-function-permalink" href={`#${block.id}`} aria-label={`Permalink to ${block.title}`}>
             #
           </a>
-          <h3 id={block.id}>{renderInline(block.title, currentSlug)}</h3>
+          <h3 id={block.id}>{renderInline(block.title, currentSlug, options.resolveHref)}</h3>
         </header>
         <div className="docs-function-card-body">
           {block.blocks.map((child, childIndex) =>
-            renderBlock(child, childIndex, currentSlug, { inFunctionCard: true }),
+            renderBlock(child, childIndex, currentSlug, { ...options, inFunctionCard: true }),
           )}
         </div>
       </section>
@@ -65,17 +66,17 @@ function renderBlock(
 
   if (block.type === 'heading') {
     const id = slugify(block.text);
-    if (block.depth === 1) return <h1 key={index}>{renderInline(block.text, currentSlug)}</h1>;
+    if (block.depth === 1) return <h1 key={index}>{renderInline(block.text, currentSlug, options.resolveHref)}</h1>;
     if (block.depth === 2) {
       return (
         <h2 id={id} key={index}>
-          {renderInline(block.text, currentSlug)}
+          {renderInline(block.text, currentSlug, options.resolveHref)}
         </h2>
       );
     }
     return (
       <h3 id={id} key={index}>
-        {renderInline(block.text, currentSlug)}
+        {renderInline(block.text, currentSlug, options.resolveHref)}
       </h3>
     );
   }
@@ -84,7 +85,7 @@ function renderBlock(
     const isFunctionLabel = options.inFunctionCard && /^(Parameters|Returns|Notes):$/.test(block.text);
     return (
       <p className={isFunctionLabel ? 'docs-function-label' : undefined} key={index}>
-        {renderInline(block.text, currentSlug)}
+        {renderInline(block.text, currentSlug, options.resolveHref)}
       </p>
     );
   }
@@ -94,7 +95,7 @@ function renderBlock(
     return (
       <ListTag key={index}>
         {block.items.map((item, itemIndex) => (
-          <li key={itemIndex}>{renderInline(item, currentSlug)}</li>
+          <li key={itemIndex}>{renderInline(item, currentSlug, options.resolveHref)}</li>
         ))}
       </ListTag>
     );
@@ -106,7 +107,7 @@ function renderBlock(
         <thead>
           <tr>
             {block.headers.map((header, headerIndex) => (
-              <th key={headerIndex}>{renderInline(header, currentSlug)}</th>
+              <th key={headerIndex}>{renderInline(header, currentSlug, options.resolveHref)}</th>
             ))}
           </tr>
         </thead>
@@ -114,7 +115,7 @@ function renderBlock(
           {block.rows.map((row, rowIndex) => (
             <tr key={rowIndex}>
               {block.headers.map((_, cellIndex) => (
-                <td key={cellIndex}>{renderInline(row[cellIndex] ?? '', currentSlug)}</td>
+                <td key={cellIndex}>{renderInline(row[cellIndex] ?? '', currentSlug, options.resolveHref)}</td>
               ))}
             </tr>
           ))}
@@ -336,7 +337,11 @@ function splitTableRow(line: string) {
     .map((cell) => cell.trim());
 }
 
-function renderInline(text: string, currentSlug: readonly string[]) {
+function renderInline(
+  text: string,
+  currentSlug: readonly string[],
+  resolveHref: (href: string, currentSlug: readonly string[]) => string,
+) {
   const pieces: React.ReactNode[] = [];
   const tokenPattern = /(`[^`]+`|\[[^\]]+\]\([^)]+\))/g;
   let cursor = 0;
@@ -351,8 +356,8 @@ function renderInline(text: string, currentSlug: readonly string[]) {
       const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
       if (link) {
         pieces.push(
-          <Link href={hrefForDocLink(link[2], currentSlug)} key={pieces.length}>
-            {renderInline(link[1], currentSlug)}
+          <Link href={resolveHref(link[2], currentSlug)} key={pieces.length}>
+            {renderInline(link[1], currentSlug, resolveHref)}
           </Link>,
         );
       }

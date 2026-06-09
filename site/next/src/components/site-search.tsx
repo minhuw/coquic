@@ -2,13 +2,13 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ArrowRight, BarChart3, BookOpen, FileText, Gauge, Search, Terminal, X } from 'lucide-react';
+import { ArrowRight, BarChart3, BookOpen, FileText, Gauge, Newspaper, Search, Terminal, X } from 'lucide-react';
 import MiniSearch from 'minisearch';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { siteSearchItems, type SiteSearchItem, type SiteSearchKind } from '@/lib/search-index';
 
-const suggestedIds = ['route-qa', 'route-workbench', 'route-docs', 'route-performance', 'route-interop', 'route-coverage'];
+const suggestedIds = ['route-qa', 'route-workbench', 'route-docs', 'route-blog', 'route-performance', 'route-interop', 'route-coverage'];
 const maxResults = 8;
 const searchEngine = createSearchEngine(siteSearchItems);
 
@@ -265,6 +265,8 @@ function iconForKind(kind: SiteSearchKind) {
   switch (kind) {
     case 'docs':
       return BookOpen;
+    case 'blog':
+      return Newspaper;
     case 'tool':
       return Terminal;
     case 'dashboard':

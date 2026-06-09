@@ -796,6 +796,166 @@
   html[data-theme="dark"] .docs-code-scroll .shiki span {
     color: var(--shiki-dark);
   }
+
+  .blog-list {
+    @apply grid gap-3 py-5 md:grid-cols-2;
+  }
+
+  .blog-card {
+    @apply min-w-0 rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] transition-colors duration-200;
+  }
+
+  .blog-card:hover {
+    @apply border-[var(--line-strong)] bg-[var(--surface-2)];
+  }
+
+  .blog-card-link {
+    @apply grid min-h-full gap-3 p-4 text-[var(--ink)] no-underline sm:p-5;
+  }
+
+  .blog-card-meta {
+    @apply flex min-w-0 flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] font-semibold uppercase text-[var(--muted)];
+  }
+
+  .blog-card h2 {
+    @apply text-[24px] font-normal leading-tight text-[var(--ink)] sm:text-[28px];
+  }
+
+  .blog-card p {
+    @apply text-[15px] leading-relaxed text-[var(--soft)];
+  }
+
+  .blog-card-foot {
+    @apply mt-auto flex min-w-0 items-end justify-between gap-3;
+  }
+
+  .blog-card-foot svg {
+    @apply size-4 shrink-0 text-[var(--primary)] transition-transform duration-200;
+  }
+
+  .blog-card:hover .blog-card-foot svg {
+    @apply translate-x-1;
+  }
+
+  .blog-tags {
+    @apply flex min-w-0 flex-wrap gap-1.5;
+  }
+
+  .blog-tags span {
+    @apply inline-flex min-h-7 items-center rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface-2)] px-2 font-mono text-[11px] font-semibold text-[var(--muted)];
+  }
+
+  .blog-post {
+    @apply mx-auto grid max-w-[980px] gap-5 py-5;
+  }
+
+  .blog-back-link {
+    @apply inline-flex w-fit items-center gap-2 rounded-[var(--radius)] px-2 py-1 font-mono text-xs font-semibold text-[var(--primary)] no-underline transition-colors duration-200 hover:bg-[var(--primary-soft)] focus-visible:bg-[var(--primary-soft)];
+  }
+
+  .blog-back-link svg {
+    @apply size-4;
+  }
+
+  .blog-post-header {
+    @apply grid gap-3 border-b border-[var(--line)] pb-5;
+  }
+
+  .blog-post-header h1 {
+    @apply max-w-[820px] text-[34px] font-normal leading-[1.08] text-[var(--ink)] sm:text-[44px] lg:text-[54px];
+  }
+
+  .blog-post-header p {
+    @apply max-w-[760px] text-[16px] leading-relaxed text-[var(--soft)];
+  }
+
+  .blog-post-body {
+    @apply rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] px-4 py-5 sm:px-6 lg:px-8 lg:py-7;
+  }
+
+  .blog-post-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.75rem;
+    width: 100%;
+  }
+
+  .blog-language-shell {
+    display: contents;
+  }
+
+  .blog-language-tabs {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    align-self: center;
+    justify-content: flex-end;
+    gap: 0.25rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+
+  .blog-language-tab {
+    display: inline-flex;
+    min-height: calc(1.75rem - 2px);
+    cursor: pointer;
+    align-items: center;
+    padding-inline: 0.75rem;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    transition:
+      background-color 200ms ease,
+      color 200ms ease;
+  }
+
+  .blog-language-tab:hover,
+  .blog-language-tab:focus-visible {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  .blog-language-tab[aria-pressed="true"] {
+    background: var(--primary-action);
+    color: var(--primary-contrast);
+  }
+
+  .blog-language-tab[aria-pressed="true"]:hover,
+  .blog-language-tab[aria-pressed="true"]:focus-visible {
+    background: var(--primary-action-hover);
+    color: var(--primary-contrast);
+  }
+
+  .blog-language-panel {
+    display: grid;
+    gap: 1rem;
+  }
+
+  .blog-language-panel[hidden] {
+    display: none;
+  }
+
+  @media (width <= 560px) {
+    .blog-post-actions {
+      grid-template-columns: 1fr;
+      align-items: start;
+    }
+
+    .blog-language-tabs {
+      justify-self: start;
+    }
+  }
+
+  .blog-language-shell[data-blog-language="en"] .blog-language-panel[data-blog-language-panel="zh"],
+  .blog-language-shell[data-blog-language="zh"] .blog-language-panel[data-blog-language-panel="en"] {
+    display: none;
+  }
 }
 
 @layer components {

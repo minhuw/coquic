@@ -12,13 +12,13 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     const auto bytes = coquic::fuzz::bytes_from_input(data, size);
     const auto span = coquic::fuzz::byte_span(bytes);
 
-    coquic::fuzz::exercise_packet(span, {});
-    coquic::fuzz::exercise_packet(span, {.one_rtt_destination_connection_id_length = 2});
-    coquic::fuzz::exercise_packet(span, {
-                                            .one_rtt_destination_connection_id_length = 2,
-                                            .accept_greased_quic_bit = true,
-                                        });
     coquic::fuzz::exercise_datagram(span);
+    coquic::fuzz::exercise_datagram(span, {.one_rtt_destination_connection_id_length = 8});
+    coquic::fuzz::exercise_datagram(span, {.accept_greased_quic_bit = true});
+    coquic::fuzz::exercise_datagram(span, {
+                                              .one_rtt_destination_connection_id_length = 8,
+                                              .accept_greased_quic_bit = true,
+                                          });
 
     return 0;
 }

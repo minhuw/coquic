@@ -1,0 +1,15 @@
+# Coalesced plaintext datagram constants.
+version_negotiation="\x00\x00\x00\x00"
+version_1="\x00\x00\x00\x01"
+version_2="\x6b\x33\x43\xcf"
+initial_v1_first="\xc0"
+initial_v2_first="\xd0"
+handshake_v1_first="\xe0"
+retry_v1_first="\xf0"
+short_header="\x40"
+dcid_len_1="\x01"
+dcid_len_8="\x08"
+frame_ping="\x01"
+frame_crypto="\x06"
+frame_padding="\x00"
+

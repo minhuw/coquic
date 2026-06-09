@@ -264,6 +264,28 @@ TEST(QuicPerfServerTest, PerfSendBufferReportsBufferedDatagramCount) {
     EXPECT_EQ(backend.sent_datagrams.size(), 1u);
 }
 
+TEST(QuicPerfServerTest, PerfSendBufferBoundsDirectSinkDatagrams) {
+    RecordingIoBackend backend;
+    PerfSendBuffer buffer;
+    buffer.set_backend(&backend);
+
+    constexpr std::size_t kBufferedDatagramLimit = 256;
+    for (std::size_t index = 0; index < kBufferedDatagramLimit + 1; ++index) {
+        ASSERT_TRUE(buffer.on_send_datagram_payload(
+            1, 17, coquic::quic::DatagramBuffer{std::vector<std::byte>{std::byte{0x01}}},
+            coquic::quic::QuicEcnCodepoint::not_ect, false, 0));
+    }
+
+    EXPECT_EQ(buffer.size(), 1u);
+    ASSERT_EQ(backend.operations.size(), 1u);
+    EXPECT_EQ(backend.operations[0], "send_many_on_route");
+    EXPECT_EQ(backend.sent_datagrams.size(), kBufferedDatagramLimit);
+
+    ASSERT_TRUE(buffer.flush(backend));
+    EXPECT_EQ(buffer.size(), 0u);
+    EXPECT_EQ(backend.sent_datagrams.size(), kBufferedDatagramLimit + 1);
+}
+
 TEST(QuicPerfServerTest, PerfSendBufferFlushesRouteRunsWithRouteBatchApi) {
     RecordingIoBackend backend;
     PerfSendBuffer buffer;

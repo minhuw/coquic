@@ -184,7 +184,7 @@ bool PerfSendBuffer::on_send_datagram(quic::QuicCoreSendDatagram datagram) {
         return false;
     }
     COQUIC_PERF_LOOP_PROFILE_TIMER(perf_append_timer, send_buffer_append_ns);
-    return append_send_datagram(*backend_, std::move(datagram), /*flush_when_full=*/false);
+    return append_send_datagram(*backend_, std::move(datagram), /*flush_when_full=*/true);
 }
 
 bool PerfSendBuffer::on_send_datagram_payload(quic::QuicConnectionHandle connection,
@@ -203,7 +203,7 @@ bool PerfSendBuffer::on_send_datagram_payload(quic::QuicConnectionHandle connect
     }
     COQUIC_PERF_LOOP_PROFILE_TIMER(perf_append_timer, send_buffer_append_ns);
     return append_payload_datagram(*backend_, route_handle, std::move(bytes), ecn, is_pmtu_probe,
-                                   /*flush_when_full=*/false);
+                                   /*flush_when_full=*/true);
 }
 
 bool PerfSendBuffer::append_or_flush(io::QuicIoBackend &backend, quic::QuicCoreResult &result) {

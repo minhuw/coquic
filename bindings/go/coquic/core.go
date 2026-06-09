@@ -449,18 +449,18 @@ func NewClientConfig(sourceConnectionID, initialDestinationConnectionID []byte) 
 }
 
 type InboundDatagram struct {
-    Bytes                     []byte
-    RouteHandle               RouteHandle
-    HasRouteHandle            bool
-    AddressValidationIdentity []byte
-    Ecn                       EcnCodepoint
+	Bytes                     []byte
+	RouteHandle               RouteHandle
+	HasRouteHandle            bool
+	AddressValidationIdentity []byte
+	Ecn                       EcnCodepoint
 }
 
 type SendStreamData struct {
-    StreamID StreamID
-    Bytes    []byte
-    Fin      bool
-    Priority int32
+	StreamID StreamID
+	Bytes    []byte
+	Fin      bool
+	Priority int32
 }
 
 type Endpoint struct {
@@ -584,33 +584,33 @@ func (e *Endpoint) TimerExpired(now TimeUs) (*QueryResult, error) {
 }
 
 func (e *Endpoint) SendStream(connection ConnectionHandle, streamID StreamID, data []byte, fin bool, now TimeUs) (*QueryResult, error) {
-    return e.SendStreamWithPriority(
-        connection,
-        SendStreamData{
-            StreamID: streamID,
-            Bytes:    data,
-            Fin:      fin,
-        },
-        now,
-    )
+	return e.SendStreamWithPriority(
+		connection,
+		SendStreamData{
+			StreamID: streamID,
+			Bytes:    data,
+			Fin:      fin,
+		},
+		now,
+	)
 }
 
 func (e *Endpoint) SendStreamWithPriority(connection ConnectionHandle, streamData SendStreamData, now TimeUs) (*QueryResult, error) {
-    if e == nil || e.ptr == nil {
-        return nil, StatusError{Status: StatusInvalidArgument}
-    }
-    var out *C.coquic_result_t
-    status := C.coquic_go_quic_stream_send(
-        e.ptr,
-        C.coquic_connection_handle_t(connection),
-        C.coquic_stream_id_t(streamData.StreamID),
-        bytePtr(streamData.Bytes),
-        C.size_t(len(streamData.Bytes)),
-        cBool(streamData.Fin),
-        C.int32_t(streamData.Priority),
-        C.coquic_time_us_t(now),
-        &out,
-    )
+	if e == nil || e.ptr == nil {
+		return nil, StatusError{Status: StatusInvalidArgument}
+	}
+	var out *C.coquic_result_t
+	status := C.coquic_go_quic_stream_send(
+		e.ptr,
+		C.coquic_connection_handle_t(connection),
+		C.coquic_stream_id_t(streamData.StreamID),
+		bytePtr(streamData.Bytes),
+		C.size_t(len(streamData.Bytes)),
+		cBool(streamData.Fin),
+		C.int32_t(streamData.Priority),
+		C.coquic_time_us_t(now),
+		&out,
+	)
 	if err := statusError(status); err != nil {
 		return nil, err
 	}
@@ -769,14 +769,31 @@ func (r *QueryResult) Effects() ([]Effect, error) {
 	}
 	count := int(C.coquic_result_effect_count(r.ptr))
 	effects := make([]Effect, 0, count)
+	err := r.ForEachEffect(func(effect Effect) error {
+		effects = append(effects, effect)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return effects, nil
+}
+
+func (r *QueryResult) ForEachEffect(callback func(Effect) error) error {
+	if r == nil || r.ptr == nil {
+		return errors.New("coquic query result is closed")
+	}
+	count := int(C.coquic_result_effect_count(r.ptr))
 	for index := 0; index < count; index++ {
 		var raw C.coquic_effect_t
 		if err := statusError(C.coquic_result_effect_at(r.ptr, C.size_t(index), &raw)); err != nil {
-			return nil, err
+			return err
 		}
-		effects = append(effects, effectFromRaw(raw))
+		if err := callback(effectFromRaw(raw)); err != nil {
+			return err
+		}
 	}
-	return effects, nil
+	return nil
 }
 
 func effectFromRaw(raw C.coquic_effect_t) Effect {

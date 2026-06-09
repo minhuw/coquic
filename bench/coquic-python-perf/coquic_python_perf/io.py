@@ -120,24 +120,33 @@ class UdpRuntime:
             ecn=coquic.EcnCodepoint.UNAVAILABLE,
         )
 
-    def append_result_sends(self, result: coquic.QueryResult) -> None:
+    def collect_result_effects(self, result: coquic.QueryResult) -> list[coquic.Effect]:
+        out = []
         for effect in result.effects:
-            if effect.kind != "send_datagram":
-                continue
-            if len(self.send_buffer) >= MAX_BUFFERED_SEND_DATAGRAMS:
-                raise PerfError(
-                    "send buffer exceeded before flush; call flush_sends more often"
+            if effect.kind == "send_datagram":
+                if len(self.send_buffer) >= MAX_BUFFERED_SEND_DATAGRAMS:
+                    raise PerfError(
+                        "send buffer exceeded before flush; call flush_sends more often"
+                    )
+                if effect.route_handle is None:
+                    raise PerfError("send datagram missing route handle")
+                self.send_buffer.append(
+                    TxDatagram(
+                        route_handle=effect.route_handle,
+                        bytes=effect.bytes,
+                        ecn=effect.ecn,
+                        is_pmtu_probe=effect.is_pmtu_probe,
+                    )
                 )
-            if effect.route_handle is None:
-                raise PerfError("send datagram missing route handle")
-            self.send_buffer.append(
-                TxDatagram(
-                    route_handle=effect.route_handle,
-                    bytes=effect.bytes,
-                    ecn=effect.ecn,
-                    is_pmtu_probe=effect.is_pmtu_probe,
-                )
-            )
+            elif effect.kind in (
+                "receive_stream_data",
+                "state_event",
+                "connection_lifecycle_event",
+                "peer_reset_stream",
+                "peer_stop_sending",
+            ):
+                out.append(effect)
+        return out
 
     async def flush_sends(self) -> None:
         datagrams = self.send_buffer
@@ -176,20 +185,6 @@ class UdpRuntime:
     def address_validation_identity(self, route_handle: int) -> bytes | None:
         route = self.routes_by_handle.get(route_handle)
         return route.address_validation_identity if route is not None else None
-
-
-def copy_non_send_effects(result: coquic.QueryResult) -> list[coquic.Effect]:
-    out = []
-    for effect in result.effects:
-        if effect.kind in (
-            "receive_stream_data",
-            "state_event",
-            "connection_lifecycle_event",
-            "peer_reset_stream",
-            "peer_stop_sending",
-        ):
-            out.append(effect)
-    return out
 
 
 def address_validation_identity(peer: tuple[str, int]) -> bytes:

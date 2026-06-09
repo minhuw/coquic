@@ -7,7 +7,7 @@ import coquic
 
 from . import PerfError
 from .config import Direction, Mode, PerfConfig, client_endpoint_config
-from .io import UdpRuntime, copy_non_send_effects
+from .io import UdpRuntime
 from .metrics import (
     ServerCounters,
     duration_millis,
@@ -208,8 +208,7 @@ class Client:
             self.summary.failure_reason = f"client local error: {result.local_error!r}"
             raise PerfError(self.summary.failure_reason)
 
-        self.io.append_result_sends(result)
-        effects = copy_non_send_effects(result)
+        effects = self.io.collect_result_effects(result)
 
         commands: list[ClientCommand] = []
         for effect in effects:

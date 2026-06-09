@@ -49,7 +49,11 @@ func Run(configValue config.PerfConfig) (metrics.RunSummary, error) {
 	}
 	defer endpoint.Destroy()
 
-	ioRuntime, err := perfio.NewServer(configValue.Host, configValue.Port)
+	ioRuntime, err := perfio.NewServer(
+		configValue.Host,
+		configValue.Port,
+		configValue.MaxOutboundDatagramSize,
+	)
 	if err != nil {
 		return metrics.RunSummary{}, err
 	}
@@ -59,6 +63,7 @@ func Run(configValue config.PerfConfig) (metrics.RunSummary, error) {
 		endpoint:             endpoint,
 		io:                   ioRuntime,
 		sessions:             make(map[coquic.ConnectionHandle]*session),
+		payloadCache:         make(map[uint64][]byte),
 		completedCRRSessions: make(map[coquic.ConnectionHandle]bool),
 	}
 	if err := server.run(); err != nil {
@@ -71,6 +76,7 @@ type Server struct {
 	endpoint             *coquic.Endpoint
 	io                   *perfio.UdpRuntime
 	sessions             map[coquic.ConnectionHandle]*session
+	payloadCache         map[uint64][]byte
 	completedCRRSessions map[coquic.ConnectionHandle]bool
 	acceptedSession      bool
 	completedSessionSeen bool
@@ -169,10 +175,7 @@ func (s *Server) collectResultCommands(result *coquic.QueryResult) ([]serverComm
 		return nil, fmt.Errorf("server local error: %+v", *localError)
 	}
 
-	if err := s.io.AppendResultSends(result); err != nil {
-		return nil, err
-	}
-	effects, err := perfio.CopyNonSendEffects(result)
+	effects, err := s.io.CollectResultEffects(result)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +363,7 @@ func (s *Server) completeSession(connection coquic.ConnectionHandle) []serverCom
 func (s *Server) executeCommand(command serverCommand, now coquic.TimeUs) (*coquic.QueryResult, error) {
 	switch command.kind {
 	case commandSendResponse:
-		return s.endpoint.SendStream(command.connection, command.streamID, makePayload(command.bytes), true, now)
+		return s.endpoint.SendStream(command.connection, command.streamID, s.cachedPayload(command.bytes), true, now)
 	case commandSendControl:
 		fin := false
 		switch command.message.(type) {
@@ -372,6 +375,15 @@ func (s *Server) executeCommand(command serverCommand, now coquic.TimeUs) (*coqu
 	default:
 		return nil, fmt.Errorf("unknown server command")
 	}
+}
+
+func (s *Server) cachedPayload(size uint64) []byte {
+	if payload, ok := s.payloadCache[size]; ok {
+		return payload
+	}
+	payload := makePayload(size)
+	s.payloadCache[size] = payload
+	return payload
 }
 
 func (s *Server) makeCompleteCommand(connection coquic.ConnectionHandle) *serverCommand {

@@ -26,6 +26,7 @@ pub struct UdpRuntime {
     handles_by_peer: HashMap<SocketAddr, RouteHandle>,
     next_route_handle: RouteHandle,
     send_buffer: Vec<TxDatagram>,
+    recv_buffer_size: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -43,7 +44,11 @@ pub struct RxDatagram {
 }
 
 impl UdpRuntime {
-    pub async fn client(host: &str, port: u16) -> Result<(Self, RouteHandle, Vec<u8>)> {
+    pub async fn client(
+        host: &str,
+        port: u16,
+        recv_buffer_size: usize,
+    ) -> Result<(Self, RouteHandle, Vec<u8>)> {
         let peer = resolve_remote(host, port)?;
         let bind_addr = if peer.is_ipv4() {
             "0.0.0.0:0"
@@ -51,7 +56,7 @@ impl UdpRuntime {
             "[::]:0"
         };
         let socket = bind_udp_socket(bind_addr).await?;
-        let mut runtime = Self::new(socket);
+        let mut runtime = Self::new(socket, recv_buffer_size);
         let route = runtime.ensure_route(peer);
         let identity = runtime
             .address_validation_identity(route)
@@ -60,10 +65,10 @@ impl UdpRuntime {
         Ok((runtime, route, identity))
     }
 
-    pub async fn server(host: &str, port: u16) -> Result<Self> {
+    pub async fn server(host: &str, port: u16, recv_buffer_size: usize) -> Result<Self> {
         let bind_addr = format!("{host}:{port}");
         let socket = bind_udp_socket(&bind_addr).await?;
-        Ok(Self::new(socket))
+        Ok(Self::new(socket, recv_buffer_size))
     }
 
     pub fn now_us(&self) -> TimeUs {
@@ -101,33 +106,78 @@ impl UdpRuntime {
         }
     }
 
-    pub fn append_result_sends(&mut self, result: &QueryResult) -> Result<()> {
+    pub fn collect_result_effects(&mut self, result: &QueryResult) -> Result<Vec<OwnedEffect>> {
+        let mut out = Vec::new();
         for effect in result.effects() {
-            if let Effect::SendDatagram {
-                route_handle,
-                bytes,
-                ecn,
-                is_pmtu_probe,
-                ..
-            } = effect?
-            {
-                if self.send_buffer.len() >= MAX_BUFFERED_SEND_DATAGRAMS {
-                    return Err(PerfError::new(
-                        "send buffer exceeded before flush; call flush_sends more often",
-                    ));
-                }
-                let route_handle = route_handle
-                    .ok_or_else(|| PerfError::new("send datagram missing route handle"))?;
-                self.send_buffer.push(TxDatagram {
+            match effect? {
+                Effect::SendDatagram {
                     route_handle,
-                    bytes: bytes.to_vec(),
+                    bytes,
                     ecn,
                     is_pmtu_probe,
-                });
+                    ..
+                } => {
+                    if self.send_buffer.len() >= MAX_BUFFERED_SEND_DATAGRAMS {
+                        return Err(PerfError::new(
+                            "send buffer exceeded before flush; call flush_sends more often",
+                        ));
+                    }
+                    let route_handle = route_handle
+                        .ok_or_else(|| PerfError::new("send datagram missing route handle"))?;
+                    self.send_buffer.push(TxDatagram {
+                        route_handle,
+                        bytes: bytes.to_vec(),
+                        ecn,
+                        is_pmtu_probe,
+                    });
+                }
+                Effect::ReceiveStreamData {
+                    connection,
+                    stream_id,
+                    bytes,
+                    fin,
+                } => out.push(OwnedEffect::ReceiveStreamData {
+                    connection,
+                    stream_id,
+                    bytes: bytes.to_vec(),
+                    fin,
+                }),
+                Effect::StateEvent { connection, change } => {
+                    out.push(OwnedEffect::StateEvent { connection, change });
+                }
+                Effect::ConnectionLifecycleEvent { connection, event } => {
+                    out.push(OwnedEffect::ConnectionLifecycleEvent { connection, event });
+                }
+                Effect::PeerResetStream {
+                    connection,
+                    stream_id,
+                    application_error_code,
+                    final_size,
+                } => out.push(OwnedEffect::PeerResetStream {
+                    connection,
+                    stream_id,
+                    application_error_code,
+                    final_size,
+                }),
+                Effect::PeerStopSending {
+                    connection,
+                    stream_id,
+                    application_error_code,
+                } => out.push(OwnedEffect::PeerStopSending {
+                    connection,
+                    stream_id,
+                    application_error_code,
+                }),
+                Effect::ReceiveDatagramData { .. }
+                | Effect::PeerPreferredAddressAvailable { .. }
+                | Effect::ResumptionStateAvailable { .. }
+                | Effect::ZeroRttStatusEvent { .. }
+                | Effect::PacketInspection(_)
+                | Effect::NewTokenAvailable { .. }
+                | Effect::Unknown(_) => {}
             }
         }
-
-        Ok(())
+        Ok(out)
     }
 
     pub async fn flush_sends(&mut self) -> Result<()> {
@@ -146,7 +196,7 @@ impl UdpRuntime {
     }
 
     pub async fn recv(&mut self) -> io::Result<RxDatagram> {
-        let mut buffer = vec![0u8; MAX_UDP_DATAGRAM_SIZE];
+        let mut buffer = vec![0u8; self.recv_buffer_size];
         let (len, peer) = self.socket.recv_from(&mut buffer).await?;
         buffer.truncate(len);
         let route_handle = self.ensure_route(peer);
@@ -186,7 +236,7 @@ impl UdpRuntime {
         }
     }
 
-    fn new(socket: UdpSocket) -> Self {
+    fn new(socket: UdpSocket, recv_buffer_size: usize) -> Self {
         Self {
             socket,
             start: Instant::now(),
@@ -194,6 +244,7 @@ impl UdpRuntime {
             handles_by_peer: HashMap::new(),
             next_route_handle: 1,
             send_buffer: Vec::new(),
+            recv_buffer_size: recv_buffer_size.clamp(1, MAX_UDP_DATAGRAM_SIZE),
         }
     }
 
@@ -265,60 +316,6 @@ pub enum WaitEvent {
     Idle,
 }
 
-pub fn copy_non_send_effects(result: &QueryResult) -> Result<Vec<OwnedEffect>> {
-    let mut out = Vec::new();
-    for effect in result.effects() {
-        match effect? {
-            Effect::ReceiveStreamData {
-                connection,
-                stream_id,
-                bytes,
-                fin,
-            } => out.push(OwnedEffect::ReceiveStreamData {
-                connection,
-                stream_id,
-                bytes: bytes.to_vec(),
-                fin,
-            }),
-            Effect::StateEvent { connection, change } => {
-                out.push(OwnedEffect::StateEvent { connection, change });
-            }
-            Effect::ConnectionLifecycleEvent { connection, event } => {
-                out.push(OwnedEffect::ConnectionLifecycleEvent { connection, event });
-            }
-            Effect::PeerResetStream {
-                connection,
-                stream_id,
-                application_error_code,
-                final_size,
-            } => out.push(OwnedEffect::PeerResetStream {
-                connection,
-                stream_id,
-                application_error_code,
-                final_size,
-            }),
-            Effect::PeerStopSending {
-                connection,
-                stream_id,
-                application_error_code,
-            } => out.push(OwnedEffect::PeerStopSending {
-                connection,
-                stream_id,
-                application_error_code,
-            }),
-            Effect::SendDatagram { .. }
-            | Effect::ReceiveDatagramData { .. }
-            | Effect::PeerPreferredAddressAvailable { .. }
-            | Effect::ResumptionStateAvailable { .. }
-            | Effect::ZeroRttStatusEvent { .. }
-            | Effect::PacketInspection(_)
-            | Effect::NewTokenAvailable { .. }
-            | Effect::Unknown(_) => {}
-        }
-    }
-    Ok(out)
-}
-
 #[derive(Clone, Debug)]
 pub enum OwnedEffect {
     ReceiveStreamData {
@@ -387,7 +384,7 @@ mod tests {
     #[tokio::test]
     async fn wait_reports_timer_when_future_timer_is_scheduled() {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut runtime = UdpRuntime::new(socket);
+        let mut runtime = UdpRuntime::new(socket, MAX_UDP_DATAGRAM_SIZE);
         let event = runtime
             .wait(
                 Some(runtime.now_us() + Duration::from_millis(10).as_micros() as u64),
@@ -402,7 +399,7 @@ mod tests {
     #[tokio::test]
     async fn wait_reports_idle_when_no_timer_is_scheduled() {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut runtime = UdpRuntime::new(socket);
+        let mut runtime = UdpRuntime::new(socket, MAX_UDP_DATAGRAM_SIZE);
         let event = runtime.wait(None, Duration::from_millis(1)).await.unwrap();
 
         assert!(matches!(event, WaitEvent::Idle));

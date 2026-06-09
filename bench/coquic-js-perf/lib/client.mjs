@@ -2,7 +2,7 @@ import { ClientConfig, Endpoint, Lifecycle, StateChange } from "@coquic/coquic";
 
 import { Direction, Mode, clientEndpointConfig } from "./config.mjs";
 import { PerfError } from "./error.mjs";
-import { copyNonSendEffects, timeUsToNumber, UdpRuntime } from "./io.mjs";
+import { timeUsToNumber, UdpRuntime } from "./io.mjs";
 import {
   durationMillis,
   finalizeSummary,
@@ -206,9 +206,8 @@ class Client {
       throw new PerfError(this.summary.failure_reason);
     }
 
-    this.io.appendResultSends(result);
     const commands = [];
-    for (const effect of copyNonSendEffects(result)) {
+    for (const effect of this.io.collectResultEffects(result)) {
       if (effect.kind === "connection_lifecycle_event") {
         if (effect.event === Lifecycle.CREATED) {
           const connection = Number(effect.connection);

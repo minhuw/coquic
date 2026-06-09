@@ -749,6 +749,8 @@ def _configure_library(lib: C.CDLL) -> None:
     lib.coquic_endpoint_connection_count.restype = C.c_size_t
     lib.coquic_endpoint_has_send_continuation_pending.argtypes = [endpoint]
     lib.coquic_endpoint_has_send_continuation_pending.restype = C.c_uint8
+    lib.coquic_endpoint_has_pending_stream_send.argtypes = [endpoint]
+    lib.coquic_endpoint_has_pending_stream_send.restype = C.c_uint8
     lib.coquic_endpoint_next_wakeup.argtypes = [endpoint]
     lib.coquic_endpoint_next_wakeup.restype = coquic_optional_time_us_t
 

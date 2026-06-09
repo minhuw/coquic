@@ -39,6 +39,7 @@ type UdpRuntime struct {
 	handlesByPeer   map[string]coquic.RouteHandle
 	nextRouteHandle coquic.RouteHandle
 	sendBuffer      []TxDatagram
+	recvBufferSize  int
 }
 
 type WaitKind int
@@ -54,7 +55,7 @@ type WaitEvent struct {
 	Datagram RxDatagram
 }
 
-func NewClient(host string, port uint16) (*UdpRuntime, coquic.RouteHandle, []byte, error) {
+func NewClient(host string, port uint16, recvBufferSize uint64) (*UdpRuntime, coquic.RouteHandle, []byte, error) {
 	peer, err := resolveRemote(host, port)
 	if err != nil {
 		return nil, 0, nil, err
@@ -71,7 +72,7 @@ func NewClient(host string, port uint16) (*UdpRuntime, coquic.RouteHandle, []byt
 		socket.Close()
 		return nil, 0, nil, err
 	}
-	runtime := newRuntime(socket)
+	runtime := newRuntime(socket, recvBufferSize)
 	route := runtime.EnsureRoute(peer)
 	identity := runtime.AddressValidationIdentity(route)
 	if identity == nil {
@@ -81,7 +82,7 @@ func NewClient(host string, port uint16) (*UdpRuntime, coquic.RouteHandle, []byt
 	return runtime, route, append([]byte(nil), identity...), nil
 }
 
-func NewServer(host string, port uint16) (*UdpRuntime, error) {
+func NewServer(host string, port uint16, recvBufferSize uint64) (*UdpRuntime, error) {
 	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, strconv.Itoa(int(port))))
 	if err != nil {
 		return nil, err
@@ -94,7 +95,7 @@ func NewServer(host string, port uint16) (*UdpRuntime, error) {
 		socket.Close()
 		return nil, err
 	}
-	return newRuntime(socket), nil
+	return newRuntime(socket, recvBufferSize), nil
 }
 
 func (r *UdpRuntime) Close() error {
@@ -133,29 +134,36 @@ func (r *UdpRuntime) InboundDatagram(rx RxDatagram) coquic.InboundDatagram {
 	}
 }
 
-func (r *UdpRuntime) AppendResultSends(result *coquic.QueryResult) error {
-	effects, err := result.Effects()
+func (r *UdpRuntime) CollectResultEffects(result *coquic.QueryResult) ([]coquic.Effect, error) {
+	out := make([]coquic.Effect, 0)
+	err := result.ForEachEffect(func(effect coquic.Effect) error {
+		switch effect.Kind {
+		case coquic.EffectSendDatagram:
+			if len(r.sendBuffer) >= MaxBufferedSendDatagrams {
+				return fmt.Errorf("send buffer exceeded before flush; call flush_sends more often")
+			}
+			if !effect.HasRouteHandle {
+				return fmt.Errorf("send datagram missing route handle")
+			}
+			r.sendBuffer = append(r.sendBuffer, TxDatagram{
+				RouteHandle: effect.RouteHandle,
+				Bytes:       effect.Bytes,
+				Ecn:         effect.Ecn,
+				IsPMTUProbe: effect.IsPMTUProbe,
+			})
+		case coquic.EffectReceiveStreamData,
+			coquic.EffectStateEvent,
+			coquic.EffectConnectionLifecycleEvent,
+			coquic.EffectPeerResetStream,
+			coquic.EffectPeerStopSending:
+			out = append(out, effect)
+		}
+		return nil
+	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, effect := range effects {
-		if effect.Kind != coquic.EffectSendDatagram {
-			continue
-		}
-		if len(r.sendBuffer) >= MaxBufferedSendDatagrams {
-			return fmt.Errorf("send buffer exceeded before flush; call flush_sends more often")
-		}
-		if !effect.HasRouteHandle {
-			return fmt.Errorf("send datagram missing route handle")
-		}
-		r.sendBuffer = append(r.sendBuffer, TxDatagram{
-			RouteHandle: effect.RouteHandle,
-			Bytes:       append([]byte(nil), effect.Bytes...),
-			Ecn:         effect.Ecn,
-			IsPMTUProbe: effect.IsPMTUProbe,
-		})
-	}
-	return nil
+	return out, nil
 }
 
 func (r *UdpRuntime) FlushSends() error {
@@ -179,7 +187,7 @@ func (r *UdpRuntime) SendBufferEmpty() bool {
 }
 
 func (r *UdpRuntime) Recv() (RxDatagram, error) {
-	buffer := make([]byte, MaxUDPDatagramSize)
+	buffer := make([]byte, r.recvBufferSize)
 	length, peer, err := r.socket.ReadFromUDP(buffer)
 	if err != nil {
 		return RxDatagram{}, err
@@ -234,33 +242,22 @@ func (r *UdpRuntime) AddressValidationIdentity(routeHandle coquic.RouteHandle) [
 	return route.AddressValidationIdentity
 }
 
-func CopyNonSendEffects(result *coquic.QueryResult) ([]coquic.Effect, error) {
-	effects, err := result.Effects()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]coquic.Effect, 0, len(effects))
-	for _, effect := range effects {
-		switch effect.Kind {
-		case coquic.EffectReceiveStreamData,
-			coquic.EffectStateEvent,
-			coquic.EffectConnectionLifecycleEvent,
-			coquic.EffectPeerResetStream,
-			coquic.EffectPeerStopSending:
-			out = append(out, effect)
-		}
-	}
-	return out, nil
-}
-
-func newRuntime(socket *net.UDPConn) *UdpRuntime {
+func newRuntime(socket *net.UDPConn, recvBufferSize uint64) *UdpRuntime {
 	return &UdpRuntime{
 		socket:          socket,
 		start:           time.Now(),
 		routesByHandle:  make(map[coquic.RouteHandle]Route),
 		handlesByPeer:   make(map[string]coquic.RouteHandle),
 		nextRouteHandle: 1,
+		recvBufferSize:  boundedDatagramBufferSize(recvBufferSize),
 	}
+}
+
+func boundedDatagramBufferSize(size uint64) int {
+	if size == 0 || size > MaxUDPDatagramSize {
+		return MaxUDPDatagramSize
+	}
+	return int(size)
 }
 
 func resolveRemote(host string, port uint16) (*net.UDPAddr, error) {

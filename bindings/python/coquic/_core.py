@@ -896,6 +896,9 @@ class Endpoint:
             self._lib.coquic_endpoint_has_send_continuation_pending(self._checked_ptr())
         )
 
+    def has_pending_stream_send(self) -> bool:
+        return bool(self._lib.coquic_endpoint_has_pending_stream_send(self._checked_ptr()))
+
     def next_wakeup(self) -> TimeUs | None:
         return _optional_time(
             self._lib.coquic_endpoint_next_wakeup(self._checked_ptr())

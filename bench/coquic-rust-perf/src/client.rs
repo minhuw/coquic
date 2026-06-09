@@ -1,5 +1,5 @@
 use crate::config::{client_endpoint_config, Direction, Mode, PerfConfig};
-use crate::io::{copy_non_send_effects, OwnedEffect, UdpRuntime, WaitEvent};
+use crate::io::{OwnedEffect, UdpRuntime, WaitEvent};
 use crate::metrics::{
     duration_millis, finalize_summary, new_run_summary, reset_measurement, RunSummary,
     ServerCounters,
@@ -80,7 +80,7 @@ pub async fn run_client(config: PerfConfig) -> Result<RunSummary> {
     let endpoint_config = client_endpoint_config(&config);
     let mut endpoint = Endpoint::new(&endpoint_config)?;
     let (mut io, primary_route, primary_identity) =
-        UdpRuntime::client(&config.host, config.port).await?;
+        UdpRuntime::client(&config.host, config.port, config.max_outbound_datagram_size).await?;
     let mut client = Client {
         config: config.clone(),
         endpoint: &mut endpoint,
@@ -235,8 +235,7 @@ impl Client<'_> {
             ));
         }
 
-        self.io.append_result_sends(&result)?;
-        let effects = copy_non_send_effects(&result)?;
+        let effects = self.io.collect_result_effects(&result)?;
         drop(result);
 
         let mut commands = Vec::new();

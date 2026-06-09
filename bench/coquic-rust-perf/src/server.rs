@@ -1,5 +1,5 @@
 use crate::config::{server_endpoint_config, Direction, Mode, PerfConfig};
-use crate::io::{copy_non_send_effects, OwnedEffect, UdpRuntime, WaitEvent};
+use crate::io::{OwnedEffect, UdpRuntime, WaitEvent};
 use crate::protocol::{
     decode_control_message, encode_control_message, ControlMessage, SessionComplete, SessionError,
     SessionReady, SessionStart, CONTROL_STREAM_ID, PROTOCOL_VERSION, PROTOCOL_VERSION_LEGACY,
@@ -38,11 +38,13 @@ impl Session {
 pub async fn run_server(config: PerfConfig) -> Result<crate::metrics::RunSummary> {
     let endpoint_config = server_endpoint_config(&config)?;
     let mut endpoint = Endpoint::new(&endpoint_config)?;
-    let mut io = UdpRuntime::server(&config.host, config.port).await?;
+    let mut io =
+        UdpRuntime::server(&config.host, config.port, config.max_outbound_datagram_size).await?;
     let mut server = Server {
         endpoint: &mut endpoint,
         io: &mut io,
         sessions: HashMap::new(),
+        payload_cache: HashMap::new(),
         accepted_session: false,
         completed_session_seen: false,
     };
@@ -55,6 +57,7 @@ struct Server<'a> {
     endpoint: &'a mut Endpoint,
     io: &'a mut UdpRuntime,
     sessions: HashMap<ConnectionHandle, Session>,
+    payload_cache: HashMap<usize, Vec<u8>>,
     accepted_session: bool,
     completed_session_seen: bool,
 }
@@ -140,8 +143,7 @@ impl Server<'_> {
             return Err(PerfError::new(format!("server local error: {error:?}")));
         }
 
-        self.io.append_result_sends(&result)?;
-        let effects = copy_non_send_effects(&result)?;
+        let effects = self.io.collect_result_effects(&result)?;
         drop(result);
 
         let mut commands = Vec::new();
@@ -353,11 +355,13 @@ impl Server<'_> {
         bytes: u64,
         now: coquic::TimeUs,
     ) -> Result<QueryResult> {
-        let payload = make_payload(bytes as usize);
-        self.endpoint
+        let endpoint = &self.endpoint;
+        let payload_cache = &mut self.payload_cache;
+        let payload = cached_payload(payload_cache, bytes as usize);
+        endpoint
             .connection(connection)
             .stream(stream_id)
-            .send(&payload, true, now)
+            .send(payload, true, now)
             .map_err(Into::into)
     }
 
@@ -411,6 +415,7 @@ impl Server<'_> {
             && env_flag_enabled("COQUIC_PERF_SERVER_EXIT_ON_SESSION_COMPLETE")
             && self.sessions.values().all(|session| session.complete_sent)
             && !self.endpoint.has_send_continuation_pending()
+            && !self.endpoint.has_pending_stream_send()
     }
 }
 
@@ -434,6 +439,13 @@ pub fn validate_session_start(start: &SessionStart) -> Option<String> {
 
 fn make_payload(bytes: usize) -> Vec<u8> {
     vec![0x5a; bytes]
+}
+
+fn cached_payload(cache: &mut HashMap<usize, Vec<u8>>, bytes: usize) -> &[u8] {
+    cache
+        .entry(bytes)
+        .or_insert_with(|| make_payload(bytes))
+        .as_slice()
 }
 
 fn env_flag_enabled(name: &str) -> bool {

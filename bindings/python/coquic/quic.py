@@ -94,6 +94,9 @@ class Endpoint:
     def has_send_continuation_pending(self) -> bool:
         return self._core.has_send_continuation_pending()
 
+    def has_pending_stream_send(self) -> bool:
+        return self._core.has_pending_stream_send()
+
 
 class Connection:
     def __init__(self, endpoint: Endpoint, handle: ConnectionHandle):

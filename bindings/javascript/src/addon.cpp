@@ -1152,6 +1152,15 @@ napi_value EndpointHasSendContinuationPending(napi_env env, napi_callback_info i
                      coquic_endpoint_has_send_continuation_pending(holder->endpoint->get()) != 0);
 }
 
+napi_value EndpointHasPendingStreamSend(napi_env env, napi_callback_info info) {
+    std::size_t argc = 0;
+    auto *holder = endpoint_holder(env, info, &argc, nullptr);
+    if (holder == nullptr) {
+        return nullptr;
+    }
+    return make_bool(env, coquic_endpoint_has_pending_stream_send(holder->endpoint->get()) != 0);
+}
+
 void set_function(napi_env env, napi_value object, const char *name, napi_callback callback) {
     napi_value fn = nullptr;
     napi_create_function(env, name, NAPI_AUTO_LENGTH, callback, nullptr, &fn);
@@ -1178,6 +1187,8 @@ napi_value Init(napi_env env, napi_value exports) {
          nullptr},
         {"hasSendContinuationPending", nullptr, EndpointHasSendContinuationPending, nullptr,
          nullptr, nullptr, napi_default, nullptr},
+        {"hasPendingStreamSend", nullptr, EndpointHasPendingStreamSend, nullptr, nullptr, nullptr,
+         napi_default, nullptr},
     };
     napi_value endpoint_constructor = nullptr;
     napi_define_class(env, "Endpoint", NAPI_AUTO_LENGTH, EndpointConstructor, nullptr,

@@ -7,7 +7,7 @@ import coquic
 
 from . import PerfError
 from .config import Direction, Mode, PerfConfig, server_endpoint_config
-from .io import UdpRuntime, copy_non_send_effects
+from .io import UdpRuntime
 from .metrics import new_run_summary
 from .protocol import (
     CONTROL_STREAM_ID,
@@ -67,6 +67,7 @@ class Server:
         self.endpoint = endpoint
         self.io = io
         self.sessions: dict[int, Session] = {}
+        self.payload_cache: dict[int, bytes] = {}
         self.completed_crr_sessions: set[int] = set()
         self.accepted_session = False
         self.completed_session_seen = False
@@ -125,8 +126,7 @@ class Server:
         if result.local_error is not None:
             raise PerfError(f"server local error: {result.local_error!r}")
 
-        self.io.append_result_sends(result)
-        effects = copy_non_send_effects(result)
+        effects = self.io.collect_result_effects(result)
 
         commands: list[ServerCommand] = []
         for effect in effects:
@@ -274,7 +274,7 @@ class Server:
 
     def execute_command(self, command: ServerCommand, now: int) -> coquic.QueryResult:
         if isinstance(command, SendResponseCommand):
-            payload = make_payload(command.bytes)
+            payload = self.cached_payload(command.bytes)
             return (
                 self.endpoint.connection(command.connection)
                 .stream(command.stream_id)
@@ -288,6 +288,13 @@ class Server:
             .stream(CONTROL_STREAM_ID)
             .send(payload, fin, now)
         )
+
+    def cached_payload(self, size: int) -> bytes:
+        payload = self.payload_cache.get(size)
+        if payload is None:
+            payload = make_payload(size)
+            self.payload_cache[size] = payload
+        return payload
 
     def make_complete_command(self, connection: int) -> SendControlCommand | None:
         session = self.sessions.get(connection)
@@ -318,6 +325,7 @@ class Server:
             and env_flag_enabled("COQUIC_PERF_SERVER_EXIT_ON_SESSION_COMPLETE")
             and all(session.complete_sent for session in self.sessions.values())
             and not self.endpoint.has_send_continuation_pending()
+            and not self.endpoint.has_pending_stream_send()
         )
 
     def _tolerate_failed_state(self, connection: int) -> bool:

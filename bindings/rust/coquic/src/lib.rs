@@ -1480,6 +1480,10 @@ impl Endpoint {
         unsafe { ffi::coquic_endpoint_has_send_continuation_pending(self.ptr.as_ptr()) != 0 }
     }
 
+    pub fn has_pending_stream_send(&self) -> bool {
+        unsafe { ffi::coquic_endpoint_has_pending_stream_send(self.ptr.as_ptr()) != 0 }
+    }
+
     pub fn next_wakeup(&self) -> Option<TimeUs> {
         unsafe { optional_time_from_raw(ffi::coquic_endpoint_next_wakeup(self.ptr.as_ptr())) }
     }

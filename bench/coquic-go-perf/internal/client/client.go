@@ -76,7 +76,11 @@ func Run(configValue config.PerfConfig) (metrics.RunSummary, error) {
 	}
 	defer endpoint.Destroy()
 
-	ioRuntime, primaryRoute, primaryIdentity, err := perfio.NewClient(configValue.Host, configValue.Port)
+	ioRuntime, primaryRoute, primaryIdentity, err := perfio.NewClient(
+		configValue.Host,
+		configValue.Port,
+		configValue.MaxOutboundDatagramSize,
+	)
 	if err != nil {
 		return metrics.RunSummary{}, err
 	}
@@ -258,10 +262,7 @@ func (c *Client) collectResultCommands(result *coquic.QueryResult, now coquic.Ti
 		return nil, fmt.Errorf("%s", c.summary.FailureReason)
 	}
 
-	if err := c.io.AppendResultSends(result); err != nil {
-		return nil, err
-	}
-	effects, err := perfio.CopyNonSendEffects(result)
+	effects, err := c.io.CollectResultEffects(result)
 	if err != nil {
 		return nil, err
 	}

@@ -102,24 +102,35 @@ export class UdpRuntime {
     });
   }
 
-  appendResultSends(result) {
+  collectResultEffects(result) {
+    const out = [];
     for (const effect of result.effects) {
-      if (effect.kind !== "send_datagram") {
-        continue;
+      if (effect.kind === "send_datagram") {
+        if (this.sendBuffer.length >= MAX_BUFFERED_SEND_DATAGRAMS) {
+          throw new PerfError("send buffer exceeded before flush; call flushSends more often");
+        }
+        if (effect.routeHandle == null) {
+          throw new PerfError("send datagram missing route handle");
+        }
+        this.sendBuffer.push({
+          routeHandle: Number(effect.routeHandle),
+          bytes: effect.bytes,
+          ecn: effect.ecn,
+          isPmtuProbe: effect.isPmtuProbe,
+        });
+      } else if (
+        [
+          "receive_stream_data",
+          "state_event",
+          "connection_lifecycle_event",
+          "peer_reset_stream",
+          "peer_stop_sending",
+        ].includes(effect.kind)
+      ) {
+        out.push(effect);
       }
-      if (this.sendBuffer.length >= MAX_BUFFERED_SEND_DATAGRAMS) {
-        throw new PerfError("send buffer exceeded before flush; call flushSends more often");
-      }
-      if (effect.routeHandle == null) {
-        throw new PerfError("send datagram missing route handle");
-      }
-      this.sendBuffer.push({
-        routeHandle: Number(effect.routeHandle),
-        bytes: effect.bytes,
-        ecn: effect.ecn,
-        isPmtuProbe: effect.isPmtuProbe,
-      });
     }
+    return out;
   }
 
   async flushSends() {
@@ -189,18 +200,6 @@ export class UdpRuntime {
     const route = this.routesByHandle.get(Number(routeHandle));
     return route?.addressValidationIdentity ?? null;
   }
-}
-
-export function copyNonSendEffects(result) {
-  return result.effects.filter((effect) =>
-    [
-      "receive_stream_data",
-      "state_event",
-      "connection_lifecycle_event",
-      "peer_reset_stream",
-      "peer_stop_sending",
-    ].includes(effect.kind),
-  );
 }
 
 export function addressValidationIdentity(peer) {

@@ -867,6 +867,7 @@ extern "C" {
 
     pub fn coquic_endpoint_connection_count(endpoint: *const coquic_endpoint_t) -> usize;
     pub fn coquic_endpoint_has_send_continuation_pending(endpoint: *const coquic_endpoint_t) -> u8;
+    pub fn coquic_endpoint_has_pending_stream_send(endpoint: *const coquic_endpoint_t) -> u8;
     pub fn coquic_endpoint_next_wakeup(
         endpoint: *const coquic_endpoint_t,
     ) -> coquic_optional_time_us_t;

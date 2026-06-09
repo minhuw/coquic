@@ -15,7 +15,7 @@ func newLoopbackRuntime(t *testing.T) *UdpRuntime {
 	t.Cleanup(func() {
 		_ = socket.Close()
 	})
-	return newRuntime(socket)
+	return newRuntime(socket, MaxUDPDatagramSize)
 }
 
 func TestWaitReportsTimerForFutureWakeupPastIdleTimeout(t *testing.T) {

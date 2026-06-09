@@ -2,7 +2,7 @@ import { Endpoint, Lifecycle, StateChange } from "@coquic/coquic";
 
 import { Direction, Mode, serverEndpointConfig } from "./config.mjs";
 import { PerfError } from "./error.mjs";
-import { copyNonSendEffects, timeUsToNumber, UdpRuntime } from "./io.mjs";
+import { timeUsToNumber, UdpRuntime } from "./io.mjs";
 import { newRunSummary } from "./metrics.mjs";
 import {
   CONTROL_STREAM_ID,
@@ -62,6 +62,7 @@ class Server {
     this.endpoint = endpoint;
     this.io = io;
     this.sessions = new Map();
+    this.payloadCache = new Map();
     this.completedCrrSessions = new Set();
     this.acceptedSession = false;
     this.completedSessionSeen = false;
@@ -124,9 +125,8 @@ class Server {
       throw new PerfError(`server local error: ${JSON.stringify(result.localError)}`);
     }
 
-    this.io.appendResultSends(result);
     const commands = [];
-    for (const effect of copyNonSendEffects(result)) {
+    for (const effect of this.io.collectResultEffects(result)) {
       if (effect.kind === "connection_lifecycle_event") {
         if (effect.event === Lifecycle.ACCEPTED) {
           this.acceptedSession = true;
@@ -271,7 +271,7 @@ class Server {
       return this.endpoint
         .connection(command.connection)
         .stream(command.streamId)
-        .send(makePayload(command.bytes), true, now);
+        .send(this.cachedPayload(command.bytes), true, now);
     }
 
     const fin =
@@ -280,6 +280,15 @@ class Server {
       .connection(command.connection)
       .stream(CONTROL_STREAM_ID)
       .send(encodeControlMessage(command.message), fin, now);
+  }
+
+  cachedPayload(size) {
+    let payload = this.payloadCache.get(size);
+    if (payload == null) {
+      payload = makePayload(size);
+      this.payloadCache.set(size, payload);
+    }
+    return payload;
   }
 
   makeCompleteCommand(connection) {
@@ -309,7 +318,8 @@ class Server {
       this.completedSessionSeen &&
       envFlagEnabled("COQUIC_PERF_SERVER_EXIT_ON_SESSION_COMPLETE") &&
       Array.from(this.sessions.values()).every((session) => session.completeSent) &&
-      !this.endpoint.hasSendContinuationPending()
+      !this.endpoint.hasSendContinuationPending() &&
+      !this.endpoint.hasPendingStreamSend()
     );
   }
 

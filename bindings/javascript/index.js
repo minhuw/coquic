@@ -242,6 +242,14 @@ export class Endpoint {
   has_send_continuation_pending() {
     return this.hasSendContinuationPending();
   }
+
+  hasPendingStreamSend() {
+    return this._native.hasPendingStreamSend();
+  }
+
+  has_pending_stream_send() {
+    return this.hasPendingStreamSend();
+  }
 }
 
 export class Connection {

@@ -119,6 +119,10 @@ impl Endpoint {
     pub fn has_send_continuation_pending(&self) -> bool {
         self.inner.borrow().has_send_continuation_pending()
     }
+
+    pub fn has_pending_stream_send(&self) -> bool {
+        self.inner.borrow().has_pending_stream_send()
+    }
 }
 
 pub struct ConnectResult {

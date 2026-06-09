@@ -10,6 +10,7 @@ coverage/
 !site/next/app/coverage/
 .rag/
 .remote-ci/
+.fuzz/
 .envrc.local
 .github/perf-runner/.env
 .github/perf-runner/.env.*

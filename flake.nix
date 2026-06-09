@@ -1836,6 +1836,7 @@ EOF
         includePreCommit = true;
         banner = "coquic dev shell ready. Run: zig build";
         extraPackages = [
+          pkgs.aflplusplus
           llvmPkgs.clang
           llvmPkgs.clang-tools
           pkgs.lldb

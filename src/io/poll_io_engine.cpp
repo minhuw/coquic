@@ -47,7 +47,9 @@ namespace {
 
 constexpr std::size_t kMaxDatagramBytes = 65535;
 constexpr std::size_t kMaxReceiveDrainBatch = 64;
-constexpr std::size_t kRecvmmsgDrainBatch = 32;
+constexpr std::size_t kRecvmmsgDrainBatch = 8;
+constexpr std::size_t kReceiveByteStoragePoolSlots = kRecvmmsgDrainBatch * 2;
+constexpr std::size_t kReceiveScratchCopyMaxBytes = std::size_t{4} * 1024;
 constexpr std::size_t kReceiveResultStorageCacheMaxBytes = std::size_t{256} * 1024;
 constexpr std::size_t kReceiveResultStorageCacheBucketBytes = std::size_t{4} * 1024;
 constexpr std::size_t kReceiveResultStorageCacheSlots = 128;
@@ -85,6 +87,8 @@ struct IoProfileCounters {
     std::uint64_t rx_storage_recycles = 0;
     std::uint64_t rx_storage_drops = 0;
     std::uint64_t rx_storage_pool_high_water = 0;
+    std::uint64_t rx_storage_compact_copies = 0;
+    std::uint64_t rx_storage_compact_copy_bytes = 0;
 };
 
 struct RecvmmsgScratch {
@@ -171,7 +175,7 @@ struct ReceiveDatagramBatchResult {
 };
 
 using ReceiveByteStoragePool =
-    quic::detail::FixedObjectCache<std::vector<std::byte>, kMaxReceiveDrainBatch * 2>;
+    quic::detail::FixedObjectCache<std::vector<std::byte>, kReceiveByteStoragePoolSlots>;
 
 COQUIC_NO_PROFILE bool io_profile_enabled();
 COQUIC_NO_PROFILE IoProfileCounters &io_profile_counters();
@@ -296,7 +300,9 @@ COQUIC_NO_PROFILE void print_io_profile() {
               << " rx_storage_scratch_reuses=" << c.rx_storage_scratch_reuses
               << " rx_storage_recycles=" << c.rx_storage_recycles
               << " rx_storage_drops=" << c.rx_storage_drops
-              << " rx_storage_pool_high_water=" << c.rx_storage_pool_high_water << '\n';
+              << " rx_storage_pool_high_water=" << c.rx_storage_pool_high_water
+              << " rx_storage_compact_copies=" << c.rx_storage_compact_copies
+              << " rx_storage_compact_copy_bytes=" << c.rx_storage_compact_copy_bytes << '\n';
 }
 
 COQUIC_NO_PROFILE void register_io_profile_printer_once() {
@@ -1401,6 +1407,33 @@ QuicIoEngineEvent make_rx_event(int socket_fd, internal::ReceiveDatagramResult r
     };
 }
 
+COQUIC_NO_PROFILE internal::ReceiveDatagramResult
+compact_small_receive_storage(internal::ReceiveDatagramResult received) {
+    if (received.shared_bytes == nullptr) {
+        return received;
+    }
+
+    if (received.shared_bytes.use_count() > 2) {
+        return received;
+    }
+
+    const auto payload = received.payload();
+    if (payload.size() > kReceiveScratchCopyMaxBytes) {
+        return received;
+    }
+
+    received.bytes.assign(payload.begin(), payload.end());
+    received.shared_bytes.reset();
+    received.begin = 0;
+    received.end = 0;
+    if (io_profile_enabled()) {
+        auto &counters = io_profile_counters();
+        ++counters.rx_storage_compact_copies;
+        counters.rx_storage_compact_copy_bytes += payload.size();
+    }
+    return received;
+}
+
 void refresh_queued_receive_event_time(QuicIoEngineEvent &event) {
     if (event.kind != QuicIoEngineEvent::Kind::rx_datagram || !event.rx.has_value()) {
         return;
@@ -1592,10 +1625,12 @@ PollIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
                 return std::nullopt;
             }
 
-            auto event = make_rx_event(descriptor.fd, std::move(received_batch.datagrams.front()));
+            auto first_received =
+                compact_small_receive_storage(std::move(received_batch.datagrams.front()));
+            auto event = make_rx_event(descriptor.fd, std::move(first_received));
             for (std::size_t index = 1; index < received_batch.datagrams.size(); ++index) {
-                queue_event(
-                    make_rx_event(descriptor.fd, std::move(received_batch.datagrams[index])));
+                queue_event(make_rx_event(descriptor.fd, compact_small_receive_storage(std::move(
+                                                             received_batch.datagrams[index]))));
             }
             if (received_batch.may_have_more_datagrams) {
                 while (queued_event_count() < kMaxReceiveDrainBatch - 1) {
@@ -1608,7 +1643,8 @@ PollIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
                         return std::nullopt;
                     }
                     for (auto &extra : extra_batch.datagrams) {
-                        queue_event(make_rx_event(descriptor.fd, std::move(extra)));
+                        queue_event(make_rx_event(descriptor.fd,
+                                                  compact_small_receive_storage(std::move(extra))));
                     }
                     if (!extra_batch.may_have_more_datagrams) {
                         break;
@@ -2067,6 +2103,81 @@ int first_recvmmsg_batch_then_hard_error_for_tests(int, mmsghdr *messages,
     return static_cast<int>(message_count);
 }
 
+int two_small_recvmmsg_datagrams_for_tests(int, mmsghdr *messages, unsigned int message_count, int,
+                                           timespec *) {
+    const unsigned int received_count = std::min<unsigned int>(message_count, 2u);
+    for (unsigned int index = 0; index < received_count; ++index) {
+        auto &message = messages[index].msg_hdr;
+        if (message.msg_iov == nullptr || message.msg_iovlen == 0 ||
+            message.msg_iov[0].iov_len < 2) {
+            errno = EINVAL;
+            return -1;
+        }
+        auto *bytes = static_cast<std::byte *>(message.msg_iov[0].iov_base);
+        bytes[0] = static_cast<std::byte>(0xa0u + index);
+        bytes[1] = static_cast<std::byte>(0xb0u + index);
+        messages[index].msg_len = 2;
+    }
+    return static_cast<int>(received_count);
+}
+
+int two_large_recvmmsg_datagrams_for_tests(int, mmsghdr *messages, unsigned int message_count, int,
+                                           timespec *) {
+    constexpr std::size_t kLargeDatagramSize = kReceiveScratchCopyMaxBytes + 1;
+    const unsigned int received_count = std::min<unsigned int>(message_count, 2u);
+    for (unsigned int index = 0; index < received_count; ++index) {
+        auto &message = messages[index].msg_hdr;
+        if (message.msg_iov == nullptr || message.msg_iovlen == 0 ||
+            message.msg_iov[0].iov_len < kLargeDatagramSize) {
+            errno = EINVAL;
+            return -1;
+        }
+        auto *bytes = static_cast<std::byte *>(message.msg_iov[0].iov_base);
+        bytes[0] = static_cast<std::byte>(0xc0u + index);
+        bytes[kLargeDatagramSize - 1] = static_cast<std::byte>(0xd0u + index);
+        messages[index].msg_len = kLargeDatagramSize;
+    }
+    return static_cast<int>(received_count);
+}
+
+int one_udp_gro_recvmmsg_datagram_for_tests(int, mmsghdr *messages, unsigned int message_count, int,
+                                            timespec *) {
+#if defined(__linux__) && defined(UDP_GRO)
+    if (message_count == 0) {
+        return 0;
+    }
+    auto &message = messages[0].msg_hdr;
+    constexpr std::size_t kCoalescedSize = 6;
+    constexpr std::uint16_t kSegmentSize = 2;
+    if (message.msg_iov == nullptr || message.msg_iovlen == 0 ||
+        message.msg_iov[0].iov_len < kCoalescedSize) {
+        errno = EINVAL;
+        return -1;
+    }
+    auto *bytes = static_cast<std::byte *>(message.msg_iov[0].iov_base);
+    for (std::size_t index = 0; index < kCoalescedSize; ++index) {
+        bytes[index] = static_cast<std::byte>(0xe0u + index);
+    }
+    auto *control_header = CMSG_FIRSTHDR(&message);
+    if (control_header == nullptr) {
+        errno = EINVAL;
+        return -1;
+    }
+    control_header->cmsg_level = SOL_UDP;
+    control_header->cmsg_type = UDP_GRO;
+    control_header->cmsg_len = CMSG_LEN(sizeof(kSegmentSize));
+    std::memcpy(CMSG_DATA(control_header), &kSegmentSize, sizeof(kSegmentSize));
+    message.msg_controllen = control_header->cmsg_len;
+    messages[0].msg_len = kCoalescedSize;
+    return 1;
+#else
+    static_cast<void>(messages);
+    static_cast<void>(message_count);
+    errno = EAGAIN;
+    return -1;
+#endif
+}
+
 int errqueue_then_timeout_poll_for_tests(pollfd *poll_descriptors, nfds_t descriptor_count, int) {
     g_poll_engine_test_trace.ignored_errqueue_poll_calls += 1;
     for (nfds_t index = 0; index < descriptor_count; ++index) {
@@ -2399,6 +2510,105 @@ bool poll_io_engine_restamps_queued_receive_events_for_tests() {
         third_event->now == queued_time,
         second_event->rx->shared_bytes == shared_receive_bytes,
     });
+}
+
+bool poll_io_engine_compacts_queued_small_receive_storage_for_tests() {
+    const ScopedSocketIoBackendOpsOverride runtime_ops{
+        SocketIoBackendOpsOverride{
+            .poll_fn = &readable_poll_for_tests,
+            .recvmmsg_fn = &two_small_recvmmsg_datagrams_for_tests,
+        },
+    };
+
+    PollIoEngine engine;
+    constexpr std::array<int, 1> kSockets = {91};
+    auto first_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    auto second_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    if (!first_event.has_value() || !second_event.has_value() || !first_event->rx.has_value() ||
+        !second_event->rx.has_value()) {
+        return false;
+    }
+
+    const auto first_payload = first_event->rx->payload();
+    const auto second_payload = second_event->rx->payload();
+    return all_true({
+        first_event->kind == QuicIoEngineEvent::Kind::rx_datagram,
+        second_event->kind == QuicIoEngineEvent::Kind::rx_datagram,
+        first_event->rx->shared_bytes == nullptr,
+        first_event->rx->bytes.size() == 2,
+        first_payload.size() == 2,
+        first_payload[0] == std::byte{0xa0},
+        second_event->rx->shared_bytes == nullptr,
+        second_event->rx->bytes.size() == 2,
+        second_payload.size() == 2,
+        second_payload[0] == std::byte{0xa1},
+    });
+}
+
+bool poll_io_engine_keeps_queued_large_receive_storage_shared_for_tests() {
+    const ScopedSocketIoBackendOpsOverride runtime_ops{
+        SocketIoBackendOpsOverride{
+            .poll_fn = &readable_poll_for_tests,
+            .recvmmsg_fn = &two_large_recvmmsg_datagrams_for_tests,
+        },
+    };
+
+    PollIoEngine engine;
+    constexpr std::array<int, 1> kSockets = {92};
+    auto first_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    auto second_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    if (!first_event.has_value() || !second_event.has_value() || !second_event->rx.has_value()) {
+        return false;
+    }
+
+    const auto second_payload = second_event->rx->payload();
+    return all_true({
+        second_event->kind == QuicIoEngineEvent::Kind::rx_datagram,
+        second_event->rx->shared_bytes != nullptr,
+        second_event->rx->bytes.empty(),
+        second_payload.size() == kReceiveScratchCopyMaxBytes + 1,
+        second_payload[0] == std::byte{0xc1},
+        second_payload[second_payload.size() - 1] == std::byte{0xd1},
+    });
+}
+
+bool poll_io_engine_keeps_queued_gro_receive_storage_shared_for_tests() {
+#if defined(__linux__) && defined(UDP_GRO)
+    const ScopedSocketIoBackendOpsOverride runtime_ops{
+        SocketIoBackendOpsOverride{
+            .poll_fn = &readable_poll_for_tests,
+            .recvmmsg_fn = &one_udp_gro_recvmmsg_datagram_for_tests,
+        },
+    };
+
+    PollIoEngine engine;
+    constexpr std::array<int, 1> kSockets = {93};
+    auto first_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    auto second_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    auto third_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    if (!first_event.has_value() || !second_event.has_value() || !third_event.has_value() ||
+        !first_event->rx.has_value() || !second_event->rx.has_value() ||
+        !third_event->rx.has_value()) {
+        return false;
+    }
+
+    const auto first_payload = first_event->rx->payload();
+    const auto second_payload = second_event->rx->payload();
+    const auto third_payload = third_event->rx->payload();
+    return all_true({
+        first_event->rx->shared_bytes != nullptr,
+        second_event->rx->shared_bytes == first_event->rx->shared_bytes,
+        third_event->rx->shared_bytes == first_event->rx->shared_bytes,
+        first_payload.size() == 2,
+        second_payload.size() == 2,
+        third_payload.size() == 2,
+        first_payload[0] == std::byte{0xe0},
+        second_payload[0] == std::byte{0xe2},
+        third_payload[0] == std::byte{0xe4},
+    });
+#else
+    return true;
+#endif
 }
 
 bool poll_io_engine_ignores_non_pmtu_errqueue_for_tests() {

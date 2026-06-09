@@ -933,6 +933,20 @@ TEST(SocketIoBackendTest, PollIoEngineRestampsQueuedReceiveEvents) {
     EXPECT_TRUE(coquic::io::test::poll_io_engine_restamps_queued_receive_events_for_tests());
 }
 
+TEST(SocketIoBackendTest, PollIoEngineCompactsQueuedSmallReceiveStorage) {
+    EXPECT_TRUE(coquic::io::test::poll_io_engine_compacts_queued_small_receive_storage_for_tests());
+}
+
+TEST(SocketIoBackendTest, PollIoEngineKeepsQueuedLargeReceiveStorageShared) {
+    EXPECT_TRUE(
+        coquic::io::test::poll_io_engine_keeps_queued_large_receive_storage_shared_for_tests());
+}
+
+TEST(SocketIoBackendTest, PollIoEngineKeepsQueuedGroReceiveStorageShared) {
+    EXPECT_TRUE(
+        coquic::io::test::poll_io_engine_keeps_queued_gro_receive_storage_shared_for_tests());
+}
+
 TEST(SocketIoBackendTest, HasPendingEventsChecksLiveBackendCore) {
     coquic::io::SocketIoBackend backend(coquic::io::QuicUdpBackendConfig{});
     EXPECT_FALSE(backend.has_pending_events());

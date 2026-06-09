@@ -436,9 +436,17 @@ class PacketSpaceRecovery {
     static bool slot_declared_lost(const SentPacketLedgerSlot &slot);
     static bool slot_is_pmtu_probe(const SentPacketLedgerSlot &slot);
     static DeadlineTrackedPacket tracked_packet(const SentPacketLedgerSlot &slot);
-    static RecoveryPacketHandle packet_handle(const SentPacketLedgerSlot &slot,
-                                              std::size_t slot_index);
+    RecoveryPacketHandle packet_handle(const SentPacketLedgerSlot &slot,
+                                       std::size_t slot_index) const;
     static void reclaim_retired_packet_storage(SentPacketRecord &packet);
+    std::optional<std::size_t> slot_index_for_packet_number(std::uint64_t packet_number) const;
+    std::optional<std::size_t> slot_index_for_handle(RecoveryPacketHandle handle) const;
+    std::size_t absolute_slot_index(std::size_t relative_slot_index) const;
+    std::size_t relative_slot_index(std::size_t absolute_slot_index) const;
+    SentPacketLedgerSlot *slot_for_handle(RecoveryPacketHandle handle);
+    const SentPacketLedgerSlot *slot_for_handle(RecoveryPacketHandle handle) const;
+    void compact_retired_prefix();
+    void prepend_slots_for_packet_number(std::uint64_t packet_number);
     std::unique_ptr<SentPacketRecord> acquire_packet_record(SentPacketRecord &&packet);
     void recycle_packet_record(std::unique_ptr<SentPacketRecord> packet);
     SentPacketRecord &materialize_slot_packet(SentPacketLedgerSlot &slot);
@@ -479,6 +487,7 @@ class PacketSpaceRecovery {
     void maybe_adapt_reordering_thresholds_from_spurious_loss(const SentPacketRecord &packet,
                                                               QuicCoreTimePoint now);
     std::size_t ensure_slot_for_packet_number(std::uint64_t packet_number);
+    void rebuild_auxiliary_indexes(bool release_auxiliary_storage);
     AckApplyState begin_ack_received_apply(std::uint64_t largest_acknowledged);
     void apply_ack_range_descending(AckApplyState &state, const AckPacketNumberRange &range);
     AckApplyResult finish_ack_received_apply(AckApplyState &state, QuicCoreTimePoint now);
@@ -494,6 +503,7 @@ class PacketSpaceRecovery {
     mutable std::optional<DeadlineTrackedPacket> latest_in_flight_ack_eliciting_packet_;
     mutable std::set<DeadlineTrackedPacket, DeadlineTrackedPacketLess> eligible_loss_packets_;
     std::optional<std::uint64_t> largest_acked_packet_number_;
+    std::uint64_t first_slot_packet_number_ = 0;
     std::size_t first_live_slot_ = kInvalidLedgerSlotIndex;
     std::size_t last_live_slot_ = kInvalidLedgerSlotIndex;
     bool live_sent_times_monotonic_ = true;

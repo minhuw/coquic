@@ -256,7 +256,7 @@ const activePlotFilters = {
 };
 const plotFilterGroupsOpen = {
   languages: true,
-  vendors: true,
+  vendors: !(typeof window !== "undefined" && window.matchMedia("(max-width: 680px)").matches),
 };
 
 function formatNumber(value, decimals = 3) {
@@ -354,7 +354,11 @@ function renderIdentityIcon(kind, iconUrl, code, label, url) {
     image.loading = "lazy";
     image.decoding = "async";
     image.referrerPolicy = "no-referrer";
-    image.addEventListener("error", () => image.remove(), { once: true });
+    image.addEventListener("load", () => badge.classList.add("has-image"), { once: true });
+    image.addEventListener("error", () => {
+      badge.classList.remove("has-image");
+      image.remove();
+    }, { once: true });
     badge.append(image);
   }
 

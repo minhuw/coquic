@@ -165,6 +165,143 @@ function knownBrokenTitle(row) {
   return ` Known peer-broken: upstream ${known.peer || row.peer} ${known.role || "peer"} fails ${known.case || row.name} against ${failed}/${supported} supported peers in ${known.source || "upstream"} run ${run}${unsupported ? `; ${unsupported} unsupported upstream peers` : ""}.`;
 }
 
+function implementationDisplayName(name) {
+  return (implementationMeta[name] || { name }).name;
+}
+
+function resultLabel(result, row) {
+  if (isKnownBrokenFailure(row, result)) {
+    return "known peer-broken";
+  }
+  if (isSkippedResult(result)) {
+    return "unsupported";
+  }
+  if (result === "succeeded") {
+    return "pass";
+  }
+  if (result === "failed") {
+    return "failed";
+  }
+  return "not reported";
+}
+
+function resultDetails(source, test, row, result) {
+  const details = row && row.details ? row.details : "";
+  const known = knownBrokenTitle(row).trim();
+  return {
+    title: test === "all" ? "All test cases" : test,
+    client: implementationDisplayName(source.client),
+    server: implementationDisplayName(source.server),
+    result: resultLabel(result, row),
+    details: [details, known].filter(Boolean).join(" "),
+  };
+}
+
+function ensureInteropTooltip() {
+  let tooltip = document.querySelector(".interop-tooltip");
+  if (tooltip) {
+    return tooltip;
+  }
+
+  tooltip = document.createElement("div");
+  tooltip.className = "interop-tooltip";
+  tooltip.setAttribute("role", "tooltip");
+  document.body.append(tooltip);
+  document.addEventListener("pointerdown", (event) => {
+    const target = event.target;
+    if (target instanceof Element && (target.closest(".test-cell") || target.closest(".interop-tooltip"))) {
+      return;
+    }
+    hideInteropTooltip();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      hideInteropTooltip();
+    }
+  });
+  document.addEventListener("scroll", hideInteropTooltip, true);
+  return tooltip;
+}
+
+function positionInteropTooltip(target, event) {
+  const tooltip = ensureInteropTooltip();
+  const targetRect = target.getBoundingClientRect();
+  const anchorX = event && typeof event.clientX === "number" ? event.clientX : targetRect.left + targetRect.width / 2;
+  const anchorY = event && typeof event.clientY === "number" ? event.clientY : targetRect.top + targetRect.height / 2;
+  const margin = 12;
+  const gap = 12;
+  const tooltipRect = tooltip.getBoundingClientRect();
+  let left = anchorX + gap;
+  let top = anchorY + gap;
+
+  if (left + tooltipRect.width > window.innerWidth - margin) {
+    left = Math.max(margin, anchorX - tooltipRect.width - gap);
+  }
+  if (top + tooltipRect.height > window.innerHeight - margin) {
+    top = Math.max(margin, targetRect.top - tooltipRect.height - gap);
+  }
+
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+}
+
+function showInteropTooltip(target, details, event) {
+  const tooltip = ensureInteropTooltip();
+  const title = document.createElement("strong");
+  title.textContent = details.title;
+
+  const client = tooltipLine("Client", details.client);
+  const server = tooltipLine("Server", details.server);
+  const result = tooltipLine("Result", details.result);
+
+  const children = [title, client, server, result];
+  if (details.details) {
+    const extra = document.createElement("small");
+    extra.textContent = details.details;
+    children.push(extra);
+  }
+
+  tooltip.replaceChildren(...children);
+  tooltip.classList.add("visible");
+  positionInteropTooltip(target, event);
+}
+
+function tooltipLine(label, value) {
+  const line = document.createElement("span");
+  const key = document.createElement("b");
+  key.textContent = label;
+  line.append(key, document.createTextNode(value));
+  return line;
+}
+
+function hideInteropTooltip() {
+  const tooltip = document.querySelector(".interop-tooltip");
+  if (tooltip) {
+    tooltip.classList.remove("visible");
+  }
+}
+
+function attachResultTooltip(cell, details) {
+  const label = `${details.title}: client ${details.client}, server ${details.server}, result ${details.result}${details.details ? `. ${details.details}` : ""}`;
+  cell.tabIndex = 0;
+  cell.setAttribute("aria-label", label);
+  cell.addEventListener("pointerenter", (event) => {
+    showInteropTooltip(cell, details, event);
+  });
+  cell.addEventListener("pointermove", (event) => {
+    positionInteropTooltip(cell, event);
+  });
+  cell.addEventListener("pointerleave", hideInteropTooltip);
+  cell.addEventListener("focus", () => {
+    showInteropTooltip(cell, details);
+  });
+  cell.addEventListener("blur", hideInteropTooltip);
+  cell.addEventListener("click", (event) => {
+    event.stopPropagation();
+    showInteropTooltip(cell, details, event);
+  });
+}
+
 function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
   if (!tests.length) {
     return "unknown";
@@ -359,7 +496,7 @@ function renderMatrix() {
       const rowStatusPill = document.createElement("span");
       rowStatusPill.className = `test-cell row-status ${resultClass(rowStatus)}`;
       rowStatusPill.textContent = resultToken(rowStatus);
-      rowStatusPill.title = `${source.server} -> ${source.client}: row ${rowStatus}`;
+      attachResultTooltip(rowStatusPill, resultDetails(source, "all", null, rowStatus));
       rowStatusCell.append(rowStatusPill);
       tr.append(rowStatusCell);
 
@@ -381,9 +518,7 @@ function renderMatrix() {
         const cell = document.createElement("span");
         cell.className = `test-cell ${resultClass(result, row)}`;
         cell.textContent = resultTokenForRow(row, result);
-        cell.title = row
-          ? `${source.server} -> ${source.client}: ${test} ${row.result}${row.details ? ` (${row.details})` : ""}.${knownBrokenTitle(row)}`
-          : `${source.server} -> ${source.client}: ${test} not reported`;
+        attachResultTooltip(cell, resultDetails(source, test, row, result));
         td.append(cell);
         tr.append(td);
       }

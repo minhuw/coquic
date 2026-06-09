@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { ChevronDown, Contact } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { CoquicLogoIcon, GitHubIcon } from './icons';
 import { SiteSearch } from './site-search';
@@ -29,12 +29,55 @@ interface DemoNavProps {
 }
 
 export function DemoNav({ active }: DemoNavProps) {
+  const navRef = useRef<HTMLElement>(null);
+  const linksRef = useRef<HTMLSpanElement>(null);
   const [openMenu, setOpenMenu] = useState<NavMenuId | null>(null);
   const benchmarkActive = benchmarkViews.some((view) => view.route === active);
   const developmentActive = developmentViews.some((view) => view.route === active);
 
+  useEffect(() => {
+    const activeItem = linksRef.current?.querySelector<HTMLElement>('[data-nav-active="true"]');
+    if (!activeItem || !window.matchMedia('(max-width: 680px)').matches) {
+      return;
+    }
+    activeItem.scrollIntoView({ block: 'nearest', inline: 'center' });
+  }, [active]);
+
+  useEffect(() => {
+    if (!openMenu) {
+      return;
+    }
+
+    function closeOnOutsidePointer(event: PointerEvent) {
+      if (navRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setOpenMenu(null);
+    }
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setOpenMenu(null);
+      }
+    }
+
+    document.addEventListener('pointerdown', closeOnOutsidePointer);
+    document.addEventListener('keydown', closeOnEscape);
+
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [openMenu]);
+
   function toggleMenu(menu: NavMenuId) {
     setOpenMenu((current) => (current === menu ? null : menu));
+  }
+
+  function closeMenuForHoverPointer(event: React.MouseEvent<HTMLElement>) {
+    if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+      setOpenMenu(null);
+    }
   }
 
   function handleTriggerKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, menu: NavMenuId) {
@@ -50,23 +93,34 @@ export function DemoNav({ active }: DemoNavProps) {
 
   return (
     <nav
+      ref={navRef}
       className="top-nav"
       aria-label="Demo views"
-      onMouseLeave={() => {
-        setOpenMenu(null);
-      }}
+      onMouseLeave={closeMenuForHoverPointer}
     >
       <Link className="top-nav-home" href="/" aria-label="Home" aria-current={active === 'home' ? 'page' : undefined}>
         <CoquicLogoIcon className="size-8" aria-hidden="true" />
       </Link>
       <SiteSearch />
-      <span className="top-nav-links">
+      <span className="top-nav-links" ref={linksRef}>
         {primaryViews.map((view) => (
-          <Link key={view.href} className="nav-link" href={view.href} aria-current={active === view.route ? 'page' : undefined}>
+          <Link
+            key={view.href}
+            className={`nav-link nav-link-${view.route}${active === view.route ? ' nav-link-active' : ''}`}
+            href={view.href}
+            aria-current={active === view.route ? 'page' : undefined}
+            aria-label={view.label}
+            data-nav-active={active === view.route ? 'true' : undefined}
+          >
             {view.label}
           </Link>
         ))}
-        <span className="nav-menu" data-open={openMenu === 'benchmark' ? 'true' : undefined}>
+        <span
+          className={`nav-menu nav-menu-benchmark${benchmarkActive ? ' nav-menu-active' : ''}`}
+          data-active={benchmarkActive ? 'true' : undefined}
+          data-nav-active={benchmarkActive ? 'true' : undefined}
+          data-open={openMenu === 'benchmark' ? 'true' : undefined}
+        >
           <button
             className="nav-link nav-menu-trigger"
             type="button"
@@ -84,13 +138,26 @@ export function DemoNav({ active }: DemoNavProps) {
           </button>
           <span className="nav-menu-content">
             {benchmarkViews.map((view) => (
-              <Link key={view.href} className="nav-menu-link" href={view.href} aria-current={active === view.route ? 'page' : undefined}>
+              <Link
+                key={view.href}
+                className="nav-menu-link"
+                href={view.href}
+                aria-current={active === view.route ? 'page' : undefined}
+                onClick={() => {
+                  setOpenMenu(null);
+                }}
+              >
                 {view.label}
               </Link>
             ))}
           </span>
         </span>
-        <span className="nav-menu" data-open={openMenu === 'development' ? 'true' : undefined}>
+        <span
+          className={`nav-menu nav-menu-development${developmentActive ? ' nav-menu-active' : ''}`}
+          data-active={developmentActive ? 'true' : undefined}
+          data-nav-active={developmentActive ? 'true' : undefined}
+          data-open={openMenu === 'development' ? 'true' : undefined}
+        >
           <button
             className="nav-link nav-menu-trigger"
             type="button"
@@ -108,7 +175,15 @@ export function DemoNav({ active }: DemoNavProps) {
           </button>
           <span className="nav-menu-content">
             {developmentViews.map((view) => (
-              <Link key={view.href} className="nav-menu-link" href={view.href} aria-current={active === view.route ? 'page' : undefined}>
+              <Link
+                key={view.href}
+                className="nav-menu-link"
+                href={view.href}
+                aria-current={active === view.route ? 'page' : undefined}
+                onClick={() => {
+                  setOpenMenu(null);
+                }}
+              >
                 {view.label}
               </Link>
             ))}
@@ -135,6 +210,36 @@ export function DemoNav({ active }: DemoNavProps) {
             <GitHubIcon className="size-6" />
           </a>
         </span>
+      </span>
+      <span className="mobile-nav-menu-content" data-open={openMenu === 'benchmark' ? 'true' : undefined}>
+        {benchmarkViews.map((view) => (
+          <Link
+            key={view.href}
+            className="nav-menu-link"
+            href={view.href}
+            aria-current={active === view.route ? 'page' : undefined}
+            onClick={() => {
+              setOpenMenu(null);
+            }}
+          >
+            {view.label}
+          </Link>
+        ))}
+      </span>
+      <span className="mobile-nav-menu-content" data-open={openMenu === 'development' ? 'true' : undefined}>
+        {developmentViews.map((view) => (
+          <Link
+            key={view.href}
+            className="nav-menu-link"
+            href={view.href}
+            aria-current={active === view.route ? 'page' : undefined}
+            onClick={() => {
+              setOpenMenu(null);
+            }}
+          >
+            {view.label}
+          </Link>
+        ))}
       </span>
     </nav>
   );

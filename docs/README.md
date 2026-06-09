@@ -38,6 +38,18 @@ bindings/rust/coquic
 |   Ergonomic Rust QUIC facade over coquic-sys.
 bench/coquic-rust-perf
 +-- Tokio UDP perf runtime over coquic-rs.
+bindings/javascript
+|-- Node.js N-API wrapper.
+bench/coquic-js-perf
++-- JavaScript UDP perf runtime over the Node.js wrapper.
+bindings/python
+|-- ctypes wrapper and Python QUIC facade.
+bench/coquic-python-perf
++-- Python UDP perf runtime over the Python wrapper.
+bindings/go
+|-- cgo wrapper.
+bench/coquic-go-perf
++-- Go UDP perf runtime over the Go wrapper.
 ```
 
 ## Contents
@@ -56,6 +68,11 @@ bench/coquic-rust-perf
   per-function semantics.
 - [Rust Wrappers](api/rust-wrapper.md): `coquic-sys`, `coquic-rs`, and the
   Tokio Rust perf runtime.
+- [JavaScript Wrapper](api/javascript-wrapper.md): Node.js N-API package and
+  JavaScript perf runtime.
+- [Python Wrapper](api/python-wrapper.md): `ctypes` package, QUIC facade, and
+  Python perf runtime.
+- [Go Wrapper](api/go-wrapper.md): cgo package and Go perf runtime.
 
 ### Runtime
 

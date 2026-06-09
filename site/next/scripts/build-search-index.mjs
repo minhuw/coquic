@@ -15,6 +15,9 @@ const docs = [
   { href: '/docs/api/c-ffi', file: 'api/c-ffi.md', section: 'Native Bindings', label: 'C FFI API' },
   { href: '/docs/api/c-ffi-reference', file: 'api/c-ffi-reference.md', section: 'Native Bindings', label: 'C FFI Reference' },
   { href: '/docs/api/rust-wrapper', file: 'api/rust-wrapper.md', section: 'Native Bindings', label: 'Rust Wrappers' },
+  { href: '/docs/api/javascript-wrapper', file: 'api/javascript-wrapper.md', section: 'Native Bindings', label: 'JavaScript Wrapper' },
+  { href: '/docs/api/python-wrapper', file: 'api/python-wrapper.md', section: 'Native Bindings', label: 'Python Wrapper' },
+  { href: '/docs/api/go-wrapper', file: 'api/go-wrapper.md', section: 'Native Bindings', label: 'Go Wrapper' },
   { href: '/docs/api/integration', file: 'api/integration.md', section: 'Runtime', label: 'Runtime Integration' },
 ];
 
@@ -64,6 +67,14 @@ function readDocMarkdown(file) {
         : '';
     case 'api/rust-wrapper.md':
       return existsSync('../../docs/api/rust-wrapper.md') ? readFileSync('../../docs/api/rust-wrapper.md', 'utf-8') : '';
+    case 'api/javascript-wrapper.md':
+      return existsSync('../../docs/api/javascript-wrapper.md')
+        ? readFileSync('../../docs/api/javascript-wrapper.md', 'utf-8')
+        : '';
+    case 'api/python-wrapper.md':
+      return existsSync('../../docs/api/python-wrapper.md') ? readFileSync('../../docs/api/python-wrapper.md', 'utf-8') : '';
+    case 'api/go-wrapper.md':
+      return existsSync('../../docs/api/go-wrapper.md') ? readFileSync('../../docs/api/go-wrapper.md', 'utf-8') : '';
     case 'api/integration.md':
       return existsSync('../../docs/api/integration.md') ? readFileSync('../../docs/api/integration.md', 'utf-8') : '';
     default:

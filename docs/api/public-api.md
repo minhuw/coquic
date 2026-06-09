@@ -33,9 +33,11 @@ public ABI surface for native bindings, but it is not one of the C++ API layers.
 Use it for C consumers and native language bindings that need opaque handles,
 explicit result ownership, and pkg-config or CMake package metadata.
 
-The in-tree [Rust Wrappers](rust-wrapper.md) build on that C FFI: `coquic-sys`
-provides safe handle ownership plus borrowed result/update views, and
-`coquic-rs` adds an ergonomic QUIC facade for Rust callers.
+The in-tree language wrappers build on that C FFI. [Rust](rust-wrapper.md)
+provides `coquic-sys` plus an ergonomic `coquic-rs` facade; the
+[JavaScript](javascript-wrapper.md), [Python](python-wrapper.md), and
+[Go](go-wrapper.md) wrappers expose similar sans-I/O QUIC surfaces for their
+runtime ecosystems.
 
 ## Layer Map
 

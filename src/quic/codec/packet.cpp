@@ -9,6 +9,9 @@ namespace coquic::quic {
 
 namespace {
 
+constexpr std::size_t kMaxEncodedConnectionIdLength = 255;
+constexpr std::size_t kMaxVersion1ConnectionIdLength = 20;
+
 enum class ProtectedPacketType : std::uint8_t {
     initial,
     zero_rtt,
@@ -99,6 +102,22 @@ bool valid_truncated_packet_number(const PacketNumberEncoding &encoding) {
     return truncated_packet_number <= max_value;
 }
 
+bool valid_long_header_connection_id_length(std::uint32_t version,
+                                            const ConnectionId &connection_id) {
+    if (connection_id.size() > kMaxEncodedConnectionIdLength) {
+        return false;
+    }
+
+    return version != kQuicVersion1 || connection_id.size() <= kMaxVersion1ConnectionIdLength;
+}
+
+bool valid_long_header_connection_ids(std::uint32_t version,
+                                      const ConnectionId &destination_connection_id,
+                                      const ConnectionId &source_connection_id) {
+    return valid_long_header_connection_id_length(version, destination_connection_id) &&
+           valid_long_header_connection_id_length(version, source_connection_id);
+}
+
 std::optional<CodecError> append_packet_number(BufferWriter &writer,
                                                const PacketNumberEncoding &encoding) {
     for (std::size_t i = 0; i < encoding.packet_number_length; ++i) {
@@ -136,7 +155,7 @@ CodecResult<ConnectionId> read_connection_id(BufferReader &reader, bool enforce_
     if (!length.has_value()) {
         return CodecResult<ConnectionId>::failure(length.error().code, length.error().offset);
     }
-    if (enforce_v1_limit && length.value() > 20) {
+    if (enforce_v1_limit && length.value() > kMaxVersion1ConnectionIdLength) {
         return CodecResult<ConnectionId>::failure(CodecErrorCode::invalid_varint, reader.offset());
     }
 
@@ -479,10 +498,8 @@ CodecResult<std::vector<std::byte>> serialize_long_header_fields(
         return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::unsupported_packet_type,
                                                             0);
     }
-    const auto invalid_v1_connection_id =
-        (version == kQuicVersion1) &
-        ((destination_connection_id.size() > 20) | (source_connection_id.size() > 20));
-    if (invalid_v1_connection_id) {
+    if (!valid_long_header_connection_ids(version, destination_connection_id,
+                                          source_connection_id)) {
         return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
     }
     if (!valid_truncated_packet_number(PacketNumberEncoding{
@@ -560,10 +577,10 @@ CodecResult<std::vector<std::byte>> serialize_packet(const Packet &packet) {
     }
 
     if (const auto *retry = std::get_if<RetryPacket>(&packet)) {
-        const auto invalid_retry_packet = (retry->version == kVersionNegotiationVersion) |
-                                          (retry->retry_unused_bits > 0x0fu) |
-                                          (retry->destination_connection_id.size() > 20) |
-                                          (retry->source_connection_id.size() > 20);
+        const auto invalid_retry_packet =
+            (retry->version == kVersionNegotiationVersion) | (retry->retry_unused_bits > 0x0fu) |
+            !valid_long_header_connection_ids(retry->version, retry->destination_connection_id,
+                                              retry->source_connection_id);
         if (invalid_retry_packet) {
             return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
         }

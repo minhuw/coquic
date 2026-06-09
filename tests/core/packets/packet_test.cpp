@@ -160,6 +160,30 @@ TEST(QuicPacketTest, RoundTripsRetryPacketWithNonZeroUnusedBits) {
     EXPECT_EQ(retry->retry_unused_bits, 0x0bu);
 }
 
+TEST(QuicPacketTest, RoundTripsNonV1RetryPacketWithLongConnectionIds) {
+    RetryPacket packet{
+        .version = 0x180102aau,
+        .destination_connection_id = std::vector<std::byte>(24, std::byte{0xaa}),
+        .source_connection_id = std::vector<std::byte>(24, std::byte{0xbb}),
+        .retry_token = {std::byte{0x10}, std::byte{0x11}},
+        .retry_integrity_tag = {std::byte{0x00}, std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
+                                std::byte{0x04}, std::byte{0x05}, std::byte{0x06}, std::byte{0x07},
+                                std::byte{0x08}, std::byte{0x09}, std::byte{0x0a}, std::byte{0x0b},
+                                std::byte{0x0c}, std::byte{0x0d}, std::byte{0x0e}, std::byte{0x0f}},
+    };
+
+    auto encoded = coquic::quic::serialize_packet(packet);
+    ASSERT_TRUE(encoded.has_value());
+
+    auto decoded = coquic::quic::deserialize_packet(encoded.value(), {});
+    ASSERT_TRUE(decoded.has_value());
+    const auto *retry = std::get_if<RetryPacket>(&decoded.value().packet);
+    ASSERT_NE(retry, nullptr);
+    EXPECT_EQ(retry->version, packet.version);
+    EXPECT_EQ(retry->destination_connection_id.size(), 24u);
+    EXPECT_EQ(retry->source_connection_id.size(), 24u);
+}
+
 TEST(QuicPacketTest, SerializesQuicV2LongHeaderTypeBitsPerRfc9369) {
     const auto initial = coquic::quic::serialize_packet(InitialPacket{
         .version = 0x6b3343cfu,
@@ -721,6 +745,13 @@ TEST(QuicPacketTest, RejectsInvalidPacketSerializationInputs) {
         },
         CodecErrorCode::invalid_varint);
     expect_packet_serialize_error(
+        RetryPacket{
+            .version = 0x180102aau,
+            .destination_connection_id = std::vector<std::byte>(256, std::byte{0xaa}),
+            .source_connection_id = {std::byte{0xbb}},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_packet_serialize_error(
         InitialPacket{
             .version = 0,
             .destination_connection_id = {std::byte{0xaa}},
@@ -751,6 +782,19 @@ TEST(QuicPacketTest, RejectsInvalidPacketSerializationInputs) {
             .version = 1,
             .destination_connection_id = {std::byte{0xaa}},
             .source_connection_id = std::vector<std::byte>(21, std::byte{0xbb}),
+            .packet_number_length = 1,
+            .truncated_packet_number = 1,
+            .frames = {CryptoFrame{
+                .offset = 0,
+                .crypto_data = {std::byte{0x01}},
+            }},
+        },
+        CodecErrorCode::invalid_varint);
+    expect_packet_serialize_error(
+        InitialPacket{
+            .version = 2,
+            .destination_connection_id = std::vector<std::byte>(256, std::byte{0xaa}),
+            .source_connection_id = {std::byte{0xbb}},
             .packet_number_length = 1,
             .truncated_packet_number = 1,
             .frames = {CryptoFrame{

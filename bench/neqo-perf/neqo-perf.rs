@@ -1550,7 +1550,29 @@ fn merge_counters(dst: &mut Counters, mut src: Counters) {
 
 async fn run_single_crr_request(cfg: &Config, shape: RequestShape) -> Result<Counters, String> {
     let mut counters = Counters::default();
-    run_request_batch(cfg, 1, shape, &mut counters).await?;
+    let (socket, local_addr, conn) = connect_client(cfg)
+        .await
+        .map_err(|err| format!("neqo CRR connect failed: {err}"))?;
+    let mut client = NeqoClientBatch {
+        socket,
+        local_addr,
+        conn,
+        batch: ClientBatch::new(cfg, 1, shape),
+    };
+    let started = Instant::now();
+    while client.batch.completed_requests < 1 && started.elapsed() < BATCH_TIMEOUT {
+        drive_batches(std::slice::from_mut(&mut client), &mut counters).await?;
+        if client.batch.completed_requests >= 1 {
+            break;
+        }
+    }
+    close_batches(std::slice::from_mut(&mut client)).await;
+    if client.batch.completed_requests < 1 {
+        return Err(format!(
+            "neqo-perf completed {} of 1 CRR requests",
+            client.batch.completed_requests
+        ));
+    }
     Ok(counters)
 }
 
@@ -1606,7 +1628,9 @@ async fn run_client(cfg: &Config) -> RunSummary<'_> {
     } else {
         run_crr(cfg, &mut counters).await
     };
-    let elapsed = if cfg.requests.set {
+    let elapsed = if !cfg.requests.set && !cfg.total_bytes.set && rc.is_ok() {
+        cfg.duration
+    } else if cfg.requests.set {
         start.elapsed()
     } else {
         measure_start.elapsed()

@@ -203,6 +203,17 @@ typedef struct run_summary_t {
     uint64_t skipped_setup_errors;
 } run_summary_t;
 
+typedef struct crr_worker_state_t {
+    config_t cfg;
+    uint64_t measure_start;
+    uint64_t measure_deadline;
+    uint64_t started;
+    int failed;
+    char failure_reason[256];
+    counters_t counters;
+    pthread_mutex_t mutex;
+} crr_worker_state_t;
+
 static volatile sig_atomic_t stop_requested = 0;
 
 static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes, size_t length,
@@ -957,7 +968,8 @@ static int should_send_complete(const app_ctx_t *app) {
     }
     return (start->mode == MODE_CODE_BULK && start->total_bytes.set &&
             app->server_requests_completed >= start->streams) ||
-           (start->mode == MODE_CODE_BULK && start->direction == DIRECTION_CODE_UPLOAD &&
+           (start->mode == MODE_CODE_BULK && start->total_bytes.set &&
+            start->direction == DIRECTION_CODE_UPLOAD &&
             app->server_requests_completed >= start->streams) ||
            (start->mode == MODE_CODE_RR && start->requests.set &&
             app->server_requests_completed >= start->requests.value);
@@ -1427,53 +1439,122 @@ static int run_client_session(app_ctx_t *app) {
     return app->failed ? -1 : 0;
 }
 
-static int run_crr(const config_t *cfg, counters_t *counters) {
-    uint64_t measure_start = picoquic_current_time() + cfg->warmup_us;
-    uint64_t measure_deadline = measure_start + cfg->duration_us;
-    uint64_t started = 0;
-    while ((cfg->requests.set && started < cfg->requests.value) ||
-           (!cfg->requests.set && picoquic_current_time() < measure_deadline)) {
-        uint64_t batch = cfg->connections;
-        if (cfg->requests.set && cfg->requests.value - started < batch) {
-            batch = cfg->requests.value - started;
-        }
-        if (batch == 0) {
-            break;
-        }
-        app_ctx_t app;
-        memset(&app, 0, sizeof(app));
-        app.cfg = *cfg;
-        app.cfg.mode = "rr";
-        app.cfg.requests.set = 1;
-        app.cfg.requests.value = batch;
-        app.cfg.requests_in_flight = 1;
-        app.cfg.connections = batch;
-        app.cfg.warmup_us = 0;
-        app.is_client = 1;
-        app.measure_start = measure_start;
-        app.measure_deadline = measure_deadline;
-        if (run_client_session(&app) != 0) {
-            if (!cfg->requests.set) {
-                counters->skipped_setup_errors++;
-                continue;
-            }
-            free(app.counters.latencies.values);
+static int merge_counters(counters_t *dst, const counters_t *src) {
+    dst->bytes_sent += src->bytes_sent;
+    dst->bytes_received += src->bytes_received;
+    dst->requests_completed += src->requests_completed;
+    dst->skipped_setup_errors += src->skipped_setup_errors;
+    for (size_t i = 0; i < src->latencies.len; ++i) {
+        if (latency_push(&dst->latencies, src->latencies.values[i]) != 0) {
             return -1;
         }
-        counters->bytes_sent += app.counters.bytes_sent;
-        counters->bytes_received += app.counters.bytes_received;
-        counters->requests_completed += app.counters.requests_completed;
-        counters->skipped_setup_errors += app.counters.skipped_setup_errors;
-        for (size_t i = 0; i < app.counters.latencies.len; ++i) {
-            if (latency_push(&counters->latencies, app.counters.latencies.values[i]) != 0) {
-                free(app.counters.latencies.values);
-                return -1;
-            }
-        }
-        free(app.counters.latencies.values);
-        started += batch;
     }
     return 0;
+}
+
+static int next_crr_task(crr_worker_state_t *state, int *counts) {
+    int should_start = 0;
+    pthread_mutex_lock(&state->mutex);
+    if (!state->failed) {
+        uint64_t now = picoquic_current_time();
+        if (state->cfg.requests.set) {
+            if (state->started < state->cfg.requests.value) {
+                state->started++;
+                *counts = 1;
+                should_start = 1;
+            }
+        } else if (now < state->measure_deadline) {
+            state->started++;
+            *counts = now >= state->measure_start;
+            should_start = 1;
+        }
+    }
+    pthread_mutex_unlock(&state->mutex);
+    return should_start;
+}
+
+static void *crr_worker_main(void *arg) {
+    crr_worker_state_t *state = (crr_worker_state_t *)arg;
+    int counts = 0;
+    while (next_crr_task(state, &counts)) {
+        app_ctx_t app;
+        memset(&app, 0, sizeof(app));
+        app.cfg = state->cfg;
+        app.cfg.mode = "rr";
+        app.cfg.requests.set = 1;
+        app.cfg.requests.value = 1;
+        app.cfg.requests_in_flight = 1;
+        app.cfg.connections = 1;
+        app.cfg.warmup_us = 0;
+        app.is_client = 1;
+        app.measure_start = counts ? 0 : state->measure_start;
+        app.measure_deadline = state->measure_deadline;
+
+        int ret = run_client_session(&app);
+
+        pthread_mutex_lock(&state->mutex);
+        if (ret != 0 || app.failed) {
+            if (state->cfg.requests.set && !state->failed) {
+                state->failed = 1;
+                snprintf(state->failure_reason, sizeof(state->failure_reason), "%s",
+                         app.error[0] == 0 ? "picoquic CRR client failed" : app.error);
+            } else if (!state->cfg.requests.set) {
+                state->counters.skipped_setup_errors++;
+            }
+        } else if (merge_counters(&state->counters, &app.counters) != 0 && !state->failed) {
+            state->failed = 1;
+            snprintf(state->failure_reason, sizeof(state->failure_reason),
+                     "out of memory recording CRR latency");
+        }
+        pthread_mutex_unlock(&state->mutex);
+        free(app.counters.latencies.values);
+    }
+    return NULL;
+}
+
+static int run_crr(const config_t *cfg, counters_t *counters) {
+    crr_worker_state_t state;
+    memset(&state, 0, sizeof(state));
+    state.cfg = *cfg;
+    state.measure_start = picoquic_current_time() + cfg->warmup_us;
+    state.measure_deadline = state.measure_start + cfg->duration_us;
+    if (pthread_mutex_init(&state.mutex, NULL) != 0) {
+        return -1;
+    }
+
+    pthread_t *threads = (pthread_t *)calloc((size_t)cfg->connections, sizeof(*threads));
+    if (threads == NULL) {
+        pthread_mutex_destroy(&state.mutex);
+        return -1;
+    }
+
+    uint64_t created = 0;
+    for (; created < cfg->connections; ++created) {
+        if (pthread_create(&threads[created], NULL, crr_worker_main, &state) != 0) {
+            pthread_mutex_lock(&state.mutex);
+            state.failed = 1;
+            snprintf(state.failure_reason, sizeof(state.failure_reason),
+                     "picoquic CRR worker creation failed");
+            pthread_mutex_unlock(&state.mutex);
+            break;
+        }
+    }
+
+    for (uint64_t i = 0; i < created; ++i) {
+        pthread_join(threads[i], NULL);
+    }
+    free(threads);
+
+    int failed = state.failed;
+    if (failed) {
+        fprintf(stderr, "%s\n",
+                state.failure_reason[0] == 0 ? "picoquic CRR failed" : state.failure_reason);
+        free(state.counters.latencies.values);
+    } else {
+        *counters = state.counters;
+    }
+    pthread_mutex_destroy(&state.mutex);
+    return failed ? -1 : 0;
 }
 
 static run_summary_t new_summary(const config_t *cfg) {

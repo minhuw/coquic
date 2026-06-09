@@ -837,7 +837,8 @@ static int should_send_complete(server_conn_data_t *conn_data) {
     const perf_session_start_t *start = &conn_data->start;
     return (start->mode == MODE_CODE_BULK && start->total_bytes.set &&
             conn_data->requests_completed >= start->streams) ||
-           (start->mode == MODE_CODE_BULK && start->direction == DIRECTION_CODE_UPLOAD &&
+           (start->mode == MODE_CODE_BULK && start->total_bytes.set &&
+            start->direction == DIRECTION_CODE_UPLOAD &&
             conn_data->requests_completed >= start->streams) ||
            (start->mode == MODE_CODE_RR && start->requests.set &&
             conn_data->requests_completed >= start->requests.value);
@@ -2027,26 +2028,8 @@ static int run_bulk(const config_t *cfg, counters_t *counters, char *failure_rea
                               failure_reason_len);
     }
 
-    if (is_direction(cfg, "download")) {
-        return run_timed_bulk_download(cfg, response_bytes, request_bytes, counters, failure_reason,
-                                       failure_reason_len);
-    }
-
-    uint64_t deadline = now_us() + cfg->duration_us;
-    while (now_us() < deadline) {
-        uint64_t before = now_us();
-        config_t upload_cfg = *cfg;
-        upload_cfg.total_bytes.value = request_bytes * cfg->streams * cfg->connections;
-        upload_cfg.total_bytes.set = 1;
-        if (run_fixed_bulk(&upload_cfg, response_bytes, request_bytes, counters, failure_reason,
-                           failure_reason_len) != 0) {
-            return -1;
-        }
-        if (now_us() - before > cfg->duration_us * 2) {
-            break;
-        }
-    }
-    return 0;
+    return run_timed_bulk_download(cfg, response_bytes, request_bytes, counters, failure_reason,
+                                   failure_reason_len);
 }
 
 static int run_rr(const config_t *cfg, counters_t *counters, char *failure_reason,
@@ -2095,7 +2078,9 @@ static run_summary_t run_client(const config_t *cfg) {
         rc = run_crr(cfg, &counters, failure_reason, sizeof(failure_reason));
     }
     uint64_t end = now_us();
-    uint64_t elapsed = end - (cfg->requests.set ? start : measure_start);
+    uint64_t elapsed = (!cfg->requests.set && !cfg->total_bytes.set && rc == 0)
+                           ? cfg->duration_us
+                           : end - (cfg->requests.set ? start : measure_start);
     run_summary_t summary =
         make_summary(cfg, &counters, (int64_t)duration_millis(elapsed), rc == 0 ? "ok" : "failed",
                      rc == 0 ? NULL : failure_reason);

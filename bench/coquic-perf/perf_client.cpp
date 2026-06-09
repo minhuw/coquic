@@ -186,13 +186,12 @@ bool QuicPerfClient::timed_crr_mode() const {
     return config_.mode == QuicPerfMode::crr && !config_.requests.has_value();
 }
 
-bool QuicPerfClient::timed_bulk_download_mode() const {
-    return config_.mode == QuicPerfMode::bulk && config_.direction == QuicPerfDirection::download &&
-           !config_.total_bytes.has_value();
+bool QuicPerfClient::timed_bulk_mode() const {
+    return config_.mode == QuicPerfMode::bulk && !config_.total_bytes.has_value();
 }
 
 bool QuicPerfClient::timed_mode() const {
-    return timed_rr_mode() || timed_crr_mode() || timed_bulk_download_mode();
+    return timed_rr_mode() || timed_crr_mode() || timed_bulk_mode();
 }
 
 bool QuicPerfClient::benchmark_accepts_new_work() const {
@@ -209,7 +208,7 @@ std::optional<quic::QuicCoreTimePoint> QuicPerfClient::benchmark_next_wakeup() c
     case BenchmarkPhase::measure:
         return measure_deadline_;
     case BenchmarkPhase::drain:
-        if (timed_bulk_download_mode()) {
+        if (timed_bulk_mode()) {
             return drain_deadline_;
         }
         return std::nullopt;
@@ -230,7 +229,7 @@ QuicPerfClient::next_wait_wakeup(std::optional<quic::QuicCoreTimePoint> core_nex
 }
 
 quic::QuicCoreDuration QuicPerfClient::result_elapsed(quic::QuicCoreTimePoint now) const {
-    if (timed_rr_mode() || timed_crr_mode() || timed_bulk_download_mode()) {
+    if (timed_rr_mode() || timed_crr_mode() || timed_bulk_mode()) {
         if (phase_ == BenchmarkPhase::warmup) {
             return quic::QuicCoreDuration{0};
         }
@@ -269,7 +268,7 @@ void QuicPerfClient::enter_measure_phase(quic::QuicCoreTimePoint now) {
             counts_toward_measurement = true;
         }
     }
-    if (timed_bulk_download_mode()) {
+    if (timed_bulk_mode()) {
         for (auto &[_, connection] : connections_) {
             (void)maybe_start_bulk_streams(connection, now);
         }
@@ -288,7 +287,7 @@ void QuicPerfClient::enter_measure_phase(quic::QuicCoreTimePoint now) {
 void QuicPerfClient::enter_drain_phase(quic::QuicCoreTimePoint now) {
     phase_ = BenchmarkPhase::drain;
     summary_.elapsed = result_elapsed(now);
-    if (timed_bulk_download_mode()) {
+    if (timed_bulk_mode()) {
         drain_deadline_ = now + std::min(config_.duration, quic::QuicCoreDuration{2000000});
     }
     if (config_.mode == QuicPerfMode::rr) {
@@ -315,7 +314,7 @@ void QuicPerfClient::enter_drain_phase(quic::QuicCoreTimePoint now) {
                 (void)maybe_close_crr_connection(it->second, now);
             }
         }
-    } else if (timed_bulk_download_mode()) {
+    } else if (timed_bulk_mode()) {
         for (auto &[_, connection] : connections_) {
             (void)maybe_close_bulk_connection(connection, now);
         }
@@ -323,7 +322,7 @@ void QuicPerfClient::enter_drain_phase(quic::QuicCoreTimePoint now) {
 }
 
 void QuicPerfClient::force_close_timed_bulk_drain(quic::QuicCoreTimePoint now) {
-    if (!timed_bulk_download_mode() || phase_ != BenchmarkPhase::drain) {
+    if (!timed_bulk_mode() || phase_ != BenchmarkPhase::drain) {
         return;
     }
     if (!drain_deadline_.has_value() || now < *drain_deadline_) {
@@ -407,8 +406,8 @@ int QuicPerfClient::run() {
             if (!flush_pending_sends()) {
                 return fail("client final flush failed");
             }
-            if (timed_bulk_download_mode() && config_.response_bytes > 0 &&
-                summary_.bytes_received == 0) {
+            if (timed_bulk_mode() && config_.direction == QuicPerfDirection::download &&
+                config_.response_bytes > 0 && summary_.bytes_received == 0) {
                 return fail("timed bulk download measured zero bytes");
             }
             summary_.status = "ok";
@@ -725,11 +724,12 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
     }
 
     connection.bytes_received += received.byte_count();
-    if (timed_bulk_download_mode()) {
+    if (timed_bulk_mode()) {
         const auto stream_it = connection.active_bulk_streams.find(received.stream_id);
         const bool within_measurement_window =
             now >= measure_started_at_ && now < measure_deadline_;
-        if (stream_it != connection.active_bulk_streams.end() && stream_it->second &&
+        if (config_.direction == QuicPerfDirection::download &&
+            stream_it != connection.active_bulk_streams.end() && stream_it->second &&
             within_measurement_window) {
             summary_.bytes_received += received.byte_count();
         }
@@ -817,7 +817,7 @@ bool QuicPerfClient::run_complete() const {
 
     switch (config_.mode) {
     case QuicPerfMode::bulk: {
-        if (timed_bulk_download_mode()) {
+        if (timed_bulk_mode()) {
             if (phase_ != BenchmarkPhase::drain) {
                 return false;
             }
@@ -877,13 +877,20 @@ bool QuicPerfClient::open_bulk_stream(ConnectionState &connection, quic::QuicCor
     const auto stream_id = connection.next_stream_id;
     connection.next_stream_id = next_client_perf_stream_id(stream_id);
     connection.active_bulk_streams.emplace(stream_id, counts_toward_measurement);
+    const auto bytes = config_.direction == QuicPerfDirection::upload
+                           ? make_payload(static_cast<std::size_t>(
+                                 std::max(config_.request_bytes, config_.response_bytes)))
+                           : std::vector<std::byte>{};
+    if (counts_toward_measurement) {
+        summary_.bytes_sent += bytes.size();
+    }
     auto send_result = advance_endpoint(
         quic::QuicCoreConnectionCommand{
             .connection = connection.handle,
             .input =
                 quic::QuicCoreSendStreamData{
                     .stream_id = stream_id,
-                    .bytes = {},
+                    .bytes = bytes,
                     .fin = true,
                 },
         },
@@ -904,7 +911,7 @@ bool QuicPerfClient::maybe_start_bulk_streams(ConnectionState &connection,
         return true;
     }
 
-    if (timed_bulk_download_mode()) {
+    if (timed_bulk_mode()) {
         if (phase_ == BenchmarkPhase::drain) {
             return true;
         }

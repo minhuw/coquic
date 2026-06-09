@@ -126,7 +126,8 @@ class Client {
       if (this.runComplete()) {
         await this.io.flushSends();
         if (
-          this.timedBulkDownloadMode() &&
+          this.timedBulkMode() &&
+          this.config.direction === Direction.DOWNLOAD &&
           this.config.responseBytes > 0 &&
           this.summary.bytes_received === 0
         ) {
@@ -267,8 +268,8 @@ class Client {
     if (streamId === CONTROL_STREAM_ID) {
       return this.handleControlStreamData(connection, data, fin, now);
     }
-    if (this.timedBulkDownloadMode()) {
-      return this.handleBulkDownloadData(connection, streamId, data, fin, now);
+    if (this.timedBulkMode()) {
+      return this.handleBulkData(connection, streamId, data, fin, now);
     }
     if (this.config.mode === Mode.RR || this.config.mode === Mode.CRR) {
       return this.handleRequestResponseData(connection, streamId, data, fin, now);
@@ -331,12 +332,12 @@ class Client {
     throw new PerfError("client received unexpected session_start");
   }
 
-  handleBulkDownloadData(connection, streamId, data, fin, now) {
+  handleBulkData(connection, streamId, data, fin, now) {
     const commands = [];
     const state = this.connections.get(connection);
     const counts = state?.activeBulkStreams.get(streamId) ?? false;
     const withinWindow = now >= this.measureStartedAt && now < this.measureDeadline;
-    if (counts && withinWindow) {
+    if (this.config.direction === Direction.DOWNLOAD && counts && withinWindow) {
       this.summary.bytes_received += data.length;
     }
     if (!fin) {
@@ -426,7 +427,7 @@ class Client {
       return commands;
     }
 
-    if (this.timedBulkDownloadMode()) {
+    if (this.timedBulkMode()) {
       if (this.phase === BenchmarkPhase.DRAIN) {
         return commands;
       }
@@ -468,7 +469,14 @@ class Client {
       throw new PerfError("bulk stream for unknown connection");
     }
     state.activeBulkStreams.set(streamId, countsTowardMeasurement);
-    return [new SendStreamCommand(connection, streamId, Buffer.alloc(0), true)];
+    let payload = Buffer.alloc(0);
+    if (this.config.direction === Direction.UPLOAD) {
+      payload = makePayload(Math.max(this.config.requestBytes, this.config.responseBytes));
+      if (countsTowardMeasurement) {
+        this.summary.bytes_sent += payload.length;
+      }
+    }
+    return [new SendStreamCommand(connection, streamId, payload, true)];
   }
 
   maybeIssueRrRequests(connection, now) {
@@ -615,7 +623,7 @@ class Client {
 
   async forceCloseTimedBulkDrain(now) {
     if (
-      !this.timedBulkDownloadMode() ||
+      !this.timedBulkMode() ||
       this.phase !== BenchmarkPhase.DRAIN ||
       this.drainDeadline == null ||
       now < this.drainDeadline
@@ -667,7 +675,7 @@ class Client {
     }
     this.phase = BenchmarkPhase.DRAIN;
     this.summary.elapsed_ms = durationMillis(this.resultElapsedSeconds(now));
-    if (this.timedBulkDownloadMode()) {
+    if (this.timedBulkMode()) {
       this.drainDeadline = now + durationUs(Math.min(this.config.duration, DRAIN_TIMEOUT));
     }
 
@@ -677,7 +685,7 @@ class Client {
         commands = this.maybeCloseRrConnection(handle);
       } else if (this.config.mode === Mode.CRR) {
         commands = this.maybeCloseCrrConnection(handle);
-      } else if (this.timedBulkDownloadMode()) {
+      } else if (this.timedBulkMode()) {
         commands = this.maybeCloseBulkConnection(handle);
       }
       for (const command of commands) {
@@ -695,16 +703,12 @@ class Client {
     return this.config.mode === Mode.CRR && this.config.requests == null;
   }
 
-  timedBulkDownloadMode() {
-    return (
-      this.config.mode === Mode.BULK &&
-      this.config.direction === Direction.DOWNLOAD &&
-      this.config.totalBytes == null
-    );
+  timedBulkMode() {
+    return this.config.mode === Mode.BULK && this.config.totalBytes == null;
   }
 
   timedMode() {
-    return this.timedRrMode() || this.timedCrrMode() || this.timedBulkDownloadMode();
+    return this.timedRrMode() || this.timedCrrMode() || this.timedBulkMode();
   }
 
   benchmarkAcceptsNewWork() {
@@ -721,7 +725,7 @@ class Client {
     if (this.phase === BenchmarkPhase.MEASURE) {
       return this.measureDeadline;
     }
-    if (this.timedBulkDownloadMode()) {
+    if (this.timedBulkMode()) {
       return this.drainDeadline;
     }
     return null;
@@ -751,7 +755,7 @@ class Client {
     }
 
     if (this.config.mode === Mode.BULK) {
-      if (this.timedBulkDownloadMode()) {
+      if (this.timedBulkMode()) {
         return (
           this.phase === BenchmarkPhase.DRAIN &&
           Array.from(this.connections.values()).every(

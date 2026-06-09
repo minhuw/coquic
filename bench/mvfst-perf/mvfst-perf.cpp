@@ -1413,7 +1413,7 @@ void collectCompleted(const std::vector<CompletedStream> &completed, Counters &c
     }
 }
 
-void runTimedBulkDownload(const Config &cfg, Counters &counters) {
+void runTimedBulk(const Config &cfg, Counters &counters) {
     auto clients = connectClients(cfg);
     auto measureStart = Clock::now() + cfg.warmup;
     auto deadline = measureStart + cfg.duration;
@@ -1426,6 +1426,7 @@ void runTimedBulkDownload(const Config &cfg, Counters &counters) {
         for (auto &client : clients) {
             for (const auto &completed : client->driveUntil(deadline, false)) {
                 if (completed.counts && Clock::now() >= measureStart) {
+                    counters.bytesSent += completed.requestBytes;
                     counters.bytesReceived += completed.received;
                 }
             }
@@ -1591,8 +1592,8 @@ RunSummary runClient(const Config &cfg) {
     auto runStart = Clock::now();
     Duration elapsed;
     if (cfg.mode == kModeBulk) {
-        if (cfg.direction == kDirectionDownload && !cfg.totalBytes.set) {
-            runTimedBulkDownload(cfg, counters);
+        if (!cfg.totalBytes.set) {
+            runTimedBulk(cfg, counters);
             elapsed = cfg.duration;
         } else {
             runFixedBulk(cfg, counters);

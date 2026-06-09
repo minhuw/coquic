@@ -139,7 +139,8 @@ class Client:
             if self.run_complete():
                 await self.io.flush_sends()
                 if (
-                    self.timed_bulk_download_mode()
+                    self.timed_bulk_mode()
+                    and self.config.direction == Direction.DOWNLOAD
                     and self.config.response_bytes > 0
                     and self.summary.bytes_received == 0
                 ):
@@ -270,8 +271,8 @@ class Client:
         if stream_id == CONTROL_STREAM_ID:
             return self.handle_control_stream_data(connection, data, fin, now)
 
-        if self.timed_bulk_download_mode():
-            return self.handle_bulk_download_data(connection, stream_id, data, fin, now)
+        if self.timed_bulk_mode():
+            return self.handle_bulk_data(connection, stream_id, data, fin, now)
 
         if self.config.mode in (Mode.RR, Mode.CRR):
             return self.handle_request_response_data(
@@ -332,7 +333,7 @@ class Client:
             return []
         raise PerfError("client received unexpected session_start")
 
-    def handle_bulk_download_data(
+    def handle_bulk_data(
         self, connection: int, stream_id: int, data: bytes, fin: bool, now: int
     ) -> list[ClientCommand]:
         commands: list[ClientCommand] = []
@@ -343,7 +344,7 @@ class Client:
             else False
         )
         within_window = now >= self.measure_started_at and now < self.measure_deadline
-        if counts and within_window:
+        if self.config.direction == Direction.DOWNLOAD and counts and within_window:
             self.summary.bytes_received += len(data)
         if not fin:
             return commands
@@ -437,7 +438,7 @@ class Client:
         if state is None or not state.session_ready or state.control_complete:
             return commands
 
-        if self.timed_bulk_download_mode():
+        if self.timed_bulk_mode():
             if self.phase == BenchmarkPhase.DRAIN:
                 return commands
             while (
@@ -476,7 +477,12 @@ class Client:
         if state is None:
             raise PerfError("bulk stream for unknown connection")
         state.active_bulk_streams[stream_id] = counts_toward_measurement
-        return [SendStreamCommand(connection, stream_id, b"", True)]
+        payload = b""
+        if self.config.direction == Direction.UPLOAD:
+            payload = make_payload(max(self.config.request_bytes, self.config.response_bytes))
+            if counts_toward_measurement:
+                self.summary.bytes_sent += len(payload)
+        return [SendStreamCommand(connection, stream_id, payload, True)]
 
     def maybe_issue_rr_requests(self, connection: int, now: int) -> list[ClientCommand]:
         commands: list[ClientCommand] = []
@@ -603,7 +609,7 @@ class Client:
 
     async def force_close_timed_bulk_drain(self, now: int) -> None:
         if (
-            not self.timed_bulk_download_mode()
+            not self.timed_bulk_mode()
             or self.phase != BenchmarkPhase.DRAIN
             or self.drain_deadline is None
             or now < self.drain_deadline
@@ -644,7 +650,7 @@ class Client:
             return
         self.phase = BenchmarkPhase.DRAIN
         self.summary.elapsed_ms = duration_millis(self.result_elapsed_seconds(now))
-        if self.timed_bulk_download_mode():
+        if self.timed_bulk_mode():
             self.drain_deadline = now + duration_us(
                 min(self.config.duration, DRAIN_TIMEOUT)
             )
@@ -654,7 +660,7 @@ class Client:
                 commands = self.maybe_close_rr_connection(handle)
             elif self.config.mode == Mode.CRR:
                 commands = self.maybe_close_crr_connection(handle)
-            elif self.timed_bulk_download_mode():
+            elif self.timed_bulk_mode():
                 commands = self.maybe_close_bulk_connection(handle)
             else:
                 commands = []
@@ -668,18 +674,14 @@ class Client:
     def timed_crr_mode(self) -> bool:
         return self.config.mode == Mode.CRR and self.config.requests is None
 
-    def timed_bulk_download_mode(self) -> bool:
-        return (
-            self.config.mode == Mode.BULK
-            and self.config.direction == Direction.DOWNLOAD
-            and self.config.total_bytes is None
-        )
+    def timed_bulk_mode(self) -> bool:
+        return self.config.mode == Mode.BULK and self.config.total_bytes is None
 
     def timed_mode(self) -> bool:
         return (
             self.timed_rr_mode()
             or self.timed_crr_mode()
-            or self.timed_bulk_download_mode()
+            or self.timed_bulk_mode()
         )
 
     def benchmark_accepts_new_work(self) -> bool:
@@ -692,7 +694,7 @@ class Client:
             return self.benchmark_started_at + duration_us(self.config.warmup)
         if self.phase == BenchmarkPhase.MEASURE:
             return self.measure_deadline
-        if self.timed_bulk_download_mode():
+        if self.timed_bulk_mode():
             return self.drain_deadline
         return None
 
@@ -716,7 +718,7 @@ class Client:
             return False
 
         if self.config.mode == Mode.BULK:
-            if self.timed_bulk_download_mode():
+            if self.timed_bulk_mode():
                 return self.phase == BenchmarkPhase.DRAIN and all(
                     state.close_requested and not state.active_bulk_streams
                     for state in self.connections.values()

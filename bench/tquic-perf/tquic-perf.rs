@@ -630,6 +630,7 @@ fn should_send_complete(conn_state: &ServerConn) -> bool {
         && conn_state.requests_completed >= start.streams)
         || (start.mode == MODE_BULK
             && start.direction == DIRECTION_UPLOAD
+            && start.total_bytes.set
             && conn_state.requests_completed >= start.streams)
         || (start.mode == MODE_RR
             && start.requests.set

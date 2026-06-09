@@ -285,7 +285,7 @@ func (s *Server) handleBulkStreamFin(
 	if start.Direction == config.DirectionDownload {
 		return s.handleBulkDownloadFin(connection, streamID, current), nil
 	}
-	if current.requestsCompleted >= start.Streams {
+	if start.TotalBytes != nil && current.requestsCompleted >= start.Streams {
 		return s.completeSession(connection), nil
 	}
 	return nil, nil

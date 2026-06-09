@@ -2200,7 +2200,9 @@ static run_summary_t run_client(const config_t *cfg) {
         rc = run_crr(cfg, counters, failure_reason, sizeof(failure_reason));
     }
     uint64_t end = now_us();
-    uint64_t elapsed = end - (cfg->requests.set ? start : measure_start);
+    uint64_t elapsed = (!cfg->requests.set && !cfg->total_bytes.set && rc == 0)
+                           ? cfg->duration_us
+                           : end - (cfg->requests.set ? start : measure_start);
     run_summary_t summary =
         make_summary(cfg, counters, (int64_t)duration_millis(elapsed), rc == 0 ? "ok" : "failed",
                      rc == 0 ? NULL : failure_reason);

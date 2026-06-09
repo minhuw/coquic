@@ -383,7 +383,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
             return true;
         }
 
-        if (session.start->mode == QuicPerfMode::bulk &&
+        if (session.start->mode == QuicPerfMode::bulk && session.start->total_bytes.has_value() &&
             session.start->direction == QuicPerfDirection::upload &&
             session.requests_completed >= session.start->streams) {
             // Bulk upload completes once every client upload stream reaches FIN.

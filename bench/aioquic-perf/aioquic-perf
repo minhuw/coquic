@@ -338,8 +338,8 @@ async def run_client(cfg: Config) -> dict:
     counters = Counters()
     start = make_session_start(cfg)
     if cfg.mode == MODE_BULK:
-        if cfg.direction == DIRECTION_DOWNLOAD and not cfg.total_bytes.set:
-            await run_timed_bulk_download(cfg, start, counters)
+        if not cfg.total_bytes.set:
+            await run_timed_bulk(cfg, start, counters)
             elapsed = cfg.duration
         else:
             await run_fixed_bulk(cfg, start, counters)
@@ -369,20 +369,22 @@ async def run_client(cfg: Config) -> dict:
     return summary
 
 
-async def run_timed_bulk_download(
+async def run_timed_bulk(
     cfg: Config, start: SessionStart, counters: Counters
 ) -> None:
     measure_start = time.monotonic() + cfg.warmup
     measure_deadline = measure_start + cfg.duration
     connections = await open_connections(cfg, start)
     tasks: set[asyncio.Task[CompletedStream]] = set()
+    request_bytes = max(cfg.request_bytes, cfg.response_bytes) if cfg.direction == DIRECTION_UPLOAD else 0
+    response_bytes = 0 if cfg.direction == DIRECTION_UPLOAD else cfg.response_bytes
     try:
         protocols = [connection.protocol for connection in connections]
         for protocol in protocols:
             for _ in range(cfg.streams):
                 tasks.add(
                     asyncio.create_task(
-                        run_stream(protocol, False, 0, cfg.response_bytes)
+                        run_stream(protocol, False, request_bytes, response_bytes)
                     )
                 )
         while time.monotonic() < measure_deadline:
@@ -409,8 +411,8 @@ async def run_timed_bulk_download(
                         run_stream(
                             protocol,
                             time.monotonic() >= measure_start,
-                            0,
-                            cfg.response_bytes,
+                            request_bytes,
+                            response_bytes,
                         )
                     )
                 )
@@ -762,6 +764,7 @@ async def maybe_send_session_complete(session: ServerSession) -> None:
     ) or (
         start.mode == MODE_BULK
         and start.direction == DIRECTION_UPLOAD
+        and start.total_bytes.set
         and session.requests_completed >= start.streams
     ) or (
         start.mode == MODE_RR

@@ -145,7 +145,8 @@ impl Client<'_> {
 
             if self.run_complete() {
                 self.io.flush_sends().await?;
-                if self.timed_bulk_download_mode()
+                if self.timed_bulk_mode()
+                    && self.config.direction == Direction::Download
                     && self.config.response_bytes > 0
                     && self.summary.bytes_received == 0
                 {
@@ -370,7 +371,7 @@ impl Client<'_> {
             return Ok(commands);
         }
 
-        if self.timed_bulk_download_mode() {
+        if self.timed_bulk_mode() {
             let counts = self
                 .connections
                 .get(&connection)
@@ -378,7 +379,7 @@ impl Client<'_> {
                 .unwrap_or(false);
             let within_measurement_window =
                 now >= self.measure_started_at && now < self.measure_deadline;
-            if counts && within_measurement_window {
+            if self.config.direction == Direction::Download && counts && within_measurement_window {
                 self.summary.bytes_received += bytes.len() as u64;
             }
             if fin {
@@ -508,7 +509,7 @@ impl Client<'_> {
             return Ok(commands);
         }
 
-        if self.timed_bulk_download_mode() {
+        if self.timed_bulk_mode() {
             if self.phase == BenchmarkPhase::Drain {
                 return Ok(commands);
             }
@@ -571,10 +572,19 @@ impl Client<'_> {
         state
             .active_bulk_streams
             .insert(stream_id, counts_toward_measurement);
+        let payload = if self.config.direction == Direction::Upload {
+            let bytes = self.config.request_bytes.max(self.config.response_bytes);
+            if counts_toward_measurement {
+                self.summary.bytes_sent += bytes as u64;
+            }
+            make_payload(bytes)
+        } else {
+            Vec::new()
+        };
         Ok(vec![ClientCommand::SendStream {
             connection,
             stream_id,
-            bytes: Vec::new(),
+            bytes: payload,
             fin: true,
         }])
     }
@@ -790,7 +800,7 @@ impl Client<'_> {
     }
 
     async fn force_close_timed_bulk_drain(&mut self, now: u64) -> Result<()> {
-        if !self.timed_bulk_download_mode() || self.phase != BenchmarkPhase::Drain {
+        if !self.timed_bulk_mode() || self.phase != BenchmarkPhase::Drain {
             return Ok(());
         }
         if !self
@@ -848,7 +858,7 @@ impl Client<'_> {
         }
         self.phase = BenchmarkPhase::Drain;
         self.summary.elapsed_ms = duration_millis(self.result_elapsed(now));
-        if self.timed_bulk_download_mode() {
+        if self.timed_bulk_mode() {
             self.drain_deadline =
                 Some(now.saturating_add(duration_us(self.config.duration.min(DRAIN_TIMEOUT))));
         }
@@ -859,7 +869,7 @@ impl Client<'_> {
                 self.maybe_close_rr_connection(handle)?
             } else if self.config.mode == Mode::Crr {
                 self.maybe_close_crr_connection(handle)?
-            } else if self.timed_bulk_download_mode() {
+            } else if self.timed_bulk_mode() {
                 self.maybe_close_bulk_connection(handle)?
             } else {
                 Vec::new()
@@ -880,14 +890,12 @@ impl Client<'_> {
         self.config.mode == Mode::Crr && self.config.requests.is_none()
     }
 
-    fn timed_bulk_download_mode(&self) -> bool {
-        self.config.mode == Mode::Bulk
-            && self.config.direction == Direction::Download
-            && self.config.total_bytes.is_none()
+    fn timed_bulk_mode(&self) -> bool {
+        self.config.mode == Mode::Bulk && self.config.total_bytes.is_none()
     }
 
     fn timed_mode(&self) -> bool {
-        self.timed_rr_mode() || self.timed_crr_mode() || self.timed_bulk_download_mode()
+        self.timed_rr_mode() || self.timed_crr_mode() || self.timed_bulk_mode()
     }
 
     fn benchmark_accepts_new_work(&self) -> bool {
@@ -904,7 +912,7 @@ impl Client<'_> {
                 .map(|started| started.saturating_add(duration_us(self.config.warmup))),
             BenchmarkPhase::Measure => Some(self.measure_deadline),
             BenchmarkPhase::Drain => {
-                if self.timed_bulk_download_mode() {
+                if self.timed_bulk_mode() {
                     self.drain_deadline
                 } else {
                     None
@@ -944,7 +952,7 @@ impl Client<'_> {
 
         match self.config.mode {
             Mode::Bulk => {
-                if self.timed_bulk_download_mode() {
+                if self.timed_bulk_mode() {
                     return self.phase == BenchmarkPhase::Drain
                         && self.connections.values().all(|state| {
                             state.close_requested && state.active_bulk_streams.is_empty()

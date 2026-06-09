@@ -285,7 +285,7 @@ impl Server<'_> {
                     }
                 }
             }
-            (Mode::Bulk, Direction::Upload, true) => {
+            (Mode::Bulk, Direction::Upload, true) if start.total_bytes.is_some() => {
                 let complete = self
                     .sessions
                     .get(&connection)

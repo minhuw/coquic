@@ -83,7 +83,7 @@ class QuicPerfClient {
     next_wait_wakeup(std::optional<quic::QuicCoreTimePoint> core_next_wakeup) const;
     bool timed_rr_mode() const;
     bool timed_crr_mode() const;
-    bool timed_bulk_download_mode() const;
+    bool timed_bulk_mode() const;
     bool timed_mode() const;
     quic::QuicCoreResult advance_endpoint(quic::QuicCoreEndpointInput input,
                                           quic::QuicCoreTimePoint now);

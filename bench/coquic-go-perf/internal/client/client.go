@@ -145,7 +145,8 @@ func (c *Client) run() (metrics.RunSummary, error) {
 			if err := c.io.FlushSends(); err != nil {
 				return c.summary, err
 			}
-			if c.timedBulkDownloadMode() &&
+			if c.timedBulkMode() &&
+				c.config.Direction == config.DirectionDownload &&
 				c.config.ResponseBytes > 0 &&
 				c.summary.BytesReceived == 0 {
 				return c.summary, fmt.Errorf("timed bulk download measured zero bytes")
@@ -323,8 +324,8 @@ func (c *Client) handleStreamData(
 	if uint64(streamID) == protocol.ControlStreamID {
 		return c.handleControlStreamData(connection, data, fin, now)
 	}
-	if c.timedBulkDownloadMode() {
-		return c.handleBulkDownloadData(connection, streamID, data, fin, now)
+	if c.timedBulkMode() {
+		return c.handleBulkData(connection, streamID, data, fin, now)
 	}
 	if c.config.Mode == config.ModeRR || c.config.Mode == config.ModeCRR {
 		return c.handleRequestResponseData(connection, streamID, data, fin, now)
@@ -400,7 +401,7 @@ func (c *Client) handleControlMessage(
 	}
 }
 
-func (c *Client) handleBulkDownloadData(
+func (c *Client) handleBulkData(
 	connection coquic.ConnectionHandle,
 	streamID coquic.StreamID,
 	data []byte,
@@ -413,7 +414,7 @@ func (c *Client) handleBulkDownloadData(
 		counts = state.activeBulkStreams[streamID]
 	}
 	withinWindow := now >= c.measureStartedAt && now < c.measureDeadline
-	if counts && withinWindow {
+	if c.config.Direction == config.DirectionDownload && counts && withinWindow {
 		c.summary.BytesReceived += uint64(len(data))
 	}
 	if !fin {
@@ -534,7 +535,7 @@ func (c *Client) maybeStartBulkStreams(connection coquic.ConnectionHandle, _ coq
 		return nil, nil
 	}
 
-	if c.timedBulkDownloadMode() {
+	if c.timedBulkMode() {
 		if c.phase == phaseDrain {
 			return nil, nil
 		}
@@ -595,10 +596,18 @@ func (c *Client) openBulkStream(connection coquic.ConnectionHandle, countsToward
 		return nil, fmt.Errorf("bulk stream for unknown connection")
 	}
 	state.activeBulkStreams[streamID] = countsTowardMeasurement
+	payload := []byte(nil)
+	if c.config.Direction == config.DirectionUpload {
+		payload = makePayload(maxU64(c.config.RequestBytes, c.config.ResponseBytes))
+		if countsTowardMeasurement {
+			c.summary.BytesSent += uint64(len(payload))
+		}
+	}
 	return []clientCommand{{
 		kind:       commandSendStream,
 		connection: connection,
 		streamID:   streamID,
+		bytes:      payload,
 		fin:        true,
 	}}, nil
 }
@@ -753,7 +762,7 @@ func (c *Client) advanceBenchmarkPhaseSync(now coquic.TimeUs) {
 }
 
 func (c *Client) forceCloseTimedBulkDrain(now coquic.TimeUs) error {
-	if !c.timedBulkDownloadMode() || c.phase != phaseDrain {
+	if !c.timedBulkMode() || c.phase != phaseDrain {
 		return nil
 	}
 	if c.drainDeadline == nil || now < *c.drainDeadline {
@@ -820,7 +829,7 @@ func (c *Client) enterDrainPhase(now coquic.TimeUs) error {
 	}
 	c.phase = phaseDrain
 	c.summary.ElapsedMs = metrics.DurationMillis(c.resultElapsed(now))
-	if c.timedBulkDownloadMode() {
+	if c.timedBulkMode() {
 		drain := c.config.Duration
 		if drain > drainTimeout {
 			drain = drainTimeout
@@ -840,7 +849,7 @@ func (c *Client) enterDrainPhase(now coquic.TimeUs) error {
 			commands, err = c.maybeCloseRRConnection(handle)
 		case c.config.Mode == config.ModeCRR:
 			commands, err = c.maybeCloseCRRConnection(handle)
-		case c.timedBulkDownloadMode():
+		case c.timedBulkMode():
 			commands, err = c.maybeCloseBulkConnection(handle)
 		}
 		if err != nil {
@@ -867,14 +876,12 @@ func (c *Client) timedCRRMode() bool {
 	return c.config.Mode == config.ModeCRR && c.config.Requests == nil
 }
 
-func (c *Client) timedBulkDownloadMode() bool {
-	return c.config.Mode == config.ModeBulk &&
-		c.config.Direction == config.DirectionDownload &&
-		c.config.TotalBytes == nil
+func (c *Client) timedBulkMode() bool {
+	return c.config.Mode == config.ModeBulk && c.config.TotalBytes == nil
 }
 
 func (c *Client) timedMode() bool {
-	return c.timedRRMode() || c.timedCRRMode() || c.timedBulkDownloadMode()
+	return c.timedRRMode() || c.timedCRRMode() || c.timedBulkMode()
 }
 
 func (c *Client) benchmarkAcceptsNewWork() bool {
@@ -891,7 +898,7 @@ func (c *Client) benchmarkNextWakeup() (coquic.TimeUs, bool) {
 	case phaseMeasure:
 		return c.measureDeadline, true
 	case phaseDrain:
-		if c.timedBulkDownloadMode() && c.drainDeadline != nil {
+		if c.timedBulkMode() && c.drainDeadline != nil {
 			return *c.drainDeadline, true
 		}
 	}
@@ -936,7 +943,7 @@ func (c *Client) runComplete() bool {
 
 	switch c.config.Mode {
 	case config.ModeBulk:
-		if c.timedBulkDownloadMode() {
+		if c.timedBulkMode() {
 			if c.phase != phaseDrain {
 				return false
 			}
@@ -1071,6 +1078,13 @@ func (c *Client) nextStreamID(connection coquic.ConnectionHandle) (coquic.Stream
 
 func makePayload(size uint64) []byte {
 	return makePayloadByte(size, 0x5a)
+}
+
+func maxU64(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func makePayloadByte(size uint64, value byte) []byte {

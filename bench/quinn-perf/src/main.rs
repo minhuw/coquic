@@ -117,6 +117,7 @@ struct ConnectionState {
 #[derive(Default)]
 struct BulkStreamResult {
     counts: bool,
+    sent: u64,
     received: u64,
     err: Option<String>,
 }
@@ -463,6 +464,7 @@ fn should_send_session_complete(session: &ServerSession, requests_completed: u64
     }
     if session.start.mode == MODE_BULK
         && session.start.direction == DIRECTION_UPLOAD
+        && session.start.total_bytes.set
         && requests_completed >= session.start.streams
     {
         return true;
@@ -497,8 +499,8 @@ async fn run_client(cfg: &Config) -> Result<RunSummary, AnyError> {
     let run_start = Instant::now();
     let elapsed = match cfg.mode.as_str() {
         MODE_BULK => {
-            if cfg.direction == DIRECTION_DOWNLOAD && !cfg.total_bytes.set {
-                run_timed_bulk_download(cfg, &connections, counters.clone()).await?;
+            if !cfg.total_bytes.set {
+                run_timed_bulk(cfg, &connections, counters.clone()).await?;
                 cfg.duration
             } else {
                 run_fixed_bulk(cfg, &connections, counters.clone()).await?;
@@ -675,7 +677,7 @@ async fn wait_for_ready(control: &mut RecvStream) -> Result<(), AnyError> {
     Ok(())
 }
 
-async fn run_timed_bulk_download(
+async fn run_timed_bulk(
     cfg: &Config,
     connections: &[ConnectionState],
     counters: Arc<MeasuredCounters>,
@@ -688,7 +690,13 @@ async fn run_timed_bulk_download(
 
     for c in connections {
         for _ in 0..cfg.streams {
-            open_bulk_download(c.conn.clone(), false, tx.clone(), active.clone());
+            open_bulk(
+                c.conn.clone(),
+                cfg.direction.clone(),
+                false,
+                tx.clone(),
+                active.clone(),
+            );
         }
     }
 
@@ -700,6 +708,9 @@ async fn run_timed_bulk_download(
         }
         if result.counts {
             counters
+                .bytes_sent
+                .fetch_add(result.sent, Ordering::Relaxed);
+            counters
                 .bytes_received
                 .fetch_add(result.received, Ordering::Relaxed);
         }
@@ -708,7 +719,13 @@ async fn run_timed_bulk_download(
         {
             let index = next_connection.fetch_add(1, Ordering::Relaxed);
             let conn = &connections[(index as usize) % connections.len()];
-            open_bulk_download(conn.conn.clone(), true, tx.clone(), active.clone());
+            open_bulk(
+                conn.conn.clone(),
+                cfg.direction.clone(),
+                true,
+                tx.clone(),
+                active.clone(),
+            );
         }
     }
     let drain_deadline = Instant::now() + DEFAULT_DRAIN_TIMEOUT;
@@ -722,25 +739,28 @@ async fn run_timed_bulk_download(
     Ok(())
 }
 
-fn open_bulk_download(
+fn open_bulk(
     conn: Connection,
+    direction: String,
     counts: bool,
     tx: mpsc::Sender<BulkStreamResult>,
     active: Arc<AtomicU64>,
 ) {
     active.fetch_add(1, Ordering::Relaxed);
     tokio::spawn(async move {
-        let result = run_bulk_download_stream(conn).await;
+        let result = run_timed_bulk_stream(conn, &direction).await;
         active.fetch_sub(1, Ordering::Relaxed);
         let _ = tx
             .send(match result {
-                Ok(received) => BulkStreamResult {
+                Ok((sent, received)) => BulkStreamResult {
                     counts,
+                    sent,
                     received,
                     err: None,
                 },
                 Err(err) => BulkStreamResult {
                     counts,
+                    sent: 0,
                     received: 0,
                     err: Some(err.to_string()),
                 },
@@ -749,10 +769,16 @@ fn open_bulk_download(
     });
 }
 
-async fn run_bulk_download_stream(conn: Connection) -> Result<u64, AnyError> {
+async fn run_timed_bulk_stream(conn: Connection, direction: &str) -> Result<(u64, u64), AnyError> {
     let (mut send, mut recv) = conn.open_bi().await?;
+    if direction == DIRECTION_UPLOAD {
+        let sent = write_n(&mut send, WRITE_CHUNK_SIZE as u64).await?;
+        send.finish()?;
+        return Ok((sent, 0));
+    }
     send.finish()?;
-    copy_and_count(&mut recv).await
+    let received = copy_and_count(&mut recv).await?;
+    Ok((0, received))
 }
 
 async fn run_fixed_bulk(

@@ -223,7 +223,7 @@ class Server {
     if (start.direction === Direction.DOWNLOAD) {
       return this.handleBulkDownloadFin(connection, streamId, session);
     }
-    if (session.requestsCompleted >= start.streams) {
+    if (start.totalBytes != null && session.requestsCompleted >= start.streams) {
       return this.completeSession(connection);
     }
     return [];

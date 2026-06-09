@@ -31,7 +31,6 @@
 #define READ_CHUNK_SIZE 65536
 #define WRITE_CHUNK_SIZE 32768
 #define DRAIN_TIMEOUT_US 2000000ULL
-#define TIMED_BULK_RESPONSE_BYTES (1ULL << 62)
 #define TRANSFER_CONNECTION_WINDOW (32U * 1024U * 1024U)
 #define TRANSFER_STREAM_WINDOW (16U * 1024U * 1024U)
 #define TRANSFER_MAX_STREAMS 1048576ULL
@@ -437,7 +436,8 @@ static int should_send_complete(conn_ctx_t *conn) {
     }
     return (start->mode == MODE_CODE_BULK && start->total_bytes.set &&
             conn->server_requests_completed >= start->streams) ||
-           (start->mode == MODE_CODE_BULK && start->direction == DIRECTION_CODE_UPLOAD &&
+           (start->mode == MODE_CODE_BULK && start->total_bytes.set &&
+            start->direction == DIRECTION_CODE_UPLOAD &&
             conn->server_requests_completed >= start->streams) ||
            (start->mode == MODE_CODE_RR && start->requests.set &&
             conn->server_requests_completed >= start->requests.value);
@@ -1557,28 +1557,43 @@ static void consume_completed_bulk(perf_ctx_t *ctx, counters_t *c, uint64_t meas
     ctx->completed_len = 0;
 }
 
-static void run_timed_bulk_download(config_t *cfg, counters_t *c) {
+static void refill_timed_bulk(config_t *cfg, perf_ctx_t *ctx, uint64_t deadline) {
+    uint64_t request_bytes =
+        strcmp(cfg->direction, "upload") == 0
+            ? (cfg->request_bytes > cfg->response_bytes ? cfg->request_bytes : cfg->response_bytes)
+            : 0;
+    uint64_t response_bytes = strcmp(cfg->direction, "upload") == 0 ? 0 : cfg->response_bytes;
+    for (uint64_t i = 0; !ctx->error && i < cfg->connections; ++i) {
+        conn_ctx_t *conn = connection_at(ctx, i);
+        while (conn != NULL && active_streams_for_conn(conn) < cfg->streams) {
+            if (now_us() >= deadline) {
+                return;
+            }
+            open_request(ctx, conn, 1, request_bytes, response_bytes);
+        }
+    }
+}
+
+static void run_timed_bulk(config_t *cfg, counters_t *c) {
     perf_ctx_t *ctx = alloc_ctx(cfg, 0);
     if (ctx == NULL) {
         fprintf(stderr, "could not initialize xquic client\n");
         exit(1);
     }
-    uint64_t connections = rr_connection_target(cfg);
-    if (!ctx->error && open_connections(ctx, connections) != 0) {
+    if (!ctx->error && open_connections(ctx, cfg->connections) != 0) {
         set_error(ctx, "could not connect xquic client");
     }
     uint64_t measure_start = now_us() + cfg->warmup_us;
     uint64_t deadline = measure_start + cfg->duration_us;
     ctx->measure_start_us = measure_start;
-    ctx->count_stream_bytes = 1;
-    for (uint64_t i = 0; !ctx->error && i < cfg->connections; ++i) {
-        conn_ctx_t *conn = connection_at(ctx, i);
-        for (uint64_t j = 0; j < cfg->streams; ++j) {
-            open_request(ctx, conn, 1, 0, TIMED_BULK_RESPONSE_BYTES);
-        }
-    }
+    ctx->count_stream_bytes = strcmp(cfg->direction, "download") == 0;
+    refill_timed_bulk(cfg, ctx, deadline);
     while (!ctx->error && now_us() < deadline) {
         drive_once(ctx, deadline);
+        refill_timed_bulk(cfg, ctx, deadline);
+        if (strcmp(cfg->direction, "upload") == 0) {
+            consume_completed(ctx, c, measure_start, 1);
+        }
         ctx->completed_len = 0;
     }
     if (ctx->error) {
@@ -1586,7 +1601,9 @@ static void run_timed_bulk_download(config_t *cfg, counters_t *c) {
         free_ctx(ctx);
         exit(1);
     }
-    c->bytes_received += ctx->live_bytes_received;
+    if (strcmp(cfg->direction, "download") == 0) {
+        c->bytes_received += ctx->live_bytes_received;
+    }
     free_ctx(ctx);
 }
 
@@ -1867,8 +1884,8 @@ static void run_client(config_t *cfg) {
     memset(&counters, 0, sizeof(counters));
     uint64_t start = now_us();
     if (strcmp(cfg->mode, "bulk") == 0) {
-        if (strcmp(cfg->direction, "download") == 0 && !cfg->total_bytes.set) {
-            run_timed_bulk_download(cfg, &counters);
+        if (!cfg->total_bytes.set) {
+            run_timed_bulk(cfg, &counters);
             emit_summary(cfg, &counters, cfg->duration_us, NULL);
         } else {
             run_fixed_bulk(cfg, &counters);

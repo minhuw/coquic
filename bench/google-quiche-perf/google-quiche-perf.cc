@@ -1590,7 +1590,9 @@ RunSummary RunClient(const Config &cfg) {
         failure = ex.what();
     }
     Duration elapsed;
-    if (cfg.requests.set || cfg.total_bytes.set) {
+    if (failure.empty() && !cfg.requests.set && !cfg.total_bytes.set) {
+        elapsed = cfg.duration;
+    } else if (cfg.requests.set || cfg.total_bytes.set) {
         elapsed = std::chrono::duration_cast<Duration>(Clock::now() - start);
     } else {
         Duration raw_elapsed = std::chrono::duration_cast<Duration>(Clock::now() - measure_start);

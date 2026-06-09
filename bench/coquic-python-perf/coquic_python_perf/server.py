@@ -223,7 +223,7 @@ class Server:
             return []
         if start.direction == Direction.DOWNLOAD:
             return self.handle_bulk_download_fin(connection, stream_id, session)
-        if session.requests_completed >= start.streams:
+        if start.total_bytes is not None and session.requests_completed >= start.streams:
             return self.complete_session(connection)
         return []
 

@@ -653,6 +653,7 @@ fn maybe_send_session_complete(client: &mut ServerClient) -> Result<(), AnyError
         && client.requests_completed >= start.streams)
         || (start.mode == MODE_BULK
             && start.direction == DIRECTION_UPLOAD
+            && start.total_bytes.set
             && client.requests_completed >= start.streams)
         || (start.mode == MODE_RR
             && start.requests.set
@@ -754,8 +755,8 @@ fn run_client(cfg: &Config, summary: &mut RunSummary) -> Result<(), AnyError> {
     let start = make_session_start(cfg);
     let elapsed = match cfg.mode.as_str() {
         MODE_BULK => {
-            if cfg.direction == DIRECTION_DOWNLOAD && !cfg.total_bytes.set {
-                run_timed_bulk_download(cfg, &start, &mut counters)?;
+            if !cfg.total_bytes.set {
+                run_timed_bulk(cfg, &start, &mut counters)?;
                 cfg.duration
             } else {
                 run_fixed_bulk(cfg, &start, &mut counters)?;
@@ -794,7 +795,7 @@ fn run_client(cfg: &Config, summary: &mut RunSummary) -> Result<(), AnyError> {
     Ok(())
 }
 
-fn run_timed_bulk_download(
+fn run_timed_bulk(
     cfg: &Config,
     start: &SessionStart,
     counters: &mut Counters,
@@ -802,22 +803,37 @@ fn run_timed_bulk_download(
     let mut clients = open_connections(cfg, start, cfg.connections)?;
     let measure_start = Instant::now() + cfg.warmup;
     let measure_deadline = measure_start + cfg.duration;
+    let request_bytes = if cfg.direction == DIRECTION_UPLOAD {
+        cfg.request_bytes.max(cfg.response_bytes)
+    } else {
+        0
+    };
+    let response_bytes = if cfg.direction == DIRECTION_UPLOAD {
+        0
+    } else {
+        cfg.response_bytes
+    };
     for client in &mut clients {
         for _ in 0..cfg.streams {
-            client.open_request(false, 0, cfg.response_bytes)?;
+            client.open_request(false, request_bytes, response_bytes)?;
         }
     }
     while Instant::now() < measure_deadline {
         for client in &mut clients {
             for completed in client.drive(Some(measure_deadline))? {
                 if completed.counts && Instant::now() >= measure_start {
+                    counters.bytes_sent += completed.request_bytes;
                     counters.bytes_received += completed.received;
                 }
             }
         }
         for client in &mut clients {
             while client.streams.len() < int_cap(cfg.streams) && Instant::now() < measure_deadline {
-                client.open_request(Instant::now() >= measure_start, 0, cfg.response_bytes)?;
+                client.open_request(
+                    Instant::now() >= measure_start,
+                    request_bytes,
+                    response_bytes,
+                )?;
             }
         }
     }

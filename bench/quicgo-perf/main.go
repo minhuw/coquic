@@ -205,6 +205,7 @@ type clientDialer struct {
 
 type bulkStreamResult struct {
 	counts   bool
+	sent     uint64
 	received uint64
 	err      error
 }
@@ -469,6 +470,7 @@ func shouldSendSessionComplete(session *serverSession, requestsCompleted uint64)
 		return true
 	}
 	if session.start.mode == modeBulk && session.start.direction == directionUpload &&
+		session.start.totalBytes.set &&
 		requestsCompleted >= session.start.streams {
 		return true
 	}
@@ -522,8 +524,8 @@ func runClient(cfg config) (runSummary, error) {
 	runStart := time.Now()
 	switch cfg.mode {
 	case modeBulk:
-		if cfg.direction == directionDownload && !cfg.totalBytes.set {
-			err = runTimedBulkDownload(cfg, connections, counters)
+		if !cfg.totalBytes.set {
+			err = runTimedBulk(cfg, connections, counters)
 			elapsed = cfg.duration
 		} else {
 			err = runFixedBulk(cfg, connections, counters)
@@ -709,7 +711,7 @@ func waitForReady(control *quic.Stream) error {
 	return nil
 }
 
-func runTimedBulkDownload(cfg config, connections []connectionState, counters *measuredCounters) error {
+func runTimedBulk(cfg config, connections []connectionState, counters *measuredCounters) error {
 	measureStart := time.Now().Add(cfg.warmup)
 	measureDeadline := measureStart.Add(cfg.duration)
 	resultCh := make(chan bulkStreamResult, intCap(cfg.streams*cfg.connections+64))
@@ -722,8 +724,8 @@ func runTimedBulkDownload(cfg config, connections []connectionState, counters *m
 		active.Add(1)
 		go func() {
 			defer active.Add(^uint64(0))
-			received, err := runBulkDownloadStream(ctx, c.conn)
-			resultCh <- bulkStreamResult{counts: counts, received: received, err: err}
+			sent, received, err := runTimedBulkStream(ctx, c.conn, cfg)
+			resultCh <- bulkStreamResult{counts: counts, sent: sent, received: received, err: err}
 		}()
 	}
 
@@ -741,6 +743,7 @@ func runTimedBulkDownload(cfg config, connections []connectionState, counters *m
 			return result.err
 		}
 		if result.counts {
+			counters.bytesSent.Add(result.sent)
 			counters.bytesReceived.Add(result.received)
 		}
 		for active.Load() < cfg.streams*cfg.connections && time.Now().Before(measureDeadline) {
@@ -759,18 +762,29 @@ func runTimedBulkDownload(cfg config, connections []connectionState, counters *m
 	return nil
 }
 
-func runBulkDownloadStream(ctx context.Context, conn *quic.Conn) (uint64, error) {
+func runTimedBulkStream(ctx context.Context, conn *quic.Conn, cfg config) (uint64, uint64, error) {
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
+	}
+	if cfg.direction == directionUpload {
+		sent, err := writeN(stream, maxU64(cfg.requestBytes, cfg.responseBytes))
+		if err != nil {
+			return sent, 0, err
+		}
+		if err := stream.Close(); err != nil {
+			return sent, 0, err
+		}
+		return sent, 0, nil
 	}
 	if _, err := stream.Write(nil); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := stream.Close(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return copyAndCount(io.Discard, stream)
+	received, err := copyAndCount(io.Discard, stream)
+	return 0, received, err
 }
 
 func runFixedBulk(cfg config, connections []connectionState, counters *measuredCounters) error {
@@ -1345,4 +1359,11 @@ func intCap(value uint64) int {
 		return math.MaxInt
 	}
 	return int(value)
+}
+
+func maxU64(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
 }

@@ -2245,6 +2245,10 @@ TEST(QuicCoreTest, BulkStreamDatagramsFillValidatedMtuExactly) {
         auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
         ASSERT_FALSE(datagram.empty());
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+        // # All QUIC packets that are not sent in a PMTU probe SHOULD be
+        // # sized to fit within the maximum datagram size to avoid the
+        // # datagram being fragmented or dropped [RFC8085].
         EXPECT_EQ(datagram.size(), path_udp_payload_size);
     }
 }
@@ -4190,6 +4194,9 @@ TEST(QuicCoreTest, ApplicationProbeIgnoresQueuedStreamDataOnResettingStream) {
     }
 
     EXPECT_TRUE(saw_handshake_done);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+    // # A sender MUST NOT send any of these frames from a terminal state
+    // # ("Data Recvd" or "Reset Recvd").
     //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
     // # A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED frame for
     // # a stream in the "Reset Sent" state or any terminal state -- that

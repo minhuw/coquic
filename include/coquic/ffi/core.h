@@ -70,6 +70,7 @@ typedef uint8_t coquic_local_error_code_t;
 #define COQUIC_LOCAL_ERROR_FINAL_SIZE_CONFLICT 5u
 #define COQUIC_LOCAL_ERROR_DATAGRAM_NOT_SUPPORTED 6u
 #define COQUIC_LOCAL_ERROR_DATAGRAM_TOO_LARGE 7u
+#define COQUIC_LOCAL_ERROR_FLOW_CONTROL_VIOLATION 8u
 
 typedef uint8_t coquic_lifecycle_t;
 #define COQUIC_LIFECYCLE_CREATED 0u

@@ -592,7 +592,8 @@ TEST(QuicRecoveryTest, AckHistoryBuildsMultipleAckRanges) {
     // # A receiver SHOULD include an ACK Range containing the largest
     // # received packet number in every ACK frame.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
-    // # ACK frames SHOULD always acknowledge the most recently received packets.
+    // # ACK frames SHOULD always acknowledge the most recently received
+    // # packets, and the
     EXPECT_EQ(ack_frame.largest_acknowledged, 4u);
     EXPECT_EQ(ack_frame.first_ack_range, 0u);
     EXPECT_EQ(ack_frame.additional_ranges[0].gap, 1u);
@@ -1104,6 +1105,10 @@ TEST(QuicRecoveryTest, AckElicitingGapRequestsImmediateAck) {
     // # *  when the packet has a packet number larger than the highest-
     // #    numbered ack-eliciting packet that has been received and there are
     // #    missing packets between that packet and this packet.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+    // # the more out of order the packets are, the more important it is to send
+    // # an updated ACK frame quickly, to prevent the peer from declaring a packet
+    // # as lost and spuriously retransmitting the frames it contains.
     EXPECT_TRUE(history.requests_immediate_ack());
 }
 

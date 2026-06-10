@@ -1306,6 +1306,15 @@ TEST(QuicCoreTest, MatchingPathResponseResetsRecoveryForNewPath) {
     ASSERT_TRUE(processed.has_value());
 
     EXPECT_EQ(connection.current_send_path_id_, 9u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    // # Packets sent on the old path MUST NOT contribute to congestion control
+    // # or RTT estimation for the new path.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    // # On confirming a peer's ownership of its new address, an endpoint MUST
+    // # immediately reset the congestion controller and round-trip time
+    // # estimator for the new path to initial values (see Appendices A.3 and
+    // # B.3 of [QUIC-RECOVERY]) unless the only change in the peer's address is
+    // # its port number.
     EXPECT_EQ(connection.congestion_controller_.bytes_in_flight(), 0u);
     EXPECT_EQ(connection.recovery_rtt_state_.latest_rtt, std::nullopt);
     EXPECT_EQ(connection.recovery_rtt_state_.min_rtt, std::nullopt);

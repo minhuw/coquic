@@ -1036,6 +1036,10 @@ CodecResult<bool> QuicConnection::request_connection_migration(QuicPathId path_i
         // # A client that migrates to a preferred address MUST validate the
         // # address it chooses before migrating; see Section 21.5.3.
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+    // # Once the handshake is confirmed, the client SHOULD select one of the
+    // # two addresses provided by the server and initiate path validation
+    // # (see Section 8.2).
     maybe_switch_to_path(path_id, /*initiated_locally=*/true, now);
     return CodecResult<bool>::success(true);
 }
@@ -1177,6 +1181,10 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
     }
 
     if (const auto deadline = pto_deadline(); deadline.has_value() && now >= *deadline) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+        // # To
+        // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+        // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
         arm_pto_probe(now);
         if (packet_trace_matches_connection(config_.source_connection_id)) {
             const auto in_flight_ack_eliciting_count = [](const PacketSpaceState &packet_space) {

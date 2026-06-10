@@ -1380,9 +1380,18 @@ TEST(QuicCoreTest, ClientHandshakeKeepalivePtoUsesPeerActivityBeforeHandshakeKey
     EXPECT_EQ(connection.pto_deadline(), std::optional{coquic::quic::test::test_time(4000)});
     EXPECT_EQ(connection.next_wakeup(), std::optional{coquic::quic::test::test_time(4000)});
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # To
+    // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+    // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
     connection.on_timeout(coquic::quic::test::test_time(4000));
 
     EXPECT_EQ(connection.pto_count_, 5u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # Specifically, the client
+    // # MUST send an Initial packet in a UDP datagram that contains at least
+    // # 1200 bytes if it does not have Handshake keys, and otherwise send a
+    // # Handshake packet.
     EXPECT_TRUE(connection.initial_space_.pending_probe_packet.has_value() &&
                 connection.initial_space_.pending_probe_packet->has_ping);
     EXPECT_FALSE(connection.handshake_space_.pending_probe_packet.has_value());
@@ -1620,6 +1629,10 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsHandshakeAckAfterAckOnlyS
     auto deadline = coquic::quic::compute_pto_deadline(connection.shared_recovery_rtt_state(),
                                                        std::chrono::milliseconds(0),
                                                        coquic::quic::test::test_time(4), 2);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # To
+    // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+    // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
     connection.arm_pto_probe(deadline);
 
     ASSERT_TRUE(connection.handshake_space_.pending_probe_packet.has_value());
@@ -1627,6 +1640,10 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsHandshakeAckAfterAckOnlyS
         optional_ref_or_terminate(connection.handshake_space_.pending_probe_packet).has_ping);
 
     auto probe_datagram = connection.drain_outbound_datagram(deadline);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # To
+    // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+    // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
     if (probe_datagram.empty()) {
         ADD_FAILURE() << "missing keepalive Handshake PTO probe datagram";
         return;
@@ -1638,6 +1655,11 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsHandshakeAckAfterAckOnlyS
         return;
     }
     auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&probe_packets[0]);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # Specifically, the client
+    // # MUST send an Initial packet in a UDP datagram that contains at least
+    // # 1200 bytes if it does not have Handshake keys, and otherwise send a
+    // # Handshake packet.
     if (handshake == nullptr) {
         ADD_FAILURE() << "keepalive PTO probe was not a Handshake packet";
         return;
@@ -1677,16 +1699,30 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsInitialAckAfterAckOnlySen
     auto deadline = coquic::quic::compute_pto_deadline(connection.shared_recovery_rtt_state(),
                                                        std::chrono::milliseconds(0),
                                                        coquic::quic::test::test_time(4), 2);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # To
+    // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+    // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
     connection.arm_pto_probe(deadline);
 
     ASSERT_TRUE(connection.initial_space_.pending_probe_packet.has_value());
     EXPECT_TRUE(optional_ref_or_terminate(connection.initial_space_.pending_probe_packet).has_ping);
 
     auto probe_datagram = connection.drain_outbound_datagram(deadline);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # To
+    // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+    // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
     if (probe_datagram.empty()) {
         ADD_FAILURE() << "missing keepalive Initial PTO probe datagram";
         return;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # Specifically, the client
+    // # MUST send an Initial packet in a UDP datagram that contains at least
+    // # 1200 bytes if it does not have Handshake keys, and otherwise send a
+    // # Handshake packet.
+    EXPECT_GE(probe_datagram.size(), 1200u);
 
     auto probe_packets = decode_sender_datagram(connection, probe_datagram);
     if (probe_packets.size() != 1u) {
@@ -1694,6 +1730,11 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsInitialAckAfterAckOnlySen
         return;
     }
     auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&probe_packets[0]);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # Specifically, the client
+    // # MUST send an Initial packet in a UDP datagram that contains at least
+    // # 1200 bytes if it does not have Handshake keys, and otherwise send a
+    // # Handshake packet.
     if (initial == nullptr) {
         ADD_FAILURE() << "keepalive PTO probe was not an Initial packet";
         return;
@@ -3362,6 +3403,10 @@ TEST(QuicCoreTest, ApplicationSendPathPreservesAckByTrimmingStreamData) {
 
     ASSERT_FALSE(datagram.empty());
     EXPECT_FALSE(connection.has_failed());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    // # An endpoint SHOULD include multiple frames in a single packet if
+    // # they are to be sent at the same encryption level, instead of
+    // # coalescing multiple packets at the same encryption level.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
     // # An endpoint SHOULD send an ACK frame with other frames when there are
     // # new ack-eliciting packets to acknowledge.

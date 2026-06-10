@@ -504,6 +504,10 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
             return;
         }
         if (client_handshake_keepalive_due) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+            // # To
+            // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+            // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
             selected_packet_space = client_handshake_keepalive_space;
             selected_deadline = client_handshake_keepalive_deadline;
         } else {
@@ -1165,6 +1169,10 @@ void QuicConnection::start_client_if_needed(QuicCoreTimePoint now) {
                 (decoded_resumption_state_->application_context ==
                  config_.zero_rtt.application_context);
             if (enable_zero_rtt_attempt) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+                // # A client that attempts to send 0-RTT data MUST remember
+                // # all other transport parameters used by the server that it
+                // # is able to process.
                 peer_transport_parameters_ = decoded_resumption_state_->peer_transport_parameters;
                 note_endpoint_route_state_changed();
                 initialize_peer_flow_control_from_transport_parameters();

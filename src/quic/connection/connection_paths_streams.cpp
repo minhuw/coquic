@@ -398,6 +398,9 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
         return CodecResult<bool>::success(true);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # The client MUST use the server's new values in the handshake instead;
+    // # if the server does not provide new values, the default values are used.
     const auto peer_transport_parameters =
         peer_transport_parameters_.value_or(TransportParameters{});
     if (auto validated = validate_peer_transport_parameters(
@@ -411,6 +414,9 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
         if (decoded_resumption_state_.has_value() &&
             !zero_rtt_transport_limits_not_reduced(
                 decoded_resumption_state_->peer_transport_parameters, peer_transport_parameters)) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+            // # A server MUST reject 0-RTT data if the restored values for
+            // # transport parameters cannot be supported.
             return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
         }
     }
@@ -1789,6 +1795,36 @@ CodecResult<bool> QuicConnection::validate_retired_peer_reset_stream_frame(
     return CodecResult<bool>::success(true);
 }
 
+CodecResult<bool>
+QuicConnection::commit_peer_stream_final_size_to_connection_flow_control(StreamState &stream,
+                                                                         std::uint64_t frame_type) {
+    if (!stream.peer_final_size.has_value()) {
+        return CodecResult<bool>::success(true);
+    }
+    if (stream.highest_received_offset >= *stream.peer_final_size) {
+        return CodecResult<bool>::success(true);
+    }
+
+    const auto final_size_delta = *stream.peer_final_size - stream.highest_received_offset;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # The receiver MUST use the final size of the stream to account for all
+    // # bytes sent on the stream in its connection-level flow controller.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.9
+    // # The sum of the final sizes on all streams -- including streams in
+    // # terminal states -- MUST NOT exceed the value advertised by a receiver.
+    if (connection_flow_control_.received_committed >
+            connection_flow_control_.advertised_max_data ||
+        final_size_delta > connection_flow_control_.advertised_max_data -
+                               connection_flow_control_.received_committed) {
+        return CodecResult<bool>::failure(flow_control_error(frame_type));
+    }
+
+    connection_flow_control_.received_committed += final_size_delta;
+    stream.highest_received_offset = *stream.peer_final_size;
+    stream.receive_flow_control_consumed = *stream.peer_final_size;
+    return CodecResult<bool>::success(true);
+}
+
 bool QuicConnection::try_retire_stream_to_peer_range(const StreamState &stream) {
     if (stream.id_info.initiator != StreamInitiator::peer) {
         return false;
@@ -2706,6 +2742,15 @@ void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_loc
         if (!existing_path->second.mtu.viable) {
             return;
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+        // # Packets sent on the old path MUST NOT contribute to congestion
+        // # control or RTT estimation for the new path.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+        // # On confirming a peer's ownership of its new address, an endpoint
+        // # MUST immediately reset the congestion controller and round-trip
+        // # time estimator for the new path to initial values (see Appendices
+        // # A.3 and B.3 of [QUIC-RECOVERY]) unless the only change in the
+        // # peer's address is its port number.
         reset_recovery_for_new_path(path_id);
         const auto old_path_id = current_send_path_id_;
         if (current_send_path_id_.has_value()) {
@@ -2718,6 +2763,10 @@ void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_loc
         path.is_current_send_path = true;
         current_send_path_id_ = path_id;
         if (old_path_id.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+            // # As soon as path validation succeeds, the client SHOULD begin sending
+            // # all future packets to the new server address using the new connection
+            // # ID and discontinue use of the old server address.
             retire_peer_connection_id_for_inactive_path(*old_path_id, path_id);
         }
         return;
@@ -2837,6 +2886,15 @@ void QuicConnection::reset_recovery_for_new_path(QuicPathId path_id) {
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    // # Packets sent on the old path MUST NOT contribute to congestion control
+    // # or RTT estimation for the new path.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    // # On confirming a peer's ownership of its new address, an endpoint MUST
+    // # immediately reset the congestion controller and round-trip time
+    // # estimator for the new path to initial values (see Appendices A.3 and
+    // # B.3 of [QUIC-RECOVERY]) unless the only change in the peer's address is
+    // # its port number.
     congestion_controller_.reset_for_new_path();
     recovery_rtt_state_ = RecoveryRttState{};
     pto_count_ = 0;

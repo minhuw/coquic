@@ -57,6 +57,7 @@ enum class LocalErrorCode : std::uint8_t {
     final_size_conflict,
     datagram_not_supported,
     datagram_too_large,
+    flow_control_violation,
 };
 
 enum class Lifecycle : std::uint8_t {

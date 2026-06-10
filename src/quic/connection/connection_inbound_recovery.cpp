@@ -407,7 +407,7 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                         } else {
                             //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
                             // # A client MUST NOT send 0-RTT packets once it starts processing
-                            // 1-RTT # packets from the server.
+                            // # 1-RTT packets from the server.
                             discard_packet_space_state(zero_rtt_space_);
                         }
                     }
@@ -700,7 +700,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                         } else {
                             //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
                             // # A client MUST NOT send 0-RTT packets once it starts processing
-                            // 1-RTT # packets from the server.
+                            // # 1-RTT packets from the server.
                             discard_packet_space_state(zero_rtt_space_);
                         }
                     }
@@ -2862,6 +2862,11 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 return CodecResult<bool>::failure(
                     stream_state_codec_error(noted.error(), kFrameTypeResetStream));
             }
+            const auto committed = commit_peer_stream_final_size_to_connection_flow_control(
+                *stream_state, kFrameTypeResetStream);
+            if (!committed.has_value()) {
+                return committed;
+            }
 
             pending_peer_reset_effects_.push_back(QuicCorePeerResetStream{
                 .stream_id = reset_stream->stream_id,
@@ -3050,6 +3055,10 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 path->validation_deadline.reset();
                 last_validated_path_id_ = validated_path_id;
                 if (current_send_path_id_ != validated_path_id) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+                    // # As soon as path validation succeeds, the client SHOULD begin sending
+                    // # all future packets to the new server address using the new connection
+                    // # ID and discontinue use of the old server address.
                     maybe_switch_to_path(validated_path_id, /*initiated_locally=*/false, now);
                 }
                 if (current_send_path_id_ == validated_path_id && previous_path_id_.has_value()) {
@@ -3296,6 +3305,11 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             if (!noted.has_value()) {
                 return CodecResult<bool>::failure(
                     stream_state_codec_error(noted.error(), kFrameTypeResetStream));
+            }
+            const auto committed = commit_peer_stream_final_size_to_connection_flow_control(
+                *stream_state, kFrameTypeResetStream);
+            if (!committed.has_value()) {
+                return committed;
             }
 
             pending_peer_reset_effects_.push_back(QuicCorePeerResetStream{

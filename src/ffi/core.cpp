@@ -258,6 +258,8 @@ coquic_local_error_code_t from_cpp(coquic::core::LocalErrorCode code) {
         return COQUIC_LOCAL_ERROR_RECEIVE_SIDE_CLOSED;
     case coquic::core::LocalErrorCode::final_size_conflict:
         return COQUIC_LOCAL_ERROR_FINAL_SIZE_CONFLICT;
+    case coquic::core::LocalErrorCode::flow_control_violation:
+        return COQUIC_LOCAL_ERROR_FLOW_CONTROL_VIOLATION;
     case coquic::core::LocalErrorCode::datagram_not_supported:
         return COQUIC_LOCAL_ERROR_DATAGRAM_NOT_SUPPORTED;
     case coquic::core::LocalErrorCode::datagram_too_large:

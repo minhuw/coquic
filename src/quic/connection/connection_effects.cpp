@@ -223,6 +223,9 @@ std::vector<ConnectionId> QuicConnection::active_local_connection_ids() const {
         // # carry this connection ID for the duration of the connection or until
         // # its peer invalidates the connection ID via a RETIRE_CONNECTION_ID
         // # frame (Section 19.16).
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+        // # The endpoint SHOULD continue to accept the previously issued
+        // # connection IDs until they are retired by the peer.
         connection_ids.push_back(record.connection_id);
     }
     return connection_ids;

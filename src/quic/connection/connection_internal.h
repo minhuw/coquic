@@ -1406,6 +1406,12 @@ stream_transport_error_for_state_error(StreamStateErrorCode code) {
     case StreamStateErrorCode::send_side_closed:
     case StreamStateErrorCode::receive_side_closed:
         return QuicTransportErrorCode::stream_state_error;
+    case StreamStateErrorCode::flow_control_violation:
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+        // # A receiver MUST close the connection with an error of type
+        // # FLOW_CONTROL_ERROR if the sender violates the advertised connection
+        // # or stream data limits; see Section 11 for details on error handling.
+        return QuicTransportErrorCode::flow_control_error;
     case StreamStateErrorCode::final_size_conflict:
         //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
         // # If a RESET_STREAM or STREAM frame is received indicating a change
@@ -3077,6 +3083,11 @@ inline COQUIC_NO_PROFILE PacketSpaceState *client_handshake_keepalive_packet_spa
                                               handshake_discarded, handshake_space)) {
         return nullptr;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # Specifically, the client
+    // # MUST send an Initial packet in a UDP datagram that contains at least
+    // # 1200 bytes if it does not have Handshake keys, and otherwise send a
+    // # Handshake packet.
     return (!handshake_discarded && handshake_space.write_secret.has_value()) ? &handshake_space
                                                                               : &initial_space;
 }

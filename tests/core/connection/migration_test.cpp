@@ -1222,6 +1222,10 @@ TEST(QuicCoreTest, PreferredAddressMigrationSendsOnlyProbingFramesUntilValidated
             .queue_stream_send(0, coquic::quic::test::bytes_from_string("preferred-data"), false)
             .has_value());
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+    // # Once the handshake is confirmed, the client SHOULD select one of the
+    // # two addresses provided by the server and initiate path validation
+    // # (see Section 8.2).
     auto requested = connection.request_connection_migration(
         7, coquic::quic::QuicMigrationRequestReason::preferred_address);
     ASSERT_TRUE(requested.has_value());
@@ -1264,6 +1268,10 @@ TEST(QuicCoreTest, PreferredAddressMigrationSendsOnlyProbingFramesUntilValidated
 
     auto stream_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
     ASSERT_FALSE(stream_datagram.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+    // # As soon as path validation succeeds, the client SHOULD begin sending
+    // # all future packets to the new server address using the new connection
+    // # ID and discontinue use of the old server address.
     EXPECT_EQ(connection.last_drained_path_id(), 7u);
     EXPECT_TRUE(datagram_has_application_stream(connection, stream_datagram));
 }

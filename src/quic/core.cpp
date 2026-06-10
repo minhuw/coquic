@@ -53,6 +53,7 @@ constexpr auto kStreamStateErrorMap = std::to_array<QuicCoreLocalErrorCode>({
     QuicCoreLocalErrorCode::invalid_stream_direction,
     QuicCoreLocalErrorCode::send_side_closed,
     QuicCoreLocalErrorCode::receive_side_closed,
+    QuicCoreLocalErrorCode::flow_control_violation,
     QuicCoreLocalErrorCode::final_size_conflict,
 });
 
@@ -2019,6 +2020,10 @@ std::optional<QuicConnectionHandle>
         if (key.size() != token.size()) {
             continue;
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
+        // # When comparing a datagram to stateless reset token values, endpoints
+        // # MUST perform the comparison without leaking information about the
+        // # value of the token.
         if (CRYPTO_memcmp(key.data(), token.data(), token.size()) == 0) {
             return route.owner;
         }
@@ -3676,7 +3681,7 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                             //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.1
                             // # The client MUST use the value from the Source
                             // # Connection ID field of the Retry packet in the Destination
-                            // Connection # ID field of subsequent packets that it sends.
+                            // # Connection ID field of subsequent packets that it sends.
                             config.initial_destination_connection_id = retry->source_connection_id;
                             entry.connection = std::make_unique<QuicConnection>(config);
                             connection = entry.connection.get();

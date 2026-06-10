@@ -905,6 +905,50 @@ TEST(QuicCoreTest, InitializePeerFlowControlAssignsReceiveWindowToPreexistingStr
     EXPECT_EQ(stream.receive_flow_control_limit, stream.flow_control.advertised_max_stream_data);
 }
 
+TEST(QuicCoreTest, ResetStreamFinalSizeCountsAgainstConnectionFlowControl) {
+    auto accepted = make_connected_server_connection();
+    accepted.connection_flow_control_.advertised_max_data = 5;
+
+    const auto accepted_result = accepted.process_inbound_application(
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::ResetStreamFrame{
+                .stream_id = 0,
+                .application_protocol_error_code = 7,
+                .final_size = 5,
+            },
+        },
+        coquic::quic::test::test_time());
+    ASSERT_TRUE(accepted_result.has_value());
+    EXPECT_EQ(accepted.connection_flow_control_.received_committed, 5u);
+    EXPECT_EQ(accepted.streams_.at(0).receive_flow_control_consumed, 5u);
+
+    auto overflow = make_connected_server_connection();
+    overflow.connection_flow_control_.advertised_max_data = 4;
+
+    const auto overflow_result = overflow.process_inbound_application(
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::ResetStreamFrame{
+                .stream_id = 0,
+                .application_protocol_error_code = 7,
+                .final_size = 5,
+            },
+        },
+        coquic::quic::test::test_time());
+    ASSERT_FALSE(overflow_result.has_value());
+    EXPECT_EQ(overflow_result.error().code, coquic::quic::CodecErrorCode::invalid_varint);
+    ASSERT_TRUE(overflow_result.error().has_transport_error_code);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # The receiver MUST use the final size of the stream to account for all
+    // # bytes sent on the stream in its connection-level flow controller.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.9
+    // # The sum of the final sizes on all streams -- including streams in
+    // # terminal states -- MUST NOT exceed the value advertised by a receiver.
+    EXPECT_EQ(overflow_result.error().transport_error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::flow_control_error));
+    EXPECT_EQ(overflow.connection_flow_control_.received_committed, 0u);
+    EXPECT_FALSE(overflow.take_peer_reset_stream().has_value());
+}
+
 TEST(QuicCoreTest, ClientLargePartialResponseFlowKeepsReceiveCreditStateConsistent) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());

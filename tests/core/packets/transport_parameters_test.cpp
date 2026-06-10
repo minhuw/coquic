@@ -855,6 +855,34 @@ TEST(QuicTransportParametersTest, RejectsActiveConnectionIdLimitBelowTwo) {
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
+TEST(QuicTransportParametersTest, RejectsMaxStreamsTransportParametersAboveStreamLimit) {
+    const auto expect_rejected = [](const TransportParameters &parameters) {
+        const auto validation = coquic::quic::validate_peer_transport_parameters(
+            EndpointRole::client, parameters,
+            make_validation_context(ConnectionId{std::byte{0xaa}}));
+        ASSERT_FALSE(validation.has_value());
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+        // # If either is received, the connection MUST be closed immediately with
+        // # a connection error of type TRANSPORT_PARAMETER_ERROR if the offending
+        // # value was received in a transport parameter or of type
+        // # FRAME_ENCODING_ERROR if it was received in a frame; see Section 10.2.
+        EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+    };
+
+    expect_rejected(TransportParameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_max_streams_bidi = (std::uint64_t{1} << 60) + 1,
+        .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+    });
+    expect_rejected(TransportParameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_max_streams_uni = (std::uint64_t{1} << 60) + 1,
+        .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+    });
+}
+
 TEST(QuicTransportParametersTest, RejectsMissingInitialSourceConnectionId) {
     const auto validation = coquic::quic::validate_peer_transport_parameters(
         EndpointRole::client,

@@ -2480,6 +2480,10 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetHelpersGenerateAndDetectResets)
     // # However, endpoints MUST treat any packet ending in a valid stateless
     // # reset token as a Stateless Reset, as other QUIC versions might allow
     // # the use of a long header.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
+    // # When comparing a datagram to stateless reset token values, endpoints
+    // # MUST perform the comparison without leaking information about the value
+    // # of the token.
     EXPECT_EQ(client.detect_stateless_reset(reset_datagram.bytes.span()),
               std::optional<QuicConnectionHandle>{4u});
 

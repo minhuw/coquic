@@ -53,6 +53,7 @@ constexpr std::uint64_t minimum_max_udp_payload_size = 1200;
 constexpr std::uint64_t minimum_active_connection_id_limit = 2;
 constexpr std::uint64_t maximum_ack_delay_exponent = 20;
 constexpr std::uint64_t maximum_max_ack_delay = (std::uint64_t{1} << 14);
+constexpr std::uint64_t maximum_stream_limit = std::uint64_t{1} << 60;
 constexpr std::size_t maximum_connection_id_length = 20;
 constexpr std::size_t stateless_reset_token_length = 16;
 
@@ -691,6 +692,15 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
     // # invalid value as a connection error of type
     // # TRANSPORT_PARAMETER_ERROR.
     if (parameters.max_ack_delay >= maximum_max_ack_delay) {
+        return validation_failure();
+    }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # If either is received, the connection MUST be closed immediately with
+    // # a connection error of type TRANSPORT_PARAMETER_ERROR if the offending
+    // # value was received in a transport parameter or of type
+    // # FRAME_ENCODING_ERROR if it was received in a frame; see Section 10.2.
+    if (parameters.initial_max_streams_bidi > maximum_stream_limit ||
+        parameters.initial_max_streams_uni > maximum_stream_limit) {
         return validation_failure();
     }
 

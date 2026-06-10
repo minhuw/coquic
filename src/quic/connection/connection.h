@@ -875,6 +875,9 @@ class QuicConnection {
     CodecResult<bool> validate_retired_peer_reset_stream_frame(
         std::uint64_t stream_id, // NOLINT(bugprone-easily-swappable-parameters)
         std::uint64_t final_size, std::uint64_t frame_type) const;
+    CodecResult<bool>
+    commit_peer_stream_final_size_to_connection_flow_control(StreamState &stream,
+                                                             std::uint64_t frame_type);
     bool try_retire_stream_to_peer_range(const StreamState &stream);
     std::size_t retired_peer_stream_count() const;
     void maybe_retire_stream(std::uint64_t stream_id);

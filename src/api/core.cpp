@@ -126,6 +126,8 @@ LocalErrorCode from_internal(quic::QuicCoreLocalErrorCode code) {
         return LocalErrorCode::receive_side_closed;
     case quic::QuicCoreLocalErrorCode::final_size_conflict:
         return LocalErrorCode::final_size_conflict;
+    case quic::QuicCoreLocalErrorCode::flow_control_violation:
+        return LocalErrorCode::flow_control_violation;
     case quic::QuicCoreLocalErrorCode::datagram_not_supported:
         return LocalErrorCode::datagram_not_supported;
     case quic::QuicCoreLocalErrorCode::datagram_too_large:

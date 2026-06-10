@@ -475,11 +475,25 @@ TEST(QuicStreamsTest, SendAndReceiveValidationCoverClosedAndOverflowPaths) {
     EXPECT_EQ(receive_closed.error().code, StreamStateErrorCode::receive_side_closed);
 
     StreamState overflow_state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
-    ASSERT_TRUE(overflow_state
+    overflow_state.flow_control.advertised_max_stream_data = 4;
+    const auto stream_data_limit =
+        overflow_state.validate_receive_range(/*offset=*/3, /*length=*/2, /*fin=*/false);
+    ASSERT_FALSE(stream_data_limit.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+    // # An endpoint MUST terminate a connection with an error of type
+    // # FLOW_CONTROL_ERROR if it receives more data than the largest maximum
+    // # stream data that it has sent for the affected stream.
+    EXPECT_EQ(stream_data_limit.error().code, StreamStateErrorCode::flow_control_violation);
+
+    StreamState offset_overflow_state =
+        make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    offset_overflow_state.flow_control.advertised_max_stream_data =
+        std::numeric_limits<std::uint64_t>::max();
+    ASSERT_TRUE(offset_overflow_state
                     .validate_receive_range(std::numeric_limits<std::uint64_t>::max() - 2,
                                             /*length=*/8, /*fin=*/true)
                     .has_value());
-    EXPECT_EQ(overflow_state.peer_final_size, std::numeric_limits<std::uint64_t>::max());
+    EXPECT_EQ(offset_overflow_state.peer_final_size, std::numeric_limits<std::uint64_t>::max());
 }
 
 TEST(QuicStreamsTest, FinalSizeConflictPathsPropagateThroughReceiveAndReset) {
@@ -539,6 +553,9 @@ TEST(QuicStreamsTest, LocalResetQueuesFinalSizeAndStopsRetransmittingStreamData)
     EXPECT_EQ(reset_frame.application_protocol_error_code, 9u);
     EXPECT_EQ(reset_frame.final_size, 5u);
     //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+    // # A sender MUST NOT send any of these frames from a terminal state
+    // # ("Data Recvd" or "Reset Recvd").
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
     // # A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED frame for
     // # a stream in the "Reset Sent" state or any terminal state -- that
     // # is, after sending a RESET_STREAM frame.
@@ -580,6 +597,9 @@ TEST(QuicStreamsTest, ResetAndStopSendingRemainIdempotentAfterAcknowledgement) {
     EXPECT_TRUE(reset_state.has_outstanding_send());
     const auto reset_frame = reset.value_or(coquic::quic::ResetStreamFrame{});
     reset_state.acknowledge_reset_frame(reset_frame);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+    // # A sender MUST NOT send any of these frames from a terminal state
+    // # ("Data Recvd" or "Reset Recvd").
     //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
     // # A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED frame for
     // # a stream in the "Reset Sent" state or any terminal state -- that

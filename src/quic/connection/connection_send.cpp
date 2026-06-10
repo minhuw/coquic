@@ -1502,6 +1502,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 .packet_number = initial_space_.next_send_packet_number,
                 .frames = build_initial_frames(crypto_ranges),
             });
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+            // # Specifically, the client
+            // # MUST send an Initial packet in a UDP datagram that contains at least
+            // # 1200 bytes if it does not have Handshake keys, and otherwise send a
+            // # Handshake packet.
             return serialize_candidate_datagram_with_metadata(candidate_packets);
         };
         auto initial_candidate_datagram = trim_crypto_ranges_to_fit(
@@ -1830,6 +1835,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             handshake_sent_record.crypto_ranges = sent_handshake_probe_crypto_ranges;
             handshake_sent_record.has_ping = handshake_space_.pending_probe_packet->has_ping;
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+        // # Specifically, the client
+        // # MUST send an Initial packet in a UDP datagram that contains at least
+        // # 1200 bytes if it does not have Handshake keys, and otherwise send a
+        // # Handshake packet.
         queue_tracked_packet(handshake_space_, handshake_sent_record,
                              handshake_candidate_datagram.value().packet_metadata.back().length);
         if (track_client_handshake_keepalive_probes) {
@@ -3663,6 +3673,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     maybe_note_path_validation_ack_eliciting_send(
                         path_validation_ack_eliciting, [&] { note_idle_ack_eliciting_send(now); });
                 });
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+                // # Since packets containing only ACK frames are not congestion
+                // # controlled, an endpoint MUST NOT send more than one such
+                // # packet in response to receiving an ack-eliciting packet.
                 application_space_.received_packets.on_ack_sent();
                 application_space_.pending_ack_deadline = std::nullopt;
                 application_space_.force_ack_send = false;
@@ -3807,6 +3821,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 return {};
             }
 
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+            // # An endpoint SHOULD include multiple frames in a single packet if
+            // # they are to be sent at the same encryption level, instead of
+            // # coalescing multiple packets at the same encryption level.
             ApplicationCandidateFrameBuilder application_candidate_frames{
                 ApplicationCandidateFrameBuilder::Args{
                     .scratch = application_candidate_frame_scratch_,
@@ -4332,6 +4350,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 local_application_close_sent_ = true;
                 enter_closing_state(now, QuicConnectionTerminalState::closed);
             };
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+            // # All QUIC packets that are not sent in a PMTU probe SHOULD be
+            // # sized to fit within the maximum datagram size to avoid the
+            // # datagram being fragmented or dropped [RFC8085].
             auto candidate_datagram_size = datagram_size_or_zero(candidate_application_datagram);
             if (candidate_datagram_size > max_outbound_datagram_size) {
                 retry_candidate_without_receive_credit();

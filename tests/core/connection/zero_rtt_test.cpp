@@ -92,6 +92,9 @@ TEST(QuicCoreTest, ClientUsesResumptionStateToEmitZeroRttDatagramBeforeHandshake
         },
         coquic::quic::test::test_time(101));
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # A client that attempts to send 0-RTT data MUST remember all other
+    // # transport parameters used by the server that it is able to process.
     EXPECT_FALSE(coquic::quic::test::send_datagrams_from(send).empty());
     EXPECT_EQ(coquic::quic::test::zero_rtt_statuses_from(send),
               std::vector{coquic::quic::QuicZeroRttStatus::attempted});
@@ -1515,6 +1518,9 @@ TEST(QuicCoreTest, AcceptedZeroRttRejectsReducedServerTransportLimits) {
         auto validated = connection.validate_peer_transport_parameters_if_ready();
 
         //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+        // # A server MUST reject 0-RTT data if the restored values for transport
+        // # parameters cannot be supported.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
         // # If 0-RTT data is accepted by the server, the server MUST NOT reduce
         // # any limits or alter any values that might be violated by the client
         // # with its 0-RTT data.
@@ -1587,6 +1593,12 @@ TEST(QuicCoreTest, AcceptedZeroRttAllowsNonRememberedAndOptionalParameterReducti
                                                                     SSL_EARLY_DATA_ACCEPTED, true);
 
     EXPECT_TRUE(connection.validate_peer_transport_parameters_if_ready().has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # The client MUST use the server's new values in the handshake instead;
+    // # if the server does not provide new values, the default values are used.
+    EXPECT_EQ(optional_ref_or_terminate(connection.peer_transport_parameters_).max_ack_delay, 25u);
+    EXPECT_EQ(optional_ref_or_terminate(connection.peer_transport_parameters_).ack_delay_exponent,
+              3u);
 }
 
 TEST(QuicCoreTest, StartClientWithVersionMismatchedResumptionStateMarksZeroRttUnavailable) {

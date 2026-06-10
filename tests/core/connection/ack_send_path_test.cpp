@@ -2907,6 +2907,10 @@ TEST(QuicCoreTest, DelayedApplicationAckDeadlineSuppressesImmediateAckOnlySend) 
     EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
     ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # Since packets containing only ACK frames are not congestion controlled,
+    // # an endpoint MUST NOT send more than one such packet in response to
+    // # receiving an ack-eliciting packet.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
     // # Every packet SHOULD be acknowledged at least once, and ack-eliciting
     // # packets MUST be acknowledged at least once within the maximum delay
     // # an endpoint communicated using the max_ack_delay transport parameter;

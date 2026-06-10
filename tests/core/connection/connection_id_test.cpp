@@ -1268,6 +1268,9 @@ TEST(QuicCoreTest, ActiveLocalConnectionIdsExcludeRetiredEntries) {
     // # carry this connection ID for the duration of the connection or until
     // # its peer invalidates the connection ID via a RETIRE_CONNECTION_ID
     // # frame (Section 19.16).
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+    // # The endpoint SHOULD continue to accept the previously issued connection
+    // # IDs until they are retired by the peer.
     EXPECT_EQ(active_connection_ids[0], connection.config_.source_connection_id);
     EXPECT_EQ(active_connection_ids[1], bytes_from_ints({0x11}));
 }

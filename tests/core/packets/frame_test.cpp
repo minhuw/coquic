@@ -1902,6 +1902,11 @@ TEST(QuicFrameTest, RejectsMalformedFlowControlConnectionIdAndCloseFrames) {
     // # Receipt of a frame that
     // # permits opening of a stream larger than this limit MUST be treated
     // # as a connection error of type FRAME_ENCODING_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # If either is received, the connection MUST be closed immediately with
+    // # a connection error of type TRANSPORT_PARAMETER_ERROR if the offending
+    // # value was received in a transport parameter or of type
+    // # FRAME_ENCODING_ERROR if it was received in a frame; see Section 10.2.
     expect_decode_error(
         as_span(std::array<std::byte, 9>{std::byte{0x12}, std::byte{0xd0}, std::byte{0x00},
                                          std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
@@ -2048,6 +2053,11 @@ TEST(QuicFrameTest, RejectsInvalidSerializationInputsAcrossFrameFamilies) {
     // # Receipt of a frame that
     // # permits opening of a stream larger than this limit MUST be treated
     // # as a connection error of type FRAME_ENCODING_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # If either is received, the connection MUST be closed immediately with
+    // # a connection error of type TRANSPORT_PARAMETER_ERROR if the offending
+    // # value was received in a transport parameter or of type
+    // # FRAME_ENCODING_ERROR if it was received in a frame; see Section 10.2.
     expect_serialize_error(
         MaxStreamsFrame{
             .maximum_streams = (1ull << 60) + 1,

@@ -940,6 +940,11 @@ CodecResult<MaxStreamsFrame> decode_max_streams_frame(BufferReader &reader,
     // # Receipt of a frame that
     // # permits opening of a stream larger than this limit MUST be treated
     // # as a connection error of type FRAME_ENCODING_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # If either is received, the connection MUST be closed immediately with
+    // # a connection error of type TRANSPORT_PARAMETER_ERROR if the offending
+    // # value was received in a transport parameter or of type
+    // # FRAME_ENCODING_ERROR if it was received in a frame; see Section 10.2.
     if (maximum_streams.value() > kMaxStreamsLimit) {
         return CodecResult<MaxStreamsFrame>::failure(CodecErrorCode::invalid_varint,
                                                      reader.offset());
@@ -1260,6 +1265,11 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &frame_writer, cons
         // # Receipt of a frame that
         // # permits opening of a stream larger than this limit MUST be treated
         // # as a connection error of type FRAME_ENCODING_ERROR.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+        // # If either is received, the connection MUST be closed immediately with
+        // # a connection error of type TRANSPORT_PARAMETER_ERROR if the offending
+        // # value was received in a transport parameter or of type
+        // # FRAME_ENCODING_ERROR if it was received in a frame; see Section 10.2.
         if (max_streams->maximum_streams > kMaxStreamsLimit) {
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }

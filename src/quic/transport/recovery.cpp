@@ -138,6 +138,10 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
             // # *  when the packet has a packet number larger than the highest-
             // #    numbered ack-eliciting packet that has been received and there are
             // #    missing packets between that packet and this packet.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+            // # the more out of order the packets are, the more important it is to send
+            // # an updated ACK frame quickly, to prevent the peer from declaring a packet
+            // # as lost and spuriously retransmitting the frames it contains.
             immediate_ack_requested_ =
                 immediate_ack_requested_ || ack_eliciting_out_of_order ||
                 ack_eliciting_creates_gap ||
@@ -258,7 +262,8 @@ std::optional<OutboundAckHeader> ReceivedPacketHistory::build_outbound_ack_heade
         now - largest_received_packet_record.received_time, QuicCoreClock::duration::zero()));
     OutboundAckHeader header{
         //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
-        // # ACK frames SHOULD always acknowledge the most recently received packets.
+        // # ACK frames SHOULD always acknowledge the most recently received
+        // # packets, and the
         .largest_acknowledged = largest_range->second.largest_packet_number,
         .ack_delay = encode_ack_delay(ack_delay, ack_delay_exponent),
         .first_ack_range = largest_range->second.largest_packet_number - largest_range->first,

@@ -287,7 +287,11 @@ StreamStateResult<bool> StreamState::validate_receive_range(std::uint64_t offset
 
     const auto range_end = saturating_add(offset, length);
     if (range_end > flow_control.advertised_max_stream_data) {
-        return StreamStateResult<bool>::failure(StreamStateErrorCode::final_size_conflict,
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+        // # An endpoint MUST terminate a connection with an error of type
+        // # FLOW_CONTROL_ERROR if it receives more data than the largest
+        // # maximum stream data that it has sent for the affected stream.
+        return StreamStateResult<bool>::failure(StreamStateErrorCode::flow_control_violation,
                                                 stream_id);
     }
     if (peer_final_size.has_value() && range_end > *peer_final_size) {
@@ -379,6 +383,9 @@ bool StreamState::has_pending_send() const {
     }
 
     if (reset_state != StreamControlFrameState::none) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+        // # A sender MUST NOT send any of these frames from a terminal state
+        // # ("Data Recvd" or "Reset Recvd").
         //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
         // # A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED frame for
         // # a stream in the "Reset Sent" state or any terminal state -- that
@@ -597,6 +604,9 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
 void StreamState::append_send_fragments(StreamSendBudget budget,
                                         std::vector<StreamFrameSendFragment> &fragments) {
     if (reset_state != StreamControlFrameState::none) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+        // # A sender MUST NOT send any of these frames from a terminal state
+        // # ("Data Recvd" or "Reset Recvd").
         //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
         // # A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED frame for
         // # a stream in the "Reset Sent" state or any terminal state -- that

@@ -1162,12 +1162,14 @@ TEST(CoquicCoreFfiTest, ResultLocalErrorsExposeAllCodesAndOptionalFields) {
         coquic::core::LocalErrorCode::final_size_conflict,
         coquic::core::LocalErrorCode::datagram_not_supported,
         coquic::core::LocalErrorCode::datagram_too_large,
+        coquic::core::LocalErrorCode::flow_control_violation,
     };
     const std::vector<coquic_local_error_code_t> ffi_codes{
         COQUIC_LOCAL_ERROR_UNSUPPORTED_OPERATION,    COQUIC_LOCAL_ERROR_INVALID_STREAM_ID,
         COQUIC_LOCAL_ERROR_INVALID_STREAM_DIRECTION, COQUIC_LOCAL_ERROR_SEND_SIDE_CLOSED,
         COQUIC_LOCAL_ERROR_RECEIVE_SIDE_CLOSED,      COQUIC_LOCAL_ERROR_FINAL_SIZE_CONFLICT,
         COQUIC_LOCAL_ERROR_DATAGRAM_NOT_SUPPORTED,   COQUIC_LOCAL_ERROR_DATAGRAM_TOO_LARGE,
+        COQUIC_LOCAL_ERROR_FLOW_CONTROL_VIOLATION,
     };
 
     for (std::size_t index = 0; index < codes.size(); ++index) {

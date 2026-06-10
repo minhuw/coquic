@@ -2203,6 +2203,31 @@ TEST(QuicCoreTest, ConnectionProcessInboundApplicationCoversRemainingValidationB
                              coquic::quic::test::test_time(1)),
                          coquic::quic::CodecErrorCode::invalid_varint);
 
+    auto stream_flow_overflow = make_connected_client_connection();
+    auto &limited_stream = stream_flow_overflow.streams_
+                               .emplace(0, coquic::quic::make_implicit_stream_state(
+                                               /*stream_id=*/0, stream_flow_overflow.config_.role))
+                               .first->second;
+    stream_flow_overflow.initialize_stream_flow_control(limited_stream);
+    limited_stream.flow_control.advertised_max_stream_data = 1;
+    limited_stream.receive_flow_control_limit = 1;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # A receiver MUST close the connection with an error of type
+    // # FLOW_CONTROL_ERROR if the sender violates the advertised connection
+    // # or stream data limits; see Section 11 for details on error handling.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+    // # An endpoint MUST terminate a connection with an error of type
+    // # FLOW_CONTROL_ERROR if it receives more data than the largest maximum
+    // # stream data that it has sent for the affected stream.
+    expect_transport_codec_failure(
+        stream_flow_overflow.process_inbound_application(
+            std::array<coquic::quic::Frame, 1>{
+                coquic::quic::test::make_inbound_application_stream_frame("xy", 0),
+            },
+            coquic::quic::test::test_time(1)),
+        coquic::quic::CodecErrorCode::invalid_varint,
+        coquic::quic::QuicTransportErrorCode::flow_control_error);
+
     coquic::quic::QuicConnection gated_connection(coquic::quic::test::make_client_core_config());
     gated_connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     for (const auto &frame : std::vector<coquic::quic::Frame>{
@@ -2555,6 +2580,30 @@ TEST(QuicCoreTest, ConnectionProcessInboundReceivedApplicationCoversValidationAn
                 make_received_stream_frame("xy", /*offset=*/(std::uint64_t{1} << 62) - 1)},
             coquic::quic::test::test_time(2), /*allow_preconnected_frames=*/false, /*path_id=*/0),
         coquic::quic::CodecErrorCode::invalid_varint);
+
+    auto stream_flow_overflow = make_connected_client_connection();
+    auto &limited_stream = stream_flow_overflow.streams_
+                               .emplace(0, coquic::quic::make_implicit_stream_state(
+                                               /*stream_id=*/0, stream_flow_overflow.config_.role))
+                               .first->second;
+    stream_flow_overflow.initialize_stream_flow_control(limited_stream);
+    limited_stream.flow_control.advertised_max_stream_data = 1;
+    limited_stream.receive_flow_control_limit = 1;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # A receiver MUST close the connection with an error of type
+    // # FLOW_CONTROL_ERROR if the sender violates the advertised connection
+    // # or stream data limits; see Section 11 for details on error handling.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+    // # An endpoint MUST terminate a connection with an error of type
+    // # FLOW_CONTROL_ERROR if it receives more data than the largest maximum
+    // # stream data that it has sent for the affected stream.
+    expect_transport_codec_failure(stream_flow_overflow.process_inbound_received_application(
+                                       std::vector<coquic::quic::ReceivedFrame>{
+                                           make_received_stream_frame("xy", /*offset=*/0)},
+                                       coquic::quic::test::test_time(2),
+                                       /*allow_preconnected_frames=*/false, /*path_id=*/0),
+                                   coquic::quic::CodecErrorCode::invalid_varint,
+                                   coquic::quic::QuicTransportErrorCode::flow_control_error);
 
     const std::array<std::byte, 8> gated_challenge_data = make_challenge_data(0x2a);
     const auto run_gated_frame = [&](const coquic::quic::ReceivedFrame &frame) {

@@ -36,6 +36,7 @@ enum class StreamStateErrorCode : std::uint8_t {
     invalid_stream_direction,
     send_side_closed,
     receive_side_closed,
+    flow_control_violation,
     final_size_conflict,
 };
 

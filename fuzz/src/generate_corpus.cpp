@@ -109,6 +109,81 @@ void write_seed(const std::filesystem::path &root, const std::string &target,
     write_seed(root, target, name, std::span<const std::byte>(data.data(), data.size()));
 }
 
+class FuzzInputBuilder {
+  public:
+    void write_u8(unsigned value) {
+        data_.push_back(static_cast<std::byte>(value & 0xffu));
+    }
+
+    void write_u64(std::uint64_t value) {
+        for (int shift = 56; shift >= 0; shift -= 8) {
+            write_u8(static_cast<unsigned>((value >> shift) & 0xffu));
+        }
+    }
+
+    void write_size(std::uint64_t value) {
+        write_u64(value);
+    }
+
+    void write_sized_bytes(std::span<const std::byte> data) {
+        write_size(data.size());
+        data_.insert(data_.end(), data.begin(), data.end());
+    }
+
+    std::vector<std::byte> finish() && {
+        return std::move(data_);
+    }
+
+  private:
+    std::vector<std::byte> data_;
+};
+
+enum class ProtectedSeedPacketSpace : std::uint8_t {
+    handshake,
+    zero_rtt,
+    one_rtt,
+};
+
+void write_common_protected_seed_prefix(FuzzInputBuilder &seed) {
+    seed.write_u8(0); // endpoint role
+    seed.write_u8(0); // cipher suite
+    seed.write_sized_bytes(bytes({0x83}));
+    seed.write_sized_bytes(bytes({0xde, 0xad, 0xbe, 0xef}));
+    seed.write_size(0); // generate one packet
+    seed.write_size(0); // one-byte packet number
+}
+
+std::vector<std::byte> protected_packet_seed(ProtectedSeedPacketSpace packet_space,
+                                             std::uint8_t frame_choice) {
+    FuzzInputBuilder seed;
+    write_common_protected_seed_prefix(seed);
+
+    switch (packet_space) {
+    case ProtectedSeedPacketSpace::handshake:
+        seed.write_u8(1); // ProtectedHandshakePacket
+        seed.write_sized_bytes(bytes({0x84}));
+        seed.write_sized_bytes(bytes({0xc2}));
+        seed.write_u64(0); // packet number
+        break;
+    case ProtectedSeedPacketSpace::zero_rtt:
+        seed.write_u8(2); // ProtectedZeroRttPacket
+        seed.write_sized_bytes(bytes({0x85}));
+        seed.write_sized_bytes(bytes({0xc3}));
+        seed.write_u64(0); // packet number
+        break;
+    case ProtectedSeedPacketSpace::one_rtt:
+        seed.write_u8(3);  // ProtectedOneRttPacket
+        seed.write_u8(0);  // spin bit
+        seed.write_u8(0);  // key phase
+        seed.write_u64(0); // packet number delta
+        break;
+    }
+
+    seed.write_size(0); // generate one frame
+    seed.write_u8(frame_choice);
+    return std::move(seed).finish();
+}
+
 void write_encoded_frame(const std::filesystem::path &root, const std::string &name,
                          const Frame &frame) {
     const auto encoded = coquic::quic::serialize_frame(frame);
@@ -414,6 +489,72 @@ void generate_packet_seeds(const std::filesystem::path &root) {
     write_encoded_packet(root, "fuzz_datagram", "generated_one_rtt_dcid_8", one_rtt_dcid_8);
 }
 
+void generate_protected_packet_seeds(const std::filesystem::path &root) {
+    static constexpr std::array<const char *, 5> handshake_frames = {
+        "padding", "ping", "ack", "crypto", "transport_close",
+    };
+    static constexpr std::array<const char *, 16> zero_rtt_frames = {
+        "padding",
+        "ping",
+        "reset_stream",
+        "stop_sending",
+        "stream",
+        "datagram",
+        "max_data",
+        "max_stream_data",
+        "max_streams",
+        "data_blocked",
+        "stream_data_blocked",
+        "streams_blocked",
+        "new_connection_id",
+        "path_challenge",
+        "transport_close",
+        "application_close",
+    };
+    static constexpr std::array<const char *, 22> one_rtt_frames = {
+        "padding",
+        "ping",
+        "ack",
+        "reset_stream",
+        "stop_sending",
+        "crypto",
+        "new_token",
+        "stream",
+        "datagram",
+        "max_data",
+        "max_stream_data",
+        "max_streams",
+        "data_blocked",
+        "stream_data_blocked",
+        "streams_blocked",
+        "new_connection_id",
+        "retire_connection_id",
+        "path_challenge",
+        "path_response",
+        "transport_close",
+        "application_close",
+        "handshake_done",
+    };
+
+    for (std::size_t i = 0; i < handshake_frames.size(); ++i) {
+        write_seed(root, "fuzz_protected_packet",
+                   "generated_handshake_" + std::string(handshake_frames[i]),
+                   protected_packet_seed(ProtectedSeedPacketSpace::handshake,
+                                         static_cast<std::uint8_t>(i)));
+    }
+    for (std::size_t i = 0; i < zero_rtt_frames.size(); ++i) {
+        write_seed(root, "fuzz_protected_packet",
+                   "generated_zero_rtt_" + std::string(zero_rtt_frames[i]),
+                   protected_packet_seed(ProtectedSeedPacketSpace::zero_rtt,
+                                         static_cast<std::uint8_t>(i)));
+    }
+    for (std::size_t i = 0; i < one_rtt_frames.size(); ++i) {
+        write_seed(
+            root, "fuzz_protected_packet", "generated_one_rtt_" + std::string(one_rtt_frames[i]),
+            protected_packet_seed(ProtectedSeedPacketSpace::one_rtt, static_cast<std::uint8_t>(i)));
+    }
+}
+
 void generate_transport_parameter_seeds(const std::filesystem::path &root) {
     write_encoded_transport_parameters(root, "generated_minimal",
                                        TransportParameters{
@@ -500,6 +641,7 @@ void generate(const std::filesystem::path &root) {
     generate_varint_seeds(root);
     generate_frame_seeds(root);
     generate_packet_seeds(root);
+    generate_protected_packet_seeds(root);
     generate_transport_parameter_seeds(root);
     generate_state_machine_seeds(root);
 }

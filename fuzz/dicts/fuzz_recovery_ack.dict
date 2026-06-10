@@ -1,0 +1,6 @@
+record_received="\x00"
+send_packet="\x04"
+ack_ranges="\x06"
+ack_frame="\x07"
+declare_lost="\x08"
+retire="\x09"

@@ -1,0 +1,8 @@
+# client role, stream 0, peer limit, receive/send/control operations
+00 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 10 00
+00 00 00 00 00 00 20 00
+00 05 68 65 6c 6c 6f
+04 00 00 00 40
+05 00 00 00 00 00
+08 00 00 00 01

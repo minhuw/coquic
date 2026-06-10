@@ -30,6 +30,33 @@ common_flags=(
   -I"$repo_root/include"
 )
 
+tls_backend="${COQUIC_TLS_BACKEND:-quictls}"
+tls_linkage="${COQUIC_TLS_LINKAGE:-static}"
+case "$tls_backend" in
+  quictls)
+    tls_include_dir="${QUICTLS_INCLUDE_DIR:-}"
+    tls_lib_dir="${QUICTLS_LIB_DIR:-}"
+    packet_crypto_source="$repo_root/src/quic/crypto/packet_crypto_quictls.cpp"
+    ;;
+  boringssl)
+    tls_include_dir="${BORINGSSL_INCLUDE_DIR:-}"
+    tls_lib_dir="${BORINGSSL_LIB_DIR:-}"
+    packet_crypto_source="$repo_root/src/quic/crypto/packet_crypto_boringssl.cpp"
+    ;;
+  *)
+    printf 'error: unsupported COQUIC_TLS_BACKEND=%s\n' "$tls_backend" >&2
+    exit 1
+    ;;
+esac
+
+tls_lib_ext="a"
+if [ "$tls_linkage" = "shared" ]; then
+  tls_lib_ext="so"
+elif [ "$tls_linkage" != "static" ]; then
+  printf 'error: unsupported COQUIC_TLS_LINKAGE=%s\n' "$tls_linkage" >&2
+  exit 1
+fi
+
 sanitizers="${COQUIC_FUZZ_SANITIZERS:-address,undefined}"
 if [ -n "$sanitizers" ]; then
   common_flags+=("-fsanitize=$sanitizers")
@@ -50,6 +77,50 @@ common_sources=(
 transport_sources=(
   "$repo_root/src/quic/transport/transport_parameters.cpp"
 )
+
+crypto_stream_sources=(
+  "$repo_root/src/quic/crypto/crypto_stream.cpp"
+)
+
+stream_sources=(
+  "${crypto_stream_sources[@]}"
+  "$repo_root/src/quic/transport/streams.cpp"
+)
+
+recovery_sources=(
+  "${stream_sources[@]}"
+  "$repo_root/src/quic/transport/recovery.cpp"
+)
+
+congestion_sources=(
+  "${recovery_sources[@]}"
+  "$repo_root/src/quic/cca/common.cpp"
+  "$repo_root/src/quic/cca/newreno.cpp"
+  "$repo_root/src/quic/cca/cubic.cpp"
+  "$repo_root/src/quic/cca/bbr.cpp"
+  "$repo_root/src/quic/cca/copa.cpp"
+  "$repo_root/src/quic/transport/congestion.cpp"
+)
+
+protected_sources=(
+  "$repo_root/src/quic/codec/packet_number.cpp"
+  "$repo_root/src/quic/codec/protected_codec.cpp"
+  "$repo_root/src/quic/codec/protected_codec_test_hooks.cpp"
+  "$packet_crypto_source"
+  "${stream_sources[@]}"
+)
+
+protected_link_args=()
+if [ -n "$tls_include_dir" ] && [ -n "$tls_lib_dir" ]; then
+  common_flags+=("-I$tls_include_dir")
+  protected_link_args+=(
+    "$tls_lib_dir/libssl.$tls_lib_ext"
+    "$tls_lib_dir/libcrypto.$tls_lib_ext"
+    -lm
+    -pthread
+    -ldl
+  )
+fi
 
 build_target() {
   local name="$1"
@@ -73,11 +144,30 @@ build_seed_generator() {
 }
 
 for target in "${COQUIC_FUZZ_TARGETS[@]}"; do
-  if [ "$target" = "fuzz_transport_parameters" ]; then
-    build_target "$target" "${transport_sources[@]}"
-  else
-    build_target "$target"
-  fi
+  case "$target" in
+    fuzz_transport_parameters)
+      build_target "$target" "${transport_sources[@]}"
+      ;;
+    fuzz_protected_packet)
+      if [ -z "$tls_include_dir" ] || [ -z "$tls_lib_dir" ]; then
+        printf 'error: %s requires TLS include/lib env for backend %s\n' "$target" "$tls_backend" >&2
+        exit 1
+      fi
+      build_target "$target" "${protected_sources[@]}" "${protected_link_args[@]}"
+      ;;
+    fuzz_stream_state)
+      build_target "$target" "${stream_sources[@]}"
+      ;;
+    fuzz_recovery_ack)
+      build_target "$target" "${recovery_sources[@]}"
+      ;;
+    fuzz_congestion)
+      build_target "$target" "${congestion_sources[@]}"
+      ;;
+    *)
+      build_target "$target"
+      ;;
+  esac
 done
 build_seed_generator
 

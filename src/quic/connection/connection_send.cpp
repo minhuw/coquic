@@ -550,6 +550,13 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
         }
 
         const auto packet_number = reserve_packet_number(application_space_);
+        if (!packet_number.has_value()) {
+            for (const auto &fragment : fragments) {
+                stream.restore_send_fragment(fragment);
+            }
+            connection_flow_control_.highest_sent -= new_bytes_sent;
+            break;
+        }
         if (!current_write_phase_first_packet_number_.has_value()) {
             current_write_phase_first_packet_number_ = packet_number;
         }
@@ -563,7 +570,7 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
             serialized_packet_length = append_protected_one_rtt_stream_fragment_packet_to_datagram(
                 datagram, outbound_spin_bit_for_path(current_send_path_id_),
                 application_write_key_phase_, destination_connection_id,
-                kDefaultInitialPacketNumberLength, packet_number, fragments.front(),
+                kDefaultInitialPacketNumberLength, *packet_number, fragments.front(),
                 serialize_context.value());
         }
         if (!serialized_packet_length.has_value()) {
@@ -587,7 +594,7 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
             serialized_packet_length = append_protected_one_rtt_stream_fragment_packet_to_datagram(
                 datagram, outbound_spin_bit_for_path(current_send_path_id_),
                 application_write_key_phase_, destination_connection_id,
-                kDefaultInitialPacketNumberLength, packet_number, fragments.front(),
+                kDefaultInitialPacketNumberLength, *packet_number, fragments.front(),
                 serialize_context.value());
             if (!serialized_packet_length.has_value()) {
                 log_codec_failure("append_split_fin_one_rtt_packet_to_datagram",
@@ -607,7 +614,7 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
         const auto ecn = outbound_ecn_codepoint_for_path(current_send_path_id_);
         PendingSimpleStreamPacketScratch pending_packet{
             .packet_space = &application_space_,
-            .packet_number = packet_number,
+            .packet_number = *packet_number,
             .sent_time = now,
             .first_stream_frame_metadata = stream_frame_send_metadata(fragments.front()),
             .packet_index = 0,
@@ -1340,32 +1347,46 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             // # [QUIC-TLS]), an endpoint MUST send any CONNECTION_CLOSE frames
             // # in a 1-RTT packet.
         }
-        ProtectedPacket packet =
-            application_space_.write_secret.has_value()
-                ? make_application_protected_packet(
-                      /*use_zero_rtt_packet_protection=*/false, current_version_,
-                      application_destination_connection_id(), config_.source_connection_id,
-                      application_write_key_phase_, kDefaultInitialPacketNumberLength,
-                      reserve_packet_number(application_space_), std::vector<Frame>{*close_frame},
-                      {})
-                : (handshake_space_.write_secret.has_value()
-                       ? ProtectedPacket{ProtectedHandshakePacket{
-                             .version = current_version_,
-                             .destination_connection_id = send_destination_connection_id,
-                             .source_connection_id = config_.source_connection_id,
-                             .packet_number_length = kDefaultInitialPacketNumberLength,
-                             .packet_number = reserve_packet_number(handshake_space_),
-                             .frames = std::vector<Frame>{*close_frame},
-                         }}
-                       : ProtectedPacket{ProtectedInitialPacket{
-                             .version = initial_packet_version,
-                             .destination_connection_id = send_destination_connection_id,
-                             .source_connection_id = config_.source_connection_id,
-                             .token = initial_token,
-                             .packet_number_length = kDefaultInitialPacketNumberLength,
-                             .packet_number = reserve_packet_number(initial_space_),
-                             .frames = std::vector<Frame>{*close_frame},
-                         }});
+        std::optional<std::uint64_t> close_packet_number;
+        ProtectedPacket packet;
+        if (application_space_.write_secret.has_value()) {
+            close_packet_number = reserve_packet_number(application_space_);
+            if (!close_packet_number.has_value()) {
+                return {};
+            }
+            packet = make_application_protected_packet(
+                /*use_zero_rtt_packet_protection=*/false, current_version_,
+                application_destination_connection_id(), config_.source_connection_id,
+                application_write_key_phase_, kDefaultInitialPacketNumberLength,
+                *close_packet_number, std::vector<Frame>{*close_frame}, {});
+        } else if (handshake_space_.write_secret.has_value()) {
+            close_packet_number = reserve_packet_number(handshake_space_);
+            if (!close_packet_number.has_value()) {
+                return {};
+            }
+            packet = ProtectedHandshakePacket{
+                .version = current_version_,
+                .destination_connection_id = send_destination_connection_id,
+                .source_connection_id = config_.source_connection_id,
+                .packet_number_length = kDefaultInitialPacketNumberLength,
+                .packet_number = *close_packet_number,
+                .frames = std::vector<Frame>{*close_frame},
+            };
+        } else {
+            close_packet_number = reserve_packet_number(initial_space_);
+            if (!close_packet_number.has_value()) {
+                return {};
+            }
+            packet = ProtectedInitialPacket{
+                .version = initial_packet_version,
+                .destination_connection_id = send_destination_connection_id,
+                .source_connection_id = config_.source_connection_id,
+                .token = initial_token,
+                .packet_number_length = kDefaultInitialPacketNumberLength,
+                .packet_number = *close_packet_number,
+                .frames = std::vector<Frame>{*close_frame},
+            };
+        }
         set_application_packet_spin_bit(packet, outbound_spin_bit_for_path(selected_send_path_id));
         if (std::holds_alternative<ProtectedInitialPacket>(packet)) {
             close_packet_space = &initial_space_;
@@ -1554,6 +1575,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 return {};
             }
             initial_packet_number = reserve_packet_number(initial_space_);
+            if (!initial_packet_number.has_value()) {
+                for (const auto &range : sent_initial_crypto_ranges) {
+                    initial_space_.send_crypto.mark_unsent(range.offset, range.bytes.size());
+                }
+                return {};
+            }
             packets.emplace_back(ProtectedInitialPacket{
                 .version = initial_packet_version,
                 .destination_connection_id = send_destination_connection_id,
@@ -1636,20 +1663,23 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                         return finalize_datagram(packets);
                     }
                     const auto duplicate_packet_number = reserve_packet_number(initial_space_);
+                    if (!duplicate_packet_number.has_value()) {
+                        return {};
+                    }
                     duplicate_candidate_packets.back() = ProtectedInitialPacket{
                         .version = initial_packet_version,
                         .destination_connection_id = send_destination_connection_id,
                         .source_connection_id = config_.source_connection_id,
                         .token = initial_token,
                         .packet_number_length = kDefaultInitialPacketNumberLength,
-                        .packet_number = duplicate_packet_number,
+                        .packet_number = *duplicate_packet_number,
                         .frames = sent_initial_frames,
                     };
                     packets = std::move(duplicate_candidate_packets);
                     queue_tracked_packet(
                         initial_space_,
                         SentPacketRecord{
-                            .packet_number = duplicate_packet_number,
+                            .packet_number = *duplicate_packet_number,
                             .sent_time = now,
                             .ack_eliciting = initial_ack_eliciting,
                             .in_flight = initial_ack_eliciting,
@@ -1820,18 +1850,24 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         }
 
         const auto handshake_packet_number = reserve_packet_number(handshake_space_);
+        if (!handshake_packet_number.has_value()) {
+            for (const auto &range : sent_handshake_crypto_ranges) {
+                handshake_space_.send_crypto.mark_unsent(range.offset, range.bytes.size());
+            }
+            return {};
+        }
 
         packets.emplace_back(ProtectedHandshakePacket{
             .version = current_version_,
             .destination_connection_id = send_destination_connection_id,
             .source_connection_id = config_.source_connection_id,
             .packet_number_length = kDefaultInitialPacketNumberLength,
-            .packet_number = handshake_packet_number,
+            .packet_number = *handshake_packet_number,
             .frames = sent_handshake_frames,
         });
 
         SentPacketRecord handshake_sent_record{
-            .packet_number = handshake_packet_number,
+            .packet_number = *handshake_packet_number,
             .sent_time = now,
             .ack_eliciting = handshake_ack_eliciting,
             .in_flight = handshake_ack_eliciting,
@@ -2024,7 +2060,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 }
             }
 
-            static_cast<void>(reserve_packet_number(application_space_));
+            if (!reserve_packet_number(application_space_).has_value()) {
+                return std::nullopt;
+            }
             return reserved_packet_number;
         };
         const auto try_send_simple_application_ack_only = [&]() -> std::optional<DatagramBuffer> {

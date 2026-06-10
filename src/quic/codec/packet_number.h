@@ -7,6 +7,8 @@
 
 namespace coquic::quic {
 
+inline constexpr std::uint64_t kMaxPacketNumber = (std::uint64_t{1} << 62) - 1;
+
 CodecResult<std::uint32_t> truncate_packet_number(std::uint64_t packet_number,
                                                   std::uint8_t packet_number_length);
 

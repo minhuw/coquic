@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "src/quic/codec/packet_number.h"
 #include "tests/support/core/connection_ack_test_support.h"
 
 namespace {
@@ -1941,6 +1942,30 @@ TEST(QuicCoreTest, ApplicationCloseDrainReturnsEmptyWithoutOneRttKeys) {
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     EXPECT_TRUE(datagram.empty());
+}
+
+TEST(QuicCoreTest, SendingAtPacketNumberLimitSilentlyClosesWithoutDatagram) {
+    auto connection = make_connected_client_connection();
+    connection.application_space_.next_send_packet_number = coquic::quic::kMaxPacketNumber;
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("limit"), false)
+            .has_value());
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    // # If the packet number for sending reaches 2^62-1, the sender MUST
+    // # close the connection without sending a CONNECTION_CLOSE frame or any
+    // # further packets;
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    EXPECT_TRUE(datagram.empty());
+    EXPECT_TRUE(connection.has_failed());
+    ASSERT_TRUE(connection.pending_terminal_state_.has_value());
+    EXPECT_TRUE(optional_value_or_terminate(connection.pending_terminal_state_) ==
+                coquic::quic::QuicConnectionTerminalState::closed);
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), 0u);
+    EXPECT_EQ(connection.application_space_.next_send_packet_number,
+              coquic::quic::kMaxPacketNumber);
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(2)).empty());
 }
 
 TEST(QuicCoreTest, TinyDatagramBudgetTruncatesApplicationCloseReason) {

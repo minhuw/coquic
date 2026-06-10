@@ -811,7 +811,7 @@ class QuicConnection {
     static bool
     should_skip_packet_number_for_optimistic_ack_detection(const PacketSpaceState &packet_space,
                                                            std::uint64_t packet_number);
-    std::uint64_t reserve_packet_number(PacketSpaceState &packet_space);
+    std::optional<std::uint64_t> reserve_packet_number(PacketSpaceState &packet_space);
     bool ack_ranges_include_unsent_packet_number(const PacketSpaceState &packet_space,
                                                  AckRangeCursor cursor) const;
     CodecResult<bool> reject_optimistic_ack_if_detected(PacketSpaceState &packet_space,

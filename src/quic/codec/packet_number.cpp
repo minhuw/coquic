@@ -4,7 +4,6 @@ namespace coquic::quic {
 
 namespace {
 
-constexpr std::uint64_t kMaxPacketNumber = (std::uint64_t{1} << 62) - 1;
 constexpr std::uint64_t kPacketNumberSpaceSize = std::uint64_t{1} << 62;
 
 bool valid_packet_number_length(std::uint8_t packet_number_length) {

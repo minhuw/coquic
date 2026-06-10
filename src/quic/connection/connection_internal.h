@@ -41,6 +41,7 @@
 #include "src/quic/codec/buffer.h"
 #include "src/quic/connection/connection_test_hooks.h"
 #include "src/quic/codec/frame.h"
+#include "src/quic/codec/packet_number.h"
 #include "src/quic/crypto/packet_crypto.h"
 #include "src/quic/crypto/packet_crypto_test_hooks.h"
 #include "src/quic/codec/protected_codec.h"

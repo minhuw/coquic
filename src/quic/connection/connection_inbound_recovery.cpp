@@ -721,7 +721,16 @@ bool QuicConnection::should_skip_packet_number_for_optimistic_ack_detection(
     return skip_counter_active & skip_interval_due & packet_number_available;
 }
 
-std::uint64_t QuicConnection::reserve_packet_number(PacketSpaceState &packet_space) {
+std::optional<std::uint64_t> QuicConnection::reserve_packet_number(PacketSpaceState &packet_space) {
+    if (packet_space.next_send_packet_number >= kMaxPacketNumber) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+        // # If the packet number for sending reaches 2^62-1, the sender MUST
+        // # close the connection without sending a CONNECTION_CLOSE frame or any
+        // # further packets;
+        mark_silent_close();
+        return std::nullopt;
+    }
+
     //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
     // # New packet numbers MUST be used for any new packets that are sent; as
     // # described in Section 17.2.5.3, reusing packet numbers could compromise

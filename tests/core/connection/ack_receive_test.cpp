@@ -1166,7 +1166,8 @@ TEST(QuicCoreTest, OptimisticAckMitigationSkipsPacketNumbersAndRejectsAcksForThe
 
     std::vector<std::uint64_t> sent_packet_numbers;
     for (std::int64_t index = 0; index < 16; ++index) {
-        const auto packet_number = connection.reserve_packet_number(connection.application_space_);
+        const auto packet_number = optional_value_or_terminate(
+            connection.reserve_packet_number(connection.application_space_));
         sent_packet_numbers.push_back(packet_number);
         connection.track_sent_packet(connection.application_space_,
                                      coquic::quic::SentPacketRecord{

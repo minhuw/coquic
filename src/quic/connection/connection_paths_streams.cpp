@@ -690,6 +690,9 @@ void QuicConnection::queue_path_response(QuicPathId path_id, const std::array<st
     // # On receiving a PATH_CHALLENGE frame, an endpoint MUST respond by
     // # echoing the data contained in the PATH_CHALLENGE frame in a
     // # PATH_RESPONSE frame.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.3
+    // # An endpoint that receives a PATH_CHALLENGE on an active path SHOULD
+    // # send a non-probing packet in response.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-19.17
     // # The recipient of this frame MUST generate a PATH_RESPONSE frame
     // # (Section 19.18) containing the same Data value.

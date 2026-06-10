@@ -3828,6 +3828,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                                         : take_new_token_frames(ack_only_mode);
             auto new_connection_id_frames = take_new_connection_id_frames(ack_only_mode);
             auto retire_connection_id_frames = take_retire_connection_id_frames(ack_only_mode);
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.3
+            // # An endpoint that receives a PATH_CHALLENGE on an active path
+            // # SHOULD send a non-probing packet in response.
             auto application_path_validation_frames = take_path_validation_frames(ack_only_mode);
             if (application_path_validation_frames.response.has_value()) {
                 defer_retire_connection_id_frames(retire_connection_id_frames);

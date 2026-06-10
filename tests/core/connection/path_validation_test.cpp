@@ -777,6 +777,51 @@ TEST(QuicCoreTest, FirstServerResponseToProbingPacketOnNewPathAlsoIncludesPathCh
     EXPECT_TRUE(saw_path_challenge);
 }
 
+TEST(QuicCoreTest, PathChallengeOnActivePathSendsNonProbingResponse) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 9;
+    connection.current_send_path_id_ = 9;
+    auto &active_path = connection.ensure_path_state(9);
+    active_path.validated = true;
+    active_path.is_current_send_path = true;
+    constexpr std::array<std::byte, 8> challenge = {
+        std::byte{0x11}, std::byte{0x12}, std::byte{0x13}, std::byte{0x14},
+        std::byte{0x15}, std::byte{0x16}, std::byte{0x17}, std::byte{0x18}};
+    ASSERT_TRUE(connection.queue_stream_send(0, std::vector<std::byte>(64, std::byte{0x61}), false)
+                    .has_value());
+
+    auto processed = connection.process_inbound_application(
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::PathChallengeFrame{.data = challenge},
+        },
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/9,
+        /*used_previous_application_read_secret=*/false, /*packet_number=*/77);
+
+    ASSERT_TRUE(processed.has_value());
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 9u);
+
+    auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    auto *first_packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(first_packet, nullptr);
+
+    bool saw_stream = false;
+    bool saw_path_response = false;
+    for (const auto &frame : first_packet->frames) {
+        saw_stream = saw_stream || std::holds_alternative<coquic::quic::StreamFrame>(frame);
+        saw_path_response =
+            saw_path_response || std::holds_alternative<coquic::quic::PathResponseFrame>(frame);
+    }
+
+    EXPECT_TRUE(saw_path_response);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.3
+    // # An endpoint that receives a PATH_CHALLENGE on an active path SHOULD
+    // # send a non-probing packet in response.
+    EXPECT_TRUE(saw_stream);
+}
+
 TEST(QuicCoreTest, ApplicationProbeOnNewPathIncludesPathChallenge) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;

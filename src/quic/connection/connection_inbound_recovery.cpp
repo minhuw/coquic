@@ -2449,6 +2449,10 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
                         return pending.sequence_number == acked.sequence_number;
                     });
             });
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+        // # An endpoint SHOULD allow for sending and tracking a number of
+        // # RETIRE_CONNECTION_ID frames of at least twice the value of the
+        // # active_connection_id_limit transport parameter.
         for (const auto &retired : packet.retire_connection_id_frames) {
             if (const auto peer = peer_connection_ids_.find(retired.sequence_number);
                 peer != peer_connection_ids_.end()) {

@@ -367,6 +367,65 @@ TEST(QuicCoreTest, LostRetireConnectionIdFrameKeepsPeerCidAndRequeuesRetirement)
     EXPECT_EQ(connection.pending_retire_connection_id_frames_.front().sequence_number, 0u);
 }
 
+TEST(QuicCoreTest, RetireConnectionIdTracksAtLeastTwiceActiveConnectionIdLimit) {
+    auto connection = make_connected_server_connection();
+    constexpr std::uint64_t active_connection_id_limit = 2;
+    constexpr std::uint64_t retired_connection_ids = 2 * active_connection_id_limit;
+    connection.local_transport_parameters_.active_connection_id_limit = active_connection_id_limit;
+    connection.peer_connection_ids_.clear();
+    connection.active_peer_connection_id_sequence_ = retired_connection_ids;
+
+    for (std::uint64_t sequence = 0; sequence <= retired_connection_ids; ++sequence) {
+        connection.peer_connection_ids_[sequence] = coquic::quic::PeerConnectionIdRecord{
+            .sequence_number = sequence,
+            .connection_id = bytes_from_ints({static_cast<std::uint8_t>(0xa0u + sequence)}),
+        };
+    }
+
+    for (std::uint64_t sequence = 0; sequence < retired_connection_ids; ++sequence) {
+        connection.queue_peer_connection_id_retirement(sequence);
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+    // # An endpoint SHOULD allow for sending and tracking a number of
+    // # RETIRE_CONNECTION_ID frames of at least twice the value of the
+    // # active_connection_id_limit transport parameter.
+    ASSERT_EQ(connection.pending_retire_connection_id_frames_.size(), retired_connection_ids);
+
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_TRUE(connection.pending_retire_connection_id_frames_.empty());
+
+    auto handle = connection.application_space_.recovery.newest_tracked_packet();
+    ASSERT_TRUE(handle.has_value());
+    const auto *packet = connection.application_space_.recovery.packet_for_handle(
+        optional_value_or_terminate(handle));
+    ASSERT_NE(packet, nullptr);
+    ASSERT_EQ(packet->retire_connection_id_frames.size(), retired_connection_ids);
+    for (std::uint64_t sequence = 0; sequence < retired_connection_ids; ++sequence) {
+        ASSERT_TRUE(connection.peer_connection_ids_.contains(sequence));
+        EXPECT_TRUE(connection.peer_connection_ids_.at(sequence).locally_retired);
+        EXPECT_TRUE(connection.peer_connection_ids_.at(sequence).retire_frame_in_flight);
+        EXPECT_EQ(packet->retire_connection_id_frames[sequence].sequence_number, sequence);
+    }
+
+    const auto packet_number = connection.application_space_.next_send_packet_number - 1;
+    const auto acked = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = packet_number,
+            .first_ack_range = 0,
+        },
+        coquic::quic::test::test_time(2), connection.local_transport_parameters_.ack_delay_exponent,
+        connection.local_transport_parameters_.max_ack_delay, /*suppress_pto_reset=*/false);
+
+    ASSERT_TRUE(acked.has_value());
+    for (std::uint64_t sequence = 0; sequence < retired_connection_ids; ++sequence) {
+        EXPECT_FALSE(connection.peer_connection_ids_.contains(sequence));
+    }
+    EXPECT_TRUE(connection.peer_connection_ids_.contains(retired_connection_ids));
+}
+
 TEST(QuicCoreTest, NewConnectionIdProcessingRejectsInvalidSequencesConflictsAndLimits) {
     const auto make_token = [](std::uint8_t fill) {
         std::array<std::byte, 16> token{};

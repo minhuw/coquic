@@ -938,6 +938,10 @@ void QuicConnection::queue_peer_connection_id_retirement(std::uint64_t sequence_
     if (peer->second.retire_frame_in_flight) {
         return;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+    // # An endpoint SHOULD allow for sending and tracking a number of
+    // # RETIRE_CONNECTION_ID frames of at least twice the value of the
+    // # active_connection_id_limit transport parameter.
     const bool already_pending = std::ranges::any_of(
         pending_retire_connection_id_frames_, [&](const RetireConnectionIdFrame &pending) {
             return pending.sequence_number == sequence_number;

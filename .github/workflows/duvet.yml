@@ -122,4 +122,18 @@ jobs:
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
             minhuw@coquic.minhuw.dev \
-            "sudo rm -rf /opt/coquic-demo/current/app/public/duvet && sudo install -d -m 755 /opt/coquic-demo/current/app/public/duvet && sudo install -m 644 /tmp/coquic-duvet-report.html /opt/coquic-demo/current/app/public/duvet/report.html && sudo install -m 644 /tmp/coquic-duvet-report.json /opt/coquic-demo/current/app/public/duvet/report.json && sudo install -m 644 /tmp/coquic-duvet-snapshot.txt /opt/coquic-demo/current/app/public/duvet/snapshot.txt && rm -f /tmp/coquic-duvet-report.html /tmp/coquic-duvet-report.json /tmp/coquic-duvet-snapshot.txt"
+            'bash -s' <<'EOF'
+          set -euo pipefail
+          public_duvet_dir="/opt/coquic-demo/current/app/public/duvet"
+          sudo rm -rf "${public_duvet_dir}"
+          sudo install -d -m 755 "${public_duvet_dir}"
+          sudo install -m 644 /tmp/coquic-duvet-report.html "${public_duvet_dir}/report.html"
+          sudo install -m 644 /tmp/coquic-duvet-report.json "${public_duvet_dir}/report.json"
+          sudo install -m 644 /tmp/coquic-duvet-snapshot.txt "${public_duvet_dir}/snapshot.txt"
+          rm -f /tmp/coquic-duvet-report.html /tmp/coquic-duvet-report.json /tmp/coquic-duvet-snapshot.txt
+          sudo test -s "${public_duvet_dir}/report.html"
+          sudo test -s "${public_duvet_dir}/report.json"
+          sudo test -s "${public_duvet_dir}/snapshot.txt"
+          sudo systemctl restart coquic-demo.service
+          sudo systemctl is-active --quiet coquic-demo.service
+          EOF

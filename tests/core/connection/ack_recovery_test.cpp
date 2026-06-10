@@ -106,6 +106,96 @@ TEST(QuicCoreTest, TimeoutBeforeLossAndPtoDeadlinesDoesNothing) {
     EXPECT_EQ(connection.pto_count_, 0u);
 }
 
+TEST(QuicCoreTest, PmtudProbeAckRaisesValidatedDatagramSize) {
+    auto connection = make_connected_client_connection();
+    connection.config_.max_outbound_datagram_size = 1452;
+    connection.config_.transport.pmtud_max_datagram_size = 1452;
+    connection.current_send_path_id_ = 0;
+    auto &path = connection.ensure_path_state(0);
+    path.validated = true;
+    path.mtu.enabled = true;
+    path.mtu.viable = true;
+    path.mtu.base_datagram_size = 1200;
+    path.mtu.validated_datagram_size = 1200;
+    path.mtu.search_low = 1200;
+    path.mtu.probe_ceiling = 1452;
+    path.mtu.next_probe_time = coquic::quic::test::test_time(1);
+
+    connection.maybe_arm_pmtu_probe(coquic::quic::test::test_time(1));
+    ASSERT_TRUE(connection.application_space_.pending_probe_packet.has_value());
+    const auto probe =
+        optional_value_or_terminate(connection.application_space_.pending_probe_packet);
+    ASSERT_TRUE(probe.is_pmtu_probe);
+    EXPECT_GT(probe.pmtu_probe_size, path.mtu.validated_datagram_size);
+
+    connection.note_pmtu_probe_sent(0, /*packet_number=*/42, probe.pmtu_probe_size);
+    connection.note_pmtu_probe_acked(
+        coquic::quic::SentPacketRecord{
+            .packet_number = 42,
+            .sent_time = coquic::quic::test::test_time(1),
+            .ack_eliciting = true,
+            .in_flight = true,
+            .path_id = 0,
+            .is_pmtu_probe = true,
+            .pmtu_probe_size = probe.pmtu_probe_size,
+        },
+        coquic::quic::test::test_time(2));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+    // # An endpoint SHOULD use DPLPMTUD (Section 14.3) or PMTUD (Section
+    // # 14.2.1) to determine whether the path to a destination will support a
+    // # desired maximum datagram size without fragmentation.
+    EXPECT_EQ(path.mtu.validated_datagram_size, probe.pmtu_probe_size);
+    EXPECT_EQ(path.mtu.search_low, probe.pmtu_probe_size);
+    EXPECT_FALSE(path.mtu.outstanding_probe_packet_number.has_value());
+}
+
+TEST(QuicCoreTest, LostPmtudProbeDoesNotTriggerCongestionReaction) {
+    auto connection = make_connected_client_connection();
+    connection.current_send_path_id_ = 0;
+    auto &path = connection.ensure_path_state(0);
+    path.validated = true;
+    path.mtu.enabled = true;
+    path.mtu.viable = true;
+    path.mtu.validated_datagram_size = 1200;
+    path.mtu.probe_ceiling = 1452;
+    path.mtu.outstanding_probe_size = 1400;
+    path.mtu.outstanding_probe_packet_number = 7;
+
+    connection.congestion_controller_.congestion_window_ = 16000;
+    connection.congestion_controller_.bytes_in_flight_ = 1400;
+    const auto congestion_window_before = connection.congestion_controller_.congestion_window();
+    const auto bytes_in_flight_before = connection.congestion_controller_.bytes_in_flight();
+
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 7,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1400,
+                                     .path_id = 0,
+                                     .is_pmtu_probe = true,
+                                     .pmtu_probe_size = 1400,
+                                 });
+    ASSERT_TRUE(connection
+                    .mark_lost_packet(
+                        connection.application_space_,
+                        optional_value_or_terminate(
+                            connection.application_space_.recovery.handle_for_packet_number(7)),
+                        /*already_marked_in_recovery=*/false, coquic::quic::test::test_time(3))
+                    .has_value());
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.4
+    // # Loss of a QUIC packet that is carried in a PMTU probe is therefore not a
+    // # reliable indication of congestion and SHOULD NOT trigger a congestion
+    // # control reaction; see Item 7 in Section 3 of [DPLPMTUD].
+    EXPECT_EQ(connection.congestion_controller_.congestion_window(), congestion_window_before);
+    EXPECT_EQ(connection.congestion_controller_.bytes_in_flight(), bytes_in_flight_before);
+    EXPECT_FALSE(path.mtu.outstanding_probe_packet_number.has_value());
+    EXPECT_EQ(path.mtu.probe_ceiling, 1399u);
+}
+
 TEST(QuicCoreTest, ServerProcessingHandshakePacketDiscardsInitialRecoveryState) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_server_core_config());
     connection.started_ = true;

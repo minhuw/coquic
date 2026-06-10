@@ -2512,6 +2512,10 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
     if (!packet.is_pmtu_probe) {
         congestion_controller_.on_packets_lost(std::span<const SentPacketRecord>(&packet, 1));
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.4
+    // # Loss of a QUIC packet that is carried in a PMTU probe is therefore not a
+    // # reliable indication of congestion and SHOULD NOT trigger a congestion
+    // # control reaction; see Item 7 in Section 3 of [DPLPMTUD].
     note_pmtu_probe_lost(packet, now.value_or(packet.sent_time));
     if (packet_space_is_application(packet_space, application_space_) &&
         current_send_path_id_.has_value()) {

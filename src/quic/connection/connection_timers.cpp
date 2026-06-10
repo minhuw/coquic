@@ -367,6 +367,10 @@ void QuicConnection::maybe_arm_pmtu_probe(QuicCoreTimePoint now) {
         path.mtu.next_probe_time = now + QuicCoreDuration{100000};
         return;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+    // # An endpoint SHOULD use DPLPMTUD (Section 14.3) or PMTUD (Section
+    // # 14.2.1) to determine whether the path to a destination will support a
+    // # desired maximum datagram size without fragmentation.
     const auto probe_size = next_pmtu_probe_size(path);
     if (!probe_size.has_value()) {
         maybe_trace_pmtu_no_probe(config_.source_connection_id, path);

@@ -3084,6 +3084,10 @@ void QuicConnection::note_pmtu_probe_acked(const SentPacketRecord &packet, QuicC
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+    // # An endpoint SHOULD use DPLPMTUD (Section 14.3) or PMTUD (Section
+    // # 14.2.1) to determine whether the path to a destination will support a
+    // # desired maximum datagram size without fragmentation.
     auto &path = ensure_path_state(packet.path_id);
     const auto probe_size = packet.pmtu_probe_size != 0
                                 ? std::optional<std::size_t>{packet.pmtu_probe_size}
@@ -3113,6 +3117,10 @@ void QuicConnection::note_pmtu_probe_lost(const SentPacketRecord &packet, QuicCo
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.4
+    // # Loss of a QUIC packet that is carried in a PMTU probe is therefore not a
+    // # reliable indication of congestion and SHOULD NOT trigger a congestion
+    // # control reaction; see Item 7 in Section 3 of [DPLPMTUD].
     auto &path = ensure_path_state(packet.path_id);
     if (should_clear_outstanding_pmtu_probe(path.mtu, packet.packet_number)) {
         if (packet.pmtu_probe_size > path.mtu.validated_datagram_size) {

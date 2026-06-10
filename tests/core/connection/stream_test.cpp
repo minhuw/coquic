@@ -135,6 +135,9 @@ TEST(QuicCoreTest, DatagramSendPriorityChoosesHigherPriorityThenFifo) {
 TEST(QuicCoreTest, DatagramSendPriorityIsRelativeToPendingStreamWork) {
     auto connection = make_connected_client_connection();
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.3
+    // # A QUIC implementation SHOULD provide ways in which an application can
+    // # indicate the relative priority of streams.
     ASSERT_TRUE(connection
                     .queue_stream_send(0, bytes_from_ints({0x73}), false,
                                        /*priority=*/5)

@@ -219,13 +219,22 @@ std::optional<QuicCoreTimePoint> QuicConnection::ack_deadline() const {
 }
 
 QuicCoreDuration QuicConnection::path_validation_timeout_period() const {
-    const auto pto_reference =
+    const auto current_pto_reference =
         std::max(compute_pto_deadline(shared_recovery_rtt_state(), QuicCoreDuration{0},
                                       QuicCoreTimePoint{}, /*pto_count=*/0) -
                      QuicCoreTimePoint{},
                  QuicCoreClock::duration::zero());
-    return std::chrono::duration_cast<QuicCoreDuration>(pto_reference *
-                                                        kPersistentCongestionThreshold);
+    const auto new_path_pto_reference =
+        std::max(compute_pto_deadline(RecoveryRttState{}, QuicCoreDuration{0}, QuicCoreTimePoint{},
+                                      /*pto_count=*/0) -
+                     QuicCoreTimePoint{},
+                 QuicCoreClock::duration::zero());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.4
+    // # A value of three times the larger of the current PTO or the PTO for
+    // # the new path (using kInitialRtt, as defined in [QUIC-RECOVERY]) is
+    // # RECOMMENDED.
+    return std::chrono::duration_cast<QuicCoreDuration>(
+        std::max(current_pto_reference, new_path_pto_reference) * kPersistentCongestionThreshold);
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::idle_timeout_deadline() const {

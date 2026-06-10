@@ -635,6 +635,26 @@ TEST(QuicCoreTest, LocalMigrationRequestSendsPathChallengeWithoutOtherPayload) {
     EXPECT_TRUE(saw_path_challenge);
 }
 
+TEST(QuicCoreTest, LocalMigrationBeforeHandshakeConfirmedIsRejected) {
+    auto connection = make_connected_client_connection();
+    connection.handshake_confirmed_ = false;
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    install_spare_peer_connection_id(connection);
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::active);
+
+    ASSERT_FALSE(requested.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    // # An endpoint MUST NOT initiate connection migration before the handshake
+    // # is confirmed, as defined in Section 4.1.2 of [QUIC-TLS].
+    EXPECT_FALSE(connection.paths_.contains(7));
+    EXPECT_EQ(connection.current_send_path_id_, 3u);
+}
+
 TEST(QuicCoreTest, LocalMigrationRequestUsesSparePeerConnectionIdOnNewPath) {
     auto connection = make_connected_client_connection();
     connection.paths_.clear();
@@ -1041,6 +1061,30 @@ TEST(QuicCoreTest, PeerMigrationKeepsPendingSendPathDespiteOldPathTraffic) {
 
     EXPECT_EQ(connection.current_send_path_id_, 7u);
     EXPECT_EQ(connection.previous_path_id_, 3u);
+    EXPECT_FALSE(connection.paths_.at(7).validated);
+    EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+}
+
+TEST(QuicCoreTest, PeerMigrationViolationOfDisableActiveMigrationStartsPathValidation) {
+    auto connection = make_connected_server_connection();
+    connection.local_transport_parameters_.disable_active_migration = true;
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 7,
+        {coquic::quic::PingFrame{}, coquic::quic::MaxDataFrame{.maximum_data = 1024}}));
+
+    EXPECT_FALSE(connection.has_failed());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    // # If the peer violates this requirement, the endpoint MUST either drop
+    // # the incoming packets on that path without generating a Stateless Reset
+    // # or proceed with path validation and allow the peer to migrate.
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_EQ(connection.previous_path_id_, 3u);
+    ASSERT_TRUE(connection.paths_.contains(7));
     EXPECT_FALSE(connection.paths_.at(7).validated);
     EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
 }
@@ -1646,7 +1690,13 @@ TEST(QuicCoreTest, MigrationHelpersCoverAdditionalPrivateBranches) {
 
         connection.on_timeout(coquic::quic::test::test_time(10));
 
-        EXPECT_EQ(connection.current_send_path_id_, 11u);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.2
+        // # If an endpoint has no state about the last validated peer address,
+        // # it MUST close the connection silently by discarding all connection
+        // # state.
+        EXPECT_TRUE(connection.has_failed());
+        EXPECT_EQ(optional_value_or_terminate(connection.pending_terminal_state_),
+                  coquic::quic::QuicConnectionTerminalState::closed);
         EXPECT_FALSE(connection.previous_path_id_.has_value());
     }
 

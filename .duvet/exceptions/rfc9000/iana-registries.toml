@@ -1,0 +1,167 @@
+target = "https://www.rfc-editor.org/rfc/rfc9000"
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.2"
+quote = '''
+New requests for codepoints from QUIC registries SHOULD use a
+randomly selected codepoint that excludes both existing allocations
+and the first unallocated codepoint in the selected space.
+'''
+reason = '''
+This is guidance for authors requesting QUIC registry codepoints, not a
+transport behavior implemented by CoQUIC.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.2"
+quote = '''
+For codepoints that are encoded in variable-length integers
+(Section 16), such as frame types, codepoints that encode to four or
+eight bytes (that is, values 2^14 and above) SHOULD be used unless
+the usage is especially sensitive to having a longer encoding.
+'''
+reason = '''
+This is guidance for authors requesting QUIC registry codepoints, not a
+transport behavior implemented by CoQUIC.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.2"
+quote = '''
+IANA MUST allocate
+the selected codepoint if the codepoint is unassigned and the
+requirements of the registration policy are met.
+'''
+reason = '''
+This requirement is directed at IANA registry administration, not at QUIC
+endpoint implementations.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.3"
+quote = '''
+This SHOULD be done only for the
+codepoints with the earliest recorded date, and entries that have
+been updated less than a year prior SHOULD NOT be reclaimed.
+'''
+reason = '''
+This requirement concerns designated-expert maintenance of IANA registries,
+not QUIC endpoint behavior.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.3"
+quote = '''
+A request to remove a codepoint MUST be reviewed by the designated
+experts.
+'''
+reason = '''
+This requirement concerns designated-expert maintenance of IANA registries,
+not QUIC endpoint behavior.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.3"
+quote = '''
+The experts MUST attempt to determine whether the codepoint
+is still in use.
+'''
+reason = '''
+This requirement concerns designated-expert maintenance of IANA registries,
+not QUIC endpoint behavior.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.3"
+quote = '''
+If any use of the codepoints is identified by this search or a
+request to update the registration is made, the codepoint MUST NOT be
+reclaimed.
+'''
+reason = '''
+This requirement concerns designated-expert maintenance of IANA registries,
+not QUIC endpoint behavior.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.4"
+quote = '''
+All registrations made by Standards Track publications MUST be
+permanent.
+'''
+reason = '''
+This requirement is directed at IANA registry policy, not at QUIC endpoint
+implementations.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.2"
+quote = '''
+All codepoints that follow the pattern 0x?a?a?a?a are reserved, MUST
+NOT be assigned by IANA, and MUST NOT appear in the listing of
+assigned values.
+'''
+reason = '''
+This requirement is directed at IANA registry administration. CoQUIC can
+test handling of reserved values separately, but it does not assign or list
+IANA codepoints.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.3"
+quote = '''
+In addition to the fields listed in Section 22.1.1, permanent
+registrations in this registry MUST include the following field:
+'''
+reason = '''
+This requirement defines the format of IANA transport-parameter registry
+entries, not QUIC endpoint behavior.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.3"
+quote = '''
+Each value of the form "31 * N + 27" for integer values of N (that
+is, 27, 58, 89, ...) are reserved; these values MUST NOT be assigned
+by IANA and MUST NOT appear in the listing of assigned values.
+'''
+reason = '''
+This requirement is directed at IANA registry administration. CoQUIC can
+test handling of reserved transport parameters separately, but it does not
+assign or list IANA codepoints.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.4"
+quote = '''
+In addition to the fields listed in Section 22.1.1, permanent
+registrations in this registry MUST include the following field:
+'''
+reason = '''
+This requirement defines the format of IANA frame-type registry entries,
+not QUIC endpoint behavior.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.4"
+quote = '''
+In addition to the advice in Section 22.1, specifications for new
+permanent registrations SHOULD describe the means by which an
+endpoint might determine that it can send the identified type of
+frame.
+'''
+reason = '''
+This requirement is guidance for specifications that register new frame
+types, not behavior implemented by this QUIC endpoint.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.5"
+quote = '''
+In addition to the fields listed in Section 22.1.1, permanent
+registrations in this registry MUST include the following fields:
+'''
+reason = '''
+This requirement defines the format of IANA error-code registry entries,
+not QUIC endpoint behavior.
+'''

@@ -858,6 +858,11 @@ TEST(SocketIoBackendTest, SharedUdpBackendCoreSendManyOnRouteMapsSingleRouteInto
 }
 
 TEST(SocketIoBackendTest, ConfiguresLinuxSocketsForReceivingEcnMetadata) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14
+    // # UDP datagrams MUST NOT be fragmented at the IP layer.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14
+    // # In IPv4 [IPv4], the Don't Fragment (DF) bit MUST be set if possible,
+    // # to prevent fragmentation on the path.
     EXPECT_TRUE(
         coquic::io::test::socket_io_backend_configures_linux_ecn_socket_options_for_tests());
 }
@@ -908,6 +913,14 @@ TEST(SocketIoBackendTest, PollEngineIgnoresNonPathMtuErrqueueEvents) {
     EXPECT_TRUE(coquic::io::test::poll_io_engine_ignores_non_pmtu_errqueue_for_tests());
 }
 
+TEST(SocketIoBackendTest, PollEngineIgnoresPathMtuDecreaseBelowQuicFloor) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+    // # An endpoint MUST ignore an ICMP message that claims the PMTU has
+    // # decreased below QUIC's smallest allowed maximum datagram size.
+    EXPECT_TRUE(
+        coquic::io::test::poll_io_engine_ignores_pmtu_decrease_below_quic_floor_for_tests());
+}
+
 TEST(SocketIoBackendTest, UsesSendmsgToApplyOutboundEcnMarkings) {
     EXPECT_TRUE(coquic::io::test::socket_io_backend_sendmsg_uses_outbound_ecn_for_tests());
 }
@@ -918,6 +931,10 @@ TEST(SocketIoBackendTest, UsesIpTosForIpv4MappedIpv6OutboundEcnMarkings) {
 }
 
 TEST(SocketIoBackendTest, AppliesIpv6FlowLabelOnOutboundDatagrams) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.7
+    // # Endpoints that send data using IPv6 SHOULD apply an IPv6 flow label in
+    // # compliance with [RFC6437], unless the local API does not allow setting
+    // # IPv6 flow labels.
     EXPECT_TRUE(coquic::io::test::socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests());
 }
 

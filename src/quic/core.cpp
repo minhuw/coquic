@@ -1115,6 +1115,11 @@ COQUIC_NO_PROFILE bool address_identity_allowed_by_request_forgery_policy(
         const auto current_class = classify_address_validation_identity(current_identity);
         if (address_class_is_public_like(current_class) &&
             address_class_is_private_like(candidate_class)) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-21.5.6
+            // # Endpoints SHOULD NOT allow connections or migration to a
+            // # loopback address if the same service was previously available
+            // # at a different interface or if the address was provided by a
+            // # service at a non-loopback address.
             return false;
         }
     }
@@ -1123,6 +1128,10 @@ COQUIC_NO_PROFILE bool address_identity_allowed_by_request_forgery_policy(
         std::ranges::find(policy.blocked_udp_ports, *port) != policy.blocked_udp_ports.end()) {
         return false;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-21.5.6
+    // # Endpoints SHOULD NOT refuse to use an address unless they have specific
+    // # knowledge about the network indicating that sending datagrams to
+    // # unvalidated addresses in a given range is not safe.
     return true;
 }
 

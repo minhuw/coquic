@@ -2331,6 +2331,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                            !response_path->second.outstanding_challenge.has_value()) {
                     response_path->second.outstanding_challenge =
                         next_path_challenge_data(response_path->first);
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+                    // # The server MUST probe on the path toward the client from
+                    // # its preferred address.
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.3
                     // # Servers SHOULD initiate path validation to the client's
                     // # new address upon receiving a probe packet from a

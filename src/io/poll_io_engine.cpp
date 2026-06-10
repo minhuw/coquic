@@ -380,6 +380,10 @@ sockaddr_storage peer_with_ipv6_flow_label(const sockaddr_storage &peer, socklen
     }
 
     auto *ipv6_peer = reinterpret_cast<sockaddr_in6 *>(&peer_with_flow_label);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.7
+    // # Endpoints that send data using IPv6 SHOULD apply an IPv6 flow label in
+    // # compliance with [RFC6437], unless the local API does not allow setting
+    // # IPv6 flow labels.
     ipv6_peer->sin6_flowinfo = htonl(hash_ipv6_flow_label_input(*ipv6_peer, datagram));
     return peer_with_flow_label;
 }
@@ -1354,6 +1358,9 @@ PathMtuUpdateResult receive_path_mtu_update(int socket_fd, std::string_view role
                 reinterpret_cast<const sock_extended_err *>(CMSG_DATA(control_message));
             const auto max_udp_payload_size =
                 max_udp_payload_size_from_error_control_message(error, ipv6_error);
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+            // # An endpoint MUST ignore an ICMP message that claims the PMTU has
+            // # decreased below QUIC's smallest allowed maximum datagram size.
             if (max_udp_payload_size >= 1200) {
                 return PathMtuUpdateResult{
                     .status = PathMtuUpdateStatus::ok,
@@ -2630,6 +2637,34 @@ bool poll_io_engine_ignores_non_pmtu_errqueue_for_tests() {
 
     PollIoEngine engine;
     constexpr std::array<int, 1> kSockets = {62};
+    auto wait_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
+    auto observed_event = wait_event.value_or(QuicIoEngineEvent{});
+    return all_true({
+        wait_event.has_value(),
+        observed_event.kind == QuicIoEngineEvent::Kind::idle_timeout,
+        g_poll_engine_test_trace.ignored_errqueue_poll_calls == 2,
+    });
+}
+
+bool poll_io_engine_ignores_pmtu_decrease_below_quic_floor_for_tests() {
+    g_recorded_recvmsg_for_tests = {};
+    g_poll_engine_test_trace = {};
+    auto &ipv4 = *reinterpret_cast<sockaddr_in *>(&g_recorded_recvmsg_for_tests.peer);
+    ipv4.sin_family = AF_INET;
+    ipv4.sin_port = htons(7443);
+    ipv4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    g_recorded_recvmsg_for_tests.peer_len = sizeof(sockaddr_in);
+    g_recorded_recvmsg_for_tests.pmtu = 1199;
+
+    const ScopedSocketIoBackendOpsOverride runtime_ops{
+        SocketIoBackendOpsOverride{
+            .poll_fn = &errqueue_then_timeout_poll_for_tests,
+            .recvmsg_fn = &record_recvmsg_for_tests,
+        },
+    };
+
+    PollIoEngine engine;
+    constexpr std::array<int, 1> kSockets = {63};
     auto wait_event = engine.wait(kSockets, /*idle_timeout_ms=*/5, std::nullopt, "server");
     auto observed_event = wait_event.value_or(QuicIoEngineEvent{});
     return all_true({

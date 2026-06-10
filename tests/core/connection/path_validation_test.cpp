@@ -774,6 +774,9 @@ TEST(QuicCoreTest, FirstServerResponseToProbingPacketOnNewPathAlsoIncludesPathCh
     // # echoing the data contained in the PATH_CHALLENGE frame in a
     // # PATH_RESPONSE frame.
     EXPECT_TRUE(saw_path_response);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+    // # The server MUST probe on the path toward the client from its
+    // # preferred address.
     EXPECT_TRUE(saw_path_challenge);
 }
 
@@ -1460,6 +1463,10 @@ TEST(QuicCoreTest, RepeatedPathValidationUsesFreshChallengeData) {
 TEST(QuicCoreTest, PathValidationStartArmsDeadline) {
     auto connection = make_connected_client_connection();
     install_spare_peer_connection_id(connection);
+    connection.recovery_rtt_state_.latest_rtt = std::chrono::microseconds(1000);
+    connection.recovery_rtt_state_.min_rtt = std::chrono::microseconds(1000);
+    connection.recovery_rtt_state_.smoothed_rtt = std::chrono::microseconds(1000);
+    connection.recovery_rtt_state_.rttvar = std::chrono::microseconds(250);
 
     auto now = coquic::quic::test::test_time(100);
     connection.start_path_validation(7, /*initiated_locally=*/true, now);
@@ -1471,6 +1478,12 @@ TEST(QuicCoreTest, PathValidationStartArmsDeadline) {
     // # [QUIC-RECOVERY] and MUST NOT be more aggressive.
     EXPECT_EQ(optional_value_or_terminate(validation_deadline),
               now + connection.path_validation_timeout_period());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.4
+    // # A value of three times the larger of the current PTO or the PTO for
+    // # the new path (using kInitialRtt, as defined in [QUIC-RECOVERY]) is
+    // # RECOMMENDED.
+    constexpr auto expected_new_path_pto = coquic::quic::kInitialRtt * 3;
+    EXPECT_EQ(connection.path_validation_timeout_period(), expected_new_path_pto * 3);
     EXPECT_GT(optional_value_or_terminate(validation_deadline), now);
     EXPECT_FALSE(connection.path_validation_timed_out(7, coquic::quic::test::test_time(99)));
 }

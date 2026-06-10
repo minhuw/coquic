@@ -438,6 +438,10 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                         mark_peer_address_validated();
                     }
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+                    // # Packets containing discarded CRYPTO frames MUST be acknowledged
+                    // # because the packet has been received and processed by the transport
+                    // # even though the CRYPTO frame was discarded.
                     application_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now, ecn,
                         config_.transport.ack_eliciting_threshold);

@@ -660,6 +660,10 @@ void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_lo
     const bool validation_already_underway =
         !path.validated && path.outstanding_challenge.has_value();
     path.validated = false;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    // # If the peer violates this requirement, the endpoint MUST either drop
+    // # the incoming packets on that path without generating a Stateless Reset
+    // # or proceed with path validation and allow the peer to migrate.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
     // # If the recipient permits the migration, it MUST send subsequent packets
     // # to the new peer address
@@ -943,6 +947,10 @@ void QuicConnection::queue_peer_connection_id_retirement(std::uint64_t sequence_
             active_peer_connection_id_sequence_ = next_active->first;
         }
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+    // # An endpoint SHOULD limit the number of connection IDs it has retired
+    // # locally for which RETIRE_CONNECTION_ID frames have not yet been
+    // # acknowledged.
     if (peer->second.retire_frame_in_flight) {
         return;
     }
@@ -1087,6 +1095,10 @@ void QuicConnection::issue_spare_connection_ids() {
         note_endpoint_route_state_changed();
         pending_new_connection_id_frames_.push_back(NewConnectionIdFrame{
             .sequence_number = sequence_number,
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+            // # Endpoints SHOULD NOT issue updates of the Retire Prior To field
+            // # before receiving RETIRE_CONNECTION_ID frames that retire all
+            // # connection IDs indicated by the previous Retire Prior To value.
             .retire_prior_to = 0,
             .connection_id = connection_id,
             .stateless_reset_token = stateless_reset_token,

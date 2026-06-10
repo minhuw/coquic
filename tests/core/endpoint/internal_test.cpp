@@ -2256,6 +2256,10 @@ TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeInitialRoute
     EXPECT_EQ(loopback_error.code, QuicCoreLocalErrorCode::unsupported_operation);
     EXPECT_EQ(client.connection_count(), 0u);
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-21.5.6
+    // # Endpoints SHOULD NOT refuse to use an address unless they have specific
+    // # knowledge about the network indicating that sending datagrams to
+    // # unvalidated addresses in a given range is not safe.
     auto blocked_port = client.advance_endpoint(
         QuicCoreOpenConnection{
             .connection = make_client_open_config(2),
@@ -2334,6 +2338,26 @@ TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeNewRoutes) {
     EXPECT_EQ(private_migration_error.code, QuicCoreLocalErrorCode::unsupported_operation);
     EXPECT_FALSE(entry.path_id_by_route_handle.contains(29));
 
+    auto loopback_migration = client.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                QuicCoreRequestConnectionMigration{
+                    .route_handle = 30,
+                    .reason = QuicMigrationRequestReason::active,
+                    .address_validation_identity = make_ipv4_identity(127, 0, 0, 1, 4433),
+                },
+        },
+        coquic::quic::test::test_time(3));
+    auto loopback_migration_error = optional_value_or_terminate(loopback_migration.local_error);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-21.5.6
+    // # Endpoints SHOULD NOT allow connections or migration to a
+    // # loopback address if the same service was previously available
+    // # at a different interface or if the address was provided by a
+    // # service at a non-loopback address.
+    EXPECT_EQ(loopback_migration_error.code, QuicCoreLocalErrorCode::unsupported_operation);
+    EXPECT_FALSE(entry.path_id_by_route_handle.contains(30));
+
     auto link_local_inbound = client.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = bytes_from_ints({0x40, 0xa1, 0xb2, 0x00, 0x00}),
@@ -2343,7 +2367,7 @@ TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeNewRoutes) {
                                     0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
                                    4433),
         },
-        coquic::quic::test::test_time(3));
+        coquic::quic::test::test_time(4));
     EXPECT_TRUE(link_local_inbound.effects.empty());
     EXPECT_FALSE(entry.path_id_by_route_handle.contains(31));
 }

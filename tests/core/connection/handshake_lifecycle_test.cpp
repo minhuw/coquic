@@ -1648,6 +1648,11 @@ TEST(QuicCoreTest, InboundApplicationCryptoFrameIsIgnoredAfterHandshakeConnected
 
     EXPECT_TRUE(injected);
     EXPECT_FALSE(connection.has_failed());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+    // # Packets containing discarded CRYPTO frames MUST be acknowledged because
+    // # the packet has been received and processed by the transport even though
+    // # the CRYPTO frame was discarded.
+    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
     const auto received = connection.take_received_stream_data();
     ASSERT_TRUE(received.has_value());
     if (!received.has_value()) {

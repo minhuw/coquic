@@ -405,6 +405,10 @@ TEST(QuicCoreTest, RetireConnectionIdTracksAtLeastTwiceActiveConnectionIdLimit) 
     for (std::uint64_t sequence = 0; sequence < retired_connection_ids; ++sequence) {
         ASSERT_TRUE(connection.peer_connection_ids_.contains(sequence));
         EXPECT_TRUE(connection.peer_connection_ids_.at(sequence).locally_retired);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+        // # An endpoint SHOULD limit the number of connection IDs it has retired
+        // # locally for which RETIRE_CONNECTION_ID frames have not yet been
+        // # acknowledged.
         EXPECT_TRUE(connection.peer_connection_ids_.at(sequence).retire_frame_in_flight);
         EXPECT_EQ(packet->retire_connection_id_frames[sequence].sequence_number, sequence);
     }
@@ -743,6 +747,11 @@ TEST(QuicCoreTest, IssuedConnectionIdsAreUniqueAcrossAdjacentServerConnectionIds
             EXPECT_TRUE(issued_connection_ids.insert(frame.connection_id).second)
                 << "duplicate issued CID sequence=" << frame.sequence_number
                 << " base_sequence=" << base_sequence;
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+            // # Endpoints SHOULD NOT issue updates of the Retire Prior To field
+            // # before receiving RETIRE_CONNECTION_ID frames that retire all
+            // # connection IDs indicated by the previous Retire Prior To value.
+            EXPECT_EQ(frame.retire_prior_to, 0u);
         }
     }
 }
@@ -937,6 +946,11 @@ TEST(QuicCoreTest, RetiringRequestedLocalConnectionIdQueuesReplacement) {
     // # An endpoint SHOULD supply a new connection ID when the peer retires a
     // # connection ID.
     EXPECT_EQ(connection.pending_new_connection_id_frames_.front().sequence_number, 2u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+    // # Endpoints SHOULD NOT issue updates of the Retire Prior To field before
+    // # receiving RETIRE_CONNECTION_ID frames that retire all connection IDs
+    // # indicated by the previous Retire Prior To value.
+    EXPECT_EQ(connection.pending_new_connection_id_frames_.front().retire_prior_to, 0u);
 }
 
 TEST(QuicCoreTest, PreferredAddressReservesSequenceOneInLocalConnectionIdInventory) {
@@ -965,6 +979,13 @@ TEST(QuicCoreTest, PreferredAddressStartsIssuedConnectionIdsAtSequenceTwo) {
     // # by 1.
     EXPECT_EQ(connection.pending_new_connection_id_frames_.front().sequence_number, 2u);
     EXPECT_EQ(connection.pending_new_connection_id_frames_.back().sequence_number, 7u);
+    for (const auto &frame : connection.pending_new_connection_id_frames_) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+        // # Endpoints SHOULD NOT issue updates of the Retire Prior To field
+        // # before receiving RETIRE_CONNECTION_ID frames that retire all
+        // # connection IDs indicated by the previous Retire Prior To value.
+        EXPECT_EQ(frame.retire_prior_to, 0u);
+    }
 }
 
 TEST(QuicCoreTest, IssuedConnectionIdsUseDistinctStatelessResetTokens) {

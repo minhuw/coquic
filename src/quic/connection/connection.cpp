@@ -951,6 +951,9 @@ StreamStateResult<bool> QuicConnection::queue_stream_send_impl(
         stream->send_final_size = stream->send_flow_control_committed;
         stream->send_fin_state = StreamSendFinState::pending;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.3
+    // # A QUIC implementation SHOULD provide ways in which an application can
+    // # indicate the relative priority of streams.
     stream_send_priorities_[stream_id] = priority;
     note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
                                    *stream);
@@ -1042,6 +1045,12 @@ StreamStateResult<bool> QuicConnection::queue_stream_reset(LocalResetCommand com
 CodecResult<bool> QuicConnection::request_connection_migration(QuicPathId path_id,
                                                                QuicMigrationRequestReason reason,
                                                                QuicCoreTimePoint now) {
+    if (!handshake_confirmed_) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+        // # An endpoint MUST NOT initiate connection migration before the
+        // # handshake is confirmed, as defined in Section 4.1.2 of [QUIC-TLS].
+        return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
+    }
     const bool peer_disables_active_migration =
         peer_transport_parameters_.has_value() &&
         peer_transport_parameters_->disable_active_migration;
@@ -1185,8 +1194,7 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
     maybe_discard_server_zero_rtt_packet_space(now);
 
     if (current_send_path_id_.has_value() &&
-        path_validation_timed_out(*current_send_path_id_, now) &&
-        last_validated_path_id_.has_value()) {
+        path_validation_timed_out(*current_send_path_id_, now)) {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.4
         // # Endpoints SHOULD abandon path validation based on a timer.
         auto &current = paths_.at(*current_send_path_id_);
@@ -1194,6 +1202,14 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
         current.challenge_pending = false;
         current.validation_initiated_locally = false;
         current.validation_deadline.reset();
+        if (!last_validated_path_id_.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.2
+            // # If an endpoint has no state about the last validated peer
+            // # address, it MUST close the connection silently by discarding
+            // # all connection state.
+            mark_silent_close();
+            return;
+        }
         previous_path_id_ = current_send_path_id_;
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.2
         // # To protect the connection from failing due to such a spurious

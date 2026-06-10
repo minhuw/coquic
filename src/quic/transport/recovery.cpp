@@ -115,10 +115,10 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
         if (!largest_received_packet_number_.has_value() ||
             packet_number > *largest_received_packet_number_) {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
-            //# Receivers can discard all ACK Ranges, but they MUST retain the
-            //# largest packet number that has been successfully processed, as
-            //# that is used to recover packet numbers from subsequent packets;
-            //# see Section 17.1.
+            // # Receivers can discard all ACK Ranges, but they MUST retain the
+            // # largest packet number that has been successfully processed, as
+            // # that is used to recover packet numbers from subsequent packets;
+            // # see Section 17.1.
             largest_received_packet_number_ = packet_number;
             largest_received_packet_record_ = ReceivedPacketRecord{
                 .ack_eliciting = ack_eliciting,
@@ -2511,9 +2511,9 @@ void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
     if (!previous_min_rtt_sample.has_value() && rtt_state.min_rtt.has_value()) {
         previous_min_rtt_sample = *rtt_state.min_rtt;
     }
-    const auto effective_ack_delay =
-        ack_delay.ignore_max_ack_delay ? ack_delay.ack_delay
-                                       : std::min(ack_delay.ack_delay, ack_delay.max_ack_delay);
+    const auto effective_ack_delay = ack_delay.ignore_max_ack_delay
+                                         ? ack_delay.ack_delay
+                                         : std::min(ack_delay.ack_delay, ack_delay.max_ack_delay);
     const auto ack_delay_compensated_rtt =
         latest_sample > effective_ack_delay ? latest_sample - effective_ack_delay : latest_sample;
 
@@ -2564,8 +2564,7 @@ void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
         adjusted_rtt_us = latest_sample - effective_ack_delay;
     }
     rtt_state.latest_adjusted_rtt_sample = adjusted_rtt_us;
-    rtt_state.latest_ack_delay_compensated_rtt_sample =
-        ack_delay_compensated_rtt;
+    rtt_state.latest_ack_delay_compensated_rtt_sample = ack_delay_compensated_rtt;
 
     rtt_state.rttvar = (rtt_state.rttvar * 3 + (rtt_state.smoothed_rtt > adjusted_rtt
                                                     ? rtt_state.smoothed_rtt - adjusted_rtt

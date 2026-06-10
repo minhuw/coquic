@@ -688,10 +688,10 @@ TEST(QuicRecoveryTest, AckHistoryOutboundSnapshotWalkerIgnoresPostSnapshotHistor
     EXPECT_EQ(mutated_header->additional_range_count, 3u);
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
-    //# Receivers can discard all ACK Ranges, but they MUST retain the
-    //# largest packet number that has been successfully processed, as that
-    //# is used to recover packet numbers from subsequent packets; see
-    //# Section 17.1.
+    // # Receivers can discard all ACK Ranges, but they MUST retain the
+    // # largest packet number that has been successfully processed, as that
+    // # is used to recover packet numbers from subsequent packets; see
+    // # Section 17.1.
     std::vector<AckRange> snapshot_ranges;
     history.for_each_additional_ack_range_descending(
         *snapshot_header, [&](AckRange range) { snapshot_ranges.push_back(range); });
@@ -3286,13 +3286,12 @@ TEST(QuicRecoveryTest, FirstRttSampleCanUseUnboundedAckDelayBeforeHandshakeConfi
     const auto sent = make_sent_packet(/*packet_number=*/8, /*ack_eliciting=*/true,
                                        coquic::quic::test::test_time(10));
 
-    coquic::quic::update_rtt(
-        rtt, coquic::quic::test::test_time(2042), sent,
-        coquic::quic::RttAckDelayAdjustment{
-            .ack_delay = std::chrono::milliseconds(2000),
-            .max_ack_delay = std::chrono::milliseconds(25),
-            .ignore_max_ack_delay = true,
-        });
+    coquic::quic::update_rtt(rtt, coquic::quic::test::test_time(2042), sent,
+                             coquic::quic::RttAckDelayAdjustment{
+                                 .ack_delay = std::chrono::milliseconds(2000),
+                                 .max_ack_delay = std::chrono::milliseconds(25),
+                                 .ignore_max_ack_delay = true,
+                             });
 
     EXPECT_EQ(rtt.latest_rtt, std::optional{std::chrono::milliseconds(2032)});
     EXPECT_EQ(rtt.latest_adjusted_rtt, std::optional{std::chrono::milliseconds(32)});

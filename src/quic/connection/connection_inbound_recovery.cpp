@@ -17,8 +17,9 @@ struct CryptoAckDelayParameters {
     std::uint64_t max_ack_delay_ms;
 };
 
-CryptoAckDelayParameters crypto_ack_delay_parameters(
-    EncryptionLevel level, const std::optional<TransportParameters> &peer_transport_parameters) {
+CryptoAckDelayParameters
+crypto_ack_delay_parameters(EncryptionLevel level,
+                            const std::optional<TransportParameters> &peer_transport_parameters) {
     if (level == EncryptionLevel::initial) {
         return CryptoAckDelayParameters{
             .ack_delay_exponent = 0,
@@ -1484,8 +1485,7 @@ void QuicConnection::maybe_update_rtt_before_ack_loss_detection(
         return;
     }
 
-    const bool ignore_max_ack_delay =
-        (&packet_space != &initial_space_) && !handshake_confirmed_;
+    const bool ignore_max_ack_delay = (&packet_space != &initial_space_) && !handshake_confirmed_;
     update_rtt(packet_space.recovery.rtt_state(), now, *largest_packet,
                RttAckDelayAdjustment{
                    .ack_delay = decoded_ack_delay,

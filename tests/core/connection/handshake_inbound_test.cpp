@@ -129,14 +129,14 @@ TEST(QuicCoreTest, HandshakeAckDelayUsesPeerTransportParameterExponent) {
                                      .has_ping = true,
                                  });
 
-    expect_codec_success(connection.process_inbound_crypto(
-        coquic::quic::EncryptionLevel::handshake,
-        std::array<coquic::quic::Frame, 1>{coquic::quic::AckFrame{
-            .largest_acknowledged = 4,
-            .ack_delay = 1000,
-            .first_ack_range = 0,
-        }},
-        coquic::quic::test::test_time(10)));
+    expect_codec_success(
+        connection.process_inbound_crypto(coquic::quic::EncryptionLevel::handshake,
+                                          std::array<coquic::quic::Frame, 1>{coquic::quic::AckFrame{
+                                              .largest_acknowledged = 4,
+                                              .ack_delay = 1000,
+                                              .first_ack_range = 0,
+                                          }},
+                                          coquic::quic::test::test_time(10)));
 
     EXPECT_EQ(connection.handshake_space_.recovery.rtt_state().latest_rtt,
               std::optional{std::chrono::milliseconds(10)});
@@ -1738,8 +1738,7 @@ TEST(QuicCoreTest, ServerHandshakeStatusUpdateFlushesPendingHandshakeAckBeforeDi
     bool saw_handshake_ack = false;
     bool saw_handshake_done = false;
     for (const auto &packet : decoded.value()) {
-        if (const auto *handshake =
-                std::get_if<coquic::quic::ProtectedHandshakePacket>(&packet)) {
+        if (const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packet)) {
             for (const auto &frame : handshake->frames) {
                 if (const auto *ack = std::get_if<coquic::quic::AckFrame>(&frame)) {
                     saw_handshake_ack = true;

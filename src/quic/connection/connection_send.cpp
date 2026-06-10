@@ -1750,13 +1750,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     const auto build_handshake_frames = [&](std::span<const ByteRange> crypto_ranges,
                                             bool override_probe_crypto_ranges = false,
                                             std::span<const ByteRange> probe_crypto_ranges = {}) {
-        const auto handshake_ack_delay_exponent =
-            local_transport_parameters_.ack_delay_exponent;
+        const auto handshake_ack_delay_exponent = local_transport_parameters_.ack_delay_exponent;
         const auto handshake_ack_frame =
             (handshake_space_.pending_probe_packet.has_value() &&
              handshake_space_.pending_probe_packet->force_ack)
-                ? handshake_space_.received_packets.build_ack_frame(
-                      handshake_ack_delay_exponent, now, /*allow_non_pending=*/true)
+                ? handshake_space_.received_packets.build_ack_frame(handshake_ack_delay_exponent,
+                                                                    now, /*allow_non_pending=*/true)
                 : handshake_space_.received_packets.build_ack_frame(handshake_ack_delay_exponent,
                                                                     now);
         //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6

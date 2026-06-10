@@ -346,8 +346,8 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         }
         if (defer_short_header_packet_before_server_handshake_complete(
                 allow_defer, short_header_packet, config_.role, status_,
-                deferred_protected_packets_, packet_bytes, packet_path_id, datagram_id,
-                packet_ecn, packet_received_at)) {
+                deferred_protected_packets_, packet_bytes, packet_path_id, datagram_id, packet_ecn,
+                packet_received_at)) {
             return true;
         }
 
@@ -440,10 +440,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                     return true;
                 }
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
-                //# For example, if decryption fails (because the keys are not
-                //# available or for any other reason), the receiver MAY either
-                //# discard or buffer the packet for later processing and MUST
-                //# attempt to process the remaining packets.
+                // # For example, if decryption fails (because the keys are not
+                // # available or for any other reason), the receiver MAY either
+                // # discard or buffer the packet for later processing and MUST
+                // # attempt to process the remaining packets.
                 // Later packets in the same datagram can depend on keys unlocked by an earlier
                 // packet, so buffer them even after partial progress.
                 defer_packet(packet_bytes, packet_path_id, datagram_id, packet_ecn,
@@ -571,11 +571,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
 
         return true;
     };
-    const auto process_packet_bytes = [&](std::span<const std::byte> packet_bytes, bool allow_defer,
-                                          QuicPathId packet_path_id, QuicEcnCodepoint packet_ecn,
-                                          std::optional<std::uint32_t> datagram_id,
-                                          bool packet_replay_trigger,
-                                          QuicCoreTimePoint packet_received_at) -> bool {
+    const auto process_packet_bytes =
+        [&](std::span<const std::byte> packet_bytes, bool allow_defer, QuicPathId packet_path_id,
+            QuicEcnCodepoint packet_ecn, std::optional<std::uint32_t> datagram_id,
+            bool packet_replay_trigger, QuicCoreTimePoint packet_received_at) -> bool {
         if (qlog_session_ != nullptr) {
             const auto emit_qlog_event = [&](const ProtectedPacket &packet) {
                 if (!datagram_id.has_value()) {
@@ -831,11 +830,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         auto deferred_packets = std::move(deferred_protected_packets_);
         deferred_protected_packets_.clear();
         for (const auto &deferred_packet : deferred_packets) {
-            if (!process_packet_bytes(deferred_packet.bytes, /*allow_defer=*/true,
-                                      deferred_packet.path_id, deferred_packet.ecn,
-                                      deferred_packet.datagram_id,
-                                      /*packet_replay_trigger=*/true,
-                                      deferred_packet.received_at.value_or(now))) {
+            if (!process_packet_bytes(
+                    deferred_packet.bytes, /*allow_defer=*/true, deferred_packet.path_id,
+                    deferred_packet.ecn, deferred_packet.datagram_id,
+                    /*packet_replay_trigger=*/true, deferred_packet.received_at.value_or(now))) {
                 return false;
             }
         }

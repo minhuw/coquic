@@ -656,6 +656,8 @@ class QuicConnection {
                              bool allow_in_place_receive_decode);
     CodecResult<ConnectionId>
     peek_client_initial_destination_connection_id(std::span<const std::byte> bytes) const;
+    CodecResult<ConnectionId>
+    peek_long_header_destination_connection_id(std::span<const std::byte> bytes) const;
     CodecResult<std::size_t> peek_next_packet_length(std::span<const std::byte> bytes) const;
     CodecResult<bool> process_inbound_packet(const ProtectedPacket &packet, QuicCoreTimePoint now,
                                              QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable,

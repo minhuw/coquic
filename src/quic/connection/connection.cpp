@@ -244,6 +244,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         };
     std::size_t offset = 0;
     bool processed_any_packet = false;
+    std::optional<ConnectionId> first_datagram_destination_connection_id;
     const auto make_deserialize_context =
         [&](const std::optional<TrafficSecret> &application_secret,
             bool application_key_phase) -> CodecResult<DeserializeProtectionContext> {
@@ -874,6 +875,21 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         }
 
         const auto packet_bytes = bytes.subspan(offset, packet_length.value());
+        const auto packet_destination_connection_id =
+            peek_long_header_destination_connection_id(packet_bytes);
+        if (packet_destination_connection_id.has_value()) {
+            if (!first_datagram_destination_connection_id.has_value()) {
+                first_datagram_destination_connection_id = packet_destination_connection_id.value();
+            } else if (packet_destination_connection_id.value() !=
+                       first_datagram_destination_connection_id.value()) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+                // # Receivers SHOULD ignore any subsequent packets with a
+                // # different Destination Connection ID than the first packet
+                // # in the datagram.
+                offset += packet_length.value();
+                continue;
+            }
+        }
         //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
         // # The receiver of coalesced QUIC packets MUST individually process
         // # each QUIC packet and separately acknowledge them, as if they were

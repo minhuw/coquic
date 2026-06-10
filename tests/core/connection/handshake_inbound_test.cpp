@@ -229,15 +229,19 @@ TEST(QuicCoreTest, ClientDiscardsServerInitialWithToken) {
 }
 
 TEST(QuicCoreTest, ProcessInboundDatagramSeparatelyAcknowledgesCoalescedInitialAndHandshake) {
-    auto connection = make_connected_client_connection();
-    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
-    connection.handshake_confirmed_ = false;
-    connection.initial_packet_space_discarded_ = false;
-    connection.handshake_packet_space_discarded_ = false;
-    connection.handshake_space_.read_secret = make_test_traffic_secret(
-        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
-    connection.initial_space_.pending_ack_deadline = std::nullopt;
-    connection.handshake_space_.pending_ack_deadline = std::nullopt;
+    const auto make_connection = [] {
+        auto connection = make_connected_client_connection();
+        connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+        connection.handshake_confirmed_ = false;
+        connection.initial_packet_space_discarded_ = false;
+        connection.handshake_packet_space_discarded_ = false;
+        connection.handshake_space_.read_secret = make_test_traffic_secret(
+            coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+        connection.initial_space_.pending_ack_deadline = std::nullopt;
+        connection.handshake_space_.pending_ack_deadline = std::nullopt;
+        return connection;
+    };
+    auto connection = make_connection();
 
     const auto coalesced = coquic::quic::serialize_protected_datagram(
         std::array<coquic::quic::ProtectedPacket, 2>{
@@ -283,6 +287,44 @@ TEST(QuicCoreTest, ProcessInboundDatagramSeparatelyAcknowledgesCoalescedInitialA
               coquic::quic::test::test_time(1));
     EXPECT_EQ(optional_value_or_terminate(connection.handshake_space_.pending_ack_deadline),
               coquic::quic::test::test_time(1));
+
+    auto mismatched = make_connection();
+    const auto mismatched_coalesced = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 2>{
+            coquic::quic::ProtectedInitialPacket{
+                .version = coquic::quic::kQuicVersion1,
+                .destination_connection_id = mismatched.config_.source_connection_id,
+                .source_connection_id = bytes_from_hex("0011223344556677"),
+                .packet_number_length = 2,
+                .packet_number = 1,
+                .frames = {coquic::quic::PingFrame{}},
+            },
+            coquic::quic::ProtectedHandshakePacket{
+                .version = coquic::quic::kQuicVersion1,
+                .destination_connection_id = bytes_from_ints({0x55, 0x66}),
+                .source_connection_id = bytes_from_hex("0011223344556677"),
+                .packet_number_length = 2,
+                .packet_number = 2,
+                .frames = {coquic::quic::PingFrame{}},
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                mismatched.client_initial_destination_connection_id(),
+            .handshake_secret = mismatched.handshake_space_.read_secret,
+        });
+    ASSERT_TRUE(mismatched_coalesced.has_value());
+
+    mismatched.process_inbound_datagram(mismatched_coalesced.value(),
+                                        coquic::quic::test::test_time(2));
+
+    EXPECT_FALSE(mismatched.has_failed());
+    EXPECT_TRUE(mismatched.initial_space_.received_packets.has_ack_to_send());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    // # Receivers SHOULD ignore any subsequent packets with a different
+    // # Destination Connection ID than the first packet in the datagram.
+    EXPECT_FALSE(mismatched.handshake_space_.received_packets.has_ack_to_send());
 }
 
 TEST(QuicCoreTest, ConnectionProcessInboundApplicationCoversAckReorderAndErrorBranches) {

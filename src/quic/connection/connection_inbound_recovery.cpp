@@ -55,6 +55,54 @@ CodecResult<ConnectionId> QuicConnection::peek_client_initial_destination_connec
         destination_connection_id.value().begin(), destination_connection_id.value().end()));
 }
 
+CodecResult<ConnectionId>
+QuicConnection::peek_long_header_destination_connection_id(std::span<const std::byte> bytes) const {
+    BufferReader reader(bytes);
+    const auto first_byte = reader.read_byte();
+    if (!first_byte.has_value()) {
+        return CodecResult<ConnectionId>::failure(first_byte.error().code,
+                                                  first_byte.error().offset);
+    }
+
+    const auto header_byte = std::to_integer<std::uint8_t>(first_byte.value());
+    if ((header_byte & 0x80u) == 0) {
+        return CodecResult<ConnectionId>::failure(CodecErrorCode::unsupported_packet_type, 0);
+    }
+    if (invalid_fixed_bit_is_rejected(header_byte, config_.transport.grease_quic_bit)) {
+        return CodecResult<ConnectionId>::failure(CodecErrorCode::invalid_fixed_bit, 0);
+    }
+
+    const auto version = reader.read_exact(4);
+    if (!version.has_value()) {
+        return CodecResult<ConnectionId>::failure(version.error().code, version.error().offset);
+    }
+    const auto version_value = read_u32_be(version.value());
+    if (!is_supported_quic_version(version_value)) {
+        return CodecResult<ConnectionId>::failure(CodecErrorCode::unsupported_packet_type, 0);
+    }
+
+    const auto destination_connection_id_length = reader.read_byte();
+    if (!destination_connection_id_length.has_value()) {
+        return CodecResult<ConnectionId>::failure(destination_connection_id_length.error().code,
+                                                  destination_connection_id_length.error().offset);
+    }
+    const auto destination_connection_id_length_value =
+        std::to_integer<std::uint8_t>(destination_connection_id_length.value());
+    if (destination_connection_id_length_value > 20) {
+        return CodecResult<ConnectionId>::failure(CodecErrorCode::invalid_varint, reader.offset());
+    }
+
+    const auto destination_connection_id =
+        reader.read_exact(destination_connection_id_length_value);
+    if (!destination_connection_id.has_value()) {
+        return CodecResult<ConnectionId>::failure(destination_connection_id.error().code,
+                                                  destination_connection_id.error().offset);
+    }
+
+    return CodecResult<ConnectionId>::success(ConnectionId(
+        destination_connection_id.value().begin(), destination_connection_id.value().end()));
+}
+
 CodecResult<std::size_t>
 QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const {
     BufferReader reader(bytes);

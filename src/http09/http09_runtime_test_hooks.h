@@ -81,6 +81,7 @@ enum class ClientConnectionBackendLoopCaseForTests : std::uint8_t {
     timer_event_then_wait_failure,
     timer_due_before_wait_then_wait_failure,
     timer_due_before_wait_then_drive_failure,
+    immediate_timer_yields_to_ready_receive,
     timer_event_then_drive_failure,
     timer_event_then_terminal_success,
     missing_path_mtu_update,
@@ -96,6 +97,7 @@ enum class ClientConnectionBackendLoopCaseForTests : std::uint8_t {
     outer_pump_terminal_success,
     peer_input_then_outer_pump_terminal_success,
     pending_work_core_inputs_are_drained_before_wait,
+    pending_work_no_send_core_inputs_yield_to_wait,
     pending_work_followup_timer_drive_failure,
     pending_work_followup_timer_continue_then_terminal_success,
 };

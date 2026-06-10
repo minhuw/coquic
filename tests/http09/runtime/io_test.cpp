@@ -487,6 +487,17 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_TRUE(timer_due_before_wait_then_drive_failure.terminal_failure);
     EXPECT_EQ(timer_due_before_wait_then_drive_failure.wait_calls, 0U);
 
+    const auto immediate_timer_yields_to_ready_receive =
+        coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::
+                immediate_timer_yields_to_ready_receive);
+    EXPECT_EQ(immediate_timer_yields_to_ready_receive.exit_code, 0);
+    EXPECT_TRUE(immediate_timer_yields_to_ready_receive.terminal_success);
+    EXPECT_FALSE(immediate_timer_yields_to_ready_receive.terminal_failure);
+    EXPECT_EQ(immediate_timer_yields_to_ready_receive.wait_calls, 1U);
+    ASSERT_EQ(immediate_timer_yields_to_ready_receive.wait_requests.size(), 1U);
+    ASSERT_TRUE(immediate_timer_yields_to_ready_receive.wait_requests[0].has_value());
+
     const auto timer_event_then_drive_failure =
         coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
             coquic::http09::test::ClientConnectionBackendLoopCaseForTests::
@@ -625,6 +636,15 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_TRUE(pending_work_core_inputs_are_drained_before_wait.terminal_success);
     EXPECT_FALSE(pending_work_core_inputs_are_drained_before_wait.terminal_failure);
     EXPECT_EQ(pending_work_core_inputs_are_drained_before_wait.wait_calls, 0U);
+
+    const auto pending_work_no_send_core_inputs_yield_to_wait =
+        coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::
+                pending_work_no_send_core_inputs_yield_to_wait);
+    EXPECT_EQ(pending_work_no_send_core_inputs_yield_to_wait.exit_code, 1);
+    EXPECT_FALSE(pending_work_no_send_core_inputs_yield_to_wait.terminal_success);
+    EXPECT_FALSE(pending_work_no_send_core_inputs_yield_to_wait.terminal_failure);
+    EXPECT_EQ(pending_work_no_send_core_inputs_yield_to_wait.wait_calls, 1U);
 
     const auto pending_work_followup_timer_drive_failure =
         coquic::http09::test::run_client_connection_backend_loop_case_for_tests(

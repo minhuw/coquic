@@ -1717,10 +1717,11 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
         }
         return current >= terminal_success_deadline.value_or(QuicCoreTimePoint::max());
     };
-    const auto drive_result = [&](const QuicCoreResult &result) {
+    const auto drive_result = [&](const QuicCoreResult &result,
+                                  bool *observed_send_effects = nullptr) {
         return drive_endpoint_until_blocked_with_backend(
             endpoint, core, io_context.primary_route_handle, backend, result, state, "client",
-            &config, &client_policy, &io_context);
+            &config, &client_policy, &io_context, observed_send_effects);
     };
 
     if (!drive_result(start_result)) {
@@ -1730,21 +1731,41 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
         return 0;
     }
 
-    const auto process_expired_client_timer = [&](QuicCoreTimePoint current,
-                                                  bool &processed_any) -> bool {
-        processed_any = false;
+    struct ClientBackendTimerProcessResult {
+        bool ok = true;
+        bool processed = false;
+        bool deferred_for_backend = false;
+    };
+    std::size_t immediate_timer_pumps = 0;
+    const auto process_expired_client_timer =
+        [&](QuicCoreTimePoint current) -> ClientBackendTimerProcessResult {
         const auto next_wakeup = state.next_wakeup;
         if (!next_wakeup.has_value() || next_wakeup.value() > current) {
-            return true;
+            immediate_timer_pumps = 0;
+            return {};
         }
 
-        processed_any = true;
-        return drive_result(core.advance(QuicCoreTimerExpired{}, current));
+        if (immediate_timer_pumps >= kClientBackendImmediateTimerBudget) {
+            with_runtime_trace([&](std::ostream &stream) {
+                stream << "http09-client trace: backend-yield due-timer"
+                       << " immediate_timer_pumps=" << immediate_timer_pumps << '\n';
+            });
+            return ClientBackendTimerProcessResult{
+                .deferred_for_backend = true,
+            };
+        }
+
+        ++immediate_timer_pumps;
+        return ClientBackendTimerProcessResult{
+            .ok = drive_result(core.advance(QuicCoreTimerExpired{}, current)),
+            .processed = true,
+        };
     };
 
     struct PumpEndpointWorkResult {
         bool ok = true;
         bool advanced_core = false;
+        bool observed_send_effects = false;
     };
     const auto pump_client_endpoint_work_once = [&]() -> PumpEndpointWorkResult {
         if (!state.endpoint_has_pending_work) {
@@ -1767,9 +1788,12 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
             return {};
         }
 
+        bool observed_send_effects = false;
+        const auto result = advance_core_with_inputs(core, endpoint_update.core_inputs, now());
         return PumpEndpointWorkResult{
-            .ok = drive_result(advance_core_with_inputs(core, endpoint_update.core_inputs, now())),
+            .ok = drive_result(result, &observed_send_effects),
             .advanced_core = true,
+            .observed_send_effects = observed_send_effects,
         };
     };
 
@@ -1778,37 +1802,56 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
             return 0;
         }
 
-        bool processed_timers = false;
-        if (!process_expired_client_timer(now(), processed_timers)) {
+        const auto timer_result = process_expired_client_timer(now());
+        if (!timer_result.ok) {
             return 1;
         }
-        if (processed_timers) {
+        if (timer_result.processed) {
             continue;
         }
 
-        for (;;) {
-            const auto pump_result = pump_client_endpoint_work_once();
-            if (!pump_result.ok) {
-                return 1;
-            }
-            if (state.terminal_success) {
-                const auto current = now();
-                ensure_terminal_success_deadline(current);
-                if (should_exit_after_terminal_success(current)) {
-                    return 0;
+        if (!timer_result.deferred_for_backend) {
+            std::size_t no_send_pumps = 0;
+            for (;;) {
+                const auto pump_result = pump_client_endpoint_work_once();
+                if (!pump_result.ok) {
+                    return 1;
                 }
-                break;
-            }
-            if (!pump_result.advanced_core || !state.endpoint_has_pending_work) {
-                break;
-            }
+                if (state.terminal_success) {
+                    const auto current = now();
+                    ensure_terminal_success_deadline(current);
+                    if (should_exit_after_terminal_success(current)) {
+                        return 0;
+                    }
+                    break;
+                }
+                if (!pump_result.advanced_core || !state.endpoint_has_pending_work) {
+                    break;
+                }
+                if (pump_result.observed_send_effects) {
+                    no_send_pumps = 0;
+                } else {
+                    ++no_send_pumps;
+                }
 
-            bool processed_followup_timers = false;
-            if (!process_expired_client_timer(now(), processed_followup_timers)) {
-                return 1;
-            }
-            if (processed_followup_timers) {
-                continue;
+                const auto followup_timer_result = process_expired_client_timer(now());
+                if (!followup_timer_result.ok) {
+                    return 1;
+                }
+                if (followup_timer_result.processed) {
+                    continue;
+                }
+                if (followup_timer_result.deferred_for_backend) {
+                    break;
+                }
+                if (no_send_pumps > kClientBackendNoSendPumpBudget) {
+                    with_runtime_trace([&](std::ostream &stream) {
+                        stream << "http09-client trace: backend-yield pending="
+                               << state.endpoint_has_pending_work
+                               << " no_send_pumps=" << no_send_pumps << '\n';
+                    });
+                    break;
+                }
             }
         }
 
@@ -1821,6 +1864,7 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
         if (!event.has_value()) {
             return 1;
         }
+        immediate_timer_pumps = 0;
 
         if (event->kind == QuicIoEvent::Kind::idle_timeout) {
             if (state.terminal_success) {

@@ -625,6 +625,27 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
             .terminal_failure = true,
         });
         break;
+    case ClientConnectionBackendLoopCaseForTests::immediate_timer_yields_to_ready_receive:
+        start_result.next_wakeup = event_time;
+        endpoint.next_wakeup_overrides = {
+            std::nullopt,
+            event_time,
+        };
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_success = true,
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::rx_datagram,
+            .now = event_time - std::chrono::milliseconds(kClientSuccessDrainWindowMs + 1),
+            .datagram =
+                QuicIoRxDatagram{
+                    .route_handle = QuicRouteHandle{17},
+                    .bytes = {std::byte{0x01}},
+                },
+        });
+        break;
     case ClientConnectionBackendLoopCaseForTests::timer_event_then_drive_failure:
         endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
         endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
@@ -837,6 +858,45 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
         });
         endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
             .terminal_success = true,
+        });
+        break;
+    case ClientConnectionBackendLoopCaseForTests::pending_work_no_send_core_inputs_yield_to_wait:
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .has_pending_work = true,
+        });
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+            .terminal_failure = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .core_inputs =
+                {
+                    QuicCoreTimerExpired{},
+                },
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .core_inputs =
+                {
+                    QuicCoreTimerExpired{},
+                },
+            .has_pending_work = true,
+        });
+        endpoint.poll_updates.push_back(QuicHttp09EndpointUpdate{
+            .core_inputs =
+                {
+                    QuicCoreTimerExpired{},
+                },
+            .has_pending_work = true,
+        });
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::idle_timeout,
+            .now = event_time,
         });
         break;
     case ClientConnectionBackendLoopCaseForTests::pending_work_followup_timer_drive_failure:

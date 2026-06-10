@@ -1937,7 +1937,18 @@ TEST(QuicCoreTest, UnvalidatedMigratedPathDoesNotRepeatPathChallengeBeforePto) {
     // # An endpoint SHOULD NOT probe a new path with packets containing a
     // # PATH_CHALLENGE frame more frequently than it would send an Initial
     // # packet.
-    EXPECT_TRUE(second_datagram.empty());
+    ASSERT_FALSE(second_datagram.empty());
+    auto second_packets = decode_sender_datagram(connection, second_datagram);
+    ASSERT_EQ(second_packets.size(), 1u);
+    auto *second_packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&second_packets[0]);
+    ASSERT_NE(second_packet, nullptr);
+
+    bool second_has_path_challenge = false;
+    for (auto &frame : second_packet->frames) {
+        second_has_path_challenge = second_has_path_challenge ||
+                                    std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+    }
+    EXPECT_FALSE(second_has_path_challenge);
     EXPECT_FALSE(connection.paths_.at(9).challenge_pending);
 }
 

@@ -146,7 +146,7 @@ TEST(QuicCoreTest, CoreMigrationRequestReportsUnsupportedOperationWhenPeerDisabl
     EXPECT_EQ(local_error.stream_id, std::nullopt);
 }
 
-TEST(QuicCoreTest, PeerMigrationDefersApplicationProbePayloadUntilPathValidated) {
+TEST(QuicCoreTest, PeerMigrationCarriesApplicationProbePayloadUnderAmplificationLimit) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;
     connection.current_send_path_id_ = 3;
@@ -206,8 +206,8 @@ TEST(QuicCoreTest, PeerMigrationDefersApplicationProbePayloadUntilPathValidated)
     // # An endpoint MAY send data to an unvalidated peer address, but it MUST
     // # protect against potential attacks as described in Sections 9.3.1 and
     // # 9.3.2.
-    EXPECT_FALSE(saw_stream_frame);
-    EXPECT_TRUE(connection.application_space_.pending_probe_packet.has_value());
+    EXPECT_TRUE(saw_stream_frame);
+    EXPECT_FALSE(connection.application_space_.pending_probe_packet.has_value());
 }
 
 TEST(QuicCoreTest, MatchingPathResponsePromotesValidatedPeerMigrationPath) {
@@ -291,7 +291,7 @@ TEST(QuicCoreTest, AckOnlyRebindResponseIncludesPathChallengeOnFirstNewPathPacke
     EXPECT_TRUE(saw_path_challenge);
 }
 
-TEST(QuicCoreTest, AckOnlyRebindDefersQueuedStreamDataUntilPathValidated) {
+TEST(QuicCoreTest, AckOnlyRebindCarriesQueuedStreamDataUnderAmplificationLimit) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;
     connection.current_send_path_id_ = 3;
@@ -343,10 +343,12 @@ TEST(QuicCoreTest, AckOnlyRebindDefersQueuedStreamDataUntilPathValidated) {
     }
 
     EXPECT_TRUE(saw_path_challenge);
-    EXPECT_FALSE(saw_stream_frame);
+    EXPECT_TRUE(saw_stream_frame);
+    EXPECT_LE(migrated_datagram.size(),
+              connection.paths_.at(7).anti_amplification_received_bytes * 3u);
 }
 
-TEST(QuicCoreTest, AckOnlyRebindDefersApplicationProbePayloadUntilPathValidated) {
+TEST(QuicCoreTest, AckOnlyRebindClearsAckedApplicationProbePayload) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;
     connection.current_send_path_id_ = 3;
@@ -404,7 +406,9 @@ TEST(QuicCoreTest, AckOnlyRebindDefersApplicationProbePayloadUntilPathValidated)
 
     EXPECT_TRUE(saw_path_challenge);
     EXPECT_FALSE(saw_stream_frame);
-    EXPECT_TRUE(connection.application_space_.pending_probe_packet.has_value());
+    EXPECT_FALSE(connection.application_space_.pending_probe_packet.has_value());
+    EXPECT_LE(migrated_datagram.size(),
+              connection.paths_.at(7).anti_amplification_received_bytes * 3u);
 }
 
 TEST(QuicCoreTest, AckOnlyRebindPathValidationBypassesCongestionWindow) {
@@ -1089,7 +1093,7 @@ TEST(QuicCoreTest, PeerMigrationViolationOfDisableActiveMigrationStartsPathValid
     EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
 }
 
-TEST(QuicCoreTest, PeerMigrationFollowsHigherNumberedPacketBackToValidatedPath) {
+TEST(QuicCoreTest, PeerMigrationKeepsValidatingPathAcrossHigherNumberedValidatedPathPacket) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;
     connection.current_send_path_id_ = 3;
@@ -1118,11 +1122,12 @@ TEST(QuicCoreTest, PeerMigrationFollowsHigherNumberedPacketBackToValidatedPath) 
                         /*packet_number=*/101)
                     .has_value());
 
-    EXPECT_EQ(connection.current_send_path_id_, 3u);
-    EXPECT_EQ(connection.previous_path_id_, 7u);
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_EQ(connection.previous_path_id_, 3u);
+    EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
 }
 
-TEST(QuicCoreTest, PeerMigrationRebindBouncePreservesOutstandingChallenge) {
+TEST(QuicCoreTest, PeerMigrationRebindKeepsOutstandingChallengeAcrossValidatedPathTraffic) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;
     connection.current_send_path_id_ = 3;
@@ -1150,7 +1155,7 @@ TEST(QuicCoreTest, PeerMigrationRebindBouncePreservesOutstandingChallenge) {
                         /*path_id=*/3, /*used_previous_application_read_secret=*/false,
                         /*packet_number=*/102)
                     .has_value());
-    ASSERT_EQ(connection.current_send_path_id_, 3u);
+    ASSERT_EQ(connection.current_send_path_id_, 7u);
 
     ASSERT_TRUE(connection
                     .process_inbound_application(

@@ -3121,8 +3121,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             // # An endpoint MAY send data to an unvalidated peer address, but it
             // # MUST protect against potential attacks as described in Sections
             // # 9.3.1 and 9.3.2.
-            return !validation_path->second.validation_initiated_locally ||
-                   validation_path->second.preferred_address_path;
+            return !handshake_confirmed_ || validation_path->second.preferred_address_path;
         };
         const auto validation_only_send_is_preferred_address =
             [&](std::optional<QuicPathId> path_id) {

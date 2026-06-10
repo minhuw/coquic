@@ -316,6 +316,77 @@ COQUIC_NO_PROFILE void emit_send_datagram(QuicCoreResult &result, QuicCoreSendDa
     }
 }
 
+COQUIC_NO_PROFILE QuicCoreResult take_connection_non_send_effects(
+    QuicConnectionHandle connection_handle, QuicConnection &quic_connection) {
+    QuicCoreResult result;
+    while (auto received = quic_connection.take_received_stream_data()) {
+        received->connection = connection_handle;
+        result.effects.emplace_back(std::move(*received));
+    }
+    while (auto received = quic_connection.take_received_datagram_data()) {
+        received->connection = connection_handle;
+        result.effects.emplace_back(std::move(*received));
+    }
+    while (const auto reset = quic_connection.take_peer_reset_stream()) {
+        result.effects.emplace_back(QuicCorePeerResetStream{
+            .connection = connection_handle,
+            .stream_id = reset->stream_id,
+            .application_error_code = reset->application_error_code,
+            .final_size = reset->final_size,
+        });
+    }
+    while (const auto stop = quic_connection.take_peer_stop_sending()) {
+        result.effects.emplace_back(QuicCorePeerStopSending{
+            .connection = connection_handle,
+            .stream_id = stop->stream_id,
+            .application_error_code = stop->application_error_code,
+        });
+    }
+    while (const auto event = quic_connection.take_state_change()) {
+        result.effects.emplace_back(QuicCoreStateEvent{
+            .connection = connection_handle,
+            .change = *event,
+        });
+    }
+    while (const auto preferred = quic_connection.take_peer_preferred_address_available()) {
+        result.effects.emplace_back(QuicCorePeerPreferredAddressAvailable{
+            .connection = connection_handle,
+            .preferred_address = preferred->preferred_address,
+        });
+    }
+    while (const auto state = quic_connection.take_resumption_state_available()) {
+        result.effects.emplace_back(QuicCoreResumptionStateAvailable{
+            .connection = connection_handle,
+            .state = state->state,
+        });
+    }
+    while (const auto status = quic_connection.take_zero_rtt_status_event()) {
+        result.effects.emplace_back(QuicCoreZeroRttStatusEvent{
+            .connection = connection_handle,
+            .status = status->status,
+        });
+    }
+    while (auto new_token = quic_connection.take_new_token()) {
+        result.effects.emplace_back(QuicCoreNewTokenAvailable{
+            .connection = connection_handle,
+            .token = std::move(*new_token),
+        });
+    }
+    while (auto inspection = quic_connection.take_packet_inspection()) {
+        inspection->connection = connection_handle;
+        result.effects.emplace_back(std::move(*inspection));
+    }
+    if (const auto terminal = quic_connection.take_terminal_state()) {
+        if (*terminal == QuicConnectionTerminalState::closed) {
+            result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+                .connection = connection_handle,
+                .event = QuicCoreConnectionLifecycle::closed,
+            });
+        }
+    }
+    return result;
+}
+
 COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
     QuicConnectionHandle connection_handle,
     const std::optional<QuicRouteHandle> &default_route_handle,
@@ -458,70 +529,14 @@ COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
         drain_result.send_continuation_pending = true;
     }
 
-    while (auto received = quic_connection.take_received_stream_data()) {
-        received->connection = connection_handle;
-        drain_result.effects.emplace_back(std::move(*received));
-    }
-    while (auto received = quic_connection.take_received_datagram_data()) {
-        received->connection = connection_handle;
-        drain_result.effects.emplace_back(std::move(*received));
-    }
-    while (const auto reset = quic_connection.take_peer_reset_stream()) {
-        drain_result.effects.emplace_back(QuicCorePeerResetStream{
-            .connection = connection_handle,
-            .stream_id = reset->stream_id,
-            .application_error_code = reset->application_error_code,
-            .final_size = reset->final_size,
-        });
-    }
-    while (const auto stop = quic_connection.take_peer_stop_sending()) {
-        drain_result.effects.emplace_back(QuicCorePeerStopSending{
-            .connection = connection_handle,
-            .stream_id = stop->stream_id,
-            .application_error_code = stop->application_error_code,
-        });
-    }
-    while (const auto event = quic_connection.take_state_change()) {
-        drain_result.effects.emplace_back(QuicCoreStateEvent{
-            .connection = connection_handle,
-            .change = *event,
-        });
-    }
-    while (const auto preferred = quic_connection.take_peer_preferred_address_available()) {
-        drain_result.effects.emplace_back(QuicCorePeerPreferredAddressAvailable{
-            .connection = connection_handle,
-            .preferred_address = preferred->preferred_address,
-        });
-    }
-    while (const auto state = quic_connection.take_resumption_state_available()) {
-        drain_result.effects.emplace_back(QuicCoreResumptionStateAvailable{
-            .connection = connection_handle,
-            .state = state->state,
-        });
-    }
-    while (const auto status = quic_connection.take_zero_rtt_status_event()) {
-        drain_result.effects.emplace_back(QuicCoreZeroRttStatusEvent{
-            .connection = connection_handle,
-            .status = status->status,
-        });
-    }
-    while (auto new_token = quic_connection.take_new_token()) {
-        drain_result.effects.emplace_back(QuicCoreNewTokenAvailable{
-            .connection = connection_handle,
-            .token = std::move(*new_token),
-        });
-    }
-    while (auto inspection = quic_connection.take_packet_inspection()) {
-        inspection->connection = connection_handle;
-        drain_result.effects.emplace_back(std::move(*inspection));
-    }
-    if (const auto terminal = quic_connection.take_terminal_state()) {
-        if (*terminal == QuicConnectionTerminalState::closed) {
-            drain_result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
-                .connection = connection_handle,
-                .event = QuicCoreConnectionLifecycle::closed,
-            });
-        }
+    auto non_send_effects = take_connection_non_send_effects(connection_handle, quic_connection);
+    if (drain_result.effects.empty()) {
+        drain_result.effects = std::move(non_send_effects.effects);
+    } else if (!non_send_effects.effects.empty()) {
+        drain_result.effects.reserve(drain_result.effects.size() + non_send_effects.effects.size());
+        drain_result.effects.insert(drain_result.effects.end(),
+                                    std::make_move_iterator(non_send_effects.effects.begin()),
+                                    std::make_move_iterator(non_send_effects.effects.end()));
     }
 
     if (!drain_result.send_continuation_pending) {
@@ -2522,6 +2537,7 @@ QuicCore::QuicCore(QuicCoreConfig config)
           .request_forgery_policy = config.request_forgery_policy,
           .emit_shared_receive_stream_data = config.emit_shared_receive_stream_data,
           .enable_packet_inspection = config.enable_packet_inspection,
+          .defer_inbound_application_send_drain = config.defer_inbound_application_send_drain,
       }),
       legacy_config_(std::move(config)), endpoint_random_(std::random_device{}()),
       connection_(this) {
@@ -2931,14 +2947,29 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                     }
                 }
 
-                auto drained = drain_connection_effects(
-                    entry.handle, entry.default_route_handle, entry.route_handle_by_path_id,
-                    *entry.connection, now, take_send_continuation_drain(entry), send_sink);
-                drain_queued_server_new_token(entry, drained, now, send_sink);
+                const bool defer_send_drain =
+                    endpoint_config_.defer_inbound_application_send_drain &&
+                    inbound_result.processed_any_packet &&
+                    (!entry.connection->pending_stream_receive_effects_.empty() ||
+                     !entry.connection->pending_datagram_receive_effects_.empty());
+                auto drained =
+                    defer_send_drain
+                        ? take_connection_non_send_effects(entry.handle, *entry.connection)
+                        : drain_connection_effects(entry.handle, entry.default_route_handle,
+                                                   entry.route_handle_by_path_id, *entry.connection,
+                                                   now, take_send_continuation_drain(entry),
+                                                   send_sink);
+                if (!defer_send_drain) {
+                    drain_queued_server_new_token(entry, drained, now, send_sink);
+                }
                 bool remove_entry =
                     should_remove_endpoint_connection_entry(*entry.connection, drained, now);
                 remember_client_new_tokens(entry, drained);
-                note_send_continuation(entry, drained, now);
+                if (defer_send_drain) {
+                    refresh_entry_wakeup(entry);
+                } else {
+                    note_send_continuation(entry, drained, now);
+                }
                 append_result(result, std::move(drained));
                 refresh_server_connection_routes(entry);
                 if (remove_entry) {

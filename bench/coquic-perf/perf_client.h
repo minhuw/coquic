@@ -50,6 +50,7 @@ class QuicPerfClient {
     };
 
     struct OutstandingRequest {
+        std::uint64_t stream_id = 0;
         quic::QuicCoreTimePoint started_at{};
         std::size_t received_bytes = 0;
         bool counts_toward_measurement = false;
@@ -62,7 +63,7 @@ class QuicPerfClient {
         bool control_complete = false;
         bool close_requested = false;
         std::vector<std::byte> control_bytes;
-        std::unordered_map<std::uint64_t, OutstandingRequest> outstanding_requests;
+        std::vector<OutstandingRequest> outstanding_requests;
         std::unordered_map<std::uint64_t, bool> active_bulk_streams;
         std::uint64_t next_stream_id = kQuicPerfFirstDataStreamId;
         std::uint64_t bytes_sent = 0;
@@ -108,7 +109,6 @@ class QuicPerfClient {
     bool flush_json_result() const;
     bool drain_pending_backend_events();
     bool flush_pending_sends();
-
     QuicPerfConfig config_;
     quic::QuicCore core_;
     std::unique_ptr<io::QuicIoBackend> backend_;
@@ -117,6 +117,7 @@ class QuicPerfClient {
     std::vector<std::byte> primary_address_validation_identity_;
     std::unordered_map<quic::QuicConnectionHandle, ConnectionState> connections_;
     std::unordered_set<quic::QuicConnectionHandle> closing_connections_;
+    quic::SharedBytes request_payload_;
     std::size_t requests_started_ = 0;
     std::size_t crr_requests_opened_ = 0;
     std::uint64_t next_connection_index_ = 0;

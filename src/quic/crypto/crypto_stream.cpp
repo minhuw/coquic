@@ -600,6 +600,23 @@ CodecResult<ContiguousReceiveBytes> ReliableReceiveBuffer::push_shared(std::uint
     return CodecResult<ContiguousReceiveBytes>::success(take_contiguous_buffered_bytes({}));
 }
 
+CodecResult<bool> ReliableReceiveBuffer::try_accept_contiguous(std::uint64_t offset,
+                                                               std::size_t length) {
+    if (length == 0) {
+        return CodecResult<bool>::success(offset == next_contiguous_offset_ &&
+                                          buffered_bytes_.empty());
+    }
+    if (offset > maximum_stream_offset || length - 1 > maximum_stream_offset - offset) {
+        return CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
+    }
+    if (offset != next_contiguous_offset_ || !buffered_bytes_.empty()) {
+        return CodecResult<bool>::success(false);
+    }
+
+    next_contiguous_offset_ = range_end(offset, length);
+    return CodecResult<bool>::success(true);
+}
+
 CodecResult<std::vector<std::byte>> ReliableReceiveBuffer::push(std::uint64_t offset,
                                                                 std::vector<std::byte> &&bytes) {
     auto received = push_shared(offset, SharedBytes(std::move(bytes)));

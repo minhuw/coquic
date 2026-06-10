@@ -451,6 +451,8 @@ quic::QuicCoreEndpointConfig make_perf_client_endpoint_config(const QuicPerfConf
         .max_outbound_datagram_size = config.max_outbound_datagram_size,
     };
     endpoint_config.emit_shared_receive_stream_data = true;
+    endpoint_config.defer_inbound_application_send_drain =
+        config.mode == QuicPerfMode::rr || config.mode == QuicPerfMode::crr;
     endpoint_config.transport.congestion_control = config.congestion_control;
     endpoint_config.transport.enable_hystart_plus_plus = perf_enable_hystart_plus_plus(config);
     endpoint_config.transport.send_stream_fairness = perf_send_stream_fairness(config);
@@ -475,6 +477,7 @@ quic::QuicCoreEndpointConfig make_perf_server_endpoint_config(const QuicPerfConf
             },
     };
     endpoint_config.emit_shared_receive_stream_data = true;
+    endpoint_config.defer_inbound_application_send_drain = true;
     endpoint_config.max_outbound_datagram_size = config.max_outbound_datagram_size;
     endpoint_config.transport.congestion_control = config.congestion_control;
     endpoint_config.transport.enable_hystart_plus_plus = perf_enable_hystart_plus_plus(config);

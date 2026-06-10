@@ -80,6 +80,17 @@ inline std::vector<QuicCoreSendDatagram> send_effects_from(const QuicCoreResult 
     return out;
 }
 
+inline std::vector<QuicCoreReceiveStreamData>
+received_stream_data_from(const QuicCoreResult &result) {
+    std::vector<QuicCoreReceiveStreamData> out;
+    for (const auto &effect : result.effects) {
+        if (const auto *received = std::get_if<QuicCoreReceiveStreamData>(&effect)) {
+            out.push_back(*received);
+        }
+    }
+    return out;
+}
+
 inline std::vector<QuicCoreNewTokenAvailable> new_token_effects_from(const QuicCoreResult &result) {
     std::vector<QuicCoreNewTokenAvailable> out;
     for (const auto &effect : result.effects) {

@@ -177,6 +177,7 @@ struct QuicCoreConfig {
     QuicRequestForgeryPolicyConfig request_forgery_policy;
     bool emit_shared_receive_stream_data = false;
     bool enable_packet_inspection = false;
+    bool defer_inbound_application_send_drain = false;
 };
 
 using QuicCoreClock = std::chrono::steady_clock;
@@ -329,6 +330,7 @@ struct QuicCoreEndpointConfig {
     QuicRequestForgeryPolicyConfig request_forgery_policy;
     bool emit_shared_receive_stream_data = false;
     bool enable_packet_inspection = false;
+    bool defer_inbound_application_send_drain = false;
     bool allow_peer_address_change = true;
     bool retain_stateless_reset_tokens_after_connection_close = true;
     QuicCoreDuration stateless_reset_token_retention{600000000};

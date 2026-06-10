@@ -2720,7 +2720,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             if (application_frame_requires_connected_state(require_connected, status_)) {
                 return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeStopSending));
             }
-            if (find_retired_peer_stream_range(stop_sending->stream_id) != nullptr) {
+            if (find_retired_compact_stream_range(stop_sending->stream_id) != nullptr) {
                 continue;
             }
 
@@ -2765,7 +2765,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 return CodecResult<bool>::failure(
                     protocol_violation_error(kFrameTypeMaxStreamData));
             }
-            if (find_retired_peer_stream_range(max_stream_data->stream_id) != nullptr) {
+            if (find_retired_compact_stream_range(max_stream_data->stream_id) != nullptr) {
                 continue;
             }
 
@@ -2812,7 +2812,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 return CodecResult<bool>::failure(
                     protocol_violation_error(kFrameTypeStreamDataBlocked));
             }
-            if (find_retired_peer_stream_range(stream_data_blocked->stream_id) != nullptr) {
+            if (find_retired_compact_stream_range(stream_data_blocked->stream_id) != nullptr) {
                 continue;
             }
 
@@ -3127,7 +3127,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             if (application_frame_requires_connected_state(require_connected, status_)) {
                 return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeStopSending));
             }
-            if (find_retired_peer_stream_range(stop_sending->stream_id) != nullptr) {
+            if (find_retired_compact_stream_range(stop_sending->stream_id) != nullptr) {
                 continue;
             }
 
@@ -3172,7 +3172,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 return CodecResult<bool>::failure(
                     protocol_violation_error(kFrameTypeMaxStreamData));
             }
-            if (find_retired_peer_stream_range(max_stream_data->stream_id) != nullptr) {
+            if (find_retired_compact_stream_range(max_stream_data->stream_id) != nullptr) {
                 continue;
             }
 
@@ -3219,7 +3219,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 return CodecResult<bool>::failure(
                     protocol_violation_error(kFrameTypeStreamDataBlocked));
             }
-            if (find_retired_peer_stream_range(stream_data_blocked->stream_id) != nullptr) {
+            if (find_retired_compact_stream_range(stream_data_blocked->stream_id) != nullptr) {
                 continue;
             }
 
@@ -3401,13 +3401,26 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
     }
     connection_flow_control_.received_committed += received_delta;
 
-    auto shared_contiguous_bytes =
-        stream_state->receive_buffer.push_shared(stream_offset, stream_frame.stream_data);
-    if (!shared_contiguous_bytes.has_value()) {
-        return CodecResult<bool>::failure(shared_contiguous_bytes.error().code,
-                                          shared_contiguous_bytes.error().offset);
+    const auto fast_contiguous_receive = config_.emit_shared_receive_stream_data
+                                             ? stream_state->receive_buffer.try_accept_contiguous(
+                                                   stream_offset, stream_frame.stream_data.size())
+                                             : CodecResult<bool>::success(false);
+    if (!fast_contiguous_receive.has_value()) {
+        return CodecResult<bool>::failure(fast_contiguous_receive.error().code,
+                                          fast_contiguous_receive.error().offset);
     }
-    const auto contiguous_size = shared_contiguous_bytes.value().span().size();
+    ContiguousReceiveBytes shared_contiguous_bytes;
+    if (!fast_contiguous_receive.value()) {
+        auto pushed =
+            stream_state->receive_buffer.push_shared(stream_offset, stream_frame.stream_data);
+        if (!pushed.has_value()) {
+            return CodecResult<bool>::failure(pushed.error().code, pushed.error().offset);
+        }
+        shared_contiguous_bytes = std::move(pushed).value();
+    }
+    const auto contiguous_size = fast_contiguous_receive.value()
+                                     ? stream_frame.stream_data.size()
+                                     : shared_contiguous_bytes.span().size();
     if (stream_frame.stream_id == 0 &&
         packet_trace_matches_connection(config_.source_connection_id)) {
         std::cerr << "quic-packet-trace stream scid="
@@ -3427,11 +3440,13 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
             .stream_id = stream_frame.stream_id,
             .fin = fin_ready,
         };
-        if (config_.emit_shared_receive_stream_data &&
-            shared_contiguous_bytes.value().owned.empty()) {
-            receive.shared_bytes = std::move(shared_contiguous_bytes.value().shared);
+        if (fast_contiguous_receive.value()) {
+            receive.shared_bytes = stream_frame.stream_data;
+        } else if (config_.emit_shared_receive_stream_data &&
+                   shared_contiguous_bytes.owned.empty()) {
+            receive.shared_bytes = std::move(shared_contiguous_bytes.shared);
         } else {
-            receive.bytes = shared_contiguous_bytes.value().to_vector();
+            receive.bytes = shared_contiguous_bytes.to_vector();
         }
         pending_stream_receive_effects_.push_back(std::move(receive));
         stream_state->flow_control.delivered_bytes += static_cast<std::uint64_t>(contiguous_size);

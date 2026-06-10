@@ -419,6 +419,51 @@ TEST(QuicCoreTest, ProcessInboundDatagramBuffersOutOfOrderOneRttStreamDataUntilG
     EXPECT_TRUE(connection.streams_.at(0).receive_buffer.buffered_bytes_.empty());
 }
 
+TEST(QuicCoreTest, ProcessInboundDatagramFastReceivesInOrderSharedOneRttStreamData) {
+    auto connection = make_connected_server_connection();
+    connection.config_.emit_shared_receive_stream_data = true;
+
+    auto encoded = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 1,
+                .packet_number = 7,
+                .frames =
+                    {
+                        coquic::quic::StreamFrame{
+                            .fin = true,
+                            .has_offset = true,
+                            .has_length = true,
+                            .stream_id = 0,
+                            .offset = 0,
+                            .stream_data = coquic::quic::test::bytes_from_string("fast"),
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = optional_ref_or_terminate(connection.application_space_.read_secret),
+        });
+    ASSERT_TRUE(encoded.has_value());
+
+    connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(1));
+
+    auto received_stream = optional_value_or_terminate(connection.take_received_stream_data());
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(received_stream.payload()), "fast");
+    EXPECT_TRUE(received_stream.bytes.empty());
+    EXPECT_FALSE(received_stream.shared_bytes.empty());
+    EXPECT_TRUE(received_stream.fin);
+    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
+    ASSERT_TRUE(connection.streams_.contains(0));
+    EXPECT_TRUE(connection.streams_.at(0).receive_buffer.buffered_bytes_.empty());
+    EXPECT_EQ(connection.streams_.at(0).receive_flow_control_consumed, 4u);
+    EXPECT_TRUE(connection.streams_.at(0).peer_fin_delivered);
+}
+
 TEST(QuicCoreTest, ProcessInboundDatagramIgnoresAckRangeTrimmedOneRttReplay) {
     auto connection = make_connected_server_connection();
     connection.config_.emit_shared_receive_stream_data = false;
@@ -3951,6 +3996,63 @@ TEST(QuicCoreTest, TerminalPeerBidirectionalStreamsRetireIntoCompactRanges) {
     ASSERT_NE(const_retired_scratch, nullptr);
     EXPECT_TRUE(const_retired_scratch->send_closed);
     EXPECT_TRUE(const_retired_scratch->receive_closed);
+}
+
+TEST(QuicCoreTest, TerminalLocalBidirectionalStreamsRetireIntoCompactRanges) {
+    auto connection = make_connected_client_connection();
+    const auto retire_terminal_local_bidi_stream = [](coquic::quic::QuicConnection &connection,
+                                                      std::uint64_t stream_id) {
+        auto &stream = connection.streams_
+                           .emplace(stream_id, coquic::quic::make_implicit_stream_state(
+                                                   stream_id, connection.config_.role))
+                           .first->second;
+        connection.initialize_stream_flow_control(stream);
+        stream.peer_final_size = 32;
+        stream.peer_send_closed = true;
+        stream.peer_fin_delivered = true;
+        stream.receive_flow_control_consumed = 32;
+        stream.highest_received_offset = 32;
+        stream.flow_control.delivered_bytes = 32;
+        stream.send_final_size = 32;
+        stream.send_flow_control_committed = 32;
+        stream.flow_control.highest_sent = 32;
+        stream.send_fin_state = coquic::quic::StreamSendFinState::acknowledged;
+
+        connection.maybe_retire_stream(stream_id);
+        EXPECT_FALSE(connection.streams_.contains(stream_id));
+    };
+
+    for (std::uint64_t stream_id : {0u, 4u}) {
+        retire_terminal_local_bidi_stream(connection, stream_id);
+    }
+
+    EXPECT_TRUE(connection.retired_streams_.empty());
+    ASSERT_EQ(connection.retired_local_bidi_stream_ranges_.size(), 1u);
+    EXPECT_EQ(connection.retired_local_stream_count(), 2u);
+
+    const auto duplicate =
+        connection.validate_retired_peer_stream_frame(/*stream_id=*/0, /*offset=*/0,
+                                                      /*length=*/32, /*fin=*/true, 0x08);
+    ASSERT_TRUE(duplicate.has_value());
+    EXPECT_TRUE(duplicate.value());
+
+    const auto final_size_conflict =
+        connection.validate_retired_peer_stream_frame(/*stream_id=*/0, /*offset=*/0,
+                                                      /*length=*/33, /*fin=*/true, 0x08);
+    EXPECT_FALSE(final_size_conflict.has_value());
+
+    const auto reset_final_size_match =
+        connection.validate_retired_peer_reset_stream_frame(/*stream_id=*/0,
+                                                            /*final_size=*/32, 0x04);
+    ASSERT_TRUE(reset_final_size_match.has_value());
+    EXPECT_TRUE(reset_final_size_match.value());
+
+    auto *retired_scratch = connection.find_stream_state(0);
+    ASSERT_NE(retired_scratch, nullptr);
+    EXPECT_TRUE(retired_scratch->send_closed);
+    EXPECT_TRUE(retired_scratch->receive_closed);
+    EXPECT_EQ(retired_scratch->send_final_size, std::optional<std::uint64_t>{32});
+    EXPECT_EQ(retired_scratch->peer_final_size, std::optional<std::uint64_t>{32});
 }
 
 TEST(QuicCoreTest, MarkLostPacketRequeuesUnidirectionalMaxStreamsFrame) {

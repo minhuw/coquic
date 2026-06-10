@@ -266,6 +266,7 @@ class ReliableReceiveBuffer {
     CodecResult<std::vector<std::byte>> push(std::uint64_t offset, std::vector<std::byte> &&bytes);
     CodecResult<std::vector<std::byte>> push(std::uint64_t offset,
                                              std::span<const std::byte> bytes);
+    CodecResult<bool> try_accept_contiguous(std::uint64_t offset, std::size_t length);
 
   private:
     void buffer_range(std::uint64_t offset, const SharedBytes &bytes);

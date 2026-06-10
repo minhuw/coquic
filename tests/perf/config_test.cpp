@@ -207,6 +207,39 @@ TEST(QuicPerfConfigTest, EndpointConfigKeepsPmtudEnabledForContainerBenchmarks) 
     EXPECT_TRUE(server.transport.pmtud_enabled);
 }
 
+TEST(QuicPerfConfigTest, EndpointConfigDefersInboundApplicationSendDrainForCoalescing) {
+    const auto default_config = coquic::quic::QuicCoreEndpointConfig{};
+    EXPECT_FALSE(default_config.defer_inbound_application_send_drain);
+
+    const auto bulk_client =
+        make_perf_client_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::client});
+    const auto bulk_server =
+        make_perf_server_endpoint_config(QuicPerfConfig{.role = QuicPerfRole::server});
+    const auto rr_client = make_perf_client_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::rr,
+    });
+    const auto rr_server = make_perf_server_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::server,
+        .mode = QuicPerfMode::rr,
+    });
+    const auto crr_client = make_perf_client_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::crr,
+    });
+    const auto crr_server = make_perf_server_endpoint_config(QuicPerfConfig{
+        .role = QuicPerfRole::server,
+        .mode = QuicPerfMode::crr,
+    });
+
+    EXPECT_FALSE(bulk_client.defer_inbound_application_send_drain);
+    EXPECT_TRUE(bulk_server.defer_inbound_application_send_drain);
+    EXPECT_TRUE(rr_client.defer_inbound_application_send_drain);
+    EXPECT_TRUE(rr_server.defer_inbound_application_send_drain);
+    EXPECT_TRUE(crr_client.defer_inbound_application_send_drain);
+    EXPECT_TRUE(crr_server.defer_inbound_application_send_drain);
+}
+
 TEST(QuicPerfConfigTest, EndpointConfigUsesTransferSizedReceiveWindows) {
     constexpr std::uint64_t kExpectedConnectionWindow = 32ull * 1024ull * 1024ull;
     constexpr std::uint64_t kExpectedStreamWindow = 16ull * 1024ull * 1024ull;

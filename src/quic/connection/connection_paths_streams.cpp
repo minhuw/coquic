@@ -1494,10 +1494,12 @@ StreamState *QuicConnection::find_active_stream_state(std::uint64_t stream_id) {
 }
 
 StreamState *QuicConnection::find_retired_stream_state(std::uint64_t stream_id) {
-    if (auto it = retired_streams_.find(stream_id); it != retired_streams_.end()) {
-        return &it->second;
+    if (!largest_retired_stream_id_.has_value() || stream_id <= *largest_retired_stream_id_) {
+        if (auto it = retired_streams_.find(stream_id); it != retired_streams_.end()) {
+            return &it->second;
+        }
     }
-    if (const auto *range = find_retired_peer_stream_range(stream_id); range != nullptr) {
+    if (const auto *range = find_retired_compact_stream_range(stream_id); range != nullptr) {
         retired_peer_stream_lookup_scratch_ = make_retired_peer_stream_state(stream_id, *range);
         return &retired_peer_stream_lookup_scratch_;
     }
@@ -1515,10 +1517,12 @@ const StreamState *QuicConnection::find_stream_state(std::uint64_t stream_id) co
     if (auto it = streams_.find(stream_id); it != streams_.end()) {
         return &it->second;
     }
-    if (auto it = retired_streams_.find(stream_id); it != retired_streams_.end()) {
-        return &it->second;
+    if (!largest_retired_stream_id_.has_value() || stream_id <= *largest_retired_stream_id_) {
+        if (auto it = retired_streams_.find(stream_id); it != retired_streams_.end()) {
+            return &it->second;
+        }
     }
-    if (const auto *range = find_retired_peer_stream_range(stream_id); range != nullptr) {
+    if (const auto *range = find_retired_compact_stream_range(stream_id); range != nullptr) {
         retired_peer_stream_lookup_scratch_ = make_retired_peer_stream_state(stream_id, *range);
         return &retired_peer_stream_lookup_scratch_;
     }
@@ -1535,6 +1539,18 @@ const std::map<std::uint64_t, QuicConnection::RetiredPeerStreamRange> &
 QuicConnection::retired_peer_stream_ranges(StreamDirection direction) const {
     return direction == StreamDirection::bidirectional ? retired_peer_bidi_stream_ranges_
                                                        : retired_peer_uni_stream_ranges_;
+}
+
+std::map<std::uint64_t, QuicConnection::RetiredPeerStreamRange> &
+QuicConnection::retired_local_stream_ranges(StreamDirection direction) {
+    return direction == StreamDirection::bidirectional ? retired_local_bidi_stream_ranges_
+                                                       : retired_local_uni_stream_ranges_;
+}
+
+const std::map<std::uint64_t, QuicConnection::RetiredPeerStreamRange> &
+QuicConnection::retired_local_stream_ranges(StreamDirection direction) const {
+    return direction == StreamDirection::bidirectional ? retired_local_bidi_stream_ranges_
+                                                       : retired_local_uni_stream_ranges_;
 }
 
 QuicConnection::RetiredPeerStreamRange *
@@ -1569,6 +1585,46 @@ QuicConnection::find_retired_peer_stream_range(std::uint64_t stream_id) const {
     return stream_index <= candidate->second.last_index ? &candidate->second : nullptr;
 }
 
+QuicConnection::RetiredPeerStreamRange *
+QuicConnection::find_retired_local_stream_range(std::uint64_t stream_id) {
+    const auto id_info = classify_stream_id(stream_id, config_.role);
+    if (id_info.initiator != StreamInitiator::local) {
+        return nullptr;
+    }
+    auto &ranges = retired_local_stream_ranges(id_info.direction);
+    const auto stream_index = stream_id >> 2u;
+    auto after = ranges.upper_bound(stream_index);
+    if (after == ranges.begin()) {
+        return nullptr;
+    }
+    auto candidate = std::prev(after);
+    return stream_index <= candidate->second.last_index ? &candidate->second : nullptr;
+}
+
+const QuicConnection::RetiredPeerStreamRange *
+QuicConnection::find_retired_local_stream_range(std::uint64_t stream_id) const {
+    const auto id_info = classify_stream_id(stream_id, config_.role);
+    if (id_info.initiator != StreamInitiator::local) {
+        return nullptr;
+    }
+    const auto &ranges = retired_local_stream_ranges(id_info.direction);
+    const auto stream_index = stream_id >> 2u;
+    auto after = ranges.upper_bound(stream_index);
+    if (after == ranges.begin()) {
+        return nullptr;
+    }
+    auto candidate = std::prev(after);
+    return stream_index <= candidate->second.last_index ? &candidate->second : nullptr;
+}
+
+const QuicConnection::RetiredPeerStreamRange *
+QuicConnection::find_retired_compact_stream_range(std::uint64_t stream_id) const {
+    if (const auto *range = find_retired_peer_stream_range(stream_id); range != nullptr) {
+        return range;
+    }
+    return find_retired_local_stream_range(stream_id);
+}
+
 StreamState
 QuicConnection::make_retired_peer_stream_state(std::uint64_t stream_id,
                                                const RetiredPeerStreamRange &range) const {
@@ -1598,7 +1654,7 @@ QuicConnection::make_retired_peer_stream_state(std::uint64_t stream_id,
 CodecResult<bool> QuicConnection::validate_retired_peer_stream_frame(
     std::uint64_t stream_id, // NOLINT(bugprone-easily-swappable-parameters)
     std::uint64_t offset, std::size_t length, bool fin, std::uint64_t frame_type) const {
-    const auto *range = find_retired_peer_stream_range(stream_id);
+    const auto *range = find_retired_compact_stream_range(stream_id);
     if (range == nullptr) {
         return CodecResult<bool>::success(false);
     }
@@ -1619,7 +1675,7 @@ CodecResult<bool> QuicConnection::validate_retired_peer_stream_frame(
 CodecResult<bool> QuicConnection::validate_retired_peer_reset_stream_frame(
     std::uint64_t stream_id, // NOLINT(bugprone-easily-swappable-parameters)
     std::uint64_t final_size, std::uint64_t frame_type) const {
-    const auto *range = find_retired_peer_stream_range(stream_id);
+    const auto *range = find_retired_compact_stream_range(stream_id);
     if (range == nullptr) {
         return CodecResult<bool>::success(false);
     }
@@ -1679,6 +1735,55 @@ bool QuicConnection::try_retire_stream_to_peer_range(const StreamState &stream) 
     return true;
 }
 
+bool QuicConnection::try_retire_stream_to_local_range(const StreamState &stream) {
+    if (stream.id_info.initiator != StreamInitiator::local) {
+        return false;
+    }
+    if (!stream.peer_fin_delivered || stream.peer_reset_received || !stream.peer_final_size ||
+        !stream.send_final_size || stream.reset_state != StreamControlFrameState::none ||
+        stream.stop_sending_state != StreamControlFrameState::none ||
+        stream.flow_control.max_stream_data_state != StreamControlFrameState::none ||
+        stream.flow_control.stream_data_blocked_state != StreamControlFrameState::none) {
+        return false;
+    }
+
+    const auto stream_index = stream.stream_id >> 2u;
+    RetiredPeerStreamRange merged{
+        .first_index = stream_index,
+        .last_index = stream_index,
+        .receive_final_size = *stream.peer_final_size,
+        .send_final_size = *stream.send_final_size,
+        .peer_max_stream_data = stream.flow_control.peer_max_stream_data,
+        .local_receive_window = stream.flow_control.local_receive_window,
+        .advertised_max_stream_data = stream.flow_control.advertised_max_stream_data,
+    };
+    auto &ranges = retired_local_stream_ranges(stream.id_info.direction);
+    auto after = ranges.upper_bound(stream_index);
+    if (after != ranges.begin()) {
+        auto previous = std::prev(after);
+        if (previous->second.last_index + 1 == stream_index &&
+            previous->second.receive_final_size == merged.receive_final_size &&
+            previous->second.send_final_size == merged.send_final_size &&
+            previous->second.peer_max_stream_data == merged.peer_max_stream_data &&
+            previous->second.local_receive_window == merged.local_receive_window &&
+            previous->second.advertised_max_stream_data == merged.advertised_max_stream_data) {
+            merged.first_index = previous->second.first_index;
+            ranges.erase(previous);
+        }
+    }
+    if (after != ranges.end() && stream_index + 1 == after->second.first_index &&
+        after->second.receive_final_size == merged.receive_final_size &&
+        after->second.send_final_size == merged.send_final_size &&
+        after->second.peer_max_stream_data == merged.peer_max_stream_data &&
+        after->second.local_receive_window == merged.local_receive_window &&
+        after->second.advertised_max_stream_data == merged.advertised_max_stream_data) {
+        merged.last_index = after->second.last_index;
+        ranges.erase(after);
+    }
+    ranges.emplace(merged.first_index, merged);
+    return true;
+}
+
 std::size_t QuicConnection::retired_peer_stream_count() const {
     std::size_t count = 0;
     const auto count_ranges = [&](const auto &ranges) {
@@ -1689,6 +1794,19 @@ std::size_t QuicConnection::retired_peer_stream_count() const {
     };
     count_ranges(retired_peer_bidi_stream_ranges_);
     count_ranges(retired_peer_uni_stream_ranges_);
+    return count;
+}
+
+std::size_t QuicConnection::retired_local_stream_count() const {
+    std::size_t count = 0;
+    const auto count_ranges = [&](const auto &ranges) {
+        for (const auto &[first_index, range] : ranges) {
+            static_cast<void>(first_index);
+            count += static_cast<std::size_t>(range.last_index - range.first_index + 1);
+        }
+    };
+    count_ranges(retired_local_bidi_stream_ranges_);
+    count_ranges(retired_local_uni_stream_ranges_);
     return count;
 }
 
@@ -1712,7 +1830,12 @@ void QuicConnection::maybe_retire_stream(std::uint64_t stream_id) {
     }
 
     forget_active_stream_queued_bytes(stream->second);
-    if (!try_retire_stream_to_peer_range(stream->second)) {
+    stream_send_priorities_.erase(stream_id);
+    if (!try_retire_stream_to_peer_range(stream->second) &&
+        !try_retire_stream_to_local_range(stream->second)) {
+        largest_retired_stream_id_ = largest_retired_stream_id_.has_value()
+                                         ? std::max(*largest_retired_stream_id_, stream_id)
+                                         : stream_id;
         retired_streams_.insert_or_assign(stream_id, std::move(stream->second));
     }
     streams_.erase(stream);

@@ -354,6 +354,7 @@ TEST(QuicPerfServerTest, FixedDownloadRuntimeBranchQueuesCachedSharedPayloadOnSt
     QuicPerfServer::Session session{
         .connection = connection,
         .start = make_fixed_download_start(4096),
+        .fixed_response_payload = server.cached_download_payload(4096),
     };
 
     ASSERT_TRUE(server.handle_stream_data(session,

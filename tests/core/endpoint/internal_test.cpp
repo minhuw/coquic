@@ -682,6 +682,84 @@ TEST(QuicCoreEndpointInternalTest, ConnectionCommandDrainsPendingEndpointEffects
     EXPECT_TRUE(saw_zero_rtt);
 }
 
+TEST(QuicCoreEndpointInternalTest, InboundDatagramCanDeferSendDrainUntilReceiveEffects) {
+    auto config = make_client_endpoint_config();
+    config.defer_inbound_application_send_drain = true;
+    QuicCore endpoint(std::move(config));
+    static_cast<void>(endpoint.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0)));
+
+    auto &entry = endpoint.connections_.at(1);
+    *entry.connection = make_connected_client_connection();
+    const ConnectionId endpoint_cid = bytes_from_ints({0xc1, 0x01, 0, 0, 0, 0, 0, 0x01});
+    entry.connection->config_.source_connection_id = endpoint_cid;
+    entry.connection->local_connection_ids_[0].connection_id = endpoint_cid;
+    entry.connection->note_endpoint_route_state_changed();
+    entry.default_route_handle = 17;
+    entry.path_id_by_route_handle.emplace(17, 0);
+    entry.route_handle_by_path_id.emplace(0, 17);
+    endpoint.refresh_server_connection_routes(entry);
+
+    const auto peer_datagram = serialize_protected_datagram(
+        std::array<ProtectedPacket, 1>{
+            ProtectedOneRttPacket{
+                .destination_connection_id = entry.connection->config_.source_connection_id,
+                .packet_number_length = 1,
+                .packet_number = 1,
+                .frames =
+                    {
+                        StreamFrame{
+                            .fin = true,
+                            .has_offset = false,
+                            .has_length = true,
+                            .stream_id = 1,
+                            .stream_data = bytes_from_ints({0x6f, 0x6b}),
+                        },
+                    },
+            },
+        },
+        SerializeProtectionContext{
+            .local_role = EndpointRole::server,
+            .client_initial_destination_connection_id =
+                entry.connection->client_initial_destination_connection_id(),
+            .one_rtt_secret = entry.connection->application_space_.read_secret,
+            .one_rtt_key_phase = entry.connection->application_read_key_phase_,
+        });
+    ASSERT_TRUE(peer_datagram.has_value());
+
+    auto inbound = endpoint.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = peer_datagram.value(),
+            .route_handle = 17,
+            .ecn = QuicEcnCodepoint::ce,
+        },
+        coquic::quic::test::test_time(2));
+
+    EXPECT_TRUE(send_effects_from(inbound).empty());
+    auto received = received_stream_data_from(inbound);
+    ASSERT_EQ(received.size(), 1u);
+    EXPECT_EQ(received.front().connection, 1u);
+    EXPECT_EQ(received.front().stream_id, 1u);
+    EXPECT_EQ(received.front().bytes, bytes_from_ints({0x6f, 0x6b}));
+
+    auto response = endpoint.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                QuicCoreSendStreamData{
+                    .stream_id = 1,
+                    .bytes = bytes_from_ints({0x72}),
+                    .fin = true,
+                },
+        },
+        coquic::quic::test::test_time(2));
+    EXPECT_FALSE(send_effects_from(response).empty());
+}
+
 TEST(QuicCoreEndpointInternalTest, EndpointDiagnosticsSkipNullEntriesAndTrackContinuations) {
     QuicCore endpoint(make_client_endpoint_config());
     static_cast<void>(endpoint.advance_endpoint(

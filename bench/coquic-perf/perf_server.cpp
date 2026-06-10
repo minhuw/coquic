@@ -9,7 +9,7 @@
 namespace coquic::perf {
 namespace {
 
-constexpr std::size_t kMaxPendingBackendEventsBeforeFlush = 64;
+constexpr std::size_t kMaxPendingBackendEventsBeforeFlush = 256;
 
 std::vector<std::byte> make_payload(std::size_t bytes) {
     return std::vector<std::byte>(bytes, std::byte{0x5a});
@@ -68,9 +68,10 @@ QuicPerfServer::QuicPerfServer(const QuicPerfConfig &config,
     send_buffer_.set_backend(backend_.get());
 }
 
-quic::SharedBytes QuicPerfServer::cached_download_payload(std::size_t bytes) {
+const quic::SharedBytes &QuicPerfServer::cached_download_payload(std::size_t bytes) {
+    static const quic::SharedBytes kEmptyPayload;
     if (bytes == 0) {
-        return {};
+        return kEmptyPayload;
     }
 
     auto [it, inserted] = download_payload_cache_.try_emplace(bytes);
@@ -180,6 +181,15 @@ int QuicPerfServer::run() {
             if (!handle_result(advance_endpoint(std::move(*input), event->now), event->now)) {
                 return 1;
             }
+        }
+        const bool interactive_pending =
+            std::any_of(sessions_.begin(), sessions_.end(), [](const auto &entry) {
+                return entry.second.start.has_value() &&
+                       (entry.second.start->mode == QuicPerfMode::rr ||
+                        entry.second.start->mode == QuicPerfMode::crr);
+            });
+        if (interactive_pending && !drain_pending_backend_events()) {
+            return 1;
         }
         if (!flush_pending_sends()) {
             return 1;
@@ -327,14 +337,13 @@ bool QuicPerfServer::handle_stream_data(Session &session,
             !session.start->total_bytes.has_value() && received.fin) {
             // Unbounded bulk download replies with the configured payload on each finished stream.
             const auto response_bytes = static_cast<std::size_t>(session.start->response_bytes);
-            auto response_payload = cached_download_payload(response_bytes);
             auto send_result = advance_endpoint(
                 quic::QuicCoreConnectionCommand{
                     .connection = session.connection,
                     .input =
                         quic::QuicCoreSendSharedStreamData{
                             .stream_id = received.stream_id,
-                            .bytes = std::move(response_payload),
+                            .bytes = session.fixed_response_payload,
                             .fin = true,
                         },
                 },
@@ -404,9 +413,9 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                 quic::QuicCoreConnectionCommand{
                     .connection = session.connection,
                     .input =
-                        quic::QuicCoreSendStreamData{
+                        quic::QuicCoreSendSharedStreamData{
                             .stream_id = received.stream_id,
-                            .bytes = make_payload(response_bytes),
+                            .bytes = session.fixed_response_payload,
                             .fin = true,
                         },
                 },
@@ -455,6 +464,13 @@ bool QuicPerfServer::handle_stream_data(Session &session,
 
     // A valid start message arms the session and acknowledges readiness on the control stream.
     session.start = *start;
+    if (session.start->mode == QuicPerfMode::rr || session.start->mode == QuicPerfMode::crr ||
+        (session.start->mode == QuicPerfMode::bulk &&
+         session.start->direction == QuicPerfDirection::download &&
+         !session.start->total_bytes.has_value())) {
+        session.fixed_response_payload =
+            cached_download_payload(static_cast<std::size_t>(session.start->response_bytes));
+    }
     session.ready_sent = true;
     return send_control(session,
                         QuicPerfSessionReady{.protocol_version = kQuicPerfProtocolVersion});

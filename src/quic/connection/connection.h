@@ -865,8 +865,15 @@ class QuicConnection {
     retired_peer_stream_ranges(StreamDirection direction);
     const std::map<std::uint64_t, RetiredPeerStreamRange> &
     retired_peer_stream_ranges(StreamDirection direction) const;
+    std::map<std::uint64_t, RetiredPeerStreamRange> &
+    retired_local_stream_ranges(StreamDirection direction);
+    const std::map<std::uint64_t, RetiredPeerStreamRange> &
+    retired_local_stream_ranges(StreamDirection direction) const;
     RetiredPeerStreamRange *find_retired_peer_stream_range(std::uint64_t stream_id);
     const RetiredPeerStreamRange *find_retired_peer_stream_range(std::uint64_t stream_id) const;
+    RetiredPeerStreamRange *find_retired_local_stream_range(std::uint64_t stream_id);
+    const RetiredPeerStreamRange *find_retired_local_stream_range(std::uint64_t stream_id) const;
+    const RetiredPeerStreamRange *find_retired_compact_stream_range(std::uint64_t stream_id) const;
     StreamState make_retired_peer_stream_state(std::uint64_t stream_id,
                                                const RetiredPeerStreamRange &range) const;
     CodecResult<bool> validate_retired_peer_stream_frame(
@@ -876,7 +883,9 @@ class QuicConnection {
         std::uint64_t stream_id, // NOLINT(bugprone-easily-swappable-parameters)
         std::uint64_t final_size, std::uint64_t frame_type) const;
     bool try_retire_stream_to_peer_range(const StreamState &stream);
+    bool try_retire_stream_to_local_range(const StreamState &stream);
     std::size_t retired_peer_stream_count() const;
+    std::size_t retired_local_stream_count() const;
     void maybe_retire_stream(std::uint64_t stream_id);
     StreamStateResult<StreamState *> get_or_open_local_stream(std::uint64_t stream_id);
     StreamStateResult<StreamState *> get_existing_receive_stream(std::uint64_t stream_id);
@@ -1060,8 +1069,11 @@ class QuicConnection {
     };
     mutable ActiveStreamLookupCache active_stream_lookup_cache_;
     std::unordered_map<std::uint64_t, StreamState> retired_streams_;
+    std::optional<std::uint64_t> largest_retired_stream_id_;
     std::map<std::uint64_t, RetiredPeerStreamRange> retired_peer_bidi_stream_ranges_;
     std::map<std::uint64_t, RetiredPeerStreamRange> retired_peer_uni_stream_ranges_;
+    std::map<std::uint64_t, RetiredPeerStreamRange> retired_local_bidi_stream_ranges_;
+    std::map<std::uint64_t, RetiredPeerStreamRange> retired_local_uni_stream_ranges_;
     mutable StreamState retired_peer_stream_lookup_scratch_;
     ConnectionFlowControlState connection_flow_control_;
     StreamOpenLimits stream_open_limits_;

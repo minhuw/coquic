@@ -161,7 +161,8 @@ active_crr_connections_for_test(std::span<const QuicPerfDrainStateSnapshot> conn
 }
 
 QuicPerfClient::QuicPerfClient(const QuicPerfConfig &config)
-    : config_(config), core_(make_perf_client_endpoint_config(config)) {
+    : config_(config), core_(make_perf_client_endpoint_config(config)),
+      request_payload_(make_payload(config.request_bytes)) {
     summary_.mode = config.mode;
     summary_.direction = config.direction;
     summary_.backend = config.io_backend == io::QuicIoBackendKind::io_uring ? "io_uring" : "socket";
@@ -259,8 +260,7 @@ void QuicPerfClient::enter_measure_phase(quic::QuicCoreTimePoint now) {
     measure_deadline_ = now + config_.duration;
     reset_perf_run_summary_measurement(summary_);
     for (auto &[_, connection] : connections_) {
-        for (auto &[stream_id, request] : connection.outstanding_requests) {
-            (void)stream_id;
+        for (auto &request : connection.outstanding_requests) {
             request.counts_toward_measurement = false;
         }
         for (auto &[stream_id, counts_toward_measurement] : connection.active_bulk_streams) {
@@ -491,6 +491,14 @@ int QuicPerfClient::run() {
             if (!handle_result(std::move(inbound_result), event_handling_time)) {
                 return fail("client inbound datagram failed");
             }
+            if (config_.mode == QuicPerfMode::rr || config_.mode == QuicPerfMode::crr) {
+                if (!drain_pending_backend_events()) {
+                    return fail("client interactive queued receive drain failed");
+                }
+                if (!send_buffer_.flush(*backend_)) {
+                    return fail("client interactive send flush failed");
+                }
+            }
             continue;
         }
     }
@@ -692,6 +700,7 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
             if (const auto *ready = std::get_if<QuicPerfSessionReady>(&*decoded)) {
                 (void)ready;
                 connection.session_ready = true;
+                connection.outstanding_requests.reserve(config_.requests_in_flight);
                 maybe_start_timed_benchmark(now);
                 if (!maybe_start_bulk_streams(connection, now) ||
                     !maybe_issue_rr_requests(connection, now) ||
@@ -756,22 +765,24 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
     }
 
     if (config_.mode == QuicPerfMode::rr || config_.mode == QuicPerfMode::crr) {
-        const auto request_it = connection.outstanding_requests.find(received.stream_id);
+        const auto request_it = std::find_if(
+            connection.outstanding_requests.begin(), connection.outstanding_requests.end(),
+            [&](const auto &request) { return request.stream_id == received.stream_id; });
         if (request_it == connection.outstanding_requests.end()) {
             return true;
         }
 
-        request_it->second.received_bytes += received.byte_count();
-        if (request_it->second.counts_toward_measurement) {
+        request_it->received_bytes += received.byte_count();
+        if (request_it->counts_toward_measurement) {
             summary_.bytes_received += received.byte_count();
         }
         if (!received.fin) {
             return true;
         }
 
-        if (request_it->second.counts_toward_measurement) {
-            summary_.latency_samples.push_back(std::chrono::duration_cast<quic::QuicCoreDuration>(
-                now - request_it->second.started_at));
+        if (request_it->counts_toward_measurement) {
+            summary_.latency_samples.push_back(
+                std::chrono::duration_cast<quic::QuicCoreDuration>(now - request_it->started_at));
             ++summary_.requests_completed;
         }
         connection.outstanding_requests.erase(request_it);
@@ -974,43 +985,45 @@ bool QuicPerfClient::maybe_issue_rr_requests(ConnectionState &connection,
             connection.requests_started < *connection.request_limit)) {
         const auto stream_id = connection.next_stream_id;
         connection.next_stream_id = next_client_perf_stream_id(stream_id);
-        const auto [request_it, inserted] = connection.outstanding_requests.emplace(
-            stream_id, OutstandingRequest{
-                           .started_at = now,
-                           .counts_toward_measurement =
-                               config_.requests.has_value() || phase_ == BenchmarkPhase::measure,
-                       });
-        if (!inserted) {
+        if (std::any_of(connection.outstanding_requests.begin(),
+                        connection.outstanding_requests.end(),
+                        [&](const auto &request) { return request.stream_id == stream_id; })) {
             summary_.failure_reason = "client duplicate rr stream id";
             return false;
         }
-
+        connection.outstanding_requests.push_back(OutstandingRequest{
+            .stream_id = stream_id,
+            .started_at = now,
+            .counts_toward_measurement =
+                config_.requests.has_value() || phase_ == BenchmarkPhase::measure,
+        });
+        auto &request = connection.outstanding_requests.back();
         auto send_result = advance_endpoint(
             quic::QuicCoreConnectionCommand{
                 .connection = connection.handle,
                 .input =
-                    quic::QuicCoreSendStreamData{
+                    quic::QuicCoreSendSharedStreamData{
                         .stream_id = stream_id,
-                        .bytes = make_payload(config_.request_bytes),
+                        .bytes = request_payload_,
                         .fin = true,
                     },
             },
             now);
         if (send_result.local_error.has_value() || send_result.send_sink_failed) {
             summary_.failure_reason = "client rr request local error";
-            connection.outstanding_requests.erase(request_it);
+            connection.outstanding_requests.pop_back();
             return false;
         }
         if (!send_buffer_.append_or_flush(*backend_, send_result)) {
             summary_.failure_reason = "client rr request flush failed";
-            connection.outstanding_requests.erase(request_it);
+            connection.outstanding_requests.pop_back();
             return false;
         }
 
         ++requests_started_;
         ++connection.requests_started;
         connection.bytes_sent += config_.request_bytes;
-        if (request_it->second.counts_toward_measurement) {
+        if (request.counts_toward_measurement) {
             summary_.bytes_sent += config_.request_bytes;
         }
     }
@@ -1032,41 +1045,42 @@ bool QuicPerfClient::maybe_issue_crr_request(ConnectionState &connection,
 
     const auto stream_id = connection.next_stream_id;
     connection.next_stream_id = next_client_perf_stream_id(stream_id);
-    const auto [request_it, inserted] = connection.outstanding_requests.emplace(
-        stream_id, OutstandingRequest{
-                       .started_at = now,
-                       .counts_toward_measurement =
-                           config_.requests.has_value() || phase_ == BenchmarkPhase::measure,
-                   });
-    if (!inserted) {
+    if (std::any_of(connection.outstanding_requests.begin(), connection.outstanding_requests.end(),
+                    [&](const auto &request) { return request.stream_id == stream_id; })) {
         summary_.failure_reason = "client duplicate crr stream id";
         return false;
     }
-
+    connection.outstanding_requests.push_back(OutstandingRequest{
+        .stream_id = stream_id,
+        .started_at = now,
+        .counts_toward_measurement =
+            config_.requests.has_value() || phase_ == BenchmarkPhase::measure,
+    });
+    auto &request = connection.outstanding_requests.back();
     auto send_result = advance_endpoint(
         quic::QuicCoreConnectionCommand{
             .connection = connection.handle,
             .input =
-                quic::QuicCoreSendStreamData{
+                quic::QuicCoreSendSharedStreamData{
                     .stream_id = stream_id,
-                    .bytes = make_payload(config_.request_bytes),
+                    .bytes = request_payload_,
                     .fin = true,
                 },
         },
         now);
     if (send_result.local_error.has_value() || send_result.send_sink_failed) {
         summary_.failure_reason = "client crr request local error";
-        connection.outstanding_requests.erase(request_it);
+        connection.outstanding_requests.pop_back();
         return false;
     }
     if (!send_buffer_.append_or_flush(*backend_, send_result)) {
         summary_.failure_reason = "client crr request flush failed";
-        connection.outstanding_requests.erase(request_it);
+        connection.outstanding_requests.pop_back();
         return false;
     }
 
     connection.bytes_sent += config_.request_bytes;
-    if (request_it->second.counts_toward_measurement) {
+    if (request.counts_toward_measurement) {
         summary_.bytes_sent += config_.request_bytes;
     }
     return true;

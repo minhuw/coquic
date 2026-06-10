@@ -32,6 +32,7 @@ class QuicPerfServer {
         std::uint64_t bytes_sent = 0;
         std::uint64_t bytes_received = 0;
         std::uint64_t requests_completed = 0;
+        quic::SharedBytes fixed_response_payload;
     };
 
     quic::QuicCoreResult advance_endpoint(quic::QuicCoreEndpointInput input,
@@ -44,7 +45,7 @@ class QuicPerfServer {
     bool should_exit_on_idle_empty() const;
     bool should_exit_on_session_complete() const;
     bool completed_sessions_drained_for_exit() const;
-    quic::SharedBytes cached_download_payload(std::size_t bytes);
+    const quic::SharedBytes &cached_download_payload(std::size_t bytes);
     bool send_control(Session &session, const QuicPerfControlMessage &message);
 
     QuicPerfConfig config_;

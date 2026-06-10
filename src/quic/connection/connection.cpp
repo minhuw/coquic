@@ -883,7 +883,11 @@ StreamStateResult<bool> QuicConnection::queue_stream_send_impl(
         stream->send_final_size = stream->send_flow_control_committed;
         stream->send_fin_state = StreamSendFinState::pending;
     }
-    stream_send_priorities_[stream_id] = priority;
+    if (priority != 0) {
+        stream_send_priorities_[stream_id] = priority;
+    } else if (!stream_send_priorities_.empty()) {
+        stream_send_priorities_.erase(stream_id);
+    }
     note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
                                    *stream);
 

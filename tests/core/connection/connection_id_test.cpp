@@ -1029,6 +1029,23 @@ TEST(QuicCoreTest, NewConnectionIdRetirePriorToRefreshesCurrentPathPeerConnectio
     ASSERT_EQ(connection.pending_retire_connection_id_frames_.size(), 1u);
     EXPECT_EQ(connection.pending_retire_connection_id_frames_.front().sequence_number, 8u);
     EXPECT_EQ(connection.outbound_destination_connection_id(4), bytes_from_ints({0x11, 0x11}));
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(application, nullptr);
+    EXPECT_EQ(application->destination_connection_id, bytes_from_ints({0x11, 0x11}));
+    ASSERT_EQ(application->frames.size(), 1u);
+    const auto *retire =
+        std::get_if<coquic::quic::RetireConnectionIdFrame>(&application->frames.front());
+    ASSERT_NE(retire, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.16
+    // # The sequence number specified in a RETIRE_CONNECTION_ID frame MUST NOT
+    // # refer to the Destination Connection ID field of the packet in which
+    // # the frame is contained.
+    EXPECT_EQ(retire->sequence_number, 8u);
 }
 
 TEST(QuicCoreTest, CorruptedOneRttRequestConnectionIdBitflipDoesNotBlockValidRetransmit) {

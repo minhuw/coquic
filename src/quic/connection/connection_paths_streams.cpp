@@ -928,6 +928,10 @@ void QuicConnection::queue_peer_connection_id_retirement(std::uint64_t sequence_
             std::find_if(peer_connection_ids_.begin(), peer_connection_ids_.end(),
                          [](const auto &entry) { return !entry.second.locally_retired; });
         if (next_active != peer_connection_ids_.end()) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-19.16
+            // # The sequence number specified in a RETIRE_CONNECTION_ID frame
+            // # MUST NOT refer to the Destination Connection ID field of the
+            // # packet in which the frame is contained.
             active_peer_connection_id_sequence_ = next_active->first;
         }
     }

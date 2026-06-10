@@ -145,6 +145,22 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
     COQUIC_SEND_PROFILE_TIMER(setup_timer, inbound_setup_ns);
     if (status_ == HandshakeStatus::failed || bytes.empty()) {
         if (close_mode_ == QuicConnectionCloseMode::closing) {
+            last_inbound_path_id_ = path_id;
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+            // # To avoid being used for an amplification attack, such endpoints
+            // # MUST limit the cumulative size of packets it sends to three
+            // # times the cumulative size of the packets that are received and
+            // # attributed to the connection.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+            // # An endpoint in the closing state MUST either discard packets
+            // # received from an unvalidated address or limit the cumulative
+            // # size of packets it sends to an unvalidated address to three
+            // # times the size of packets it receives from that address.
+            maybe_note_inbound_datagram_bytes(
+                count_inbound_bytes, bytes, accepts_greased_quic_bit(),
+                [&](std::size_t byte_count) { note_inbound_datagram_bytes(byte_count); });
+        }
+        if (close_mode_ == QuicConnectionCloseMode::closing) {
             ++closing_packets_since_last_close_;
             if (closing_packets_since_last_close_ >= closing_packet_response_threshold_) {
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-11.1

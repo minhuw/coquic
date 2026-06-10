@@ -1420,6 +1420,19 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         if (!candidate.has_value()) {
             return {};
         }
+        if (candidate.value().bytes.size() > max_outbound_datagram_size) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+            // # To avoid being used for an amplification attack, such endpoints
+            // # MUST limit the cumulative size of packets it sends to three
+            // # times the cumulative size of the packets that are received and
+            // # attributed to the connection.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+            // # An endpoint in the closing state MUST either discard packets
+            // # received from an unvalidated address or limit the cumulative
+            // # size of packets it sends to an unvalidated address to three
+            // # times the size of packets it receives from that address.
+            return {};
+        }
         queue_tracked_packet_at_index(
             *close_packet_space,
             SentPacketRecord{

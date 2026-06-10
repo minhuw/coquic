@@ -2845,7 +2845,9 @@ bool QuicConnection::anti_amplification_applies() const {
         return true;
     }
     return config_.role == EndpointRole::server && status_ != HandshakeStatus::idle &&
-           status_ != HandshakeStatus::failed && !peer_address_validated_;
+           (status_ != HandshakeStatus::failed ||
+            close_mode_ == QuicConnectionCloseMode::closing) &&
+           !peer_address_validated_;
 }
 
 bool QuicConnection::anti_amplification_applies(QuicPathId path_id) const {
@@ -3009,6 +3011,15 @@ QuicConnection::outbound_datagram_size_limit_for_path(std::optional<QuicPathId> 
         }
     }
 
+    if (path_id.has_value() &&
+        (peer_address_validated_ || close_mode_ == QuicConnectionCloseMode::closing) &&
+        anti_amplification_applies(*path_id)) {
+        const auto &path = paths_.at(*path_id);
+        return static_cast<std::size_t>(
+            std::min<std::uint64_t>(saturating_subtract(anti_amplification_send_budget(*path_id),
+                                                        path.anti_amplification_sent_bytes),
+                                    static_cast<std::uint64_t>(max_datagram_size)));
+    }
     if (!anti_amplification_applies()) {
         return max_datagram_size;
     }
@@ -3115,7 +3126,9 @@ void QuicConnection::note_inbound_datagram_bytes(std::size_t bytes) {
         return;
     }
 
-    if (status_ == HandshakeStatus::connected && peer_address_validated_) {
+    if ((status_ == HandshakeStatus::connected && peer_address_validated_) ||
+        (close_mode_ == QuicConnectionCloseMode::closing && peer_address_validated_ &&
+         paths_.contains(last_inbound_path_id_))) {
         auto &path = ensure_path_state(last_inbound_path_id_);
         const auto received = path.anti_amplification_received_bytes;
         auto increment = static_cast<std::uint64_t>(bytes);
@@ -3125,9 +3138,10 @@ void QuicConnection::note_inbound_datagram_bytes(std::size_t bytes) {
                 : received + increment;
         return;
     }
-    const bool server_before_address_validation = config_.role == EndpointRole::server &&
-                                                  status_ != HandshakeStatus::failed &&
-                                                  !peer_address_validated_;
+    const bool server_before_address_validation =
+        config_.role == EndpointRole::server &&
+        (status_ != HandshakeStatus::failed || close_mode_ == QuicConnectionCloseMode::closing) &&
+        !peer_address_validated_;
     if (!server_before_address_validation && !anti_amplification_applies()) {
         return;
     }

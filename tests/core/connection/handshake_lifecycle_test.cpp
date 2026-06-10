@@ -842,6 +842,82 @@ TEST(QuicCoreTest, ClosingStateRateLimitsClosePacketRetransmission) {
     EXPECT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(8)));
 }
 
+TEST(QuicCoreTest, ClosingServerLimitsCloseRetransmissionsByAttributedBytes) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.peer_address_validated_ = false;
+    connection.anti_amplification_received_bytes_ = 0;
+    connection.anti_amplification_sent_bytes_ = 0;
+    connection.queue_transport_close_for_error(
+        coquic::quic::test::test_time(1),
+        coquic::quic::CodecError{.code = coquic::quic::CodecErrorCode::invalid_varint,
+                                 .offset = 0});
+
+    const auto blocked = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    EXPECT_TRUE(blocked.empty());
+    EXPECT_EQ(connection.anti_amplification_sent_bytes_, 0u);
+
+    const auto inbound_datagram = std::vector<std::byte>(64, std::byte{0x40});
+    connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(3));
+    ASSERT_EQ(connection.anti_amplification_received_bytes_, inbound_datagram.size());
+    ASSERT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(3)));
+
+    const auto close_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+    // # To avoid being used for an amplification attack, such endpoints MUST
+    // # limit the cumulative size of packets it sends to three times the
+    // # cumulative size of the packets that are received and attributed to the
+    // # connection.
+    EXPECT_LE(close_datagram.size(), inbound_datagram.size() * 3u);
+    EXPECT_EQ(connection.anti_amplification_sent_bytes_, close_datagram.size());
+    EXPECT_FALSE(connection.has_sendable_datagram(coquic::quic::test::test_time(4)));
+}
+
+TEST(QuicCoreTest, ClosingServerLimitsCloseRetransmissionsOnUnvalidatedPath) {
+    auto connection = make_connected_server_connection();
+    connection.peer_address_validated_ = true;
+    connection.queue_transport_close_for_error(
+        coquic::quic::test::test_time(1),
+        coquic::quic::CodecError{.code = coquic::quic::CodecErrorCode::invalid_varint,
+                                 .offset = 0});
+    ASSERT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(2)).empty());
+
+    connection.current_send_path_id_ = 7;
+    auto &path = connection.ensure_path_state(7);
+    path.validated = false;
+    path.is_current_send_path = true;
+    path.anti_amplification_received_bytes = 0;
+    path.anti_amplification_sent_bytes = 0;
+
+    const auto blocked_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+    EXPECT_TRUE(blocked_datagram.empty());
+    EXPECT_EQ(path.anti_amplification_sent_bytes, 0u);
+
+    const auto inbound_datagram = std::vector<std::byte>(64, std::byte{0x40});
+    connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(4),
+                                        /*path_id=*/7);
+    connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(5),
+                                        /*path_id=*/7);
+    ASSERT_EQ(path.anti_amplification_received_bytes, inbound_datagram.size() * 2u);
+    ASSERT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(4)));
+
+    const auto close_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(5));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+    // # An endpoint in the closing state MUST either discard packets received
+    // # from an unvalidated address or limit the cumulative size of packets it
+    // # sends to an unvalidated address to three times the size of packets it
+    // # receives from that address.
+    EXPECT_LE(close_datagram.size(), inbound_datagram.size() * 2u * 3u);
+    EXPECT_EQ(path.anti_amplification_sent_bytes, close_datagram.size());
+    EXPECT_EQ(connection.last_drained_path_id_, std::optional<coquic::quic::QuicPathId>{7});
+}
+
 TEST(QuicCoreTest, ConnectionCloseFramesDoNotEmitInternalFailureDebugLog) {
     auto connection = make_connected_client_connection();
 

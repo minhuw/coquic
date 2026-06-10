@@ -2813,6 +2813,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             // # the anti-amplification limit.
             if (datagram_size_limit < kMinimumInitialDatagramSize ||
                 candidate.value().bytes.size() >= kMinimumInitialDatagramSize) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+                // # Unlike other cases where datagrams are expanded, endpoints
+                // # MUST NOT discard datagrams that appear to be too small when
+                // # they contain PATH_CHALLENGE or PATH_RESPONSE.
                 return true;
             }
 
@@ -3102,6 +3106,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             //= https://www.rfc-editor.org/rfc/rfc9000#section-21.5.3
             // # A client MUST NOT send non-probing frames to a preferred address
             // # prior to validating that address; see Section 8.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+            // # An endpoint MAY send data to an unvalidated peer address, but it
+            // # MUST protect against potential attacks as described in Sections
+            // # 9.3.1 and 9.3.2.
             return !validation_path->second.validation_initiated_locally ||
                    validation_path->second.preferred_address_path;
         };

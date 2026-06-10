@@ -198,6 +198,10 @@ TEST(QuicCoreTest, PeerMigrationDefersApplicationProbePayloadUntilPathValidated)
     // # change to a peer's address, unless it has previously validated that
     // # address.
     EXPECT_TRUE(saw_path_challenge);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+    // # An endpoint MAY send data to an unvalidated peer address, but it MUST
+    // # protect against potential attacks as described in Sections 9.3.1 and
+    // # 9.3.2.
     EXPECT_FALSE(saw_stream_frame);
     EXPECT_TRUE(connection.application_space_.pending_probe_packet.has_value());
 }

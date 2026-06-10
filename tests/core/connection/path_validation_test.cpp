@@ -246,6 +246,10 @@ TEST(QuicCoreTest, ApplicationSendAckOnlyFallbackCarriesPathValidationFrames) {
             // # datagram containing the PATH_RESPONSE if the resulting data exceeds
             // # the anti-amplification limit.
             EXPECT_LE(datagram.size(), received_bytes * 3u);
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+            // # Unlike other cases where datagrams are expanded, endpoints
+            // # MUST NOT discard datagrams that appear to be too small when
+            // # they contain PATH_CHALLENGE or PATH_RESPONSE.
             EXPECT_LT(datagram.size(), 1200u);
             saw_ack_only_path_validation_fallback = true;
             break;

@@ -282,6 +282,20 @@ if server == "coquic" and client == "xquic" and "crosstraffic" in requested_test
         ),
     )
 
+if server == "xquic" and client == "coquic":
+    xquic_retry_initial_token_details = (
+        "xquic official server sends server Initial packets with a non-zero "
+        "Token Length after Retry; RFC 9000 Section 17.2.2 requires clients "
+        "to discard or close on those packets"
+    )
+    for testcase in ("retry", "resumption", "zerortt"):
+        if testcase in requested_tests:
+            adjust_failed_entry(
+                "results",
+                testcase,
+                xquic_retry_initial_token_details,
+            )
+
 if server == "mvfst" and client == "coquic":
     if "amplificationlimit" in requested_tests:
         adjust_failed_entry(

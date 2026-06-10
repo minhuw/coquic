@@ -11,10 +11,11 @@ using quic::CipherSuite;
 using quic::QuicTransportConfig;
 
 constexpr std::uint64_t kHttp09InteropActiveConnectionIdLimit = 8;
-// Keep the official multiplexing profile below the runner's 1000-stream
-// ceiling so peers pace request streams instead of enqueueing thousands before
-// loss recovery can make progress.
-constexpr std::uint64_t kHttp09InteropServerInitialMaxStreamsBidi = 64;
+// The official multiplexing testcase invokes endpoints with TESTCASE=transfer,
+// generates thousands of requests, and rejects server transport parameters
+// above 1000 streams. Use that ceiling so peers can open a large first wave of
+// request streams while still satisfying the runner's transport-parameter check.
+constexpr std::uint64_t kHttp09InteropServerInitialMaxStreamsBidi = 1000;
 constexpr int kHttp09InteropClientReceiveTimeoutMs = 30000;
 constexpr int kHttp09InteropMulticonnectClientReceiveTimeoutMs = 180000;
 constexpr std::string_view kHttp09InteropApplicationProtocol = "hq-interop";

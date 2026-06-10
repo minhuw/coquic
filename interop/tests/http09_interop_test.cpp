@@ -8,7 +8,7 @@ using namespace coquic::http09::test_support;
 
 constexpr std::uint64_t kTransferClientInitialMaxData = 32ull * 1024ull * 1024ull;
 constexpr std::uint64_t kTransferClientInitialMaxStreamData = 16ull * 1024ull * 1024ull;
-constexpr std::uint64_t kTransferServerInitialMaxStreamsBidi = 64;
+constexpr std::uint64_t kTransferServerInitialMaxStreamsBidi = 1000;
 
 void expect_interop_defaults(const coquic::http09::Http09RuntimeConfig &runtime) {
     EXPECT_EQ(runtime.application_protocol, "hq-interop");

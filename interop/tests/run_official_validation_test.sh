@@ -73,6 +73,7 @@ cat >"${xquic_results}" <<'JSON'
   "clients": ["xquic"],
   "results": [[
     {"name": "connectionmigration", "result": "failed"},
+    {"name": "retry", "result": "succeeded"},
     {"name": "transfer", "result": "succeeded"}
   ]],
   "measurements": [[
@@ -109,6 +110,47 @@ if "30-second request deadline" not in xquic_crosstraffic.get("details", ""):
 adjusted_names = {entry.get("name") for entry in data.get("coquic_compat_adjustments", [])}
 if adjusted_names != {"connectionmigration", "crosstraffic"}:
     raise SystemExit("expected compatibility adjustment audit trail")
+PY
+
+xquic_server_results="${tmpdir}/xquic-server-results.json"
+cat >"${xquic_server_results}" <<'JSON'
+{
+  "servers": ["xquic"],
+  "clients": ["coquic"],
+  "results": [[
+    {"name": "retry", "result": "failed"},
+    {"name": "resumption", "result": "failed"},
+    {"name": "zerortt", "result": "failed"},
+    {"name": "http3", "result": "succeeded"}
+  ]],
+  "measurements": [[]]
+}
+JSON
+
+apply_official_result_compatibility_adjustments \
+  "${xquic_server_results}" xquic coquic retry,resumption,zerortt,http3
+
+python3 - "${xquic_server_results}" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+results = {
+    entry["name"]: entry
+    for entry in data["results"][0]
+}
+for name in ("retry", "resumption", "zerortt"):
+    entry = results[name]
+    if entry["result"] != "unsupported":
+        raise SystemExit(f"expected xquic server {name} to be marked unsupported")
+    if "non-zero Token Length" not in entry.get("details", ""):
+        raise SystemExit(f"expected xquic server {name} rationale details")
+if results["http3"]["result"] != "succeeded":
+    raise SystemExit("expected xquic server http3 result to be unchanged")
+adjusted_names = {entry.get("name") for entry in data.get("coquic_compat_adjustments", [])}
+if adjusted_names != {"retry", "resumption", "zerortt"}:
+    raise SystemExit("expected xquic server compatibility adjustment audit trail")
 PY
 
 mvfst_results="${tmpdir}/mvfst-results.json"

@@ -27,6 +27,8 @@ export default function BlogIndexPage() {
                 <span className="blog-card-meta">
                   <time dateTime={post.date}>{formatBlogDate(post.date)}</time>
                   <span>{post.readingMinutes} min read</span>
+                  <span>{post.author}</span>
+                  {post.polishedBy ? <span className="blog-polish-badge">Polished by {post.polishedBy}</span> : null}
                 </span>
                 <h2>{post.title}</h2>
                 <p>{post.description}</p>

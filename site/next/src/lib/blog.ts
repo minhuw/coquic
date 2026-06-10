@@ -8,6 +8,7 @@ export type BlogPostMeta = {
   description: string;
   date: string;
   author: string;
+  polishedBy: string;
   tags: string[];
   readingMinutes: number;
 };
@@ -92,6 +93,7 @@ function readBlogPost(fileName: string): BlogPost | null {
     description: frontmatter.description || extractDescription(markdown),
     date: frontmatter.date || '1970-01-01',
     author: frontmatter.author || 'CoQUIC',
+    polishedBy: frontmatter.polishedBy || '',
     tags: parseTags(frontmatter.tags),
     readingMinutes: estimateReadingMinutes(markdown),
     markdown,

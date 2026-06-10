@@ -817,6 +817,10 @@
     @apply flex min-w-0 flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] font-semibold uppercase text-[var(--muted)];
   }
 
+  .blog-polish-badge {
+    @apply inline-flex min-h-5 items-center rounded-[var(--radius)] border border-[var(--primary-soft)] bg-[var(--primary-soft)] px-1.5 text-[10px] font-bold normal-case text-[var(--primary)];
+  }
+
   .blog-card h2 {
     @apply text-[24px] font-normal leading-tight text-[var(--ink)] sm:text-[28px];
   }

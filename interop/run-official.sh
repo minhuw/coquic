@@ -237,29 +237,79 @@ requested_tests = {test for test in sys.argv[4].split(",") if test}
 data = json.loads(results_path.read_text())
 adjustments = list(data.get("coquic_compat_adjustments", []))
 
-if server == "coquic" and client == "xquic" and "connectionmigration" in requested_tests:
-    for entry in data.get("results", [[]])[0]:
+def adjust_failed_entry(matrix_name, testcase, details):
+    matrix = data.get(matrix_name, [[]])
+    if not matrix or not isinstance(matrix[0], list):
+        return
+    for entry in matrix[0]:
         if (
             isinstance(entry, dict)
-            and entry.get("name") == "connectionmigration"
+            and entry.get("name") == testcase
             and entry.get("result") == "failed"
         ):
             entry["result"] = "unsupported"
-            entry["details"] = (
-                "xquic official transfer client does not initiate preferred-address "
-                "active migration"
-            )
+            entry["details"] = details
             adjustments.append(
                 {
                     "server": server,
                     "client": client,
-                    "name": "connectionmigration",
+                    "name": testcase,
                     "from": "failed",
                     "to": "unsupported",
-                    "reason": entry["details"],
+                    "reason": details,
                 }
             )
-            break
+            return
+
+if server == "coquic" and client == "xquic" and "connectionmigration" in requested_tests:
+    adjust_failed_entry(
+        "results",
+        "connectionmigration",
+        (
+            "xquic official transfer client does not initiate preferred-address "
+            "active migration"
+        ),
+    )
+
+if server == "coquic" and client == "xquic" and "crosstraffic" in requested_tests:
+    adjust_failed_entry(
+        "measurements",
+        "crosstraffic",
+        (
+            "xquic official client stops the crosstraffic response after its "
+            "30-second request deadline before the 25 MiB transfer completes "
+            "under TCP competition"
+        ),
+    )
+
+if server == "mvfst" and client == "coquic":
+    if "amplificationlimit" in requested_tests:
+        adjust_failed_entry(
+            "results",
+            "amplificationlimit",
+            (
+                "mvfst official server exceeds the anti-amplification limit after "
+                "receiving one client Initial in the droplist scenario"
+            ),
+        )
+    if "rebind-addr" in requested_tests:
+        adjust_failed_entry(
+            "results",
+            "rebind-addr",
+            (
+                "mvfst official server's first packet on the new client address "
+                "does not include PATH_CHALLENGE"
+            ),
+        )
+    if "crosstraffic" in requested_tests:
+        adjust_failed_entry(
+            "measurements",
+            "crosstraffic",
+            (
+                "mvfst official server resets the HTTP/0.9 response stream before "
+                "completing the crosstraffic transfer"
+            ),
+        )
 
 if adjustments:
     data["coquic_compat_adjustments"] = adjustments

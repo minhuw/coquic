@@ -11,7 +11,10 @@ using quic::CipherSuite;
 using quic::QuicTransportConfig;
 
 constexpr std::uint64_t kHttp09InteropActiveConnectionIdLimit = 8;
-constexpr std::uint64_t kHttp09InteropServerInitialMaxStreamsBidi = 1000;
+// Keep the official multiplexing profile below the runner's 1000-stream
+// ceiling so peers pace request streams instead of enqueueing thousands before
+// loss recovery can make progress.
+constexpr std::uint64_t kHttp09InteropServerInitialMaxStreamsBidi = 64;
 constexpr int kHttp09InteropClientReceiveTimeoutMs = 30000;
 constexpr int kHttp09InteropMulticonnectClientReceiveTimeoutMs = 180000;
 constexpr std::string_view kHttp09InteropApplicationProtocol = "hq-interop";

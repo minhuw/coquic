@@ -1313,6 +1313,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             profile.datagrams_le_1472 += static_cast<std::uint64_t>(datagram.bytes.size() <= 1472);
             profile.datagrams_gt_1472 += static_cast<std::uint64_t>(datagram.bytes.size() > 1472);
         }
+        if (discard_handshake_packet_space_after_ack_ &&
+            std::ranges::any_of(datagram_packets, [](const ProtectedPacket &packet) {
+                return std::holds_alternative<ProtectedHandshakePacket>(packet);
+            })) {
+            discard_handshake_packet_space();
+        }
         return std::move(datagram.bytes);
     };
     const auto fail_datagram_send = [&](bool preserve_pending_packets = false) -> DatagramBuffer {
@@ -1744,12 +1750,15 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     const auto build_handshake_frames = [&](std::span<const ByteRange> crypto_ranges,
                                             bool override_probe_crypto_ranges = false,
                                             std::span<const ByteRange> probe_crypto_ranges = {}) {
+        const auto handshake_ack_delay_exponent =
+            local_transport_parameters_.ack_delay_exponent;
         const auto handshake_ack_frame =
             (handshake_space_.pending_probe_packet.has_value() &&
              handshake_space_.pending_probe_packet->force_ack)
-                ? handshake_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now,
-                                                                    /*allow_non_pending=*/true)
-                : handshake_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now);
+                ? handshake_space_.received_packets.build_ack_frame(
+                      handshake_ack_delay_exponent, now, /*allow_non_pending=*/true)
+                : handshake_space_.received_packets.build_ack_frame(handshake_ack_delay_exponent,
+                                                                    now);
         //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
         // # ACK frames MUST only be carried in a packet that has the same packet
         // # number space as the packet being acknowledged; see Section 12.1.

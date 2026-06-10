@@ -376,28 +376,32 @@ struct DeferredProtectedDatagram {
     QuicPathId path_id = 0;
     std::optional<std::uint32_t> datagram_id;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
+    std::optional<QuicCoreTimePoint> received_at;
 
     DeferredProtectedDatagram() = default;
     explicit DeferredProtectedDatagram(
         DatagramBuffer datagram_bytes, QuicPathId id = 0,
         std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
-        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
+        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable,
+        std::optional<QuicCoreTimePoint> datagram_received_at = std::nullopt)
         : bytes(std::move(datagram_bytes)), path_id(id), datagram_id(qlog_datagram_id),
-          ecn(datagram_ecn) {
+          ecn(datagram_ecn), received_at(datagram_received_at) {
     }
     explicit DeferredProtectedDatagram(
         const std::vector<std::byte> &datagram_bytes, QuicPathId id = 0,
         std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
-        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
+        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable,
+        std::optional<QuicCoreTimePoint> datagram_received_at = std::nullopt)
         : DeferredProtectedDatagram(DatagramBuffer(datagram_bytes), id, qlog_datagram_id,
-                                    datagram_ecn) {
+                                    datagram_ecn, datagram_received_at) {
     }
     explicit DeferredProtectedDatagram(
         std::vector<std::byte> &&datagram_bytes, QuicPathId id = 0,
         std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
-        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
+        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable,
+        std::optional<QuicCoreTimePoint> datagram_received_at = std::nullopt)
         : DeferredProtectedDatagram(DatagramBuffer(std::move(datagram_bytes)), id, qlog_datagram_id,
-                                    datagram_ecn) {
+                                    datagram_ecn, datagram_received_at) {
     }
 
     bool operator==(const DeferredProtectedDatagram &) const = default;
@@ -804,6 +808,7 @@ class QuicConnection {
     CodecResult<bool> validate_peer_transport_parameters_if_ready();
     void update_handshake_status();
     void confirm_handshake();
+    bool should_defer_server_handshake_discard_for_ack() const;
     PathState &ensure_path_state(QuicPathId path_id);
     void start_path_validation(QuicPathId path_id, bool initiated_locally,
                                QuicCoreTimePoint now = QuicCoreClock::now());
@@ -1143,6 +1148,7 @@ class QuicConnection {
     bool initial_packet_space_discarded_ = false;
     bool handshake_packet_space_discarded_ = false;
     bool handshake_confirmed_ = false;
+    bool discard_handshake_packet_space_after_ack_ = false;
     StreamControlFrameState handshake_done_state_ = StreamControlFrameState::none;
     bool handshake_ready_emitted_ = false;
     bool handshake_confirmed_emitted_ = false;

@@ -2873,7 +2873,8 @@ deferred_protected_datagram_matches(const DeferredProtectedDatagram &candidate, 
 inline COQUIC_NO_PROFILE void
 queue_deferred_protected_datagram(std::vector<DeferredProtectedDatagram> &deferred_packets,
                                   std::span<const std::byte> bytes, QuicPathId path_id,
-                                  std::optional<std::uint32_t> datagram_id, QuicEcnCodepoint ecn) {
+                                  std::optional<std::uint32_t> datagram_id, QuicEcnCodepoint ecn,
+                                  QuicCoreTimePoint received_at) {
     for (const auto &candidate : deferred_packets) {
         if (deferred_protected_datagram_matches(candidate, path_id, bytes)) {
             return;
@@ -2882,20 +2883,22 @@ queue_deferred_protected_datagram(std::vector<DeferredProtectedDatagram> &deferr
     if (deferred_packets.size() >= kMaximumDeferredProtectedPackets) {
         deferred_packets.erase(deferred_packets.begin());
     }
-    deferred_packets.emplace_back(DatagramBuffer(bytes), path_id, datagram_id, ecn);
+    deferred_packets.emplace_back(DatagramBuffer(bytes), path_id, datagram_id, ecn, received_at);
 }
 
 inline COQUIC_NO_PROFILE COQUIC_NOINLINE bool
 defer_short_header_packet_before_server_handshake_complete(
     bool allow_defer, bool short_header_packet, EndpointRole role, HandshakeStatus status,
     std::vector<DeferredProtectedDatagram> &deferred_packets, std::span<const std::byte> bytes,
-    QuicPathId path_id, std::optional<std::uint32_t> datagram_id, QuicEcnCodepoint ecn) {
+    QuicPathId path_id, std::optional<std::uint32_t> datagram_id, QuicEcnCodepoint ecn,
+    QuicCoreTimePoint received_at) {
     if (!should_defer_short_header_packet_before_server_handshake_complete(
             allow_defer, short_header_packet, role, status)) {
         return false;
     }
 
-    queue_deferred_protected_datagram(deferred_packets, bytes, path_id, datagram_id, ecn);
+    queue_deferred_protected_datagram(deferred_packets, bytes, path_id, datagram_id, ecn,
+                                      received_at);
     return true;
 }
 

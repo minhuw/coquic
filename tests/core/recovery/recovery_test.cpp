@@ -687,6 +687,11 @@ TEST(QuicRecoveryTest, AckHistoryOutboundSnapshotWalkerIgnoresPostSnapshotHistor
     EXPECT_EQ(mutated_header->largest_acknowledged, 10u);
     EXPECT_EQ(mutated_header->additional_range_count, 3u);
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+    //# Receivers can discard all ACK Ranges, but they MUST retain the
+    //# largest packet number that has been successfully processed, as that
+    //# is used to recover packet numbers from subsequent packets; see
+    //# Section 17.1.
     std::vector<AckRange> snapshot_ranges;
     history.for_each_additional_ack_range_descending(
         *snapshot_header, [&](AckRange range) { snapshot_ranges.push_back(range); });
@@ -2260,6 +2265,23 @@ TEST(QuicRecoveryTest, RecoveryTracksLatestInflightAckElicitingPacketIncremental
     EXPECT_FALSE(recovery.latest_in_flight_ack_eliciting_packet().has_value());
 }
 
+TEST(QuicRecoveryTest, SimpleStreamRetransmissionRemainsLatestInflightForPto) {
+    PacketSpaceRecovery recovery;
+    recovery.on_simple_stream_packet_sent(make_simple_stream_sent_packet(
+        /*packet_number=*/2, /*offset=*/0));
+    recovery.on_packet_sent(make_sent_packet(/*packet_number=*/4, /*ack_eliciting=*/true,
+                                             coquic::quic::test::test_time(4)));
+
+    recovery.on_packet_declared_lost(2);
+
+    recovery.on_simple_stream_packet_sent(make_simple_stream_sent_packet(
+        /*packet_number=*/6, /*offset=*/0));
+
+    const auto latest_in_flight = recovery.latest_in_flight_ack_eliciting_packet();
+    ASSERT_TRUE(latest_in_flight.has_value());
+    EXPECT_EQ(optional_value_or_terminate(latest_in_flight).packet_number, 6u);
+}
+
 TEST(QuicRecoveryTest, LatestInflightAckElicitingPacketRefreshesStaleCache) {
     PacketSpaceRecovery recovery;
     recovery.on_packet_sent(make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
@@ -3257,6 +3279,30 @@ TEST(QuicRecoveryTest, FirstRttSampleResetsEstimator) {
     EXPECT_EQ(rtt.min_rtt_sample, std::optional{std::chrono::microseconds(60000)});
     EXPECT_EQ(rtt.smoothed_rtt, std::chrono::milliseconds(60));
     EXPECT_EQ(rtt.rttvar, std::chrono::milliseconds(30));
+}
+
+TEST(QuicRecoveryTest, FirstRttSampleCanUseUnboundedAckDelayBeforeHandshakeConfirmed) {
+    RecoveryRttState rtt;
+    const auto sent = make_sent_packet(/*packet_number=*/8, /*ack_eliciting=*/true,
+                                       coquic::quic::test::test_time(10));
+
+    coquic::quic::update_rtt(
+        rtt, coquic::quic::test::test_time(2042), sent,
+        coquic::quic::RttAckDelayAdjustment{
+            .ack_delay = std::chrono::milliseconds(2000),
+            .max_ack_delay = std::chrono::milliseconds(25),
+            .ignore_max_ack_delay = true,
+        });
+
+    EXPECT_EQ(rtt.latest_rtt, std::optional{std::chrono::milliseconds(2032)});
+    EXPECT_EQ(rtt.latest_adjusted_rtt, std::optional{std::chrono::milliseconds(32)});
+    EXPECT_EQ(rtt.latest_rtt_sample, std::optional{std::chrono::microseconds(2032000)});
+    EXPECT_EQ(rtt.latest_adjusted_rtt_sample, std::optional{std::chrono::microseconds(32000)});
+    EXPECT_EQ(rtt.latest_ack_delay_compensated_rtt_sample,
+              std::optional{std::chrono::microseconds(32000)});
+    EXPECT_EQ(rtt.min_rtt_sample, std::optional{std::chrono::microseconds(2032000)});
+    EXPECT_EQ(rtt.smoothed_rtt, std::chrono::milliseconds(32));
+    EXPECT_EQ(rtt.rttvar, std::chrono::milliseconds(16));
 }
 
 TEST(QuicRecoveryTest, SubsequentRttSamplesCanSkipAckDelayAdjustment) {

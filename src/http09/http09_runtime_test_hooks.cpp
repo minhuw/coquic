@@ -1671,7 +1671,9 @@ bool runtime_policy_core_inputs_advance_before_terminal_success_for_tests() {
     endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
         .terminal_success = true,
     });
-    endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+    endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{
+        .handled_local_error = true,
+    });
 
     QuicCore core = make_local_error_client_core_for_tests();
     EndpointDriveState state;

@@ -12,6 +12,27 @@ TlsAdapter *optional_tls_pointer(std::optional<TlsAdapter> &tls) {
     return &*tls;
 }
 
+struct CryptoAckDelayParameters {
+    std::uint64_t ack_delay_exponent;
+    std::uint64_t max_ack_delay_ms;
+};
+
+CryptoAckDelayParameters crypto_ack_delay_parameters(
+    EncryptionLevel level, const std::optional<TransportParameters> &peer_transport_parameters) {
+    if (level == EncryptionLevel::initial) {
+        return CryptoAckDelayParameters{
+            .ack_delay_exponent = 0,
+            .max_ack_delay_ms = 0,
+        };
+    }
+
+    const auto &parameters = peer_transport_parameters.value_or(TransportParameters{});
+    return CryptoAckDelayParameters{
+        .ack_delay_exponent = parameters.ack_delay_exponent,
+        .max_ack_delay_ms = parameters.max_ack_delay,
+    };
+}
+
 } // namespace
 
 CodecResult<ConnectionId> QuicConnection::peek_client_initial_destination_connection_id(
@@ -928,8 +949,11 @@ CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
         }
 
         if (const auto *ack_frame = std::get_if<AckFrame>(&frame)) {
+            const auto ack_delay_parameters =
+                crypto_ack_delay_parameters(level, peer_transport_parameters_);
             const auto processed_ack = process_inbound_ack(
-                packet_space, *ack_frame, now, /*ack_delay_exponent=*/0, /*max_ack_delay_ms=*/0,
+                packet_space, *ack_frame, now, ack_delay_parameters.ack_delay_exponent,
+                ack_delay_parameters.max_ack_delay_ms,
                 config_.role == EndpointRole::client && level == EncryptionLevel::initial);
             if (!processed_ack.has_value()) {
                 return processed_ack;
@@ -1003,8 +1027,11 @@ CodecResult<bool> QuicConnection::process_inbound_received_crypto(
         }
 
         if (const auto *ack_frame = std::get_if<ReceivedAckFrame>(&frame)) {
+            const auto ack_delay_parameters =
+                crypto_ack_delay_parameters(level, peer_transport_parameters_);
             const auto processed_ack = process_inbound_ack(
-                packet_space, *ack_frame, now, /*ack_delay_exponent=*/0, /*max_ack_delay_ms=*/0,
+                packet_space, *ack_frame, now, ack_delay_parameters.ack_delay_exponent,
+                ack_delay_parameters.max_ack_delay_ms,
                 config_.role == EndpointRole::client && level == EncryptionLevel::initial);
             if (!processed_ack.has_value()) {
                 return processed_ack;
@@ -1457,8 +1484,14 @@ void QuicConnection::maybe_update_rtt_before_ack_loss_detection(
         return;
     }
 
-    update_rtt(packet_space.recovery.rtt_state(), now, *largest_packet, decoded_ack_delay,
-               transport_parameter_milliseconds(max_ack_delay_ms));
+    const bool ignore_max_ack_delay =
+        (&packet_space != &initial_space_) && !handshake_confirmed_;
+    update_rtt(packet_space.recovery.rtt_state(), now, *largest_packet,
+               RttAckDelayAdjustment{
+                   .ack_delay = decoded_ack_delay,
+                   .max_ack_delay = transport_parameter_milliseconds(max_ack_delay_ms),
+                   .ignore_max_ack_delay = ignore_max_ack_delay,
+               });
     recovery_rtt_state_ = packet_space.recovery.rtt_state();
     synchronize_recovery_rtt_state();
     if (send_profile_enabled()) {

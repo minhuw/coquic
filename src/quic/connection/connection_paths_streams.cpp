@@ -275,8 +275,9 @@ void QuicConnection::replay_deferred_protected_packets(QuicCoreTimePoint now) {
     auto deferred_packets = std::move(deferred_protected_packets_);
     deferred_protected_packets_.clear();
     for (const auto &deferred_packet : deferred_packets) {
-        process_inbound_datagram(deferred_packet.bytes, now, deferred_packet.path_id,
-                                 deferred_packet.ecn, deferred_packet.datagram_id,
+        process_inbound_datagram(deferred_packet.bytes, deferred_packet.received_at.value_or(now),
+                                 deferred_packet.path_id, deferred_packet.ecn,
+                                 deferred_packet.datagram_id,
                                  /*replay_trigger=*/true,
                                  /*count_inbound_bytes=*/true);
         if (status_ == HandshakeStatus::failed) {
@@ -487,7 +488,17 @@ void QuicConnection::confirm_handshake() {
     handshake_confirmed_ = true;
     queue_state_change(QuicCoreStateChange::handshake_confirmed);
     issue_spare_connection_ids();
+    if (should_defer_server_handshake_discard_for_ack()) {
+        discard_handshake_packet_space_after_ack_ = true;
+        return;
+    }
     discard_handshake_packet_space();
+}
+
+bool QuicConnection::should_defer_server_handshake_discard_for_ack() const {
+    return config_.role == EndpointRole::server && !handshake_packet_space_discarded_ &&
+           handshake_space_.write_secret.has_value() &&
+           handshake_space_.received_packets.has_ack_to_send();
 }
 
 PathState &QuicConnection::ensure_path_state(QuicPathId path_id) {
@@ -1288,6 +1299,7 @@ void QuicConnection::discard_initial_packet_space() {
 void QuicConnection::discard_handshake_packet_space() {
     recovery_rtt_state_ = shared_recovery_rtt_state();
     handshake_packet_space_discarded_ = true;
+    discard_handshake_packet_space_after_ack_ = false;
     discard_packet_space_state(handshake_space_);
     pto_count_ = 0;
 }

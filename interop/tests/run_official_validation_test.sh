@@ -75,12 +75,14 @@ cat >"${xquic_results}" <<'JSON'
     {"name": "connectionmigration", "result": "failed"},
     {"name": "transfer", "result": "succeeded"}
   ]],
-  "measurements": [[]]
+  "measurements": [[
+    {"name": "crosstraffic", "result": "failed"}
+  ]]
 }
 JSON
 
 apply_official_result_compatibility_adjustments \
-  "${xquic_results}" coquic xquic connectionmigration,transfer
+  "${xquic_results}" coquic xquic connectionmigration,transfer,crosstraffic
 
 python3 - "${xquic_results}" <<'PY'
 import json
@@ -96,8 +98,57 @@ if connectionmigration["result"] != "unsupported":
     raise SystemExit("expected xquic connectionmigration to be marked unsupported")
 if "preferred-address active migration" not in connectionmigration.get("details", ""):
     raise SystemExit("expected xquic connectionmigration rationale details")
-if not data.get("coquic_compat_adjustments"):
+xquic_crosstraffic = next(
+    entry for entry in data["measurements"][0]
+    if entry["name"] == "crosstraffic"
+)
+if xquic_crosstraffic["result"] != "unsupported":
+    raise SystemExit("expected xquic crosstraffic to be marked unsupported")
+if "30-second request deadline" not in xquic_crosstraffic.get("details", ""):
+    raise SystemExit("expected xquic crosstraffic rationale details")
+adjusted_names = {entry.get("name") for entry in data.get("coquic_compat_adjustments", [])}
+if adjusted_names != {"connectionmigration", "crosstraffic"}:
     raise SystemExit("expected compatibility adjustment audit trail")
+PY
+
+mvfst_results="${tmpdir}/mvfst-results.json"
+cat >"${mvfst_results}" <<'JSON'
+{
+  "servers": ["mvfst"],
+  "clients": ["coquic"],
+  "results": [[
+    {"name": "amplificationlimit", "result": "failed"},
+    {"name": "rebind-addr", "result": "failed"}
+  ]],
+  "measurements": [[
+    {"name": "crosstraffic", "result": "failed"}
+  ]]
+}
+JSON
+
+apply_official_result_compatibility_adjustments \
+  "${mvfst_results}" mvfst coquic amplificationlimit,rebind-addr,crosstraffic
+
+python3 - "${mvfst_results}" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+results = {
+    entry["name"]: entry
+    for entry in data["results"][0] + data["measurements"][0]
+}
+for name in ("amplificationlimit", "rebind-addr", "crosstraffic"):
+    entry = results[name]
+    if entry["result"] != "unsupported":
+        raise SystemExit(f"expected mvfst {name} to be marked unsupported")
+    if not entry.get("details"):
+        raise SystemExit(f"expected mvfst {name} rationale details")
+adjustments = data.get("coquic_compat_adjustments", [])
+adjusted_names = {entry.get("name") for entry in adjustments}
+if adjusted_names != {"amplificationlimit", "rebind-addr", "crosstraffic"}:
+    raise SystemExit("expected mvfst compatibility adjustment audit trail")
 PY
 
 echo "run-official result validation ok"

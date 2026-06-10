@@ -33,6 +33,12 @@ TEST(QuicHttp09RuntimeTest, DeferredReplayPreservesIndividualBufferedPathIds) {
     connection.process_inbound_datagram(second_deferred, coquic::quic::test::test_time(2),
                                         /*path_id=*/22);
     ASSERT_GE(connection.deferred_protected_packets_.size(), 2u);
+    ASSERT_TRUE(connection.deferred_protected_packets_[0].received_at.has_value());
+    ASSERT_TRUE(connection.deferred_protected_packets_[1].received_at.has_value());
+    EXPECT_EQ(connection.deferred_protected_packets_[0].received_at.value(),
+              coquic::quic::test::test_time(1));
+    EXPECT_EQ(connection.deferred_protected_packets_[1].received_at.value(),
+              coquic::quic::test::test_time(2));
 
     connection.current_send_path_id_.reset();
     connection.replay_deferred_protected_packets(coquic::quic::test::test_time(3));

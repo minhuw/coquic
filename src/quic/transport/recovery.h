@@ -158,6 +158,12 @@ struct RecoveryRttState {
     QuicCoreDuration rttvar{166000};
 };
 
+struct RttAckDelayAdjustment {
+    std::chrono::microseconds ack_delay{0};
+    std::chrono::microseconds max_ack_delay{0};
+    bool ignore_max_ack_delay = false;
+};
+
 struct DeadlineTrackedPacket {
     std::uint64_t packet_number = 0;
     QuicCoreTimePoint sent_time{};
@@ -545,5 +551,8 @@ QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt_state,
 void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
                 const SentPacketRecord &largest_newly_acked_packet,
                 std::chrono::microseconds ack_delay, std::chrono::microseconds max_ack_delay);
+void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
+                const SentPacketRecord &largest_newly_acked_packet,
+                RttAckDelayAdjustment ack_delay);
 
 } // namespace coquic::quic

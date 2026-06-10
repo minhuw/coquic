@@ -114,6 +114,11 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
                                               bool ack_eliciting_creates_gap) {
         if (!largest_received_packet_number_.has_value() ||
             packet_number > *largest_received_packet_number_) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+            //# Receivers can discard all ACK Ranges, but they MUST retain the
+            //# largest packet number that has been successfully processed, as
+            //# that is used to recover packet numbers from subsequent packets;
+            //# see Section 17.1.
             largest_received_packet_number_ = packet_number;
             largest_received_packet_record_ = ReceivedPacketRecord{
                 .ack_eliciting = ack_eliciting,
@@ -2485,6 +2490,16 @@ QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt_state,
 void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
                 const SentPacketRecord &largest_newly_acked_packet,
                 std::chrono::microseconds ack_delay, std::chrono::microseconds max_ack_delay) {
+    update_rtt(rtt_state, ack_receive_time, largest_newly_acked_packet,
+               RttAckDelayAdjustment{
+                   .ack_delay = ack_delay,
+                   .max_ack_delay = max_ack_delay,
+               });
+}
+
+void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
+                const SentPacketRecord &largest_newly_acked_packet,
+                RttAckDelayAdjustment ack_delay) {
     //= https://www.rfc-editor.org/rfc/rfc9002#section-5.1
     // # The RTT sample, latest_rtt, is generated as the time elapsed since
     // # the largest acknowledged packet was sent:
@@ -2496,6 +2511,11 @@ void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
     if (!previous_min_rtt_sample.has_value() && rtt_state.min_rtt.has_value()) {
         previous_min_rtt_sample = *rtt_state.min_rtt;
     }
+    const auto effective_ack_delay =
+        ack_delay.ignore_max_ack_delay ? ack_delay.ack_delay
+                                       : std::min(ack_delay.ack_delay, ack_delay.max_ack_delay);
+    const auto ack_delay_compensated_rtt =
+        latest_sample > effective_ack_delay ? latest_sample - effective_ack_delay : latest_sample;
 
     rtt_state.latest_rtt = latest_sample;
     rtt_state.latest_rtt_sample = latest_sample;
@@ -2511,15 +2531,22 @@ void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
                                    : latest_sample;
 
     if (first_sample) {
-        rtt_state.smoothed_rtt = latest_sample;
-        rtt_state.rttvar = latest_sample / 2;
-        rtt_state.latest_adjusted_rtt.reset();
-        rtt_state.latest_adjusted_rtt_sample.reset();
-        rtt_state.latest_ack_delay_compensated_rtt_sample.reset();
+        const auto first_smoothed_rtt =
+            ack_delay.ignore_max_ack_delay ? ack_delay_compensated_rtt : latest_sample;
+        rtt_state.smoothed_rtt = first_smoothed_rtt;
+        rtt_state.rttvar = first_smoothed_rtt / 2;
+        if (first_smoothed_rtt != latest_sample) {
+            rtt_state.latest_adjusted_rtt = first_smoothed_rtt;
+            rtt_state.latest_adjusted_rtt_sample = first_smoothed_rtt;
+            rtt_state.latest_ack_delay_compensated_rtt_sample = first_smoothed_rtt;
+        } else {
+            rtt_state.latest_adjusted_rtt.reset();
+            rtt_state.latest_adjusted_rtt_sample.reset();
+            rtt_state.latest_ack_delay_compensated_rtt_sample.reset();
+        }
         return;
     }
 
-    const auto bounded_ack_delay = std::min(ack_delay, max_ack_delay);
     auto adjusted_rtt = latest_sample;
     //= https://www.rfc-editor.org/rfc/rfc9002#section-5.3
     // # *  MUST use the lesser of the acknowledgment delay and the peer's
@@ -2527,18 +2554,18 @@ void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
     //= https://www.rfc-editor.org/rfc/rfc9002#section-5.3
     // # *  MUST NOT subtract the acknowledgment delay from the RTT sample if
     // # the resulting value is smaller than the min_rtt.
-    if (latest_sample >= *rtt_state.min_rtt + bounded_ack_delay) {
-        adjusted_rtt = latest_sample - bounded_ack_delay;
+    if (latest_sample >= *rtt_state.min_rtt + effective_ack_delay) {
+        adjusted_rtt = latest_sample - effective_ack_delay;
     }
     rtt_state.latest_adjusted_rtt = adjusted_rtt;
 
     auto adjusted_rtt_us = latest_sample;
-    if (latest_sample >= *rtt_state.min_rtt_sample + bounded_ack_delay) {
-        adjusted_rtt_us = latest_sample - bounded_ack_delay;
+    if (latest_sample >= *rtt_state.min_rtt_sample + effective_ack_delay) {
+        adjusted_rtt_us = latest_sample - effective_ack_delay;
     }
     rtt_state.latest_adjusted_rtt_sample = adjusted_rtt_us;
     rtt_state.latest_ack_delay_compensated_rtt_sample =
-        latest_sample > bounded_ack_delay ? latest_sample - bounded_ack_delay : latest_sample;
+        ack_delay_compensated_rtt;
 
     rtt_state.rttvar = (rtt_state.rttvar * 3 + (rtt_state.smoothed_rtt > adjusted_rtt
                                                     ? rtt_state.smoothed_rtt - adjusted_rtt

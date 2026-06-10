@@ -891,6 +891,44 @@ TEST(QuicStreamsTest, MaxStreamDataFramesTransitionThroughPendingSentLostAndAcke
     EXPECT_FALSE(state.has_outstanding_send());
 }
 
+TEST(QuicStreamsTest, FinalReceiveSizeStopsMaxStreamDataFrames) {
+    StreamState size_known = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    size_known.flow_control.advertised_max_stream_data = 10;
+    size_known.receive_flow_control_limit = 10;
+    size_known.queue_max_stream_data(/*maximum_stream_data=*/20);
+    const auto sent = size_known.take_max_stream_data_frame();
+    ASSERT_TRUE(sent.has_value());
+
+    ASSERT_TRUE(size_known.note_peer_final_size(/*final_size=*/8).has_value());
+    size_known.mark_max_stream_data_frame_lost(sent.value_or(coquic::quic::MaxStreamDataFrame{}));
+    size_known.queue_max_stream_data(/*maximum_stream_data=*/30);
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    // # An endpoint SHOULD stop sending MAX_STREAM_DATA frames when the
+    // # receiving part of the stream enters a "Size Known" or "Reset Recvd"
+    // # state.
+    EXPECT_FALSE(size_known.take_max_stream_data_frame().has_value());
+    EXPECT_FALSE(size_known.has_pending_send());
+
+    StreamState reset_received = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
+    reset_received.flow_control.advertised_max_stream_data = 10;
+    reset_received.receive_flow_control_limit = 10;
+    reset_received.queue_max_stream_data(/*maximum_stream_data=*/20);
+    ASSERT_TRUE(reset_received.flow_control.pending_max_stream_data_frame.has_value());
+
+    ASSERT_TRUE(reset_received
+                    .note_peer_reset(coquic::quic::ResetStreamFrame{
+                        .stream_id = 0,
+                        .application_protocol_error_code = 0,
+                        .final_size = 0,
+                    })
+                    .has_value());
+    reset_received.queue_max_stream_data(/*maximum_stream_data=*/30);
+
+    EXPECT_FALSE(reset_received.take_max_stream_data_frame().has_value());
+    EXPECT_FALSE(reset_received.has_pending_send());
+}
+
 TEST(QuicStreamsTest, StreamDataBlockedFramesDeduplicateAndClearWhenPeerCreditCatchesUp) {
     StreamState state = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);
     state.flow_control.peer_max_stream_data = 4;

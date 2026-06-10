@@ -435,6 +435,12 @@ StreamStateResult<bool> StreamState::note_peer_final_size(std::uint64_t final_si
     }
 
     peer_final_size = final_size;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    // # An endpoint SHOULD stop sending MAX_STREAM_DATA frames when the
+    // # receiving part of the stream enters a "Size Known" or "Reset Recvd"
+    // # state.
+    flow_control.pending_max_stream_data_frame = std::nullopt;
+    flow_control.max_stream_data_state = StreamControlFrameState::none;
     return StreamStateResult<bool>::success(true);
 }
 
@@ -586,6 +592,13 @@ void StreamState::note_peer_max_stream_data(std::uint64_t maximum_stream_data) {
 }
 
 void StreamState::queue_max_stream_data(std::uint64_t maximum_stream_data) {
+    if (peer_final_size.has_value() || peer_reset_received) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # An endpoint SHOULD stop sending MAX_STREAM_DATA frames when the
+        // # receiving part of the stream enters a "Size Known" or "Reset Recvd"
+        // # state.
+        return;
+    }
     if (maximum_stream_data <= flow_control.advertised_max_stream_data) {
         return;
     }

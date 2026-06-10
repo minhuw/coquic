@@ -1233,6 +1233,27 @@ TEST(QuicCoreTest, InboundResetStreamFailsForSendOnlyStream) {
     EXPECT_TRUE(connection.has_failed());
 }
 
+TEST(QuicCoreTest, PeerControlFrameCreatesLowerSameTypeStreams) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
+        connection, coquic::quic::HandshakeStatus::connected);
+
+    auto injected = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection, {coquic::quic::StopSendingFrame{
+                        .stream_id = 8,
+                        .application_protocol_error_code = 7,
+                    }});
+
+    EXPECT_TRUE(injected);
+    EXPECT_FALSE(connection.has_failed());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.2
+    // # Before a stream is created, all streams of the same type with lower-
+    // # numbered stream IDs MUST be created.
+    EXPECT_TRUE(connection.streams_.contains(0));
+    EXPECT_TRUE(connection.streams_.contains(4));
+    EXPECT_TRUE(connection.streams_.contains(8));
+}
+
 TEST(QuicCoreTest, InboundStreamDataIsIgnoredAfterPeerResetStream) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_server_core_config());
     coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
@@ -2854,6 +2875,25 @@ TEST(QuicCoreTest,
     EXPECT_FALSE(injected);
     EXPECT_TRUE(connection.has_failed());
     EXPECT_FALSE(connection.take_received_stream_data().has_value());
+}
+
+TEST(QuicCoreTest, PeerStreamFrameCreatesLowerSameTypeStreams) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
+        connection, coquic::quic::HandshakeStatus::connected);
+
+    auto injected = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection,
+        {coquic::quic::test::make_inbound_application_stream_frame("ping", 0, 8, false)});
+
+    EXPECT_TRUE(injected);
+    EXPECT_FALSE(connection.has_failed());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.2
+    // # Before a stream is created, all streams of the same type with lower-
+    // # numbered stream IDs MUST be created.
+    EXPECT_TRUE(connection.streams_.contains(0));
+    EXPECT_TRUE(connection.streams_.contains(4));
+    EXPECT_TRUE(connection.streams_.contains(8));
 }
 
 TEST(QuicCoreTest, InboundApplicationStreamCarriesFinWhenFinalDataBecomesContiguous) {

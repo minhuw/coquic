@@ -1,0 +1,93 @@
+'$schema' = "https://awslabs.github.io/duvet/config/v0.4.0.json"
+
+[[source]]
+pattern = "src/**/*.cpp"
+comment-style = { content = "// #" }
+
+[[source]]
+pattern = "src/**/*.h"
+comment-style = { content = "// #" }
+
+[[source]]
+pattern = "include/**/*.h"
+comment-style = { content = "// #" }
+
+[[source]]
+pattern = "tests/**/*.cpp"
+type = "test"
+comment-style = { content = "// #" }
+
+[[source]]
+pattern = "tests/**/*.h"
+type = "test"
+comment-style = { content = "// #" }
+
+[[source]]
+pattern = "interop/**/*.cpp"
+type = "test"
+comment-style = { content = "// #" }
+
+[[source]]
+pattern = "interop/**/*.h"
+type = "test"
+comment-style = { content = "// #" }
+
+[[source]]
+pattern = "fuzz/**/*.cpp"
+type = "test"
+comment-style = { content = "// #" }
+
+[[source]]
+pattern = "fuzz/**/*.h"
+type = "test"
+comment-style = { content = "// #" }
+
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9000"
+format = "ietf"
+
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9001"
+format = "ietf"
+
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9002"
+format = "ietf"
+
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9114"
+format = "ietf"
+
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9204"
+format = "ietf"
+
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9221"
+format = "ietf"
+
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9287"
+format = "ietf"
+
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9368"
+format = "ietf"
+
+[[specification]]
+source = "https://www.rfc-editor.org/rfc/rfc9369"
+format = "ietf"
+
+[report.html]
+enabled = true
+path = ".duvet/reports/report.html"
+issue-link = "https://github.com/minhuw/coquic/issues"
+blob-link = "https://github.com/minhuw/coquic/blob/${{ SHA || GITHUB_SHA || 'main' }}"
+
+[report.json]
+enabled = true
+path = ".duvet/reports/report.json"
+
+[report.snapshot]
+enabled = true
+path = ".duvet/snapshot.txt"

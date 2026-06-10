@@ -1920,6 +1920,28 @@ void QuicConnection::maybe_retire_stream(std::uint64_t stream_id) {
     invalidate_active_stream_lookup_cache();
 }
 
+StreamState *QuicConnection::open_peer_initiated_stream_with_predecessors(std::uint64_t stream_id) {
+    StreamState *target = nullptr;
+    for (std::uint64_t candidate = stream_id & 0x03u; candidate <= stream_id; candidate += 4u) {
+        auto *stream = find_stream_state(candidate);
+        if (stream == nullptr) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-3.2
+            // # Before a stream is created, all streams of the same type with lower-
+            // # numbered stream IDs MUST be created.
+            auto it = streams_.emplace_hint(streams_.end(), candidate,
+                                            make_implicit_stream_state(candidate, config_.role));
+            initialize_stream_flow_control(it->second);
+            stream = &it->second;
+        }
+        if (candidate == stream_id) {
+            target = stream;
+        }
+    }
+
+    invalidate_active_stream_lookup_cache();
+    return target;
+}
+
 StreamStateResult<StreamState *> QuicConnection::get_or_open_local_stream(std::uint64_t stream_id) {
     if (auto *existing = find_active_stream_state(stream_id); existing != nullptr) {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-2.1
@@ -2029,13 +2051,8 @@ CodecResult<StreamState *> QuicConnection::get_or_open_receive_stream(std::uint6
         return CodecResult<StreamState *>::failure(stream_limit_error(/*frame_type=*/0));
     }
 
-    auto it = streams_.emplace_hint(streams_.end(), stream_id,
-                                    make_implicit_stream_state(stream_id, config_.role));
-    initialize_stream_flow_control(it->second);
-    active_stream_lookup_cache_.valid = true;
-    active_stream_lookup_cache_.stream_id = stream_id;
-    active_stream_lookup_cache_.stream = it;
-    return CodecResult<StreamState *>::success(&it->second);
+    auto *stream = open_peer_initiated_stream_with_predecessors(stream_id);
+    return CodecResult<StreamState *>::success(stream);
 }
 
 CodecResult<StreamState *> QuicConnection::get_or_open_send_stream(std::uint64_t stream_id) {
@@ -2069,13 +2086,8 @@ CodecResult<StreamState *> QuicConnection::get_or_open_send_stream(std::uint64_t
         return CodecResult<StreamState *>::failure(stream_limit_error(/*frame_type=*/0));
     }
 
-    auto it = streams_.emplace_hint(streams_.end(), stream_id,
-                                    make_implicit_stream_state(stream_id, config_.role));
-    initialize_stream_flow_control(it->second);
-    active_stream_lookup_cache_.valid = true;
-    active_stream_lookup_cache_.stream_id = stream_id;
-    active_stream_lookup_cache_.stream = it;
-    return CodecResult<StreamState *>::success(&it->second);
+    auto *stream = open_peer_initiated_stream_with_predecessors(stream_id);
+    return CodecResult<StreamState *>::success(stream);
 }
 
 CodecResult<StreamState *>

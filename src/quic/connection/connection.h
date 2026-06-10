@@ -881,6 +881,7 @@ class QuicConnection {
     bool try_retire_stream_to_peer_range(const StreamState &stream);
     std::size_t retired_peer_stream_count() const;
     void maybe_retire_stream(std::uint64_t stream_id);
+    StreamState *open_peer_initiated_stream_with_predecessors(std::uint64_t stream_id);
     StreamStateResult<StreamState *> get_or_open_local_stream(std::uint64_t stream_id);
     StreamStateResult<StreamState *> get_existing_receive_stream(std::uint64_t stream_id);
     CodecResult<StreamState *> get_or_open_receive_stream(std::uint64_t stream_id);

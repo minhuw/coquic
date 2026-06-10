@@ -1136,6 +1136,24 @@ TEST(QuicCryptoStreamTest, ReceiveBufferReleasesReorderedApplicationBytesContigu
     EXPECT_EQ(released.value(), bytes_from_string("gh"));
 }
 
+TEST(QuicCryptoStreamTest, ReceiveBufferSupportsFourKilobytesOfOutOfOrderCrypto) {
+    ReliableReceiveBuffer buffer;
+    const auto tail = std::vector<std::byte>(4096, std::byte{0x5a});
+
+    auto buffered = buffer.push(1, tail);
+
+    ASSERT_TRUE(buffered.has_value());
+    EXPECT_TRUE(buffered.value().empty());
+    auto released = buffer.push(0, std::vector<std::byte>{std::byte{0x41}});
+    ASSERT_TRUE(released.has_value());
+    ASSERT_EQ(released.value().size(), tail.size() + 1u);
+    EXPECT_EQ(released.value().front(), std::byte{0x41});
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+    // # Implementations MUST support buffering at least 4096 bytes of data
+    // # received in out-of-order CRYPTO frames.
+    EXPECT_EQ(std::vector<std::byte>(released.value().begin() + 1, released.value().end()), tail);
+}
+
 TEST(QuicCryptoStreamTest, ReceiveBufferReturnsOnlyUndeliveredTailOfOverlappingWrite) {
     ReliableReceiveBuffer buffer;
     auto first = buffer.push(0, bytes_from_string("abcd"));

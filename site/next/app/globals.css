@@ -1573,7 +1573,8 @@
 
 @layer components {
   .comparison-shell,
-  .coverage-grid {
+  .coverage-grid,
+  .duvet-report-shell {
     @apply mt-5 grid gap-4;
   }
 
@@ -1581,15 +1582,21 @@
   .plot,
   .component-panel,
   .file-panel,
-  .interop-shell {
+  .interop-shell,
+  .duvet-report-shell {
     @apply rounded-[var(--radius)] border border-[var(--line)] bg-[var(--surface)] shadow-none;
   }
 
   .chart-panel,
   .component-panel,
   .file-panel,
-  .interop-shell {
+  .interop-shell,
+  .duvet-report-shell {
     @apply overflow-hidden;
+  }
+
+  .duvet-report-frame {
+    @apply h-[calc(100vh-236px)] min-h-[680px] w-full border-0 bg-white;
   }
 
   .plot-grid {

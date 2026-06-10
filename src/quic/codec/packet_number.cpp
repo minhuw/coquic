@@ -65,6 +65,10 @@ recover_packet_number(std::optional<std::uint64_t> largest_authenticated_packet_
     const auto candidate_packet_number =
         (expected_packet_number & ~packet_number_window_mask) | truncated_packet_number;
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.1
+    // # Once header protection is removed, the packet number is decoded by
+    // # finding the packet number value that is closest to the next expected
+    // # packet.
     if (expected_packet_number >= packet_number_half_window &&
         candidate_packet_number <= expected_packet_number - packet_number_half_window &&
         candidate_packet_number < kPacketNumberSpaceSize - packet_number_window) {

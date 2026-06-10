@@ -22,8 +22,17 @@ TEST(QuicCoreTest, ApplicationAckFramesIncludeEcnCountsWhenReceiveMetadataIsAvai
         std::find_if(application->frames.begin(), application->frames.end(), [](const auto &frame) {
             return std::holds_alternative<coquic::quic::AckFrame>(frame);
         });
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+    // # For instance, packets that are protected with 1-RTT keys MUST be
+    // # acknowledged in packets that are also protected with 1-RTT keys.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+    // # An acknowledgment for a 1-RTT packet MUST be carried in a 1-RTT packet.
     ASSERT_NE(ack_it, application->frames.end());
     const auto &ack_frame = std::get<coquic::quic::AckFrame>(*ack_it);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.1
+    // # Even if an endpoint does not set an ECT field in packets it sends,
+    // # the endpoint MUST provide feedback about ECN markings it receives,
+    // # if these are accessible.
     ASSERT_TRUE(ack_frame.ecn_counts.has_value());
     const auto &ecn_counts = optional_ref_or_terminate(ack_frame.ecn_counts);
     EXPECT_EQ(ecn_counts.ect0, 0u);
@@ -81,6 +90,9 @@ TEST(QuicCoreTest, LatencySpinBitIsDisabledUnlessConfigured) {
     path.spin.disabled = false;
     path.spin.value = true;
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+    // # When the spin bit is disabled, endpoints MAY set the spin bit to any
+    // # value and MUST ignore any incoming value.
     EXPECT_FALSE(connection.outbound_spin_bit_for_path(0));
 
     connection.update_spin_bit_on_receive(0, /*peer_spin_bit=*/false, /*packet_number=*/1);
@@ -1163,6 +1175,10 @@ TEST(QuicCoreTest, OptimisticAckMitigationSkipsPacketNumbersAndRejectsAcksForThe
     EXPECT_FALSE(processed.has_value());
     EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::closing);
     ASSERT_TRUE(connection.pending_transport_close_.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+    // # An endpoint SHOULD treat receipt of an acknowledgment for a packet it
+    // # did not send as a connection error of type PROTOCOL_VIOLATION, if it is
+    // # able to detect the condition.
     EXPECT_EQ(optional_ref_or_terminate(connection.pending_transport_close_).error_code,
               static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation));
 }
@@ -1193,6 +1209,8 @@ TEST(QuicCoreTest, AckProcessingDisablesEcnWhenAckOmitsCountsForNewlyAckedEct0Pa
         /*suppress_pto_reset=*/false);
 
     ASSERT_TRUE(processed.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+    // # If validation fails, then the endpoint MUST disable ECN.
     EXPECT_EQ(path.ecn.state, coquic::quic::QuicPathEcnState::failed);
 }
 
@@ -1256,6 +1274,9 @@ TEST(QuicCoreTest, AckProcessingTreatsCeCounterGrowthAsSingleCongestionEvent) {
                                                  /*suppress_pto_reset=*/false);
 
     ASSERT_TRUE(second.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.1
+    // # An endpoint MUST NOT fail ECN validation as a result of processing an ACK
+    // # frame that does not increase the largest acknowledged packet number.
     EXPECT_EQ(connection.congestion_controller_.congestion_window(), first_reduction);
 }
 

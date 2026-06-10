@@ -25,6 +25,9 @@ constexpr std::array<std::byte, 20> quic_v1_initial_salt{
     std::byte{0xad}, std::byte{0xcc}, std::byte{0xbb}, std::byte{0x7f}, std::byte{0x0a},
 };
 
+//= https://www.rfc-editor.org/rfc/rfc9001#section-9.6
+// # New QUIC versions SHOULD define a new salt value used in calculating
+// # initial secrets.
 constexpr std::array<std::byte, 20> quic_v2_initial_salt{
     std::byte{0x0d}, std::byte{0xed}, std::byte{0xe3}, std::byte{0xde}, std::byte{0xf7},
     std::byte{0x00}, std::byte{0xa6}, std::byte{0xdb}, std::byte{0x81}, std::byte{0x93},
@@ -134,6 +137,9 @@ inline CodecResult<std::span<const std::byte>> initial_salt_for_version(std::uin
             std::span<const std::byte>(quic_v1_initial_salt));
     }
     if (version == kQuicVersion2) {
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-5.2
+        // # Future versions of QUIC SHOULD generate a new salt value, thus
+        // # ensuring that the keys are different for each version of QUIC.
         return CodecResult<std::span<const std::byte>>::success(
             std::span<const std::byte>(quic_v2_initial_salt));
     }
@@ -153,6 +159,13 @@ packet_protection_labels_for_version(std::uint32_t version) {
         });
     }
     if (version == kQuicVersion2) {
+        //= https://www.rfc-editor.org/rfc/rfc9369#section-3
+        // # Except for a few differences, QUIC version 2 endpoints MUST implement
+        // # the QUIC version 1 specification as described in [QUIC], [QUIC-TLS],
+        // # and [QUIC-RECOVERY].
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-9.6
+        // # a new version of QUIC SHOULD define new labels for key derivation for
+        // # packet protection key and IV, plus the header protection keys.
         return CodecResult<PacketProtectionLabels>::success(PacketProtectionLabels{
             .key = "quicv2 key",
             .iv = "quicv2 iv",

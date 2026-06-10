@@ -131,6 +131,9 @@ ReliableSendBuffer::take_ranges_by_state(SegmentState state, std::size_t &remain
             .offset = it->first,
             .bytes =
                 SharedBytes{
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+                    // # The data at a given offset MUST NOT change if it is sent
+                    // # multiple times
                     it->second.storage,
                     it->second.begin,
                     it->second.begin + chunk_size,

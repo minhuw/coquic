@@ -78,6 +78,15 @@ const routeItems: SiteSearchItem[] = [
     kind: 'dashboard',
     keywords: ['coverage', 'llvm', 'lines', 'branches', 'tests'],
   },
+  {
+    id: 'route-duvet',
+    title: 'Duvet RFC Compliance',
+    href: '/duvet',
+    section: 'Development',
+    description: 'Open the Duvet traceability report for RFC requirements, implementation citations, and tests.',
+    kind: 'dashboard',
+    keywords: ['duvet', 'rfc', 'compliance', 'traceability', 'requirements', 'quic', 'http3', 'qpack'],
+  },
 ];
 
 const scenarioItems: SiteSearchItem[] = [

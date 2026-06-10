@@ -9,12 +9,23 @@ struct PendingPathValidationFrames {
     std::optional<PathChallengeFrame> challenge;
 };
 
-bool path_validation_challenge_needs_minimum_datagram(
+bool path_validation_needs_minimum_datagram(
     const PendingPathValidationFrames &path_validation_frames,
     const std::map<QuicPathId, PathState> &paths) {
+    if (path_validation_frames.response.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+        // # An endpoint MUST expand datagrams that contain a PATH_RESPONSE frame
+        // # to at least the smallest allowed maximum datagram size of 1200 bytes.
+        return true;
+    }
     if (!path_validation_frames.challenge.has_value()) {
         return false;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+    // # An endpoint MUST expand datagrams that contain a PATH_CHALLENGE frame
+    // # to at least the smallest allowed maximum datagram size of 1200 bytes,
+    // # unless the anti-amplification limit for the path does not permit
+    // # sending a datagram of this size.
     const auto path = paths.find(path_validation_frames.path_id);
     return path != paths.end() && !path->second.validated;
 }
@@ -94,6 +105,9 @@ std::span<const Frame> build_application_candidate_frames(
         stream_data_blocked_frames.size() + (datagram_frame.has_value() ? 1u : 0u) +
         (application_close_frame.has_value() ? 1u : 0u) + (include_ping ? 1u : 0u));
     candidate_frames.insert(candidate_frames.end(), crypto_frames.begin(), crypto_frames.end());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # An endpoint SHOULD send an ACK frame with other frames when there are
+    // # new ack-eliciting packets to acknowledge.
     append_application_ack_frame(candidate_frames, received_packets, candidate_ack_header);
     if (include_handshake_done) {
         candidate_frames.emplace_back(HandshakeDoneFrame{});
@@ -114,6 +128,9 @@ std::span<const Frame> build_application_candidate_frames(
         candidate_frames.emplace_back(*candidate_path_validation_frames.response);
     }
     if (candidate_path_validation_frames.challenge.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+        // # However, an endpoint SHOULD NOT send multiple PATH_CHALLENGE frames in
+        // # a single packet.
         candidate_frames.emplace_back(*candidate_path_validation_frames.challenge);
     }
     for (const auto &frame : max_stream_data_frames) {
@@ -673,6 +690,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         ++send_profile_counters().drain_calls;
     }
     if (close_mode_ == QuicConnectionCloseMode::draining) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.2
+        // # An endpoint MUST NOT send further packets.
         return {};
     }
     maybe_arm_pmtu_probe(now);
@@ -729,8 +748,14 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
 
     auto packets = std::vector<ProtectedPacket>{};
     auto selected_send_path_id = current_send_path_id_;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    // # Senders MUST NOT coalesce QUIC packets with different connection IDs
+    // # into a single UDP datagram.
     auto send_destination_connection_id = outbound_destination_connection_id();
     const auto application_destination_connection_id = [&]() {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+        // # Senders MUST NOT coalesce QUIC packets with different connection IDs
+        // # into a single UDP datagram.
         return outbound_destination_connection_id(selected_send_path_id);
     };
     bool duplicate_first_compatible_server_initial_crypto =
@@ -896,6 +921,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     auto initial_packet_version =
         defer_server_compatible_negotiation_crypto ? original_version_ : current_version_;
     static const std::vector<std::byte> kEmptyInitialToken;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.2
+    // # Initial packets sent by the server MUST set the Token Length field
+    // # to 0; clients that receive an Initial packet with a non-zero Token
+    // # Length field MUST either discard the packet or generate a connection
+    // # error of type PROTOCOL_VIOLATION.
     const std::vector<std::byte> &initial_token =
         config_.role == EndpointRole::client ? config_.retry_token : kEmptyInitialToken;
     std::optional<SerializeProtectionContext> cached_serialize_context;
@@ -1030,6 +1060,20 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             const auto frames_without_padding = mutable_initial->frames;
             const auto padding_deficit =
                 kMinimumInitialDatagramSize - datagram.value().bytes.size();
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+            // # Clients MUST ensure that UDP datagrams containing Initial
+            // # packets have UDP payloads of at least 1200 bytes, adding
+            // # PADDING frames as necessary.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+            // # A client MUST expand the payload of all UDP datagrams carrying
+            // # Initial packets to at least the smallest allowed maximum
+            // # datagram size of 1200 bytes by adding PADDING frames to the
+            // # Initial packet or by coalescing the Initial packet; see Section
+            // # 12.2.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+            // # Similarly, a server MUST expand the payload of all UDP
+            // # datagrams carrying ack-eliciting Initial packets to at least
+            // # the smallest allowed maximum datagram size of 1200 bytes.
             const auto serialize_padded_initial =
                 [&](std::size_t padding_length) -> CodecResult<SerializedProtectedDatagram> {
                 mutable_initial->frames = frames_without_padding;
@@ -1276,6 +1320,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             return {};
         }
         auto close_packet_space = &application_space_;
+        if (application_space_.write_secret.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+            // # After the handshake is confirmed (see Section 4.1.2 of
+            // # [QUIC-TLS]), an endpoint MUST send any CONNECTION_CLOSE frames
+            // # in a 1-RTT packet.
+        }
         ProtectedPacket packet =
             application_space_.write_secret.has_value()
                 ? make_application_protected_packet(
@@ -1371,6 +1421,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                                                                      /*allow_non_pending=*/true)
                    : initial_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0,
                                                                      now));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+    // # ACK frames MUST only be carried in a packet that has the same packet
+    // # number space as the packet being acknowledged; see Section 12.1.
     auto initial_crypto_ranges = std::vector<ByteRange>{};
     if (!initial_packet_space_discarded_ && !defer_server_compatible_negotiation_crypto) {
         initial_crypto_ranges =
@@ -1400,6 +1453,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         }
         if (initial_ack_frame.has_value() && !has_ack_eliciting_frame(initial_frame_list) &&
             should_add_server_handshake_keepalive_ping(initial_space_)) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+            // # In that case, an endpoint MUST NOT send an ack-eliciting frame
+            // # in all packets that would otherwise be non-ack-eliciting, to
+            // # avoid an infinite feedback loop of acknowledgments.
             initial_frame_list.emplace_back(PingFrame{});
         }
         if (!defer_server_compatible_negotiation_crypto &&
@@ -1432,7 +1489,14 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             candidate_packets.emplace_back(ProtectedInitialPacket{
                 .version = initial_packet_version,
                 .destination_connection_id = send_destination_connection_id,
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.2
+                // # The client MUST NOT change the Source Connection ID because the
+                // # server could include the connection ID as part of its token
+                // # validation logic; see Section 8.1.4.
                 .source_connection_id = config_.source_connection_id,
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+                // # The client MUST include the token in all Initial packets it
+                // # sends, unless a Retry replaces the token with a newer one.
                 .token = initial_token,
                 .packet_number_length = kDefaultInitialPacketNumberLength,
                 .packet_number = initial_space_.next_send_packet_number,
@@ -1474,6 +1538,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             packets.emplace_back(ProtectedInitialPacket{
                 .version = initial_packet_version,
                 .destination_connection_id = send_destination_connection_id,
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.2
+                // # The client MUST NOT change the Source Connection ID because the
+                // # server could include the connection ID as part of its token
+                // # validation logic; see Section 8.1.4.
                 .source_connection_id = config_.source_connection_id,
                 .token = initial_token,
                 .packet_number_length = kDefaultInitialPacketNumberLength,
@@ -1598,6 +1666,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 ? handshake_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now,
                                                                     /*allow_non_pending=*/true)
                 : handshake_space_.received_packets.build_ack_frame(/*ack_delay_exponent=*/0, now);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+        // # ACK frames MUST only be carried in a packet that has the same packet
+        // # number space as the packet being acknowledged; see Section 12.1.
         std::vector<Frame> handshake_frame_list;
         handshake_frame_list.reserve(
             crypto_ranges.size() + (handshake_ack_frame.has_value() ? 1u : 0u) +
@@ -1615,6 +1686,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         }
         if (handshake_ack_frame.has_value() && !has_ack_eliciting_frame(handshake_frame_list) &&
             should_add_server_handshake_keepalive_ping(handshake_space_)) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+            // # In that case, an endpoint MUST NOT send an ack-eliciting frame
+            // # in all packets that would otherwise be non-ack-eliciting, to
+            // # avoid an infinite feedback loop of acknowledgments.
             handshake_frame_list.emplace_back(PingFrame{});
         }
         if (handshake_space_.pending_probe_packet.has_value() &&
@@ -1820,6 +1895,17 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 ? std::optional<OutboundAckHeader>{}
                 : application_space_.received_packets.build_outbound_ack_header(
                       local_transport_parameters_.ack_delay_exponent, now);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+        // # ACK frames MUST only be carried in a packet that has the same packet
+        // # number space as the packet being acknowledged; see Section 12.1.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+        // # For instance, packets that are protected with 1-RTT keys MUST be
+        // # acknowledged in packets that are also protected with 1-RTT keys.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+        // # An acknowledgment for a 1-RTT packet MUST be carried in a 1-RTT packet.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+        // # Packets that a client sends with 0-RTT packet protection MUST be
+        // # acknowledged by the server in packets protected by 1-RTT keys.
         const auto maybe_queue_client_ack_only_receive_keepalive_challenge = [&]() {
             const bool has_receive_interest = std::ranges::any_of(
                 streams_, [](const auto &entry) { return !stream_receive_terminal(entry.second); });
@@ -2113,6 +2199,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     return entry.second.pending_response.has_value();
                 });
             if (response_path != paths_.end()) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+                // # An endpoint MUST NOT delay transmission of a packet
+                // # containing a PATH_RESPONSE frame unless constrained by
+                // # congestion control.
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+                // # A PATH_RESPONSE frame MUST be sent on the network path
+                // # where the PATH_CHALLENGE frame was received.
                 PendingPathValidationFrames pending_path_validation{
                     .path_id = response_path->first,
                     .response =
@@ -2120,9 +2213,15 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                             .data = *response_path->second.pending_response,
                         },
                 };
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+                // # An endpoint MUST NOT send more than one PATH_RESPONSE frame in
+                // # response to one PATH_CHALLENGE frame; see Section 13.3.
                 response_path->second.pending_response.reset();
                 if (response_path->second.challenge_pending &
                     response_path->second.outstanding_challenge.has_value()) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+                    // # However, an endpoint SHOULD NOT send multiple PATH_CHALLENGE
+                    // # frames in a single packet.
                     pending_path_validation.challenge = PathChallengeFrame{
                         .data = *response_path->second.outstanding_challenge,
                     };
@@ -2131,6 +2230,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                            !response_path->second.outstanding_challenge.has_value()) {
                     response_path->second.outstanding_challenge =
                         next_path_challenge_data(response_path->first);
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+                    // # However, an endpoint SHOULD NOT send multiple PATH_CHALLENGE
+                    // # frames in a single packet.
                     pending_path_validation.challenge = PathChallengeFrame{
                         .data = *response_path->second.outstanding_challenge,
                     };
@@ -2163,6 +2265,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 .path_id = *current_send_path_id_,
             };
             if (path->second.challenge_pending & path->second.outstanding_challenge.has_value()) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+                // # An endpoint SHOULD NOT probe a new path with packets containing a
+                // # PATH_CHALLENGE frame more frequently than it would send an Initial
+                // # packet.
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+                // # However, an endpoint SHOULD NOT send multiple PATH_CHALLENGE frames in
+                // # a single packet.
                 pending_path_validation.challenge = PathChallengeFrame{
                     .data = *path->second.outstanding_challenge,
                 };
@@ -2177,6 +2286,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             fragments.clear();
             std::size_t selected_payload_bytes = 0;
             auto remaining_wire_bytes = max_wire_bytes;
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+            // # Senders MUST NOT send data in excess of either limit.
             auto remaining_connection_credit =
                 connection_flow.peer_max_data > connection_flow.highest_sent
                     ? connection_flow.peer_max_data - connection_flow.highest_sent
@@ -2506,6 +2617,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 bool has_application_close, std::uint64_t candidate_packet_number,
                 bool write_key_phase) -> CodecResult<SerializedProtectedDatagram> {
             const bool use_zero_rtt = use_zero_rtt_packet_protection & !has_application_close;
+            if (has_application_close && !use_zero_rtt) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+                // # After the handshake is confirmed (see Section 4.1.2 of
+                // # [QUIC-TLS]), an endpoint MUST send any CONNECTION_CLOSE frames
+                // # in a 1-RTT packet.
+            }
             if (!use_zero_rtt) {
                 const auto candidate_destination_connection_id =
                     application_destination_connection_id();
@@ -2581,9 +2698,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             if (!candidate.has_value()) {
                 return true;
             }
-            if (!path_validation_challenge_needs_minimum_datagram(path_validation_frames, paths_)) {
+            if (!path_validation_needs_minimum_datagram(path_validation_frames, paths_)) {
                 return true;
             }
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+            // # However, an endpoint MUST NOT expand the
+            // # datagram containing the PATH_RESPONSE if the resulting data exceeds
+            // # the anti-amplification limit.
             if (datagram_size_limit < kMinimumInitialDatagramSize ||
                 candidate.value().bytes.size() >= kMinimumInitialDatagramSize) {
                 return true;
@@ -2849,23 +2970,40 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         bool prefer_fresh_application_stream_data = pending_application_probe != nullptr &&
                                                     remaining_pto_probe_datagrams_ == 1 &&
                                                     has_pending_fresh_application_stream_send();
-        const auto should_send_application_probe_first = [&]() {
-            const auto validation_only_path_id = [&]() -> std::optional<QuicPathId> {
-                const auto response_path =
-                    std::find_if(paths_.begin(), paths_.end(), [](const auto &entry) {
-                        return entry.second.pending_response.has_value();
-                    });
-                if (response_path != paths_.end()) {
-                    return response_path->first;
-                }
-                return current_send_path_id_;
-            }();
-            if (validation_only_path_id.has_value()) {
-                const auto validation_path = paths_.find(*validation_only_path_id);
-                if (validation_path != paths_.end() && !validation_path->second.validated &&
-                    !validation_path->second.validation_initiated_locally) {
+        const auto validation_only_path_id = [&]() -> std::optional<QuicPathId> {
+            const auto response_path =
+                std::find_if(paths_.begin(), paths_.end(), [](const auto &entry) {
+                    return entry.second.pending_response.has_value();
+                });
+            if (response_path != paths_.end()) {
+                return response_path->first;
+            }
+            return current_send_path_id_;
+        };
+        const auto path_send_is_validation_only = [&](QuicPathId path_id) {
+            const auto validation_path = paths_.find(path_id);
+            if (validation_path == paths_.end() || validation_path->second.validated) {
+                return false;
+            }
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-21.5.3
+            // # A client MUST NOT send non-probing frames to a preferred address
+            // # prior to validating that address; see Section 8.
+            return !validation_path->second.validation_initiated_locally ||
+                   validation_path->second.preferred_address_path;
+        };
+        const auto validation_only_send_is_preferred_address =
+            [&](std::optional<QuicPathId> path_id) {
+                if (!path_id.has_value()) {
                     return false;
                 }
+                const auto validation_path = paths_.find(*path_id);
+                return validation_path != paths_.end() && !validation_path->second.validated &&
+                       validation_path->second.preferred_address_path;
+            };
+        const auto should_send_application_probe_first = [&]() {
+            const auto path_id = validation_only_path_id();
+            if (path_id.has_value() && path_send_is_validation_only(*path_id)) {
+                return false;
             }
             if (pending_application_probe == nullptr) {
                 return false;
@@ -3082,8 +3220,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             if (!datagram.has_value()) {
                 return fail_datagram_send(has_pending_tracked_packet());
             }
-            if (path_validation_challenge_needs_minimum_datagram(probe_path_validation_frames,
-                                                                 paths_) &&
+            if (path_validation_needs_minimum_datagram(probe_path_validation_frames, paths_) &&
                 !probe_packet.is_pmtu_probe) {
                 std::vector<Frame> probe_crypto_frames;
                 append_application_crypto_frames(probe_crypto_frames, probe_crypto_ranges);
@@ -3420,27 +3557,18 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             const auto include_handshake_done =
                 !use_zero_rtt_packet_protection && config_.role == EndpointRole::server &&
                 handshake_done_state_ == StreamControlFrameState::pending;
-            const auto validation_only_path_id = [&]() -> std::optional<QuicPathId> {
-                const auto response_path =
-                    std::find_if(paths_.begin(), paths_.end(), [](const auto &entry) {
-                        return entry.second.pending_response.has_value();
-                    });
-                if (response_path != paths_.end()) {
-                    return response_path->first;
-                }
-                return current_send_path_id_;
-            }();
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
+            // # Servers MUST NOT send a HANDSHAKE_DONE frame before completing
+            // # the handshake.
+            const auto selected_validation_only_path_id = validation_only_path_id();
             const bool validation_only_send = [&]() {
-                if (!validation_only_path_id.has_value()) {
+                if (!selected_validation_only_path_id.has_value()) {
                     return false;
                 }
-                const auto validation_path = paths_.find(*validation_only_path_id);
-                if (validation_path == paths_.end()) {
-                    return false;
-                }
-                return static_cast<bool>(!validation_path->second.validated &
-                                         !validation_path->second.validation_initiated_locally);
+                return path_send_is_validation_only(*selected_validation_only_path_id);
             }();
+            const bool suppress_ack_for_preferred_address_validation =
+                validation_only_send_is_preferred_address(selected_validation_only_path_id);
             auto application_close_frame = pending_application_close_;
             bool send_application_close_only = application_close_frame.has_value();
             if (application_close_frame.has_value() && !can_send_one_rtt_packets) {
@@ -3479,6 +3607,33 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     restore_ack_path_validation_after_send_failure(ack_only_path_validation_frames);
                     return {};
                 }
+                auto ack_only_datagram = serialize_application_candidate_from_frames(
+                    ack_only_frames, {}, /*has_application_close=*/false, *ack_only_packet_number,
+                    application_write_key_phase_);
+                if (!ack_only_datagram.has_value()) {
+                    restore_ack_path_validation_after_send_failure(ack_only_path_validation_frames);
+                    return fail_datagram_send(has_pending_tracked_packet());
+                }
+                if (path_validation_needs_minimum_datagram(ack_only_path_validation_frames,
+                                                           paths_) &&
+                    max_outbound_datagram_size >= kMinimumInitialDatagramSize &&
+                    ack_only_datagram.value().bytes.size() < kMinimumInitialDatagramSize) {
+                    std::size_t padding_length =
+                        kMinimumInitialDatagramSize - ack_only_datagram.value().bytes.size();
+                    if (maybe_add_pmtu_probe_padding(padding_length, ack_only_frames,
+                                                     padding_length) &&
+                        !retry_padded_pmtu_probe_serialization(
+                            ack_only_datagram, ack_only_frames, kMinimumInitialDatagramSize,
+                            padding_length, [&] {
+                                return serialize_application_candidate_from_frames(
+                                    ack_only_frames, {}, /*has_application_close=*/false,
+                                    *ack_only_packet_number, application_write_key_phase_);
+                            })) {
+                        restore_ack_path_validation_after_send_failure(
+                            ack_only_path_validation_frames);
+                        return fail_datagram_send(has_pending_tracked_packet());
+                    }
+                }
                 auto ack_only_packet = make_application_protected_packet(
                     use_zero_rtt_packet_protection, current_version_,
                     application_destination_connection_id(), config_.source_connection_id,
@@ -3487,11 +3642,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 set_application_packet_spin_bit(ack_only_packet,
                                                 outbound_spin_bit_for_path(selected_send_path_id));
                 packets.emplace_back(std::move(ack_only_packet));
-                auto ack_only_datagram = serialize_candidate_datagram_with_metadata(packets);
-                if (!ack_only_datagram.has_value()) {
-                    restore_ack_path_validation_after_send_failure(ack_only_path_validation_frames);
-                    return fail_datagram_send(has_pending_tracked_packet());
-                }
                 maybe_queue_ack_only_path_validation_packet(ack_only_path_validation_frames, [&] {
                     const bool path_validation_ack_eliciting =
                         ack_only_path_validation_is_ack_eliciting(ack_only_path_validation_frames);
@@ -3635,7 +3785,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 }
             } application_stream_scratch_guard{stream_fragments, active_stream_iterator_scratch_};
             std::optional<OutboundAckHeader> selected_ack_frame;
-            if (!send_application_close_only && base_ack_frame.has_value()) {
+            if (!send_application_close_only && !suppress_ack_for_preferred_address_validation &&
+                base_ack_frame.has_value()) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2
+                // # When sending a packet for any reason, an endpoint SHOULD attempt to
+                // # include an ACK frame if one has not been sent recently.
                 selected_ack_frame =
                     base_ack_frame->additional_ranges.empty()
                         ? base_ack_frame
@@ -4231,6 +4385,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     : std::nullopt;
             if (ack_eliciting && !bypass_congestion_window &&
                 !congestion_controller_.can_send_ack_eliciting(candidate_datagram_size)) {
+                //= https://www.rfc-editor.org/rfc/rfc9002#section-7
+                // # An endpoint MUST NOT send a packet if it would cause bytes_in_flight
+                // # (see Appendix B.2) to be larger than the congestion window, unless
+                // # the packet is sent on a PTO timer expiration (see Section 6.2) or
+                // # when entering recovery (see Section 7.3.2).
                 note_application_congestion_blocked(candidate_datagram_size);
                 return restore_and_fallback_blocked_application_candidate();
             }

@@ -409,6 +409,9 @@ CodecResult<DecodedAckHeader> decode_ack_header(BufferReader &reader) {
                                                       first_ack_range.error().offset);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3.1
+    // # If any computed packet number is negative, an endpoint MUST generate
+    // # a connection error of type FRAME_ENCODING_ERROR.
     if (largest_acknowledged.value() < first_ack_range.value()) {
         return CodecResult<DecodedAckHeader>::failure(CodecErrorCode::invalid_varint,
                                                       reader.offset());
@@ -440,6 +443,9 @@ decode_ack_additional_ranges(BufferReader &reader, std::uint64_t additional_rang
             return ack_range_length.error();
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3.1
+        // # If any computed packet number is negative, an endpoint MUST generate
+        // # a connection error of type FRAME_ENCODING_ERROR.
         if (ack_previous_smallest < additional_range_gap_value + 2) {
             return CodecError{
                 .code = CodecErrorCode::invalid_varint,
@@ -448,6 +454,9 @@ decode_ack_additional_ranges(BufferReader &reader, std::uint64_t additional_rang
         }
 
         const auto largest = ack_previous_smallest - additional_range_gap_value - 2;
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3.1
+        // # If any computed packet number is negative, an endpoint MUST generate
+        // # a connection error of type FRAME_ENCODING_ERROR.
         if (largest < ack_range_length.value()) {
             return CodecError{
                 .code = CodecErrorCode::invalid_varint,
@@ -634,6 +643,10 @@ CodecResult<CryptoFrame> decode_crypto_frame(BufferReader &reader) {
                                                  crypto_data.error().offset);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.6
+    // # Receipt of a frame that exceeds
+    // # this limit MUST be treated as a connection error of type
+    // # FRAME_ENCODING_ERROR or CRYPTO_BUFFER_EXCEEDED.
     if (offset.value() > kMaxVarInt - crypto_data.value().size()) {
         return CodecResult<CryptoFrame>::failure(CodecErrorCode::invalid_varint, reader.offset());
     }
@@ -659,6 +672,10 @@ CodecResult<ReceivedCryptoFrame> decode_received_crypto_frame(BufferReader &read
                                                          crypto_data.error().offset);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.6
+    // # Receipt of a frame that exceeds
+    // # this limit MUST be treated as a connection error of type
+    // # FRAME_ENCODING_ERROR or CRYPTO_BUFFER_EXCEEDED.
     if (offset.value() > kMaxVarInt - crypto_data.value().size()) {
         return CodecResult<ReceivedCryptoFrame>::failure(CodecErrorCode::invalid_varint,
                                                          reader.offset());
@@ -674,6 +691,12 @@ CodecResult<NewTokenFrame> decode_new_token_frame(BufferReader &reader) {
     if (!token.has_value()) {
         return CodecResult<NewTokenFrame>::failure(token.error().code, token.error().offset);
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.7
+    // # The token MUST NOT be empty.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.7
+    // # A client MUST treat receipt
+    // # of a NEW_TOKEN frame with an empty Token field as a connection
+    // # error of type FRAME_ENCODING_ERROR.
     if (token.value().empty()) {
         return CodecResult<NewTokenFrame>::failure(CodecErrorCode::invalid_varint, reader.offset());
     }
@@ -717,6 +740,10 @@ CodecResult<StreamFrame> decode_stream_frame(BufferReader &reader, std::uint64_t
         frame.stream_data.assign(bytes.begin(), bytes.end());
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.8
+    // # Receipt of a frame that exceeds this limit
+    // # MUST be treated as a connection error of type FRAME_ENCODING_ERROR or
+    // # FLOW_CONTROL_ERROR.
     if (offset_value > kMaxVarInt - frame.stream_data.size()) {
         return CodecResult<StreamFrame>::failure(CodecErrorCode::invalid_varint, reader.offset());
     }
@@ -764,6 +791,10 @@ CodecResult<ReceivedStreamFrame> decode_received_stream_frame(BufferReader &read
         frame.stream_data = bytes.subspan(data_offset, remaining);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.8
+    // # Receipt of a frame that exceeds this limit
+    // # MUST be treated as a connection error of type FRAME_ENCODING_ERROR or
+    // # FLOW_CONTROL_ERROR.
     if (offset_value > kMaxVarInt - frame.stream_data.size()) {
         return CodecResult<ReceivedStreamFrame>::failure(CodecErrorCode::invalid_varint,
                                                          reader.offset());
@@ -905,6 +936,10 @@ CodecResult<MaxStreamsFrame> decode_max_streams_frame(BufferReader &reader,
         return CodecResult<MaxStreamsFrame>::failure(maximum_streams.error().code,
                                                      maximum_streams.error().offset);
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.11
+    // # Receipt of a frame that
+    // # permits opening of a stream larger than this limit MUST be treated
+    // # as a connection error of type FRAME_ENCODING_ERROR.
     if (maximum_streams.value() > kMaxStreamsLimit) {
         return CodecResult<MaxStreamsFrame>::failure(CodecErrorCode::invalid_varint,
                                                      reader.offset());
@@ -923,6 +958,10 @@ CodecResult<StreamsBlockedFrame> decode_streams_blocked_frame(BufferReader &read
         return CodecResult<StreamsBlockedFrame>::failure(maximum_streams.error().code,
                                                          maximum_streams.error().offset);
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.14
+    // # Receipt of a frame that encodes a larger
+    // # stream ID MUST be treated as a connection error of type
+    // # STREAM_LIMIT_ERROR or FRAME_ENCODING_ERROR.
     if (maximum_streams.value() > kMaxStreamsLimit) {
         return CodecResult<StreamsBlockedFrame>::failure(CodecErrorCode::invalid_varint,
                                                          reader.offset());
@@ -953,10 +992,21 @@ CodecResult<NewConnectionIdFrame> decode_new_connection_id_frame(BufferReader &r
                                                           length.error().offset);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+    // # Values less than 1 and greater than 20 are invalid
+    // # and MUST be treated as a connection error of type
+    // # FRAME_ENCODING_ERROR.
     if (length.value() == 0 || length.value() > 20) {
         return CodecResult<NewConnectionIdFrame>::failure(CodecErrorCode::invalid_varint,
                                                           reader.offset());
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+    // # The value in the Retire Prior To field
+    // # MUST be less than or equal to the value in the Sequence Number field.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+    // # Receiving a value in the Retire Prior To field that is greater than
+    // # that in the Sequence Number field MUST be treated as a connection
+    // # error of type FRAME_ENCODING_ERROR.
     if (retire_prior_to.value() > sequence_number.value()) {
         return CodecResult<NewConnectionIdFrame>::failure(CodecErrorCode::invalid_varint,
                                                           reader.offset());
@@ -1091,6 +1141,10 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &frame_writer, cons
     }
 
     if (const auto *crypto = std::get_if<CryptoFrame>(&frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.6
+        // # Receipt of a frame that exceeds
+        // # this limit MUST be treated as a connection error of type
+        // # FRAME_ENCODING_ERROR or CRYPTO_BUFFER_EXCEEDED.
         if (crypto->offset > kMaxVarInt - crypto->crypto_data.size()) {
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
@@ -1108,6 +1162,8 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &frame_writer, cons
     }
 
     if (const auto *new_token = std::get_if<NewTokenFrame>(&frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.7
+        // # The token MUST NOT be empty.
         if (new_token->token.empty()) {
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
@@ -1135,6 +1191,10 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &frame_writer, cons
         }
 
         const auto offset = stream->offset.value_or(0);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.8
+        // # Receipt of a frame that exceeds this limit
+        // # MUST be treated as a connection error of type FRAME_ENCODING_ERROR or
+        // # FLOW_CONTROL_ERROR.
         if (offset > kMaxVarInt - stream->stream_data.size()) {
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
@@ -1196,6 +1256,10 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &frame_writer, cons
     }
 
     if (const auto *max_streams = std::get_if<MaxStreamsFrame>(&frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.11
+        // # Receipt of a frame that
+        // # permits opening of a stream larger than this limit MUST be treated
+        // # as a connection error of type FRAME_ENCODING_ERROR.
         if (max_streams->maximum_streams > kMaxStreamsLimit) {
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
@@ -1231,6 +1295,10 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &frame_writer, cons
     }
 
     if (const auto *streams_blocked = std::get_if<StreamsBlockedFrame>(&frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.14
+        // # Receipt of a frame that encodes a larger
+        // # stream ID MUST be treated as a connection error of type
+        // # STREAM_LIMIT_ERROR or FRAME_ENCODING_ERROR.
         if (streams_blocked->maximum_streams > kMaxStreamsLimit) {
             return CodecError{.code = CodecErrorCode::invalid_varint, .offset = 0};
         }
@@ -1248,6 +1316,17 @@ std::optional<CodecError> serialize_frame_into_writer(Writer &frame_writer, cons
 
     // Connection-ID and path-validation frames carry bounded identifiers or fixed challenge bytes.
     if (const auto *new_connection_id = std::get_if<NewConnectionIdFrame>(&frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+        // # Values less than 1 and greater than 20 are invalid
+        // # and MUST be treated as a connection error of type
+        // # FRAME_ENCODING_ERROR.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+        // # The value in the Retire Prior To field
+        // # MUST be less than or equal to the value in the Sequence Number field.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+        // # Receiving a value in the Retire Prior To field that is greater than
+        // # that in the Sequence Number field MUST be treated as a connection
+        // # error of type FRAME_ENCODING_ERROR.
         const auto invalid_new_connection_id =
             new_connection_id->connection_id.empty() |
             (new_connection_id->connection_id.size() > 20) |
@@ -1448,6 +1527,10 @@ CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> byte
     }
 
     const auto frame_type = frame_type_result.value().value;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # To ensure simple and efficient
+    // # implementations of frame parsing, a frame type MUST use the shortest
+    // # possible encoding.
     if ((frame_type <= 0x1eu || frame_type == 0x30u || frame_type == 0x31u) &&
         frame_type_result.value().bytes_consumed != 1) {
         return decode_failure(CodecErrorCode::non_shortest_frame_type_encoding, 0);
@@ -1679,6 +1762,9 @@ CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> byte
             .bytes_consumed = reader.offset(),
         });
     default:
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+        // # An endpoint MUST treat the receipt of a frame of unknown type as a
+        // # connection error of type FRAME_ENCODING_ERROR.
         return decode_failure(CodecErrorCode::unknown_frame_type, 0);
     }
 }
@@ -1711,6 +1797,10 @@ CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(const SharedBy
     }
 
     const auto frame_type = frame_type_result.value().value;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # To ensure simple and efficient
+    // # implementations of frame parsing, a frame type MUST use the shortest
+    // # possible encoding.
     if ((frame_type <= 0x1eu || frame_type == 0x30u || frame_type == 0x31u) &&
         frame_type_result.value().bytes_consumed != 1) {
         return received_decode_failure(CodecErrorCode::non_shortest_frame_type_encoding, 0);
@@ -1785,11 +1875,18 @@ CodecResult<ReceivedAckFrameDecodeResult> deserialize_received_ack_frame(const S
     }
 
     const auto frame_type = frame_type_result.value().value;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # To ensure simple and efficient
+    // # implementations of frame parsing, a frame type MUST use the shortest
+    // # possible encoding.
     if ((frame_type <= 0x1eu || frame_type == 0x30u || frame_type == 0x31u) &&
         frame_type_result.value().bytes_consumed != 1) {
         return received_ack_decode_failure(CodecErrorCode::non_shortest_frame_type_encoding, 0);
     }
     if (frame_type != 0x02 && frame_type != 0x03) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+        // # An endpoint MUST treat the receipt of a frame of unknown type as a
+        // # connection error of type FRAME_ENCODING_ERROR.
         return received_ack_decode_failure(CodecErrorCode::unknown_frame_type, 0);
     }
 

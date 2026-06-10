@@ -235,6 +235,8 @@ COQUIC_NO_PROFILE bool post_handshake_failed(SSL *ssl) {
 }
 
 COQUIC_NO_PROFILE bool configure_ctx_failed(SSL_CTX *ctx, const SSL_QUIC_METHOD *quic_method) {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.2
+    // # Clients MUST NOT offer TLS versions older than 1.3.
     return consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_ctx_config) ||
            SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION) != 1 ||
            SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION) != 1 ||
@@ -360,6 +362,8 @@ COQUIC_NO_PROFILE bool ssl_quic_method_failed(SSL *ssl, const SSL_QUIC_METHOD *q
 }
 
 COQUIC_NO_PROFILE void configure_rfc_quic_transport_extension(SSL *ssl) {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-8.2
+    // # Endpoints MUST send the quic_transport_parameters extension;
     SSL_set_quic_transport_version(ssl, TLSEXT_TYPE_quic_transport_parameters);
 }
 

@@ -133,6 +133,12 @@ TEST(QuicCoreTest, CoreMigrationRequestReportsUnsupportedOperationWhenPeerDisabl
     ASSERT_TRUE(result.local_error.has_value());
     const auto &local_error = optional_ref_or_terminate(result.local_error);
     EXPECT_EQ(local_error.code, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    // # If the peer sent the disable_active_migration transport parameter,
+    // # an endpoint also MUST NOT send packets (including probing packets;
+    // # see Section 9.1) from a different local address to the address the
+    // # peer used during the handshake, unless the endpoint has acted on a
+    // # preferred_address transport parameter from the peer.
     EXPECT_EQ(local_error.stream_id, std::nullopt);
 }
 
@@ -165,6 +171,9 @@ TEST(QuicCoreTest, PeerMigrationDefersApplicationProbePayloadUntilPathValidated)
 
     auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(datagram.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+    // # If the recipient permits the migration, it MUST send subsequent packets
+    // # to the new peer address
     EXPECT_EQ(connection.last_drained_path_id(), 9u);
 
     auto packets = decode_sender_datagram(connection, datagram);
@@ -181,6 +190,13 @@ TEST(QuicCoreTest, PeerMigrationDefersApplicationProbePayloadUntilPathValidated)
             saw_stream_frame || std::holds_alternative<coquic::quic::StreamFrame>(frame);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+    // # and MUST initiate path validation (Section 8.2) to verify the peer's
+    // # ownership of the address if validation is not already underway.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    // # An endpoint MUST perform path validation (Section 8.2) if it detects any
+    // # change to a peer's address, unless it has previously validated that
+    // # address.
     EXPECT_TRUE(saw_path_challenge);
     EXPECT_FALSE(saw_stream_frame);
     EXPECT_TRUE(connection.application_space_.pending_probe_packet.has_value());
@@ -648,6 +664,19 @@ TEST(QuicCoreTest, LocalMigrationRequestUsesSparePeerConnectionIdOnNewPath) {
     const auto &destination_connection_ids_value =
         optional_ref_or_terminate(destination_connection_ids);
     ASSERT_EQ(destination_connection_ids_value.size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # An endpoint that initiates migration and requires non-zero-length
+    // # connection IDs SHOULD ensure that the pool of connection IDs available
+    // # to its peer allows the peer to use a new connection ID on migration,
+    // # as the peer will be unable to respond if the pool is exhausted.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    // # An endpoint MUST NOT reuse a connection ID when sending from more than
+    // # one local address -- for example, when initiating connection migration
+    // # as described in Section 9.2 or when probing a new network path as
+    // # described in Section 9.1.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    // # Similarly, an endpoint MUST NOT reuse a connection ID when sending to
+    // # more than one destination address.
     EXPECT_EQ(destination_connection_ids_value.front(), bytes_from_ints({0x10, 0x11}));
 }
 
@@ -669,6 +698,11 @@ TEST(QuicCoreTest, LocalMigrationWithoutUnusedPeerConnectionIdIsRejected) {
         7, coquic::quic::QuicMigrationRequestReason::active);
 
     ASSERT_FALSE(requested.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # An endpoint that initiates migration and requires non-zero-length
+    // # connection IDs SHOULD ensure that the pool of connection IDs available
+    // # to its peer allows the peer to use a new connection ID on migration,
+    // # as the peer will be unable to respond if the pool is exhausted.
     EXPECT_FALSE(connection.paths_.contains(7));
     EXPECT_EQ(connection.current_send_path_id_, 3u);
 }
@@ -702,6 +736,10 @@ TEST(QuicCoreTest, ValidatedLocalMigrationRetiresPreviousPathPeerConnectionId) {
         connection, 7, {coquic::quic::PathResponseFrame{.data = challenge}}));
 
     EXPECT_TRUE(connection.paths_.at(7).validated);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+    // # Endpoints SHOULD retire connection IDs when they are no longer actively
+    // # using either the local or destination address for which the connection ID
+    // # was used.
     EXPECT_TRUE(connection.peer_connection_ids_.at(0).locally_retired);
     ASSERT_EQ(connection.pending_retire_connection_id_frames_.size(), 1u);
     EXPECT_EQ(connection.pending_retire_connection_id_frames_.front().sequence_number, 0u);
@@ -943,10 +981,20 @@ TEST(QuicCoreTest, PeerMigrationKeepsPendingSendPathDespiteOldPathTraffic) {
         connection, 7,
         {coquic::quic::PingFrame{}, coquic::quic::MaxDataFrame{.maximum_data = 1024}}));
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+    // # If the recipient permits the migration, it MUST send subsequent packets
+    // # to the new peer address
     EXPECT_EQ(connection.current_send_path_id_, 7u);
     EXPECT_EQ(connection.previous_path_id_, 3u);
     ASSERT_TRUE(connection.paths_.contains(7));
     EXPECT_FALSE(connection.paths_.at(7).validated);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+    // # and MUST initiate path validation (Section 8.2) to verify the peer's
+    // # ownership of the address if validation is not already underway.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    // # An endpoint MUST perform path validation (Section 8.2) if it detects any
+    // # change to a peer's address, unless it has previously validated that
+    // # address.
     EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
 
     ASSERT_TRUE(
@@ -1147,6 +1195,79 @@ TEST(QuicCoreTest, PreferredAddressMigrationUsesPreferredAddressConnectionId) {
               bytes_from_ints({0x41, 0x42, 0x43, 0x44}));
 }
 
+TEST(QuicCoreTest, PreferredAddressMigrationSendsOnlyProbingFramesUntilValidated) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+    auto &peer_parameters = optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_parameters.active_connection_id_limit = 8;
+    peer_parameters.preferred_address = coquic::quic::PreferredAddress{
+        .ipv4_address = {std::byte{127}, std::byte{0}, std::byte{0}, std::byte{2}},
+        .ipv4_port = 4444,
+        .connection_id = bytes_from_ints({0x41, 0x42}),
+    };
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa, 0xab}),
+    };
+    connection.active_peer_connection_id_sequence_ = 0;
+    connection.application_space_.received_packets.record_received(
+        /*packet_number=*/10, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
+    ASSERT_TRUE(
+        connection
+            .queue_stream_send(0, coquic::quic::test::bytes_from_string("preferred-data"), false)
+            .has_value());
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::preferred_address);
+    ASSERT_TRUE(requested.has_value());
+
+    auto validation_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(validation_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 7u);
+
+    auto destination_connection_ids = protected_datagram_destination_connection_ids(
+        validation_datagram, connection.config_.source_connection_id.size());
+    ASSERT_TRUE(destination_connection_ids.has_value());
+    const auto &destination_connection_ids_value =
+        optional_ref_or_terminate(destination_connection_ids);
+    ASSERT_EQ(destination_connection_ids_value.size(), 1u);
+    EXPECT_EQ(destination_connection_ids_value.front(), bytes_from_ints({0x41, 0x42}));
+
+    auto validation_packets = decode_sender_datagram(connection, validation_datagram);
+    ASSERT_EQ(validation_packets.size(), 1u);
+    const auto *validation_packet =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&validation_packets.front());
+    ASSERT_NE(validation_packet, nullptr);
+    EXPECT_TRUE(std::ranges::any_of(validation_packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+    }));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-21.5.3
+    // # A client MUST NOT send non-probing frames to a preferred address
+    // # prior to validating that address; see Section 8.
+    EXPECT_TRUE(connection.is_probing_only(validation_packet->frames));
+    EXPECT_FALSE(datagram_has_application_ack(connection, validation_datagram));
+    EXPECT_FALSE(datagram_has_application_stream(connection, validation_datagram));
+
+    auto outstanding_challenge =
+        optional_value_or_terminate(connection.paths_.at(7).outstanding_challenge);
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 7, {coquic::quic::PathResponseFrame{.data = outstanding_challenge}}));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+    // # A client that migrates to a preferred address MUST validate the
+    // # address it chooses before migrating; see Section 21.5.3.
+    ASSERT_TRUE(connection.paths_.at(7).validated);
+
+    auto stream_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(stream_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 7u);
+    EXPECT_TRUE(datagram_has_application_stream(connection, stream_datagram));
+}
+
 TEST(QuicCoreTest, PreferredAddressMigrationDefersOldCidRetirementUntilAfterPathResponse) {
     auto connection = make_connected_client_connection();
     connection.paths_.clear();
@@ -1319,6 +1440,16 @@ TEST(QuicCoreTest, DisableActiveMigrationRejectsGenericMigrationRequest) {
     auto requested = connection.request_connection_migration(
         7, coquic::quic::QuicMigrationRequestReason::active);
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # An endpoint that receives this transport parameter MUST NOT use a new
+    // # local address when sending to the address that the peer used during the
+    // # handshake.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    // # If the peer sent the disable_active_migration transport parameter,
+    // # an endpoint also MUST NOT send packets (including probing packets;
+    // # see Section 9.1) from a different local address to the address the
+    // # peer used during the handshake, unless the endpoint has acted on a
+    // # preferred_address transport parameter from the peer.
     ASSERT_FALSE(requested.has_value());
 }
 
@@ -1390,12 +1521,22 @@ TEST(QuicCoreTest, MigrationHelpersCoverExistingPathSelectionAndAmplificationBra
         connection.ensure_path_state(9).anti_amplification_received_bytes = 4;
 
         EXPECT_TRUE(connection.anti_amplification_applies());
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8
+        // # Therefore, after receiving packets from an address that is not yet
+        // # validated, an endpoint MUST limit the amount of data it sends to the
+        // # unvalidated address to three times the amount of data received from
+        // # that address.
         EXPECT_EQ(connection.anti_amplification_send_budget(), 12u);
 
         connection.ensure_path_state(7).pending_response =
             std::array{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
                        std::byte{0x05}, std::byte{0x06}, std::byte{0x07}, std::byte{0x08}};
         connection.ensure_path_state(7).anti_amplification_received_bytes = 5;
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8
+        // # Therefore, after receiving packets from an address that is not yet
+        // # validated, an endpoint MUST limit the amount of data it sends to the
+        // # unvalidated address to three times the amount of data received from
+        // # that address.
         EXPECT_EQ(connection.anti_amplification_send_budget(), 15u);
 
         connection.paths_.at(7).pending_response.reset();

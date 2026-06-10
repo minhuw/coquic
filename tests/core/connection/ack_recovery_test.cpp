@@ -374,6 +374,8 @@ TEST(QuicCoreTest, ApplicationPtoDoesNotResendFullyAckedPrefixOfPartiallyOutstan
         ADD_FAILURE() << "retransmitted prefix did not start at offset zero";
     }
     if (retransmitted_prefix[0].bytes != coquic::quic::test::bytes_from_string("he")) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+        // # The data at a given offset MUST NOT change if it is sent multiple times
         ADD_FAILURE() << "retransmitted prefix bytes changed";
     }
     connection.track_sent_packet(connection.application_space_,
@@ -399,6 +401,9 @@ TEST(QuicCoreTest, ApplicationPtoDoesNotResendFullyAckedPrefixOfPartiallyOutstan
 
     auto fallback_probe = connection.select_pto_probe(connection.application_space_);
     if (!fallback_probe.stream_fragments.empty()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # A sender SHOULD avoid retransmitting information from packets once
+        // # they are acknowledged.
         ADD_FAILURE() << "PTO probe resent an already acknowledged stream prefix";
     }
     if (!fallback_probe.has_ping) {
@@ -438,9 +443,14 @@ TEST(QuicCoreTest, ApplicationPtoDoesNotResendFullyAckedPrefixOfPartiallyOutstan
         return;
     }
     if (optional_value_or_terminate(stream_frames[0].offset) != 2u) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # A sender SHOULD avoid retransmitting information from packets once
+        // # they are acknowledged.
         ADD_FAILURE() << "fallback PTO resent the acknowledged prefix";
     }
     if (stream_frames[0].stream_data != coquic::quic::test::bytes_from_string("llo")) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+        // # The data at a given offset MUST NOT change if it is sent multiple times
         ADD_FAILURE() << "fallback PTO stream bytes changed";
     }
 }
@@ -1013,6 +1023,10 @@ TEST(QuicCoreTest, SelectPtoProbeSkipsPacketsThatCannotBeProbed) {
         ADD_FAILURE() << "PTO probe did not skip non-probeable packets";
     }
     if (!ping_probe.has_ping) {
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.4
+        // # When there is no data to send, the sender SHOULD send
+        // # a PING or other ack-eliciting frame in a single packet, rearming the
+        // # PTO timer.
         ADD_FAILURE() << "selected PTO probe did not retain PING";
     }
 }
@@ -1793,6 +1807,10 @@ TEST(QuicCoreTest, ServerInitialAckOnlySendAddsSinglePingWhenNothingIsInFlight) 
     if (!saw_second_ack) {
         ADD_FAILURE() << "second Initial ACK-only send did not ACK packet 9";
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # In that case, an endpoint MUST NOT send an ack-eliciting frame in all
+    // # packets that would otherwise be non-ack-eliciting, to avoid an infinite
+    // # feedback loop of acknowledgments.
     if (saw_second_ping) {
         ADD_FAILURE() << "second Initial ACK-only send added an extra PING";
     }
@@ -1883,6 +1901,10 @@ TEST(QuicCoreTest, ServerHandshakeAckOnlySendAddsSinglePingWhenNothingIsInFlight
     if (!saw_second_ack) {
         ADD_FAILURE() << "second Handshake ACK-only send did not ACK packet 13";
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # In that case, an endpoint MUST NOT send an ack-eliciting frame in all
+    // # packets that would otherwise be non-ack-eliciting, to avoid an infinite
+    // # feedback loop of acknowledgments.
     if (saw_second_ping) {
         ADD_FAILURE() << "second Handshake ACK-only send added an extra PING";
     }
@@ -2029,6 +2051,10 @@ TEST(QuicCoreTest, ClientSendsStandaloneHandshakeAckWhileHandshakeInProgress) {
         coquic::quic::test::test_time(1));
 
     ASSERT_TRUE(processed.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+    // # packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+    // # within its advertised max_ack_delay, with the following exception.
     ASSERT_EQ(connection.handshake_space_.pending_ack_deadline,
               std::optional{coquic::quic::test::test_time(1)});
 
@@ -2052,6 +2078,13 @@ TEST(QuicCoreTest, ClientSendsStandaloneHandshakeAckWhileHandshakeInProgress) {
     auto ack_it = std::find_if(handshake->frames.begin(), handshake->frames.end(), [](auto &frame) {
         return std::holds_alternative<coquic::quic::AckFrame>(frame);
     });
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+    // # packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+    // # within its advertised max_ack_delay, with the following exception.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+    // # ACK frames MUST only be carried in a packet that has the same packet
+    // # number space as the packet being acknowledged; see Section 12.1.
     if (ack_it == handshake->frames.end()) {
         ADD_FAILURE() << "standalone Handshake ACK packet did not carry an ACK frame";
     }
@@ -3329,6 +3362,9 @@ TEST(QuicCoreTest, ApplicationSendPathPreservesAckByTrimmingStreamData) {
 
     ASSERT_FALSE(datagram.empty());
     EXPECT_FALSE(connection.has_failed());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # An endpoint SHOULD send an ACK frame with other frames when there are
+    // # new ack-eliciting packets to acknowledge.
     EXPECT_TRUE(datagram_has_application_ack(connection, datagram));
     EXPECT_TRUE(datagram_has_application_stream(connection, datagram));
     EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
@@ -3596,6 +3632,9 @@ TEST(QuicCoreTest, RetransmittedServerResponseStillCarriesAckForRepeatedRequestP
     }
 
     EXPECT_TRUE(saw_stream);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2
+    // # When sending a packet for any reason, an endpoint SHOULD attempt to
+    // # include an ACK frame if one has not been sent recently.
     EXPECT_TRUE(saw_ack);
 }
 

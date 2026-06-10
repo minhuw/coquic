@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DUVET_VERSION="${DUVET_VERSION:-0.4.2}"
+DUVET_HOME="${DUVET_HOME:-.cache/duvet}"
+DUVET_BIN="${DUVET_BIN:-}"
+
+if [ -z "${DUVET_BIN}" ]; then
+  if command -v duvet >/dev/null 2>&1; then
+    DUVET_BIN="$(command -v duvet)"
+  elif [ -x "${DUVET_HOME}/bin/duvet" ]; then
+    DUVET_BIN="${DUVET_HOME}/bin/duvet"
+  else
+    mkdir -p "${DUVET_HOME}"
+    CARGO_HOME="${DUVET_HOME}/cargo" cargo install duvet \
+      --version "${DUVET_VERSION}" \
+      --locked \
+      --root "${DUVET_HOME}"
+    DUVET_BIN="${DUVET_HOME}/bin/duvet"
+  fi
+fi
+
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists openssl; then
+  openssl_libdir="$(pkg-config --variable=libdir openssl)"
+  export LD_LIBRARY_PATH="${openssl_libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
+SHA="${SHA:-$(git rev-parse --short HEAD)}" \
+  "${DUVET_BIN}" report --config-path .duvet/config.toml "$@"
+
+echo "compliance report available in '.duvet/reports/report.html'"

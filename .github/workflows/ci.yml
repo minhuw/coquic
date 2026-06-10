@@ -51,3 +51,21 @@ jobs:
             export COQUIC_CLANG_TIDY_DIFF_BASE
           fi
           nix develop .#lint -c ./scripts/run-clang-tidy.sh --diff
+
+  compliance:
+    name: RFC Compliance
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
+        with:
+          summarize: false
+
+      - name: Duvet Report
+        run: nix develop -c ./scripts/compliance --ci

@@ -14,6 +14,7 @@
 namespace {
 
 using coquic::quic::AckFrame;
+using coquic::quic::ApplicationConnectionCloseFrame;
 using coquic::quic::CodecErrorCode;
 using coquic::quic::CryptoFrame;
 using coquic::quic::DatagramFrame;
@@ -87,6 +88,9 @@ TEST(QuicPacketTest, SerializesInitialPacketHeaderAndPayloadLength) {
 
     auto encoded = coquic::quic::serialize_packet(packet);
     ASSERT_TRUE(encoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    // # The value included prior to protection MUST be set to 0.
+    EXPECT_EQ(std::to_integer<std::uint8_t>(encoded.value().front()) & 0x0cu, 0u);
 
     auto decoded = coquic::quic::deserialize_packet(encoded.value(), {});
     ASSERT_TRUE(decoded.has_value());
@@ -102,6 +106,19 @@ TEST(QuicPacketTest, RoundTripsVersionNegotiationPacket) {
 
     auto encoded = coquic::quic::serialize_packet(packet);
     ASSERT_TRUE(encoded.has_value());
+    ASSERT_GE(encoded.value().size(), 5u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.1
+    // # Where QUIC might be multiplexed with other protocols (see [RFC7983]),
+    // # servers SHOULD set the most significant bit of this field (0x40) to 1
+    // # so that Version Negotiation packets appear to have the Fixed Bit field.
+    EXPECT_EQ(std::to_integer<std::uint8_t>(encoded.value()[0]) & 0x40u, 0x40u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.1
+    // # The Version field of a Version Negotiation packet MUST be set to
+    // # 0x00000000.
+    EXPECT_EQ(encoded.value()[1], std::byte{0x00});
+    EXPECT_EQ(encoded.value()[2], std::byte{0x00});
+    EXPECT_EQ(encoded.value()[3], std::byte{0x00});
+    EXPECT_EQ(encoded.value()[4], std::byte{0x00});
 
     auto decoded = coquic::quic::deserialize_packet(encoded.value(), {});
     ASSERT_TRUE(decoded.has_value());
@@ -110,6 +127,12 @@ TEST(QuicPacketTest, RoundTripsVersionNegotiationPacket) {
     ASSERT_NE(version_negotiation, nullptr);
     ASSERT_EQ(version_negotiation->supported_versions.size(), 2u);
     EXPECT_EQ(version_negotiation->supported_versions[1], 0x6b3343cfu);
+
+    encoded.value()[0] = std::byte{0xff};
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.1
+    // # The value in the Unused field is set to an arbitrary value by the
+    // # server.  Clients MUST ignore the value of this field.
+    EXPECT_TRUE(coquic::quic::deserialize_packet(encoded.value(), {}).has_value());
 }
 
 TEST(QuicPacketTest, RoundTripsRetryPacket) {
@@ -157,6 +180,9 @@ TEST(QuicPacketTest, RoundTripsRetryPacketWithNonZeroUnusedBits) {
     ASSERT_TRUE(decoded.has_value());
     const auto *retry = std::get_if<RetryPacket>(&decoded.value().packet);
     ASSERT_NE(retry, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5
+    // # The value in the Unused field is set to an arbitrary value by the
+    // # server; a client MUST ignore these bits.
     EXPECT_EQ(retry->retry_unused_bits, 0x0bu);
 }
 
@@ -174,6 +200,10 @@ TEST(QuicPacketTest, SerializesQuicV2LongHeaderTypeBitsPerRfc9369) {
         }},
     });
     ASSERT_TRUE(initial.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-3
+    // # Except for a few differences, QUIC version 2 endpoints MUST implement
+    // # the QUIC version 1 specification as described in [QUIC], [QUIC-TLS],
+    // # and [QUIC-RECOVERY].
     EXPECT_EQ(std::to_integer<std::uint8_t>(initial.value().front()) & 0xf0u, 0xd0u);
 
     const auto zero_rtt = coquic::quic::serialize_packet(ZeroRttPacket{
@@ -227,6 +257,27 @@ TEST(QuicPacketTest, RejectsAckFrameInZeroRttPacket) {
 
     auto encoded = coquic::quic::serialize_packet(packet);
     ASSERT_FALSE(encoded.has_value());
+    EXPECT_EQ(encoded.error().code, CodecErrorCode::frame_not_allowed_in_packet_type);
+}
+
+TEST(QuicPacketTest, RejectsApplicationConnectionCloseInNonApplicationPacket) {
+    InitialPacket packet{
+        .version = 1,
+        .destination_connection_id = {std::byte{0xaa}},
+        .source_connection_id = {std::byte{0xbb}},
+        .token = {},
+        .packet_number_length = 1,
+        .truncated_packet_number = 7,
+        .frames = {ApplicationConnectionCloseFrame{
+            .error_code = 0x100,
+        }},
+    };
+
+    auto encoded = coquic::quic::serialize_packet(packet);
+    ASSERT_FALSE(encoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+    // # CONNECTION_CLOSE frames signaling application errors (type 0x1d)
+    // # MUST only appear in the application data packet number space.
     EXPECT_EQ(encoded.error().code, CodecErrorCode::frame_not_allowed_in_packet_type);
 }
 
@@ -431,6 +482,9 @@ TEST(QuicPacketTest, ParsesOneRttPacketWithContextLength) {
 
     auto encoded = coquic::quic::serialize_packet(packet);
     ASSERT_TRUE(encoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.3.1
+    // # The value included prior to protection MUST be set to 0.
+    EXPECT_EQ(std::to_integer<std::uint8_t>(encoded.value().front()) & 0x18u, 0u);
 
     auto decoded = coquic::quic::deserialize_packet(
         encoded.value(), coquic::quic::DeserializeOptions{
@@ -493,6 +547,9 @@ TEST(QuicPacketTest, RejectsLongHeaderConnectionIdOverLimit) {
 
     auto encoded = coquic::quic::serialize_packet(packet);
     ASSERT_FALSE(encoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    // # In QUIC version 1, this value MUST NOT exceed
+    // # 20 bytes.
     EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
 }
 
@@ -584,6 +641,9 @@ TEST(QuicPacketTest, AllowsTerminalStreamFramesWithoutLength) {
 }
 
 TEST(QuicPacketTest, RejectsDatagramFrameInInitialAndHandshakePackets) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+    // # * All other frame types MUST only be sent in the application data
+    // # packet number space.
     expect_packet_serialize_error(
         InitialPacket{
             .version = 1,
@@ -780,6 +840,9 @@ TEST(QuicPacketTest, RejectsInvalidPacketSerializationInputs) {
             .frames = {},
         },
         CodecErrorCode::empty_packet_payload);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # The payload of a packet that contains frames MUST contain at least
+    // # one frame, and MAY contain multiple frames and multiple frame types.
     expect_packet_serialize_error(
         OneRttPacket{
             .destination_connection_id = {std::byte{0xaa}},
@@ -871,6 +934,9 @@ TEST(QuicPacketTest, RejectsMalformedInitialPackets) {
         as_span(std::array<std::byte, 6>{std::byte{0xc0}, std::byte{0x00}, std::byte{0x00},
                                          std::byte{0x00}, std::byte{0x01}, std::byte{0x15}}),
         {}, CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    // # Endpoints that receive a version 1 long header with a
+    // # value larger than 20 MUST drop the packet.
     expect_packet_decode_error(
         as_span(std::array<std::byte, 7>{std::byte{0xc0}, std::byte{0x00}, std::byte{0x00},
                                          std::byte{0x00}, std::byte{0x01}, std::byte{0x00},
@@ -905,6 +971,9 @@ TEST(QuicPacketTest, RejectsMalformedInitialPackets) {
             std::byte{0xc0}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01},
             std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01}, std::byte{0x00}}),
         {}, CodecErrorCode::empty_packet_payload);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # An endpoint MUST treat receipt of a packet containing no frames as a
+    // # connection error of type PROTOCOL_VIOLATION.
 }
 
 TEST(QuicPacketTest, RejectsMalformedZeroRttAndHandshakePackets) {
@@ -963,7 +1032,30 @@ TEST(QuicPacketTest, RejectsForbiddenFramesAndFrameDecodeErrorsInLongHeaders) {
     initial_with_forbidden_frame.insert(initial_with_forbidden_frame.end(),
                                         forbidden_payload.value().begin(),
                                         forbidden_payload.value().end());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+    // # * All other frame types MUST only be sent in the application data
+    // # packet number space.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # An endpoint MUST treat
+    // # receipt of a frame in a packet type that is not permitted as a
+    // # connection error of type PROTOCOL_VIOLATION.
     expect_packet_decode_error(initial_with_forbidden_frame, {},
+                               CodecErrorCode::frame_not_allowed_in_packet_type);
+
+    std::vector<std::byte> handshake_with_forbidden_frame{
+        std::byte{0xe0}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x00},
+        std::byte{0x01}, std::byte{0x00},
+        std::byte{0x00}, static_cast<std::byte>(1 + forbidden_payload.value().size()),
+        std::byte{0x00},
+    };
+    handshake_with_forbidden_frame.insert(handshake_with_forbidden_frame.end(),
+                                          forbidden_payload.value().begin(),
+                                          forbidden_payload.value().end());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.4
+    // # Endpoints MUST treat receipt of Handshake packets with other frames
+    // # as a connection error of type PROTOCOL_VIOLATION.
+    expect_packet_decode_error(handshake_with_forbidden_frame, {},
                                CodecErrorCode::frame_not_allowed_in_packet_type);
 
     expect_packet_decode_error(
@@ -1010,6 +1102,10 @@ TEST(QuicPacketTest, RejectsOutboundAckFrameInZeroRttPacket) {
     });
 
     ASSERT_FALSE(encoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # An endpoint MUST treat
+    // # receipt of a frame in a packet type that is not permitted as a
+    // # connection error of type PROTOCOL_VIOLATION.
     EXPECT_EQ(encoded.error().code, coquic::quic::CodecErrorCode::frame_not_allowed_in_packet_type);
 }
 
@@ -1028,8 +1124,17 @@ TEST(QuicPacketTest, RejectsMalformedRetryAndShortHeaderPackets) {
                                          std::byte{0x00}}),
         {}, CodecErrorCode::packet_length_mismatch);
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.3.1
+    // # Packets
+    // # containing a zero value for this bit are not valid packets in this
+    // # version and MUST be discarded.
     expect_packet_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x00}}), {},
                                CodecErrorCode::invalid_fixed_bit);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.3.1
+    // # An endpoint MUST treat receipt of a
+    // # packet that has a non-zero value for these bits, after removing
+    // # both packet and header protection, as a connection error of type
+    // # PROTOCOL_VIOLATION.
     expect_packet_decode_error(as_span(std::array<std::byte, 1>{std::byte{0x58}}), {},
                                CodecErrorCode::invalid_reserved_bits);
     expect_packet_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x40}, std::byte{0xaa}}),
@@ -1048,6 +1153,9 @@ TEST(QuicPacketTest, RejectsMalformedRetryAndShortHeaderPackets) {
             .one_rtt_destination_connection_id_length = 1,
         },
         CodecErrorCode::empty_packet_payload);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # An endpoint MUST treat receipt of a packet containing no frames as a
+    // # connection error of type PROTOCOL_VIOLATION.
     expect_packet_decode_error(as_span(std::array<std::byte, 4>{std::byte{0x40}, std::byte{0xaa},
                                                                 std::byte{0x01}, std::byte{0x1f}}),
                                coquic::quic::DeserializeOptions{
@@ -1065,6 +1173,11 @@ TEST(QuicPacketTest, RejectsMalformedGenericPacketHeaders) {
         as_span(std::array<std::byte, 5>{std::byte{0x80}, std::byte{0x00}, std::byte{0x00},
                                          std::byte{0x00}, std::byte{0x01}}),
         {}, CodecErrorCode::invalid_fixed_bit);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    // # An endpoint MUST
+    // # treat receipt of a packet that has a non-zero value for these bits
+    // # after removing both packet and header protection as a connection
+    // # error of type PROTOCOL_VIOLATION.
     expect_packet_decode_error(
         as_span(std::array<std::byte, 5>{std::byte{0xcc}, std::byte{0x00}, std::byte{0x00},
                                          std::byte{0x00}, std::byte{0x01}}),
@@ -1087,11 +1200,18 @@ TEST(QuicPacketTest, AcceptsGreasedQuicBitWhenEnabled) {
     greased_initial.front() &= std::byte{0xbfu};
     const auto strict_initial = coquic::quic::deserialize_packet(greased_initial, {});
     ASSERT_FALSE(strict_initial.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    // # Packets containing a zero
+    // # value for this bit are not valid packets in this version and MUST
+    // # be discarded.
     EXPECT_EQ(strict_initial.error().code, CodecErrorCode::invalid_fixed_bit);
 
     const auto decoded_initial = coquic::quic::deserialize_packet(
         greased_initial, coquic::quic::DeserializeOptions{.accept_greased_quic_bit = true});
     ASSERT_TRUE(decoded_initial.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9287#section-3
+    // # An endpoint that advertises the grease_quic_bit transport parameter
+    // # MUST accept packets with the QUIC Bit set to a value of 0.
     EXPECT_NE(std::get_if<InitialPacket>(&decoded_initial.value().packet), nullptr);
 
     const auto one_rtt_encoded = coquic::quic::serialize_packet(OneRttPacket{
@@ -1111,6 +1231,10 @@ TEST(QuicPacketTest, AcceptsGreasedQuicBitWhenEnabled) {
     if (strict_one_rtt.has_value()) {
         FAIL() << "strict GREASE QUIC bit decode succeeded";
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.3.1
+    // # Packets
+    // # containing a zero value for this bit are not valid packets in this
+    // # version and MUST be discarded.
     EXPECT_EQ(strict_one_rtt.error().code, CodecErrorCode::invalid_fixed_bit);
 
     const auto decoded_one_rtt = coquic::quic::deserialize_packet(
@@ -1121,6 +1245,9 @@ TEST(QuicPacketTest, AcceptsGreasedQuicBitWhenEnabled) {
     if (!decoded_one_rtt.has_value()) {
         FAIL() << "GREASE QUIC bit 1-RTT packet did not decode";
     }
+    //= https://www.rfc-editor.org/rfc/rfc9287#section-3
+    // # An endpoint that advertises the grease_quic_bit transport parameter
+    // # MUST accept packets with the QUIC Bit set to a value of 0.
     EXPECT_NE(std::get_if<OneRttPacket>(&decoded_one_rtt.value().packet), nullptr);
 }
 

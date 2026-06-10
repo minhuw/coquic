@@ -74,6 +74,11 @@ TEST(QuicCoreTest, BlockedStreamResumesWhenPeerMaxStreamDataArrives) {
         first, server, coquic::quic::test::test_time(2));
 
     ASSERT_EQ(coquic::quic::test::stream_payloads_from(first_received).size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+    // # An endpoint MUST NOT send data on any stream without ensuring that it
+    // # is within the flow control limits set by its peer.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # Senders MUST NOT send data in excess of either limit.
     EXPECT_EQ(coquic::quic::test::stream_payloads_from(first_received)[0],
               (coquic::quic::test::StreamPayload{0, "abcd", false}));
 
@@ -114,6 +119,11 @@ TEST(QuicCoreTest, BlockedConnectionResumesWhenPeerMaxDataArrives) {
         first, server, coquic::quic::test::test_time(2));
 
     ASSERT_EQ(coquic::quic::test::stream_payloads_from(first_received).size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+    // # An endpoint MUST NOT send data on any stream without ensuring that it
+    // # is within the flow control limits set by its peer.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # Senders MUST NOT send data in excess of either limit.
     EXPECT_EQ(coquic::quic::test::stream_payloads_from(first_received)[0],
               (coquic::quic::test::StreamPayload{0, "abcd", false}));
 
@@ -757,6 +767,10 @@ TEST(QuicCoreTest, ApplicationSendQueuesConnectionDataBlockedFrameWhenCreditIsEx
     }
 
     EXPECT_TRUE(saw_ack);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # A sender SHOULD send a
+    // # STREAM_DATA_BLOCKED or DATA_BLOCKED frame to indicate to the receiver
+    // # that it has data to write but is blocked by flow control limits.
     EXPECT_TRUE(saw_data_blocked);
     EXPECT_FALSE(saw_stream);
 }
@@ -766,6 +780,10 @@ TEST(QuicCoreTest, ConnectionFlowControlTracksMaxDataAndDataBlockedFrames) {
     state.peer_max_data = 4;
 
     EXPECT_EQ(state.sendable_bytes(/*queued_bytes=*/10), 4u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # A sender SHOULD send a
+    // # STREAM_DATA_BLOCKED or DATA_BLOCKED frame to indicate to the receiver
+    // # that it has data to write but is blocked by flow control limits.
     EXPECT_TRUE(state.should_send_data_blocked(/*queued_bytes=*/5));
 
     coquic::quic::ConnectionFlowControlState exhausted_credit;
@@ -774,8 +792,17 @@ TEST(QuicCoreTest, ConnectionFlowControlTracksMaxDataAndDataBlockedFrames) {
     EXPECT_EQ(exhausted_credit.sendable_bytes(/*queued_bytes=*/4), 0u);
 
     state.note_peer_max_data(/*maximum_data=*/4);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # A sender MUST ignore any MAX_STREAM_DATA or MAX_DATA frames that do
+    // # not increase flow control limits.
     EXPECT_EQ(state.peer_max_data, 4u);
     state.note_peer_max_data(/*maximum_data=*/8);
+    EXPECT_EQ(state.peer_max_data, 8u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    // # A receiver MUST accept packets containing an outdated frame, such as
+    // # a MAX_DATA frame carrying a smaller maximum data value than one found
+    // # in an older packet.
+    state.note_peer_max_data(/*maximum_data=*/6);
     EXPECT_EQ(state.peer_max_data, 8u);
 
     state.advertised_max_data = 10;
@@ -1009,6 +1036,11 @@ TEST(QuicCoreTest, ClientLargePartialResponseFlowKeepsReceiveCreditStateConsiste
         std::ranges::any_of(client.connection_->streams_, [](const auto &entry) {
             return entry.second.flow_control.pending_max_stream_data_frame.has_value();
         });
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.2
+    // # Therefore, a receiver MUST NOT wait for a STREAM_DATA_BLOCKED or
+    // # DATA_BLOCKED frame before sending a MAX_STREAM_DATA or MAX_DATA frame;
+    // # doing so could result in the sender being blocked for the rest of the
+    // # connection.
     EXPECT_TRUE(saw_max_stream_data || has_pending_max_stream_data);
 }
 
@@ -1068,6 +1100,8 @@ TEST(QuicCoreTest, ConnectionHelperMethodsCoverRemainingStreamOpenAndFlowControl
 
     auto existing_local = peer_flow.get_or_open_local_stream(/*stream_id=*/0);
     ASSERT_TRUE(existing_local.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.1
+    // # A QUIC endpoint MUST NOT reuse a stream ID within a connection.
     EXPECT_EQ(existing_local.value(), &existing);
 
     auto invalid_peer_bidi = peer_flow.get_or_open_local_stream(/*stream_id=*/1);
@@ -1096,6 +1130,9 @@ TEST(QuicCoreTest, ConnectionHelperMethodsCoverRemainingStreamOpenAndFlowControl
     stream_open.local_transport_parameters_.initial_max_streams_bidi = 1;
     auto over_limit_receive = stream_open.get_or_open_receive_stream(/*stream_id=*/9);
     ASSERT_FALSE(over_limit_receive.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.11
+    // # An endpoint MUST terminate a connection with an error of type
+    // # STREAM_LIMIT_ERROR if a peer opens more streams than was permitted.
     EXPECT_EQ(over_limit_receive.error().code, coquic::quic::CodecErrorCode::invalid_varint);
 
     auto over_limit_send = stream_open.get_or_open_send_stream(/*stream_id=*/9);
@@ -1112,6 +1149,10 @@ TEST(QuicCoreTest, ConnectionHelperMethodsCoverRemainingStreamOpenAndFlowControl
     blocked.connection_flow_control_.highest_sent = 5;
     blocked.refresh_stream_sendable_byte_caches();
     blocked.maybe_queue_connection_blocked_frame();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.12
+    // # A sender SHOULD send a DATA_BLOCKED frame (type=0x14) when it wishes
+    // # to send data but is unable to do so due to connection-level flow
+    // # control; see Section 4.
     ASSERT_TRUE(blocked.connection_flow_control_.pending_data_blocked_frame.has_value());
     if (blocked.connection_flow_control_.pending_data_blocked_frame.has_value()) {
         EXPECT_EQ(blocked.connection_flow_control_.pending_data_blocked_frame->maximum_data, 5u);

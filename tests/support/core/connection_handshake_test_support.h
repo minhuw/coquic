@@ -103,6 +103,16 @@ void expect_codec_failure(const coquic::quic::CodecResult<T> &result,
     EXPECT_EQ(result.error().code, expected_code);
 }
 
+template <typename T>
+void expect_transport_codec_failure(const coquic::quic::CodecResult<T> &result,
+                                    coquic::quic::CodecErrorCode expected_code,
+                                    coquic::quic::QuicTransportErrorCode expected_transport) {
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, expected_code);
+    ASSERT_TRUE(result.error().has_transport_error_code);
+    EXPECT_EQ(result.error().transport_error_code, static_cast<std::uint64_t>(expected_transport));
+}
+
 inline void expect_protected_datagram_starts_with_handshake(
     coquic::quic::CodecResult<std::vector<coquic::quic::ProtectedPacket>> result) {
     ASSERT_TRUE(result.has_value());

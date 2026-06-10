@@ -146,6 +146,9 @@ TEST(QuicStreamsTest, FlowControlBlocksNewBytesAtPeerMaxStreamData) {
     state.flow_control.highest_sent = 0;
     state.send_flow_control_committed = 6;
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+    // # The data sent on a stream MUST NOT exceed the largest maximum
+    // # stream data value advertised by the receiver.
     EXPECT_EQ(state.sendable_bytes(), 4u);
     EXPECT_TRUE(state.should_send_stream_data_blocked());
 }
@@ -155,6 +158,11 @@ TEST(QuicStreamsTest, MaxStreamsLimitBlocksSecondLocalBidirectionalStream) {
     limits.peer_max_bidirectional = 1;
 
     EXPECT_TRUE(limits.can_open_local_stream(/*stream_id=*/0, EndpointRole::client));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # Endpoints MUST NOT exceed the limit set by their peer.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.11
+    // # An endpoint MUST NOT open more streams than permitted by the current
+    // # stream limit set by its peer.
     EXPECT_FALSE(limits.can_open_local_stream(/*stream_id=*/4, EndpointRole::client));
 }
 
@@ -291,6 +299,20 @@ TEST(QuicStreamsTest, NextSendOffsetPrefersFreshDataThenLostRangesWhenRequested)
 
     EXPECT_EQ(state.next_send_offset_for_budget(/*prefer_fresh_data=*/false), sent[0].offset);
     EXPECT_EQ(state.next_send_offset_for_budget(/*prefer_fresh_data=*/true), 4u);
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    // # Endpoints SHOULD prioritize retransmission of data over sending new
+    // # data, unless priorities specified by the application indicate otherwise;
+    // # see Section 2.3.
+    const auto retransmitted = state.take_send_fragments(coquic::quic::StreamSendBudget{
+        .packet_bytes = 4,
+        .new_bytes = 4,
+        .prefer_fresh_data = false,
+    });
+    ASSERT_EQ(retransmitted.size(), 1u);
+    EXPECT_EQ(retransmitted[0].offset, sent[0].offset);
+
+    state.restore_send_fragment(retransmitted[0]);
 
     const auto fresh = state.take_send_fragments(coquic::quic::StreamSendBudget{
         .packet_bytes = 4,
@@ -474,6 +496,11 @@ TEST(QuicStreamsTest, FinalSizeConflictPathsPropagateThroughReceiveAndReset) {
     const auto fin_conflict =
         fin_conflict_state.validate_receive_range(/*offset=*/0, /*length=*/5, /*fin=*/true);
     ASSERT_FALSE(fin_conflict.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # If a RESET_STREAM or STREAM frame is received indicating a change
+    // # in the final size for the stream, an endpoint SHOULD respond with
+    // # an error of type FINAL_SIZE_ERROR; see Section 11 for details on
+    // # error handling.
     EXPECT_EQ(fin_conflict.error().code, StreamStateErrorCode::final_size_conflict);
 
     StreamState reset_conflict_state =
@@ -485,6 +512,11 @@ TEST(QuicStreamsTest, FinalSizeConflictPathsPropagateThroughReceiveAndReset) {
         .final_size = 5,
     });
     ASSERT_FALSE(reset_conflict.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # If a RESET_STREAM or STREAM frame is received indicating a change
+    // # in the final size for the stream, an endpoint SHOULD respond with
+    // # an error of type FINAL_SIZE_ERROR; see Section 11 for details on
+    // # error handling.
     EXPECT_EQ(reset_conflict.error().code, StreamStateErrorCode::final_size_conflict);
 }
 
@@ -506,6 +538,10 @@ TEST(QuicStreamsTest, LocalResetQueuesFinalSizeAndStopsRetransmittingStreamData)
     EXPECT_EQ(reset_frame.stream_id, 0u);
     EXPECT_EQ(reset_frame.application_protocol_error_code, 9u);
     EXPECT_EQ(reset_frame.final_size, 5u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+    // # A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED frame for
+    // # a stream in the "Reset Sent" state or any terminal state -- that
+    // # is, after sending a RESET_STREAM frame.
     EXPECT_TRUE(state.take_send_fragments(/*max_bytes=*/16).empty());
 
     state.mark_send_fragment_lost(coquic::quic::StreamFrameSendFragment{
@@ -518,7 +554,19 @@ TEST(QuicStreamsTest, LocalResetQueuesFinalSizeAndStopsRetransmittingStreamData)
 
     state.mark_reset_frame_lost(reset_frame);
     EXPECT_TRUE(state.has_pending_send());
-    ASSERT_TRUE(state.take_reset_frame().has_value());
+    const auto resent_reset = state.take_reset_frame();
+    ASSERT_TRUE(resent_reset.has_value());
+    if (!resent_reset.has_value()) {
+        GTEST_FAIL() << "expected resent reset frame";
+        return;
+    }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    // # The content of a RESET_STREAM frame MUST NOT change when it is
+    // # sent again.
+    EXPECT_EQ(resent_reset->stream_id, reset_frame.stream_id);
+    EXPECT_EQ(resent_reset->application_protocol_error_code,
+              reset_frame.application_protocol_error_code);
+    EXPECT_EQ(resent_reset->final_size, reset_frame.final_size);
 }
 
 TEST(QuicStreamsTest, ResetAndStopSendingRemainIdempotentAfterAcknowledgement) {
@@ -532,6 +580,10 @@ TEST(QuicStreamsTest, ResetAndStopSendingRemainIdempotentAfterAcknowledgement) {
     EXPECT_TRUE(reset_state.has_outstanding_send());
     const auto reset_frame = reset.value_or(coquic::quic::ResetStreamFrame{});
     reset_state.acknowledge_reset_frame(reset_frame);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+    // # A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED frame for
+    // # a stream in the "Reset Sent" state or any terminal state -- that
+    // # is, after sending a RESET_STREAM frame.
     EXPECT_FALSE(reset_state.has_pending_send());
     EXPECT_FALSE(reset_state.has_outstanding_send());
     ASSERT_TRUE(reset_state.validate_local_reset(/*application_error_code=*/6).has_value());
@@ -823,6 +875,10 @@ TEST(QuicStreamsTest, StreamDataBlockedFramesDeduplicateAndClearWhenPeerCreditCa
     EXPECT_EQ(state.send_flow_control_limit, 4u);
 
     state.queue_stream_data_blocked();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.13
+    // # A sender SHOULD send a STREAM_DATA_BLOCKED frame (type=0x15) when it
+    // # wishes to send data but is unable to do so due to stream-level flow
+    // # control.
     EXPECT_TRUE(state.has_pending_send());
     ASSERT_TRUE(state.flow_control.pending_stream_data_blocked_frame.has_value());
     state.queue_stream_data_blocked();
@@ -985,6 +1041,9 @@ TEST(QuicStreamsTest, StopSendingAndFinPathsShortCircuitWhenStateAlreadyClosed) 
     StreamState stop = make_implicit_stream_state(/*stream_id=*/3, EndpointRole::client);
     stop.peer_reset_received = true;
     ASSERT_TRUE(stop.validate_local_stop_sending(/*application_error_code=*/7).has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+    // # STOP_SENDING SHOULD only be sent for a stream that has not been reset
+    // # by the peer.
     EXPECT_FALSE(stop.pending_stop_sending_frame.has_value());
 
     StreamState peer_stop = make_implicit_stream_state(/*stream_id=*/0, EndpointRole::client);

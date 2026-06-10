@@ -292,6 +292,9 @@ TEST(QuicCoreTest, ResumedClientDoesNotCoalescePacketsWithDifferentDestinationCo
         }
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    // # Senders MUST NOT coalesce QUIC packets with different connection IDs
+    // # into a single UDP datagram.
     EXPECT_FALSE(saw_mixed_destination_connection_ids);
 }
 
@@ -753,6 +756,9 @@ TEST(QuicCoreTest, AcceptedZeroRttPacketsScheduleApplicationAck) {
         }
 
         saw_ack = true;
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+        // # Packets that a client sends with 0-RTT packet protection MUST be
+        // # acknowledged by the server in packets protected by 1-RTT keys.
         EXPECT_EQ(ack->largest_acknowledged, 7u);
     }
 
@@ -1056,6 +1062,9 @@ TEST(QuicCoreTest, InboundOneRttPacketDiscardsClientZeroRttWriteKeys) {
         coquic::quic::test::test_time(1));
 
     ASSERT_TRUE(processed.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+    // # A client MUST NOT send 0-RTT packets once it starts processing 1-RTT
+    // # packets from the server.
     EXPECT_FALSE(connection.zero_rtt_space_.write_secret.has_value());
 }
 
@@ -1369,6 +1378,10 @@ TEST(QuicCoreTest, ReceivedZeroRttAckOnlyPacketDoesNotScheduleApplicationAck) {
 
     ASSERT_TRUE(processed.has_value());
     EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, 12u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # An endpoint MUST NOT send a non-ack-eliciting packet in response to
+    // # a non-ack-eliciting packet, even if there are packet gaps that precede
+    // # the received packet.
     EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
     EXPECT_FALSE(connection.application_space_.pending_ack_deadline.has_value());
     EXPECT_EQ(connection.last_peer_activity_time_, std::optional{coquic::quic::test::test_time(1)});
@@ -1501,6 +1514,14 @@ TEST(QuicCoreTest, AcceptedZeroRttRejectsReducedServerTransportLimits) {
 
         auto validated = connection.validate_peer_transport_parameters_if_ready();
 
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+        // # If 0-RTT data is accepted by the server, the server MUST NOT reduce
+        // # any limits or alter any values that might be violated by the client
+        // # with its 0-RTT data.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+        // # In particular, a server that accepts 0-RTT data MUST NOT set values
+        // # for the following parameters (Section 18.2) that are smaller than the
+        // # remembered values of the parameters.
         ASSERT_FALSE(validated.has_value());
         EXPECT_EQ(validated.error().code,
                   coquic::quic::CodecErrorCode::invalid_packet_protection_state);

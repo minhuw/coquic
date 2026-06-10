@@ -141,6 +141,13 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         if (close_mode_ == QuicConnectionCloseMode::closing) {
             ++closing_packets_since_last_close_;
             if (closing_packets_since_last_close_ >= closing_packet_response_threshold_) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-11.1
+                // # An endpoint SHOULD be prepared to retransmit a packet
+                // # containing a CONNECTION_CLOSE frame if it receives more
+                // # packets on a terminated connection.
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+                // # An endpoint SHOULD limit the rate at which it generates
+                // # packets in the closing state.
                 closing_close_packet_pending_ = true;
             }
         }
@@ -401,6 +408,11 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 }
                 // Later packets in the same datagram can depend on keys unlocked by an earlier
                 // packet, so buffer them even after partial progress.
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+                // # For example, if decryption fails (because the keys are not available
+                // # or for any other reason), the receiver MAY either discard or buffer
+                // # the packet for later processing and MUST attempt to process the
+                // # remaining packets.
                 defer_packet(packet_bytes, packet_path_id, datagram_id, packet_ecn);
                 return true;
             }
@@ -411,6 +423,9 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                     is_discardable_short_header_packet_error(packets.error().code);
             }
             if (!should_discard_packet) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
+                // # Invalid packets that lack strong integrity protection, such as
+                // # Initial, Retry, or Version Negotiation, MAY be discarded.
                 should_discard_packet = coquic::quic::should_discard_corrupted_long_header_packet(
                     short_header_packet, packets.error().code);
             }
@@ -427,6 +442,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 return true;
             }
             log_codec_failure(labels.deserialize, packets.error());
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
+            // # An endpoint MUST generate a connection error if processing the contents
+            // # of these packets prior to discovering an error, or fully revert any
+            // # changes made during that processing.
             queue_transport_close_for_error(now, packets.error());
             return false;
         }
@@ -829,6 +848,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         }
 
         const auto packet_bytes = bytes.subspan(offset, packet_length.value());
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+        // # The receiver of coalesced QUIC packets MUST individually process
+        // # each QUIC packet and separately acknowledge them, as if they were
+        // # received as the payload of different UDP datagrams.
         if (!process_packet_bytes(packet_bytes, /*allow_defer=*/true, path_id, ecn,
                                   inbound_datagram_id, replay_trigger)) {
             return result;
@@ -900,11 +923,19 @@ CodecResult<bool> QuicConnection::queue_datagram_send_shared(SharedBytes bytes,
 
     if (!peer_transport_parameters_.has_value() ||
         peer_transport_parameters_->max_datagram_frame_size == 0) {
+        //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+        // # An endpoint MUST NOT send DATAGRAM frames until it has received the
+        // # max_datagram_frame_size transport parameter with a non-zero value
+        // # during the handshake (or during a previous handshake if 0-RTT is
+        // # used).
         return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
     }
 
     const auto wire_size = datagram_frame_wire_size(bytes.size(), /*has_length=*/true);
     if (wire_size > peer_transport_parameters_->max_datagram_frame_size) {
+        //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+        // # An endpoint MUST NOT send DATAGRAM frames that are larger
+        // # than the max_datagram_frame_size value it has received from its peer.
         return CodecResult<bool>::failure(CodecErrorCode::packet_length_mismatch, 0);
     }
 
@@ -947,6 +978,9 @@ StreamStateResult<bool> QuicConnection::queue_stream_reset(LocalResetCommand com
     const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(*stream);
     const auto previous_has_lost_send_data =
         stream->reset_state == StreamControlFrameState::none && stream->send_buffer.has_lost_data();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11.2
+    // # RESET_STREAM MUST only be instigated by the application protocol that
+    // # uses QUIC.
     const auto validated = stream->validate_local_reset(command.application_error_code);
     if (!validated.has_value()) {
         return validated;
@@ -964,9 +998,24 @@ CodecResult<bool> QuicConnection::request_connection_migration(QuicPathId path_i
         peer_transport_parameters_.has_value() &&
         peer_transport_parameters_->disable_active_migration;
     if (reason == QuicMigrationRequestReason::active && peer_disables_active_migration) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+        // # An endpoint that receives this transport parameter MUST NOT use a
+        // # new local address when sending to the address that the peer used
+        // # during the handshake.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+        // # If the peer sent the disable_active_migration transport parameter,
+        // # an endpoint also MUST NOT send packets (including probing packets;
+        // # see Section 9.1) from a different local address to the address the
+        // # peer used during the handshake, unless the endpoint has acted on a
+        // # preferred_address transport parameter from the peer.
         return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
     }
     if (reason == QuicMigrationRequestReason::active && !can_initiate_path_validation(path_id)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+        // # An endpoint that initiates migration and requires non-zero-length
+        // # connection IDs SHOULD ensure that the pool of connection IDs available
+        // # to its peer allows the peer to use a new connection ID on migration,
+        // # as the peer will be unable to respond if the pool is exhausted.
         return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
     }
 
@@ -983,6 +1032,9 @@ CodecResult<bool> QuicConnection::request_connection_migration(QuicPathId path_i
         set_path_peer_connection_id_sequence(path, kPreferredAddressConnectionIdSequence);
         path.destination_connection_id_override = preferred_address->value().connection_id;
         path.preferred_address_path = true;
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+        // # A client that migrates to a preferred address MUST validate the
+        // # address it chooses before migrating; see Section 21.5.3.
     }
     maybe_switch_to_path(path_id, /*initiated_locally=*/true, now);
     return CodecResult<bool>::success(true);
@@ -1068,6 +1120,12 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
 
     if (const auto idle_deadline = idle_timeout_deadline();
         idle_deadline.has_value() && now >= *idle_deadline) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.1
+        // # If a max_idle_timeout is specified by either endpoint in its
+        // # transport parameters (Section 18.2), the connection is silently
+        // # closed and its state is discarded when it remains idle for longer
+        // # than the minimum of the max_idle_timeout value advertised by both
+        // # endpoints.
         mark_silent_close();
         return;
     }
@@ -1077,12 +1135,18 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
     if (current_send_path_id_.has_value() &&
         path_validation_timed_out(*current_send_path_id_, now) &&
         last_validated_path_id_.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.4
+        // # Endpoints SHOULD abandon path validation based on a timer.
         auto &current = paths_.at(*current_send_path_id_);
         current.is_current_send_path = false;
         current.challenge_pending = false;
         current.validation_initiated_locally = false;
         current.validation_deadline.reset();
         previous_path_id_ = current_send_path_id_;
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.2
+        // # To protect the connection from failing due to such a spurious
+        // # migration, an endpoint MUST revert to using the last validated peer
+        // # address when validation of a new peer address fails.
         current_send_path_id_ = last_validated_path_id_;
         ensure_path_state(*last_validated_path_id_).is_current_send_path = true;
     }
@@ -1161,6 +1225,9 @@ bool QuicConnection::has_sendable_datagram(QuicCoreTimePoint now, bool continue_
         ++send_profile_counters().has_sendable_checks;
     }
     if (close_mode_ == QuicConnectionCloseMode::draining) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.2
+        // # While otherwise identical to the closing state, an
+        // # endpoint in the draining state MUST NOT send any packets.
         if (send_profile_enabled()) {
             ++send_profile_counters().has_sendable_false;
         }
@@ -1242,6 +1309,9 @@ bool QuicConnection::has_application_space_sendable_data(bool application_ack_du
 }
 
 bool QuicConnection::accepts_greased_quic_bit() const {
+    //= https://www.rfc-editor.org/rfc/rfc9287#section-3
+    // # An endpoint that advertises the grease_quic_bit transport parameter
+    // # MUST accept packets with the QUIC Bit set to a value of 0.
     return static_cast<bool>(config_.transport.grease_quic_bit |
                              local_transport_parameters_.grease_quic_bit);
 }

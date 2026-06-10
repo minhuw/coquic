@@ -247,6 +247,9 @@ TEST(QuicTlsAdapterContractTest, ClientHelloUsesRfcQuicTransportParametersExtens
     const auto initial_client_flight = client.take_pending(EncryptionLevel::initial);
     ASSERT_FALSE(initial_client_flight.empty());
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-8.2
+    // # The quic_transport_parameters extension is carried in the ClientHello
+    // # and the EncryptedExtensions messages during the handshake.
     const auto extension_types = client_hello_extension_types(initial_client_flight);
     ASSERT_TRUE(extension_types.has_value());
     const auto &types = optional_ref_or_terminate(extension_types);
@@ -383,6 +386,9 @@ TEST(QuicTlsAdapterContractTest, ZeroRttSessionTicketAdvertisesQuicEarlyDataLimi
 
     const auto max_early_data = TlsAdapterTestPeer::session_max_early_data(*exported);
     ASSERT_TRUE(max_early_data.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.6.1
+    // # Servers MUST NOT send the early_data extension with a
+    // # max_early_data_size field set to any value other than 0xffffffff.
     EXPECT_EQ(optional_ref_or_terminate(max_early_data), std::numeric_limits<std::uint32_t>::max());
 }
 

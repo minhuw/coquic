@@ -1678,6 +1678,10 @@ void Http3Connection::queue_startup_streams() {
     const auto encoder_stream_id = allocate_local_uni_stream_id();
     const auto decoder_stream_id = allocate_local_uni_stream_id();
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-3.2
+    // # After the QUIC connection is established, a SETTINGS frame MUST be
+    // # sent by each endpoint as the initial frame of their respective HTTP
+    // # control stream.
     const auto control_stream =
         serialize_http3_control_stream(settings_from_snapshot(config_.local_settings));
     if (!control_stream.has_value()) {
@@ -2039,6 +2043,13 @@ void Http3Connection::register_peer_uni_stream(std::uint64_t stream_id, std::uin
     }
 
     if (stream_type == static_cast<std::uint64_t>(Http3UniStreamType::qpack_encoder)) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+        // # Each endpoint
+        // # MUST initiate, at most, one encoder stream and, at most, one decoder
+        // # stream.
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+        // # Receipt of a second instance of either stream type MUST be
+        // # treated as a connection error of type H3_STREAM_CREATION_ERROR.
         if (state_.remote_qpack_encoder_stream_id.has_value()) {
             queue_connection_close(Http3ErrorCode::stream_creation_error,
                                    "duplicate peer qpack encoder stream");
@@ -2050,6 +2061,13 @@ void Http3Connection::register_peer_uni_stream(std::uint64_t stream_id, std::uin
     }
 
     if (stream_type == static_cast<std::uint64_t>(Http3UniStreamType::qpack_decoder)) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+        // # Each endpoint
+        // # MUST initiate, at most, one encoder stream and, at most, one decoder
+        // # stream.
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+        // # Receipt of a second instance of either stream type MUST be
+        // # treated as a connection error of type H3_STREAM_CREATION_ERROR.
         if (state_.remote_qpack_decoder_stream_id.has_value()) {
             queue_connection_close(Http3ErrorCode::stream_creation_error,
                                    "duplicate peer qpack decoder stream");
@@ -3118,6 +3136,10 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4
+    // # If an endpoint receives a second SETTINGS frame on the control
+    // # stream, the endpoint MUST respond with a connection error of type
+    // # H3_FRAME_UNEXPECTED.
     if (std::holds_alternative<Http3SettingsFrame>(frame)) {
         queue_connection_close(Http3ErrorCode::frame_unexpected,
                                "duplicate settings frame on control stream");

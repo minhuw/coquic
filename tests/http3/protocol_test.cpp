@@ -418,6 +418,14 @@ TEST(QuicHttp3ProtocolTest, RejectsMalformedFrameEncodings) {
     ASSERT_FALSE(truncated_goaway.has_value());
     EXPECT_EQ(truncated_goaway.error().code, CodecErrorCode::truncated_input);
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-7.1
+    // # Each frame's payload MUST contain exactly the fields identified in
+    // # its description.
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-7.1
+    // # A frame payload that contains additional bytes
+    // # after the identified fields or a frame payload that terminates before
+    // # the end of the identified fields MUST be treated as a connection
+    // # error of type H3_FRAME_ERROR.
     auto trailing_goaway =
         coquic::http3::parse_http3_frame(bytes_from_ints({0x07, 0x02, 0x00, 0x00}));
     ASSERT_FALSE(trailing_goaway.has_value());
@@ -585,6 +593,11 @@ TEST(QuicHttp3ProtocolTest, RejectsInvalidRequestHeaders) {
          }) {
         auto result = coquic::http3::validate_http3_request_headers(test_case.fields);
         ASSERT_FALSE(result.has_value());
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2
+        // # An endpoint MUST NOT generate
+        // # an HTTP/3 field section containing connection-specific fields; any
+        // # message containing connection-specific fields MUST be treated as
+        // # malformed.
         EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::message_error);
         EXPECT_EQ(result.error().detail, test_case.detail);
     }
@@ -811,6 +824,10 @@ TEST(QuicHttp3ProtocolTest, RejectsRequestContentLengthCommaListMismatchesAndEqu
         };
         auto result = coquic::http3::validate_http3_request_headers(fields);
         ASSERT_FALSE(result.has_value());
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2
+        // # The only exception to this is the TE header field, which MAY be
+        // # present in an HTTP/3 request header; when it is, it MUST NOT contain
+        // # any value other than "trailers".
         EXPECT_EQ(result.error().detail, "invalid te header");
     }
 }
@@ -958,6 +975,10 @@ TEST(QuicHttp3ProtocolTest, RejectsInvalidResponseHeadersAndTrailers) {
     auto trailer_uppercase = coquic::http3::validate_http3_trailers(
         std::array{coquic::http3::Http3Field{"X-Test", "1"}});
     ASSERT_FALSE(trailer_uppercase.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2
+    // # A request or
+    // # response containing uppercase characters in field names MUST be
+    // # treated as malformed.
     EXPECT_EQ(trailer_uppercase.error().detail, "uppercase header name");
 }
 

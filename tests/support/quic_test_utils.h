@@ -739,6 +739,43 @@ long_header_destination_connection_id(std::span<const std::byte> datagram) {
                         destination_connection_id.value().end());
 }
 
+inline std::optional<ConnectionId>
+long_header_source_connection_id(std::span<const std::byte> datagram) {
+    BufferReader reader(datagram);
+    const auto first_byte = reader.read_byte();
+    if (!first_byte.has_value() ||
+        (std::to_integer<std::uint8_t>(first_byte.value()) & 0x80u) == 0) {
+        return std::nullopt;
+    }
+
+    const auto version = reader.read_exact(4);
+    if (!version.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto destination_connection_id_length = reader.read_byte();
+    if (!destination_connection_id_length.has_value()) {
+        return std::nullopt;
+    }
+    const auto destination_connection_id =
+        reader.read_exact(std::to_integer<std::uint8_t>(destination_connection_id_length.value()));
+    if (!destination_connection_id.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto source_connection_id_length = reader.read_byte();
+    if (!source_connection_id_length.has_value()) {
+        return std::nullopt;
+    }
+    const auto source_connection_id =
+        reader.read_exact(std::to_integer<std::uint8_t>(source_connection_id_length.value()));
+    if (!source_connection_id.has_value()) {
+        return std::nullopt;
+    }
+
+    return ConnectionId(source_connection_id.value().begin(), source_connection_id.value().end());
+}
+
 inline std::optional<std::vector<std::byte>>
 client_initial_datagram_token(std::span<const std::byte> datagram) {
     BufferReader reader(datagram);

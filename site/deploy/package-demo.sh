@@ -24,6 +24,7 @@ runtime_public_entries=(
   "interop-results.json"
   "coverage-results.json"
   "coverage"
+  "duvet"
 )
 
 if [[ ! -f "${server_js}" ]]; then

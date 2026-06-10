@@ -10,6 +10,10 @@ namespace {
 TEST(QuicPacketNumberTest, RecoversPacketNumberFromRfc9000AppendixA3Example) {
     const auto recovered = coquic::quic::recover_packet_number(0xa82f30eaULL, 0x9b32U, 2);
     ASSERT_TRUE(recovered.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.1
+    // # Once header protection is removed, the packet number is decoded by
+    // # finding the packet number value that is closest to the next expected
+    // # packet.
     EXPECT_EQ(recovered.value(), 0xa82f9b32ULL);
 }
 

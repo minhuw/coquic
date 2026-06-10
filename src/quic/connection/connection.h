@@ -882,7 +882,7 @@ class QuicConnection {
     StreamStateResult<StreamState *> get_existing_receive_stream(std::uint64_t stream_id);
     CodecResult<StreamState *> get_or_open_receive_stream(std::uint64_t stream_id);
     CodecResult<StreamState *> get_or_open_send_stream(std::uint64_t stream_id);
-    CodecResult<StreamState *> get_or_open_send_stream_for_peer_stop(std::uint64_t stream_id);
+    CodecResult<StreamState *> get_existing_send_stream_for_peer_control(std::uint64_t stream_id);
     StreamStateResult<bool> queue_stream_send_impl(std::uint64_t stream_id,
                                                    std::span<const std::byte> owned_bytes,
                                                    std::optional<SharedBytes> shared_bytes,

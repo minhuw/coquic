@@ -108,6 +108,10 @@ TEST(QuicHttp3QpackTest, RejectsMalformedFieldSectionPrefix) {
 
 TEST(QuicHttp3QpackTest, RejectsIndexedFieldLineWithInvalidStaticIndex) {
     auto decoder = make_decoder();
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-3.1
+    // # When the decoder encounters an invalid static table index in a field
+    // # line representation, it MUST treat this as a connection error of type
+    // # QPACK_DECOMPRESSION_FAILED.
     const auto decoded = coquic::http3::decode_http3_field_section(
         decoder, 0, bytes_from_ints({0x00, 0x00}), bytes_from_ints({0xff, 0x25}));
     ASSERT_FALSE(decoded.has_value());

@@ -37,6 +37,10 @@ StreamStateResult<bool> QuicConnection::queue_stop_sending(LocalStopSendingComma
     }
 
     auto *stream = stream_state.value();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+    // # If the stream is in the "Recv" or "Size Known" state, the transport
+    // # SHOULD signal this by sending a STOP_SENDING frame to prompt closure
+    // # of the stream in the opposite direction.
     const auto validated = stream->validate_local_stop_sending(command.application_error_code);
     if (!validated.has_value()) {
         return validated;
@@ -67,7 +71,10 @@ QuicConnection::queue_application_close(LocalApplicationCloseCommand command) {
 }
 
 void QuicConnection::queue_new_token(std::vector<std::byte> token) {
-    if (status_ == HandshakeStatus::failed || token.empty()) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.7
+    // # Clients MUST NOT send NEW_TOKEN frames.
+    if (status_ == HandshakeStatus::failed || config_.role != EndpointRole::server ||
+        token.empty()) {
         return;
     }
 
@@ -211,6 +218,11 @@ std::vector<ConnectionId> QuicConnection::active_local_connection_ids() const {
         if (record.retired) {
             continue;
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+        // # When an endpoint issues a connection ID, it MUST accept packets that
+        // # carry this connection ID for the duration of the connection or until
+        // # its peer invalidates the connection ID via a RETIRE_CONNECTION_ID
+        // # frame (Section 19.16).
         connection_ids.push_back(record.connection_id);
     }
     return connection_ids;
@@ -248,6 +260,10 @@ std::vector<StatelessResetTokenRecord> QuicConnection::peer_stateless_reset_toke
     for (const auto &[sequence_number, record] : peer_connection_ids_) {
         static_cast<void>(sequence_number);
         if (record.locally_retired) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
+            // # An endpoint MUST NOT check for any stateless reset tokens
+            // # associated with connection IDs it has not used or for connection
+            // # IDs that have been retired.
             continue;
         }
         if (!record.stateless_reset_token.has_value()) {

@@ -228,6 +228,13 @@ TEST(QuicHttp3ConnectionTest, RejectsSecondPeerQpackEncoderStream) {
                                                   coquic::quic::QuicCoreTimePoint{});
     const auto close = close_input_from(second);
 
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+    // # Each endpoint
+    // # MUST initiate, at most, one encoder stream and, at most, one decoder
+    // # stream.
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+    // # Receipt of a second instance of either stream type MUST be
+    // # treated as a connection error of type H3_STREAM_CREATION_ERROR.
     EXPECT_EQ(close_application_error_code(close),
               static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::stream_creation_error));
 }
@@ -245,6 +252,13 @@ TEST(QuicHttp3ConnectionTest, RejectsSecondPeerQpackDecoderStream) {
                                                   coquic::quic::QuicCoreTimePoint{});
     const auto close = close_input_from(second);
 
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+    // # Each endpoint
+    // # MUST initiate, at most, one encoder stream and, at most, one decoder
+    // # stream.
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+    // # Receipt of a second instance of either stream type MUST be
+    // # treated as a connection error of type H3_STREAM_CREATION_ERROR.
     EXPECT_EQ(close_application_error_code(close),
               static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::stream_creation_error));
 }
@@ -779,6 +793,10 @@ TEST(QuicHttp3ConnectionTest, ServerStoresPeerMaxPushIdAndRejectsReduction) {
     EXPECT_FALSE(close_input_from(first).has_value());
     EXPECT_EQ(server.state().peer_max_push_id, std::optional<std::uint64_t>(4u));
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.7
+    // # A MAX_PUSH_ID frame cannot reduce the maximum push ID; receipt of a
+    // # MAX_PUSH_ID frame that contains a smaller value than previously
+    // # received MUST be treated as a connection error of type H3_ID_ERROR.
     auto second = server.on_core_result(receive_result(2, max_push_id_frame_bytes(2)),
                                         coquic::quic::QuicCoreTimePoint{});
     const auto close = close_input_from(second);

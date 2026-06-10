@@ -29,6 +29,13 @@ QuicCoreDuration latest_loss_delay(const RecoveryRttState &recovery_rtt_state) {
         recovery_rtt_state.latest_rtt.has_value()
             ? std::max(*recovery_rtt_state.latest_rtt, recovery_rtt_state.smoothed_rtt)
             : kInitialRtt;
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.2
+    // # max(kTimeThreshold * max(smoothed_rtt, latest_rtt), kGranularity)
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.2
+    // # To avoid declaring
+    // # packets as lost too early, this time threshold MUST be set to at
+    // # least the local timer granularity, as indicated by the kGranularity
+    // # constant.
     const auto rounded_up_loss_delay = QuicCoreDuration((base_rtt.count() * 9 + 7) / 8);
     return std::max(kGranularity, rounded_up_loss_delay);
 }
@@ -119,6 +126,22 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
             ++ack_eliciting_packets_since_last_ack_;
             const auto effective_ack_eliciting_threshold =
                 std::max<std::uint64_t>(1, ack_eliciting_threshold);
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.2
+            // # A receiver SHOULD send an ACK frame after receiving at least
+            // # two ack-eliciting packets.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+            // # In order to assist loss detection at the sender, an endpoint SHOULD
+            // # generate and send an ACK frame without delay when it receives an ack-
+            // # eliciting packet either:
+            // # *  when the received packet has a packet number less than another
+            // #    ack-eliciting packet that has been received, or
+            // # *  when the packet has a packet number larger than the highest-
+            // #    numbered ack-eliciting packet that has been received and there are
+            // #    missing packets between that packet and this packet.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+            // # the more out of order the packets are, the more important it is to send
+            // # an updated ACK frame quickly, to prevent the peer from declaring a packet
+            // # as lost and spuriously retransmitting the frames it contains.
             immediate_ack_requested_ =
                 immediate_ack_requested_ || ack_eliciting_out_of_order ||
                 ack_eliciting_creates_gap ||
@@ -193,6 +216,11 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
 
 void ReceivedPacketHistory::trim_old_ack_ranges() {
     while (ranges_.size() > kMaxTrackedAckRanges) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+        // # A receiver MUST retain an ACK Range unless it can ensure that it will
+        // # not subsequently accept packets with numbers in that range.
+        // # Maintaining a minimum packet number that increases as ranges are
+        // # discarded is one way to achieve this with minimal state.
         least_untracked_packet_number_ = std::max(
             least_untracked_packet_number_, ranges_.begin()->second.largest_packet_number + 1);
         ranges_.erase(ranges_.begin());
@@ -216,19 +244,35 @@ std::optional<OutboundAckHeader> ReceivedPacketHistory::build_outbound_ack_heade
         return std::nullopt;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+    // # A receiver SHOULD include an ACK Range containing the largest
+    // # received packet number in every ACK frame.
     const auto largest_range = ranges_.rbegin();
     const auto largest_received_packet_record =
         largest_received_packet_record_.value_or(ReceivedPacketRecord{
             .received_time = now,
         });
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.5
+    // # An endpoint MUST NOT include delays that it does not control when
+    // # populating the ACK Delay field in an ACK frame.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.5
+    // # When the measured acknowledgment delay is larger than its
+    // # max_ack_delay, an endpoint SHOULD report the measured delay.
     const auto ack_delay = std::chrono::duration_cast<std::chrono::microseconds>(std::max(
         now - largest_received_packet_record.received_time, QuicCoreClock::duration::zero()));
     OutboundAckHeader header{
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+        // # ACK frames SHOULD always acknowledge the most recently received
+        // # packets, and the
         .largest_acknowledged = largest_range->second.largest_packet_number,
         .ack_delay = encode_ack_delay(ack_delay, ack_delay_exponent),
         .first_ack_range = largest_range->second.largest_packet_number - largest_range->first,
         .additional_range_count = 0,
         .additional_ranges = {},
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.1
+        // # Even if an endpoint does not set an ECT field in packets it sends,
+        // # the endpoint MUST provide feedback about ECN markings it receives,
+        // # if these are accessible.
         .ecn_counts =
             ecn_feedback_accessible_ ? std::optional<AckEcnCounts>{ecn_counts_} : std::nullopt,
     };
@@ -281,6 +325,9 @@ void ReceivedPacketHistory::retire_acknowledged_ranges_up_to(std::uint64_t large
     const auto retired_floor = largest_acknowledged == std::numeric_limits<std::uint64_t>::max()
                                    ? std::numeric_limits<std::uint64_t>::max()
                                    : largest_acknowledged + 1;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+    // # After receiving acknowledgments for an ACK frame, the receiver SHOULD
+    // # stop tracking those acknowledged ACK Ranges.
     least_untracked_packet_number_ = std::max(least_untracked_packet_number_, retired_floor);
 
     for (auto it = ranges_.begin(); it != ranges_.end();) {
@@ -741,6 +788,7 @@ void PacketSpaceRecovery::reclaim_retired_packet_storage(SentPacketRecord &packe
     packet.max_data_frame.reset();
     std::vector<MaxStreamDataFrame>().swap(packet.max_stream_data_frames);
     std::vector<MaxStreamsFrame>().swap(packet.max_streams_frames);
+    std::vector<StreamsBlockedFrame>().swap(packet.streams_blocked_frames);
     packet.data_blocked_frame.reset();
     std::vector<StreamDataBlockedFrame>().swap(packet.stream_data_blocked_frames);
     packet.first_stream_frame_metadata.reset();
@@ -1520,6 +1568,10 @@ PacketSpaceRecovery::collect_time_threshold_losses(QuicCoreTimePoint now) {
             : std::min<std::size_t>(static_cast<std::size_t>(*largest_acked_packet_number_ -
                                                              first_slot_packet_number_),
                                     slots_.size());
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.2
+    // # Once a later packet within the same packet number space has been
+    // # acknowledged, an endpoint SHOULD declare an earlier packet lost if it
+    // # was sent a threshold amount of time in the past.
     for (auto slot_index = first_live_slot_;
          slot_index != kInvalidLedgerSlotIndex && slot_index < loss_scan_end;
          slot_index = next_live_slot(slot_index)) {
@@ -1944,6 +1996,10 @@ void PacketSpaceRecovery::apply_ack_range_descending(AckApplyState &state,
 
         if (slot.state == LedgerSlotState::sent) {
             state.result.acked_packets.push_back(handle);
+            //= https://www.rfc-editor.org/rfc/rfc9002#section-5.1
+            // # To avoid generating multiple RTT samples for a single packet, an ACK
+            // # frame SHOULD NOT be used to update RTT estimates if it does not newly
+            // # acknowledge the largest acknowledged packet.
             if (!state.result.largest_newly_acked_packet.has_value()) {
                 state.result.largest_newly_acked_packet = AckApplyLargestNewlyAckedPacket{
                     .handle = handle,
@@ -1954,6 +2010,9 @@ void PacketSpaceRecovery::apply_ack_range_descending(AckApplyState &state,
             if (packet_number == state.largest_acknowledged) {
                 state.result.largest_acknowledged_was_newly_acked = true;
             }
+            //= https://www.rfc-editor.org/rfc/rfc9002#section-5.1
+            // # An RTT sample MUST NOT be generated on receiving an ACK frame that
+            // # does not newly acknowledge at least one ack-eliciting packet.
             if (slot_ack_eliciting(slot)) {
                 state.result.has_newly_acked_ack_eliciting = true;
             }
@@ -2001,6 +2060,9 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
             : state.effective_largest_acked - first_slot_packet_number_;
     const auto packet_threshold_scan_end = packet_threshold_loss_scan_end(
         relative_effective_largest_acked, packet_reordering_threshold_, slots_.size());
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.1
+    // # In order to remain similar to TCP,
+    // # implementations SHOULD NOT use a packet threshold less than 3;
     for (std::size_t slot_index = next_packet_threshold_loss_slot_;
          slot_index < packet_threshold_scan_end; ++slot_index) {
         auto &slot = slots_[slot_index];
@@ -2031,6 +2093,9 @@ AckApplyResult PacketSpaceRecovery::finish_ack_received_apply(AckApplyState &sta
         }
 
         const auto tracked = *eligible_loss_packets_.begin();
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.2
+        // # If packets sent prior to the largest acknowledged packet cannot yet
+        // # be declared lost, then a timer SHOULD be set for the remaining time.
         if (!is_time_threshold_lost(tracked.sent_time, now)) {
             break;
         }
@@ -2377,11 +2442,17 @@ bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest
 
 bool is_packet_threshold_lost(std::uint64_t packet_number, std::uint64_t largest_acked,
                               std::uint64_t packet_threshold) {
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1
+    // # A packet is declared lost if it meets all of the following
+    // # conditions:
     return largest_acked > packet_number && largest_acked - packet_number >= packet_threshold;
 }
 
 QuicCoreTimePoint compute_time_threshold_deadline(const RecoveryRttState &rtt_state,
                                                   QuicCoreTimePoint sent_time) {
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.2
+    // # The time threshold is:
+    // # max(kTimeThreshold * max(smoothed_rtt, latest_rtt), kGranularity)
     return sent_time + latest_loss_delay(rtt_state);
 }
 
@@ -2395,11 +2466,16 @@ QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt_state,
                                        std::uint32_t pto_count) {
     auto timeout = kInitialRtt * 3;
     if (rtt_state.latest_rtt.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
+        // # PTO = smoothed_rtt + max(4*rttvar, kGranularity) + max_ack_delay
         timeout =
             rtt_state.smoothed_rtt + std::max(rtt_state.rttvar * 4, kGranularity) + max_ack_delay;
     }
 
     for (std::uint32_t count = 0; count < pto_count; ++count) {
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
+        // # When a PTO timer expires, the PTO backoff MUST be increased,
+        // # resulting in the PTO period being set to twice its current value.
         timeout *= 2;
     }
 
@@ -2409,6 +2485,9 @@ QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt_state,
 void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
                 const SentPacketRecord &largest_newly_acked_packet,
                 std::chrono::microseconds ack_delay, std::chrono::microseconds max_ack_delay) {
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-5.1
+    // # The RTT sample, latest_rtt, is generated as the time elapsed since
+    // # the largest acknowledged packet was sent:
     const auto latest_sample_duration = std::max(
         ack_receive_time - largest_newly_acked_packet.sent_time, QuicCoreClock::duration::zero());
     const auto latest_sample = std::chrono::duration_cast<QuicCoreDuration>(latest_sample_duration);
@@ -2420,6 +2499,11 @@ void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
 
     rtt_state.latest_rtt = latest_sample;
     rtt_state.latest_rtt_sample = latest_sample;
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-5.2
+    // # min_rtt MUST be set to the latest_rtt on the first RTT sample.
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-5.2
+    // # min_rtt MUST be set to the lesser of min_rtt and latest_rtt
+    // # (Section 5.1) on all other samples.
     rtt_state.min_rtt =
         rtt_state.min_rtt.has_value() ? std::min(*rtt_state.min_rtt, latest_sample) : latest_sample;
     rtt_state.min_rtt_sample = previous_min_rtt_sample.has_value()
@@ -2437,6 +2521,12 @@ void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
 
     const auto bounded_ack_delay = std::min(ack_delay, max_ack_delay);
     auto adjusted_rtt = latest_sample;
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-5.3
+    // # *  MUST use the lesser of the acknowledgment delay and the peer's
+    // # max_ack_delay after the handshake is confirmed; and
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-5.3
+    // # *  MUST NOT subtract the acknowledgment delay from the RTT sample if
+    // # the resulting value is smaller than the min_rtt.
     if (latest_sample >= *rtt_state.min_rtt + bounded_ack_delay) {
         adjusted_rtt = latest_sample - bounded_ack_delay;
     }

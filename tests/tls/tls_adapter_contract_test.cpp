@@ -247,6 +247,9 @@ TEST(QuicTlsAdapterContractTest, ClientHelloUsesRfcQuicTransportParametersExtens
     const auto initial_client_flight = client.take_pending(EncryptionLevel::initial);
     ASSERT_FALSE(initial_client_flight.empty());
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-8.2
+    // # The quic_transport_parameters extension is carried in the ClientHello
+    // # and the EncryptedExtensions messages during the handshake.
     const auto extension_types = client_hello_extension_types(initial_client_flight);
     ASSERT_TRUE(extension_types.has_value());
     const auto &types = optional_ref_or_terminate(extension_types);
@@ -383,6 +386,9 @@ TEST(QuicTlsAdapterContractTest, ZeroRttSessionTicketAdvertisesQuicEarlyDataLimi
 
     const auto max_early_data = TlsAdapterTestPeer::session_max_early_data(*exported);
     ASSERT_TRUE(max_early_data.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.6.1
+    // # Servers MUST NOT send the early_data extension with a
+    // # max_early_data_size field set to any value other than 0xffffffff.
     EXPECT_EQ(optional_ref_or_terminate(max_early_data), std::numeric_limits<std::uint32_t>::max());
 }
 
@@ -696,6 +702,8 @@ TEST(QuicTlsAdapterContractTest, InvalidApplicationProtocolConfigProducesStickyE
     auto empty_application_protocol = make_client_config();
     empty_application_protocol.application_protocol.clear();
     TlsAdapter empty_protocol_adapter(std::move(empty_application_protocol));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7
+    // # Endpoints MUST explicitly negotiate an application protocol.
     EXPECT_FALSE(empty_protocol_adapter.start().has_value());
     EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(empty_protocol_adapter),
               CodecErrorCode::invalid_packet_protection_state);
@@ -703,6 +711,8 @@ TEST(QuicTlsAdapterContractTest, InvalidApplicationProtocolConfigProducesStickyE
     auto oversized_application_protocol = make_client_config();
     oversized_application_protocol.application_protocol = std::string(256, 'a');
     TlsAdapter oversized_protocol_adapter(std::move(oversized_application_protocol));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7
+    // # Endpoints MUST explicitly negotiate an application protocol.
     EXPECT_FALSE(oversized_protocol_adapter.start().has_value());
     EXPECT_EQ(TlsAdapterTestPeer::sticky_error_code(oversized_protocol_adapter),
               CodecErrorCode::invalid_packet_protection_state);
@@ -860,6 +870,8 @@ TEST(QuicTlsAdapterContractTest, QlogTelemetryCapturesServerOfferedAndSelectedAp
     ASSERT_EQ(server.peer_offered_application_protocols().size(), 1u);
     EXPECT_EQ(server.peer_offered_application_protocols().front(), expected);
     const auto selected_protocol = server.selected_application_protocol();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7
+    // # Endpoints MUST explicitly negotiate an application protocol.
     ASSERT_TRUE(selected_protocol.has_value());
     EXPECT_EQ(selected_protocol.value_or(std::vector<std::byte>{}), expected);
 }
@@ -877,6 +889,8 @@ TEST(QuicTlsAdapterContractTest, QlogTelemetryPublishesSelectedApplicationProtoc
 
     const auto client_selected = client.selected_application_protocol();
     const auto server_selected = server.selected_application_protocol();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7
+    // # Endpoints MUST explicitly negotiate an application protocol.
     ASSERT_TRUE(client_selected.has_value());
     ASSERT_TRUE(server_selected.has_value());
     EXPECT_EQ(client_selected.value_or(std::vector<std::byte>{}), expected);

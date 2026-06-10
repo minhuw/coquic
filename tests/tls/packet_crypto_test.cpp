@@ -740,6 +740,10 @@ TEST(QuicPacketCryptoTest, DerivesClientInitialKeysFromRfc9001AppendixA1) {
     const auto keys = coquic::quic::derive_initial_packet_keys(coquic::quic::EndpointRole::client,
                                                                true, hex_bytes("8394c8f03e515708"));
     ASSERT_TRUE(keys.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.2
+    // # The HKDF-Expand-Label function defined in TLS 1.3 MUST be used for
+    // # Initial packets even where the TLS versions offered do not include
+    // # TLS 1.3.
     EXPECT_EQ(to_hex(keys.value().key), "1f369613dd76d5467730efcbe3b1a22d");
     EXPECT_EQ(to_hex(keys.value().iv), "fa044b2f42a3fd3b46fb255c");
     EXPECT_EQ(to_hex(keys.value().hp_key), "9f50449e04a0e810283a1e9933adedd2");
@@ -776,6 +780,12 @@ TEST(QuicPacketCryptoTest, DerivesClientInitialKeysFromRfc9369AppendixA1) {
     const auto keys = coquic::quic::derive_initial_packet_keys(
         coquic::quic::EndpointRole::client, true, hex_bytes("8394c8f03e515708"), 0x6b3343cfu);
     ASSERT_TRUE(keys.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.2
+    // # Future versions of QUIC SHOULD generate a new salt value, thus
+    // # ensuring that the keys are different for each version of QUIC.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-9.6
+    // # a new version of QUIC SHOULD define new labels for key derivation for
+    // # packet protection key and IV, plus the header protection keys.
     EXPECT_EQ(to_hex(keys.value().key), "8b1a0bc121284290a29e0971b5cd045d");
     EXPECT_EQ(to_hex(keys.value().iv), "91f73e2351d8fa91660e909f");
     EXPECT_EQ(to_hex(keys.value().hp_key), "45b95e15235d6f45a6b19cbcb0294ba9");
@@ -785,6 +795,10 @@ TEST(QuicPacketCryptoTest, DerivesServerInitialKeysFromRfc9369AppendixA1) {
     const auto keys = coquic::quic::derive_initial_packet_keys(
         coquic::quic::EndpointRole::server, true, hex_bytes("8394c8f03e515708"), 0x6b3343cfu);
     ASSERT_TRUE(keys.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-3
+    // # Except for a few differences, QUIC version 2 endpoints MUST implement
+    // # the QUIC version 1 specification as described in [QUIC], [QUIC-TLS],
+    // # and [QUIC-RECOVERY].
     EXPECT_EQ(to_hex(keys.value().key), "82db637861d55e1d011f19ea71d5d2a7");
     EXPECT_EQ(to_hex(keys.value().iv), "dd13c276499c0249d3310652");
     EXPECT_EQ(to_hex(keys.value().hp_key), "edf6d05c83121201b436e16877593c3a");
@@ -888,6 +902,10 @@ TEST(QuicPacketCryptoTest, ComputesAndValidatesRetryIntegrityTagForQuicV2) {
     const auto computed_retry_integrity_tag = coquic::quic::compute_retry_integrity_tag(
         *retry_packet, original_destination_connection_id);
     ASSERT_TRUE(computed_retry_integrity_tag.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-3
+    // # Except for a few differences, QUIC version 2 endpoints MUST implement
+    // # the QUIC version 1 specification as described in [QUIC], [QUIC-TLS],
+    // # and [QUIC-RECOVERY].
     EXPECT_EQ(to_hex(std::vector<std::byte>(computed_retry_integrity_tag.value().begin(),
                                             computed_retry_integrity_tag.value().end())),
               "c8646ce8bfe33952d955543665dcc7b6");

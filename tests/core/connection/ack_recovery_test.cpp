@@ -106,6 +106,96 @@ TEST(QuicCoreTest, TimeoutBeforeLossAndPtoDeadlinesDoesNothing) {
     EXPECT_EQ(connection.pto_count_, 0u);
 }
 
+TEST(QuicCoreTest, PmtudProbeAckRaisesValidatedDatagramSize) {
+    auto connection = make_connected_client_connection();
+    connection.config_.max_outbound_datagram_size = 1452;
+    connection.config_.transport.pmtud_max_datagram_size = 1452;
+    connection.current_send_path_id_ = 0;
+    auto &path = connection.ensure_path_state(0);
+    path.validated = true;
+    path.mtu.enabled = true;
+    path.mtu.viable = true;
+    path.mtu.base_datagram_size = 1200;
+    path.mtu.validated_datagram_size = 1200;
+    path.mtu.search_low = 1200;
+    path.mtu.probe_ceiling = 1452;
+    path.mtu.next_probe_time = coquic::quic::test::test_time(1);
+
+    connection.maybe_arm_pmtu_probe(coquic::quic::test::test_time(1));
+    ASSERT_TRUE(connection.application_space_.pending_probe_packet.has_value());
+    const auto probe =
+        optional_value_or_terminate(connection.application_space_.pending_probe_packet);
+    ASSERT_TRUE(probe.is_pmtu_probe);
+    EXPECT_GT(probe.pmtu_probe_size, path.mtu.validated_datagram_size);
+
+    connection.note_pmtu_probe_sent(0, /*packet_number=*/42, probe.pmtu_probe_size);
+    connection.note_pmtu_probe_acked(
+        coquic::quic::SentPacketRecord{
+            .packet_number = 42,
+            .sent_time = coquic::quic::test::test_time(1),
+            .ack_eliciting = true,
+            .in_flight = true,
+            .path_id = 0,
+            .is_pmtu_probe = true,
+            .pmtu_probe_size = probe.pmtu_probe_size,
+        },
+        coquic::quic::test::test_time(2));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+    // # An endpoint SHOULD use DPLPMTUD (Section 14.3) or PMTUD (Section
+    // # 14.2.1) to determine whether the path to a destination will support a
+    // # desired maximum datagram size without fragmentation.
+    EXPECT_EQ(path.mtu.validated_datagram_size, probe.pmtu_probe_size);
+    EXPECT_EQ(path.mtu.search_low, probe.pmtu_probe_size);
+    EXPECT_FALSE(path.mtu.outstanding_probe_packet_number.has_value());
+}
+
+TEST(QuicCoreTest, LostPmtudProbeDoesNotTriggerCongestionReaction) {
+    auto connection = make_connected_client_connection();
+    connection.current_send_path_id_ = 0;
+    auto &path = connection.ensure_path_state(0);
+    path.validated = true;
+    path.mtu.enabled = true;
+    path.mtu.viable = true;
+    path.mtu.validated_datagram_size = 1200;
+    path.mtu.probe_ceiling = 1452;
+    path.mtu.outstanding_probe_size = 1400;
+    path.mtu.outstanding_probe_packet_number = 7;
+
+    connection.congestion_controller_.congestion_window_ = 16000;
+    connection.congestion_controller_.bytes_in_flight_ = 1400;
+    const auto congestion_window_before = connection.congestion_controller_.congestion_window();
+    const auto bytes_in_flight_before = connection.congestion_controller_.bytes_in_flight();
+
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 7,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1400,
+                                     .path_id = 0,
+                                     .is_pmtu_probe = true,
+                                     .pmtu_probe_size = 1400,
+                                 });
+    ASSERT_TRUE(connection
+                    .mark_lost_packet(
+                        connection.application_space_,
+                        optional_value_or_terminate(
+                            connection.application_space_.recovery.handle_for_packet_number(7)),
+                        /*already_marked_in_recovery=*/false, coquic::quic::test::test_time(3))
+                    .has_value());
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.4
+    // # Loss of a QUIC packet that is carried in a PMTU probe is therefore not a
+    // # reliable indication of congestion and SHOULD NOT trigger a congestion
+    // # control reaction; see Item 7 in Section 3 of [DPLPMTUD].
+    EXPECT_EQ(connection.congestion_controller_.congestion_window(), congestion_window_before);
+    EXPECT_EQ(connection.congestion_controller_.bytes_in_flight(), bytes_in_flight_before);
+    EXPECT_FALSE(path.mtu.outstanding_probe_packet_number.has_value());
+    EXPECT_EQ(path.mtu.probe_ceiling, 1399u);
+}
+
 TEST(QuicCoreTest, ServerProcessingHandshakePacketDiscardsInitialRecoveryState) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_server_core_config());
     connection.started_ = true;
@@ -374,6 +464,8 @@ TEST(QuicCoreTest, ApplicationPtoDoesNotResendFullyAckedPrefixOfPartiallyOutstan
         ADD_FAILURE() << "retransmitted prefix did not start at offset zero";
     }
     if (retransmitted_prefix[0].bytes != coquic::quic::test::bytes_from_string("he")) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+        // # The data at a given offset MUST NOT change if it is sent multiple times
         ADD_FAILURE() << "retransmitted prefix bytes changed";
     }
     connection.track_sent_packet(connection.application_space_,
@@ -399,6 +491,9 @@ TEST(QuicCoreTest, ApplicationPtoDoesNotResendFullyAckedPrefixOfPartiallyOutstan
 
     auto fallback_probe = connection.select_pto_probe(connection.application_space_);
     if (!fallback_probe.stream_fragments.empty()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # A sender SHOULD avoid retransmitting information from packets once
+        // # they are acknowledged.
         ADD_FAILURE() << "PTO probe resent an already acknowledged stream prefix";
     }
     if (!fallback_probe.has_ping) {
@@ -438,9 +533,14 @@ TEST(QuicCoreTest, ApplicationPtoDoesNotResendFullyAckedPrefixOfPartiallyOutstan
         return;
     }
     if (optional_value_or_terminate(stream_frames[0].offset) != 2u) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # A sender SHOULD avoid retransmitting information from packets once
+        // # they are acknowledged.
         ADD_FAILURE() << "fallback PTO resent the acknowledged prefix";
     }
     if (stream_frames[0].stream_data != coquic::quic::test::bytes_from_string("llo")) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+        // # The data at a given offset MUST NOT change if it is sent multiple times
         ADD_FAILURE() << "fallback PTO stream bytes changed";
     }
 }
@@ -1013,6 +1113,10 @@ TEST(QuicCoreTest, SelectPtoProbeSkipsPacketsThatCannotBeProbed) {
         ADD_FAILURE() << "PTO probe did not skip non-probeable packets";
     }
     if (!ping_probe.has_ping) {
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.4
+        // # When there is no data to send, the sender SHOULD send
+        // # a PING or other ack-eliciting frame in a single packet, rearming the
+        // # PTO timer.
         ADD_FAILURE() << "selected PTO probe did not retain PING";
     }
 }
@@ -1366,9 +1470,18 @@ TEST(QuicCoreTest, ClientHandshakeKeepalivePtoUsesPeerActivityBeforeHandshakeKey
     EXPECT_EQ(connection.pto_deadline(), std::optional{coquic::quic::test::test_time(4000)});
     EXPECT_EQ(connection.next_wakeup(), std::optional{coquic::quic::test::test_time(4000)});
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # To
+    // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+    // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
     connection.on_timeout(coquic::quic::test::test_time(4000));
 
     EXPECT_EQ(connection.pto_count_, 5u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # Specifically, the client
+    // # MUST send an Initial packet in a UDP datagram that contains at least
+    // # 1200 bytes if it does not have Handshake keys, and otherwise send a
+    // # Handshake packet.
     EXPECT_TRUE(connection.initial_space_.pending_probe_packet.has_value() &&
                 connection.initial_space_.pending_probe_packet->has_ping);
     EXPECT_FALSE(connection.handshake_space_.pending_probe_packet.has_value());
@@ -1606,6 +1719,10 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsHandshakeAckAfterAckOnlyS
     auto deadline = coquic::quic::compute_pto_deadline(connection.shared_recovery_rtt_state(),
                                                        std::chrono::milliseconds(0),
                                                        coquic::quic::test::test_time(4), 2);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # To
+    // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+    // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
     connection.arm_pto_probe(deadline);
 
     ASSERT_TRUE(connection.handshake_space_.pending_probe_packet.has_value());
@@ -1613,6 +1730,10 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsHandshakeAckAfterAckOnlyS
         optional_ref_or_terminate(connection.handshake_space_.pending_probe_packet).has_ping);
 
     auto probe_datagram = connection.drain_outbound_datagram(deadline);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # To
+    // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+    // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
     if (probe_datagram.empty()) {
         ADD_FAILURE() << "missing keepalive Handshake PTO probe datagram";
         return;
@@ -1624,6 +1745,11 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsHandshakeAckAfterAckOnlyS
         return;
     }
     auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&probe_packets[0]);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # Specifically, the client
+    // # MUST send an Initial packet in a UDP datagram that contains at least
+    // # 1200 bytes if it does not have Handshake keys, and otherwise send a
+    // # Handshake packet.
     if (handshake == nullptr) {
         ADD_FAILURE() << "keepalive PTO probe was not a Handshake packet";
         return;
@@ -1663,16 +1789,30 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsInitialAckAfterAckOnlySen
     auto deadline = coquic::quic::compute_pto_deadline(connection.shared_recovery_rtt_state(),
                                                        std::chrono::milliseconds(0),
                                                        coquic::quic::test::test_time(4), 2);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # To
+    // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+    // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
     connection.arm_pto_probe(deadline);
 
     ASSERT_TRUE(connection.initial_space_.pending_probe_packet.has_value());
     EXPECT_TRUE(optional_ref_or_terminate(connection.initial_space_.pending_probe_packet).has_ping);
 
     auto probe_datagram = connection.drain_outbound_datagram(deadline);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # To
+    // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+    // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
     if (probe_datagram.empty()) {
         ADD_FAILURE() << "missing keepalive Initial PTO probe datagram";
         return;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # Specifically, the client
+    // # MUST send an Initial packet in a UDP datagram that contains at least
+    // # 1200 bytes if it does not have Handshake keys, and otherwise send a
+    // # Handshake packet.
+    EXPECT_GE(probe_datagram.size(), 1200u);
 
     auto probe_packets = decode_sender_datagram(connection, probe_datagram);
     if (probe_packets.size() != 1u) {
@@ -1680,6 +1820,11 @@ TEST(QuicCoreTest, ClientHandshakeKeepaliveProbeRepeatsInitialAckAfterAckOnlySen
         return;
     }
     auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&probe_packets[0]);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # Specifically, the client
+    // # MUST send an Initial packet in a UDP datagram that contains at least
+    // # 1200 bytes if it does not have Handshake keys, and otherwise send a
+    // # Handshake packet.
     if (initial == nullptr) {
         ADD_FAILURE() << "keepalive PTO probe was not an Initial packet";
         return;
@@ -1793,6 +1938,10 @@ TEST(QuicCoreTest, ServerInitialAckOnlySendAddsSinglePingWhenNothingIsInFlight) 
     if (!saw_second_ack) {
         ADD_FAILURE() << "second Initial ACK-only send did not ACK packet 9";
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # In that case, an endpoint MUST NOT send an ack-eliciting frame in all
+    // # packets that would otherwise be non-ack-eliciting, to avoid an infinite
+    // # feedback loop of acknowledgments.
     if (saw_second_ping) {
         ADD_FAILURE() << "second Initial ACK-only send added an extra PING";
     }
@@ -1883,6 +2032,10 @@ TEST(QuicCoreTest, ServerHandshakeAckOnlySendAddsSinglePingWhenNothingIsInFlight
     if (!saw_second_ack) {
         ADD_FAILURE() << "second Handshake ACK-only send did not ACK packet 13";
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # In that case, an endpoint MUST NOT send an ack-eliciting frame in all
+    // # packets that would otherwise be non-ack-eliciting, to avoid an infinite
+    // # feedback loop of acknowledgments.
     if (saw_second_ping) {
         ADD_FAILURE() << "second Handshake ACK-only send added an extra PING";
     }
@@ -2029,6 +2182,10 @@ TEST(QuicCoreTest, ClientSendsStandaloneHandshakeAckWhileHandshakeInProgress) {
         coquic::quic::test::test_time(1));
 
     ASSERT_TRUE(processed.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+    // # packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+    // # within its advertised max_ack_delay, with the following exception.
     ASSERT_EQ(connection.handshake_space_.pending_ack_deadline,
               std::optional{coquic::quic::test::test_time(1)});
 
@@ -2052,6 +2209,13 @@ TEST(QuicCoreTest, ClientSendsStandaloneHandshakeAckWhileHandshakeInProgress) {
     auto ack_it = std::find_if(handshake->frames.begin(), handshake->frames.end(), [](auto &frame) {
         return std::holds_alternative<coquic::quic::AckFrame>(frame);
     });
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+    // # packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+    // # within its advertised max_ack_delay, with the following exception.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+    // # ACK frames MUST only be carried in a packet that has the same packet
+    // # number space as the packet being acknowledged; see Section 12.1.
     if (ack_it == handshake->frames.end()) {
         ADD_FAILURE() << "standalone Handshake ACK packet did not carry an ACK frame";
     }
@@ -3329,6 +3493,13 @@ TEST(QuicCoreTest, ApplicationSendPathPreservesAckByTrimmingStreamData) {
 
     ASSERT_FALSE(datagram.empty());
     EXPECT_FALSE(connection.has_failed());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    // # An endpoint SHOULD include multiple frames in a single packet if
+    // # they are to be sent at the same encryption level, instead of
+    // # coalescing multiple packets at the same encryption level.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # An endpoint SHOULD send an ACK frame with other frames when there are
+    // # new ack-eliciting packets to acknowledge.
     EXPECT_TRUE(datagram_has_application_ack(connection, datagram));
     EXPECT_TRUE(datagram_has_application_stream(connection, datagram));
     EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
@@ -3596,6 +3767,9 @@ TEST(QuicCoreTest, RetransmittedServerResponseStillCarriesAckForRepeatedRequestP
     }
 
     EXPECT_TRUE(saw_stream);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2
+    // # When sending a packet for any reason, an endpoint SHOULD attempt to
+    // # include an ACK frame if one has not been sent recently.
     EXPECT_TRUE(saw_ack);
 }
 

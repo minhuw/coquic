@@ -334,6 +334,10 @@ TEST(QuicFrameTest, RoundTripsAckWithoutEcn) {
 
     const auto *ack = std::get_if<AckFrame>(&decoded.value().frame);
     ASSERT_NE(ack, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3
+    // # QUIC implementations MUST properly handle both types, and, if they
+    // # have enabled ECN for packets they send, they SHOULD use the
+    // # information in the ECN section to manage their congestion state.
     EXPECT_FALSE(ack->ecn_counts.has_value());
     EXPECT_EQ(ack->largest_acknowledged, 42u);
     ASSERT_EQ(ack->additional_ranges.size(), 1u);
@@ -361,6 +365,10 @@ TEST(QuicFrameTest, RoundTripsAckWithEcn) {
 
     const auto *ack = std::get_if<AckFrame>(&decoded.value().frame);
     ASSERT_NE(ack, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3
+    // # QUIC implementations MUST properly handle both types, and, if they
+    // # have enabled ECN for packets they send, they SHOULD use the
+    // # information in the ECN section to manage their congestion state.
     if (!ack->ecn_counts.has_value()) {
         FAIL() << "expected ECN counts";
     }
@@ -1090,6 +1098,10 @@ TEST(QuicFrameTest, RejectsNonShortestFrameTypeEncoding) {
     std::array<std::byte, 2> bytes{std::byte{0x40}, std::byte{0x01}};
     auto decoded = coquic::quic::deserialize_frame(bytes);
     ASSERT_FALSE(decoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # To ensure simple and efficient
+    // # implementations of frame parsing, a frame type MUST use the shortest
+    // # possible encoding.
     EXPECT_EQ(decoded.error().code, CodecErrorCode::non_shortest_frame_type_encoding);
 }
 
@@ -1097,6 +1109,10 @@ TEST(QuicFrameTest, RejectsNonShortestReceivedFrameTypeEncoding) {
     const auto decoded =
         coquic::quic::deserialize_received_frame(SharedBytes{std::byte{0x40}, std::byte{0x01}});
     ASSERT_FALSE(decoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # To ensure simple and efficient
+    // # implementations of frame parsing, a frame type MUST use the shortest
+    // # possible encoding.
     EXPECT_EQ(decoded.error().code, CodecErrorCode::non_shortest_frame_type_encoding);
 }
 
@@ -1104,6 +1120,10 @@ TEST(QuicFrameTest, RejectsNonShortestDatagramFrameTypeEncoding) {
     const std::array<std::byte, 3> bytes{std::byte{0x40}, std::byte{0x30}, std::byte{0xaa}};
     const auto decoded = coquic::quic::deserialize_frame(bytes);
     ASSERT_FALSE(decoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # To ensure simple and efficient
+    // # implementations of frame parsing, a frame type MUST use the shortest
+    // # possible encoding.
     EXPECT_EQ(decoded.error().code, CodecErrorCode::non_shortest_frame_type_encoding);
 
     const auto received = coquic::quic::deserialize_received_frame(
@@ -1123,6 +1143,9 @@ TEST(QuicFrameTest, DirectReceivedAckDecoderRejectsHeaderEdges) {
                                      CodecErrorCode::non_shortest_frame_type_encoding);
     expect_received_ack_decode_error(SharedBytes{std::byte{0x01}},
                                      CodecErrorCode::unknown_frame_type);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # An endpoint MUST treat the receipt of a frame of unknown type as a
+    // # connection error of type FRAME_ENCODING_ERROR.
     expect_received_ack_decode_error(SharedBytes{std::byte{0x40}, std::byte{0x20}},
                                      CodecErrorCode::unknown_frame_type);
 
@@ -1615,6 +1638,9 @@ TEST(QuicFrameTest, RejectsMalformedAckFrames) {
                             std::byte{0x02}, std::byte{0x01}, std::byte{0x00}, std::byte{0x01},
                             std::byte{0x00}, std::byte{0x00}, std::byte{0x00}}),
                         CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3.1
+    // # If any computed packet number is negative, an endpoint MUST generate
+    // # a connection error of type FRAME_ENCODING_ERROR.
     expect_decode_error(as_span(std::array<std::byte, 7>{
                             std::byte{0x02}, std::byte{0x03}, std::byte{0x00}, std::byte{0x01},
                             std::byte{0x00}, std::byte{0x00}, std::byte{0x02}}),
@@ -1754,6 +1780,10 @@ TEST(QuicFrameTest, RejectsMalformedCryptoTokenAndStreamFrames) {
     expect_decode_error(
         as_span(std::array<std::byte, 3>{std::byte{0x06}, std::byte{0x00}, std::byte{0x01}}),
         CodecErrorCode::truncated_input);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.6
+    // # Receipt of a frame that exceeds
+    // # this limit MUST be treated as a connection error of type
+    // # FRAME_ENCODING_ERROR or CRYPTO_BUFFER_EXCEEDED.
     expect_decode_error(as_span(std::array<std::byte, 11>{
                             std::byte{0x06},
                             std::byte{0xff},
@@ -1768,6 +1798,12 @@ TEST(QuicFrameTest, RejectsMalformedCryptoTokenAndStreamFrames) {
                             std::byte{0xaa},
                         }),
                         CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.7
+    // # The token MUST NOT be empty.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.7
+    // # A client MUST treat receipt
+    // # of a NEW_TOKEN frame with an empty Token field as a connection
+    // # error of type FRAME_ENCODING_ERROR.
     expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x07}, std::byte{0x00}}),
                         CodecErrorCode::invalid_varint);
     expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x07}, std::byte{0x40}}),
@@ -1779,6 +1815,10 @@ TEST(QuicFrameTest, RejectsMalformedCryptoTokenAndStreamFrames) {
     expect_decode_error(
         as_span(std::array<std::byte, 3>{std::byte{0x0a}, std::byte{0x00}, std::byte{0x01}}),
         CodecErrorCode::truncated_input);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.8
+    // # Receipt of a frame that exceeds this limit
+    // # MUST be treated as a connection error of type FRAME_ENCODING_ERROR or
+    // # FLOW_CONTROL_ERROR.
     expect_decode_error(as_span(std::array<std::byte, 12>{
                             std::byte{0x0e},
                             std::byte{0x00},
@@ -1866,6 +1906,15 @@ TEST(QuicFrameTest, RejectsMalformedFlowControlConnectionIdAndCloseFrames) {
     expect_decode_error(
         as_span(std::array<std::byte, 3>{std::byte{0x12}, std::byte{0xc0}, std::byte{0x00}}),
         CodecErrorCode::truncated_input);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.11
+    // # Receipt of a frame that
+    // # permits opening of a stream larger than this limit MUST be treated
+    // # as a connection error of type FRAME_ENCODING_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # If either is received, the connection MUST be closed immediately with
+    // # a connection error of type TRANSPORT_PARAMETER_ERROR if the offending
+    // # value was received in a transport parameter or of type
+    // # FRAME_ENCODING_ERROR if it was received in a frame; see Section 10.2.
     expect_decode_error(
         as_span(std::array<std::byte, 9>{std::byte{0x12}, std::byte{0xd0}, std::byte{0x00},
                                          std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
@@ -1877,6 +1926,10 @@ TEST(QuicFrameTest, RejectsMalformedFlowControlConnectionIdAndCloseFrames) {
                         CodecErrorCode::truncated_input);
     expect_decode_error(as_span(std::array<std::byte, 2>{std::byte{0x15}, std::byte{0x00}}),
                         CodecErrorCode::truncated_input);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.14
+    // # Receipt of a frame that encodes a larger
+    // # stream ID MUST be treated as a connection error of type
+    // # STREAM_LIMIT_ERROR or FRAME_ENCODING_ERROR.
     expect_decode_error(
         as_span(std::array<std::byte, 9>{std::byte{0x16}, std::byte{0xd0}, std::byte{0x00},
                                          std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
@@ -1892,9 +1945,20 @@ TEST(QuicFrameTest, RejectsMalformedFlowControlConnectionIdAndCloseFrames) {
     expect_decode_error(as_span(std::array<std::byte, 4>{std::byte{0x18}, std::byte{0x00},
                                                          std::byte{0x00}, std::byte{0x00}}),
                         CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+    // # Values less than 1 and greater than 20 are invalid
+    // # and MUST be treated as a connection error of type
+    // # FRAME_ENCODING_ERROR.
     expect_decode_error(as_span(std::array<std::byte, 4>{std::byte{0x18}, std::byte{0x00},
                                                          std::byte{0x00}, std::byte{0x15}}),
                         CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+    // # The value in the Retire Prior To field
+    // # MUST be less than or equal to the value in the Sequence Number field.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+    // # Receiving a value in the Retire Prior To field that is greater than
+    // # that in the Sequence Number field MUST be treated as a connection
+    // # error of type FRAME_ENCODING_ERROR.
     expect_decode_error(as_span(std::array<std::byte, 4>{std::byte{0x18}, std::byte{0x01},
                                                          std::byte{0x02}, std::byte{0x01}}),
                         CodecErrorCode::invalid_varint);
@@ -1942,12 +2006,18 @@ TEST(QuicFrameTest, RejectsInvalidSerializationInputsAcrossFrameFamilies) {
             .length = 0,
         },
         CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.6
+    // # Receipt of a frame that exceeds
+    // # this limit MUST be treated as a connection error of type
+    // # FRAME_ENCODING_ERROR or CRYPTO_BUFFER_EXCEEDED.
     expect_serialize_error(
         CryptoFrame{
             .offset = kMaxQuicVarInt,
             .crypto_data = {std::byte{0x01}},
         },
         CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.7
+    // # The token MUST NOT be empty.
     expect_serialize_error(
         NewTokenFrame{
             .token = {},
@@ -1959,6 +2029,10 @@ TEST(QuicFrameTest, RejectsInvalidSerializationInputsAcrossFrameFamilies) {
             .stream_data = {std::byte{0x01}},
         },
         CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.8
+    // # Receipt of a frame that exceeds this limit
+    // # MUST be treated as a connection error of type FRAME_ENCODING_ERROR or
+    // # FLOW_CONTROL_ERROR.
     expect_serialize_error(
         StreamFrame{
             .has_offset = true,
@@ -1983,6 +2057,15 @@ TEST(QuicFrameTest, RejectsInvalidSerializationInputsAcrossFrameFamilies) {
             .maximum_data = kInvalidQuicVarInt,
         },
         CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.11
+    // # Receipt of a frame that
+    // # permits opening of a stream larger than this limit MUST be treated
+    // # as a connection error of type FRAME_ENCODING_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # If either is received, the connection MUST be closed immediately with
+    // # a connection error of type TRANSPORT_PARAMETER_ERROR if the offending
+    // # value was received in a transport parameter or of type
+    // # FRAME_ENCODING_ERROR if it was received in a frame; see Section 10.2.
     expect_serialize_error(
         MaxStreamsFrame{
             .maximum_streams = (1ull << 60) + 1,
@@ -2005,11 +2088,19 @@ TEST(QuicFrameTest, RejectsInvalidSerializationInputsAcrossFrameFamilies) {
             .maximum_stream_data = kInvalidQuicVarInt,
         },
         CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.14
+    // # Receipt of a frame that encodes a larger
+    // # stream ID MUST be treated as a connection error of type
+    // # STREAM_LIMIT_ERROR or FRAME_ENCODING_ERROR.
     expect_serialize_error(
         StreamsBlockedFrame{
             .maximum_streams = (1ull << 60) + 1,
         },
         CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+    // # Values less than 1 and greater than 20 are invalid
+    // # and MUST be treated as a connection error of type
+    // # FRAME_ENCODING_ERROR.
     expect_serialize_error(
         NewConnectionIdFrame{
             .connection_id = {},
@@ -2020,6 +2111,13 @@ TEST(QuicFrameTest, RejectsInvalidSerializationInputsAcrossFrameFamilies) {
             .connection_id = std::vector<std::byte>(21, std::byte{0xaa}),
         },
         CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+    // # The value in the Retire Prior To field
+    // # MUST be less than or equal to the value in the Sequence Number field.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+    // # Receiving a value in the Retire Prior To field that is greater than
+    // # that in the Sequence Number field MUST be treated as a connection
+    // # error of type FRAME_ENCODING_ERROR.
     expect_serialize_error(
         NewConnectionIdFrame{
             .sequence_number = 0,

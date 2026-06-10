@@ -101,6 +101,13 @@ TEST(QuicCoreTest,
     EXPECT_FALSE(connection.has_failed());
     ASSERT_TRUE(connection.paths_.contains(0));
     ASSERT_TRUE(connection.paths_.at(0).pending_response.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    // # On receiving a PATH_CHALLENGE frame, an endpoint MUST respond by
+    // # echoing the data contained in the PATH_CHALLENGE frame in a
+    // # PATH_RESPONSE frame.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.17
+    // # The recipient of this frame MUST generate a PATH_RESPONSE frame
+    // # (Section 19.18) containing the same Data value.
     EXPECT_EQ(optional_ref_or_terminate(connection.paths_.at(0).pending_response), challenge);
 }
 
@@ -234,6 +241,16 @@ TEST(QuicCoreTest, ApplicationSendAckOnlyFallbackCarriesPathValidationFrames) {
 
         if (saw_ack && !saw_stream && saw_path_response && saw_path_challenge &&
             connection.has_pending_application_send()) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+            // # However, an endpoint MUST NOT expand the
+            // # datagram containing the PATH_RESPONSE if the resulting data exceeds
+            // # the anti-amplification limit.
+            EXPECT_LE(datagram.size(), received_bytes * 3u);
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+            // # Unlike other cases where datagrams are expanded, endpoints
+            // # MUST NOT discard datagrams that appear to be too small when
+            // # they contain PATH_CHALLENGE or PATH_RESPONSE.
+            EXPECT_LT(datagram.size(), 1200u);
             saw_ack_only_path_validation_fallback = true;
             break;
         }
@@ -298,7 +315,13 @@ TEST(QuicCoreTest, ApplicationSendAckOnlyFallbackCarriesCurrentPathValidationFra
 
     EXPECT_TRUE(saw_ack);
     EXPECT_FALSE(saw_stream);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2
+    // # An endpoint MAY include other frames with the PATH_CHALLENGE and
+    // # PATH_RESPONSE frames used for path validation.
     EXPECT_TRUE(saw_path_response);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.3
+    // # Servers SHOULD initiate path validation to the client's new address
+    // # upon receiving a probe packet from a different address; see Section 8.
     EXPECT_TRUE(saw_path_challenge);
 }
 
@@ -627,8 +650,85 @@ TEST(QuicCoreTest, PathChallengeQueuesMatchingPathResponseOnSamePath) {
 
     auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(datagram.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    // # A PATH_RESPONSE frame MUST be sent on the network path where the
+    // # PATH_CHALLENGE frame was received.
     EXPECT_EQ(connection.last_drained_path_id(), 9u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    // # An endpoint MUST expand datagrams that contain a PATH_RESPONSE frame
+    // # to at least the smallest allowed maximum datagram size of 1200 bytes.
     EXPECT_GE(datagram.size(), 1200u);
+
+    auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    auto *first_packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(first_packet, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    // # An endpoint MUST NOT send more than one PATH_RESPONSE frame in
+    // # response to one PATH_CHALLENGE frame; see Section 13.3.
+    EXPECT_EQ(std::count_if(first_packet->frames.begin(), first_packet->frames.end(),
+                            [](const auto &frame) {
+                                return std::holds_alternative<coquic::quic::PathResponseFrame>(
+                                    frame);
+                            }),
+              1);
+}
+
+TEST(QuicCoreTest, PathMtuUpdateBelowMinimumMarksPathNotViableAndBlocksSend) {
+    auto connection = make_connected_client_connection();
+    connection.last_validated_path_id_ = 7;
+    connection.current_send_path_id_ = 7;
+    auto &path = connection.ensure_path_state(7);
+    path.validated = true;
+    path.is_current_send_path = true;
+    path.mtu.viable = true;
+    path.mtu.enabled = true;
+    path.mtu.validated_datagram_size = 1200;
+    path.mtu.probe_ceiling = 1452;
+
+    connection.apply_path_mtu_update(7, 1199);
+
+    EXPECT_FALSE(path.mtu.viable);
+    EXPECT_FALSE(path.mtu.enabled);
+    EXPECT_EQ(path.mtu.probe_ceiling, 1199u);
+    EXPECT_FALSE(path.mtu.outstanding_probe_packet_number.has_value());
+    EXPECT_EQ(connection.outbound_datagram_size_limit(), 0u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+    // # If a QUIC endpoint determines that the PMTU between any pair of local
+    // # and remote IP addresses cannot support the smallest allowed maximum
+    // # datagram size of 1200 bytes, it MUST immediately cease sending QUIC
+    // # packets, except for those in PMTU probes or those containing
+    // # CONNECTION_CLOSE frames, on the affected path.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14
+    // # QUIC MUST NOT be used if the network path cannot support a
+    // # maximum datagram size of at least 1200 bytes.
+    EXPECT_FALSE(connection.has_pending_application_send());
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
+}
+
+TEST(QuicCoreTest, PathMtuUpdateDoesNotIncreaseValidatedDatagramSizeFromIcmp) {
+    auto connection = make_connected_client_connection();
+    connection.last_validated_path_id_ = 7;
+    connection.current_send_path_id_ = 7;
+    auto &path = connection.ensure_path_state(7);
+    path.validated = true;
+    path.is_current_send_path = true;
+    path.mtu.viable = true;
+    path.mtu.enabled = true;
+    path.mtu.base_datagram_size = 1200;
+    path.mtu.validated_datagram_size = 1200;
+    path.mtu.probe_ceiling = 1452;
+    path.mtu.search_low = 1200;
+
+    connection.apply_path_mtu_update(7, 1400);
+
+    EXPECT_TRUE(path.mtu.viable);
+    EXPECT_EQ(path.mtu.probe_ceiling, 1200u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+    // # An endpoint MUST NOT increase the PMTU based on ICMP messages; see
+    // # Item 6 in Section 3 of [DPLPMTUD].
+    EXPECT_EQ(path.mtu.validated_datagram_size, 1200u);
+    EXPECT_EQ(connection.outbound_datagram_size_limit(), 1200u);
 }
 
 TEST(QuicCoreTest, FirstServerResponseToProbingPacketOnNewPathAlsoIncludesPathChallenge) {
@@ -646,7 +746,13 @@ TEST(QuicCoreTest, FirstServerResponseToProbingPacketOnNewPathAlsoIncludesPathCh
 
     auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(datagram.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    // # A PATH_RESPONSE frame MUST be sent on the network path where the
+    // # PATH_CHALLENGE frame was received.
     EXPECT_EQ(connection.last_drained_path_id(), 9u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    // # An endpoint MUST expand datagrams that contain a PATH_RESPONSE frame
+    // # to at least the smallest allowed maximum datagram size of 1200 bytes.
     EXPECT_GE(datagram.size(), 1200u);
 
     auto packets = decode_sender_datagram(connection, datagram);
@@ -663,8 +769,60 @@ TEST(QuicCoreTest, FirstServerResponseToProbingPacketOnNewPathAlsoIncludesPathCh
             saw_path_challenge || std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    // # On receiving a PATH_CHALLENGE frame, an endpoint MUST respond by
+    // # echoing the data contained in the PATH_CHALLENGE frame in a
+    // # PATH_RESPONSE frame.
     EXPECT_TRUE(saw_path_response);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+    // # The server MUST probe on the path toward the client from its
+    // # preferred address.
     EXPECT_TRUE(saw_path_challenge);
+}
+
+TEST(QuicCoreTest, PathChallengeOnActivePathSendsNonProbingResponse) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 9;
+    connection.current_send_path_id_ = 9;
+    auto &active_path = connection.ensure_path_state(9);
+    active_path.validated = true;
+    active_path.is_current_send_path = true;
+    constexpr std::array<std::byte, 8> challenge = {
+        std::byte{0x11}, std::byte{0x12}, std::byte{0x13}, std::byte{0x14},
+        std::byte{0x15}, std::byte{0x16}, std::byte{0x17}, std::byte{0x18}};
+    ASSERT_TRUE(connection.queue_stream_send(0, std::vector<std::byte>(64, std::byte{0x61}), false)
+                    .has_value());
+
+    auto processed = connection.process_inbound_application(
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::PathChallengeFrame{.data = challenge},
+        },
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/9,
+        /*used_previous_application_read_secret=*/false, /*packet_number=*/77);
+
+    ASSERT_TRUE(processed.has_value());
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 9u);
+
+    auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    auto *first_packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(first_packet, nullptr);
+
+    bool saw_stream = false;
+    bool saw_path_response = false;
+    for (const auto &frame : first_packet->frames) {
+        saw_stream = saw_stream || std::holds_alternative<coquic::quic::StreamFrame>(frame);
+        saw_path_response =
+            saw_path_response || std::holds_alternative<coquic::quic::PathResponseFrame>(frame);
+    }
+
+    EXPECT_TRUE(saw_path_response);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.3
+    // # An endpoint that receives a PATH_CHALLENGE on an active path SHOULD
+    // # send a non-probing packet in response.
+    EXPECT_TRUE(saw_stream);
 }
 
 TEST(QuicCoreTest, ApplicationProbeOnNewPathIncludesPathChallenge) {
@@ -1046,6 +1204,42 @@ TEST(QuicCoreTest, AckOnlyResponseOnNewPathAlsoIncludesPathResponse) {
     EXPECT_TRUE(saw_path_challenge);
 }
 
+TEST(QuicCoreTest, AckOnlyPathResponseOnValidatedPathIsExpanded) {
+    auto connection = make_connected_server_connection();
+    connection.ensure_path_state(0).pending_response =
+        std::array{std::byte{0x51}, std::byte{0x52}, std::byte{0x53}, std::byte{0x54},
+                   std::byte{0x55}, std::byte{0x56}, std::byte{0x57}, std::byte{0x58}};
+    connection.ensure_path_state(0).challenge_pending = false;
+    connection.ensure_path_state(0).outstanding_challenge.reset();
+    connection.application_space_.received_packets.record_received(
+        /*packet_number=*/19, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
+
+    auto response = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(response.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 0u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    // # An endpoint MUST expand datagrams that contain a PATH_RESPONSE frame
+    // # to at least the smallest allowed maximum datagram size of 1200 bytes.
+    EXPECT_GE(response.size(), 1200u);
+
+    auto packets = decode_sender_datagram(connection, response);
+    ASSERT_EQ(packets.size(), 1u);
+    auto *first_packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(first_packet, nullptr);
+
+    bool saw_path_response = false;
+    bool saw_path_challenge = false;
+    for (auto &frame : first_packet->frames) {
+        saw_path_response =
+            saw_path_response || std::holds_alternative<coquic::quic::PathResponseFrame>(frame);
+        saw_path_challenge =
+            saw_path_challenge || std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+    }
+
+    EXPECT_TRUE(saw_path_response);
+    EXPECT_FALSE(saw_path_challenge);
+}
+
 TEST(QuicCoreTest, ServerOneRttPacketOnNewPathStillRequiresPathValidation) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;
@@ -1224,6 +1418,15 @@ TEST(QuicCoreTest, MatchingPathResponseResetsRecoveryForNewPath) {
     ASSERT_TRUE(processed.has_value());
 
     EXPECT_EQ(connection.current_send_path_id_, 9u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    // # Packets sent on the old path MUST NOT contribute to congestion control
+    // # or RTT estimation for the new path.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    // # On confirming a peer's ownership of its new address, an endpoint MUST
+    // # immediately reset the congestion controller and round-trip time
+    // # estimator for the new path to initial values (see Appendices A.3 and
+    // # B.3 of [QUIC-RECOVERY]) unless the only change in the peer's address is
+    // # its port number.
     EXPECT_EQ(connection.congestion_controller_.bytes_in_flight(), 0u);
     EXPECT_EQ(connection.recovery_rtt_state_.latest_rtt, std::nullopt);
     EXPECT_EQ(connection.recovery_rtt_state_.min_rtt, std::nullopt);
@@ -1250,18 +1453,37 @@ TEST(QuicCoreTest, RepeatedPathValidationUsesFreshChallengeData) {
     auto second_challenge =
         optional_ref_or_terminate(connection.paths_.at(7).outstanding_challenge);
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+    // # The endpoint MUST use unpredictable data in every PATH_CHALLENGE
+    // # frame so that it can associate the peer's response with the
+    // # corresponding PATH_CHALLENGE.
     EXPECT_NE(first_challenge, second_challenge);
 }
 
 TEST(QuicCoreTest, PathValidationStartArmsDeadline) {
     auto connection = make_connected_client_connection();
     install_spare_peer_connection_id(connection);
+    connection.recovery_rtt_state_.latest_rtt = std::chrono::microseconds(1000);
+    connection.recovery_rtt_state_.min_rtt = std::chrono::microseconds(1000);
+    connection.recovery_rtt_state_.smoothed_rtt = std::chrono::microseconds(1000);
+    connection.recovery_rtt_state_.rttvar = std::chrono::microseconds(250);
 
     auto now = coquic::quic::test::test_time(100);
     connection.start_path_validation(7, /*initiated_locally=*/true, now);
 
     ASSERT_TRUE(connection.paths_.contains(7));
     auto validation_deadline = connection.paths_.at(7).validation_deadline;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    // # This timer SHOULD be set as described in Section 6.2.1 of
+    // # [QUIC-RECOVERY] and MUST NOT be more aggressive.
+    EXPECT_EQ(optional_value_or_terminate(validation_deadline),
+              now + connection.path_validation_timeout_period());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.4
+    // # A value of three times the larger of the current PTO or the PTO for
+    // # the new path (using kInitialRtt, as defined in [QUIC-RECOVERY]) is
+    // # RECOMMENDED.
+    constexpr auto expected_new_path_pto = coquic::quic::kInitialRtt * 3;
+    EXPECT_EQ(connection.path_validation_timeout_period(), expected_new_path_pto * 3);
     EXPECT_GT(optional_value_or_terminate(validation_deadline), now);
     EXPECT_FALSE(connection.path_validation_timed_out(7, coquic::quic::test::test_time(99)));
 }
@@ -1287,6 +1509,10 @@ TEST(QuicCoreTest, MatchingPathResponseValidatesChallengedPathAcrossInboundPathI
         connection, 11, {coquic::quic::PathResponseFrame{.data = outstanding_challenge}}));
 
     ASSERT_TRUE(connection.paths_.contains(9));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    // # This requirement MUST NOT be enforced by the endpoint that initiates
+    // # path validation, as that would enable an attack on migration; see
+    // # Section 9.3.3.
     EXPECT_TRUE(connection.paths_.at(9).validated);
     EXPECT_EQ(connection.last_validated_path_id_, 9u);
     EXPECT_EQ(connection.current_send_path_id_, 9u);
@@ -1621,6 +1847,11 @@ TEST(QuicCoreTest, PtoOnUnvalidatedMigratedPathRearmsPathChallenge) {
     auto first_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(first_datagram.empty());
     EXPECT_EQ(connection.last_drained_path_id(), 9u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+    // # An endpoint MUST expand datagrams that contain a PATH_CHALLENGE frame
+    // # to at least the smallest allowed maximum datagram size of 1200 bytes,
+    // # unless the anti-amplification limit for the path does not permit
+    // # sending a datagram of this size.
     EXPECT_GE(first_datagram.size(), 1200u);
 
     auto first_packets = decode_sender_datagram(connection, first_datagram);
@@ -1642,6 +1873,11 @@ TEST(QuicCoreTest, PtoOnUnvalidatedMigratedPathRearmsPathChallenge) {
     auto second_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1000));
     ASSERT_FALSE(second_datagram.empty());
     EXPECT_EQ(connection.last_drained_path_id(), 9u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+    // # An endpoint MUST expand datagrams that contain a PATH_CHALLENGE frame
+    // # to at least the smallest allowed maximum datagram size of 1200 bytes,
+    // # unless the anti-amplification limit for the path does not permit
+    // # sending a datagram of this size.
     EXPECT_GE(second_datagram.size(), 1200u);
 
     auto second_packets = decode_sender_datagram(connection, second_datagram);
@@ -1682,15 +1918,25 @@ TEST(QuicCoreTest, UnvalidatedMigratedPathDoesNotRepeatPathChallengeBeforePto) {
     ASSERT_NE(first_packet, nullptr);
 
     std::optional<std::array<std::byte, 8>> first_challenge;
+    std::size_t path_challenge_count = 0;
     for (auto &frame : first_packet->frames) {
         if (auto *path_challenge = std::get_if<coquic::quic::PathChallengeFrame>(&frame)) {
             first_challenge = path_challenge->data;
+            ++path_challenge_count;
         }
     }
     ASSERT_TRUE(first_challenge.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+    // # However, an endpoint SHOULD NOT send multiple PATH_CHALLENGE frames in a
+    // # single packet.
+    EXPECT_EQ(path_challenge_count, 1u);
     EXPECT_FALSE(connection.paths_.at(9).challenge_pending);
 
     auto second_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+    // # An endpoint SHOULD NOT probe a new path with packets containing a
+    // # PATH_CHALLENGE frame more frequently than it would send an Initial
+    // # packet.
     EXPECT_TRUE(second_datagram.empty());
     EXPECT_FALSE(connection.paths_.at(9).challenge_pending);
 }
@@ -1702,8 +1948,14 @@ TEST(QuicCoreTest, FailedPathValidationRevertsToLastValidatedPath) {
     connection.previous_path_id_ = 3;
     connection.ensure_path_state(9).validation_deadline = coquic::quic::test::test_time(1);
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.4
+    // # Endpoints SHOULD abandon path validation based on a timer.
     connection.on_timeout(coquic::quic::test::test_time(2));
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.2
+    // # To protect the connection from failing due to such a spurious migration,
+    // # an endpoint MUST revert to using the last validated peer address when
+    // # validation of a new peer address fails.
     EXPECT_EQ(connection.current_send_path_id_, 3u);
 }
 

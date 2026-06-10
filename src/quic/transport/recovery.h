@@ -26,9 +26,21 @@ struct ReceivedPacketHistoryTestPeer;
 struct PacketSpaceRecoveryTestPeer;
 } // namespace test
 
+//= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.1
+// # In order to remain similar to TCP,
+// # implementations SHOULD NOT use a packet threshold less than 3;
 inline constexpr std::uint64_t kPacketThreshold = 3;
+//= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.2
+// # The RECOMMENDED time threshold (kTimeThreshold), expressed as an RTT
+// # multiplier, is 9/8.
 inline constexpr double kTimeThreshold = 9.0 / 8.0;
+//= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.2
+// # The RECOMMENDED value of the timer granularity
+// # (kGranularity) is 1 millisecond.
 inline constexpr QuicCoreDuration kGranularity{1000};
+//= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2
+// # When no previous RTT is available, the initial RTT
+// # SHOULD be set to 333 milliseconds.
 inline constexpr QuicCoreDuration kInitialRtt{333000};
 inline constexpr std::size_t kMaxTrackedAckRanges = 64;
 
@@ -49,6 +61,7 @@ struct SentPacketRecord { // NOLINT(clang-analyzer-optin.performance.Padding)
     std::optional<MaxDataFrame> max_data_frame;
     std::vector<MaxStreamDataFrame> max_stream_data_frames;
     std::vector<MaxStreamsFrame> max_streams_frames;
+    std::vector<StreamsBlockedFrame> streams_blocked_frames;
     std::optional<DataBlockedFrame> data_blocked_frame;
     std::vector<StreamDataBlockedFrame> stream_data_blocked_frames;
     std::optional<StreamFrameSendMetadata> first_stream_frame_metadata;

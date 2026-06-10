@@ -51,6 +51,9 @@ NewRenoCongestionController::next_send_time(std::size_t bytes) const {
 }
 
 void NewRenoCongestionController::on_packet_sent(std::size_t bytes_sent, bool ack_eliciting) {
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7
+    // # Similar to TCP, packets containing only ACK frames do not count
+    // # toward bytes in flight and are not congestion controlled.
     if (!ack_eliciting) {
         return;
     }
@@ -144,11 +147,20 @@ void NewRenoCongestionController::on_packets_acked(std::span<const SentPacketRec
         }
 
         if (congestion_window_ < slow_start_threshold_) {
+            //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.1
+            // # While a sender is in slow start, the congestion window increases by
+            // # the number of bytes acknowledged when each acknowledgment is
+            // # processed.
             slow_start_acked_bytes =
                 congestion_saturating_add(slow_start_acked_bytes, packet.bytes_in_flight);
             continue;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.3
+        // # A sender in congestion avoidance uses an Additive Increase
+        // # Multiplicative Decrease (AIMD) approach that MUST limit the increase
+        // # to the congestion window to at most one maximum datagram size for
+        // # each congestion window that is acknowledged.
         congestion_avoidance_credit_ += packet.bytes_in_flight;
         while (congestion_avoidance_credit_ >= congestion_window_) {
             congestion_avoidance_credit_ -= congestion_window_;
@@ -282,6 +294,10 @@ void NewRenoCongestionController::on_simple_stream_packets_acked(
 
     if (!sent_during_or_before_recovery) {
         if (congestion_window_ < slow_start_threshold_) {
+            //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.1
+            // # While a sender is in slow start, the congestion window increases by
+            // # the number of bytes acknowledged when each acknowledgment is
+            // # processed.
             congestion_window_ = congestion_saturating_add(
                 congestion_window_, hystart_.growth_bytes(packets.bytes_in_flight));
             hystart_.on_slow_start_ack(packets, rtt_state);
@@ -289,6 +305,11 @@ void NewRenoCongestionController::on_simple_stream_packets_acked(
                 slow_start_threshold_ = congestion_window_;
             }
         } else {
+            //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.3
+            // # A sender in congestion avoidance uses an Additive Increase
+            // # Multiplicative Decrease (AIMD) approach that MUST limit the increase
+            // # to the congestion window to at most one maximum datagram size for
+            // # each congestion window that is acknowledged.
             congestion_avoidance_credit_ =
                 congestion_saturating_add(congestion_avoidance_credit_, packets.bytes_in_flight);
             while (congestion_avoidance_credit_ >= congestion_window_) {
@@ -360,6 +381,9 @@ void NewRenoCongestionController::on_loss_event(QuicCoreTimePoint loss_detection
     const auto largest_lost_send_sequence =
         std::exchange(pending_largest_lost_send_sequence_, std::nullopt);
     if (recovery_start_time_.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.2
+        // # A sender that is already in a recovery period stays in it and does not
+        // # reenter it.
         return;
     }
     if (loss_on_or_before_last_recovery_boundary(largest_lost_sent_time,
@@ -379,13 +403,23 @@ void NewRenoCongestionController::on_loss_event(QuicCoreTimePoint loss_detection
     recovery_delivered_bytes_ = 0;
     recovery_sent_bytes_ = 0;
     hystart_.disable();
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.2
+    // # On entering a recovery period, a sender MUST set the slow start
+    // # threshold to half the value of the congestion window when loss is
+    // # detected.
     slow_start_threshold_ = std::max(minimum_window(), congestion_window_ / 2);
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.2
+    // # The congestion window MUST be set to the reduced value of
+    // # the slow start threshold before exiting the recovery period.
     congestion_window_ = slow_start_threshold_;
     congestion_avoidance_credit_ = 0;
 }
 
 void NewRenoCongestionController::on_persistent_congestion() {
     hystart_.disable();
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.6.2
+    // # When persistent congestion is declared, the sender's congestion
+    // # window MUST be reduced to the minimum congestion window
     congestion_window_ = minimum_window();
     congestion_avoidance_credit_ = 0;
     recovery_start_time_ = std::nullopt;
@@ -406,6 +440,9 @@ std::size_t NewRenoCongestionController::bytes_in_flight() const {
 }
 
 std::size_t NewRenoCongestionController::minimum_window() const {
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.2
+    // # The RECOMMENDED
+    // # value is 2 * max_datagram_size.
     return 2 * max_datagram_size_;
 }
 
@@ -414,6 +451,11 @@ std::size_t NewRenoCongestionController::send_window() const {
         return congestion_window_;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.2
+    // # Implementations MAY reduce the congestion window immediately upon
+    // # entering a recovery period or use other mechanisms, such as
+    // # Proportional Rate Reduction [PRR], to reduce the congestion window
+    // # more gradually.
     const auto prr_delivered = static_cast<long double>(recovery_delivered_bytes_);
     const auto prr_target = static_cast<long double>(slow_start_threshold_);
     const auto recover_flight = static_cast<long double>(recovery_flight_size_);

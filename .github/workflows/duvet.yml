@@ -1,0 +1,125 @@
+name: Duvet
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  duvet:
+    name: RFC Compliance Report
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
+        with:
+          summarize: false
+
+      - name: Generate Duvet Report
+        run: nix develop -c ./scripts/compliance --ci
+
+      - name: Publish Duvet Summary
+        run: |
+          {
+            echo "## Duvet RFC Compliance"
+            echo
+            echo "- HTML report: \`.duvet/reports/report.html\`"
+            echo "- JSON report: \`.duvet/reports/report.json\`"
+            echo "- Snapshot: \`.duvet/snapshot.txt\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload Duvet Report Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: duvet-report
+          path: |
+            .duvet/reports/report.html
+            .duvet/reports/report.json
+            .duvet/snapshot.txt
+          include-hidden-files: true
+          if-no-files-found: error
+
+      - name: Configure Demo SSH
+        if: github.ref == 'refs/heads/main' && success()
+        env:
+          COQUIC_DEMO_REMOTE_SSH_KEY: ${{ secrets.COQUIC_DEMO_REMOTE_SSH_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s' "${COQUIC_DEMO_REMOTE_SSH_KEY}" > "${RUNNER_TEMP}/coquic-demo.key"
+          cat > "${HOME}/.ssh/known_hosts" <<'EOF'
+          coquic.minhuw.dev ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC/itFBGPd3dJ3Lgn1gx9n3i2HZox12SEmEAexK2fNT0F/PcwbxWuLX8oy08dEUu40IH3DIT1vTlf5bFzZKLVr3+pZn0JpGLSR2MAE14bvsfaoXbiZkZcliCv5tmvPx041qgAfOhQarqkKoi9J5AMxttWkc/Cr2huzVLlG/t3PJ0D3aB4XOzPCB+orSfbY4D4QWvlkEK29HN6mbGwJhSj+/V1YMubges/di6x9HNm0AGHRwSr4PAPFxQx2KMKfTFdrl21eOTQi29UHk1sI7C0Vg02TCO4TMCDRb99akAA0+Qrw8kt1d7Fh8k+3qNDY+tCnBmjAum74ATgRyvIrgLQ4Wk5QXE3NMPWNyLgNY2vYXv9Izl2GeH9PSjU6aACIXVpKEnWBCo0y6x9DZEA3Dfz4EiV9cy4fs7+W1likxhEVaPouTDtQH7EibHIdOoO++vdlmyYk2EG9Kn6W/Zqo55K+sOQ/K0S0sMuWIZQW2czAOpzs4R519WOIUNBzXkZ6rZqE=
+          coquic.minhuw.dev ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCjTT5KdjyCQ3G04Z8mUUOkXAqsdDuU4K5bB3jXi5B3aIzYK+2f0TT0XE3G0/r/KmZoSHYxb21TtjykFa47XFSA=
+          coquic.minhuw.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILi5VjtrGcYlzyYEXd4/PzQJXBjZ028DA6nJ7Xu50CJh
+          EOF
+          chmod 600 "${RUNNER_TEMP}/coquic-demo.key" "${HOME}/.ssh/known_hosts"
+
+      - name: Upload Duvet Report To Demo
+        if: github.ref == 'refs/heads/main' && success()
+        run: |
+          if [ ! -f .duvet/reports/report.html ]; then
+            echo "missing .duvet/reports/report.html" >&2
+            exit 1
+          fi
+          if [ ! -f .duvet/reports/report.json ]; then
+            echo "missing .duvet/reports/report.json" >&2
+            exit 1
+          fi
+          if [ ! -f .duvet/snapshot.txt ]; then
+            echo "missing .duvet/snapshot.txt" >&2
+            exit 1
+          fi
+          scp \
+            -P 22 \
+            -i "${RUNNER_TEMP}/coquic-demo.key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=10 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            .duvet/reports/report.html \
+            minhuw@coquic.minhuw.dev:/tmp/coquic-duvet-report.html
+          scp \
+            -P 22 \
+            -i "${RUNNER_TEMP}/coquic-demo.key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=10 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            .duvet/reports/report.json \
+            minhuw@coquic.minhuw.dev:/tmp/coquic-duvet-report.json
+          scp \
+            -P 22 \
+            -i "${RUNNER_TEMP}/coquic-demo.key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=10 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            .duvet/snapshot.txt \
+            minhuw@coquic.minhuw.dev:/tmp/coquic-duvet-snapshot.txt
+          ssh \
+            -p 22 \
+            -i "${RUNNER_TEMP}/coquic-demo.key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=10 \
+            -o ServerAliveCountMax=3 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts" \
+            minhuw@coquic.minhuw.dev \
+            "sudo rm -rf /opt/coquic-demo/current/app/public/duvet && sudo install -d -m 755 /opt/coquic-demo/current/app/public/duvet && sudo install -m 644 /tmp/coquic-duvet-report.html /opt/coquic-demo/current/app/public/duvet/report.html && sudo install -m 644 /tmp/coquic-duvet-report.json /opt/coquic-demo/current/app/public/duvet/report.json && sudo install -m 644 /tmp/coquic-duvet-snapshot.txt /opt/coquic-demo/current/app/public/duvet/snapshot.txt && rm -f /tmp/coquic-duvet-report.html /tmp/coquic-duvet-report.json /tmp/coquic-duvet-snapshot.txt"

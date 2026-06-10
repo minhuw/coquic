@@ -41,6 +41,7 @@
 #include "src/quic/codec/buffer.h"
 #include "src/quic/connection/connection_test_hooks.h"
 #include "src/quic/codec/frame.h"
+#include "src/quic/codec/packet_number.h"
 #include "src/quic/crypto/packet_crypto.h"
 #include "src/quic/crypto/packet_crypto_test_hooks.h"
 #include "src/quic/codec/protected_codec.h"
@@ -769,6 +770,9 @@ inline std::array<std::byte, 16> make_stateless_reset_token(
     std::span<const std::byte> connection_id, std::uint64_t sequence_number,
     const std::optional<QuicStatelessResetSecret> &configured_secret = std::nullopt) {
     std::array<std::byte, 16> token{};
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+    // # The same stateless reset token MUST NOT be used for multiple
+    // # connection IDs.
     const auto context = make_secret_derivation_context(
         connection_id, configured_secret.has_value() ? 0 : sequence_number);
     constexpr std::array label{
@@ -778,6 +782,8 @@ inline std::array<std::byte, 16> make_stateless_reset_token(
     const auto secret = configured_secret.has_value()
                             ? std::span<const std::byte>(*configured_secret)
                             : std::span<const std::byte>(quic_reset_token_secret());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+    // # The stateless reset token MUST be difficult to guess.
     if (const auto derived = prf_bytes<16>(secret, label, context)) {
         return *derived;
     }
@@ -810,10 +816,18 @@ make_path_challenge_data(std::span<const std::byte> local_connection_id, QuicPat
         std::byte{'i'}, std::byte{'c'}, std::byte{' '}, std::byte{'p'},
         std::byte{'a'}, std::byte{'t'}, std::byte{'h'},
     };
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+    // # The endpoint MUST use unpredictable data in every PATH_CHALLENGE
+    // # frame so that it can associate the peer's response with the
+    // # corresponding PATH_CHALLENGE.
     if (const auto derived = prf_bytes<8>(quic_path_challenge_secret(), label, context)) {
         return *derived;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+    // # The endpoint MUST use unpredictable data in every PATH_CHALLENGE
+    // # frame so that it can associate the peer's response with the
+    // # corresponding PATH_CHALLENGE.
     if (rand_bytes_for_connection(challenge)) {
         return challenge;
     }
@@ -835,6 +849,12 @@ make_path_challenge_data(std::span<const std::byte> local_connection_id, QuicPat
 }
 
 inline COQUIC_NO_PROFILE bool random_one_in_sixteen_from_openssl(std::uint8_t value) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+    // # Even when the spin bit is not disabled by the administrator,
+    // # endpoints MUST disable their use of the spin bit for a random
+    // # selection of at least one in every 16 network paths, or for one in
+    // # every 16 connection IDs, in order to ensure that QUIC connections that
+    // # disable the spin bit are commonly observed on the network.
     return (value & 0x0fu) == 0;
 }
 
@@ -1164,6 +1184,14 @@ make_local_version_information(std::span<const std::uint32_t> supported_versions
         return std::nullopt;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-3
+    // # Any version of QUIC that supports this mechanism MUST provide a
+    // # mechanism to exchange Version Information in both directions during
+    // # the handshake, such that this data is authenticated.
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4
+    // # Any QUIC endpoint that supports QUIC version 2 MUST send, process,
+    // # and validate the version_information transport parameter specified in
+    // # [QUIC-VN] to prevent version downgrade attacks.
     return VersionInformation{
         .chosen_version = chosen_version,
         .available_versions =
@@ -1336,6 +1364,14 @@ decode_resumption_state(std::span<const std::byte> bytes) {
 
 inline bool zero_rtt_transport_limits_not_reduced(const TransportParameters &remembered,
                                                   const TransportParameters &current) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # If 0-RTT data is accepted by the server, the server MUST NOT reduce
+    // # any limits or alter any values that might be violated by the client
+    // # with its 0-RTT data.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # In particular, a server that accepts 0-RTT data MUST NOT set values
+    // # for the following parameters (Section 18.2) that are smaller than the
+    // # remembered values of the parameters.
     return current.active_connection_id_limit >= remembered.active_connection_id_limit &&
            current.initial_max_data >= remembered.initial_max_data &&
            current.initial_max_stream_data_bidi_local >=
@@ -1382,7 +1418,18 @@ stream_transport_error_for_state_error(StreamStateErrorCode code) {
     case StreamStateErrorCode::send_side_closed:
     case StreamStateErrorCode::receive_side_closed:
         return QuicTransportErrorCode::stream_state_error;
+    case StreamStateErrorCode::flow_control_violation:
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+        // # A receiver MUST close the connection with an error of type
+        // # FLOW_CONTROL_ERROR if the sender violates the advertised connection
+        // # or stream data limits; see Section 11 for details on error handling.
+        return QuicTransportErrorCode::flow_control_error;
     case StreamStateErrorCode::final_size_conflict:
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+        // # If a RESET_STREAM or STREAM frame is received indicating a change
+        // # in the final size for the stream, an endpoint SHOULD respond with
+        // # an error of type FINAL_SIZE_ERROR; see Section 11 for details on
+        // # error handling.
         return QuicTransportErrorCode::final_size_error;
     }
     return QuicTransportErrorCode::protocol_violation;
@@ -1610,6 +1657,9 @@ template <typename FrameType> bool is_ack_eliciting_frame(const FrameType &frame
         true,  // CryptoFrame
         true,  // NewTokenFrame
         true,  // StreamFrame
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.21
+        // # Extension frames MUST be congestion controlled and MUST cause an ACK
+        // # frame to be sent.
         true,  // DatagramFrame
         true,  // MaxDataFrame
         true,  // MaxStreamDataFrame
@@ -1705,11 +1755,24 @@ inline bool has_in_flight_ack_eliciting_packet(const PacketSpaceState &packet_sp
 
 inline bool should_ignore_received_packet(const PacketSpaceState &packet_space,
                                           std::uint64_t packet_number) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    // # A receiver MUST discard a newly unprotected packet unless it is
+    // # certain that it has not processed another packet with the same packet
+    // # number from the same packet number space.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    // # Duplicate suppression MUST
+    // # happen after removing packet protection for the reasons described in
+    // # Section 9.5 of [QUIC-TLS].
     return packet_space.received_packets.should_ignore(packet_number);
 }
 
 inline void note_authenticated_packet_number(PacketSpaceState &packet_space,
                                              std::uint64_t packet_number) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+    // # Receivers can discard all ACK Ranges, but they MUST retain the
+    // # largest packet number that has been successfully processed, as that
+    // # is used to recover packet numbers from subsequent packets; see
+    // # Section 17.1.
     packet_space.largest_authenticated_packet_number = std::max(
         packet_space.largest_authenticated_packet_number.value_or(packet_number), packet_number);
 }
@@ -1731,6 +1794,10 @@ inline void schedule_application_ack_deadline(PacketSpaceState &packet_space, Qu
                                               std::uint64_t max_ack_delay_ms,
                                               QuicEcnCodepoint ecn) {
     if (ecn == QuicEcnCodepoint::ce) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+        // # Similarly, packets marked with the ECN Congestion Experienced (CE)
+        // # codepoint in the IP header SHOULD be acknowledged immediately, to
+        // # reduce the peer's response time to congestion events.
         packet_space.pending_ack_deadline = now;
         packet_space.force_ack_send = true;
         return;
@@ -3031,6 +3098,11 @@ inline COQUIC_NO_PROFILE PacketSpaceState *client_handshake_keepalive_packet_spa
                                               handshake_discarded, handshake_space)) {
         return nullptr;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # Specifically, the client
+    // # MUST send an Initial packet in a UDP datagram that contains at least
+    // # 1200 bytes if it does not have Handshake keys, and otherwise send a
+    // # Handshake packet.
     return (!handshake_discarded && handshake_space.write_secret.has_value()) ? &handshake_space
                                                                               : &initial_space;
 }
@@ -3804,8 +3876,8 @@ inline std::size_t retransmittable_probe_frame_count(const SentPacketRecord &pac
            packet.reset_stream_frames.size() + packet.stop_sending_frames.size() +
            packet.new_connection_id_frames.size() + packet.retire_connection_id_frames.size() +
            packet.max_stream_data_frames.size() + packet.max_streams_frames.size() +
-           packet.stream_data_blocked_frames.size() + packet_stream_frame_count(packet) +
-           static_cast<std::size_t>(packet.has_handshake_done) +
+           packet.streams_blocked_frames.size() + packet.stream_data_blocked_frames.size() +
+           packet_stream_frame_count(packet) + static_cast<std::size_t>(packet.has_handshake_done) +
            static_cast<std::size_t>(packet.max_data_frame.has_value()) +
            static_cast<std::size_t>(packet.data_blocked_frame.has_value());
 }
@@ -3815,10 +3887,10 @@ inline bool packet_has_only_stream_frame_metadata(const SentPacketRecord &packet
            packet.reset_stream_frames.empty() && packet.stop_sending_frames.empty() &&
            packet.new_connection_id_frames.empty() && packet.retire_connection_id_frames.empty() &&
            packet.max_stream_data_frames.empty() && packet.max_streams_frames.empty() &&
-           packet.stream_data_blocked_frames.empty() && packet.max_data_frame == std::nullopt &&
-           packet.data_blocked_frame == std::nullopt && !packet.has_handshake_done &&
-           !packet.is_pmtu_probe && !packet.has_ping && !packet.force_ack &&
-           !packet.largest_received_packet_number_acked.has_value() &&
+           packet.streams_blocked_frames.empty() && packet.stream_data_blocked_frames.empty() &&
+           packet.max_data_frame == std::nullopt && packet.data_blocked_frame == std::nullopt &&
+           !packet.has_handshake_done && !packet.is_pmtu_probe && !packet.has_ping &&
+           !packet.force_ack && !packet.largest_received_packet_number_acked.has_value() &&
            packet.qlog_packet_snapshot == nullptr && !packet.qlog_pto_probe &&
            packet.stream_fragments.empty() && sent_packet_has_stream_frames(packet);
 }
@@ -3901,6 +3973,7 @@ inline std::size_t application_ack_eliciting_frame_count(
     bool has_path_response_frame, bool has_path_challenge_frame,
     std::span<const MaxStreamDataFrame> max_stream_data_frames,
     std::span<const MaxStreamsFrame> max_streams_frames,
+    std::span<const StreamsBlockedFrame> streams_blocked_frames,
     std::span<const ResetStreamFrame> reset_stream_frames,
     std::span<const StopSendingFrame> stop_sending_frames,
     const std::optional<DataBlockedFrame> &data_blocked_frame,
@@ -3909,9 +3982,9 @@ inline std::size_t application_ack_eliciting_frame_count(
     std::span<const StreamFrameSendFragment> stream_fragments) {
     return new_token_frames.size() + new_connection_id_frames.size() +
            retire_connection_id_frames.size() + max_stream_data_frames.size() +
-           max_streams_frames.size() + reset_stream_frames.size() + stop_sending_frames.size() +
-           stream_data_blocked_frames.size() + stream_fragments.size() +
-           static_cast<std::size_t>(include_handshake_done) +
+           max_streams_frames.size() + streams_blocked_frames.size() + reset_stream_frames.size() +
+           stop_sending_frames.size() + stream_data_blocked_frames.size() +
+           stream_fragments.size() + static_cast<std::size_t>(include_handshake_done) +
            static_cast<std::size_t>(has_path_response_frame) +
            static_cast<std::size_t>(has_path_challenge_frame) +
            static_cast<std::size_t>(max_data_frame.has_value()) +

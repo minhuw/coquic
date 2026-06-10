@@ -656,6 +656,8 @@ class QuicConnection {
                              bool allow_in_place_receive_decode);
     CodecResult<ConnectionId>
     peek_client_initial_destination_connection_id(std::span<const std::byte> bytes) const;
+    CodecResult<ConnectionId>
+    peek_long_header_destination_connection_id(std::span<const std::byte> bytes) const;
     CodecResult<std::size_t> peek_next_packet_length(std::span<const std::byte> bytes) const;
     CodecResult<bool> process_inbound_packet(const ProtectedPacket &packet, QuicCoreTimePoint now,
                                              QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable,
@@ -811,7 +813,7 @@ class QuicConnection {
     static bool
     should_skip_packet_number_for_optimistic_ack_detection(const PacketSpaceState &packet_space,
                                                            std::uint64_t packet_number);
-    std::uint64_t reserve_packet_number(PacketSpaceState &packet_space);
+    std::optional<std::uint64_t> reserve_packet_number(PacketSpaceState &packet_space);
     bool ack_ranges_include_unsent_packet_number(const PacketSpaceState &packet_space,
                                                  AckRangeCursor cursor) const;
     CodecResult<bool> reject_optimistic_ack_if_detected(PacketSpaceState &packet_space,
@@ -882,16 +884,20 @@ class QuicConnection {
     CodecResult<bool> validate_retired_peer_reset_stream_frame(
         std::uint64_t stream_id, // NOLINT(bugprone-easily-swappable-parameters)
         std::uint64_t final_size, std::uint64_t frame_type) const;
+    CodecResult<bool>
+    commit_peer_stream_final_size_to_connection_flow_control(StreamState &stream,
+                                                             std::uint64_t frame_type);
     bool try_retire_stream_to_peer_range(const StreamState &stream);
     bool try_retire_stream_to_local_range(const StreamState &stream);
     std::size_t retired_peer_stream_count() const;
     std::size_t retired_local_stream_count() const;
     void maybe_retire_stream(std::uint64_t stream_id);
+    StreamState *open_peer_initiated_stream_with_predecessors(std::uint64_t stream_id);
     StreamStateResult<StreamState *> get_or_open_local_stream(std::uint64_t stream_id);
     StreamStateResult<StreamState *> get_existing_receive_stream(std::uint64_t stream_id);
     CodecResult<StreamState *> get_or_open_receive_stream(std::uint64_t stream_id);
     CodecResult<StreamState *> get_or_open_send_stream(std::uint64_t stream_id);
-    CodecResult<StreamState *> get_or_open_send_stream_for_peer_stop(std::uint64_t stream_id);
+    CodecResult<StreamState *> get_existing_send_stream_for_peer_control(std::uint64_t stream_id);
     StreamStateResult<bool> queue_stream_send_impl(std::uint64_t stream_id,
                                                    std::span<const std::byte> owned_bytes,
                                                    std::optional<SharedBytes> shared_bytes,

@@ -299,6 +299,9 @@ TEST(QuicTransportParametersTest, RoundTripsFlowControlAndStreamCountParameters)
     ASSERT_TRUE(encoded.has_value());
 
     const auto decoded = coquic::quic::deserialize_transport_parameters(encoded.value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+    // # An endpoint MUST NOT send a parameter more than once in a given
+    // # transport parameters extension.
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(decoded.value().initial_max_data, 4096u);
     EXPECT_EQ(decoded.value().initial_max_stream_data_bidi_local, 1024u);
@@ -480,6 +483,10 @@ TEST(QuicTransportParametersTest, RejectsInvalidAckTimingValues) {
             .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
         },
         make_validation_context(ConnectionId{std::byte{0xaa}}));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+    // # An endpoint MUST treat receipt of a transport parameter with an
+    // # invalid value as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR.
     ASSERT_FALSE(bad_exponent.has_value());
 
     const auto bad_max_ack_delay = coquic::quic::validate_peer_transport_parameters(
@@ -491,6 +498,10 @@ TEST(QuicTransportParametersTest, RejectsInvalidAckTimingValues) {
             .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
         },
         make_validation_context(ConnectionId{std::byte{0xaa}}));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+    // # An endpoint MUST treat receipt of a transport parameter with an
+    // # invalid value as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR.
     ASSERT_FALSE(bad_max_ack_delay.has_value());
 }
 
@@ -630,6 +641,9 @@ TEST(QuicTransportParametersTest, IgnoresUnknownParameterIdsDuringParse) {
     }));
 
     ASSERT_TRUE(decoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.2
+    // # An endpoint MUST ignore transport parameters that it does
+    // # not support.
     EXPECT_EQ(decoded.value().max_udp_payload_size, 1200u);
     EXPECT_EQ(decoded.value().active_connection_id_limit, 2u);
     EXPECT_EQ(decoded.value().initial_source_connection_id,
@@ -650,6 +664,10 @@ TEST(QuicTransportParametersTest, RejectsDuplicateKnownParameterIdsDuringParse) 
     }));
 
     ASSERT_FALSE(decoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+    // # An endpoint SHOULD treat receipt of
+    // # duplicate transport parameters as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR.
     EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
 }
 
@@ -664,6 +682,10 @@ TEST(QuicTransportParametersTest, RejectsDuplicateUnknownParameterIdsDuringParse
     }));
 
     ASSERT_FALSE(decoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+    // # An endpoint SHOULD treat receipt of
+    // # duplicate transport parameters as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR.
     EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
 }
 
@@ -774,6 +796,12 @@ TEST(QuicTransportParametersTest, RejectsInvalidMaxDatagramFrameSizeEncoding) {
     }));
 
     ASSERT_FALSE(decoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+    // # The max_datagram_frame_size transport parameter is an
+    // # integer value (represented as a variable-length integer) that
+    // # represents the maximum size of a DATAGRAM frame (including the
+    // # frame type, length, and payload) the endpoint is willing to
+    // # receive, in bytes.
     EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
 }
 
@@ -817,7 +845,42 @@ TEST(QuicTransportParametersTest, RejectsActiveConnectionIdLimitBelowTwo) {
         coquic::quic::deserialize_transport_parameters(encoded.value()).value(),
         make_validation_context(ConnectionId{std::byte{0xaa}}));
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # The value of the
+    // # active_connection_id_limit parameter MUST be at least 2.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # An
+    // # endpoint that receives a value less than 2 MUST close the
+    // # connection with an error of type TRANSPORT_PARAMETER_ERROR.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+}
+
+TEST(QuicTransportParametersTest, RejectsMaxStreamsTransportParametersAboveStreamLimit) {
+    const auto expect_rejected = [](const TransportParameters &parameters) {
+        const auto validation = coquic::quic::validate_peer_transport_parameters(
+            EndpointRole::client, parameters,
+            make_validation_context(ConnectionId{std::byte{0xaa}}));
+        ASSERT_FALSE(validation.has_value());
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+        // # If either is received, the connection MUST be closed immediately with
+        // # a connection error of type TRANSPORT_PARAMETER_ERROR if the offending
+        // # value was received in a transport parameter or of type
+        // # FRAME_ENCODING_ERROR if it was received in a frame; see Section 10.2.
+        EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
+    };
+
+    expect_rejected(TransportParameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_max_streams_bidi = (std::uint64_t{1} << 60) + 1,
+        .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+    });
+    expect_rejected(TransportParameters{
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 2,
+        .initial_max_streams_uni = (std::uint64_t{1} << 60) + 1,
+        .initial_source_connection_id = ConnectionId{std::byte{0xaa}},
+    });
 }
 
 TEST(QuicTransportParametersTest, RejectsMissingInitialSourceConnectionId) {
@@ -830,6 +893,12 @@ TEST(QuicTransportParametersTest, RejectsMissingInitialSourceConnectionId) {
         make_validation_context(ConnectionId{std::byte{0xaa}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # An endpoint MUST treat the absence of the
+    // # initial_source_connection_id transport parameter from either endpoint
+    // # or the absence of the original_destination_connection_id transport
+    // # parameter from the server as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -844,6 +913,11 @@ TEST(QuicTransportParametersTest, RejectsMismatchedInitialSourceConnectionId) {
         make_validation_context(ConnectionId{std::byte{0xaa}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # The values provided by a peer for these transport parameters MUST
+    // # match the values that an endpoint used in the Destination and Source
+    // # Connection ID fields of Initial packets that it sent (and received,
+    // # for servers).
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -858,6 +932,12 @@ TEST(QuicTransportParametersTest, RejectsMaxUdpPayloadSizeBelowMinimum) {
         make_validation_context(ConnectionId{std::byte{0xaa}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+    // # An endpoint MUST treat receipt of a transport parameter with an
+    // # invalid value as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # Values below 1200 are invalid.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -873,6 +953,14 @@ TEST(QuicTransportParametersTest, ClientRejectsOriginalDestinationConnectionId) 
         make_validation_context(ConnectionId{std::byte{0xaa}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A client MUST NOT include any server-only transport parameter:
+    // # original_destination_connection_id, preferred_address,
+    // # retry_source_connection_id, or stateless_reset_token.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A server MUST
+    // # treat receipt of any of these transport parameters as a connection
+    // # error of type TRANSPORT_PARAMETER_ERROR.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -888,6 +976,14 @@ TEST(QuicTransportParametersTest, ClientRejectsRetrySourceConnectionId) {
         make_validation_context(ConnectionId{std::byte{0xaa}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A client MUST NOT include any server-only transport parameter:
+    // # original_destination_connection_id, preferred_address,
+    // # retry_source_connection_id, or stateless_reset_token.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A server MUST
+    // # treat receipt of any of these transport parameters as a connection
+    // # error of type TRANSPORT_PARAMETER_ERROR.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -903,6 +999,14 @@ TEST(QuicTransportParametersTest, ClientRejectsPreferredAddressFromPeer) {
         make_validation_context(ConnectionId{std::byte{0xaa}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A client MUST NOT include any server-only transport parameter:
+    // # original_destination_connection_id, preferred_address,
+    // # retry_source_connection_id, or stateless_reset_token.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A server MUST
+    // # treat receipt of any of these transport parameters as a connection
+    // # error of type TRANSPORT_PARAMETER_ERROR.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -918,6 +1022,17 @@ TEST(QuicTransportParametersTest, ClientRejectsStatelessResetTokenFromPeer) {
         make_validation_context(ConnectionId{std::byte{0xaa}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # This transport parameter MUST NOT be sent
+    // # by a client but MAY be sent by a server.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A client MUST NOT include any server-only transport parameter:
+    // # original_destination_connection_id, preferred_address,
+    // # retry_source_connection_id, or stateless_reset_token.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A server MUST
+    // # treat receipt of any of these transport parameters as a connection
+    // # error of type TRANSPORT_PARAMETER_ERROR.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -936,6 +1051,14 @@ TEST(QuicTransportParametersTest, RejectsPreferredAddressWithEmptyConnectionId) 
         make_validation_context(ConnectionId{std::byte{0xaa}}, ConnectionId{std::byte{0x83}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A server
+    // # that chooses a zero-length connection ID MUST NOT provide a
+    // # preferred address.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A client MUST
+    // # treat a violation of these requirements as a connection error of
+    // # type TRANSPORT_PARAMETER_ERROR.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -953,6 +1076,14 @@ TEST(QuicTransportParametersTest,
         make_validation_context(ConnectionId{}, ConnectionId{std::byte{0x83}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A server
+    // # that chooses a zero-length connection ID MUST NOT provide a
+    // # preferred address.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A client MUST
+    // # treat a violation of these requirements as a connection error of
+    // # type TRANSPORT_PARAMETER_ERROR.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -961,6 +1092,13 @@ TEST(QuicTransportParametersTest, RejectsPreferredAddressCidLengthZeroEncoding) 
         encode_preferred_address_parameter_for_test(0));
 
     ASSERT_FALSE(decoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # Similarly, a server MUST NOT include a zero-
+    // # length connection ID in this transport parameter.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A client MUST
+    // # treat a violation of these requirements as a connection error of
+    // # type TRANSPORT_PARAMETER_ERROR.
     EXPECT_EQ(decoded.error().code, CodecErrorCode::invalid_varint);
 }
 
@@ -1011,6 +1149,9 @@ TEST(QuicTransportParametersTest, RejectsSerializingPreferredAddressWithZeroLeng
     });
 
     ASSERT_FALSE(encoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # Similarly, a server MUST NOT include a zero-
+    // # length connection ID in this transport parameter.
     EXPECT_EQ(encoded.error().code, CodecErrorCode::invalid_varint);
 }
 
@@ -1057,6 +1198,12 @@ TEST(QuicTransportParametersTest, ServerRejectsMissingOriginalDestinationConnect
                                 ConnectionId{std::byte{0x83}, std::byte{0x94}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # An endpoint MUST treat the absence of the
+    // # initial_source_connection_id transport parameter from either endpoint
+    // # or the absence of the original_destination_connection_id transport
+    // # parameter from the server as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -1072,6 +1219,11 @@ TEST(QuicTransportParametersTest, ServerRejectsMissingExpectedOriginalDestinatio
         make_validation_context(ConnectionId{std::byte{0x53}, std::byte{0x01}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # The values provided by a peer for these transport parameters MUST
+    // # match the values that an endpoint used in the Destination and Source
+    // # Connection ID fields of Initial packets that it sent (and received,
+    // # for servers).
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -1088,6 +1240,12 @@ TEST(QuicTransportParametersTest, ServerRejectsMismatchedOriginalDestinationConn
                                 ConnectionId{std::byte{0x83}, std::byte{0x94}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # An endpoint MUST treat the following as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION:
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # Endpoints MUST validate that received transport
+    // # parameters match received connection ID values.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -1105,6 +1263,9 @@ TEST(QuicTransportParametersTest, ServerRejectsMissingExpectedRetrySourceConnect
                                 ConnectionId{std::byte{0xaa}, std::byte{0xbb}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # An endpoint MUST treat the following as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION:
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -1123,6 +1284,9 @@ TEST(QuicTransportParametersTest, ServerRejectsMismatchedRetrySourceConnectionId
                                 ConnectionId{std::byte{0xaa}, std::byte{0xbb}}));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # An endpoint MUST treat the following as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION:
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -1221,6 +1385,10 @@ TEST(QuicTransportParametersTest, ServerRejectsPeerVersionInformationWithMismatc
                                 }));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+    // # If an endpoint receives a Chosen Version
+    // # equal to zero, or any Available Version equal to zero, it MUST treat
+    // # it as a parsing failure.
     expect_version_negotiation_error(validation.error());
 }
 
@@ -1244,6 +1412,10 @@ TEST(QuicTransportParametersTest, RejectsPeerVersionInformationWithZeroChosenVer
                                 }));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+    // # If an endpoint receives a Chosen Version
+    // # equal to zero, or any Available Version equal to zero, it MUST treat
+    // # it as a parsing failure.
     expect_version_negotiation_error(validation.error());
 }
 
@@ -1287,6 +1459,10 @@ TEST(QuicTransportParametersTest, ClientRejectsMissingExpectedVersionInformation
                                 }));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+    // # If a client has reacted to a Version Negotiation packet and
+    // # the server's Version Information was missing, the client MUST close
+    // # the connection with a version negotiation error.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -1312,6 +1488,11 @@ TEST(QuicTransportParametersTest, ClientRejectsMismatchedExpectedVersionInformat
                                 }));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+    // # If a client receives Version Information where the server's Chosen
+    // # Version was not sent by the client as part of its Available Versions,
+    // # the client MUST close the connection with a version negotiation
+    // # error.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -1413,6 +1594,10 @@ TEST(QuicTransportParametersTest,
                                 /*reacted_to_version_negotiation=*/true));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+    // # If the client would have selected a different
+    // # version, the client MUST close the connection with a version
+    // # negotiation error.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 
@@ -1440,6 +1625,10 @@ TEST(QuicTransportParametersTest,
                                 /*reacted_to_version_negotiation=*/true));
 
     ASSERT_FALSE(validation.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+    // # If the client would have selected a different
+    // # version, the client MUST close the connection with a version
+    // # negotiation error.
     EXPECT_EQ(validation.error().code, CodecErrorCode::invalid_packet_protection_state);
 }
 

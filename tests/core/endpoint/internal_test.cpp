@@ -2,6 +2,7 @@
 
 #include <array>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -257,15 +258,24 @@ TEST(QuicCoreEndpointInternalTest, InboundDatagramMaterializeClampsSharedPayload
 }
 
 TEST(QuicCoreEndpointInternalTest, ParseEndpointDatagramRejectsMalformedInputs) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # Endpoints MUST discard packets that are too small to be valid QUIC
+    // # packets.
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(std::span<const std::byte>{}).has_value());
 
     auto invalid_short_header = bytes_from_ints({0x00});
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(invalid_short_header).has_value());
 
     auto too_short_short_header = bytes_from_ints({0x40, 0, 1, 2});
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # Endpoints MUST discard packets that are too small to be valid QUIC
+    // # packets.
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(too_short_short_header).has_value());
 
     auto version_negotiation = bytes_from_ints({0xc0, 0x00, 0x00, 0x00, 0x00, 0x01, 0xaa, 0x00});
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-6.1
+    // # An endpoint MUST NOT send a Version Negotiation packet
+    // # in response to receiving a Version Negotiation packet.
     EXPECT_FALSE(QuicCore::parse_endpoint_datagram(version_negotiation).has_value());
 
     auto truncated_destination_connection_id = bytes_from_ints(
@@ -350,6 +360,13 @@ TEST(QuicCoreEndpointInternalTest, RetryContextAndPacketBuildersRejectMissingOrM
     auto unsupported_retry = parsed;
     unsupported_retry.version = kVersionNegotiationVersion;
     EXPECT_TRUE(QuicCore::make_retry_packet_bytes(unsupported_retry, pending).empty());
+
+    auto same_retry_source = pending;
+    same_retry_source.retry_source_connection_id = parsed.destination_connection_id;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.1
+    // # This value MUST NOT be equal to the Destination
+    // # Connection ID field of the packet sent by the client.
+    EXPECT_TRUE(QuicCore::make_retry_packet_bytes(parsed, same_retry_source).empty());
 }
 
 TEST(QuicCoreEndpointInternalTest, VersionNegotiationCanGreaseReservedVersion) {
@@ -368,6 +385,15 @@ TEST(QuicCoreEndpointInternalTest, VersionNegotiationCanGreaseReservedVersion) {
     ASSERT_TRUE(decoded.has_value());
     auto *version_negotiation = std::get_if<VersionNegotiationPacket>(&decoded.value().packet);
     ASSERT_NE(version_negotiation, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.1
+    // # The server MUST include the value from the Source Connection ID field
+    // # of the packet it receives in the Destination Connection ID field.
+    EXPECT_EQ(version_negotiation->destination_connection_id, parsed.source_connection_id);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.1
+    // # The value for Source Connection ID MUST be copied from the
+    // # Destination Connection ID of the received packet, which is initially
+    // # randomly selected by a client.
+    EXPECT_EQ(version_negotiation->source_connection_id, parsed.destination_connection_id);
     EXPECT_EQ(version_negotiation->supported_versions,
               (std::vector<std::uint32_t>{kQuicVersion1, 0x0a0a0a0a}));
 
@@ -491,6 +517,50 @@ TEST(QuicCoreEndpointInternalTest, ClientEndpointIgnoresInvalidOrRepeatedVersion
     EXPECT_TRUE(entry.connection->config_.reacted_to_version_negotiation);
 }
 
+TEST(QuicCoreEndpointInternalTest, ClientEndpointIgnoresVersionNegotiationAfterPeerPacket) {
+    auto endpoint_config = make_client_endpoint_config();
+    endpoint_config.supported_versions = {kQuicVersion2, kQuicVersion1};
+    QuicCore client(std::move(endpoint_config));
+
+    auto open_config = make_client_open_config();
+    open_config.original_version = kQuicVersion1;
+    open_config.initial_version = kQuicVersion1;
+    auto start = client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = open_config,
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0));
+    ASSERT_FALSE(send_effects_from(start).empty());
+    ASSERT_EQ(client.connections_.size(), 1u);
+    auto &entry = client.connections_.begin()->second;
+    ASSERT_NE(entry.connection, nullptr);
+    entry.connection->processed_peer_packet_ = true;
+
+    const auto version_negotiation = serialize_packet(VersionNegotiationPacket{
+        .destination_connection_id = open_config.source_connection_id,
+        .source_connection_id = open_config.initial_destination_connection_id,
+        .supported_versions = {kQuicVersion2},
+    });
+    ASSERT_TRUE(version_negotiation.has_value());
+
+    auto after_version_negotiation = client.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = version_negotiation.value(),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(1));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-6.2
+    // # A client MUST discard any Version Negotiation packet if it has
+    // # received and successfully processed any other packet, including an
+    // # earlier Version Negotiation packet.
+    EXPECT_TRUE(send_effects_from(after_version_negotiation).empty());
+    ASSERT_EQ(client.connections_.size(), 1u);
+    EXPECT_EQ(entry.connection->config_.initial_version, kQuicVersion1);
+    EXPECT_FALSE(entry.connection->config_.reacted_to_version_negotiation);
+}
+
 TEST(QuicCoreEndpointInternalTest, RouteRefreshRememberPathAndLegacySeedingCoverCollisionPaths) {
     QuicCore server_core(make_server_endpoint_config());
 
@@ -574,6 +644,17 @@ TEST(QuicCoreEndpointInternalTest, ClientEndpointRoutesShortHeaderByFullLocalCon
     }
     EXPECT_EQ(endpoint.find_endpoint_connection_for_datagram(parsed.value()),
               std::optional<QuicConnectionHandle>{1u});
+
+    auto routed_malformed = endpoint.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = bytes_from_ints({0x40, 0xc1, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xff}),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(1));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11
+    // # A stateless reset MUST NOT be used by an endpoint that has the state
+    // # necessary to send a frame on the connection.
+    EXPECT_TRUE(send_effects_from(routed_malformed).empty());
 }
 
 TEST(QuicCoreEndpointInternalTest, RetryAcceptedServerRoutesOriginalDestinationCidAlias) {
@@ -1029,6 +1110,10 @@ TEST(QuicCoreEndpointInternalTest, EndpointPathMtuUpdateAppliesToMatchedRouteOnl
         coquic::quic::test::test_time(3));
 
     EXPECT_FALSE(updated.local_error.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+    // # QUIC implementations that implement any kind of PMTU discovery
+    // # therefore SHOULD maintain a maximum datagram size for each combination
+    // # of local and remote IP addresses.
     EXPECT_EQ(first.connection->paths_.at(0).mtu.probe_ceiling, 1400u);
     EXPECT_EQ(first.connection->paths_.at(0).mtu.validated_datagram_size, 1400u);
     EXPECT_FALSE(first.connection->paths_.at(0).mtu.outstanding_probe_size.has_value());
@@ -1158,6 +1243,9 @@ TEST(QuicCoreEndpointInternalTest, InboundEndpointBranchesCoverAcceptDropAndUnkn
             .route_handle = 55,
         },
         coquic::quic::test::test_time(3));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # Servers MAY discard any Initial packet that does not carry the
+    // # expected token.
     EXPECT_TRUE(dropped.effects.empty());
     EXPECT_EQ(retry_server.connection_count(), 0u);
 }
@@ -1253,6 +1341,28 @@ TEST(QuicCoreEndpointInternalTest, EndpointAndLegacyCommandsCoverErrorAndCleanup
     auto timeout_lifecycle = lifecycle_events_from(timeout_result);
     ASSERT_EQ(timeout_lifecycle.size(), 1u);
     EXPECT_EQ(timeout_lifecycle.front().event, QuicCoreConnectionLifecycle::closed);
+
+    QuicCore draining_core(make_client_endpoint_config());
+    auto draining_entry = QuicCore::ConnectionEntry{
+        .handle = 1,
+        .connection = std::make_unique<QuicConnection>(make_connected_client_connection()),
+    };
+    draining_entry.connection->recovery_rtt_state_.latest_rtt = std::chrono::milliseconds(10);
+    draining_entry.connection->recovery_rtt_state_.smoothed_rtt = std::chrono::milliseconds(10);
+    draining_entry.connection->recovery_rtt_state_.rttvar = std::chrono::milliseconds(1);
+    draining_entry.connection->enter_draining_state(coquic::quic::test::test_time(100));
+    draining_core.connections_.emplace(draining_entry.handle, std::move(draining_entry));
+    ASSERT_EQ(draining_core.next_wakeup(), coquic::quic::test::test_time(142));
+
+    auto draining_expired =
+        draining_core.advance_endpoint(QuicCoreTimerExpired{}, coquic::quic::test::test_time(142));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+    // # Once its closing or draining state ends, an endpoint SHOULD discard
+    // # all connection state.
+    EXPECT_EQ(draining_core.connection_count(), 0u);
+    auto draining_lifecycle = lifecycle_events_from(draining_expired);
+    ASSERT_EQ(draining_lifecycle.size(), 1u);
+    EXPECT_EQ(draining_lifecycle.front().event, QuicCoreConnectionLifecycle::closed);
 
     QuicCore missing_legacy(coquic::quic::test::make_client_core_config());
     auto *missing_legacy_entry = missing_legacy.ensure_legacy_entry();
@@ -1471,6 +1581,29 @@ TEST(QuicCoreEndpointInternalTest,
     EXPECT_EQ(retry_server.retry_tokens_.size(), 1u);
 }
 
+TEST(QuicCoreEndpointInternalTest, ServerIgnoresSupportedHandshakeBeforeClientInitial) {
+    QuicCore server(make_server_endpoint_config());
+    auto supported_handshake = make_supported_long_header_datagram(
+        kQuicVersion1, bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}),
+        bytes_from_ints({0xc1, 0x01}));
+
+    auto result = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = supported_handshake,
+            .route_handle = 55,
+        },
+        coquic::quic::test::test_time(1));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.2
+    // # Clients are not able to send Handshake packets prior to receiving a
+    // # server response, so servers SHOULD ignore any such packets.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.2
+    // # Servers MUST drop incoming packets under all other circumstances.
+    EXPECT_TRUE(result.effects.empty());
+    EXPECT_FALSE(result.local_error.has_value());
+    EXPECT_EQ(server.connection_count(), 0u);
+}
+
 TEST(QuicCoreEndpointInternalTest, ServerDiscardsSupportedInitialDatagramSmallerThan1200Bytes) {
     auto server_config = make_server_endpoint_config();
     server_config.application_protocol = "coquic";
@@ -1488,10 +1621,98 @@ TEST(QuicCoreEndpointInternalTest, ServerDiscardsSupportedInitialDatagramSmaller
         },
         coquic::quic::test::test_time(1));
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+    // # A server MUST discard an Initial packet that is carried in a UDP
+    // # datagram with a payload that is smaller than the smallest allowed
+    // # maximum datagram size of 1200 bytes.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.2
+    // # Servers MUST drop smaller packets that specify unsupported versions.
     EXPECT_TRUE(result.effects.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14
+    // # Therefore, an endpoint MUST NOT close a connection when it receives a
+    // # datagram that does not meet size constraints; the endpoint MAY discard
+    // # such datagrams.
     EXPECT_FALSE(result.local_error.has_value());
     EXPECT_EQ(server.connection_count(), 0u);
     EXPECT_TRUE(server.retry_tokens_.empty());
+}
+
+TEST(QuicCoreEndpointInternalTest, ServerSendsVersionNegotiationForLargeUnsupportedVersion) {
+    auto server_config = make_server_endpoint_config();
+    server_config.application_protocol = "coquic";
+    QuicCore server(std::move(server_config));
+
+    auto unsupported_initial = make_supported_long_header_datagram(
+        0x0a0a0a0a, bytes_from_ints({0x83, 0x94, 0xc8, 0xf0}), bytes_from_ints({0xc1, 0x01}), 1200);
+
+    auto result = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = unsupported_initial,
+            .route_handle = 55,
+        },
+        coquic::quic::test::test_time(1));
+
+    const auto sends = send_effects_from(result);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.2
+    // # If a server receives a packet that indicates an unsupported version
+    // # and if the packet is large enough to initiate a new connection for
+    // # any supported version, the server SHOULD send a Version Negotiation
+    // # packet as described in Section 6.1.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.2
+    // # Servers SHOULD respond with a Version
+    // # Negotiation packet, provided that the datagram is sufficiently long.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.1
+    // # A server MUST NOT send more than one Version Negotiation packet in
+    // # response to a single UDP datagram.
+    ASSERT_EQ(sends.size(), 1u);
+    auto decoded = deserialize_packet(sends.front().bytes, {});
+    ASSERT_TRUE(decoded.has_value());
+    auto *version_negotiation = std::get_if<VersionNegotiationPacket>(&decoded.value().packet);
+    ASSERT_NE(version_negotiation, nullptr);
+    EXPECT_EQ(sends.front().route_handle, std::optional<QuicRouteHandle>{55u});
+    EXPECT_FALSE(result.local_error.has_value());
+    EXPECT_EQ(server.connection_count(), 0u);
+}
+
+TEST(QuicCoreEndpointInternalTest,
+     ServerSendsVersionNegotiationForUnsupportedVersionWithLongConnectionIds) {
+    auto server_config = make_server_endpoint_config();
+    server_config.application_protocol = "coquic";
+    QuicCore server(std::move(server_config));
+    const auto destination_connection_id = std::vector<std::byte>(21, std::byte{0x83});
+    const auto source_connection_id = std::vector<std::byte>(21, std::byte{0xc1});
+
+    auto unsupported_initial = make_supported_long_header_datagram(
+        0x0a0a0a0a, destination_connection_id, source_connection_id, 1200);
+
+    auto result = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = unsupported_initial,
+            .route_handle = 55,
+        },
+        coquic::quic::test::test_time(1));
+
+    const auto sends = send_effects_from(result);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.1
+    // # Version-specific rules for the connection ID therefore MUST NOT
+    // # influence a decision about whether to send a Version Negotiation
+    // # packet.
+    ASSERT_EQ(sends.size(), 1u);
+    auto decoded = deserialize_packet(sends.front().bytes, {});
+    ASSERT_TRUE(decoded.has_value());
+    auto *version_negotiation = std::get_if<VersionNegotiationPacket>(&decoded.value().packet);
+    ASSERT_NE(version_negotiation, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    // # In order to properly form a Version Negotiation packet, servers
+    // # SHOULD be able to read longer connection IDs from other QUIC versions.
+    EXPECT_EQ(version_negotiation->destination_connection_id, source_connection_id);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    // # In order to properly form a Version Negotiation packet, servers
+    // # SHOULD be able to read longer connection IDs from other QUIC versions.
+    EXPECT_EQ(version_negotiation->source_connection_id, destination_connection_id);
+    EXPECT_EQ(sends.front().route_handle, std::optional<QuicRouteHandle>{55u});
+    EXPECT_FALSE(result.local_error.has_value());
+    EXPECT_EQ(server.connection_count(), 0u);
 }
 
 TEST(QuicCoreEndpointInternalTest, RetryTokensUseUnpredictablePerIssueBytes) {
@@ -1527,6 +1748,8 @@ TEST(QuicCoreEndpointInternalTest, RetryTokensUseUnpredictablePerIssueBytes) {
         tokens.push_back(pending.token);
     }
     ASSERT_EQ(tokens.size(), 2u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+    // # An address validation token MUST be difficult to guess.
     EXPECT_NE(tokens[0], tokens[1]);
     for (auto &token : tokens) {
         EXPECT_EQ(token.size(), 16u);
@@ -1607,6 +1830,9 @@ TEST(QuicCoreEndpointInternalTest, SealedRetryTokenSurvivesRestartAndBindsRouteI
         },
         coquic::quic::test::test_time(1));
     auto retry_sends = send_effects_from(retry_result);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.1
+    // # A server MUST NOT send more than one Retry
+    // # packet in response to a single UDP datagram.
     ASSERT_EQ(retry_sends.size(), 1u);
     auto decoded_retry = deserialize_packet(retry_sends.front().bytes.span(), {});
     ASSERT_TRUE(decoded_retry.has_value());
@@ -1631,12 +1857,23 @@ TEST(QuicCoreEndpointInternalTest, SealedRetryTokenSurvivesRestartAndBindsRouteI
     };
 
     EXPECT_FALSE(
+        restarted.take_new_token_context(parsed, 55, coquic::quic::test::test_time(2), identity)
+            .has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.1
+    // # A token sent in a NEW_TOKEN frame or a Retry packet MUST be
+    // # constructed in a way that allows the server to identify how it was
+    // # provided to a client.
+    EXPECT_FALSE(
         restarted.take_retry_context(parsed, 56, coquic::quic::test::test_time(2), identity)
             .has_value());
     EXPECT_FALSE(restarted
                      .take_retry_context(parsed, 55, coquic::quic::test::test_time(2),
                                          bytes_from_ints({0x7f, 0x00, 0x00, 0x02}))
                      .has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+    // # Tokens sent in Retry packets SHOULD include information that allows
+    // # the server to verify that the source IP address and port in client
+    // # packets remain constant.
     auto wrong_destination = parsed;
     wrong_destination.destination_connection_id = bytes_from_ints({0x53, 0xaa});
     EXPECT_FALSE(
@@ -1651,6 +1888,9 @@ TEST(QuicCoreEndpointInternalTest, SealedRetryTokenSurvivesRestartAndBindsRouteI
     EXPECT_EQ(accepted_retry.retry_source_connection_id, retry_packet->source_connection_id);
     EXPECT_EQ(accepted_retry.address_validation_identity, identity);
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+    // # To protect against such attacks, servers MUST ensure that replay of
+    // # tokens is prevented or limited.
     EXPECT_FALSE(
         restarted.take_retry_context(parsed, 55, coquic::quic::test::test_time(3), identity)
             .has_value());
@@ -1659,6 +1899,12 @@ TEST(QuicCoreEndpointInternalTest, SealedRetryTokenSurvivesRestartAndBindsRouteI
     expired_restarted_config.retry_enabled = true;
     expired_restarted_config.address_validation_token_secret = make_address_validation_secret(0x30);
     QuicCore expired_restarted(std::move(expired_restarted_config));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-21.3
+    // # Servers SHOULD provide mitigations for this attack by limiting the
+    // # usage and lifetime of address validation tokens; see Section 8.1.3.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+    // # Servers SHOULD ensure that tokens sent in Retry packets are only
+    // # accepted for a short time, as they are returned immediately by clients.
     EXPECT_FALSE(
         expired_restarted
             .take_retry_context(parsed, 55, coquic::quic::test::test_time(12'001), identity)
@@ -1695,12 +1941,32 @@ TEST(QuicCoreEndpointInternalTest, SealedNewTokenSurvivesRestartAndIsSingleUse) 
                      .take_new_token_context(parsed, 77, coquic::quic::test::test_time(101),
                                              bytes_from_ints({0x20, 0x01, 0x0d, 0xb9}))
                      .has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+    // # Tokens sent in NEW_TOKEN frames MUST include information that allows
+    // # the server to verify that the client IP address has not changed from
+    // # when the token was issued.
 
     auto wrong_version = parsed;
     wrong_version.version = kQuicVersion2;
     EXPECT_FALSE(
         restarted
             .take_new_token_context(wrong_version, 77, coquic::quic::test::test_time(101), identity)
+            .has_value());
+
+    auto expired_config = make_server_endpoint_config();
+    expired_config.address_validation_token_secret = make_address_validation_secret(0x40);
+    QuicCore expired(std::move(expired_config));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-21.3
+    // # Servers SHOULD provide mitigations for this attack by limiting the
+    // # usage and lifetime of address validation tokens; see Section 8.1.3.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # Thus, a token SHOULD have an expiration time, which could be either an
+    // # explicit expiration time or an issued timestamp that can be used to
+    // # dynamically calculate the expiration time.
+    EXPECT_FALSE(
+        expired
+            .take_new_token_context(
+                parsed, 77, coquic::quic::test::test_time(24 * 60 * 60 * 1000 + 101), identity)
             .has_value());
 
     auto accepted =
@@ -1710,6 +1976,12 @@ TEST(QuicCoreEndpointInternalTest, SealedNewTokenSurvivesRestartAndIsSingleUse) 
     EXPECT_EQ(accepted_token.address_validation_identity, identity);
     EXPECT_TRUE(accepted_token.used);
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-21.3
+    // # Servers SHOULD provide mitigations for this attack by limiting the
+    // # usage and lifetime of address validation tokens; see Section 8.1.3.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+    // # Tokens that are provided in NEW_TOKEN frames (Section 19.7) need to be
+    // # valid for longer but SHOULD NOT be accepted multiple times.
     EXPECT_FALSE(
         restarted.take_new_token_context(parsed, 77, coquic::quic::test::test_time(102), identity)
             .has_value());
@@ -1720,6 +1992,9 @@ TEST(QuicCoreEndpointInternalTest, SealedNewTokenSurvivesRestartAndIsSingleUse) 
     auto tampered = parsed;
     tampered.token.back() =
         static_cast<std::byte>(std::to_integer<std::uint8_t>(tampered.token.back()) ^ 0x01u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+    // # For this design to work, the token MUST be covered by integrity
+    // # protection against modification or falsification by clients.
     EXPECT_FALSE(
         tampered_server
             .take_new_token_context(tampered, 77, coquic::quic::test::test_time(101), identity)
@@ -1731,6 +2006,76 @@ TEST(QuicCoreEndpointInternalTest, SealedNewTokenSurvivesRestartAndIsSingleUse) 
         tampered_server
             .take_new_token_context(truncated, 77, coquic::quic::test::test_time(101), identity)
             .has_value());
+
+    auto accept_server_config = make_server_endpoint_config();
+    accept_server_config.address_validation_token_secret = make_address_validation_secret(0x40);
+    QuicCore accept_server(std::move(accept_server_config));
+    auto accept_open = make_client_open_config(4);
+    accept_open.retry_token = original.make_endpoint_new_token(10, kQuicVersion1, 91, identity,
+                                                               coquic::quic::test::test_time(100));
+    QuicCore accept_client(make_client_endpoint_config());
+    auto client_initial = accept_client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = std::move(accept_open),
+            .initial_route_handle = 91,
+        },
+        coquic::quic::test::test_time(101));
+    auto initial_sends = send_effects_from(client_initial);
+    ASSERT_FALSE(initial_sends.empty());
+    auto accepted_initial = accept_server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = initial_sends.front().bytes,
+            .route_handle = 91,
+            .address_validation_identity = identity,
+        },
+        coquic::quic::test::test_time(102));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # When a server receives an Initial packet with an address validation
+    // # token, it MUST attempt to validate the token, unless it has already
+    // # completed address validation.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # If the validation succeeds, the server SHOULD then allow the handshake
+    // # to proceed.
+    auto accept_lifecycle = lifecycle_events_from(accepted_initial);
+    ASSERT_FALSE(accept_lifecycle.empty());
+    EXPECT_EQ(accept_lifecycle.front().event, QuicCoreConnectionLifecycle::accepted);
+
+    auto changed_address_server_config = make_server_endpoint_config();
+    changed_address_server_config.application_protocol = "coquic";
+    changed_address_server_config.address_validation_token_secret =
+        make_address_validation_secret(0x40);
+    QuicCore changed_address_server(std::move(changed_address_server_config));
+    auto changed_address_open = make_client_open_config(5);
+    changed_address_open.retry_token = original.make_endpoint_new_token(
+        11, kQuicVersion1, 92, identity, coquic::quic::test::test_time(100));
+    QuicCore changed_address_client(make_client_endpoint_config());
+    auto changed_address_initial = changed_address_client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = std::move(changed_address_open),
+            .initial_route_handle = 92,
+        },
+        coquic::quic::test::test_time(101));
+    auto changed_address_sends = send_effects_from(changed_address_initial);
+    ASSERT_FALSE(changed_address_sends.empty());
+    auto changed_address_result = changed_address_server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = changed_address_sends.front().bytes,
+            .route_handle = 92,
+            .address_validation_identity = bytes_from_ints({0x20, 0x01, 0x0d, 0xba}),
+        },
+        coquic::quic::test::test_time(102));
+    auto changed_address_lifecycle = lifecycle_events_from(changed_address_result);
+    ASSERT_FALSE(changed_address_lifecycle.empty());
+    ASSERT_EQ(changed_address_server.connection_count(), 1u);
+    const auto changed_handle = changed_address_lifecycle.front().connection;
+    auto &changed_connection = *changed_address_server.connections_.at(changed_handle).connection;
+    EXPECT_FALSE(changed_connection.peer_address_validated_);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+    // # If the client IP address has changed, the server MUST adhere to the
+    // # anti-amplification limit; see Section 8.
+    EXPECT_TRUE(changed_connection.anti_amplification_applies());
+    EXPECT_EQ(changed_connection.anti_amplification_send_budget(),
+              changed_connection.anti_amplification_received_bytes_ * 3u);
 }
 
 TEST(QuicCoreEndpointInternalTest, SealedNewTokenCanValidateWithPreviousSecret) {
@@ -1901,6 +2246,37 @@ TEST(QuicCoreEndpointInternalTest, StoredRetryAndNewTokensRejectAlreadyConsumedR
     EXPECT_TRUE(server.new_tokens_.contains(QuicCore::connection_id_key(new_token)));
 }
 
+TEST(QuicCoreEndpointInternalTest, NewTokensUseIndependentPerIssueBytes) {
+    QuicCore stateful_server(make_server_endpoint_config());
+    auto first_stateful = stateful_server.make_endpoint_new_token(
+        1, kQuicVersion1, 55, std::span<const std::byte>{}, coquic::quic::test::test_time(1));
+    auto second_stateful = stateful_server.make_endpoint_new_token(
+        2, kQuicVersion1, 55, std::span<const std::byte>{}, coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first_stateful.empty());
+    ASSERT_FALSE(second_stateful.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A server MUST ensure that every NEW_TOKEN frame it sends is unique
+    // # across all clients, with the exception of those sent to repair losses
+    // # of previously sent NEW_TOKEN frames.
+    EXPECT_NE(first_stateful, second_stateful);
+
+    auto sealed_config = make_server_endpoint_config();
+    sealed_config.address_validation_token_secret = make_address_validation_secret(0x4e);
+    QuicCore sealed_server(std::move(sealed_config));
+    auto identity = make_ipv4_identity(198, 51, 100, 9, 4433);
+    auto first_sealed = sealed_server.make_endpoint_new_token(3, kQuicVersion1, 56, identity,
+                                                              coquic::quic::test::test_time(1));
+    auto second_sealed = sealed_server.make_endpoint_new_token(4, kQuicVersion1, 56, identity,
+                                                               coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first_sealed.empty());
+    ASSERT_FALSE(second_sealed.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A server MUST ensure that every NEW_TOKEN frame it sends is unique
+    // # across all clients, with the exception of those sent to repair losses
+    // # of previously sent NEW_TOKEN frames.
+    EXPECT_NE(first_sealed, second_sealed);
+}
+
 TEST(QuicCoreEndpointInternalTest, RouteIdentityHelpersReuseStoredIdentityAndRejectDowngrade) {
     auto config = make_client_endpoint_config();
     config.allow_peer_address_change = true;
@@ -1958,6 +2334,10 @@ TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeInitialRoute
     EXPECT_EQ(loopback_error.code, QuicCoreLocalErrorCode::unsupported_operation);
     EXPECT_EQ(client.connection_count(), 0u);
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-21.5.6
+    // # Endpoints SHOULD NOT refuse to use an address unless they have specific
+    // # knowledge about the network indicating that sending datagrams to
+    // # unvalidated addresses in a given range is not safe.
     auto blocked_port = client.advance_endpoint(
         QuicCoreOpenConnection{
             .connection = make_client_open_config(2),
@@ -2036,6 +2416,26 @@ TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeNewRoutes) {
     EXPECT_EQ(private_migration_error.code, QuicCoreLocalErrorCode::unsupported_operation);
     EXPECT_FALSE(entry.path_id_by_route_handle.contains(29));
 
+    auto loopback_migration = client.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                QuicCoreRequestConnectionMigration{
+                    .route_handle = 30,
+                    .reason = QuicMigrationRequestReason::active,
+                    .address_validation_identity = make_ipv4_identity(127, 0, 0, 1, 4433),
+                },
+        },
+        coquic::quic::test::test_time(3));
+    auto loopback_migration_error = optional_value_or_terminate(loopback_migration.local_error);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-21.5.6
+    // # Endpoints SHOULD NOT allow connections or migration to a
+    // # loopback address if the same service was previously available
+    // # at a different interface or if the address was provided by a
+    // # service at a non-loopback address.
+    EXPECT_EQ(loopback_migration_error.code, QuicCoreLocalErrorCode::unsupported_operation);
+    EXPECT_FALSE(entry.path_id_by_route_handle.contains(30));
+
     auto link_local_inbound = client.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = bytes_from_ints({0x40, 0xa1, 0xb2, 0x00, 0x00}),
@@ -2045,7 +2445,7 @@ TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeNewRoutes) {
                                     0x00, 0x00, 0x00, 0x00, 0x00, 0x01},
                                    4433),
         },
-        coquic::quic::test::test_time(3));
+        coquic::quic::test::test_time(4));
     EXPECT_TRUE(link_local_inbound.effects.empty());
     EXPECT_FALSE(entry.path_id_by_route_handle.contains(31));
 }
@@ -2097,6 +2497,37 @@ TEST(QuicCoreEndpointInternalTest, ExpiredRetryAndNewTokensAreRemoved) {
     EXPECT_TRUE(server.new_tokens_.empty());
 }
 
+TEST(QuicCoreEndpointInternalTest, ServerQueuesNewTokenForValidatedMigratedClientRoute) {
+    auto server_config = make_server_endpoint_config();
+    server_config.application_protocol = "coquic";
+    QuicCore server(std::move(server_config));
+
+    auto entry = make_server_connection_entry(1);
+    entry.connection = std::make_unique<QuicConnection>(make_connected_server_connection());
+    auto &connection = *entry.connection;
+    connection.current_send_path_id_ = 7;
+    connection.last_validated_path_id_ = 7;
+    auto &migrated_path = connection.ensure_path_state(7);
+    migrated_path.validated = true;
+    migrated_path.is_current_send_path = true;
+    entry.default_route_handle = 11;
+    entry.route_handle_by_path_id.emplace(7, 55);
+    entry.path_id_by_route_handle.emplace(55, 7);
+
+    server.maybe_queue_server_new_token(entry, coquic::quic::test::test_time(1));
+
+    ASSERT_EQ(connection.pending_new_token_frames_.size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+    // # After verifying a new client address, the server SHOULD send new
+    // # address validation tokens (Section 8) to the client.
+    EXPECT_FALSE(connection.pending_new_token_frames_.front().token.empty());
+    ASSERT_EQ(entry.new_token_issued_routes.size(), 1u);
+    EXPECT_EQ(entry.new_token_issued_routes.front(), 55u);
+
+    server.maybe_queue_server_new_token(entry, coquic::quic::test::test_time(2));
+    EXPECT_EQ(connection.pending_new_token_frames_.size(), 1u);
+}
+
 // NOLINTBEGIN(clang-analyzer-cplusplus.NewDeleteLeaks)
 TEST(QuicCoreEndpointInternalTest, ClientStoresMostRecentUnusedNewTokenForOpen) {
     QuicCore client(make_client_endpoint_config());
@@ -2121,27 +2552,110 @@ TEST(QuicCoreEndpointInternalTest, ClientStoresMostRecentUnusedNewTokenForOpen) 
 
     client.remember_client_new_tokens(entry, first);
     client.remember_client_new_tokens(entry, second);
-    if (client.client_new_tokens_.size() != 2u) {
-        std::abort();
-    }
+    ASSERT_EQ(client.client_new_tokens_.size(), 2u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A client MAY use a token from any previous connection to that server.
+    EXPECT_EQ(client.client_new_tokens_.front().token, bytes_from_ints({0x01}));
 
     auto open = make_client_open_config();
     auto selected = client.take_client_new_token_for_open(open);
     auto selected_token = optional_value_or_terminate(selected);
-    if (selected_token != bytes_from_ints({0x02})) {
-        std::abort();
-    }
-    if (!client.client_new_tokens_.back().used) {
-        std::abort();
-    }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # When connecting to a server for which the client retains an
+    // # applicable and unused token, it SHOULD include that token
+    // # in the Token field of its Initial packet.
+    EXPECT_EQ(selected_token, bytes_from_ints({0x02}));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A client SHOULD NOT reuse a token from a NEW_TOKEN frame for
+    // # different connection attempts.
+    EXPECT_TRUE(client.client_new_tokens_.back().used);
 
     auto selected_again = client.take_client_new_token_for_open(open);
     auto selected_again_token = optional_value_or_terminate(selected_again);
-    if (selected_again_token != bytes_from_ints({0x01})) {
-        std::abort();
-    }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A client SHOULD NOT reuse a token from a NEW_TOKEN frame for
+    // # different connection attempts.
+    EXPECT_EQ(selected_again_token, bytes_from_ints({0x01}));
+    EXPECT_TRUE(client.take_client_new_token_for_open(open) == std::nullopt);
 
     entry.connection.reset();
+
+    QuicCore opening_client(make_client_endpoint_config());
+    opening_client.client_new_tokens_.push_back(QuicCore::ClientStoredNewToken{
+        .server_name = "localhost",
+        .version = kQuicVersion1,
+        .token = bytes_from_ints({0x03}),
+        .used = false,
+    });
+    opening_client.client_new_tokens_.push_back(QuicCore::ClientStoredNewToken{
+        .server_name = "other.example",
+        .version = kQuicVersion1,
+        .token = bytes_from_ints({0x04}),
+        .used = false,
+    });
+    auto opened = opening_client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(1));
+    auto sends = send_effects_from(opened);
+    ASSERT_FALSE(sends.empty());
+    auto initial_token = coquic::quic::test::client_initial_datagram_token(sends.front().bytes);
+    ASSERT_TRUE(initial_token.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # When connecting to a server for which the client retains an
+    // # applicable and unused token, it SHOULD include that token
+    // # in the Token field of its Initial packet.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # The client MUST include the token in all Initial packets it sends,
+    // # unless a Retry replaces the token with a newer one.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A client MUST NOT include a token that is not applicable to the server
+    // # that it is connecting to, unless the client has the knowledge that the
+    // # server that issued the token and the server the client is connecting to
+    // # are jointly managing the tokens.
+    EXPECT_EQ(optional_ref_or_terminate(initial_token), bytes_from_ints({0x03}));
+}
+
+TEST(QuicCoreEndpointInternalTest, ClientDoesNotStoreRetryTokenForFutureOpen) {
+    QuicCore client(make_client_endpoint_config());
+    auto retry_open = make_client_open_config();
+    retry_open.retry_token = bytes_from_ints({0x72, 0x74, 0x72, 0x79});
+    auto retried = client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = std::move(retry_open),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(1));
+    auto retry_sends = send_effects_from(retried);
+    ASSERT_FALSE(retry_sends.empty());
+    auto retry_initial_token =
+        coquic::quic::test::client_initial_datagram_token(retry_sends.front().bytes);
+    ASSERT_TRUE(retry_initial_token.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(retry_initial_token),
+              bytes_from_ints({0x72, 0x74, 0x72, 0x79}));
+    ASSERT_TRUE(client.client_new_tokens_.empty());
+
+    auto future = client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(2),
+            .initial_route_handle = 18,
+        },
+        coquic::quic::test::test_time(2));
+    auto future_sends = send_effects_from(future);
+    ASSERT_FALSE(future_sends.empty());
+    auto future_initial_token =
+        coquic::quic::test::client_initial_datagram_token(future_sends.front().bytes);
+    ASSERT_TRUE(future_initial_token.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # The client MUST NOT use the token provided in a Retry for future
+    // # connections.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # In comparison, a token obtained in a Retry packet MUST be used
+    // # immediately during the connection attempt and cannot be used in
+    // # subsequent connection attempts.
+    EXPECT_TRUE(optional_ref_or_terminate(future_initial_token).empty());
 }
 // NOLINTEND(clang-analyzer-cplusplus.NewDeleteLeaks)
 
@@ -2175,20 +2689,90 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetHelpersGenerateAndDetectResets)
     auto reset_datagram = optional_value_or_terminate(stateless_reset);
     EXPECT_EQ(reset_datagram.connection, 9u);
     EXPECT_EQ(reset_datagram.route_handle, std::optional<QuicRouteHandle>{55u});
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # An endpoint that sends a Stateless Reset in response to a packet that
+    // # is 43 bytes or shorter SHOULD send a Stateless Reset that is one byte
+    // # shorter than the packet it responds to.
     EXPECT_EQ(reset_datagram.bytes.size(), 42u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.3
+    // # An endpoint MUST ensure that every Stateless Reset that it sends is
+    // # smaller than the packet that triggered it, unless it maintains state
+    // # sufficient to prevent looping.
+    EXPECT_LT(reset_datagram.bytes.size(), unknown_short_header.size());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # Endpoints MUST send Stateless Resets formatted as a packet with a
+    // # short header.
+    EXPECT_EQ(std::to_integer<std::uint8_t>(reset_datagram.bytes.span().front()) & 0xc0u, 0x40u);
     ASSERT_GE(reset_datagram.bytes.size(), 21u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # An endpoint MUST NOT send a Stateless Reset that is three times or
+    // # more larger than the packet it receives to avoid being used for
+    // # amplification.
+    EXPECT_LT(reset_datagram.bytes.size(), unknown_short_header.size() * 3u);
     EXPECT_TRUE(std::equal(token.begin(), token.end(),
                            reset_datagram.bytes.end() - static_cast<std::ptrdiff_t>(token.size())));
 
-    std::vector<std::byte> tiny_unknown_short_header(21, std::byte{0xaa});
-    tiny_unknown_short_header.front() = std::byte{0x40};
-    std::copy(connection_id.begin(), connection_id.end(), tiny_unknown_short_header.begin() + 1);
-    auto tiny_parsed = QuicCore::parse_endpoint_datagram(tiny_unknown_short_header);
-    auto tiny_parsed_datagram = optional_value_or_terminate(tiny_parsed);
-    auto tiny_stateless_reset = server.make_stateless_reset_for_unknown_cid(
-        tiny_parsed_datagram, tiny_unknown_short_header, 55, coquic::quic::test::test_time(0));
-    auto tiny_reset_datagram = optional_value_or_terminate(tiny_stateless_reset);
-    EXPECT_EQ(tiny_reset_datagram.bytes.size(), 21u);
+    auto second_stateless_reset = server.make_stateless_reset_for_unknown_cid(
+        parsed_datagram, unknown_short_header, 55, coquic::quic::test::test_time(0));
+    auto second_reset_datagram = optional_value_or_terminate(second_stateless_reset);
+    auto first_random_prefix = reset_datagram.bytes.to_vector();
+    first_random_prefix.resize(first_random_prefix.size() - token.size());
+    auto second_random_prefix = second_reset_datagram.bytes.to_vector();
+    second_random_prefix.resize(second_random_prefix.size() - token.size());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # The remainder of the first byte and an arbitrary number of bytes
+    // # following it are set to values that SHOULD be indistinguishable from
+    // # random.
+    EXPECT_NE(first_random_prefix, second_random_prefix);
+
+    std::vector<std::byte> minimum_reset_unknown_short_header(21, std::byte{0xaa});
+    minimum_reset_unknown_short_header.front() = std::byte{0x40};
+    std::copy(connection_id.begin(), connection_id.end(),
+              minimum_reset_unknown_short_header.begin() + 1);
+    auto minimum_reset_parsed =
+        QuicCore::parse_endpoint_datagram(minimum_reset_unknown_short_header);
+    auto minimum_reset_parsed_datagram = optional_value_or_terminate(minimum_reset_parsed);
+    auto minimum_reset_stateless_reset = server.make_stateless_reset_for_unknown_cid(
+        minimum_reset_parsed_datagram, minimum_reset_unknown_short_header, 55,
+        coquic::quic::test::test_time(0));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.3
+    // # An endpoint MUST ensure that every Stateless Reset that it sends is
+    // # smaller than the packet that triggered it, unless it maintains state
+    // # sufficient to prevent looping.
+    EXPECT_FALSE(minimum_reset_stateless_reset.has_value());
+
+    std::vector<std::byte> small_unknown_short_header(22, std::byte{0xaa});
+    small_unknown_short_header.front() = std::byte{0x40};
+    std::copy(connection_id.begin(), connection_id.end(), small_unknown_short_header.begin() + 1);
+    auto small_parsed = QuicCore::parse_endpoint_datagram(small_unknown_short_header);
+    auto small_parsed_datagram = optional_value_or_terminate(small_parsed);
+    auto small_stateless_reset = server.make_stateless_reset_for_unknown_cid(
+        small_parsed_datagram, small_unknown_short_header, 55, coquic::quic::test::test_time(0));
+    auto small_reset_datagram = optional_value_or_terminate(small_stateless_reset);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # An endpoint MUST NOT send a Stateless Reset that is three times or
+    // # more larger than the packet it receives to avoid being used for
+    // # amplification.
+    EXPECT_LT(small_reset_datagram.bytes.size(), small_unknown_short_header.size() * 3u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.3
+    // # An endpoint MUST ensure that every Stateless Reset that it sends is
+    // # smaller than the packet that triggered it, unless it maintains state
+    // # sufficient to prevent looping.
+    EXPECT_LT(small_reset_datagram.bytes.size(), small_unknown_short_header.size());
+
+    std::vector<std::byte> medium_unknown_short_header(64, std::byte{0xaa});
+    medium_unknown_short_header.front() = std::byte{0x40};
+    std::copy(connection_id.begin(), connection_id.end(), medium_unknown_short_header.begin() + 1);
+    auto medium_parsed = QuicCore::parse_endpoint_datagram(medium_unknown_short_header);
+    auto medium_parsed_datagram = optional_value_or_terminate(medium_parsed);
+    auto medium_stateless_reset = server.make_stateless_reset_for_unknown_cid(
+        medium_parsed_datagram, medium_unknown_short_header, 55, coquic::quic::test::test_time(0));
+    auto medium_reset_datagram = optional_value_or_terminate(medium_stateless_reset);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.3
+    // # An endpoint MUST ensure that every Stateless Reset that it sends is
+    // # smaller than the packet that triggered it, unless it maintains state
+    // # sufficient to prevent looping.
+    EXPECT_LT(medium_reset_datagram.bytes.size(), medium_unknown_short_header.size());
 
     QuicCore client(make_client_endpoint_config());
     client.peer_stateless_reset_tokens_.insert_or_assign(QuicCore::stateless_reset_token_key(token),
@@ -2199,6 +2783,14 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetHelpersGenerateAndDetectResets)
                                                          QuicCore::PeerStatelessResetTokenRoute{
                                                              .owner = 99,
                                                          });
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # However, endpoints MUST treat any packet ending in a valid stateless
+    // # reset token as a Stateless Reset, as other QUIC versions might allow
+    // # the use of a long header.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
+    // # When comparing a datagram to stateless reset token values, endpoints
+    // # MUST perform the comparison without leaking information about the value
+    // # of the token.
     EXPECT_EQ(client.detect_stateless_reset(reset_datagram.bytes.span()),
               std::optional<QuicConnectionHandle>{4u});
 
@@ -2287,6 +2879,30 @@ TEST(QuicCoreEndpointInternalTest, ConfiguredResetSecretSupportsUnknownCidAfterS
     token_source_config.stateless_reset_secret = reset_secret;
     const QuicConnection token_source(std::move(token_source_config));
     auto expected_token = token_source.local_connection_ids_.at(0).stateless_reset_token;
+    auto different_secret = reset_secret;
+    different_secret.front() =
+        static_cast<std::byte>(std::to_integer<std::uint8_t>(different_secret.front()) ^ 0x55u);
+    auto different_secret_token_source_config = coquic::quic::test::make_server_core_config();
+    different_secret_token_source_config.source_connection_id =
+        original_entry.connection->config_.source_connection_id;
+    different_secret_token_source_config.stateless_reset_secret = different_secret;
+    const QuicConnection different_secret_token_source(
+        std::move(different_secret_token_source_config));
+    auto different_cid_token_source_config = coquic::quic::test::make_server_core_config();
+    different_cid_token_source_config.source_connection_id =
+        original_entry.connection->config_.source_connection_id;
+    different_cid_token_source_config.source_connection_id.back() =
+        static_cast<std::byte>(std::to_integer<std::uint8_t>(
+                                   different_cid_token_source_config.source_connection_id.back()) ^
+                               0x11u);
+    different_cid_token_source_config.stateless_reset_secret = reset_secret;
+    const QuicConnection different_cid_token_source(std::move(different_cid_token_source_config));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+    // # The stateless reset token MUST be difficult to guess.
+    EXPECT_NE(different_secret_token_source.local_connection_ids_.at(0).stateless_reset_token,
+              expected_token);
+    EXPECT_NE(different_cid_token_source.local_connection_ids_.at(0).stateless_reset_token,
+              expected_token);
     original_entry.connection->local_connection_ids_.emplace(
         0, LocalConnectionIdRecord{
                .sequence_number = 0,
@@ -2322,6 +2938,31 @@ TEST(QuicCoreEndpointInternalTest, ConfiguredResetSecretSupportsUnknownCidAfterS
                            reset_datagram.bytes.end() -
                                static_cast<std::ptrdiff_t>(expected_token.size())));
 
+    auto wrong_length_connection_id = connection_id;
+    wrong_length_connection_id.push_back(std::byte{0x80});
+    std::vector<std::byte> wrong_length_unknown_initial{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x01}, static_cast<std::byte>(wrong_length_connection_id.size()),
+    };
+    wrong_length_unknown_initial.insert(wrong_length_unknown_initial.end(),
+                                        wrong_length_connection_id.begin(),
+                                        wrong_length_connection_id.end());
+    wrong_length_unknown_initial.push_back(std::byte{0x01});
+    wrong_length_unknown_initial.push_back(std::byte{0x11});
+    wrong_length_unknown_initial.push_back(std::byte{0x00});
+    wrong_length_unknown_initial.resize(64, std::byte{0xaa});
+    auto wrong_length_parsed = QuicCore::parse_endpoint_datagram(wrong_length_unknown_initial);
+    auto wrong_length_parsed_datagram = optional_value_or_terminate(wrong_length_parsed);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+    // # An endpoint that uses this design MUST either use the same connection
+    // # ID length for all connections or encode the length of the connection
+    // # ID such that it can be recovered without state.
+    EXPECT_FALSE(restarted
+                     .make_stateless_reset_for_unknown_cid(wrong_length_parsed_datagram,
+                                                           wrong_length_unknown_initial, 55,
+                                                           coquic::quic::test::test_time(10))
+                     .has_value());
+
     auto no_secret_config = make_server_endpoint_config();
     QuicCore no_secret(std::move(no_secret_config));
     EXPECT_FALSE(no_secret
@@ -2339,7 +2980,6 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetDatagramEntersDrainingWithoutRe
     entry.connection->status_ = HandshakeStatus::connected;
     entry.connection->application_space_.write_secret = make_test_traffic_secret();
     entry.connection->peer_transport_parameters_ = TransportParameters{
-        .max_udp_payload_size = entry.connection->config_.transport.max_udp_payload_size,
         .stateless_reset_token =
             std::array<std::byte, 16>{
                 std::byte{0x10},
@@ -2359,6 +2999,7 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetDatagramEntersDrainingWithoutRe
                 std::byte{0x1e},
                 std::byte{0x1f},
             },
+        .max_udp_payload_size = entry.connection->config_.transport.max_udp_payload_size,
         .active_connection_id_limit = 2,
     };
     entry.connection->peer_transport_parameters_validated_ = true;
@@ -2374,6 +3015,10 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetDatagramEntersDrainingWithoutRe
         client.connections_.at(handle).connection->peer_transport_parameters_;
     auto &parameters = optional_ref_or_terminate(peer_transport_parameters);
     auto token = optional_value_or_terminate(parameters.stateless_reset_token);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
+    // # However, the comparison MUST be performed when the first packet in an
+    // # incoming datagram either cannot be associated with a connection or
+    // # cannot be decrypted.
     std::copy(token.begin(), token.end(),
               datagram.end() - static_cast<std::ptrdiff_t>(token.size()));
 
@@ -2386,7 +3031,16 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetDatagramEntersDrainingWithoutRe
 
     EXPECT_TRUE(send_effects_from(result).empty());
     ASSERT_TRUE(client.connections_.contains(handle));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
+    // # If the last 16 bytes of the datagram are identical in value to a
+    // # stateless reset token, the endpoint MUST enter the draining period and
+    // # not send any further packets on this connection.
     EXPECT_TRUE(client.connections_.at(handle).connection->close_state_active());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.2
+    // # An endpoint MUST NOT send further packets.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.2
+    // # While otherwise identical to the closing state, an
+    // # endpoint in the draining state MUST NOT send any packets.
     EXPECT_FALSE(client.connections_.at(handle).connection->has_sendable_datagram(
         coquic::quic::test::test_time(123)));
     EXPECT_TRUE(result.next_wakeup.has_value());

@@ -588,6 +588,12 @@ TEST(QuicRecoveryTest, AckHistoryBuildsMultipleAckRanges) {
 
     const auto &ack_frame = *ack;
     ASSERT_EQ(ack_frame.additional_ranges.size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+    // # A receiver SHOULD include an ACK Range containing the largest
+    // # received packet number in every ACK frame.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+    // # ACK frames SHOULD always acknowledge the most recently received
+    // # packets, and the
     EXPECT_EQ(ack_frame.largest_acknowledged, 4u);
     EXPECT_EQ(ack_frame.first_ack_range, 0u);
     EXPECT_EQ(ack_frame.additional_ranges[0].gap, 1u);
@@ -741,6 +747,11 @@ TEST(QuicRecoveryTest, AckHistoryCapsSparseTrackedRanges) {
         coquic::quic::test::ReceivedPacketHistoryTestPeer::contains_range_start(history, 0));
     EXPECT_TRUE(coquic::quic::test::ReceivedPacketHistoryTestPeer::contains_range_start(
         history, coquic::quic::kMaxTrackedAckRanges * 2 - 2));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+    // # A receiver MUST retain an ACK Range unless it can ensure that it will
+    // # not subsequently accept packets with numbers in that range.
+    // # Maintaining a minimum packet number that increases as ranges are
+    // # discarded is one way to achieve this with minimal state.
     EXPECT_EQ(
         coquic::quic::test::ReceivedPacketHistoryTestPeer::least_untracked_packet_number(history),
         1u);
@@ -792,6 +803,9 @@ TEST(QuicRecoveryTest, AckHistoryRetiresRangesAcknowledgedByPeerAck) {
 
     history.retire_acknowledged_ranges_up_to(4);
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+    // # After receiving acknowledgments for an ACK frame, the receiver SHOULD
+    // # stop tracking those acknowledged ACK Ranges.
     EXPECT_EQ(coquic::quic::test::ReceivedPacketHistoryTestPeer::range_count(history), 1u);
     EXPECT_EQ(
         coquic::quic::test::ReceivedPacketHistoryTestPeer::least_untracked_packet_number(history),
@@ -854,7 +868,29 @@ TEST(QuicRecoveryTest, AckHistoryMeasuresAckDelayFromLargestAcknowledgedPacket) 
 
     const auto &ack_frame = *ack;
     EXPECT_EQ(ack_frame.largest_acknowledged, 2u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.5
+    // # An endpoint MUST NOT include delays that it does not control when
+    // # populating the ACK Delay field in an ACK frame.
     EXPECT_EQ(ack_frame.ack_delay, 1000u);
+}
+
+TEST(QuicRecoveryTest, AckHistoryReportsMeasuredAckDelayWhenAboveMaxAckDelay) {
+    ReceivedPacketHistory history;
+    history.record_received(/*packet_number=*/2, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(20));
+
+    const auto ack =
+        history.build_ack_frame(/*ack_delay_exponent=*/0, coquic::quic::test::test_time(120));
+    ASSERT_TRUE(ack.has_value());
+    if (!ack.has_value()) {
+        GTEST_FAIL() << "expected ACK frame";
+        return;
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.5
+    // # When the measured acknowledgment delay is larger than its
+    // # max_ack_delay, an endpoint SHOULD report the measured delay.
+    EXPECT_EQ(ack->ack_delay, 100000u);
 }
 
 TEST(QuicRecoveryTest, AckHistoryClampsAckDelayWhenExponentIsTooLarge) {
@@ -1027,6 +1063,9 @@ TEST(QuicRecoveryTest, SecondAckElicitingPacketRequestsImmediateAckByDefault) {
 
     history.record_received(/*packet_number=*/5, /*ack_eliciting=*/true,
                             coquic::quic::test::test_time(2));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.2
+    // # A receiver SHOULD send an ACK frame after receiving at least two ack-
+    // # eliciting packets.
     EXPECT_TRUE(history.requests_immediate_ack());
 }
 
@@ -1057,6 +1096,19 @@ TEST(QuicRecoveryTest, AckElicitingGapRequestsImmediateAck) {
 
     history.record_received(/*packet_number=*/9, /*ack_eliciting=*/true,
                             coquic::quic::test::test_time(2));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # In order to assist loss detection at the sender, an endpoint SHOULD
+    // # generate and send an ACK frame without delay when it receives an ack-
+    // # eliciting packet either:
+    // # *  when the received packet has a packet number less than another
+    // #    ack-eliciting packet that has been received, or
+    // # *  when the packet has a packet number larger than the highest-
+    // #    numbered ack-eliciting packet that has been received and there are
+    // #    missing packets between that packet and this packet.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+    // # the more out of order the packets are, the more important it is to send
+    // # an updated ACK frame quickly, to prevent the peer from declaring a packet
+    // # as lost and spuriously retransmitting the frames it contains.
     EXPECT_TRUE(history.requests_immediate_ack());
 }
 
@@ -3167,6 +3219,9 @@ TEST(QuicRecoveryTest, EmptyAndUnknownRecoveryLookupsReturnWithoutStateChanges) 
 
 TEST(QuicRecoveryTest, PtoDeadlineUsesInitialRttBeforeSamples) {
     RecoveryRttState rtt;
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2
+    // # When no previous RTT is available, the initial RTT SHOULD be set to
+    // # 333 milliseconds.
     const auto deadline = coquic::quic::compute_pto_deadline(
         rtt, std::chrono::milliseconds(25), coquic::quic::test::test_time(0), /*pto_count=*/0);
     EXPECT_EQ(deadline, coquic::quic::test::test_time(999));
@@ -3183,6 +3238,8 @@ TEST(QuicRecoveryTest, FirstRttSampleResetsEstimator) {
 
     ASSERT_TRUE(rtt.latest_rtt.has_value());
     ASSERT_TRUE(rtt.min_rtt.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-5.2
+    // # min_rtt MUST be set to the latest_rtt on the first RTT sample.
     if (!rtt.latest_rtt.has_value()) {
         GTEST_FAIL() << "expected latest RTT sample";
         return;

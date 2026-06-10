@@ -66,6 +66,54 @@ CodecResult<ConnectionId> QuicConnection::peek_client_initial_destination_connec
         destination_connection_id.value().begin(), destination_connection_id.value().end()));
 }
 
+CodecResult<ConnectionId>
+QuicConnection::peek_long_header_destination_connection_id(std::span<const std::byte> bytes) const {
+    BufferReader reader(bytes);
+    const auto first_byte = reader.read_byte();
+    if (!first_byte.has_value()) {
+        return CodecResult<ConnectionId>::failure(first_byte.error().code,
+                                                  first_byte.error().offset);
+    }
+
+    const auto header_byte = std::to_integer<std::uint8_t>(first_byte.value());
+    if ((header_byte & 0x80u) == 0) {
+        return CodecResult<ConnectionId>::failure(CodecErrorCode::unsupported_packet_type, 0);
+    }
+    if (invalid_fixed_bit_is_rejected(header_byte, config_.transport.grease_quic_bit)) {
+        return CodecResult<ConnectionId>::failure(CodecErrorCode::invalid_fixed_bit, 0);
+    }
+
+    const auto version = reader.read_exact(4);
+    if (!version.has_value()) {
+        return CodecResult<ConnectionId>::failure(version.error().code, version.error().offset);
+    }
+    const auto version_value = read_u32_be(version.value());
+    if (!is_supported_quic_version(version_value)) {
+        return CodecResult<ConnectionId>::failure(CodecErrorCode::unsupported_packet_type, 0);
+    }
+
+    const auto destination_connection_id_length = reader.read_byte();
+    if (!destination_connection_id_length.has_value()) {
+        return CodecResult<ConnectionId>::failure(destination_connection_id_length.error().code,
+                                                  destination_connection_id_length.error().offset);
+    }
+    const auto destination_connection_id_length_value =
+        std::to_integer<std::uint8_t>(destination_connection_id_length.value());
+    if (destination_connection_id_length_value > 20) {
+        return CodecResult<ConnectionId>::failure(CodecErrorCode::invalid_varint, reader.offset());
+    }
+
+    const auto destination_connection_id =
+        reader.read_exact(destination_connection_id_length_value);
+    if (!destination_connection_id.has_value()) {
+        return CodecResult<ConnectionId>::failure(destination_connection_id.error().code,
+                                                  destination_connection_id.error().offset);
+    }
+
+    return CodecResult<ConnectionId>::success(ConnectionId(
+        destination_connection_id.value().begin(), destination_connection_id.value().end()));
+}
+
 CodecResult<std::size_t>
 QuicConnection::peek_next_packet_length(std::span<const std::byte> bytes) const {
     BufferReader reader(bytes);
@@ -175,6 +223,14 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                                                           current_version_)) {
                     current_version_ = protected_packet.version;
                 }
+                if (config_.role == EndpointRole::client && !protected_packet.token.empty()) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.2
+                    // # Initial packets sent by the server MUST set the Token Length field
+                    // # to 0; clients that receive an Initial packet with a non-zero Token
+                    // # Length field MUST either discard the packet or generate a connection
+                    // # error of type PROTOCOL_VIOLATION.
+                    return CodecResult<bool>::success(true);
+                }
                 if (initial_packet_space_discarded_) {
                     return CodecResult<bool>::success(true);
                 }
@@ -198,6 +254,9 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                 const bool route_changed = peer_connection_id_route_changed(
                     peer_connection_ids_, protected_packet.source_connection_id,
                     active_peer_connection_id_sequence_);
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+                // # A server MUST set the Destination Connection ID it uses for
+                // # sending packets based on the first received Initial packet.
                 peer_source_connection_id_ = protected_packet.source_connection_id;
                 peer_connection_ids_[0] = PeerConnectionIdRecord{
                     .sequence_number = 0,
@@ -213,6 +272,14 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+                    // # A packet MUST NOT be acknowledged until packet protection has been
+                    // # successfully removed and all frames contained in the packet have been
+                    // # processed.
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+                    // # The receiver of coalesced QUIC packets MUST individually process
+                    // # each QUIC packet and separately acknowledge them, as if they were
+                    // # received as the payload of different UDP datagrams.
                     initial_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now, ecn,
                         config_.transport.ack_eliciting_threshold);
@@ -225,6 +292,10 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                         note_idle_peer_activity(now);
                     }
                     if (ack_eliciting) {
+                        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+                        // # An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+                        // # packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+                        // # within its advertised max_ack_delay, with the following exception.
                         initial_space_.pending_ack_deadline = now;
                         initial_space_.force_ack_send |= ecn == QuicEcnCodepoint::ce;
                     }
@@ -281,6 +352,14 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                         discard_initial_packet_space();
                     }
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+                    // # A packet MUST NOT be acknowledged until packet protection has been
+                    // # successfully removed and all frames contained in the packet have been
+                    // # processed.
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+                    // # The receiver of coalesced QUIC packets MUST individually process
+                    // # each QUIC packet and separately acknowledge them, as if they were
+                    // # received as the payload of different UDP datagrams.
                     handshake_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now, ecn,
                         config_.transport.ack_eliciting_threshold);
@@ -293,6 +372,10 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                         note_idle_peer_activity(now);
                     }
                     if (ack_eliciting) {
+                        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+                        // # An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+                        // # packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+                        // # within its advertised max_ack_delay, with the following exception.
                         handshake_space_.pending_ack_deadline = now;
                         handshake_space_.force_ack_send |= ecn == QuicEcnCodepoint::ce;
                     }
@@ -317,11 +400,24 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+                    // # A packet MUST NOT be acknowledged until packet protection has been
+                    // # successfully removed and all frames contained in the packet have been
+                    // # processed.
                     application_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now, ecn,
                         config_.transport.ack_eliciting_threshold);
                     note_idle_peer_activity(now);
                     if (ack_eliciting) {
+                        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+                        // # Every packet SHOULD be acknowledged at least once, and ack-eliciting
+                        // # packets MUST be acknowledged at least once within the maximum delay
+                        // # an endpoint communicated using the max_ack_delay transport parameter;
+                        // # see Section 18.2.
+                        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+                        // # An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+                        // # packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+                        // # within its advertised max_ack_delay, with the following exception.
                         application_space_.pending_ack_deadline = now;
                         application_space_.force_ack_send |= ecn == QuicEcnCodepoint::ce;
                     }
@@ -353,6 +449,10 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                         mark_peer_address_validated();
                     }
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+                    // # Packets containing discarded CRYPTO frames MUST be acknowledged
+                    // # because the packet has been received and processed by the transport
+                    // # even though the CRYPTO frame was discarded.
                     application_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now, ecn,
                         config_.transport.ack_eliciting_threshold);
@@ -368,6 +468,9 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                             zero_rtt_space_.read_secret.has_value()) {
                             arm_server_zero_rtt_discard_deadline(now);
                         } else {
+                            //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+                            // # A client MUST NOT send 0-RTT packets once it starts processing
+                            // # 1-RTT packets from the server.
                             discard_packet_space_state(zero_rtt_space_);
                         }
                     }
@@ -395,6 +498,14 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 if (should_adopt_supported_client_version(config_.role, protected_packet.version,
                                                           current_version_)) {
                     current_version_ = protected_packet.version;
+                }
+                if (config_.role == EndpointRole::client && !protected_packet.token.empty()) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.2
+                    // # Initial packets sent by the server MUST set the Token Length field
+                    // # to 0; clients that receive an Initial packet with a non-zero Token
+                    // # Length field MUST either discard the packet or generate a connection
+                    // # error of type PROTOCOL_VIOLATION.
+                    return CodecResult<bool>::success(true);
                 }
                 if (initial_packet_space_discarded_) {
                     return CodecResult<bool>::success(true);
@@ -538,11 +649,28 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
+                    // # Packets that a client sends with 0-RTT packet protection
+                    // # MUST be acknowledged by the server in packets protected by
+                    // # 1-RTT keys.
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+                    // # A packet MUST NOT be acknowledged until packet protection has been
+                    // # successfully removed and all frames contained in the packet have been
+                    // # processed.
                     application_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now, ecn,
                         config_.transport.ack_eliciting_threshold);
                     note_idle_peer_activity(now);
                     if (ack_eliciting) {
+                        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+                        // # Every packet SHOULD be acknowledged at least once, and ack-eliciting
+                        // # packets MUST be acknowledged at least once within the maximum delay
+                        // # an endpoint communicated using the max_ack_delay transport parameter;
+                        // # see Section 18.2.
+                        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+                        // # An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+                        // # packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+                        // # within its advertised max_ack_delay, with the following exception.
                         application_space_.pending_ack_deadline = now;
                         application_space_.force_ack_send |= ecn == QuicEcnCodepoint::ce;
                     }
@@ -633,6 +761,9 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                             zero_rtt_space_.read_secret.has_value()) {
                             arm_server_zero_rtt_discard_deadline(now);
                         } else {
+                            //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+                            // # A client MUST NOT send 0-RTT packets once it starts processing
+                            // # 1-RTT packets from the server.
                             discard_packet_space_state(zero_rtt_space_);
                         }
                     }
@@ -653,7 +784,26 @@ bool QuicConnection::should_skip_packet_number_for_optimistic_ack_detection(
     return skip_counter_active & skip_interval_due & packet_number_available;
 }
 
-std::uint64_t QuicConnection::reserve_packet_number(PacketSpaceState &packet_space) {
+std::optional<std::uint64_t> QuicConnection::reserve_packet_number(PacketSpaceState &packet_space) {
+    if (packet_space.next_send_packet_number >= kMaxPacketNumber) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+        // # If the packet number for sending reaches 2^62-1, the sender MUST
+        // # close the connection without sending a CONNECTION_CLOSE frame or any
+        // # further packets;
+        mark_silent_close();
+        return std::nullopt;
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+    // # New packet numbers MUST be used for any new packets that are sent; as
+    // # described in Section 17.2.5.3, reusing packet numbers could compromise
+    // # packet protection.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    // # Subsequent packets sent in the same packet
+    // # number space MUST increase the packet number by at least one.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    // # A QUIC endpoint MUST NOT reuse a packet number within the same packet
+    // # number space in one connection.
     const auto packet_number = packet_space.next_send_packet_number++;
     if (!config_.transport.enable_optimistic_ack_mitigation) {
         return packet_number;
@@ -699,6 +849,10 @@ CodecResult<bool> QuicConnection::reject_optimistic_ack_if_detected(PacketSpaceS
         return CodecResult<bool>::success(true);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+    // # An endpoint SHOULD treat receipt of an acknowledgment for a packet it
+    // # did not send as a connection error of type PROTOCOL_VIOLATION, if it is
+    // # able to detect the condition.
     const auto error = optimistic_ack_protocol_violation_error();
     queue_transport_close_for_error(now, error);
     return CodecResult<bool>::failure(error);
@@ -1074,6 +1228,9 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
     auto simple_stream_ack_sample_span =
         std::span<const AckedStreamPacketSample>(simple_stream_ack_samples);
     auto acked_packet_span = std::span<const SentPacketRecord>(acked_packets);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.1
+    // # An endpoint MUST NOT fail ECN validation as a result of processing an ACK
+    // # frame that does not increase the largest acknowledged packet number.
     if (ack_result.largest_acknowledged_was_newly_acked) {
         struct PathEcnAckSummary {
             std::uint64_t newly_acked_ect0 = 0;
@@ -1119,6 +1276,8 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
                 }
 
                 if (!ecn_counts.has_value()) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+                    // # If validation fails, then the endpoint MUST disable ECN.
                     disable_ecn_on_path(path_id);
                     continue;
                 }
@@ -1131,6 +1290,8 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
                                         current_counts.ect1 < previous_counts.ect1 ||
                                         current_counts.ecn_ce < previous_counts.ecn_ce;
                 if (counts_decreased) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+                    // # If validation fails, then the endpoint MUST disable ECN.
                     disable_ecn_on_path(path_id);
                     continue;
                 }
@@ -1144,6 +1305,8 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
                 bool impossible_ect1_count = current_counts.ect1 > path.ecn.total_sent_ect1;
                 if (missing_ect0_feedback || missing_ect1_feedback || impossible_ect0_count ||
                     impossible_ect1_count) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+                    // # If validation fails, then the endpoint MUST disable ECN.
                     disable_ecn_on_path(path_id);
                     continue;
                 }
@@ -1189,6 +1352,9 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
         if (send_profile_enabled()) {
             ++send_profile_counters().loss_events;
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # Upon detecting losses, a sender MUST take appropriate congestion
+        // # control action.
         congestion_controller_.on_loss_event(now,
                                              latest_packet_sent_time(ack_eliciting_lost_packets));
         if (establishes_persistent_congestion(ack_eliciting_lost_packets, shared_rtt_state,
@@ -1283,6 +1449,9 @@ void QuicConnection::maybe_update_rtt_before_ack_loss_detection(
     if (largest_packet == nullptr) {
         return;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-5.1
+    // # An endpoint generates an RTT sample on receiving an ACK frame that
+    // # meets the following two conditions:
     if (!largest_packet->ack_eliciting &&
         !packet_space.recovery.ack_ranges_include_newly_ackable_ack_eliciting_packet(cursor)) {
         return;
@@ -1985,6 +2154,8 @@ bool QuicConnection::process_simple_stream_ack_ecn(
         }
 
         if (!ecn_counts.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+            // # If validation fails, then the endpoint MUST disable ECN.
             disable_ecn_on_path(path_id);
             continue;
         }
@@ -1994,6 +2165,8 @@ bool QuicConnection::process_simple_stream_ack_ecn(
                                          : AckEcnCounts{};
         const auto &current_counts = *ecn_counts;
         if (ecn_counts_decreased(current_counts, previous_counts)) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+            // # If validation fails, then the endpoint MUST disable ECN.
             disable_ecn_on_path(path_id);
             continue;
         }
@@ -2005,6 +2178,8 @@ bool QuicConnection::process_simple_stream_ack_ecn(
                                     summary.newly_acked_ect1, current_counts.ect0,
                                     current_counts.ect1, path.ecn.total_sent_ect0,
                                     path.ecn.total_sent_ect1)) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+            // # If validation fails, then the endpoint MUST disable ECN.
             disable_ecn_on_path(path_id);
             continue;
         }
@@ -2043,6 +2218,8 @@ bool QuicConnection::process_single_path_simple_stream_ack_ecn(
     }
 
     if (!ecn_counts.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+        // # If validation fails, then the endpoint MUST disable ECN.
         disable_ecn_on_path(path_id);
         return true;
     }
@@ -2052,6 +2229,8 @@ bool QuicConnection::process_single_path_simple_stream_ack_ecn(
                                      : AckEcnCounts{};
     const auto &current_counts = *ecn_counts;
     if (ecn_counts_decreased(current_counts, previous_counts)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+        // # If validation fails, then the endpoint MUST disable ECN.
         disable_ecn_on_path(path_id);
         return true;
     }
@@ -2062,6 +2241,8 @@ bool QuicConnection::process_single_path_simple_stream_ack_ecn(
     if (ecn_feedback_is_invalid(delta_ect0, delta_ect1, delta_ce, newly_acked_ect0,
                                 newly_acked_ect1, current_counts.ect0, current_counts.ect1,
                                 path.ecn.total_sent_ect0, path.ecn.total_sent_ect1)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+        // # If validation fails, then the endpoint MUST disable ECN.
         disable_ecn_on_path(path_id);
         return true;
     }
@@ -2074,6 +2255,10 @@ bool QuicConnection::process_single_path_simple_stream_ack_ecn(
     }
 
     if (delta_ce != 0) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3
+        // # QUIC implementations MUST properly handle both types, and, if
+        // # they have enabled ECN for packets they send, they SHOULD use the
+        // # information in the ECN section to manage their congestion state.
         latest_ecn_ce_sent_time = std::max(
             latest_ecn_ce_sent_time.value_or(latest_marked_sent_time), latest_marked_sent_time);
     }
@@ -2208,6 +2393,9 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
         const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
         auto previous_has_lost_send_data =
             stream_has_lost_send_data_for_state_change(stream->second);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # A sender SHOULD avoid retransmitting information from packets once
+        // # they are acknowledged.
         stream->second.acknowledge_send_metadata(metadata);
         note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
                                        stream->second);
@@ -2223,6 +2411,9 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
         const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
         auto previous_has_lost_send_data =
             stream_has_lost_send_data_for_state_change(stream->second);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # A sender SHOULD avoid retransmitting information from packets once
+        // # they are acknowledged.
         stream->second.acknowledge_send_fragment(fragment);
         note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
                                        stream->second);
@@ -2253,6 +2444,9 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
     for (const auto &frame : packet.max_streams_frames) {
         local_stream_limit_state_.acknowledge_max_streams_frame(frame);
     }
+    for (const auto &frame : packet.streams_blocked_frames) {
+        stream_open_limits_.acknowledge_streams_blocked_frame(frame);
+    }
     if (!packet.new_connection_id_frames.empty()) {
         std::erase_if(pending_new_connection_id_frames_, [&](const NewConnectionIdFrame &pending) {
             return std::ranges::any_of(
@@ -2272,10 +2466,19 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
                         return pending.sequence_number == acked.sequence_number;
                     });
             });
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+        // # An endpoint SHOULD allow for sending and tracking a number of
+        // # RETIRE_CONNECTION_ID frames of at least twice the value of the
+        // # active_connection_id_limit transport parameter.
         for (const auto &retired : packet.retire_connection_id_frames) {
             if (const auto peer = peer_connection_ids_.find(retired.sequence_number);
                 peer != peer_connection_ids_.end()) {
                 if (peer->second.locally_retired) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+                    // # An endpoint MUST NOT forget a connection ID without
+                    // # retiring it, though it MAY choose to treat having
+                    // # connection IDs in need of retirement that exceed this
+                    // # limit as a connection error of type CONNECTION_ID_LIMIT_ERROR.
                     peer_connection_ids_.erase(peer);
                     retired_peer_connection_id_sequences_.insert(retired.sequence_number);
                 }
@@ -2297,6 +2500,7 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
         packet.max_data_frame.reset();
         packet.max_stream_data_frames.clear();
         packet.max_streams_frames.clear();
+        packet.streams_blocked_frames.clear();
         packet.data_blocked_frame.reset();
         packet.stream_data_blocked_frames.clear();
         packet.first_stream_frame_metadata.reset();
@@ -2329,6 +2533,10 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
     if (!packet.is_pmtu_probe) {
         congestion_controller_.on_packets_lost(std::span<const SentPacketRecord>(&packet, 1));
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.4
+    // # Loss of a QUIC packet that is carried in a PMTU probe is therefore not a
+    // # reliable indication of congestion and SHOULD NOT trigger a congestion
+    // # control reaction; see Item 7 in Section 3 of [DPLPMTUD].
     note_pmtu_probe_lost(packet, now.value_or(packet.sent_time));
     if (packet_space_is_application(packet_space, application_space_) &&
         current_send_path_id_.has_value()) {
@@ -2439,10 +2647,16 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
     for (const auto &frame : packet.max_streams_frames) {
         local_stream_limit_state_.mark_max_streams_frame_lost(frame);
     }
+    for (const auto &frame : packet.streams_blocked_frames) {
+        stream_open_limits_.mark_streams_blocked_frame_lost(frame);
+    }
     const bool lost_handshake_done =
         packet.has_handshake_done &
         (handshake_done_state_ != StreamControlFrameState::acknowledged);
     if (lost_handshake_done) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # * The HANDSHAKE_DONE frame MUST be retransmitted until it is
+        // # acknowledged.
         handshake_done_state_ = StreamControlFrameState::pending;
     }
 
@@ -2497,6 +2711,15 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
     }
     if (path_id != current_send_path_id_.value_or(path_id) && !is_probing_only(frames) &&
         !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+        // # If the recipient permits the migration, it MUST send subsequent
+        // # packets to the new peer address and MUST initiate path validation
+        // # (Section 8.2) to verify the peer's ownership of the address if
+        // # validation is not already underway.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+        // # An endpoint MUST perform path validation (Section 8.2) if it detects
+        // # any change to a peer's address, unless it has previously validated
+        // # that address.
         maybe_switch_to_path(path_id, /*initiated_locally=*/false, now);
     }
     if (!paths_.empty() | (path_id != 0) | current_send_path_id_.has_value()) {
@@ -2609,6 +2832,10 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             }
             const auto received_delta =
                 stream_state->highest_received_offset - previous_highest_offset;
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-19.9
+            // # An endpoint MUST terminate a connection with an error of type
+            // # FLOW_CONTROL_ERROR if it receives more data than the maximum data
+            // # value that it has sent.
             if (connection_flow_control_.received_committed >
                     connection_flow_control_.advertised_max_data ||
                 received_delta > connection_flow_control_.advertised_max_data -
@@ -2643,6 +2870,9 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 stream_state->receive_flow_control_consumed == *stream_state->peer_final_size &&
                 !stream_state->peer_fin_delivered;
             if (contiguous_size != 0 || fin_ready) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+                // # Endpoints MUST be able to deliver stream data to an
+                // # application as an ordered byte stream.
                 pending_stream_receive_effects_.push_back(QuicCoreReceiveStreamData{
                     .stream_id = stream_frame->stream_id,
                     .bytes = owned_contiguous_bytes.value(),
@@ -2655,6 +2885,11 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 if (fin_ready) {
                     stream_state->peer_fin_delivered = true;
                 }
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-4.2
+                // # Therefore, a receiver MUST NOT wait for a
+                // # STREAM_DATA_BLOCKED or DATA_BLOCKED frame before sending a
+                // # MAX_STREAM_DATA or MAX_DATA frame; doing so could result in
+                // # the sender being blocked for the rest of the connection.
                 maybe_refresh_stream_receive_credit(*stream_state, /*force=*/false);
                 maybe_refresh_connection_receive_credit(/*force=*/false);
                 maybe_refresh_peer_stream_limit(*stream_state);
@@ -2666,15 +2901,31 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
         if (const auto *datagram_frame = std::get_if<DatagramFrame>(&frame)) {
             if (application_datagram_requires_connected_state(
                     require_connected, application_space_.read_secret.has_value(), status_)) {
+                //= https://www.rfc-editor.org/rfc/rfc9221#section-5
+                // # Like STREAM frames, DATAGRAM frames contain application data and MUST
+                // # be protected with either 0-RTT or 1-RTT keys.
                 return CodecResult<bool>::failure(
                     protocol_violation_error(datagram_frame_type_for(*datagram_frame)));
             }
             if (local_transport_parameters_.max_datagram_frame_size == 0 ||
                 datagram_frame_wire_size(datagram_frame->data.size(), datagram_frame->has_length) >
                     local_transport_parameters_.max_datagram_frame_size) {
+                //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+                // # An endpoint that receives a DATAGRAM frame when it has not indicated
+                // # support via the transport parameter MUST terminate the connection
+                // # with an error of type PROTOCOL_VIOLATION.
+                //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+                // # Similarly, an endpoint
+                // # that receives a DATAGRAM frame that is larger than the value it sent
+                // # in its max_datagram_frame_size transport parameter MUST terminate the
+                // # connection with an error of type PROTOCOL_VIOLATION.
                 return CodecResult<bool>::failure(
                     protocol_violation_error(datagram_frame_type_for(*datagram_frame)));
             }
+            //= https://www.rfc-editor.org/rfc/rfc9221#section-5
+            // # When a QUIC endpoint receives a valid DATAGRAM frame, it SHOULD
+            // # deliver the data to the application immediately, as long as it is
+            // # able to process the frame and can store the contents in memory.
             pending_datagram_receive_effects_.push_back(QuicCoreReceiveDatagramData{
                 .bytes = datagram_frame->data,
             });
@@ -2705,6 +2956,11 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 return CodecResult<bool>::failure(
                     stream_state_codec_error(noted.error(), kFrameTypeResetStream));
             }
+            const auto committed = commit_peer_stream_final_size_to_connection_flow_control(
+                *stream_state, kFrameTypeResetStream);
+            if (!committed.has_value()) {
+                return committed;
+            }
 
             pending_peer_reset_effects_.push_back(QuicCorePeerResetStream{
                 .stream_id = reset_stream->stream_id,
@@ -2724,7 +2980,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 continue;
             }
 
-            auto stream = get_or_open_send_stream_for_peer_stop(stop_sending->stream_id);
+            auto stream = get_existing_send_stream_for_peer_control(stop_sending->stream_id);
             if (!stream.has_value()) {
                 return CodecResult<bool>::failure(
                     stream_state_codec_error(stream.error(), kFrameTypeStopSending));
@@ -2769,7 +3025,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 continue;
             }
 
-            auto stream = get_or_open_send_stream(max_stream_data->stream_id);
+            auto stream = get_existing_send_stream_for_peer_control(max_stream_data->stream_id);
             if (!stream.has_value()) {
                 return CodecResult<bool>::failure(
                     stream_state_codec_error(stream.error(), kFrameTypeMaxStreamData));
@@ -2882,6 +3138,10 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 had_outstanding_challenge &&
                 path->outstanding_challenge.value() == path_response->data;
             if (matched_outstanding_challenge) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+                // # This requirement MUST NOT be enforced by the endpoint
+                // # that initiates path validation, as that would enable an
+                // # attack on migration; see Section 9.3.3.
                 path->validated = true;
                 path->challenge_pending = false;
                 path->validation_initiated_locally = false;
@@ -2889,6 +3149,10 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 path->validation_deadline.reset();
                 last_validated_path_id_ = validated_path_id;
                 if (current_send_path_id_ != validated_path_id) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+                    // # As soon as path validation succeeds, the client SHOULD begin sending
+                    // # all future packets to the new server address using the new connection
+                    // # ID and discontinue use of the old server address.
                     maybe_switch_to_path(validated_path_id, /*initiated_locally=*/false, now);
                 }
                 if (current_send_path_id_ == validated_path_id && previous_path_id_.has_value()) {
@@ -2911,6 +3175,10 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
 
         if (const auto *new_token = std::get_if<NewTokenFrame>(&frame)) {
             if (config_.role == EndpointRole::server) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-19.7
+                // # A server MUST treat receipt
+                // # of a NEW_TOKEN frame as a connection error of type
+                // # PROTOCOL_VIOLATION.
                 return CodecResult<bool>::failure(
                     frame_not_allowed_protocol_violation_error(kFrameTypeNewToken));
             }
@@ -2928,6 +3196,10 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
 
         if (std::holds_alternative<HandshakeDoneFrame>(frame)) {
             if (config_.role == EndpointRole::server) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
+                // # A
+                // # server MUST treat receipt of a HANDSHAKE_DONE frame as a connection
+                // # error of type PROTOCOL_VIOLATION.
                 return CodecResult<bool>::failure(
                     frame_not_allowed_protocol_violation_error(kFrameTypeHandshakeDone));
             }
@@ -3073,15 +3345,32 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
         if (const auto *datagram_frame = std::get_if<ReceivedDatagramFrame>(&frame)) {
             if (application_datagram_requires_connected_state(
                     require_connected, application_space_.read_secret.has_value(), status_)) {
+                //= https://www.rfc-editor.org/rfc/rfc9221#section-6
+                // # All application data
+                // # transmitted with the DATAGRAM frame, like the STREAM frame, MUST be
+                // # protected either by 0-RTT or 1-RTT keys.
                 return CodecResult<bool>::failure(
                     protocol_violation_error(datagram_frame_type_for(*datagram_frame)));
             }
             if (local_transport_parameters_.max_datagram_frame_size == 0 ||
                 datagram_frame_wire_size(datagram_frame->data.size(), datagram_frame->has_length) >
                     local_transport_parameters_.max_datagram_frame_size) {
+                //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+                // # An endpoint that receives a DATAGRAM frame when it has not indicated
+                // # support via the transport parameter MUST terminate the connection
+                // # with an error of type PROTOCOL_VIOLATION.
+                //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+                // # Similarly, an endpoint
+                // # that receives a DATAGRAM frame that is larger than the value it sent
+                // # in its max_datagram_frame_size transport parameter MUST terminate the
+                // # connection with an error of type PROTOCOL_VIOLATION.
                 return CodecResult<bool>::failure(
                     protocol_violation_error(datagram_frame_type_for(*datagram_frame)));
             }
+            //= https://www.rfc-editor.org/rfc/rfc9221#section-5
+            // # When a QUIC endpoint receives a valid DATAGRAM frame, it SHOULD
+            // # deliver the data to the application immediately, as long as it is
+            // # able to process the frame and can store the contents in memory.
             pending_datagram_receive_effects_.push_back(QuicCoreReceiveDatagramData{
                 .shared_bytes = datagram_frame->data,
             });
@@ -3112,6 +3401,11 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 return CodecResult<bool>::failure(
                     stream_state_codec_error(noted.error(), kFrameTypeResetStream));
             }
+            const auto committed = commit_peer_stream_final_size_to_connection_flow_control(
+                *stream_state, kFrameTypeResetStream);
+            if (!committed.has_value()) {
+                return committed;
+            }
 
             pending_peer_reset_effects_.push_back(QuicCorePeerResetStream{
                 .stream_id = reset_stream->stream_id,
@@ -3131,7 +3425,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 continue;
             }
 
-            auto stream = get_or_open_send_stream_for_peer_stop(stop_sending->stream_id);
+            auto stream = get_existing_send_stream_for_peer_control(stop_sending->stream_id);
             if (!stream.has_value()) {
                 return CodecResult<bool>::failure(
                     stream_state_codec_error(stream.error(), kFrameTypeStopSending));
@@ -3176,7 +3470,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 continue;
             }
 
-            auto stream = get_or_open_send_stream(max_stream_data->stream_id);
+            auto stream = get_existing_send_stream_for_peer_control(max_stream_data->stream_id);
             if (!stream.has_value()) {
                 return CodecResult<bool>::failure(
                     stream_state_codec_error(stream.error(), kFrameTypeMaxStreamData));
@@ -3317,6 +3611,10 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
 
         if (const auto *new_token = std::get_if<NewTokenFrame>(&frame)) {
             if (config_.role == EndpointRole::server) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-19.7
+                // # A server MUST treat receipt
+                // # of a NEW_TOKEN frame as a connection error of type
+                // # PROTOCOL_VIOLATION.
                 return CodecResult<bool>::failure(
                     frame_not_allowed_protocol_violation_error(kFrameTypeNewToken));
             }
@@ -3334,6 +3632,10 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
 
         if (std::holds_alternative<HandshakeDoneFrame>(frame)) {
             if (config_.role == EndpointRole::server) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
+                // # A
+                // # server MUST treat receipt of a HANDSHAKE_DONE frame as a connection
+                // # error of type PROTOCOL_VIOLATION.
                 return CodecResult<bool>::failure(
                     frame_not_allowed_protocol_violation_error(kFrameTypeHandshakeDone));
             }
@@ -3393,6 +3695,10 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
             stream_state_codec_error(validated.error(), stream_frame_type_for(stream_frame)));
     }
     const auto received_delta = stream_state->highest_received_offset - previous_highest_offset;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.9
+    // # An endpoint MUST terminate a connection with an error of type
+    // # FLOW_CONTROL_ERROR if it receives more data than the maximum data
+    // # value that it has sent.
     if (connection_flow_control_.received_committed >
             connection_flow_control_.advertised_max_data ||
         received_delta > connection_flow_control_.advertised_max_data -
@@ -3436,6 +3742,9 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
         stream_state->receive_flow_control_consumed == *stream_state->peer_final_size &&
         !stream_state->peer_fin_delivered;
     if (contiguous_size != 0 || fin_ready) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+        // # Endpoints MUST be able to deliver stream data to an application
+        // # as an ordered byte stream.
         QuicCoreReceiveStreamData receive{
             .stream_id = stream_frame.stream_id,
             .fin = fin_ready,
@@ -3469,6 +3778,15 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_stream_pa
     if (last_inbound_path_id_ != current_send_path_id_.value_or(last_inbound_path_id_) &&
         !should_keep_current_send_path_for_inbound_non_probing(last_inbound_path_id_,
                                                                packet_number)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+        // # If the recipient permits the migration, it MUST send subsequent
+        // # packets to the new peer address and MUST initiate path validation
+        // # (Section 8.2) to verify the peer's ownership of the address if
+        // # validation is not already underway.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+        // # An endpoint MUST perform path validation (Section 8.2) if it detects
+        // # any change to a peer's address, unless it has previously validated
+        // # that address.
         maybe_switch_to_path(last_inbound_path_id_, /*initiated_locally=*/false, now);
     }
     if (should_ensure_inbound_application_path(paths_.empty(), last_inbound_path_id_,
@@ -3484,10 +3802,23 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_stream_pa
         if (config_.role == EndpointRole::server && status_ != HandshakeStatus::connected) {
             mark_peer_address_validated();
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+        // # A packet MUST NOT be acknowledged until packet protection has been
+        // # successfully removed and all frames contained in the packet have been
+        // # processed.
         application_space_.received_packets.record_received(
             packet_number, /*ack_eliciting=*/true, now, ecn,
             config_.transport.ack_eliciting_threshold);
         note_idle_peer_activity(now);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+        // # Every packet SHOULD be acknowledged at least once, and ack-eliciting
+        // # packets MUST be acknowledged at least once within the maximum delay
+        // # an endpoint communicated using the max_ack_delay transport parameter;
+        // # see Section 18.2.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+        // # An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+        // # packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+        // # within its advertised max_ack_delay, with the following exception.
         schedule_application_ack_deadline(application_space_, now,
                                           local_transport_parameters_.max_ack_delay, ecn);
         if (zero_rtt_state_present(zero_rtt_space_.read_secret.has_value(),
@@ -3509,6 +3840,15 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_ack_only(
     QuicEcnCodepoint ecn, QuicPathId path_id, bool used_previous_application_read_secret) {
     if (path_id != current_send_path_id_.value_or(path_id) &&
         !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+        // # If the recipient permits the migration, it MUST send subsequent
+        // # packets to the new peer address and MUST initiate path validation
+        // # (Section 8.2) to verify the peer's ownership of the address if
+        // # validation is not already underway.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+        // # An endpoint MUST perform path validation (Section 8.2) if it detects
+        // # any change to a peer's address, unless it has previously validated
+        // # that address.
         maybe_switch_to_path(path_id, /*initiated_locally=*/false, now);
     }
     if (should_ensure_inbound_application_path(paths_.empty(), path_id, current_send_path_id_)) {
@@ -3533,6 +3873,10 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_ack_only(
     if (config_.role == EndpointRole::server && status_ != HandshakeStatus::connected) {
         mark_peer_address_validated();
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # An endpoint MUST NOT send a non-ack-eliciting packet in response to
+    // # a non-ack-eliciting packet, even if there are packet gaps that precede
+    // # the received packet.
     application_space_.received_packets.record_received(packet_number, /*ack_eliciting=*/false, now,
                                                         ecn,
                                                         config_.transport.ack_eliciting_threshold);

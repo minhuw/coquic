@@ -1,0 +1,201 @@
+target = "https://www.rfc-editor.org/rfc/rfc9000"
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-10.1.2"
+quote = '''
+Application protocols that use QUIC SHOULD provide guidance on when
+deferring an idle timeout is appropriate.
+'''
+reason = '''
+This requirement is directed at application-protocol specifications using
+QUIC. CoQUIC implements the transport facility; protocol-specific guidance
+belongs to each application protocol.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2"
+quote = '''
+This method for
+choosing the stateless reset token means that the combination of
+connection ID and static key MUST NOT be used for another connection.
+'''
+reason = '''
+CoQUIC can derive stateless reset tokens from a configured static secret
+and a connection ID, but global uniqueness of user-supplied or
+cross-process connection IDs under a shared static key is an endpoint
+deployment/configuration invariant outside a single transport connection.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2"
+quote = '''
+A connection ID from a connection
+that is reset by revealing the stateless reset token MUST NOT be
+reused for new connections at nodes that share a static key.
+'''
+reason = '''
+This constrains how operators allocate and persist connection IDs across
+nodes or restarts that share a stateless-reset key. A CoQUIC endpoint can
+retain local reset-token routes, but it cannot prove that another process
+or future deployment will not reuse a revealed connection ID with the same
+static key.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-11.2"
+quote = '''
+Application protocols SHOULD define rules for handling streams that
+are prematurely canceled by either endpoint.
+'''
+reason = '''
+This requirement is directed at application-protocol specifications using
+QUIC. CoQUIC exposes stream reset and cancellation behavior but does not
+define the application protocol policy for every protocol layered on QUIC.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-19.21"
+quote = '''
+Such extensions
+SHOULD define their interaction with previously defined extensions
+modifying the same protocol components.
+'''
+reason = '''
+This requirement is directed at specifications defining future QUIC
+extensions, not at the base transport implementation.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-21.12"
+quote = '''
+Future
+versions of QUIC that use Version Negotiation packets MUST define a
+mechanism that is robust against version downgrade attacks.
+'''
+reason = '''
+This requirement is directed at specifications for future QUIC versions.
+CoQUIC implements currently supported version-negotiation behavior but does
+not define future versions of QUIC.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-21.5"
+quote = '''
+QUIC
+servers SHOULD NOT be deployed in networks that do not deploy ingress
+filtering [BCP38] and also have inadequately secured UDP endpoints.
+'''
+reason = '''
+This is deployment guidance for operators of QUIC servers. CoQUIC cannot
+verify network ingress filtering or the security posture of unrelated UDP
+endpoints in the deployment environment.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-21.11"
+quote = '''
+To defend against this style of denial of service, endpoints that share
+a static key for stateless resets (see Section 10.3.2) MUST be arranged
+so that packets with a given connection ID always arrive at an instance
+that has connection state, unless that connection is no longer active.
+'''
+reason = '''
+This requirement is directed at deployments that shard QUIC connections
+across multiple endpoint instances sharing a stateless-reset key. CoQUIC
+can generate and verify reset tokens for an endpoint, but arranging
+cluster routing so a connection ID reaches the correct live instance is
+outside the transport library.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-21.11"
+quote = '''
+More generally, servers MUST NOT generate a stateless reset if a
+connection with the corresponding connection ID could be active on any
+endpoint using the same static key.
+'''
+reason = '''
+This is a multi-instance deployment invariant. CoQUIC suppresses
+stateless resets for connection IDs owned by the local endpoint state, but
+it cannot know whether another process or host that shares a configured
+static key still has active connection state.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-21.5"
+quote = '''
+Any future extension that allows server migration MUST
+also define countermeasures for forgery attacks.
+'''
+reason = '''
+This requirement is directed at specifications defining future server
+migration extensions, not at the base transport implementation.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-21.6"
+quote = '''
+QUIC deployments SHOULD provide mitigations for the Slowloris
+attacks, such as increasing the maximum number of clients the server
+will allow, limiting the number of connections a single IP address is
+allowed to make, imposing restrictions on the minimum transfer speed
+a connection is allowed to have, and restricting the length of time
+an endpoint is allowed to stay connected.
+'''
+reason = '''
+This is deployment guidance for operators. CoQUIC can expose transport
+limits and timers, but deployment-specific client quotas and transfer-speed
+policies are outside the transport protocol implementation.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-21.7"
+quote = '''
+QUIC deployments SHOULD provide mitigations for stream fragmentation
+attacks.
+'''
+reason = '''
+This is deployment guidance for operators. CoQUIC tracks stream state, but
+deployment-specific abuse policies and operational mitigation choices are
+outside the transport protocol implementation.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1"
+quote = '''
+The definition of a new transport parameter (Section 7.4.2) MUST
+specify whether storing the transport parameter for 0-RTT is
+mandatory, optional, or prohibited.
+'''
+reason = '''
+This requirement is directed at specifications defining new transport
+parameters. CoQUIC implements the storage behavior for transport parameters
+it supports, but it does not define every future transport parameter.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-5.2.3"
+quote = '''
+A server in a deployment that does not implement a solution to maintain
+connection continuity when the client address changes SHOULD indicate
+that migration is not supported by using the disable_active_migration
+transport parameter.
+'''
+reason = '''
+This is deployment guidance. CoQUIC exposes the disable_active_migration
+transport parameter in configuration, but whether a particular deployment
+has load-balancing continuity for client address changes is known only to
+the application or operator.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-5.2.3"
+quote = '''
+Server deployments that use this simple form of load balancing MUST
+avoid the creation of a stateless reset oracle; see Section 21.11.
+'''
+reason = '''
+This requirement constrains deployment architecture for servers using
+load balancing and shared reset keys. CoQUIC cannot verify cluster routing
+or cross-instance state ownership from within a single endpoint.
+'''

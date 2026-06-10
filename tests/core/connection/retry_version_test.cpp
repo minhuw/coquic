@@ -164,6 +164,10 @@ TEST(QuicCoreTest, ClientRestartsHandshakeAfterValidVersionNegotiation) {
     const auto restart_datagrams =
         coquic::quic::test::send_datagrams_from(after_version_negotiation);
     ASSERT_FALSE(restart_datagrams.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-6.2
+    // # A client that supports only this version of QUIC MUST abandon the
+    // # current connection attempt if it receives a Version Negotiation
+    // # packet, with the following two exceptions.
     EXPECT_EQ(read_u32_be_at(restart_datagrams.front(), 1), 0x6b3343cfu);
     EXPECT_FALSE(client.has_failed());
 }
@@ -191,6 +195,44 @@ TEST(QuicCoreTest, ClientIgnoresVersionNegotiationThatEchoesOriginalVersion) {
     const auto after_version_negotiation =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = version_negotiation.value()},
                        coquic::quic::test::test_time(1));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-6.2
+    // # A client MUST discard a Version Negotiation packet that
+    // # lists the QUIC version selected by the client.
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_version_negotiation).empty());
+    EXPECT_FALSE(client.has_failed());
+}
+
+TEST(QuicCoreTest, ClientIgnoresVersionNegotiationAfterProcessingPeerPacket) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    client_config.original_version = 0x00000001u;
+    client_config.initial_version = 0x00000001u;
+    client_config.supported_versions = {0x6b3343cfu, 0x00000001u};
+    coquic::quic::QuicCore client(std::move(client_config));
+
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    ASSERT_FALSE(coquic::quic::test::send_datagrams_from(start).empty());
+    ASSERT_NE(client.connection_, nullptr);
+    client.connection_->processed_peer_packet_ = true;
+    ASSERT_FALSE(client.is_handshake_complete());
+
+    const auto version_negotiation =
+        coquic::quic::serialize_packet(coquic::quic::VersionNegotiationPacket{
+            .destination_connection_id = {std::byte{0xc1}, std::byte{0x01}},
+            .source_connection_id = {std::byte{0x83}, std::byte{0x94}, std::byte{0xc8},
+                                     std::byte{0xf0}, std::byte{0x3e}, std::byte{0x51},
+                                     std::byte{0x57}, std::byte{0x08}},
+            .supported_versions = {0x6b3343cfu},
+        });
+    ASSERT_TRUE(version_negotiation.has_value());
+
+    const auto after_version_negotiation =
+        client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = version_negotiation.value()},
+                       coquic::quic::test::test_time(1));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-6.2
+    // # A client MUST discard any Version Negotiation packet if it has
+    // # received and successfully processed any other packet, including an
+    // # earlier Version Negotiation packet.
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_version_negotiation).empty());
     EXPECT_FALSE(client.has_failed());
 }
@@ -293,6 +335,10 @@ TEST(QuicCoreTest, ClientRestartsHandshakeAfterVersionNegotiationSkipsUnsupporte
     const auto restart_datagrams =
         coquic::quic::test::send_datagrams_from(after_version_negotiation);
     ASSERT_FALSE(restart_datagrams.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-6.2
+    // # A client that supports only this version of QUIC MUST abandon the
+    // # current connection attempt if it receives a Version Negotiation
+    // # packet, with the following two exceptions.
     EXPECT_EQ(read_u32_be_at(restart_datagrams.front(), 1), 0x6b3343cfu);
     EXPECT_FALSE(client.has_failed());
 }
@@ -361,12 +407,36 @@ TEST(QuicCoreTest, ClientRestartsHandshakeAfterValidRetry) {
     ASSERT_TRUE(restarted_destination_connection_id.has_value());
     auto restarted_destination_connection_id_value =
         restarted_destination_connection_id.value_or(coquic::quic::ConnectionId{});
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.1
+    // # The client MUST use the value from the Source
+    // # Connection ID field of the Retry packet in the Destination Connection
+    // # ID field of subsequent packets that it sends.
     EXPECT_EQ(restarted_destination_connection_id_value, retry_source_connection_id);
+    auto restarted_source_connection_id =
+        coquic::quic::test::long_header_source_connection_id(restarted_datagrams.front());
+    ASSERT_TRUE(restarted_source_connection_id.has_value());
+    auto restarted_source_connection_id_value =
+        restarted_source_connection_id.value_or(coquic::quic::ConnectionId{});
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.2
+    // # The client MUST NOT change the Source Connection ID because the server
+    // # could include the connection ID as part of its token validation logic;
+    // # see Section 8.1.4.
+    EXPECT_EQ(restarted_source_connection_id_value, client_source_connection_id);
     auto restarted_initial_token =
         coquic::quic::test::client_initial_datagram_token(restarted_datagrams.front());
     ASSERT_TRUE(restarted_initial_token.has_value());
     auto restarted_initial_token_value = restarted_initial_token.value_or(std::vector<std::byte>{});
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.2
+    // # This token MUST be repeated by the client in all
+    // # Initial packets it sends for that connection after it receives the
+    // # Retry packet.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # The client MUST include the token in all Initial packets it sends,
+    // # unless a Retry replaces the token with a newer one.
     EXPECT_EQ(restarted_initial_token_value, retry_token);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.3
+    // # A client MUST NOT reset the packet number for any packet number space
+    // # after processing a Retry packet.
     EXPECT_NE(
         tracked_packet_or_null(client.connection_->initial_space_, next_initial_send_packet_number),
         nullptr);
@@ -405,6 +475,9 @@ TEST(QuicCoreTest, ClientIgnoresRetryWithInvalidIntegrityTag) {
     auto after_invalid_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_with_invalid_tag},
                        coquic::quic::test::test_time(1));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.2
+    // # Clients MUST discard Retry packets that have a Retry Integrity Tag
+    // # that cannot be validated; see Section 5.8 of [QUIC-TLS].
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_invalid_retry).empty());
     EXPECT_FALSE(client.has_failed());
 }
@@ -434,6 +507,9 @@ TEST(QuicCoreTest, ClientIgnoresRetryWithEmptyToken) {
     auto after_empty_token_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
                        coquic::quic::test::test_time(1));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.2
+    // # A client
+    // # MUST discard a Retry packet with a zero-length Retry Token field.
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_empty_token_retry).empty());
     EXPECT_FALSE(client.has_failed());
 }
@@ -476,6 +552,9 @@ TEST(QuicCoreTest, ClientIgnoresSecondRetry) {
     auto after_second_retry = client.advance(
         coquic::quic::QuicCoreInboundDatagram{.bytes = second_retry_datagram.value()},
         coquic::quic::test::test_time(2));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.2
+    // # A client MUST accept and process at most one Retry packet for each
+    // # connection attempt.
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_second_retry).empty());
     EXPECT_FALSE(client.has_failed());
 }
@@ -517,6 +596,10 @@ TEST(QuicCoreTest, ClientIgnoresRetryAfterProcessingServerInitial) {
     auto after_late_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
                        coquic::quic::test::test_time(3));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.2
+    // # After the client has received and processed an
+    // # Initial or Retry packet from the server, it MUST discard any
+    // # subsequent Retry packets that it receives.
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_late_retry).empty());
     EXPECT_FALSE(client.has_failed());
 }
@@ -549,6 +632,10 @@ TEST(QuicCoreTest, ClientIgnoresRetryAfterProcessingPeerPacketBeforeHandshakeCom
     auto after_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
                        coquic::quic::test::test_time(1));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.2
+    // # After the client has received and processed an
+    // # Initial or Retry packet from the server, it MUST discard any
+    // # subsequent Retry packets that it receives.
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_retry).empty());
     EXPECT_FALSE(client.has_failed());
 }
@@ -576,6 +663,39 @@ TEST(QuicCoreTest, ClientIgnoresRetryWithUnexpectedDestinationConnectionId) {
     auto after_retry =
         client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
                        coquic::quic::test::test_time(1));
+    EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_retry).empty());
+    EXPECT_FALSE(client.has_failed());
+}
+
+TEST(QuicCoreTest, ClientIgnoresRetryWhoseSourceConnectionIdEqualsOriginalDestination) {
+    auto client_config = coquic::quic::test::make_client_core_config();
+    const auto client_source_connection_id = client_config.source_connection_id;
+    const auto original_version = client_config.original_version;
+    coquic::quic::QuicCore client(std::move(client_config));
+
+    auto start = client.advance(coquic::quic::QuicCoreStart{}, coquic::quic::test::test_time());
+    const auto initial_datagrams = coquic::quic::test::send_datagrams_from(start);
+    ASSERT_FALSE(initial_datagrams.empty());
+
+    const auto original_destination_connection_id =
+        coquic::quic::test::long_header_destination_connection_id(initial_datagrams.front());
+    ASSERT_TRUE(original_destination_connection_id.has_value());
+    const auto original_destination_connection_id_value =
+        original_destination_connection_id.value_or(coquic::quic::ConnectionId{});
+
+    auto retry_datagram = coquic::quic::test::make_valid_retry_datagram(
+        client_source_connection_id, original_destination_connection_id_value,
+        bytes_from_ints({0xaa, 0xbb}), original_destination_connection_id_value, original_version);
+    ASSERT_TRUE(retry_datagram.has_value());
+
+    auto after_retry =
+        client.advance(coquic::quic::QuicCoreInboundDatagram{.bytes = retry_datagram.value()},
+                       coquic::quic::test::test_time(1));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.1
+    // # A client MUST discard a Retry packet that contains a Source
+    // # Connection ID field that is identical to the Destination
+    // # Connection ID field of its Initial packet.
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(after_retry).empty());
     EXPECT_FALSE(client.has_failed());
 }
@@ -695,6 +815,10 @@ TEST(QuicCoreTest, ClientFailsOnNonRetryLongHeaderDatagramAfterRetryParserReject
     auto later =
         client.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(2));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(later).empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
+    // # An endpoint MUST generate a connection error if processing the contents
+    // # of these packets prior to discovering an error, or fully revert any
+    // # changes made during that processing.
     EXPECT_TRUE(client.has_failed());
 }
 
@@ -727,6 +851,10 @@ TEST(QuicCoreTest, ClientFailsOnNonRetryLongHeaderDatagramWithTrailingBytes) {
     auto later =
         client.advance(coquic::quic::QuicCoreTimerExpired{}, coquic::quic::test::test_time(2));
     EXPECT_TRUE(coquic::quic::test::send_datagrams_from(later).empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
+    // # An endpoint MUST generate a connection error if processing the contents
+    // # of these packets prior to discovering an error, or fully revert any
+    // # changes made during that processing.
     EXPECT_TRUE(client.has_failed());
 }
 

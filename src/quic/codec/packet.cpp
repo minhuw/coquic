@@ -27,10 +27,18 @@ enum class LongHeaderPacketType : std::uint8_t {
 
 std::uint8_t encode_long_header_type(std::uint32_t version, LongHeaderPacketType long_header_type) {
     const auto encoded_type = static_cast<std::uint8_t>(long_header_type);
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-3
+    // # Except for a few differences, QUIC version 2 endpoints MUST implement
+    // # the QUIC version 1 specification as described in [QUIC], [QUIC-TLS],
+    // # and [QUIC-RECOVERY].
     return version == kQuicVersion2 ? static_cast<std::uint8_t>(encoded_type + 1u) : encoded_type;
 }
 
 std::uint8_t encode_retry_long_header_type(std::uint32_t version) {
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-3
+    // # Except for a few differences, QUIC version 2 endpoints MUST implement
+    // # the QUIC version 1 specification as described in [QUIC], [QUIC-TLS],
+    // # and [QUIC-RECOVERY].
     return version == kQuicVersion2 ? 0x00u : 0x03u;
 }
 
@@ -39,6 +47,10 @@ bool is_retry_long_header_type(std::uint32_t version, std::uint8_t encoded_type)
 }
 
 LongHeaderPacketType decode_long_header_type(std::uint32_t version, std::uint8_t encoded_type) {
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-3
+    // # Except for a few differences, QUIC version 2 endpoints MUST implement
+    // # the QUIC version 1 specification as described in [QUIC], [QUIC-TLS],
+    // # and [QUIC-RECOVERY].
     if (encoded_type == encode_long_header_type(version, LongHeaderPacketType::initial)) {
         return LongHeaderPacketType::initial;
     }
@@ -155,6 +167,9 @@ CodecResult<ConnectionId> read_connection_id(BufferReader &reader, bool enforce_
     if (!length.has_value()) {
         return CodecResult<ConnectionId>::failure(length.error().code, length.error().offset);
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    // # Endpoints that receive a version 1 long header with a
+    // # value larger than 20 MUST drop the packet.
     if (enforce_v1_limit && length.value() > kMaxVersion1ConnectionIdLength) {
         return CodecResult<ConnectionId>::failure(CodecErrorCode::invalid_varint, reader.offset());
     }
@@ -181,6 +196,12 @@ bool frame_allowed_in_packet_type(const Frame &frame, ProtectedPacketType protec
         protected_packet_type == ProtectedPacketType::initial ||
         protected_packet_type == ProtectedPacketType::handshake;
     if (packet_type_allows_handshake_space_frames) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+        // # CONNECTION_CLOSE frames signaling application errors (type 0x1d)
+        // # MUST only appear in the application data packet number space.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+        // # * All other frame types MUST only be sent in the application data
+        // # packet number space.
         return std::holds_alternative<PaddingFrame>(frame) ||
                std::holds_alternative<PingFrame>(frame) || is_ack_like ||
                std::holds_alternative<CryptoFrame>(frame) ||
@@ -197,6 +218,9 @@ bool frame_allowed_in_packet_type(const Frame &frame, ProtectedPacketType protec
 CodecResult<std::vector<std::byte>>
 serialize_frame_sequence(const std::vector<Frame> &frames,
                          ProtectedPacketType protected_packet_type) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+    // # The payload of a packet that contains frames MUST contain at least
+    // # one frame, and MAY contain multiple frames and multiple frame types.
     if (frames.empty()) {
         return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::empty_packet_payload,
                                                             0);
@@ -204,6 +228,10 @@ serialize_frame_sequence(const std::vector<Frame> &frames,
 
     BufferWriter frame_writer;
     for (std::size_t i = 0; i < frames.size(); ++i) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+        // # An endpoint MUST treat
+        // # receipt of a frame in a packet type that is not permitted as a
+        // # connection error of type PROTOCOL_VIOLATION.
         if (!frame_allowed_in_packet_type(frames[i], protected_packet_type)) {
             return CodecResult<std::vector<std::byte>>::failure(
                 CodecErrorCode::frame_not_allowed_in_packet_type, i);
@@ -233,6 +261,8 @@ serialize_frame_sequence(const std::vector<Frame> &frames,
 
 std::byte make_long_header_first_byte(std::uint8_t encoded_type,
                                       std::uint8_t packet_number_length) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    // # The value included prior to protection MUST be set to 0.
     return static_cast<std::byte>(0x80u | 0x40u | ((encoded_type & 0x03u) << 4) |
                                   ((packet_number_length - 1) & 0x03u));
 }
@@ -245,12 +275,17 @@ std::byte make_retry_long_header_first_byte(std::uint32_t version, std::uint8_t 
 
 std::byte make_short_header_first_byte(bool spin_bit, bool key_phase,
                                        std::uint8_t packet_number_length) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.3.1
+    // # The value included prior to protection MUST be set to 0.
     return static_cast<std::byte>(0x40u | (spin_bit ? 0x20u : 0u) | (key_phase ? 0x04u : 0u) |
                                   ((packet_number_length - 1) & 0x03u));
 }
 
 CodecResult<PacketDecodeResult> decode_version_negotiation_packet(std::uint8_t first_byte,
                                                                   BufferReader &reader) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.1
+    // # The value in the Unused field is set to an arbitrary value by the
+    // # server.  Clients MUST ignore the value of this field.
     (void)first_byte;
 
     const auto destination_connection_id = read_connection_id(reader, false);
@@ -312,6 +347,9 @@ decode_long_header_fields(BufferReader &reader, std::uint32_t version,
 
     const auto source_connection_id = read_connection_id(reader, version == kQuicVersion1);
     if (!source_connection_id.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+        // # Endpoints that receive a version 1 long header
+        // # with a value larger than 20 MUST drop the packet.
         return CodecResult<DecodedLongHeaderFields>::failure(source_connection_id.error().code,
                                                              source_connection_id.error().offset);
     }
@@ -351,6 +389,9 @@ decode_long_header_fields(BufferReader &reader, std::uint32_t version,
     const auto payload = reader.read_exact(static_cast<std::size_t>(packet_payload_bytes)).value();
 
     if (payload.empty()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+        // # An endpoint MUST treat receipt of a packet containing no frames as a
+        // # connection error of type PROTOCOL_VIOLATION.
         return CodecResult<DecodedLongHeaderFields>::failure(CodecErrorCode::empty_packet_payload,
                                                              reader.offset());
     }
@@ -364,6 +405,16 @@ decode_long_header_fields(BufferReader &reader, std::uint32_t version,
                 decoded.error().code,
                 payload_start_offset + payload_offset + decoded.error().offset);
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+        // # * All other frame types MUST only be sent in the application data
+        // # packet number space.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+        // # An endpoint MUST treat
+        // # receipt of a frame in a packet type that is not permitted as a
+        // # connection error of type PROTOCOL_VIOLATION.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.4
+        // # Endpoints MUST treat receipt of Handshake packets with other frames
+        // # as a connection error of type PROTOCOL_VIOLATION.
         if (!frame_allowed_in_packet_type(decoded.value().frame, protected_packet_type)) {
             return CodecResult<DecodedLongHeaderFields>::failure(
                 CodecErrorCode::frame_not_allowed_in_packet_type,
@@ -456,6 +507,9 @@ CodecResult<PacketDecodeResult> decode_retry_packet(BufferReader &reader, std::u
 
     const auto source_connection_id = read_connection_id(reader, version == kQuicVersion1);
     if (!source_connection_id.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+        // # Endpoints that receive a version 1 long header
+        // # with a value larger than 20 MUST drop the packet.
         return CodecResult<PacketDecodeResult>::failure(source_connection_id.error().code,
                                                         source_connection_id.error().offset);
     }
@@ -478,6 +532,9 @@ CodecResult<PacketDecodeResult> decode_retry_packet(BufferReader &reader, std::u
         .packet =
             RetryPacket{
                 .version = version,
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5
+                // # The value in the Unused field is set to an arbitrary value by the
+                // # server; a client MUST ignore these bits.
                 .retry_unused_bits = static_cast<std::uint8_t>(first_byte & 0x0fu),
                 .destination_connection_id = destination_connection_id.value(),
                 .source_connection_id = source_connection_id.value(),
@@ -498,6 +555,8 @@ CodecResult<std::vector<std::byte>> serialize_long_header_fields(
         return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::unsupported_packet_type,
                                                             0);
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    // # In QUIC version 1, this value MUST NOT exceed 20 bytes.
     if (!valid_long_header_connection_ids(version, destination_connection_id,
                                           source_connection_id)) {
         return CodecResult<std::vector<std::byte>>::failure(CodecErrorCode::invalid_varint, 0);
@@ -566,7 +625,15 @@ CodecResult<std::vector<std::byte>> serialize_packet(const Packet &packet) {
         }
 
         BufferWriter writer;
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.1
+        // # Where QUIC might be multiplexed with other protocols (see
+        // # [RFC7983]), servers SHOULD set the most significant bit of this
+        // # field (0x40) to 1 so that Version Negotiation packets appear to
+        // # have the Fixed Bit field.
         writer.write_byte(std::byte{0xc0});
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.1
+        // # The Version field of a Version Negotiation packet MUST be set to
+        // # 0x00000000.
         write_u32_be(writer, kVersionNegotiationVersion);
         append_connection_id(writer, version_negotiation->destination_connection_id, false);
         append_connection_id(writer, version_negotiation->source_connection_id, false);
@@ -652,9 +719,18 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
     const auto first_byte = static_cast<std::uint8_t>(reader.read_byte().value());
 
     if ((first_byte & 0x80u) == 0) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.3.1
+        // # Packets
+        // # containing a zero value for this bit are not valid packets in this
+        // # version and MUST be discarded.
         if ((first_byte & 0x40u) == 0 && !options.accept_greased_quic_bit) {
             return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::invalid_fixed_bit, 0);
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.3.1
+        // # An endpoint MUST treat receipt of a
+        // # packet that has a non-zero value for these bits, after removing
+        // # both packet and header protection, as a connection error of type
+        // # PROTOCOL_VIOLATION.
         if ((first_byte & 0x18u) != 0) {
             return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::invalid_reserved_bits,
                                                             0);
@@ -682,6 +758,9 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
         }
 
         if (reader.remaining() == 0) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+            // # An endpoint MUST treat receipt of a packet containing no frames as a
+            // # connection error of type PROTOCOL_VIOLATION.
             return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::empty_packet_payload,
                                                             reader.offset());
         }
@@ -732,11 +811,20 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
         return decode_version_negotiation_packet(first_byte, reader);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    // # Packets containing a zero
+    // # value for this bit are not valid packets in this version and MUST
+    // # be discarded.
     if ((first_byte & 0x40u) == 0 && !options.accept_greased_quic_bit) {
         return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::invalid_fixed_bit, 0);
     }
 
     const auto type = static_cast<std::uint8_t>((first_byte >> 4) & 0x03u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2
+    // # An endpoint MUST
+    // # treat receipt of a packet that has a non-zero value for these bits
+    // # after removing both packet and header protection as a connection
+    // # error of type PROTOCOL_VIOLATION.
     if (!is_retry_long_header_type(version, type) && ((first_byte & 0x0cu) != 0)) {
         return CodecResult<PacketDecodeResult>::failure(CodecErrorCode::invalid_reserved_bits, 0);
     }

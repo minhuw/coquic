@@ -1411,6 +1411,10 @@ void maybe_queue_client_runtime_policy_inputs(const Http09RuntimeConfig &config,
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+    // # Once the handshake is confirmed, the client SHOULD select one of the
+    // # two addresses provided by the server and initiate path validation
+    // # (see Section 8.2).
     core_inputs.emplace_back(QuicCoreRequestConnectionMigration{
         .route_handle = *policy.preferred_address_route_handle,
         .reason = QuicMigrationRequestReason::preferred_address,

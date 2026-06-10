@@ -252,6 +252,10 @@ TEST(QuicCoreTest, IdleTimeoutUsesEffectivePeerMinimumAndThreePtoFloor) {
     connection.note_idle_peer_activity(coquic::quic::test::test_time(100));
 
     const auto deadline = connection.idle_timeout_deadline();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.1
+    // # To avoid excessively small idle timeout periods, endpoints MUST
+    // # increase the idle timeout period to be at least three times the
+    // # current Probe Timeout (PTO).
     EXPECT_EQ(optional_value_or_terminate(deadline), coquic::quic::test::test_time(3097));
 
     connection.on_timeout(coquic::quic::test::test_time(3096));
@@ -259,6 +263,12 @@ TEST(QuicCoreTest, IdleTimeoutUsesEffectivePeerMinimumAndThreePtoFloor) {
     EXPECT_FALSE(connection.pending_terminal_state_.has_value());
 
     connection.on_timeout(coquic::quic::test::test_time(3097));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.1
+    // # If a max_idle_timeout is specified by either endpoint in its
+    // # transport parameters (Section 18.2), the connection is silently
+    // # closed and its state is discarded when it remains idle for longer
+    // # than the minimum of the max_idle_timeout value advertised by both
+    // # endpoints.
     EXPECT_TRUE(connection.has_failed());
     EXPECT_EQ(optional_value_or_terminate(connection.pending_terminal_state_),
               coquic::quic::QuicConnectionTerminalState::closed);
@@ -271,10 +281,17 @@ TEST(QuicCoreTest, IdleTimeoutResetsOnPeerActivityAndFirstAckElicitingSend) {
     optional_ref_or_terminate(connection.peer_transport_parameters_).max_idle_timeout = 7000;
 
     connection.note_idle_peer_activity(coquic::quic::test::test_time(10));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.1
+    // # An endpoint restarts its idle timer when a packet from its peer is
+    // # received and processed successfully.
     ASSERT_EQ(connection.idle_timeout_deadline(),
               std::optional{coquic::quic::test::test_time(5010)});
 
     connection.note_idle_ack_eliciting_send(coquic::quic::test::test_time(1000));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.1
+    // # An endpoint also restarts its idle timer when sending an ack-eliciting
+    // # packet if no other ack-eliciting packets have been sent since last
+    // # receiving and processing a packet.
     EXPECT_EQ(connection.idle_timeout_deadline(),
               std::optional{coquic::quic::test::test_time(6000)});
 
@@ -283,6 +300,9 @@ TEST(QuicCoreTest, IdleTimeoutResetsOnPeerActivityAndFirstAckElicitingSend) {
               std::optional{coquic::quic::test::test_time(6000)});
 
     connection.note_idle_peer_activity(coquic::quic::test::test_time(2500));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.1
+    // # An endpoint restarts its idle timer when a packet from its peer is
+    // # received and processed successfully.
     EXPECT_EQ(connection.idle_timeout_deadline(),
               std::optional{coquic::quic::test::test_time(7500)});
 }
@@ -613,6 +633,9 @@ TEST(QuicCoreTest, ServerHandshakeCompletionQueuesHandshakeDoneFrame) {
         }
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
+    // # Servers MUST NOT send a HANDSHAKE_DONE frame before completing the
+    // # handshake.
     EXPECT_TRUE(saw_handshake_done);
     EXPECT_EQ(connection.handshake_done_state_, coquic::quic::StreamControlFrameState::sent);
 
@@ -790,6 +813,9 @@ TEST(QuicCoreTest, ClosingStateRateLimitsClosePacketRetransmission) {
                                    coquic::quic::QuicConnectionTerminalState::failed);
     connection.closing_close_packet_pending_ = true;
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+    // # An endpoint SHOULD limit the rate at which it generates packets in
+    // # the closing state.
     EXPECT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(1)));
     EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
     EXPECT_FALSE(connection.has_sendable_datagram(coquic::quic::test::test_time(2)));
@@ -799,6 +825,10 @@ TEST(QuicCoreTest, ClosingStateRateLimitsClosePacketRetransmission) {
     EXPECT_FALSE(connection.has_sendable_datagram(coquic::quic::test::test_time(3)));
 
     connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(4));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11.1
+    // # An endpoint SHOULD be prepared to retransmit a packet containing a
+    // # CONNECTION_CLOSE frame if it receives more packets on a terminated
+    // # connection.
     EXPECT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(4)));
     EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(4)).empty());
 
@@ -810,6 +840,82 @@ TEST(QuicCoreTest, ClosingStateRateLimitsClosePacketRetransmission) {
 
     connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(8));
     EXPECT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(8)));
+}
+
+TEST(QuicCoreTest, ClosingServerLimitsCloseRetransmissionsByAttributedBytes) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.peer_address_validated_ = false;
+    connection.anti_amplification_received_bytes_ = 0;
+    connection.anti_amplification_sent_bytes_ = 0;
+    connection.queue_transport_close_for_error(
+        coquic::quic::test::test_time(1),
+        coquic::quic::CodecError{.code = coquic::quic::CodecErrorCode::invalid_varint,
+                                 .offset = 0});
+
+    const auto blocked = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    EXPECT_TRUE(blocked.empty());
+    EXPECT_EQ(connection.anti_amplification_sent_bytes_, 0u);
+
+    const auto inbound_datagram = std::vector<std::byte>(64, std::byte{0x40});
+    connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(3));
+    ASSERT_EQ(connection.anti_amplification_received_bytes_, inbound_datagram.size());
+    ASSERT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(3)));
+
+    const auto close_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+    // # To avoid being used for an amplification attack, such endpoints MUST
+    // # limit the cumulative size of packets it sends to three times the
+    // # cumulative size of the packets that are received and attributed to the
+    // # connection.
+    EXPECT_LE(close_datagram.size(), inbound_datagram.size() * 3u);
+    EXPECT_EQ(connection.anti_amplification_sent_bytes_, close_datagram.size());
+    EXPECT_FALSE(connection.has_sendable_datagram(coquic::quic::test::test_time(4)));
+}
+
+TEST(QuicCoreTest, ClosingServerLimitsCloseRetransmissionsOnUnvalidatedPath) {
+    auto connection = make_connected_server_connection();
+    connection.peer_address_validated_ = true;
+    connection.queue_transport_close_for_error(
+        coquic::quic::test::test_time(1),
+        coquic::quic::CodecError{.code = coquic::quic::CodecErrorCode::invalid_varint,
+                                 .offset = 0});
+    ASSERT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(2)).empty());
+
+    connection.current_send_path_id_ = 7;
+    auto &path = connection.ensure_path_state(7);
+    path.validated = false;
+    path.is_current_send_path = true;
+    path.anti_amplification_received_bytes = 0;
+    path.anti_amplification_sent_bytes = 0;
+
+    const auto blocked_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+    EXPECT_TRUE(blocked_datagram.empty());
+    EXPECT_EQ(path.anti_amplification_sent_bytes, 0u);
+
+    const auto inbound_datagram = std::vector<std::byte>(64, std::byte{0x40});
+    connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(4),
+                                        /*path_id=*/7);
+    connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(5),
+                                        /*path_id=*/7);
+    ASSERT_EQ(path.anti_amplification_received_bytes, inbound_datagram.size() * 2u);
+    ASSERT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(4)));
+
+    const auto close_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(5));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.1
+    // # An endpoint in the closing state MUST either discard packets received
+    // # from an unvalidated address or limit the cumulative size of packets it
+    // # sends to an unvalidated address to three times the size of packets it
+    // # receives from that address.
+    EXPECT_LE(close_datagram.size(), inbound_datagram.size() * 2u * 3u);
+    EXPECT_EQ(path.anti_amplification_sent_bytes, close_datagram.size());
+    EXPECT_EQ(connection.last_drained_path_id_, std::optional<coquic::quic::QuicPathId>{7});
 }
 
 TEST(QuicCoreTest, ConnectionCloseFramesDoNotEmitInternalFailureDebugLog) {
@@ -841,6 +947,171 @@ TEST(QuicCoreTest, ConnectionCloseFramesDoNotEmitInternalFailureDebugLog) {
 
     EXPECT_TRUE(connection.has_failed());
     EXPECT_TRUE(application_close_stderr.empty());
+}
+
+TEST(QuicCoreTest, ClosingTransportErrorUsesOneRttProtectionAfterHandshakeConfirmed) {
+    auto connection = make_connected_client_connection();
+
+    connection.queue_transport_close_for_error(
+        coquic::quic::test::test_time(1),
+        coquic::quic::CodecError{.code = coquic::quic::CodecErrorCode::invalid_varint,
+                                 .offset = 0});
+
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+
+    ASSERT_FALSE(datagram.empty());
+    auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+    // # After the handshake is confirmed (see Section 4.1.2 of [QUIC-TLS]), an
+    // # endpoint MUST send any CONNECTION_CLOSE frames in a 1-RTT packet.
+    const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(one_rtt, nullptr);
+    ASSERT_EQ(one_rtt->frames.size(), 1u);
+    EXPECT_NE(std::get_if<coquic::quic::TransportConnectionCloseFrame>(&one_rtt->frames.front()),
+              nullptr);
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), 1u);
+    EXPECT_EQ(tracked_packet_count(connection.initial_space_), 0u);
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 0u);
+}
+
+TEST(QuicCoreTest, ClosingApplicationCloseConvertsToTransportCloseInHandshakePacket) {
+    auto connection = make_connected_client_connection();
+    ASSERT_TRUE(connection
+                    .queue_application_close({
+                        .application_error_code = 77,
+                        .reason_phrase = "private app reason",
+                    })
+                    .has_value());
+    connection.mark_connection_close_frame_sent(
+        coquic::quic::Frame{optional_value_or_terminate(connection.pending_application_close_)},
+        coquic::quic::test::test_time(1));
+    connection.closing_close_packet_pending_ = true;
+    connection.application_space_.write_secret.reset();
+    connection.handshake_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x46});
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+
+    ASSERT_FALSE(datagram.empty());
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.front());
+    ASSERT_NE(handshake, nullptr);
+    ASSERT_EQ(handshake->frames.size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+    // # A CONNECTION_CLOSE of type 0x1d MUST be replaced by a CONNECTION_CLOSE
+    // # of type 0x1c when sending the frame in Initial or Handshake packets.
+    const auto *close =
+        std::get_if<coquic::quic::TransportConnectionCloseFrame>(&handshake->frames.front());
+    ASSERT_NE(close, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+    // # Endpoints MUST clear the value of the Reason Phrase field and SHOULD
+    // # use the APPLICATION_ERROR code when converting to a CONNECTION_CLOSE of
+    // # type 0x1c.
+    EXPECT_EQ(close->error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::application_error));
+    EXPECT_TRUE(close->reason.bytes.empty());
+    EXPECT_TRUE(connection.closing_application_close_.has_value());
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 1u);
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), 0u);
+}
+
+TEST(QuicCoreTest, ClosingApplicationCloseConvertsToTransportCloseInInitialPacket) {
+    auto connection = make_connected_client_connection();
+    ASSERT_TRUE(connection
+                    .queue_application_close({
+                        .application_error_code = 78,
+                        .reason_phrase = "private initial reason",
+                    })
+                    .has_value());
+    connection.mark_connection_close_frame_sent(
+        coquic::quic::Frame{optional_value_or_terminate(connection.pending_application_close_)},
+        coquic::quic::test::test_time(1));
+    connection.closing_close_packet_pending_ = true;
+    connection.application_space_.write_secret.reset();
+    connection.handshake_space_.write_secret.reset();
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+
+    ASSERT_FALSE(datagram.empty());
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets.front());
+    ASSERT_NE(initial, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+    // # A CONNECTION_CLOSE of type 0x1d MUST be replaced by a CONNECTION_CLOSE
+    // # of type 0x1c when sending the frame in Initial or Handshake packets.
+    const auto close = std::find_if(
+        initial->frames.begin(), initial->frames.end(), [](const coquic::quic::Frame &frame) {
+            return std::holds_alternative<coquic::quic::TransportConnectionCloseFrame>(frame);
+        });
+    ASSERT_NE(close, initial->frames.end());
+    const auto &close_frame = std::get<coquic::quic::TransportConnectionCloseFrame>(*close);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+    // # Endpoints MUST clear the value of the Reason Phrase field and SHOULD
+    // # use the APPLICATION_ERROR code when converting to a CONNECTION_CLOSE of
+    // # type 0x1c.
+    EXPECT_EQ(close_frame.error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::application_error));
+    EXPECT_TRUE(close_frame.reason.bytes.empty());
+    EXPECT_TRUE(connection.closing_application_close_.has_value());
+    EXPECT_EQ(tracked_packet_count(connection.initial_space_), 1u);
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), 0u);
+}
+
+TEST(QuicCoreTest, ClosingAndDrainingStatesPersistForThreePtoIntervals) {
+    constexpr auto kPtoInterval = std::chrono::milliseconds(14);
+    constexpr auto kClosePeriod = kPtoInterval * 3;
+
+    auto closing = make_connected_client_connection();
+    closing.recovery_rtt_state_.latest_rtt = std::chrono::milliseconds(10);
+    closing.recovery_rtt_state_.smoothed_rtt = std::chrono::milliseconds(10);
+    closing.recovery_rtt_state_.rttvar = std::chrono::milliseconds(1);
+
+    closing.enter_closing_state(coquic::quic::test::test_time(100),
+                                coquic::quic::QuicConnectionTerminalState::failed);
+
+    const auto closing_wakeup = closing.next_wakeup();
+    ASSERT_TRUE(closing_wakeup.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+    // # These states SHOULD persist for at least three
+    // # times the current PTO interval as defined in [QUIC-RECOVERY].
+    EXPECT_EQ(coquic::quic::test_support::optional_ref_or_terminate(closing_wakeup),
+              coquic::quic::test::test_time(100) + kClosePeriod);
+    EXPECT_FALSE(closing.terminal_state_expired(coquic::quic::test::test_time(100) + kClosePeriod -
+                                                std::chrono::microseconds(1)));
+    EXPECT_TRUE(closing.terminal_state_expired(coquic::quic::test::test_time(100) + kClosePeriod));
+
+    auto draining = make_connected_client_connection();
+    draining.recovery_rtt_state_ = closing.recovery_rtt_state_;
+    draining.enter_draining_state(coquic::quic::test::test_time(200));
+
+    const auto draining_wakeup = draining.next_wakeup();
+    ASSERT_TRUE(draining_wakeup.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+    // # These states SHOULD persist for at least three
+    // # times the current PTO interval as defined in [QUIC-RECOVERY].
+    EXPECT_EQ(coquic::quic::test_support::optional_ref_or_terminate(draining_wakeup),
+              coquic::quic::test::test_time(200) + kClosePeriod);
+    EXPECT_FALSE(draining.terminal_state_expired(coquic::quic::test::test_time(200) + kClosePeriod -
+                                                 std::chrono::microseconds(1)));
+    EXPECT_TRUE(draining.terminal_state_expired(coquic::quic::test::test_time(200) + kClosePeriod));
+}
+
+TEST(QuicCoreTest, ClientsDoNotQueueNewTokenFrames) {
+    auto client = make_connected_client_connection();
+    client.queue_new_token(bytes_from_ints({0xaa}));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.7
+    // # Clients MUST NOT send NEW_TOKEN frames.
+    EXPECT_TRUE(client.pending_new_token_frames_.empty());
+
+    auto server = make_connected_server_connection();
+    server.queue_new_token(bytes_from_ints({0xbb}));
+
+    ASSERT_EQ(server.pending_new_token_frames_.size(), 1u);
+    EXPECT_EQ(server.pending_new_token_frames_.front().token, bytes_from_ints({0xbb}));
 }
 
 TEST(QuicCoreTest, HandshakeConfirmationSkipsDiscardedHandshakePacketSpaceWhenProbing) {
@@ -915,6 +1186,17 @@ TEST(QuicCoreTest, InitialPaddingSearchCoversZeroDeltaAndAlternatePaths) {
         if (connection.has_failed() || datagram.empty()) {
             continue;
         }
+
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+        // # A client MUST expand the payload of all UDP datagrams carrying
+        // # Initial packets to at least the smallest allowed maximum datagram
+        // # size of 1200 bytes by adding PADDING frames to the Initial packet
+        // # or by coalescing the Initial packet; see Section 12.2.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+        // # Clients MUST ensure that UDP datagrams containing Initial packets
+        // # have UDP payloads of at least 1200 bytes, adding PADDING frames as
+        // # necessary.
+        EXPECT_GE(datagram.size(), kMinimumInitialDatagramSizeForTest);
 
         auto packets = decode_sender_datagram(connection, datagram);
         if (packets.size() != 1u) {
@@ -1018,7 +1300,21 @@ TEST(QuicCoreTest, ClosingTransportErrorUsesHandshakeProtectionWithoutOneRttKeys
     ASSERT_EQ(handshake->frames.size(), 1u);
     const auto *close =
         std::get_if<coquic::quic::TransportConnectionCloseFrame>(&handshake->frames.front());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11.1
+    // # Errors that result in the connection being unusable, such as an
+    // # obvious violation of protocol semantics or corruption of state that
+    // # affects an entire connection, MUST be signaled using a
+    // # CONNECTION_CLOSE frame (Section 19.19).
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11
+    // # An endpoint that detects an error SHOULD signal the existence of that
+    // # error to its peer.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # An endpoint that wishes to communicate a fatal connection error MUST
+    // # use a CONNECTION_CLOSE frame if it is able.
     ASSERT_NE(close, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11
+    // # The most appropriate error code (Section 20) SHOULD be included in
+    // # the frame that signals the error.
     EXPECT_EQ(close->error_code, static_cast<std::uint64_t>(
                                      coquic::quic::QuicTransportErrorCode::frame_encoding_error));
     EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 1u);
@@ -1048,6 +1344,10 @@ TEST(QuicCoreTest, ClosingTransportErrorUsesInitialProtectionWithoutHandshakeKey
     auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
 
     ASSERT_FALSE(datagram.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+    // # Similarly, a server MUST expand the payload of all UDP datagrams
+    // # carrying ack-eliciting Initial packets to at least the smallest
+    // # allowed maximum datagram size of 1200 bytes.
     EXPECT_GE(datagram.size(), 1200u);
     auto packets = decode_sender_datagram(connection, datagram);
     ASSERT_EQ(packets.size(), 1u);
@@ -1057,6 +1357,14 @@ TEST(QuicCoreTest, ClosingTransportErrorUsesInitialProtectionWithoutHandshakeKey
         initial->frames.begin(), initial->frames.end(), [](const coquic::quic::Frame &frame) {
             return std::holds_alternative<coquic::quic::TransportConnectionCloseFrame>(frame);
         });
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11.1
+    // # Errors that result in the connection being unusable, such as an
+    // # obvious violation of protocol semantics or corruption of state that
+    // # affects an entire connection, MUST be signaled using a
+    // # CONNECTION_CLOSE frame (Section 19.19).
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11
+    // # An endpoint that detects an error SHOULD signal the existence of that
+    // # error to its peer.
     ASSERT_NE(close, initial->frames.end());
     EXPECT_EQ(tracked_packet_count(connection.initial_space_), 1u);
     EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 0u);
@@ -1340,6 +1648,11 @@ TEST(QuicCoreTest, InboundApplicationCryptoFrameIsIgnoredAfterHandshakeConnected
 
     EXPECT_TRUE(injected);
     EXPECT_FALSE(connection.has_failed());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+    // # Packets containing discarded CRYPTO frames MUST be acknowledged because
+    // # the packet has been received and processed by the transport even though
+    // # the CRYPTO frame was discarded.
+    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
     const auto received = connection.take_received_stream_data();
     ASSERT_TRUE(received.has_value());
     if (!received.has_value()) {

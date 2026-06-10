@@ -125,6 +125,10 @@ TEST(QuicCoreTest, ProcessInboundPacketLeavesInitialAndHandshakeStateUntouchedOn
         },
         coquic::quic::test::test_time());
     ASSERT_FALSE(initial_failure.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+    // # A packet MUST NOT be acknowledged until packet protection has been
+    // # successfully removed and all frames contained in the packet have been
+    // # processed.
     EXPECT_FALSE(connection.initial_space_.received_packets.has_ack_to_send());
 
     connection.handshake_space_.write_secret = make_test_traffic_secret();
@@ -139,6 +143,10 @@ TEST(QuicCoreTest, ProcessInboundPacketLeavesInitialAndHandshakeStateUntouchedOn
         },
         coquic::quic::test::test_time(1));
     ASSERT_FALSE(handshake_failure.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+    // # A packet MUST NOT be acknowledged until packet protection has been
+    // # successfully removed and all frames contained in the packet have been
+    // # processed.
     EXPECT_FALSE(connection.handshake_space_.received_packets.has_ack_to_send());
 }
 
@@ -162,7 +170,161 @@ TEST(QuicCoreTest, ProcessInboundPacketIgnoresInitialPacketAfterInitialSpaceDisc
     ASSERT_TRUE(processed.has_value());
     EXPECT_TRUE(processed.value());
     EXPECT_FALSE(connection.initial_space_.largest_authenticated_packet_number.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+    // # A packet MUST NOT be acknowledged until packet protection has been
+    // # successfully removed and all frames contained in the packet have been
+    // # processed.
     EXPECT_FALSE(connection.initial_space_.received_packets.has_ack_to_send());
+}
+
+TEST(QuicCoreTest, ClientDiscardsServerInitialWithToken) {
+    coquic::quic::QuicConnection direct(coquic::quic::test::make_client_core_config());
+    direct.started_ = true;
+    direct.status_ = coquic::quic::HandshakeStatus::in_progress;
+
+    expect_codec_success(direct.process_inbound_packet(
+        coquic::quic::ProtectedInitialPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = direct.config_.source_connection_id,
+            .source_connection_id = bytes_from_ints({0x01}),
+            .token = bytes_from_ints({0xaa}),
+            .packet_number_length = 1,
+            .packet_number = 1,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(1)));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.2
+    // # Initial packets sent by the server MUST set the Token Length field
+    // # to 0; clients that receive an Initial packet with a non-zero Token
+    // # Length field MUST either discard the packet or generate a connection
+    // # error of type PROTOCOL_VIOLATION.
+    EXPECT_FALSE(direct.initial_space_.received_packets.has_ack_to_send());
+    EXPECT_FALSE(direct.peer_source_connection_id_.has_value());
+    EXPECT_FALSE(direct.processed_peer_packet_);
+
+    coquic::quic::QuicConnection received(coquic::quic::test::make_client_core_config());
+    received.started_ = true;
+    received.status_ = coquic::quic::HandshakeStatus::in_progress;
+
+    expect_codec_success(received.process_inbound_received_packet(
+        coquic::quic::ReceivedProtectedInitialPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = received.config_.source_connection_id,
+            .source_connection_id = bytes_from_ints({0x02}),
+            .token = bytes_from_ints({0xbb}),
+            .packet_number_length = 1,
+            .packet_number = 1,
+            .plaintext_storage = std::make_shared<std::vector<std::byte>>(),
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(2)));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.2
+    // # Initial packets sent by the server MUST set the Token Length field
+    // # to 0; clients that receive an Initial packet with a non-zero Token
+    // # Length field MUST either discard the packet or generate a connection
+    // # error of type PROTOCOL_VIOLATION.
+    EXPECT_FALSE(received.initial_space_.received_packets.has_ack_to_send());
+    EXPECT_FALSE(received.peer_source_connection_id_.has_value());
+    EXPECT_FALSE(received.processed_peer_packet_);
+}
+
+TEST(QuicCoreTest, ProcessInboundDatagramSeparatelyAcknowledgesCoalescedInitialAndHandshake) {
+    const auto make_connection = [] {
+        auto connection = make_connected_client_connection();
+        connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+        connection.handshake_confirmed_ = false;
+        connection.initial_packet_space_discarded_ = false;
+        connection.handshake_packet_space_discarded_ = false;
+        connection.handshake_space_.read_secret = make_test_traffic_secret(
+            coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+        connection.initial_space_.pending_ack_deadline = std::nullopt;
+        connection.handshake_space_.pending_ack_deadline = std::nullopt;
+        return connection;
+    };
+    auto connection = make_connection();
+
+    const auto coalesced = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 2>{
+            coquic::quic::ProtectedInitialPacket{
+                .version = coquic::quic::kQuicVersion1,
+                .destination_connection_id = connection.config_.source_connection_id,
+                .source_connection_id = bytes_from_hex("0011223344556677"),
+                .packet_number_length = 2,
+                .packet_number = 1,
+                .frames = {coquic::quic::PingFrame{}},
+            },
+            coquic::quic::ProtectedHandshakePacket{
+                .version = coquic::quic::kQuicVersion1,
+                .destination_connection_id = connection.config_.source_connection_id,
+                .source_connection_id = bytes_from_hex("0011223344556677"),
+                .packet_number_length = 2,
+                .packet_number = 2,
+                .frames = {coquic::quic::PingFrame{}},
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .handshake_secret = connection.handshake_space_.read_secret,
+        });
+    ASSERT_TRUE(coalesced.has_value());
+
+    connection.process_inbound_datagram(coalesced.value(), coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(connection.has_failed());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    // # The receiver of coalesced QUIC packets MUST individually process each
+    // # QUIC packet and separately acknowledge them, as if they were received
+    // # as the payload of different UDP datagrams.
+    EXPECT_TRUE(connection.initial_space_.received_packets.has_ack_to_send());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    // # The receiver of coalesced QUIC packets MUST individually process each
+    // # QUIC packet and separately acknowledge them, as if they were received
+    // # as the payload of different UDP datagrams.
+    EXPECT_TRUE(connection.handshake_space_.received_packets.has_ack_to_send());
+    EXPECT_EQ(optional_value_or_terminate(connection.initial_space_.pending_ack_deadline),
+              coquic::quic::test::test_time(1));
+    EXPECT_EQ(optional_value_or_terminate(connection.handshake_space_.pending_ack_deadline),
+              coquic::quic::test::test_time(1));
+
+    auto mismatched = make_connection();
+    const auto mismatched_coalesced = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 2>{
+            coquic::quic::ProtectedInitialPacket{
+                .version = coquic::quic::kQuicVersion1,
+                .destination_connection_id = mismatched.config_.source_connection_id,
+                .source_connection_id = bytes_from_hex("0011223344556677"),
+                .packet_number_length = 2,
+                .packet_number = 1,
+                .frames = {coquic::quic::PingFrame{}},
+            },
+            coquic::quic::ProtectedHandshakePacket{
+                .version = coquic::quic::kQuicVersion1,
+                .destination_connection_id = bytes_from_ints({0x55, 0x66}),
+                .source_connection_id = bytes_from_hex("0011223344556677"),
+                .packet_number_length = 2,
+                .packet_number = 2,
+                .frames = {coquic::quic::PingFrame{}},
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                mismatched.client_initial_destination_connection_id(),
+            .handshake_secret = mismatched.handshake_space_.read_secret,
+        });
+    ASSERT_TRUE(mismatched_coalesced.has_value());
+
+    mismatched.process_inbound_datagram(mismatched_coalesced.value(),
+                                        coquic::quic::test::test_time(2));
+
+    EXPECT_FALSE(mismatched.has_failed());
+    EXPECT_TRUE(mismatched.initial_space_.received_packets.has_ack_to_send());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    // # Receivers SHOULD ignore any subsequent packets with a different
+    // # Destination Connection ID than the first packet in the datagram.
+    EXPECT_FALSE(mismatched.handshake_space_.received_packets.has_ack_to_send());
 }
 
 TEST(QuicCoreTest, ConnectionProcessInboundApplicationCoversAckReorderAndErrorBranches) {
@@ -647,7 +809,12 @@ TEST(QuicCoreTest, ProcessCapturedQuicGoServerInitialInstallsHandshakeSecrets) {
             return std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packet);
         });
 
-    EXPECT_NE(initial_packet, packets.end());
+    ASSERT_NE(initial_packet, packets.end());
+    const auto &server_initial = std::get<coquic::quic::ProtectedInitialPacket>(*initial_packet);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+    // # A server MUST set the Destination Connection ID it uses for sending
+    // # packets based on the first received Initial packet.
+    EXPECT_EQ(server_initial.destination_connection_id, bytes_from_hex("c516a356"));
     EXPECT_FALSE(connection.initial_packet_space_discarded_);
 }
 
@@ -928,6 +1095,10 @@ TEST(QuicCoreTest, ServerHandshakeFlightStaysWithinAmplificationBudgetBeforeVali
         total_sent += response.size();
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # Prior to validating the client address, servers MUST NOT send more
+    // # than three times as many bytes as the number of bytes they have
+    // # received.
     EXPECT_LE(total_sent, initial_packet_bytes.size() * 3u);
 }
 
@@ -1048,6 +1219,9 @@ TEST(QuicCoreTest, ConnectedServerWithoutValidatedPeerStillUsesInitialAmplificat
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     EXPECT_FALSE(connection.has_failed());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+    // # The server MUST also limit the number of bytes it sends before
+    // # validating the address of the client; see Section 8.
     EXPECT_LE(datagram.size(), remaining_budget);
     EXPECT_EQ(connection.anti_amplification_sent_bytes_, 2880u + datagram.size());
     EXPECT_EQ(connection.ensure_path_state(0).anti_amplification_sent_bytes, 0u);
@@ -1471,6 +1645,9 @@ TEST(QuicCoreTest, ServerHandshakeStatusUpdateConfirmsHandshakeOnTlsCompletion) 
     connection.update_handshake_status();
 
     EXPECT_EQ(connection.status_, coquic::quic::HandshakeStatus::connected);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
+    // # Servers MUST NOT send a HANDSHAKE_DONE frame before completing the
+    // # handshake.
     EXPECT_EQ(connection.handshake_done_state_, coquic::quic::StreamControlFrameState::pending);
     EXPECT_TRUE(connection.handshake_confirmed_);
     EXPECT_FALSE(connection.handshake_space_.read_secret.has_value());
@@ -2035,6 +2212,13 @@ TEST(QuicCoreTest, NonPacedApplicationSendLimitsAckElicitingBurst) {
 TEST(QuicCoreTest, ConnectionProcessInboundApplicationCoversRemainingValidationBranches) {
     auto flow_overflow = make_connected_client_connection();
     flow_overflow.connection_flow_control_.advertised_max_data = 0;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.9
+    // # An endpoint MUST terminate a connection with an error of type
+    // # FLOW_CONTROL_ERROR if it receives more data than the maximum data
+    // # value that it has sent.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.9
+    // # The sum of the final sizes on all streams -- including streams in
+    // # terminal states -- MUST NOT exceed the value advertised by a receiver.
     expect_codec_failure(flow_overflow.process_inbound_application(
                              std::array<coquic::quic::Frame, 1>{
                                  coquic::quic::test::make_inbound_application_stream_frame("x"),
@@ -2060,6 +2244,31 @@ TEST(QuicCoreTest, ConnectionProcessInboundApplicationCoversRemainingValidationB
                              },
                              coquic::quic::test::test_time(1)),
                          coquic::quic::CodecErrorCode::invalid_varint);
+
+    auto stream_flow_overflow = make_connected_client_connection();
+    auto &limited_stream = stream_flow_overflow.streams_
+                               .emplace(0, coquic::quic::make_implicit_stream_state(
+                                               /*stream_id=*/0, stream_flow_overflow.config_.role))
+                               .first->second;
+    stream_flow_overflow.initialize_stream_flow_control(limited_stream);
+    limited_stream.flow_control.advertised_max_stream_data = 1;
+    limited_stream.receive_flow_control_limit = 1;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # A receiver MUST close the connection with an error of type
+    // # FLOW_CONTROL_ERROR if the sender violates the advertised connection
+    // # or stream data limits; see Section 11 for details on error handling.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+    // # An endpoint MUST terminate a connection with an error of type
+    // # FLOW_CONTROL_ERROR if it receives more data than the largest maximum
+    // # stream data that it has sent for the affected stream.
+    expect_transport_codec_failure(
+        stream_flow_overflow.process_inbound_application(
+            std::array<coquic::quic::Frame, 1>{
+                coquic::quic::test::make_inbound_application_stream_frame("xy", 0),
+            },
+            coquic::quic::test::test_time(1)),
+        coquic::quic::CodecErrorCode::invalid_varint,
+        coquic::quic::QuicTransportErrorCode::flow_control_error);
 
     coquic::quic::QuicConnection gated_connection(coquic::quic::test::make_client_core_config());
     gated_connection.status_ = coquic::quic::HandshakeStatus::in_progress;
@@ -2198,26 +2407,49 @@ TEST(QuicCoreTest, ConnectionProcessInboundApplicationCoversRemainingValidationB
     }
 
     auto invalid_max_stream_data = make_connected_client_connection();
-    expect_codec_failure(invalid_max_stream_data.process_inbound_application(
-                             std::array<coquic::quic::Frame, 1>{
-                                 coquic::quic::MaxStreamDataFrame{
-                                     .stream_id = 3,
-                                     .maximum_stream_data = 1,
-                                 },
-                             },
-                             coquic::quic::test::test_time(4)),
-                         coquic::quic::CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+    // # Receiving a MAX_STREAM_DATA frame for a locally initiated stream that
+    // # has not yet been created MUST be treated as a connection error of type
+    // # STREAM_STATE_ERROR.
+    expect_transport_codec_failure(invalid_max_stream_data.process_inbound_application(
+                                       std::array<coquic::quic::Frame, 1>{
+                                           coquic::quic::MaxStreamDataFrame{
+                                               .stream_id = 0,
+                                               .maximum_stream_data = 1,
+                                           },
+                                       },
+                                       coquic::quic::test::test_time(4)),
+                                   coquic::quic::CodecErrorCode::invalid_varint,
+                                   coquic::quic::QuicTransportErrorCode::stream_state_error);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+    // # An endpoint that receives a MAX_STREAM_DATA frame for a receive-only
+    // # stream MUST terminate the connection with error STREAM_STATE_ERROR.
+    expect_transport_codec_failure(invalid_max_stream_data.process_inbound_application(
+                                       std::array<coquic::quic::Frame, 1>{
+                                           coquic::quic::MaxStreamDataFrame{
+                                               .stream_id = 3,
+                                               .maximum_stream_data = 1,
+                                           },
+                                       },
+                                       coquic::quic::test::test_time(4)),
+                                   coquic::quic::CodecErrorCode::invalid_varint,
+                                   coquic::quic::QuicTransportErrorCode::stream_state_error);
 
     auto invalid_stream_data_blocked = make_connected_client_connection();
-    expect_codec_failure(invalid_stream_data_blocked.process_inbound_application(
-                             std::array<coquic::quic::Frame, 1>{
-                                 coquic::quic::StreamDataBlockedFrame{
-                                     .stream_id = 2,
-                                     .maximum_stream_data = 1,
-                                 },
-                             },
-                             coquic::quic::test::test_time(5)),
-                         coquic::quic::CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.13
+    // # An endpoint that receives a STREAM_DATA_BLOCKED frame for a
+    // # send-only stream MUST terminate the connection with error
+    // # STREAM_STATE_ERROR.
+    expect_transport_codec_failure(invalid_stream_data_blocked.process_inbound_application(
+                                       std::array<coquic::quic::Frame, 1>{
+                                           coquic::quic::StreamDataBlockedFrame{
+                                               .stream_id = 2,
+                                               .maximum_stream_data = 1,
+                                           },
+                                       },
+                                       coquic::quic::test::test_time(5)),
+                                   coquic::quic::CodecErrorCode::invalid_varint,
+                                   coquic::quic::QuicTransportErrorCode::stream_state_error);
 
     auto reset_conflict = make_connected_client_connection();
     auto &conflict_stream = reset_conflict.streams_
@@ -2351,6 +2583,10 @@ TEST(QuicCoreTest, ConnectionProcessInboundReceivedApplicationCoversValidationAn
 
     auto flow_overflow = make_connected_client_connection();
     flow_overflow.connection_flow_control_.advertised_max_data = 0;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.9
+    // # An endpoint MUST terminate a connection with an error of type
+    // # FLOW_CONTROL_ERROR if it receives more data than the maximum data
+    // # value that it has sent.
     expect_codec_failure(
         flow_overflow.process_inbound_received_application(
             std::vector<coquic::quic::ReceivedFrame>{make_received_stream_frame("x")},
@@ -2386,6 +2622,30 @@ TEST(QuicCoreTest, ConnectionProcessInboundReceivedApplicationCoversValidationAn
                 make_received_stream_frame("xy", /*offset=*/(std::uint64_t{1} << 62) - 1)},
             coquic::quic::test::test_time(2), /*allow_preconnected_frames=*/false, /*path_id=*/0),
         coquic::quic::CodecErrorCode::invalid_varint);
+
+    auto stream_flow_overflow = make_connected_client_connection();
+    auto &limited_stream = stream_flow_overflow.streams_
+                               .emplace(0, coquic::quic::make_implicit_stream_state(
+                                               /*stream_id=*/0, stream_flow_overflow.config_.role))
+                               .first->second;
+    stream_flow_overflow.initialize_stream_flow_control(limited_stream);
+    limited_stream.flow_control.advertised_max_stream_data = 1;
+    limited_stream.receive_flow_control_limit = 1;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # A receiver MUST close the connection with an error of type
+    // # FLOW_CONTROL_ERROR if the sender violates the advertised connection
+    // # or stream data limits; see Section 11 for details on error handling.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+    // # An endpoint MUST terminate a connection with an error of type
+    // # FLOW_CONTROL_ERROR if it receives more data than the largest maximum
+    // # stream data that it has sent for the affected stream.
+    expect_transport_codec_failure(stream_flow_overflow.process_inbound_received_application(
+                                       std::vector<coquic::quic::ReceivedFrame>{
+                                           make_received_stream_frame("xy", /*offset=*/0)},
+                                       coquic::quic::test::test_time(2),
+                                       /*allow_preconnected_frames=*/false, /*path_id=*/0),
+                                   coquic::quic::CodecErrorCode::invalid_varint,
+                                   coquic::quic::QuicTransportErrorCode::flow_control_error);
 
     const std::array<std::byte, 8> gated_challenge_data = make_challenge_data(0x2a);
     const auto run_gated_frame = [&](const coquic::quic::ReceivedFrame &frame) {
@@ -2518,17 +2778,21 @@ TEST(QuicCoreTest, ConnectionProcessInboundReceivedApplicationCoversValidationAn
     }
 
     auto invalid_reset_stream = make_connected_client_connection();
-    expect_codec_failure(invalid_reset_stream.process_inbound_received_application(
-                             std::vector<coquic::quic::ReceivedFrame>{
-                                 coquic::quic::ResetStreamFrame{
-                                     .stream_id = 2,
-                                     .application_protocol_error_code = 1,
-                                     .final_size = 0,
-                                 },
-                             },
-                             coquic::quic::test::test_time(9),
-                             /*allow_preconnected_frames=*/false, /*path_id=*/0),
-                         coquic::quic::CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.4
+    // # An endpoint that receives a RESET_STREAM frame for a send-only stream
+    // # MUST terminate the connection with error STREAM_STATE_ERROR.
+    expect_transport_codec_failure(invalid_reset_stream.process_inbound_received_application(
+                                       std::vector<coquic::quic::ReceivedFrame>{
+                                           coquic::quic::ResetStreamFrame{
+                                               .stream_id = 2,
+                                               .application_protocol_error_code = 1,
+                                               .final_size = 0,
+                                           },
+                                       },
+                                       coquic::quic::test::test_time(9),
+                                       /*allow_preconnected_frames=*/false, /*path_id=*/0),
+                                   coquic::quic::CodecErrorCode::invalid_varint,
+                                   coquic::quic::QuicTransportErrorCode::stream_state_error);
 
     auto reset_conflict = make_connected_client_connection();
     auto &conflict_stream = reset_conflict.streams_
@@ -2550,40 +2814,83 @@ TEST(QuicCoreTest, ConnectionProcessInboundReceivedApplicationCoversValidationAn
                          coquic::quic::CodecErrorCode::invalid_varint);
 
     auto invalid_stop_sending = make_connected_client_connection();
-    expect_codec_failure(invalid_stop_sending.process_inbound_received_application(
-                             std::vector<coquic::quic::ReceivedFrame>{
-                                 coquic::quic::StopSendingFrame{
-                                     .stream_id = 3,
-                                     .application_protocol_error_code = 1,
-                                 },
-                             },
-                             coquic::quic::test::test_time(11),
-                             /*allow_preconnected_frames=*/false, /*path_id=*/0),
-                         coquic::quic::CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.5
+    // # Receiving a STOP_SENDING frame for a locally initiated stream that has
+    // # not yet been created MUST be treated as a connection error of type
+    // # STREAM_STATE_ERROR.
+    expect_transport_codec_failure(invalid_stop_sending.process_inbound_received_application(
+                                       std::vector<coquic::quic::ReceivedFrame>{
+                                           coquic::quic::StopSendingFrame{
+                                               .stream_id = 0,
+                                               .application_protocol_error_code = 1,
+                                           },
+                                       },
+                                       coquic::quic::test::test_time(11),
+                                       /*allow_preconnected_frames=*/false, /*path_id=*/0),
+                                   coquic::quic::CodecErrorCode::invalid_varint,
+                                   coquic::quic::QuicTransportErrorCode::stream_state_error);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.5
+    // # An endpoint that receives a STOP_SENDING frame for a receive-only
+    // # stream MUST terminate the connection with error STREAM_STATE_ERROR.
+    expect_transport_codec_failure(invalid_stop_sending.process_inbound_received_application(
+                                       std::vector<coquic::quic::ReceivedFrame>{
+                                           coquic::quic::StopSendingFrame{
+                                               .stream_id = 3,
+                                               .application_protocol_error_code = 1,
+                                           },
+                                       },
+                                       coquic::quic::test::test_time(11),
+                                       /*allow_preconnected_frames=*/false, /*path_id=*/0),
+                                   coquic::quic::CodecErrorCode::invalid_varint,
+                                   coquic::quic::QuicTransportErrorCode::stream_state_error);
 
     auto invalid_max_stream_data = make_connected_client_connection();
-    expect_codec_failure(invalid_max_stream_data.process_inbound_received_application(
-                             std::vector<coquic::quic::ReceivedFrame>{
-                                 coquic::quic::MaxStreamDataFrame{
-                                     .stream_id = 3,
-                                     .maximum_stream_data = 1,
-                                 },
-                             },
-                             coquic::quic::test::test_time(12), /*allow_preconnected_frames=*/false,
-                             /*path_id=*/0),
-                         coquic::quic::CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+    // # Receiving a MAX_STREAM_DATA frame for a locally initiated stream that
+    // # has not yet been created MUST be treated as a connection error of type
+    // # STREAM_STATE_ERROR.
+    expect_transport_codec_failure(invalid_max_stream_data.process_inbound_received_application(
+                                       std::vector<coquic::quic::ReceivedFrame>{
+                                           coquic::quic::MaxStreamDataFrame{
+                                               .stream_id = 0,
+                                               .maximum_stream_data = 1,
+                                           },
+                                       },
+                                       coquic::quic::test::test_time(12),
+                                       /*allow_preconnected_frames=*/false, /*path_id=*/0),
+                                   coquic::quic::CodecErrorCode::invalid_varint,
+                                   coquic::quic::QuicTransportErrorCode::stream_state_error);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+    // # An endpoint that receives a MAX_STREAM_DATA frame for a receive-only
+    // # stream MUST terminate the connection with error STREAM_STATE_ERROR.
+    expect_transport_codec_failure(invalid_max_stream_data.process_inbound_received_application(
+                                       std::vector<coquic::quic::ReceivedFrame>{
+                                           coquic::quic::MaxStreamDataFrame{
+                                               .stream_id = 3,
+                                               .maximum_stream_data = 1,
+                                           },
+                                       },
+                                       coquic::quic::test::test_time(12),
+                                       /*allow_preconnected_frames=*/false, /*path_id=*/0),
+                                   coquic::quic::CodecErrorCode::invalid_varint,
+                                   coquic::quic::QuicTransportErrorCode::stream_state_error);
 
     auto invalid_stream_data_blocked = make_connected_client_connection();
-    expect_codec_failure(invalid_stream_data_blocked.process_inbound_received_application(
-                             std::vector<coquic::quic::ReceivedFrame>{
-                                 coquic::quic::StreamDataBlockedFrame{
-                                     .stream_id = 2,
-                                     .maximum_stream_data = 1,
-                                 },
-                             },
-                             coquic::quic::test::test_time(13), /*allow_preconnected_frames=*/false,
-                             /*path_id=*/0),
-                         coquic::quic::CodecErrorCode::invalid_varint);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.13
+    // # An endpoint that receives a STREAM_DATA_BLOCKED frame for a
+    // # send-only stream MUST terminate the connection with error
+    // # STREAM_STATE_ERROR.
+    expect_transport_codec_failure(invalid_stream_data_blocked.process_inbound_received_application(
+                                       std::vector<coquic::quic::ReceivedFrame>{
+                                           coquic::quic::StreamDataBlockedFrame{
+                                               .stream_id = 2,
+                                               .maximum_stream_data = 1,
+                                           },
+                                       },
+                                       coquic::quic::test::test_time(13),
+                                       /*allow_preconnected_frames=*/false, /*path_id=*/0),
+                                   coquic::quic::CodecErrorCode::invalid_varint,
+                                   coquic::quic::QuicTransportErrorCode::stream_state_error);
 
     auto invalid_new_connection_id = make_connected_client_connection();
     expect_codec_failure(invalid_new_connection_id.process_inbound_received_application(
@@ -2744,6 +3051,10 @@ TEST(QuicCoreTest,
             std::vector<coquic::quic::ReceivedFrame>{coquic::quic::HandshakeDoneFrame{}},
             coquic::quic::test::test_time(9), /*allow_preconnected_frames=*/false, /*path_id=*/0),
         coquic::quic::CodecErrorCode::frame_not_allowed_in_packet_type);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
+    // # A
+    // # server MUST treat receipt of a HANDSHAKE_DONE frame as a connection
+    // # error of type PROTOCOL_VIOLATION.
     EXPECT_FALSE(server_handshake_done.handshake_confirmed_);
     EXPECT_FALSE(server_handshake_done.handshake_packet_space_discarded_);
 
@@ -3053,6 +3364,10 @@ TEST(QuicCoreTest, ProcessInboundReceivedCryptoCoversControlAndErrorBranches) {
             std::vector<coquic::quic::ReceivedFrame>{coquic::quic::HandshakeDoneFrame{}},
             coquic::quic::test::test_time(2)),
         coquic::quic::CodecErrorCode::frame_not_allowed_in_packet_type);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
+    // # A
+    // # server MUST treat receipt of a HANDSHAKE_DONE frame as a connection
+    // # error of type PROTOCOL_VIOLATION.
     EXPECT_FALSE(server_handshake_done.handshake_confirmed_);
     EXPECT_FALSE(server_handshake_done.handshake_packet_space_discarded_);
 
@@ -3103,6 +3418,10 @@ TEST(QuicCoreTest, ServerRejectsNewTokenFrameInApplicationSpace) {
         coquic::quic::test::test_time(1));
 
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.7
+    // # A server MUST treat receipt
+    // # of a NEW_TOKEN frame as a connection error of type
+    // # PROTOCOL_VIOLATION.
     EXPECT_EQ(result.error().code, coquic::quic::CodecErrorCode::frame_not_allowed_in_packet_type);
 }
 

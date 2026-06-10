@@ -81,6 +81,10 @@ TEST(QuicHttp3ConnectionTest, ServerRoleRejectsSettingsFrameOnRequestStream) {
         .role = coquic::http3::Http3ConnectionRole::server,
     });
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4
+    // # If an endpoint receives a SETTINGS frame on a different stream, the
+    // # endpoint MUST respond with a connection error of type
+    // # H3_FRAME_UNEXPECTED.
     auto update = connection.on_core_result(receive_result(0, settings_frame_bytes({})),
                                             coquic::quic::QuicCoreTimePoint{});
     auto close = close_input_from(update);

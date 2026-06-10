@@ -1822,6 +1822,10 @@ TEST(QuicProtectedCodecTest, SerializesClientInitialFromRfc9001AppendixA2) {
     auto encoded = coquic::quic::serialize_protected_datagram(
         packets, make_rfc9001_client_initial_serialize_context());
     ASSERT_TRUE(encoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.2
+    // # The HKDF-Expand-Label function defined in TLS 1.3 MUST be used for
+    // # Initial packets even where the TLS versions offered do not include
+    // # TLS 1.3.
     EXPECT_EQ(to_hex(encoded.value()), kRfc9001ClientInitialPacketHex);
 }
 
@@ -2054,6 +2058,10 @@ TEST(QuicProtectedCodecTest, RoundTripsQuicV2InitialPacket) {
     auto encoded = coquic::quic::serialize_protected_datagram(
         packets, make_rfc9001_client_initial_serialize_context());
     ASSERT_TRUE(encoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-3
+    // # Except for a few differences, QUIC version 2 endpoints MUST implement
+    // # the QUIC version 1 specification as described in [QUIC], [QUIC-TLS],
+    // # and [QUIC-RECOVERY].
     EXPECT_EQ(std::to_integer<std::uint8_t>(encoded.value().front()) & 0xf0u, 0xd0u);
 
     auto decoded = coquic::quic::deserialize_protected_datagram(
@@ -2077,6 +2085,10 @@ TEST(QuicProtectedCodecTest, RoundTripsQuicV2HandshakePacket) {
 
     auto encoded = coquic::quic::serialize_protected_datagram(packets, context);
     ASSERT_TRUE(encoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-3
+    // # Except for a few differences, QUIC version 2 endpoints MUST implement
+    // # the QUIC version 1 specification as described in [QUIC], [QUIC-TLS],
+    // # and [QUIC-RECOVERY].
     EXPECT_EQ(std::to_integer<std::uint8_t>(encoded.value().front()) & 0xf0u, 0xf0u);
 
     auto decoded = coquic::quic::deserialize_protected_datagram(encoded.value(), decode_context);
@@ -3329,6 +3341,9 @@ TEST(QuicProtectedCodecTest, RoundTripsCoalescedInitialAndHandshakeDatagram) {
         encoded.value(), make_initial_and_handshake_deserialize_context(
                              coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
     ASSERT_TRUE(decoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    // # Receivers MUST be able to
+    // # process coalesced packets.
     ASSERT_EQ(decoded.value().size(), 2u);
     EXPECT_TRUE(std::holds_alternative<coquic::quic::ProtectedInitialPacket>(decoded.value()[0]));
     EXPECT_TRUE(std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(decoded.value()[1]));
@@ -3551,6 +3566,9 @@ TEST(QuicProtectedCodecTest, RejectsInitialPacketsTooShortToRemoveHeaderProtecti
     auto decoded = coquic::quic::deserialize_protected_datagram(
         truncated, make_rfc9001_client_initial_deserialize_context());
     ASSERT_FALSE(decoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.4.2
+    // # An endpoint MUST discard packets that are not long enough to contain
+    // # a complete sample.
     EXPECT_EQ(decoded.error().code,
               coquic::quic::CodecErrorCode::header_protection_sample_too_short);
 }
@@ -3568,6 +3586,9 @@ TEST(QuicProtectedCodecTest, RejectsOneRttPacketsTooShortToRemoveHeaderProtectio
         truncated,
         make_one_rtt_deserialize_context(coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32));
     ASSERT_FALSE(decoded.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.4.2
+    // # An endpoint MUST discard packets that are not long enough to contain
+    // # a complete sample.
     EXPECT_EQ(decoded.error().code,
               coquic::quic::CodecErrorCode::header_protection_sample_too_short);
 }

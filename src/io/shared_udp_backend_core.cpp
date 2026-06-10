@@ -109,6 +109,11 @@ configure_ipv4_pmtud_socket_options_if_needed(LinuxSocketDescriptor socket, int 
         return true;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14
+    // # UDP datagrams MUST NOT be fragmented at the IP layer.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14
+    // # In IPv4 [IPv4], the Don't Fragment (DF) bit MUST be set if possible,
+    // # to prevent fragmentation on the path.
     const int discover = IP_PMTUDISC_PROBE;
     if (socket_io_backend_ops_state().setsockopt_fn(socket.fd, IPPROTO_IP, IP_MTU_DISCOVER,
                                                     &discover, sizeof(discover)) != 0) {

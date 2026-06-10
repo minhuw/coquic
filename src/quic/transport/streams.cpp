@@ -58,6 +58,36 @@ bool stream_data_blocked_frame_matches(const std::optional<StreamDataBlockedFram
            std::tie(frame.stream_id, frame.maximum_stream_data);
 }
 
+bool streams_blocked_frame_matches(const std::optional<StreamsBlockedFrame> &candidate,
+                                   const StreamsBlockedFrame &frame) {
+    if (!candidate.has_value()) {
+        return false;
+    }
+
+    return std::tie(candidate->stream_type, candidate->maximum_streams) ==
+           std::tie(frame.stream_type, frame.maximum_streams);
+}
+
+StreamControlFrameState *streams_blocked_state_for(StreamOpenLimits &limits,
+                                                   StreamLimitType stream_type) {
+    return stream_type == StreamLimitType::bidirectional ? &limits.streams_blocked_bidi_state
+                                                         : &limits.streams_blocked_uni_state;
+}
+
+std::optional<StreamsBlockedFrame> *pending_streams_blocked_frame_for(StreamOpenLimits &limits,
+                                                                      StreamLimitType stream_type) {
+    return stream_type == StreamLimitType::bidirectional
+               ? &limits.pending_streams_blocked_bidi_frame
+               : &limits.pending_streams_blocked_uni_frame;
+}
+
+const std::optional<StreamsBlockedFrame> *
+pending_streams_blocked_frame_for(const StreamOpenLimits &limits, StreamLimitType stream_type) {
+    return stream_type == StreamLimitType::bidirectional
+               ? &limits.pending_streams_blocked_bidi_frame
+               : &limits.pending_streams_blocked_uni_frame;
+}
+
 } // namespace
 
 bool StreamFrameSendFragment::has_cached_stream_frame_header() const {
@@ -172,6 +202,11 @@ bool StreamOpenLimits::can_open_local_stream(std::uint64_t stream_id,
 
     const auto id_info = classify_stream_id(stream_id, local_role);
     const auto stream_index = stream_id >> 2u;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # Endpoints MUST NOT exceed the limit set by their peer.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.11
+    // # An endpoint MUST NOT open more streams than permitted by the current
+    // # stream limit set by its peer.
     if (id_info.direction == StreamDirection::bidirectional) {
         return stream_index < peer_max_bidirectional;
     }
@@ -179,14 +214,92 @@ bool StreamOpenLimits::can_open_local_stream(std::uint64_t stream_id,
     return stream_index < peer_max_unidirectional;
 }
 
-void StreamOpenLimits::note_peer_max_streams(StreamLimitType stream_type,
-                                             std::uint64_t maximum_streams) {
-    if (stream_type == StreamLimitType::bidirectional) {
-        peer_max_bidirectional = std::max(peer_max_bidirectional, maximum_streams);
+void StreamOpenLimits::queue_streams_blocked(StreamLimitType stream_type) {
+    const auto maximum_streams = stream_type == StreamLimitType::bidirectional
+                                     ? peer_max_bidirectional
+                                     : peer_max_unidirectional;
+    auto *pending_frame = pending_streams_blocked_frame_for(*this, stream_type);
+    auto *state = streams_blocked_state_for(*this, stream_type);
+    if (pending_frame->has_value() && (*pending_frame)->maximum_streams == maximum_streams &&
+        *state != StreamControlFrameState::none) {
         return;
     }
 
-    peer_max_unidirectional = std::max(peer_max_unidirectional, maximum_streams);
+    *pending_frame = StreamsBlockedFrame{
+        .stream_type = stream_type,
+        .maximum_streams = maximum_streams,
+    };
+    *state = StreamControlFrameState::pending;
+}
+
+std::vector<StreamsBlockedFrame> StreamOpenLimits::take_streams_blocked_frames() {
+    std::vector<StreamsBlockedFrame> frames;
+    if (streams_blocked_bidi_state == StreamControlFrameState::pending &&
+        pending_streams_blocked_bidi_frame.has_value()) {
+        streams_blocked_bidi_state = StreamControlFrameState::sent;
+        frames.push_back(*pending_streams_blocked_bidi_frame);
+    }
+    if (streams_blocked_uni_state == StreamControlFrameState::pending &&
+        pending_streams_blocked_uni_frame.has_value()) {
+        streams_blocked_uni_state = StreamControlFrameState::sent;
+        frames.push_back(*pending_streams_blocked_uni_frame);
+    }
+
+    return frames;
+}
+
+void StreamOpenLimits::acknowledge_streams_blocked_frame(const StreamsBlockedFrame &frame) {
+    auto *state = streams_blocked_state_for(*this, frame.stream_type);
+    if (*state == StreamControlFrameState::none) {
+        return;
+    }
+    const auto *pending_frame = pending_streams_blocked_frame_for(*this, frame.stream_type);
+    if (!streams_blocked_frame_matches(*pending_frame, frame)) {
+        return;
+    }
+
+    *state = StreamControlFrameState::acknowledged;
+}
+
+void StreamOpenLimits::mark_streams_blocked_frame_lost(const StreamsBlockedFrame &frame) {
+    auto *state = streams_blocked_state_for(*this, frame.stream_type);
+    if (*state == StreamControlFrameState::none ||
+        *state == StreamControlFrameState::acknowledged) {
+        return;
+    }
+    const auto *pending_frame = pending_streams_blocked_frame_for(*this, frame.stream_type);
+    if (!streams_blocked_frame_matches(*pending_frame, frame)) {
+        return;
+    }
+
+    *state = StreamControlFrameState::pending;
+}
+
+void StreamOpenLimits::note_peer_max_streams(StreamLimitType stream_type,
+                                             std::uint64_t maximum_streams) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # MAX_STREAMS frames that do not increase the stream limit MUST be
+    // # ignored.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.11
+    // # MAX_STREAMS frames that do not increase the stream limit MUST be
+    // # ignored.
+    auto *current_limit = &peer_max_bidirectional;
+    if (stream_type == StreamLimitType::unidirectional) {
+        current_limit = &peer_max_unidirectional;
+    }
+
+    if (maximum_streams <= *current_limit) {
+        return;
+    }
+
+    *current_limit = maximum_streams;
+    const auto *pending_frame = pending_streams_blocked_frame_for(*this, stream_type);
+    if (!pending_frame->has_value() || (*pending_frame)->maximum_streams >= maximum_streams) {
+        return;
+    }
+
+    *pending_streams_blocked_frame_for(*this, stream_type) = std::nullopt;
+    *streams_blocked_state_for(*this, stream_type) = StreamControlFrameState::none;
 }
 
 StreamStateResult<bool> StreamState::validate_local_send(bool fin) {
@@ -196,6 +309,8 @@ StreamStateResult<bool> StreamState::validate_local_send(bool fin) {
     }
 
     if (send_closed) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+        // # An endpoint MUST NOT send data on a stream at or beyond the final size.
         return StreamStateResult<bool>::failure(StreamStateErrorCode::send_side_closed, stream_id);
     }
 
@@ -217,6 +332,12 @@ StreamStateResult<bool> StreamState::validate_local_reset(std::uint64_t applicat
     }
 
     if (reset_state == StreamControlFrameState::none) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # The content of a RESET_STREAM frame MUST NOT change when it is
+        // # sent again.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+        // # If any outstanding data is declared lost, the endpoint SHOULD send
+        // # a RESET_STREAM frame instead of retransmitting the data.
         pending_reset_frame = ResetStreamFrame{
             .stream_id = stream_id,
             .application_protocol_error_code = application_error_code,
@@ -238,6 +359,9 @@ StreamState::validate_local_stop_sending(std::uint64_t application_error_code) {
                                                 stream_id);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+    // # STOP_SENDING SHOULD only be sent for a stream that has not been reset
+    // # by the peer.
     if (peer_reset_received || peer_send_closed) {
         return StreamStateResult<bool>::success(true);
     }
@@ -268,7 +392,11 @@ StreamStateResult<bool> StreamState::validate_receive_range(std::uint64_t offset
 
     const auto range_end = saturating_add(offset, length);
     if (range_end > flow_control.advertised_max_stream_data) {
-        return StreamStateResult<bool>::failure(StreamStateErrorCode::final_size_conflict,
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+        // # An endpoint MUST terminate a connection with an error of type
+        // # FLOW_CONTROL_ERROR if it receives more data than the largest
+        // # maximum stream data that it has sent for the affected stream.
+        return StreamStateResult<bool>::failure(StreamStateErrorCode::flow_control_violation,
                                                 stream_id);
     }
     if (peer_final_size.has_value() && range_end > *peer_final_size) {
@@ -290,17 +418,29 @@ StreamStateResult<bool> StreamState::validate_receive_range(std::uint64_t offset
 }
 
 StreamStateResult<bool> StreamState::note_peer_final_size(std::uint64_t final_size) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # Once a final size for a stream is known, it cannot change.
     if (peer_final_size.has_value() && *peer_final_size != final_size) {
         return StreamStateResult<bool>::failure(StreamStateErrorCode::final_size_conflict,
                                                 stream_id);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # A receiver SHOULD treat receipt of data at or beyond the final
+    // # size as an error of type FINAL_SIZE_ERROR, even after a stream
+    // # is closed.
     if (highest_received_offset > final_size) {
         return StreamStateResult<bool>::failure(StreamStateErrorCode::final_size_conflict,
                                                 stream_id);
     }
 
     peer_final_size = final_size;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    // # An endpoint SHOULD stop sending MAX_STREAM_DATA frames when the
+    // # receiving part of the stream enters a "Size Known" or "Reset Recvd"
+    // # state.
+    flow_control.pending_max_stream_data_frame = std::nullopt;
+    flow_control.max_stream_data_state = StreamControlFrameState::none;
     return StreamStateResult<bool>::success(true);
 }
 
@@ -334,6 +474,14 @@ StreamStateResult<bool> StreamState::note_peer_stop_sending(std::uint64_t applic
         return StreamStateResult<bool>::success(true);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+    // # An endpoint that receives a STOP_SENDING frame
+    // # MUST send a RESET_STREAM frame if the stream is in the "Ready" or
+    // # "Send" state.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+    // # An endpoint SHOULD copy the error code from the STOP_SENDING frame to
+    // # the RESET_STREAM frame it sends, but it can use any application error
+    // # code.
     return validate_local_reset(application_error_code);
 }
 
@@ -346,6 +494,13 @@ bool StreamState::has_pending_send() const {
     }
 
     if (reset_state != StreamControlFrameState::none) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+        // # A sender MUST NOT send any of these frames from a terminal state
+        // # ("Data Recvd" or "Reset Recvd").
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+        // # A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED frame for
+        // # a stream in the "Reset Sent" state or any terminal state -- that
+        // # is, after sending a RESET_STREAM frame.
         return false;
     }
 
@@ -412,11 +567,18 @@ std::uint64_t StreamState::next_send_offset_for_budget(bool prefer_fresh_data) c
 }
 
 bool StreamState::should_send_stream_data_blocked() const {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+    // # A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED frame for
+    // # a stream in the "Reset Sent" state or any terminal state -- that
+    // # is, after sending a RESET_STREAM frame.
     return id_info.local_can_send && reset_state == StreamControlFrameState::none &&
            send_flow_control_committed > flow_control.peer_max_stream_data;
 }
 
 void StreamState::note_peer_max_stream_data(std::uint64_t maximum_stream_data) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # A sender MUST ignore any MAX_STREAM_DATA or MAX_DATA frames that do
+    // # not increase flow control limits.
     if (maximum_stream_data <= flow_control.peer_max_stream_data) {
         return;
     }
@@ -430,6 +592,13 @@ void StreamState::note_peer_max_stream_data(std::uint64_t maximum_stream_data) {
 }
 
 void StreamState::queue_max_stream_data(std::uint64_t maximum_stream_data) {
+    if (peer_final_size.has_value() || peer_reset_received) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # An endpoint SHOULD stop sending MAX_STREAM_DATA frames when the
+        // # receiving part of the stream enters a "Size Known" or "Reset Recvd"
+        // # state.
+        return;
+    }
     if (maximum_stream_data <= flow_control.advertised_max_stream_data) {
         return;
     }
@@ -485,6 +654,14 @@ void StreamState::queue_stream_data_blocked() {
         .stream_id = stream_id,
         .maximum_stream_data = flow_control.peer_max_stream_data,
     };
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.13
+    // # A sender SHOULD send a STREAM_DATA_BLOCKED frame (type=0x15) when it
+    // # wishes to send data but is unable to do so due to stream-level flow
+    // # control.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # A sender SHOULD send a
+    // # STREAM_DATA_BLOCKED or DATA_BLOCKED frame to indicate to the receiver
+    // # that it has data to write but is blocked by flow control limits.
     flow_control.stream_data_blocked_state = StreamControlFrameState::pending;
 }
 
@@ -545,6 +722,13 @@ std::vector<StreamFrameSendFragment> StreamState::take_send_fragments(StreamSend
 void StreamState::append_send_fragments(StreamSendBudget budget,
                                         std::vector<StreamFrameSendFragment> &fragments) {
     if (reset_state != StreamControlFrameState::none) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+        // # A sender MUST NOT send any of these frames from a terminal state
+        // # ("Data Recvd" or "Reset Recvd").
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+        // # A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED frame for
+        // # a stream in the "Reset Sent" state or any terminal state -- that
+        // # is, after sending a RESET_STREAM frame.
         return;
     }
 
@@ -571,6 +755,8 @@ void StreamState::append_send_fragments(StreamSendBudget budget,
 
     const auto append_lost_ranges = [&]() {
         send_buffer.consume_lost_ranges(remaining_bytes, std::nullopt, [&](ByteRange range) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+            // # The data at a given offset MUST NOT change if it is sent multiple times
             append_fragment(std::move(range), /*consumes_flow_control=*/false);
         });
     };
@@ -578,6 +764,14 @@ void StreamState::append_send_fragments(StreamSendBudget budget,
         const auto capped_new_bytes =
             std::min<std::uint64_t>(budget.new_bytes, static_cast<std::uint64_t>(remaining_bytes));
         auto new_remaining_bytes = static_cast<std::size_t>(capped_new_bytes);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+        // # An endpoint MUST NOT send data on any stream without ensuring that it
+        // # is within the flow control limits set by its peer.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+        // # Senders MUST NOT send data in excess of either limit.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+        // # The data sent on a stream MUST NOT exceed the largest maximum
+        // # stream data value advertised by the receiver.
         send_buffer.consume_unsent_ranges(
             new_remaining_bytes, flow_control.peer_max_stream_data, [&](ByteRange range) {
                 const auto range_end = saturating_add(range.offset, range.bytes.size());
@@ -591,6 +785,10 @@ void StreamState::append_send_fragments(StreamSendBudget budget,
         append_new_ranges();
         append_lost_ranges();
     } else {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # Endpoints SHOULD prioritize retransmission of data over sending new
+        // # data, unless priorities specified by the application indicate otherwise;
+        // # see Section 2.3.
         append_lost_ranges();
         append_new_ranges();
     }
@@ -622,6 +820,9 @@ void StreamState::acknowledge_reset_frame(const ResetStreamFrame &frame) {
 void StreamState::mark_reset_frame_lost(const ResetStreamFrame &frame) {
     if (reset_state != StreamControlFrameState::acknowledged &&
         reset_frame_matches(pending_reset_frame, frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # The content of a RESET_STREAM frame MUST NOT change when it is
+        // # sent again.
         reset_state = StreamControlFrameState::pending;
     }
 }

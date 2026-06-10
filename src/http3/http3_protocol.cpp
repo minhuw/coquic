@@ -402,6 +402,10 @@ template <typename T> Http3Result<T> validate_field_wire_syntax(const Http3Field
     if (!header_name_is_valid(field.name)) {
         return http3_failure<T>(Http3ErrorCode::message_error, "invalid header name");
     }
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2
+    // # A request or
+    // # response containing uppercase characters in field names MUST be
+    // # treated as malformed.
     if (header_name_has_uppercase(field.name)) {
         return http3_failure<T>(Http3ErrorCode::message_error, "uppercase header name");
     }
@@ -567,6 +571,14 @@ CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> byte
         if (!id.has_value()) {
             return codec_failure<Http3DecodedFrame>(id.error().code, id.error().offset);
         }
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.1
+        // # Each frame's payload MUST contain exactly the fields identified in
+        // # its description.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.1
+        // # A frame payload that contains additional bytes
+        // # after the identified fields or a frame payload that terminates before
+        // # the end of the identified fields MUST be treated as a connection
+        // # error of type H3_FRAME_ERROR.
         if (payload_reader.remaining() != 0) {
             return codec_failure<Http3DecodedFrame>(CodecErrorCode::http3_parse_error,
                                                     payload_reader.offset());
@@ -814,6 +826,11 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
 
         if (!is_pseudo) {
             saw_regular_header = true;
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2
+            // # An endpoint MUST NOT generate
+            // # an HTTP/3 field section containing connection-specific fields; any
+            // # message containing connection-specific fields MUST be treated as
+            // # malformed.
             if (is_connection_specific_header(field.name)) {
                 return http3_failure<Http3RequestHead>(
                     Http3ErrorCode::message_error, "connection-specific header is not permitted");
@@ -825,6 +842,10 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
                 }
                 host_header = field.value;
             }
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2
+            // # The only exception to this is the TE header field, which MAY be
+            // # present in an HTTP/3 request header; when it is, it MUST NOT contain
+            // # any value other than "trailers".
             if (field.name == "te" && !iequals_ascii(trim_ows(field.value), "trailers")) {
                 return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                        "invalid te header");

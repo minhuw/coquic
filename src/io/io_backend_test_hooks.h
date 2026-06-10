@@ -155,6 +155,7 @@ bool socket_io_backend_sendmsg_uses_ip_tos_for_ipv4_mapped_ipv6_peer_for_tests()
 bool socket_io_backend_sendmsg_sets_ipv6_flow_label_for_tests();
 bool socket_io_backend_recvmsg_maps_ecn_for_tests();
 bool poll_io_engine_ignores_non_pmtu_errqueue_for_tests();
+bool poll_io_engine_ignores_pmtu_decrease_below_quic_floor_for_tests();
 bool poll_io_engine_compacts_queued_small_receive_storage_for_tests();
 bool poll_io_engine_keeps_queued_large_receive_storage_shared_for_tests();
 bool poll_io_engine_keeps_queued_gro_receive_storage_shared_for_tests();

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "src/quic/codec/packet_number.h"
 #include "tests/support/core/connection_ack_test_support.h"
 
 namespace {
@@ -433,9 +434,20 @@ TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {
         ADD_FAILURE() << "unexpected second burst packet count";
         return;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    // # Subsequent packets sent in the same packet
+    // # number space MUST increase the packet number by at least one.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    // # A QUIC endpoint MUST NOT reuse a packet number within the same packet
+    // # number space in one connection.
     if (second_burst.second <= first_burst.second) {
         ADD_FAILURE() << "second burst did not advance packet numbers";
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+    // # New packet numbers MUST be used for any new packets that are sent; as
+    // # described in Section 17.2.5.3, reusing packet numbers could compromise
+    // # packet protection.
+    EXPECT_NE(second_burst.second, first_burst.second);
 
     ASSERT_TRUE(connection
                     .process_inbound_ack(connection.application_space_,
@@ -454,6 +466,12 @@ TEST(QuicCoreTest, ApplicationSendContinuesAcrossCumulativeAckBursts) {
         ADD_FAILURE() << "third burst did not send packets";
         return;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    // # Subsequent packets sent in the same packet
+    // # number space MUST increase the packet number by at least one.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    // # A QUIC endpoint MUST NOT reuse a packet number within the same packet
+    // # number space in one connection.
     if (third_burst.second <= second_burst.second) {
         ADD_FAILURE() << "third burst did not advance packet numbers";
     }
@@ -1197,6 +1215,9 @@ TEST(QuicCoreTest, PathResponseCanBeSentWhileApplicationStreamDataIsQueued) {
             });
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    // # An endpoint MUST NOT delay transmission of a packet containing a
+    // # PATH_RESPONSE frame unless constrained by congestion control.
     EXPECT_TRUE(saw_path_response);
     EXPECT_FALSE(path.pending_response.has_value());
 }
@@ -1639,6 +1660,8 @@ TEST(QuicCoreTest, AckProcessingDisablesEcnWhenPeerDecreasesEct1OrCeCounts) {
             /*max_ack_delay_ms=*/0, /*suppress_pto_reset=*/false);
 
         ASSERT_TRUE(processed.has_value());
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+        // # If validation fails, then the endpoint MUST disable ECN.
         EXPECT_EQ(path.ecn.state, coquic::quic::QuicPathEcnState::failed);
     }
 }
@@ -1682,8 +1705,17 @@ TEST(QuicCoreTest, AckProcessingDisablesEcnWhenPeerCountsDecrease) {
                                        /*max_ack_delay_ms=*/0, /*suppress_pto_reset=*/false);
 
     ASSERT_TRUE(processed.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+    // # Network routing and path elements can change mid-connection; an endpoint
+    // # MUST disable ECN if validation later fails.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+    // # If validation fails, then the endpoint MUST disable ECN.
     EXPECT_EQ(path.ecn.state, coquic::quic::QuicPathEcnState::failed);
     EXPECT_FALSE(path.ecn.has_last_peer_counts[2]);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+    // # It stops setting the ECT codepoint in IP packets that it sends,
+    // # assuming that either the network path or the peer does not support
+    // # ECN.
     EXPECT_EQ(connection.outbound_ecn_codepoint_for_path(0),
               coquic::quic::QuicEcnCodepoint::not_ect);
 }
@@ -1722,6 +1754,8 @@ TEST(QuicCoreTest, AckProcessingDisablesEcnWhenEct1FeedbackIsMissingOrImpossible
             /*max_ack_delay_ms=*/0, /*suppress_pto_reset=*/false);
 
         ASSERT_TRUE(missing_feedback.has_value());
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+        // # If validation fails, then the endpoint MUST disable ECN.
         EXPECT_EQ(path.ecn.state, coquic::quic::QuicPathEcnState::failed);
     }
 
@@ -1758,6 +1792,8 @@ TEST(QuicCoreTest, AckProcessingDisablesEcnWhenEct1FeedbackIsMissingOrImpossible
             /*max_ack_delay_ms=*/0, /*suppress_pto_reset=*/false);
 
         ASSERT_TRUE(impossible_feedback.has_value());
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+        // # If validation fails, then the endpoint MUST disable ECN.
         EXPECT_EQ(path.ecn.state, coquic::quic::QuicPathEcnState::failed);
     }
 }
@@ -1908,6 +1944,30 @@ TEST(QuicCoreTest, ApplicationCloseDrainReturnsEmptyWithoutOneRttKeys) {
     EXPECT_TRUE(datagram.empty());
 }
 
+TEST(QuicCoreTest, SendingAtPacketNumberLimitSilentlyClosesWithoutDatagram) {
+    auto connection = make_connected_client_connection();
+    connection.application_space_.next_send_packet_number = coquic::quic::kMaxPacketNumber;
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("limit"), false)
+            .has_value());
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    // # If the packet number for sending reaches 2^62-1, the sender MUST
+    // # close the connection without sending a CONNECTION_CLOSE frame or any
+    // # further packets;
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    EXPECT_TRUE(datagram.empty());
+    EXPECT_TRUE(connection.has_failed());
+    ASSERT_TRUE(connection.pending_terminal_state_.has_value());
+    EXPECT_TRUE(optional_value_or_terminate(connection.pending_terminal_state_) ==
+                coquic::quic::QuicConnectionTerminalState::closed);
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), 0u);
+    EXPECT_EQ(connection.application_space_.next_send_packet_number,
+              coquic::quic::kMaxPacketNumber);
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(2)).empty());
+}
+
 TEST(QuicCoreTest, TinyDatagramBudgetTruncatesApplicationCloseReason) {
     auto connection = make_connected_client_connection();
     connection.config_.max_outbound_datagram_size = 48;
@@ -2003,6 +2063,10 @@ TEST(QuicCoreTest, AntiAmplificationAccountingSaturatesBudgetAndCounters) {
               std::numeric_limits<std::uint64_t>::max());
 
     connection.anti_amplification_received_bytes_ = std::numeric_limits<std::uint64_t>::max() - 4u;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # For the purposes of avoiding amplification prior to address
+    // # validation, servers MUST count all of the payload bytes received in
+    // # datagrams that are uniquely attributed to a single connection.
     connection.note_inbound_datagram_bytes(8);
     EXPECT_EQ(connection.anti_amplification_received_bytes_,
               std::numeric_limits<std::uint64_t>::max());
@@ -2767,11 +2831,45 @@ TEST(QuicCoreTest, FirstAckElicitingOneRttPacketSchedulesDelayedApplicationAckDe
 
     ASSERT_TRUE(processed.has_value());
     ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # Every packet SHOULD be acknowledged at least once, and ack-eliciting
+    // # packets MUST be acknowledged at least once within the maximum delay
+    // # an endpoint communicated using the max_ack_delay transport parameter;
+    // # see Section 18.2.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+    // # packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+    // # within its advertised max_ack_delay, with the following exception.
     EXPECT_EQ(
         optional_value_or_terminate(connection.application_space_.pending_ack_deadline),
         coquic::quic::test::test_time(
             1 + static_cast<std::int64_t>(connection.local_transport_parameters_.max_ack_delay)));
     EXPECT_FALSE(connection.application_space_.force_ack_send);
+}
+
+TEST(QuicCoreTest, CeMarkedOneRttPacketSchedulesImmediateApplicationAckDeadline) {
+    auto connection = make_connected_client_connection();
+    connection.application_space_.pending_ack_deadline = std::nullopt;
+    connection.application_space_.force_ack_send = false;
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number_length = 2,
+            .packet_number = 4,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(1), coquic::quic::QuicEcnCodepoint::ce);
+
+    ASSERT_TRUE(processed.has_value());
+    ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # Similarly, packets marked with the ECN Congestion Experienced (CE)
+    // # codepoint in the IP header SHOULD be acknowledged immediately, to
+    // # reduce the peer's response time to congestion events.
+    EXPECT_EQ(optional_value_or_terminate(connection.application_space_.pending_ack_deadline),
+              coquic::quic::test::test_time(1));
+    EXPECT_TRUE(connection.application_space_.force_ack_send);
 }
 
 TEST(QuicCoreTest,
@@ -2801,6 +2899,15 @@ TEST(QuicCoreTest,
 
     ASSERT_TRUE(second_processed.has_value());
     ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # Every packet SHOULD be acknowledged at least once, and ack-eliciting
+    // # packets MUST be acknowledged at least once within the maximum delay
+    // # an endpoint communicated using the max_ack_delay transport parameter;
+    // # see Section 18.2.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+    // # packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+    // # within its advertised max_ack_delay, with the following exception.
     EXPECT_EQ(optional_value_or_terminate(connection.application_space_.pending_ack_deadline),
               coquic::quic::test::test_time(2));
     EXPECT_FALSE(connection.application_space_.force_ack_send);
@@ -2828,6 +2935,19 @@ TEST(QuicCoreTest, DelayedApplicationAckDeadlineSuppressesImmediateAckOnlySend) 
     EXPECT_TRUE(datagram.empty());
     EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
     ASSERT_TRUE(connection.application_space_.pending_ack_deadline.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # Since packets containing only ACK frames are not congestion controlled,
+    // # an endpoint MUST NOT send more than one such packet in response to
+    // # receiving an ack-eliciting packet.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # Every packet SHOULD be acknowledged at least once, and ack-eliciting
+    // # packets MUST be acknowledged at least once within the maximum delay
+    // # an endpoint communicated using the max_ack_delay transport parameter;
+    // # see Section 18.2.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+    // # An endpoint MUST acknowledge all ack-eliciting Initial and Handshake
+    // # packets immediately and all ack-eliciting 0-RTT and 1-RTT packets
+    // # within its advertised max_ack_delay, with the following exception.
     EXPECT_EQ(
         optional_value_or_terminate(connection.application_space_.pending_ack_deadline),
         coquic::quic::test::test_time(
@@ -3461,6 +3581,9 @@ TEST(QuicCoreTest, LossDetectionUsesDefaultAckDelayButRequiresRttSampleForPersis
     connection.detect_lost_packets(connection.application_space_,
                                    coquic::quic::test::test_time(1200));
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    // # Upon detecting losses, a sender MUST take appropriate congestion
+    // # control action.
     EXPECT_LT(connection.congestion_controller_.congestion_window(), initial_window);
     EXPECT_GT(connection.congestion_controller_.congestion_window(),
               connection.congestion_controller_.minimum_window());
@@ -3495,6 +3618,9 @@ TEST(QuicCoreTest, LossDetectionSkipsNonAckElicitingPacketsForPersistentCongesti
     connection.detect_lost_packets(connection.application_space_,
                                    coquic::quic::test::test_time(250));
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    // # Upon detecting losses, a sender MUST take appropriate congestion
+    // # control action.
     EXPECT_LT(connection.congestion_controller_.congestion_window(), initial_window);
     EXPECT_GT(connection.congestion_controller_.congestion_window(),
               connection.congestion_controller_.minimum_window());
@@ -3869,6 +3995,9 @@ TEST(QuicCoreTest, MarkLostPacketRequeuesHandshakeDoneWhenItWasNotYetAcknowledge
         optional_value_or_terminate(
             connection.application_space_.recovery.handle_for_packet_number(packet.packet_number)));
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    // # * The HANDSHAKE_DONE frame MUST be retransmitted until it is
+    // # acknowledged.
     EXPECT_EQ(connection.handshake_done_state_, coquic::quic::StreamControlFrameState::pending);
 }
 

@@ -135,6 +135,9 @@ TEST(QuicCoreTest, DatagramSendPriorityChoosesHigherPriorityThenFifo) {
 TEST(QuicCoreTest, DatagramSendPriorityIsRelativeToPendingStreamWork) {
     auto connection = make_connected_client_connection();
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.3
+    // # A QUIC implementation SHOULD provide ways in which an application can
+    // # indicate the relative priority of streams.
     ASSERT_TRUE(connection
                     .queue_stream_send(0, bytes_from_ints({0x73}), false,
                                        /*priority=*/5)
@@ -410,6 +413,9 @@ TEST(QuicCoreTest, ProcessInboundDatagramBuffersOutOfOrderOneRttStreamDataUntilG
         coquic::quic::test::test_time(2));
 
     auto received_stream = optional_value_or_terminate(connection.take_received_stream_data());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+    // # Endpoints MUST be able to deliver stream data to an application as an
+    // # ordered byte stream.
     if (coquic::quic::test::string_from_bytes(received_stream.bytes) != "hello") {
         ADD_FAILURE() << "unexpected coalesced stream bytes";
     }
@@ -531,6 +537,11 @@ TEST(QuicCoreTest, ProcessInboundDatagramIgnoresAckRangeTrimmedOneRttReplay) {
         ASSERT_FALSE(connection.take_received_stream_data().has_value());
     }
     ASSERT_TRUE(connection.application_space_.received_packets.should_ignore(0));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+    // # Receivers can discard all ACK Ranges, but they MUST retain the
+    // # largest packet number that has been successfully processed, as that
+    // # is used to recover packet numbers from subsequent packets; see
+    // # Section 17.1.
     EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number,
               coquic::quic::kMaxTrackedAckRanges * 2);
 
@@ -538,7 +549,20 @@ TEST(QuicCoreTest, ProcessInboundDatagramIgnoresAckRangeTrimmedOneRttReplay) {
         codec_value_or_terminate(make_stream_datagram(0, 0, "replay")),
         coquic::quic::test::test_time(200));
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    // # A receiver MUST discard a newly unprotected packet unless it is
+    // # certain that it has not processed another packet with the same packet
+    // # number from the same packet number space.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
+    // # Duplicate suppression MUST
+    // # happen after removing packet protection for the reasons described in
+    // # Section 9.5 of [QUIC-TLS].
     EXPECT_FALSE(connection.take_received_stream_data().has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+    // # Receivers can discard all ACK Ranges, but they MUST retain the
+    // # largest packet number that has been successfully processed, as that
+    // # is used to recover packet numbers from subsequent packets; see
+    // # Section 17.1.
     EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number,
               coquic::quic::kMaxTrackedAckRanges * 2);
     EXPECT_FALSE(connection.has_failed());
@@ -770,6 +794,9 @@ TEST(QuicCoreTest, DatagramSendReportsPeerSupportAndSizeLocalErrors) {
         },
         coquic::quic::test::test_time(1));
     ASSERT_TRUE(unsupported.local_error.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.21
+    // # An extension to QUIC that wishes to use a new type of frame MUST first
+    // # ensure that a peer is able to understand the frame.
     EXPECT_EQ(optional_ref_or_terminate(unsupported.local_error).code,
               coquic::quic::QuicCoreLocalErrorCode::datagram_not_supported);
     EXPECT_FALSE(optional_ref_or_terminate(unsupported.local_error).stream_id.has_value());
@@ -1053,6 +1080,9 @@ TEST(QuicCoreTest, ResetStreamLocalCommandEmitsPeerResetEffect) {
         reset, server, coquic::quic::test::test_time(2));
 
     ASSERT_EQ(coquic::quic::test::peer_resets_from(received).size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11.2
+    // # RESET_STREAM MUST only be instigated by the application protocol that
+    // # uses QUIC.
     EXPECT_EQ(coquic::quic::test::peer_resets_from(received)[0].stream_id, 0u);
     EXPECT_EQ(coquic::quic::test::peer_resets_from(received)[0].application_error_code, 7u);
     EXPECT_EQ(coquic::quic::test::peer_resets_from(received)[0].final_size, 0u);
@@ -1104,6 +1134,10 @@ TEST(QuicCoreTest, StopSendingLocalCommandEmitsPeerStopEffect) {
         stop, server, coquic::quic::test::test_time(4));
 
     ASSERT_EQ(coquic::quic::test::peer_stops_from(received).size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+    // # If the stream is in the "Recv" or "Size Known" state, the transport
+    // # SHOULD signal this by sending a STOP_SENDING frame to prompt closure
+    // # of the stream in the opposite direction.
     EXPECT_EQ(coquic::quic::test::peer_stops_from(received)[0].stream_id, 3u);
     EXPECT_EQ(coquic::quic::test::peer_stops_from(received)[0].application_error_code, 11u);
     EXPECT_FALSE(server.has_failed());
@@ -1162,6 +1196,10 @@ TEST(QuicCoreTest, LocalApplicationCloseQueuesApplicationConnectionCloseFrame) {
                 }
 
                 saw_application_close = true;
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+                // # After the handshake is confirmed (see Section 4.1.2 of
+                // # [QUIC-TLS]), an endpoint MUST send any CONNECTION_CLOSE
+                // # frames in a 1-RTT packet.
                 EXPECT_EQ(
                     close_frame->error_code,
                     static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::missing_settings));
@@ -1214,7 +1252,18 @@ TEST(QuicCoreTest, PeerStopSendingQueuesAutomaticReset) {
     auto server_result = coquic::quic::test::relay_send_datagrams_to_peer(
         client_result, server, coquic::quic::test::test_time(5));
     ASSERT_EQ(coquic::quic::test::peer_resets_from(server_result).size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11.2
+    // # RESET_STREAM MUST only be instigated by the application protocol that
+    // # uses QUIC.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+    // # An endpoint that receives a STOP_SENDING frame
+    // # MUST send a RESET_STREAM frame if the stream is in the "Ready" or
+    // # "Send" state.
     EXPECT_EQ(coquic::quic::test::peer_resets_from(server_result)[0].stream_id, 0u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+    // # An endpoint SHOULD copy the error code from the STOP_SENDING frame to
+    // # the RESET_STREAM frame it sends, but it can use any application error
+    // # code.
     EXPECT_EQ(coquic::quic::test::peer_resets_from(server_result)[0].application_error_code, 19u);
     EXPECT_EQ(coquic::quic::test::peer_resets_from(server_result)[0].final_size, 3u);
 }
@@ -1233,6 +1282,27 @@ TEST(QuicCoreTest, InboundResetStreamFailsForSendOnlyStream) {
 
     EXPECT_FALSE(injected);
     EXPECT_TRUE(connection.has_failed());
+}
+
+TEST(QuicCoreTest, PeerControlFrameCreatesLowerSameTypeStreams) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
+        connection, coquic::quic::HandshakeStatus::connected);
+
+    auto injected = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection, {coquic::quic::StopSendingFrame{
+                        .stream_id = 8,
+                        .application_protocol_error_code = 7,
+                    }});
+
+    EXPECT_TRUE(injected);
+    EXPECT_FALSE(connection.has_failed());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.2
+    // # Before a stream is created, all streams of the same type with lower-
+    // # numbered stream IDs MUST be created.
+    EXPECT_TRUE(connection.streams_.contains(0));
+    EXPECT_TRUE(connection.streams_.contains(4));
+    EXPECT_TRUE(connection.streams_.contains(8));
 }
 
 TEST(QuicCoreTest, InboundStreamDataIsIgnoredAfterPeerResetStream) {
@@ -1511,6 +1581,15 @@ TEST(QuicCoreTest, LostDatagramFrameIsNotRetransmitted) {
     auto sent_packet = first_tracked_packet(connection.application_space_);
     if (!sent_packet.ack_eliciting) {
         ADD_FAILURE() << "DATAGRAM packet was not ack eliciting";
+    }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.21
+    // # Extension frames MUST be congestion controlled and MUST cause an ACK
+    // # frame to be sent.
+    if (!sent_packet.in_flight) {
+        ADD_FAILURE() << "DATAGRAM packet was not congestion controlled";
+    }
+    if (sent_packet.bytes_in_flight == 0) {
+        ADD_FAILURE() << "DATAGRAM packet did not contribute bytes in flight";
     }
     if (sent_packet_has_stream_frames_for_tests(sent_packet)) {
         ADD_FAILURE() << "DATAGRAM packet unexpectedly carried stream frames";
@@ -2247,6 +2326,10 @@ TEST(QuicCoreTest, BulkStreamDatagramsFillValidatedMtuExactly) {
         auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
         ASSERT_FALSE(datagram.empty());
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+        // # All QUIC packets that are not sent in a PMTU probe SHOULD be
+        // # sized to fit within the maximum datagram size to avoid the
+        // # datagram being fragmented or dropped [RFC8085].
         EXPECT_EQ(datagram.size(), path_udp_payload_size);
     }
 }
@@ -2442,7 +2525,129 @@ TEST(QuicCoreTest, QueueStreamSendRejectsInvalidIdsAndClosedSendSide) {
     ASSERT_TRUE(connection.queue_stream_send(/*stream_id=*/0, {}, /*fin=*/true).has_value());
     auto closed = connection.queue_stream_send(/*stream_id=*/0, payload, /*fin=*/false);
     ASSERT_FALSE(closed.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # An endpoint MUST NOT send data on a stream at or beyond the final size.
     EXPECT_EQ(closed.error().code, coquic::quic::StreamStateErrorCode::send_side_closed);
+}
+
+TEST(QuicCoreTest, PeerStreamOpenLimitsTrackStreamsBlockedAcrossQueueLossAndAck) {
+    coquic::quic::StreamOpenLimits limits;
+    limits.peer_max_bidirectional = 2;
+    limits.peer_max_unidirectional = 3;
+
+    limits.queue_streams_blocked(coquic::quic::StreamLimitType::bidirectional);
+    ASSERT_TRUE(limits.pending_streams_blocked_bidi_frame.has_value());
+    EXPECT_EQ(limits.streams_blocked_bidi_state, coquic::quic::StreamControlFrameState::pending);
+
+    auto first_frames = limits.take_streams_blocked_frames();
+    ASSERT_EQ(first_frames.size(), 1u);
+    EXPECT_EQ(first_frames.front().stream_type, coquic::quic::StreamLimitType::bidirectional);
+    EXPECT_EQ(first_frames.front().maximum_streams, 2u);
+    EXPECT_EQ(limits.streams_blocked_bidi_state, coquic::quic::StreamControlFrameState::sent);
+
+    limits.mark_streams_blocked_frame_lost(first_frames.front());
+    EXPECT_EQ(limits.streams_blocked_bidi_state, coquic::quic::StreamControlFrameState::pending);
+
+    auto retry_frames = limits.take_streams_blocked_frames();
+    ASSERT_EQ(retry_frames.size(), 1u);
+    limits.acknowledge_streams_blocked_frame(retry_frames.front());
+    EXPECT_EQ(limits.streams_blocked_bidi_state,
+              coquic::quic::StreamControlFrameState::acknowledged);
+
+    limits.queue_streams_blocked(coquic::quic::StreamLimitType::bidirectional);
+    ASSERT_TRUE(limits.pending_streams_blocked_bidi_frame.has_value());
+    limits.note_peer_max_streams(coquic::quic::StreamLimitType::bidirectional, 4);
+    EXPECT_EQ(limits.streams_blocked_bidi_state, coquic::quic::StreamControlFrameState::none);
+    EXPECT_FALSE(limits.pending_streams_blocked_bidi_frame.has_value());
+
+    limits.queue_streams_blocked(coquic::quic::StreamLimitType::unidirectional);
+    auto uni_frames = limits.take_streams_blocked_frames();
+    ASSERT_EQ(uni_frames.size(), 1u);
+    EXPECT_EQ(uni_frames.front().stream_type, coquic::quic::StreamLimitType::unidirectional);
+    EXPECT_EQ(uni_frames.front().maximum_streams, 3u);
+}
+
+TEST(QuicCoreTest, LocalOpenBlockedByPeerLimitSendsStreamsBlockedFrame) {
+    auto connection = make_connected_client_connection();
+    auto payload = bytes_from_ints({0x61});
+    connection.stream_open_limits_.peer_max_bidirectional = 1;
+
+    auto blocked = connection.queue_stream_send(/*stream_id=*/4, payload, false);
+
+    ASSERT_FALSE(blocked.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # An endpoint that is unable to open a new stream due to the peer's
+    // # limits SHOULD send a STREAMS_BLOCKED frame (Section 19.14).
+    EXPECT_EQ(blocked.error().code, coquic::quic::StreamStateErrorCode::invalid_stream_id);
+
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(application, nullptr);
+
+    const coquic::quic::StreamsBlockedFrame *blocked_frame = nullptr;
+    bool saw_stream = false;
+    for (const auto &frame : application->frames) {
+        if (const auto *candidate = std::get_if<coquic::quic::StreamsBlockedFrame>(&frame)) {
+            blocked_frame = candidate;
+        }
+        saw_stream = saw_stream || std::holds_alternative<coquic::quic::StreamFrame>(frame);
+    }
+
+    ASSERT_NE(blocked_frame, nullptr);
+    EXPECT_EQ(blocked_frame->stream_type, coquic::quic::StreamLimitType::bidirectional);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.14
+    // # A sender SHOULD send a STREAMS_BLOCKED frame (type=0x16 or 0x17) when
+    // # it wishes to open a stream but is unable to do so due to the maximum
+    // # stream limit set by its peer; see Section 19.11.
+    EXPECT_EQ(blocked_frame->maximum_streams, 1u);
+    EXPECT_FALSE(saw_stream);
+
+    ASSERT_EQ(tracked_packet_count(connection.application_space_), 1u);
+    const auto sent = first_tracked_packet(connection.application_space_);
+    ASSERT_EQ(sent.streams_blocked_frames.size(), 1u);
+    EXPECT_EQ(connection.stream_open_limits_.streams_blocked_bidi_state,
+              coquic::quic::StreamControlFrameState::sent);
+
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(
+            connection.application_space_.recovery.handle_for_packet_number(sent.packet_number)));
+    EXPECT_EQ(connection.stream_open_limits_.streams_blocked_bidi_state,
+              coquic::quic::StreamControlFrameState::pending);
+}
+
+TEST(QuicCoreTest, LocalOpenBlockedByPeerUnidirectionalLimitSendsStreamsBlockedFrame) {
+    auto connection = make_connected_client_connection();
+    connection.stream_open_limits_.peer_max_unidirectional = 0;
+    auto blocked = connection.queue_stream_send(/*stream_id=*/2, bytes_from_ints({0x61}), false);
+
+    ASSERT_FALSE(blocked.has_value());
+    ASSERT_EQ(blocked.error().code, coquic::quic::StreamStateErrorCode::invalid_stream_id);
+    ASSERT_EQ(connection.stream_open_limits_.streams_blocked_uni_state,
+              coquic::quic::StreamControlFrameState::pending);
+
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(application, nullptr);
+
+    const coquic::quic::StreamsBlockedFrame *blocked_frame = nullptr;
+    for (const auto &frame : application->frames) {
+        if (const auto *candidate = std::get_if<coquic::quic::StreamsBlockedFrame>(&frame)) {
+            blocked_frame = candidate;
+        }
+    }
+
+    ASSERT_NE(blocked_frame, nullptr);
+    EXPECT_EQ(blocked_frame->stream_type, coquic::quic::StreamLimitType::unidirectional);
+    EXPECT_EQ(blocked_frame->maximum_streams, 0u);
 }
 
 TEST(QuicCoreTest, QueueStreamSendReturnsSuccessWithoutOpeningStreamWhenConnectionAlreadyFailed) {
@@ -2824,6 +3029,10 @@ TEST(QuicCoreTest, InboundApplicationStreamFailsForNonZeroStreamId) {
     auto injected = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
         connection, {coquic::quic::test::make_inbound_application_stream_frame("ping", 0, 1)});
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.8
+    // # An endpoint MUST terminate the connection with error STREAM_STATE_ERROR
+    // # if it receives a STREAM frame for a locally initiated stream that has
+    // # not yet been created, or for a send-only stream.
     EXPECT_FALSE(injected);
     EXPECT_TRUE(connection.has_failed());
 }
@@ -2839,9 +3048,32 @@ TEST(QuicCoreTest,
     auto injected = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
         connection, {coquic::quic::test::make_inbound_application_stream_frame("ping", 0, 0)});
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # An endpoint that receives a frame with a stream ID exceeding the
+    // # limit it has sent MUST treat this as a connection error of type
+    // # STREAM_LIMIT_ERROR; see Section 11 for details on error handling.
     EXPECT_FALSE(injected);
     EXPECT_TRUE(connection.has_failed());
     EXPECT_FALSE(connection.take_received_stream_data().has_value());
+}
+
+TEST(QuicCoreTest, PeerStreamFrameCreatesLowerSameTypeStreams) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::QuicConnectionTestPeer::set_handshake_status(
+        connection, coquic::quic::HandshakeStatus::connected);
+
+    auto injected = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection,
+        {coquic::quic::test::make_inbound_application_stream_frame("ping", 0, 8, false)});
+
+    EXPECT_TRUE(injected);
+    EXPECT_FALSE(connection.has_failed());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.2
+    // # Before a stream is created, all streams of the same type with lower-
+    // # numbered stream IDs MUST be created.
+    EXPECT_TRUE(connection.streams_.contains(0));
+    EXPECT_TRUE(connection.streams_.contains(4));
+    EXPECT_TRUE(connection.streams_.contains(8));
 }
 
 TEST(QuicCoreTest, InboundApplicationStreamCarriesFinWhenFinalDataBecomesContiguous) {
@@ -3472,6 +3704,11 @@ TEST(QuicCoreTest,
     datagram.insert(datagram.end(), malformed_second_packet.begin(), malformed_second_packet.end());
     datagram.insert(datagram.end(), third_packet.value().begin(), third_packet.value().end());
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    // # For example, if decryption fails (because the keys are not available
+    // # or for any other reason), the receiver MAY either discard or buffer
+    // # the packet for later processing and MUST attempt to process the
+    // # remaining packets.
     connection.process_inbound_datagram(datagram, coquic::quic::test::test_time(1));
 
     EXPECT_FALSE(connection.has_failed());
@@ -3510,6 +3747,12 @@ TEST(QuicCoreTest, LocalStreamLimitStateTracksUnidirectionalFramesAcrossQueueLos
     EXPECT_EQ(limits.max_streams_uni_state, coquic::quic::StreamControlFrameState::acknowledged);
 
     limits.queue_max_streams(coquic::quic::StreamLimitType::unidirectional, 3);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # MAX_STREAMS frames that do not increase the stream limit MUST be
+    // # ignored.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.11
+    // # MAX_STREAMS frames that do not increase the stream limit MUST be
+    // # ignored.
     EXPECT_EQ(limits.max_streams_uni_state, coquic::quic::StreamControlFrameState::acknowledged);
 }
 
@@ -3675,6 +3918,9 @@ TEST(QuicCoreTest, FinOnlyStreamBlockedByPeerCreditIsNotPendingApplicationSend) 
     stream.send_final_size = 1;
     stream.flow_control.peer_max_stream_data = 0;
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+    // # An endpoint MUST NOT send data on any stream without ensuring that it
+    // # is within the flow control limits set by its peer.
     EXPECT_FALSE(connection.has_pending_fresh_application_stream_send());
     EXPECT_FALSE(connection.has_pending_application_send());
 }
@@ -3757,6 +4003,11 @@ TEST(QuicCoreTest, ClosingPeerInitiatedUnidirectionalStreamRefreshesStreamLimit)
     EXPECT_TRUE(stream.peer_stream_limit_released);
     EXPECT_EQ(connection.local_stream_limit_state_.max_streams_uni_state,
               coquic::quic::StreamControlFrameState::pending);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # An endpoint MUST NOT wait to receive this signal before advertising
+    // # additional credit, since doing so will mean that the peer will be
+    // # blocked for at least an entire round trip, and potentially indefinitely
+    // # if the peer chooses not to send STREAMS_BLOCKED frames.
     ASSERT_TRUE(connection.local_stream_limit_state_.pending_max_streams_uni_frame.has_value());
     EXPECT_EQ(optional_ref_or_terminate(
                   connection.local_stream_limit_state_.pending_max_streams_uni_frame)
@@ -3779,6 +4030,11 @@ TEST(QuicCoreTest, ClosingPeerInitiatedBidirectionalStreamRefreshesStreamLimit) 
     EXPECT_TRUE(stream.peer_stream_limit_released);
     EXPECT_EQ(connection.local_stream_limit_state_.max_streams_bidi_state,
               coquic::quic::StreamControlFrameState::pending);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # An endpoint MUST NOT wait to receive this signal before advertising
+    // # additional credit, since doing so will mean that the peer will be
+    // # blocked for at least an entire round trip, and potentially indefinitely
+    // # if the peer chooses not to send STREAMS_BLOCKED frames.
     ASSERT_TRUE(connection.local_stream_limit_state_.pending_max_streams_bidi_frame.has_value());
     EXPECT_EQ(optional_ref_or_terminate(
                   connection.local_stream_limit_state_.pending_max_streams_bidi_frame)
@@ -3826,10 +4082,16 @@ TEST(QuicCoreTest, TerminalPeerStreamWithPendingOrOutstandingSendIsNotRetired) {
 
     stream.stop_sending_state = coquic::quic::StreamControlFrameState::pending;
     connection.maybe_retire_stream(2);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.4
+    // # Both endpoints MUST maintain flow control state for the stream in the
+    // # unterminated direction until that direction enters a terminal state.
     EXPECT_TRUE(connection.streams_.contains(2));
 
     stream.stop_sending_state = coquic::quic::StreamControlFrameState::sent;
     connection.maybe_retire_stream(2);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.4
+    // # Both endpoints MUST maintain flow control state for the stream in the
+    // # unterminated direction until that direction enters a terminal state.
     EXPECT_TRUE(connection.streams_.contains(2));
 }
 
@@ -3882,11 +4144,17 @@ TEST(QuicCoreTest, RetiredPeerStreamRangeRejectsIneligibleTerminalStates) {
     auto pending_max_stream_data = make_candidate();
     pending_max_stream_data.flow_control.max_stream_data_state =
         coquic::quic::StreamControlFrameState::pending;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.4
+    // # Both endpoints MUST maintain flow control state for the stream in the
+    // # unterminated direction until that direction enters a terminal state.
     EXPECT_FALSE(connection.try_retire_stream_to_peer_range(pending_max_stream_data));
 
     auto pending_stream_data_blocked = make_candidate();
     pending_stream_data_blocked.flow_control.stream_data_blocked_state =
         coquic::quic::StreamControlFrameState::pending;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.4
+    // # Both endpoints MUST maintain flow control state for the stream in the
+    // # unterminated direction until that direction enters a terminal state.
     EXPECT_FALSE(connection.try_retire_stream_to_peer_range(pending_stream_data_blocked));
 
     EXPECT_EQ(connection.retired_peer_stream_count(), 0u);
@@ -3933,11 +4201,22 @@ TEST(QuicCoreTest, TerminalPeerBidirectionalStreamsRetireIntoCompactRanges) {
     const auto final_size_conflict =
         connection.validate_retired_peer_stream_frame(/*stream_id=*/0, /*offset=*/0,
                                                       /*length=*/33, /*fin=*/true, 0x08);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # Once a final size for a stream is known, it cannot change.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # If a RESET_STREAM or STREAM frame is received indicating a change
+    // # in the final size for the stream, an endpoint SHOULD respond with
+    // # an error of type FINAL_SIZE_ERROR; see Section 11 for details on
+    // # error handling.
     EXPECT_FALSE(final_size_conflict.has_value());
 
     const auto non_fin_size_conflict =
         connection.validate_retired_peer_stream_frame(/*stream_id=*/0, /*offset=*/33,
                                                       /*length=*/1, /*fin=*/false, 0x08);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # A receiver SHOULD treat receipt of data at or beyond the final
+    // # size as an error of type FINAL_SIZE_ERROR, even after a stream
+    // # is closed.
     EXPECT_FALSE(non_fin_size_conflict.has_value());
 
     const auto short_fin_size_conflict =
@@ -3959,6 +4238,13 @@ TEST(QuicCoreTest, TerminalPeerBidirectionalStreamsRetireIntoCompactRanges) {
     const auto reset_final_size_conflict =
         connection.validate_retired_peer_reset_stream_frame(/*stream_id=*/0,
                                                             /*final_size=*/31, 0x04);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # Once a final size for a stream is known, it cannot change.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # If a RESET_STREAM or STREAM frame is received indicating a change
+    // # in the final size for the stream, an endpoint SHOULD respond with
+    // # an error of type FINAL_SIZE_ERROR; see Section 11 for details on
+    // # error handling.
     EXPECT_FALSE(reset_final_size_conflict.has_value());
 
     const auto unretired_stream =
@@ -3986,6 +4272,8 @@ TEST(QuicCoreTest, TerminalPeerBidirectionalStreamsRetireIntoCompactRanges) {
 
     auto *retired_scratch = reverse_merge_connection.find_stream_state(0);
     ASSERT_NE(retired_scratch, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.1
+    // # A QUIC endpoint MUST NOT reuse a stream ID within a connection.
     EXPECT_TRUE(retired_scratch->send_closed);
     EXPECT_TRUE(retired_scratch->receive_closed);
     EXPECT_EQ(retired_scratch->flow_control.peer_max_stream_data,
@@ -4183,6 +4471,13 @@ TEST(QuicCoreTest, ApplicationProbeIgnoresQueuedStreamDataOnResettingStream) {
     }
 
     EXPECT_TRUE(saw_handshake_done);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+    // # A sender MUST NOT send any of these frames from a terminal state
+    // # ("Data Recvd" or "Reset Recvd").
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
+    // # A sender MUST NOT send a STREAM or STREAM_DATA_BLOCKED frame for
+    // # a stream in the "Reset Sent" state or any terminal state -- that
+    // # is, after sending a RESET_STREAM frame.
     EXPECT_FALSE(saw_stream);
 }
 

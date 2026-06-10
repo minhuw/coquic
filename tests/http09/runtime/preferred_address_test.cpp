@@ -11,6 +11,10 @@ TEST(QuicHttp09RuntimeTest, PreferredAddressCidRoutesToExistingServerSession) {
 }
 
 TEST(QuicHttp09RuntimeTest, RuntimeQueuesPreferredAddressMigrationRequestAfterHandshakeConfirmed) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+    // # Once the handshake is confirmed, the client SHOULD select one of the
+    // # two addresses provided by the server and initiate path validation
+    // # (see Section 8.2).
     EXPECT_TRUE(coquic::http09::test::runtime_backend_preferred_address_request_flow_for_tests());
 }
 

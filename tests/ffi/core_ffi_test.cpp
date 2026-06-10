@@ -343,6 +343,11 @@ TEST(CoquicCoreFfiTest, InitializersAndNullQueriesAreStable) {
     EXPECT_EQ(static_cast<unsigned>(transport.congestion_control),
               static_cast<unsigned>(COQUIC_CONGESTION_CONTROL_NEWRENO));
     EXPECT_NE(transport.max_udp_payload_size, 0u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.3
+    // # Endpoints SHOULD set the initial value of BASE_PLPMTU (Section 5.1 of
+    // # [DPLPMTUD]) to be consistent with QUIC's smallest allowed maximum
+    // # datagram size.
+    EXPECT_EQ(transport.pmtud_base_datagram_size, 1200u);
 
     coquic_endpoint_config_t endpoint_config{};
     coquic_endpoint_config_init(&endpoint_config);
@@ -1171,12 +1176,14 @@ TEST(CoquicCoreFfiTest, ResultLocalErrorsExposeAllCodesAndOptionalFields) {
         coquic::core::LocalErrorCode::final_size_conflict,
         coquic::core::LocalErrorCode::datagram_not_supported,
         coquic::core::LocalErrorCode::datagram_too_large,
+        coquic::core::LocalErrorCode::flow_control_violation,
     };
     const std::vector<coquic_local_error_code_t> ffi_codes{
         COQUIC_LOCAL_ERROR_UNSUPPORTED_OPERATION,    COQUIC_LOCAL_ERROR_INVALID_STREAM_ID,
         COQUIC_LOCAL_ERROR_INVALID_STREAM_DIRECTION, COQUIC_LOCAL_ERROR_SEND_SIDE_CLOSED,
         COQUIC_LOCAL_ERROR_RECEIVE_SIDE_CLOSED,      COQUIC_LOCAL_ERROR_FINAL_SIZE_CONFLICT,
         COQUIC_LOCAL_ERROR_DATAGRAM_NOT_SUPPORTED,   COQUIC_LOCAL_ERROR_DATAGRAM_TOO_LARGE,
+        COQUIC_LOCAL_ERROR_FLOW_CONTROL_VIOLATION,
     };
 
     for (std::size_t index = 0; index < codes.size(); ++index) {

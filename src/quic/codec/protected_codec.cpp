@@ -626,6 +626,9 @@ CodecResult<ReceivedFrameList> deserialize_received_frame_sequence(
                 decoded.error().code, base_offset + offset + decoded.error().offset);
         }
         if (!frame_allowed_in_protected_payload_packet_type(decoded.value().frame, packet_type)) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.4
+            // # Endpoints MUST treat receipt of Handshake packets with other frames
+            // # as a connection error of type PROTOCOL_VIOLATION.
             return CodecResult<ReceivedFrameList>::failure(
                 CodecErrorCode::frame_not_allowed_in_packet_type, base_offset + offset);
         }
@@ -3954,6 +3957,9 @@ deserialize_protected_datagram(std::span<const std::byte> bytes,
 
     std::vector<ProtectedPacket> packets;
     std::size_t offset = 0;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    // # Receivers MUST be able to
+    // # process coalesced packets.
     while (offset < bytes.size()) {
         CodecResult<ProtectedPacketDecodeResult> decoded =
             CodecResult<ProtectedPacketDecodeResult>::failure(
@@ -4122,6 +4128,9 @@ deserialize_received_protected_datagram(std::span<const std::byte> bytes,
 
     std::vector<ReceivedProtectedPacket> packets;
     std::size_t offset = 0;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+    // # Receivers MUST be able to
+    // # process coalesced packets.
     while (offset < bytes.size()) {
         CodecResult<ReceivedProtectedPacketDecodeResult> decoded =
             CodecResult<ReceivedProtectedPacketDecodeResult>::failure(

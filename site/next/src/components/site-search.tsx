@@ -8,7 +8,16 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { siteSearchItems, type SiteSearchItem, type SiteSearchKind } from '@/lib/search-index';
 
-const suggestedIds = ['route-qa', 'route-workbench', 'route-docs', 'route-blog', 'route-performance', 'route-interop', 'route-coverage'];
+const suggestedIds = [
+  'route-qa',
+  'route-workbench',
+  'route-docs',
+  'route-blog',
+  'route-performance',
+  'route-interop',
+  'route-coverage',
+  'route-duvet',
+];
 const maxResults = 8;
 const searchEngine = createSearchEngine(siteSearchItems);
 

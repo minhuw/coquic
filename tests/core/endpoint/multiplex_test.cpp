@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <type_traits>
 #include <utility>
 
@@ -488,6 +489,55 @@ TEST(QuicCoreEndpointTest, CloseConnectionCommandRetainsStateUntilCloseDeadline)
     EXPECT_FALSE(send_effects_from(result).empty());
 
     auto next_wakeup = optional_value_or_terminate(result.next_wakeup);
+    auto expired = core.advance_endpoint(coquic::quic::QuicCoreTimerExpired{}, next_wakeup);
+    auto lifecycle = lifecycle_events_from(expired);
+    ASSERT_EQ(lifecycle.size(), 1u);
+    EXPECT_EQ(lifecycle.front().connection, 1u);
+    EXPECT_EQ(lifecycle.front().event, coquic::quic::QuicCoreConnectionLifecycle::closed);
+    EXPECT_EQ(core.connection_count(), 0u);
+}
+
+TEST(QuicCoreEndpointTest, ServerCloseConnectionCommandRetainsStateUntilCloseDeadline) {
+    coquic::quic::QuicCore core(make_server_endpoint_config());
+
+    auto entry = coquic::quic::QuicCore::ConnectionEntry{
+        .handle = 1,
+        .default_route_handle = 11,
+        .connection = std::make_unique<coquic::quic::QuicConnection>(
+            coquic::quic::test::make_server_core_config()),
+    };
+    *entry.connection = make_connected_server_connection();
+    entry.route_handle_by_path_id.emplace(0, 11);
+    entry.path_id_by_route_handle.emplace(11, 0);
+    core.connections_.emplace(entry.handle, std::move(entry));
+
+    auto result = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreCloseConnection{
+                    .application_error_code = 0,
+                    .reason_phrase = "done",
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+    // # Servers that retain an open socket for accepting new connections
+    // # SHOULD NOT end the closing or draining state early.
+    EXPECT_EQ(core.connection_count(), 1u);
+    EXPECT_TRUE(result.next_wakeup.has_value());
+    EXPECT_TRUE(lifecycle_events_from(result).empty());
+
+    auto next_wakeup = optional_value_or_terminate(result.next_wakeup);
+    auto before_deadline = core.advance_endpoint(coquic::quic::QuicCoreTimerExpired{},
+                                                 next_wakeup - std::chrono::microseconds(1));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+    // # Servers that retain an open socket for accepting new connections
+    // # SHOULD NOT end the closing or draining state early.
+    EXPECT_EQ(core.connection_count(), 1u);
+    EXPECT_TRUE(lifecycle_events_from(before_deadline).empty());
+
     auto expired = core.advance_endpoint(coquic::quic::QuicCoreTimerExpired{}, next_wakeup);
     auto lifecycle = lifecycle_events_from(expired);
     ASSERT_EQ(lifecycle.size(), 1u);

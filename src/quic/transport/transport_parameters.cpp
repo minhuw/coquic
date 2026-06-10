@@ -53,6 +53,7 @@ constexpr std::uint64_t minimum_max_udp_payload_size = 1200;
 constexpr std::uint64_t minimum_active_connection_id_limit = 2;
 constexpr std::uint64_t maximum_ack_delay_exponent = 20;
 constexpr std::uint64_t maximum_max_ack_delay = (std::uint64_t{1} << 14);
+constexpr std::uint64_t maximum_stream_limit = std::uint64_t{1} << 60;
 constexpr std::size_t maximum_connection_id_length = 20;
 constexpr std::size_t stateless_reset_token_length = 16;
 
@@ -126,6 +127,11 @@ void append_version_information_parameter(std::vector<std::byte> &output,
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-3
+    // # Version Information {
+    // #   Chosen Version (32),
+    // #   Available Versions (32) ...,
+    // # }
     std::vector<std::byte> encoded;
     encoded.reserve((1 + value->available_versions.size()) * sizeof(std::uint32_t));
     append_u32_be(encoded, value->chosen_version);
@@ -189,6 +195,9 @@ CodecResult<std::vector<std::byte>>
 serialize_transport_parameters(const TransportParameters &parameters) {
     std::vector<std::byte> output;
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+    // # An endpoint MUST NOT send a parameter more than once in a given
+    // # transport parameters extension.
     // Connection identifiers and reset tokens are emitted before scalar transport limits.
     append_connection_id_parameter(output, original_destination_connection_id_parameter_id,
                                    parameters.original_destination_connection_id);
@@ -310,6 +319,13 @@ serialize_transport_parameters(const TransportParameters &parameters) {
 
     append_connection_id_parameter(output, retry_source_connection_id_parameter_id,
                                    parameters.retry_source_connection_id);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # Similarly, a server MUST NOT include a zero-
+    // # length connection ID in this transport parameter.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A client MUST
+    // # treat a violation of these requirements as a connection error of
+    // # type TRANSPORT_PARAMETER_ERROR.
     if (parameters.preferred_address.has_value() &&
         (parameters.preferred_address->connection_id.empty() ||
          parameters.preferred_address->connection_id.size() > maximum_connection_id_length)) {
@@ -362,6 +378,10 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
         const auto value = bytes.subspan(offset, static_cast<std::size_t>(length.value().value));
         offset += value.size();
 
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+        // # An endpoint SHOULD treat receipt of
+        // # duplicate transport parameters as a connection error of type
+        // # TRANSPORT_PARAMETER_ERROR.
         if (!seen_parameter_ids.insert(id.value().value).second) {
             return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
                                                              offset);
@@ -475,6 +495,13 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
             }
 
             const auto connection_id_length = std::to_integer<std::uint8_t>(value[24]);
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+            // # Similarly, a server MUST NOT include a zero-
+            // # length connection ID in this transport parameter.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+            // # A client MUST
+            // # treat a violation of these requirements as a connection error of
+            // # type TRANSPORT_PARAMETER_ERROR.
             if (connection_id_length == 0 || connection_id_length > maximum_connection_id_length) {
                 return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
                                                                  offset);
@@ -504,6 +531,11 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
             break;
         }
         case version_information_parameter_id: {
+            //= https://www.rfc-editor.org/rfc/rfc9368#section-3
+            // # Version Information {
+            // #   Chosen Version (32),
+            // #   Available Versions (32) ...,
+            // # }
             if (value.size() < sizeof(std::uint32_t) ||
                 (value.size() % sizeof(std::uint32_t)) != 0) {
                 return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
@@ -518,6 +550,10 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
                     static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(value[3])),
             };
             if (version_information.chosen_version == 0) {
+                //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+                // # If an endpoint receives a Chosen Version
+                // # equal to zero, or any Available Version equal to zero, it MUST treat
+                // # it as a parsing failure.
                 return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
                                                                  offset);
             }
@@ -536,6 +572,10 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
                     static_cast<std::uint32_t>(
                         std::to_integer<std::uint8_t>(value[version_offset + 3]));
                 if (available_version == 0) {
+                    //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+                    // # If an endpoint receives a Chosen Version
+                    // # equal to zero, or any Available Version equal to zero, it MUST treat
+                    // # it as a parsing failure.
                     return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
                                                                      offset);
                 }
@@ -561,6 +601,12 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
             break;
         }
         case max_datagram_frame_size_parameter_id: {
+            //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+            // # The max_datagram_frame_size transport parameter is an
+            // # integer value (represented as a variable-length integer) that
+            // # represents the maximum size of a DATAGRAM frame (including the
+            // # frame type, length, and payload) the endpoint is willing to
+            // # receive, in bytes.
             const auto decoded = decode_integer_parameter(value);
             if (!decoded.has_value()) {
                 return CodecResult<TransportParameters>::failure(decoded.error().code, offset);
@@ -569,6 +615,11 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
             break;
         }
         case grease_quic_bit_parameter_id:
+            //= https://www.rfc-editor.org/rfc/rfc9287#section-3
+            // # The transport parameter is sent with an empty
+            // # value; an endpoint that understands this transport parameter MUST
+            // # treat receipt of a non-empty value of the transport parameter as a
+            // # connection error of type TRANSPORT_PARAMETER_ERROR.
             if (!value.empty()) {
                 return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
                                                                  offset);
@@ -576,6 +627,9 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
             parameters.grease_quic_bit = true;
             break;
         default:
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.2
+            // # An endpoint MUST ignore transport parameters that it does
+            // # not support.
             break;
         }
     }
@@ -586,27 +640,82 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
 CodecResult<TransportParametersValidationOk>
 validate_peer_transport_parameters(EndpointRole peer_role, const TransportParameters &parameters,
                                    const TransportParametersValidationContext &context) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # An endpoint MUST treat the absence of the
+    // # initial_source_connection_id transport parameter from either endpoint
+    // # or the absence of the original_destination_connection_id transport
+    // # parameter from the server as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR.
     if (!parameters.initial_source_connection_id.has_value()) {
         return validation_failure();
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # The values provided by a peer for these transport parameters MUST
+    // # match the values that an endpoint used in the Destination and Source
+    // # Connection ID fields of Initial packets that it sent (and received,
+    // # for servers).
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # Endpoints MUST validate that received transport
+    // # parameters match received connection ID values.
     if (parameters.initial_source_connection_id.value() !=
         context.expected_initial_source_connection_id) {
         return validation_failure();
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+    // # An endpoint MUST treat receipt of a transport parameter with an
+    // # invalid value as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # Values below 1200 are invalid.
     if (parameters.max_udp_payload_size < minimum_max_udp_payload_size) {
         return validation_failure();
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # The value of the
+    // # active_connection_id_limit parameter MUST be at least 2.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # An
+    // # endpoint that receives a value less than 2 MUST close the
+    // # connection with an error of type TRANSPORT_PARAMETER_ERROR.
     if (parameters.active_connection_id_limit < minimum_active_connection_id_limit) {
         return validation_failure();
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+    // # An endpoint MUST treat receipt of a transport parameter with an
+    // # invalid value as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR.
     if (parameters.ack_delay_exponent > maximum_ack_delay_exponent) {
         return validation_failure();
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4
+    // # An endpoint MUST treat receipt of a transport parameter with an
+    // # invalid value as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR.
     if (parameters.max_ack_delay >= maximum_max_ack_delay) {
+        return validation_failure();
+    }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # If either is received, the connection MUST be closed immediately with
+    // # a connection error of type TRANSPORT_PARAMETER_ERROR if the offending
+    // # value was received in a transport parameter or of type
+    // # FRAME_ENCODING_ERROR if it was received in a frame; see Section 10.2.
+    if (parameters.initial_max_streams_bidi > maximum_stream_limit ||
+        parameters.initial_max_streams_uni > maximum_stream_limit) {
         return validation_failure();
     }
 
     if (peer_role == EndpointRole::client) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+        // # This transport parameter MUST NOT be sent
+        // # by a client but MAY be sent by a server.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+        // # A client MUST NOT include any server-only transport parameter:
+        // # original_destination_connection_id, preferred_address,
+        // # retry_source_connection_id, or stateless_reset_token.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+        // # A server MUST
+        // # treat receipt of any of these transport parameters as a connection
+        // # error of type TRANSPORT_PARAMETER_ERROR.
         if (parameters.original_destination_connection_id.has_value() ||
             parameters.retry_source_connection_id.has_value() ||
             parameters.preferred_address.has_value() ||
@@ -616,6 +725,10 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
 
         if (parameters.version_information.has_value() &&
             has_zero_version_information_value(parameters.version_information.value())) {
+            //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+            // # If an endpoint receives a Chosen Version
+            // # equal to zero, or any Available Version equal to zero, it MUST treat
+            // # it as a parsing failure.
             return version_negotiation_validation_failure();
         }
 
@@ -629,6 +742,10 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
                     context.expected_version_information->chosen_version ||
                 !contains_version(parameters.version_information->available_versions,
                                   parameters.version_information->chosen_version)) {
+                //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+                // # If a server receives Version Information
+                // # where the Chosen Version is not included in Available Versions, it
+                // # MUST treat it as a parsing failure.
                 return version_negotiation_validation_failure();
             }
         }
@@ -636,6 +753,20 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
         return CodecResult<TransportParametersValidationOk>::success({});
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # An endpoint MUST treat the absence of the
+    // # initial_source_connection_id transport parameter from either endpoint
+    // # or the absence of the original_destination_connection_id transport
+    // # parameter from the server as a connection error of type
+    // # TRANSPORT_PARAMETER_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # The values provided by a peer for these transport parameters MUST
+    // # match the values that an endpoint used in the Destination and Source
+    // # Connection ID fields of Initial packets that it sent (and received,
+    // # for servers).
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+    // # Endpoints MUST validate that received transport
+    // # parameters match received connection ID values.
     if (!parameters.original_destination_connection_id.has_value() ||
         !context.expected_original_destination_connection_id.has_value() ||
         parameters.original_destination_connection_id.value() !=
@@ -644,19 +775,41 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
     }
 
     if (context.expected_retry_source_connection_id.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+        // # An endpoint MUST treat the following as a connection error of type
+        // # TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION:
         if (!parameters.retry_source_connection_id.has_value() ||
             parameters.retry_source_connection_id.value() !=
                 context.expected_retry_source_connection_id.value()) {
             return validation_failure();
         }
     } else if (parameters.retry_source_connection_id.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-7.3
+        // # An endpoint MUST treat the following as a connection error of type
+        // # TRANSPORT_PARAMETER_ERROR or PROTOCOL_VIOLATION:
         return validation_failure();
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A server
+    // # that chooses a zero-length connection ID MUST NOT provide a
+    // # preferred address.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A client MUST
+    // # treat a violation of these requirements as a connection error of
+    // # type TRANSPORT_PARAMETER_ERROR.
     if (parameters.preferred_address.has_value() &&
         parameters.preferred_address->connection_id.empty()) {
         return validation_failure();
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A server
+    // # that chooses a zero-length connection ID MUST NOT provide a
+    // # preferred address.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # A client MUST
+    // # treat a violation of these requirements as a connection error of
+    // # type TRANSPORT_PARAMETER_ERROR.
     if (parameters.preferred_address.has_value() &&
         parameters.initial_source_connection_id->empty()) {
         return validation_failure();
@@ -665,6 +818,10 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
     if (context.expected_version_information.has_value()) {
         if (parameters.version_information.has_value() &&
             has_zero_version_information_value(parameters.version_information.value())) {
+            //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+            // # If an endpoint receives a Chosen Version
+            // # equal to zero, or any Available Version equal to zero, it MUST treat
+            // # it as a parsing failure.
             return version_negotiation_validation_failure();
         }
 
@@ -673,11 +830,21 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
                 context.expected_version_information->chosen_version ||
             !contains_version(context.expected_version_information->available_versions,
                               parameters.version_information->chosen_version)) {
+            //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+            // # If a client receives Version Information where the server's Chosen
+            // # Version was not sent by the client as part of its Available Versions,
+            // # the client MUST close the connection with a version negotiation
+            // # error.
             return version_negotiation_validation_failure();
         }
 
         if (context.reacted_to_version_negotiation) {
             if (parameters.version_information->available_versions.empty()) {
+                //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+                // # In particular, if the client reacted to a Version
+                // # Negotiation packet and the server's Available Versions field is
+                // # empty, the client MUST close the connection with a version
+                // # negotiation error.
                 return version_negotiation_validation_failure();
             }
 
@@ -685,6 +852,10 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
                 select_preferred_version(context.expected_version_information->available_versions,
                                          parameters.version_information.value());
             if (selected_version != parameters.version_information->chosen_version) {
+                //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+                // # If the client would have selected a different
+                // # version, the client MUST close the connection with a version
+                // # negotiation error.
                 return version_negotiation_validation_failure();
             }
         }

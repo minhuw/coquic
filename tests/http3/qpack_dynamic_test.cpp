@@ -617,6 +617,11 @@ TEST(QuicHttp3QpackDynamicTest, RejectsMalformedInsertCountIncrement) {
 TEST(QuicHttp3QpackDynamicTest, RejectsZeroInsertCountIncrement) {
     auto encoder = make_encoder(220, 8);
 
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.4.3
+    // # An encoder that receives an Increment field equal to zero, or one
+    // # that increases the Known Received Count beyond what the encoder has
+    // # sent, MUST treat this as a connection error of type
+    // # QPACK_DECODER_STREAM_ERROR.
     const auto result =
         coquic::http3::process_http3_qpack_decoder_instructions(encoder, bytes_from_ints({0x00}));
     ASSERT_FALSE(result.has_value());

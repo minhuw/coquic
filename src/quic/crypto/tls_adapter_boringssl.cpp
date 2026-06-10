@@ -348,6 +348,8 @@ bool set_alpn_protos_failed(SSL *ssl, const std::vector<uint8_t> &encoded) {
 }
 
 bool client_alpn_failed(SSL *ssl, std::string_view application_protocol) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7
+    // # Endpoints MUST explicitly negotiate an application protocol.
     const auto encoded = encode_application_protocol_list(application_protocol);
     return encoded.empty() || set_alpn_protos_failed(ssl, encoded);
 }
@@ -751,6 +753,8 @@ class TlsAdapter::Impl {
             return SSL_TLSEXT_ERR_ALERT_FATAL;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-7
+        // # Endpoints MUST explicitly negotiate an application protocol.
         *out = reinterpret_cast<const uint8_t *>(impl->config_.application_protocol.data());
         *out_len = static_cast<uint8_t>(impl->config_.application_protocol.size());
         impl->selected_application_protocol_ =
@@ -885,6 +889,8 @@ class TlsAdapter::Impl {
         }
 
         if (config_.role == EndpointRole::server) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-7
+            // # Endpoints MUST explicitly negotiate an application protocol.
             SSL_CTX_set_alpn_select_cb(ctx, &Impl::select_application_protocol, nullptr);
         }
 

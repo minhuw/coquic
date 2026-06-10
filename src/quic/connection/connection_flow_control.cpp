@@ -64,6 +64,10 @@ bool ConnectionFlowControlState::should_send_data_blocked(std::uint64_t queued_b
 
 void ConnectionFlowControlState::note_peer_max_data(std::uint64_t maximum_data) {
     if (maximum_data <= peer_max_data) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+        // # A receiver MUST accept packets containing an outdated frame, such as
+        // # a MAX_DATA frame carrying a smaller maximum data value than one found
+        // # in an older packet.
         return;
     }
 

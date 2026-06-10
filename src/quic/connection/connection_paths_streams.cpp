@@ -115,10 +115,18 @@ select_compatible_server_version(std::span<const std::uint32_t> supported_versio
                                  std::uint32_t client_initial_version) {
     if (client_version_information.chosen_version != client_initial_version ||
         !contains_version(client_version_information.available_versions, client_initial_version)) {
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+        // # When the server then processes the client's Version
+        // # Information, the server MUST validate that the client's Chosen
+        // # Version matches the version in use for the connection.
         return std::nullopt;
     }
     for (const auto supported_version : supported_versions) {
         if (contains_version(client_version_information.available_versions, supported_version)) {
+            //= https://www.rfc-editor.org/rfc/rfc9368#section-2.3
+            // # In order to perform compatible version negotiation, the server MUST
+            // # select one of these versions that it (1) supports and (2) knows the
+            // # client's Chosen Version is compatible with.
             return supported_version;
         }
     }
@@ -356,6 +364,11 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
 
     if (config_.role == EndpointRole::client && decoded_resumption_state_.has_value() &&
         peer_transport_parameters_.has_value() && !tls_->handshake_complete()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+        // # When sending frames in 0-RTT packets, a client MUST only use
+        // # remembered transport parameters; importantly, it MUST NOT use
+        // # updated values that it learns from the server's updated transport
+        // # parameters or from frames received in 1-RTT packets.
         return CodecResult<bool>::success(true);
     }
 
@@ -390,6 +403,14 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
         return CodecResult<bool>::success(true);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # A client MUST NOT use remembered values for the following parameters:
+    // # ack_delay_exponent, max_ack_delay, initial_source_connection_id,
+    // # original_destination_connection_id, preferred_address,
+    // # retry_source_connection_id, and stateless_reset_token.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # The client MUST use the server's new values in the handshake instead;
+    // # if the server does not provide new values, the default values are used.
     const auto peer_transport_parameters =
         peer_transport_parameters_.value_or(TransportParameters{});
     if (auto validated = validate_peer_transport_parameters(
@@ -403,6 +424,9 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
         if (decoded_resumption_state_.has_value() &&
             !zero_rtt_transport_limits_not_reduced(
                 decoded_resumption_state_->peer_transport_parameters, peer_transport_parameters)) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+            // # A server MUST reject 0-RTT data if the restored values for
+            // # transport parameters cannot be supported.
             return CodecResult<bool>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
         }
     }
@@ -444,6 +468,9 @@ void QuicConnection::update_handshake_status() {
         if (config_.role == EndpointRole::server) {
             confirm_handshake();
             if (handshake_done_state_ == StreamControlFrameState::none) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
+                // # Servers MUST NOT send a HANDSHAKE_DONE frame before
+                // # completing the handshake.
                 handshake_done_state_ = StreamControlFrameState::pending;
             }
         }
@@ -525,8 +552,21 @@ void QuicConnection::set_path_default_pmtud_search_ceiling(QuicPathId path_id,
 void QuicConnection::apply_path_mtu_update(
     QuicPathId path_id, // NOLINT(bugprone-easily-swappable-parameters)
     std::size_t max_udp_payload_size) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+    // # QUIC implementations that implement any kind of PMTU discovery
+    // # therefore SHOULD maintain a maximum datagram size for each combination
+    // # of local and remote IP addresses.
     auto &path = ensure_path_state(path_id);
     if (max_udp_payload_size < kMinimumInitialDatagramSize) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+        // # If a QUIC endpoint determines that the PMTU between any pair of
+        // # local and remote IP addresses cannot support the smallest allowed
+        // # maximum datagram size of 1200 bytes, it MUST immediately cease
+        // # sending QUIC packets, except for those in PMTU probes or those
+        // # containing CONNECTION_CLOSE frames, on the affected path.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-14
+        // # QUIC MUST NOT be used if the network path cannot support a
+        // # maximum datagram size of at least 1200 bytes.
         path.mtu.viable = false;
         path.mtu.enabled = false;
         path.mtu.probe_ceiling = max_udp_payload_size;
@@ -560,6 +600,9 @@ void QuicConnection::apply_path_mtu_update(
     }
     path.mtu.probe_ceiling =
         std::min(path.mtu.probe_ceiling, outbound_datagram_size_ceiling_for_path(path_id));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+    // # An endpoint MUST NOT increase the PMTU based on ICMP messages; see
+    // # Item 6 in Section 3 of [DPLPMTUD].
     path.mtu.probe_ceiling = std::min(path.mtu.probe_ceiling, max_udp_payload_size);
     path.mtu.validated_datagram_size =
         std::min(path.mtu.validated_datagram_size, path.mtu.probe_ceiling);
@@ -586,6 +629,14 @@ void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_lo
 
     const auto peer_connection_id_sequence = [&]() -> std::optional<std::uint64_t> {
         if (initiated_locally) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+            // # An endpoint MUST NOT reuse a connection ID when sending from
+            // # more than one local address -- for example, when initiating
+            // # connection migration as described in Section 9.2 or when
+            // # probing a new network path as described in Section 9.1.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+            // # Similarly, an endpoint MUST NOT reuse a connection ID when
+            // # sending to more than one destination address.
             return select_peer_connection_id_sequence_for_path(path_id);
         }
         if (const auto existing = paths_.find(path_id);
@@ -609,13 +660,30 @@ void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_lo
     const bool validation_already_underway =
         !path.validated && path.outstanding_challenge.has_value();
     path.validated = false;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    // # If the peer violates this requirement, the endpoint MUST either drop
+    // # the incoming packets on that path without generating a Stateless Reset
+    // # or proceed with path validation and allow the peer to migrate.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+    // # If the recipient permits the migration, it MUST send subsequent packets
+    // # to the new peer address
     path.is_current_send_path = true;
     set_path_peer_connection_id_sequence(path, *peer_connection_id_sequence);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+    // # and MUST initiate path validation (Section 8.2) to verify the peer's
+    // # ownership of the address if validation is not already underway.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+    // # An endpoint MUST perform path validation (Section 8.2) if it detects any
+    // # change to a peer's address, unless it has previously validated that
+    // # address.
     path.challenge_pending = true;
     path.validation_initiated_locally = initiated_locally;
     if (!validation_already_underway) {
         path.outstanding_challenge = next_path_challenge_data(path_id);
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    // # This timer SHOULD be set as described in Section 6.2.1 of
+    // # [QUIC-RECOVERY] and MUST NOT be more aggressive.
     path.validation_deadline = now + path_validation_timeout_period();
     current_send_path_id_ = path_id;
 }
@@ -627,6 +695,16 @@ std::array<std::byte, 8> QuicConnection::next_path_challenge_data(QuicPathId pat
 
 void QuicConnection::queue_path_response(QuicPathId path_id, const std::array<std::byte, 8> &data) {
     auto &path = ensure_path_state(path_id);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
+    // # On receiving a PATH_CHALLENGE frame, an endpoint MUST respond by
+    // # echoing the data contained in the PATH_CHALLENGE frame in a
+    // # PATH_RESPONSE frame.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.3
+    // # An endpoint that receives a PATH_CHALLENGE on an active path SHOULD
+    // # send a non-probing packet in response.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.17
+    // # The recipient of this frame MUST generate a PATH_RESPONSE frame
+    // # (Section 19.18) containing the same Data value.
     path.pending_response = data;
 }
 
@@ -679,18 +757,23 @@ QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &fram
         return CodecResult<bool>::failure(frame_encoding_error(kFrameTypeNewConnectionId));
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+    // # An endpoint that is sending packets with a zero-length Destination
+    // # Connection ID MUST treat receipt of a NEW_CONNECTION_ID frame as a
+    // # connection error of type PROTOCOL_VIOLATION.
     if (outbound_destination_connection_id().empty()) {
         return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeNewConnectionId));
     }
 
-    if (frame.retire_prior_to < largest_peer_retire_prior_to_) {
-        if (frame.sequence_number < largest_peer_retire_prior_to_) {
-            queue_peer_connection_id_retirement(frame.sequence_number);
-            refresh_peer_connection_id_sequences_after_retirement();
-        }
-        return CodecResult<bool>::success(true);
+    const bool retire_prior_increased = frame.retire_prior_to > largest_peer_retire_prior_to_;
+    const auto effective_retire_prior_to =
+        retire_prior_increased ? frame.retire_prior_to : largest_peer_retire_prior_to_;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+    // # A receiver MUST ignore any Retire Prior To fields that do not increase
+    // # the largest received Retire Prior To value.
+    if (retire_prior_increased) {
+        largest_peer_retire_prior_to_ = frame.retire_prior_to;
     }
-    largest_peer_retire_prior_to_ = frame.retire_prior_to;
 
     auto duplicate_sequence = peer_connection_ids_.find(frame.sequence_number);
     if (duplicate_sequence != peer_connection_ids_.end()) {
@@ -700,6 +783,9 @@ QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &fram
         if (mismatched_duplicate) {
             return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeNewConnectionId));
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+        // # Receipt of the same frame multiple times MUST NOT be treated as a
+        // # connection error.
     }
 
     const auto conflicting_connection_id = std::find_if(
@@ -713,11 +799,37 @@ QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &fram
 
     for (const auto &[sequence_number, record] : peer_connection_ids_) {
         static_cast<void>(record);
-        if (sequence_number >= frame.retire_prior_to) {
+        if (sequence_number >= effective_retire_prior_to) {
             continue;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+        // # Upon receipt of an increased Retire Prior To field, the peer MUST
+        // # stop using the corresponding connection IDs and retire them with
+        // # RETIRE_CONNECTION_ID frames before adding the newly provided
+        // # connection ID to the set of active connection IDs.
         queue_peer_connection_id_retirement(sequence_number);
+    }
+    if (frame.sequence_number < effective_retire_prior_to) {
+        if (!retired_peer_connection_id_sequences_.contains(frame.sequence_number)) {
+            peer_connection_ids_[frame.sequence_number] = PeerConnectionIdRecord{
+                .sequence_number = frame.sequence_number,
+                .connection_id = frame.connection_id,
+                .stateless_reset_token = frame.stateless_reset_token,
+                .locally_retired = true,
+            };
+            note_endpoint_route_state_changed();
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+            // # An endpoint that receives a NEW_CONNECTION_ID frame with a sequence
+            // # number smaller than the Retire Prior To field of a previously
+            // # received NEW_CONNECTION_ID frame MUST send a corresponding
+            // # RETIRE_CONNECTION_ID frame that retires the newly received
+            // # connection ID, unless it has already done so for that sequence
+            // # number.
+            queue_peer_connection_id_retirement(frame.sequence_number);
+            refresh_peer_connection_id_sequences_after_retirement();
+        }
+        return CodecResult<bool>::success(true);
     }
     peer_connection_ids_[frame.sequence_number] = PeerConnectionIdRecord{
         .sequence_number = frame.sequence_number,
@@ -740,6 +852,12 @@ QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &fram
             peer_connection_ids_.begin(), peer_connection_ids_.end(), [](const auto &entry) {
                 return !entry.second.locally_retired;
             })) > local_transport_parameters_.active_connection_id_limit) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+        // # After processing a NEW_CONNECTION_ID frame and adding and retiring
+        // # active connection IDs, if the number of active connection IDs
+        // # exceeds the value advertised in its active_connection_id_limit
+        // # transport parameter, an endpoint MUST close the connection with an
+        // # error of type CONNECTION_ID_LIMIT_ERROR.
         return CodecResult<bool>::failure(connection_id_limit_error(kFrameTypeNewConnectionId));
     }
 
@@ -790,6 +908,12 @@ CodecResult<bool> QuicConnection::ensure_peer_preferred_address_connection_id() 
             peer_connection_ids_.begin(), peer_connection_ids_.end(), [](const auto &entry) {
                 return !entry.second.locally_retired;
             })) > local_transport_parameters_.active_connection_id_limit) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+        // # After processing a NEW_CONNECTION_ID frame and adding and retiring
+        // # active connection IDs, if the number of active connection IDs
+        // # exceeds the value advertised in its active_connection_id_limit
+        // # transport parameter, an endpoint MUST close the connection with an
+        // # error of type CONNECTION_ID_LIMIT_ERROR.
         return CodecResult<bool>::failure(connection_id_limit_error(kFrameTypeNewConnectionId));
     }
 
@@ -803,6 +927,11 @@ void QuicConnection::queue_peer_connection_id_retirement(std::uint64_t sequence_
     }
 
     if (!peer->second.locally_retired) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+        // # An endpoint MUST NOT forget a connection ID without retiring it,
+        // # though it MAY choose to treat having connection IDs in need of
+        // # retirement that exceed this limit as a connection error of type
+        // # CONNECTION_ID_LIMIT_ERROR.
         peer->second.locally_retired = true;
         note_endpoint_route_state_changed();
     }
@@ -811,12 +940,24 @@ void QuicConnection::queue_peer_connection_id_retirement(std::uint64_t sequence_
             std::find_if(peer_connection_ids_.begin(), peer_connection_ids_.end(),
                          [](const auto &entry) { return !entry.second.locally_retired; });
         if (next_active != peer_connection_ids_.end()) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-19.16
+            // # The sequence number specified in a RETIRE_CONNECTION_ID frame
+            // # MUST NOT refer to the Destination Connection ID field of the
+            // # packet in which the frame is contained.
             active_peer_connection_id_sequence_ = next_active->first;
         }
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+    // # An endpoint SHOULD limit the number of connection IDs it has retired
+    // # locally for which RETIRE_CONNECTION_ID frames have not yet been
+    // # acknowledged.
     if (peer->second.retire_frame_in_flight) {
         return;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+    // # An endpoint SHOULD allow for sending and tracking a number of
+    // # RETIRE_CONNECTION_ID frames of at least twice the value of the
+    // # active_connection_id_limit transport parameter.
     const bool already_pending = std::ranges::any_of(
         pending_retire_connection_id_frames_, [&](const RetireConnectionIdFrame &pending) {
             return pending.sequence_number == sequence_number;
@@ -856,12 +997,23 @@ void QuicConnection::refresh_peer_connection_id_sequences_after_retirement() {
 
 CodecResult<bool>
 QuicConnection::process_retire_connection_id_frame(const RetireConnectionIdFrame &frame) {
+    if (config_.source_connection_id.empty()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.16
+        // # An endpoint that provides a zero-length connection ID MUST treat
+        // # receipt of a RETIRE_CONNECTION_ID frame as a connection error of
+        // # type PROTOCOL_VIOLATION.
+        return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeRetireConnectionId));
+    }
     issue_spare_connection_ids();
     const auto record = local_connection_ids_.find(frame.sequence_number);
     if (record == local_connection_ids_.end()) {
         if (!handshake_confirmed_) {
             return CodecResult<bool>::success(true);
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.16
+        // # Receipt of a RETIRE_CONNECTION_ID frame containing a sequence number
+        // # greater than any previously sent to the peer MUST be treated as a
+        // # connection error of type PROTOCOL_VIOLATION.
         return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeRetireConnectionId));
     }
     if (record->second.retired) {
@@ -878,12 +1030,18 @@ QuicConnection::process_retire_connection_id_frame(const RetireConnectionIdFrame
             active_local_connection_id_sequence_ = next_active->first;
         }
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # An endpoint SHOULD supply a new connection ID when the peer retires a
+    // # connection ID.
     issue_spare_connection_ids();
     return CodecResult<bool>::success(true);
 }
 
 void QuicConnection::issue_spare_connection_ids() {
     if (!handshake_confirmed_ || !peer_transport_parameters_.has_value() ||
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
+        // # An endpoint MUST NOT send this frame if it currently requires that
+        // # its peer send packets with a zero-length Destination Connection ID.
         config_.source_connection_id.empty()) {
         return;
     }
@@ -905,10 +1063,28 @@ void QuicConnection::issue_spare_connection_ids() {
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # An endpoint SHOULD ensure that its peer has a sufficient number of
+    // # available and unused connection IDs.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    // # To ensure that migration is possible and packets sent on different
+    // # paths cannot be correlated, endpoints SHOULD provide new connection
+    // # IDs before peers migrate; see Section 5.1.1.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # An endpoint MUST NOT provide more connection IDs than the peer's limit.
     while (count_active_connection_ids(local_connection_ids_) < peer_limit) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+        // # The sequence number on each newly issued connection ID MUST increase
+        // # by 1.
         const auto sequence_number = next_local_connection_id_sequence_++;
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1
+        // # As a trivial example, this means the same connection ID
+        // # MUST NOT be issued more than once on the same connection.
         const auto connection_id =
             make_issued_connection_id(config_.source_connection_id, sequence_number);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+        // # The same stateless reset token MUST NOT be used for multiple
+        // # connection IDs.
         const auto stateless_reset_token = make_stateless_reset_token(
             connection_id, sequence_number, config_.stateless_reset_secret);
         local_connection_ids_[sequence_number] = LocalConnectionIdRecord{
@@ -919,6 +1095,10 @@ void QuicConnection::issue_spare_connection_ids() {
         note_endpoint_route_state_changed();
         pending_new_connection_id_frames_.push_back(NewConnectionIdFrame{
             .sequence_number = sequence_number,
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+            // # Endpoints SHOULD NOT issue updates of the Retire Prior To field
+            // # before receiving RETIRE_CONNECTION_ID frames that retire all
+            // # connection IDs indicated by the previous Retire Prior To value.
             .retire_prior_to = 0,
             .connection_id = connection_id,
             .stateless_reset_token = stateless_reset_token,
@@ -997,12 +1177,29 @@ ConnectionId QuicConnection::active_peer_destination_connection_id() const {
     if (const auto active = peer_connection_ids_.find(active_peer_connection_id_sequence_);
         active != peer_connection_ids_.end()) {
         if (!active->second.locally_retired) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+            // # A server MUST set the Destination Connection ID it uses for
+            // # sending packets based on the first received Initial packet.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+            // # A client MUST change the Destination Connection ID it uses for
+            // # sending packets in response to only the first received Initial
+            // # or Retry packet.
             return active->second.connection_id;
         }
     }
     if (peer_source_connection_id_.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+        // # A server MUST set the Destination Connection ID it uses for
+        // # sending packets based on the first received Initial packet.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+        // # A client MUST change the Destination Connection ID it uses for
+        // # sending packets in response to only the first received Initial
+        // # or Retry packet.
         return peer_source_connection_id_.value();
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+    // # Until a packet is received from the server, the client MUST use the
+    // # same Destination Connection ID value on all packets in this connection.
     return config_.initial_destination_connection_id;
 }
 
@@ -1163,6 +1360,11 @@ void QuicConnection::enter_closing_state(QuicCoreTimePoint now,
         close_started_at_ = now;
     }
     if (!close_deadline_.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+        // # The closing and draining connection states exist to ensure that
+        // # connections close cleanly and that delayed or reordered packets are
+        // # properly discarded.  These states SHOULD persist for at least three
+        // # times the current PTO interval as defined in [QUIC-RECOVERY].
         close_deadline_ = *close_started_at_ + three_pto_period(shared_recovery_rtt_state());
     }
     close_mode_ = QuicConnectionCloseMode::closing;
@@ -1182,6 +1384,11 @@ void QuicConnection::enter_draining_state(QuicCoreTimePoint now) {
         close_started_at_ = now;
     }
     if (!close_deadline_.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+        // # The closing and draining connection states exist to ensure that
+        // # connections close cleanly and that delayed or reordered packets are
+        // # properly discarded.  These states SHOULD persist for at least three
+        // # times the current PTO interval as defined in [QUIC-RECOVERY].
         close_deadline_ = *close_started_at_ + three_pto_period(shared_recovery_rtt_state());
     }
     close_mode_ = QuicConnectionCloseMode::draining;
@@ -1205,6 +1412,20 @@ void QuicConnection::queue_transport_close_for_error(QuicCoreTimePoint now, cons
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11.1
+    // # Errors that result in the connection being unusable, such as an
+    // # obvious violation of protocol semantics or corruption of state that
+    // # affects an entire connection, MUST be signaled using a
+    // # CONNECTION_CLOSE frame (Section 19.19).
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11
+    // # An endpoint that detects an error SHOULD signal the existence of that
+    // # error to its peer.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-11
+    // # The most appropriate error code (Section 20) SHOULD be included in
+    // # the frame that signals the error.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # An endpoint that wishes to communicate a fatal connection error MUST
+    // # use a CONNECTION_CLOSE frame if it is able.
     pending_transport_close_ = TransportConnectionCloseFrame{
         .error_code = error.has_transport_error_code
                           ? error.transport_error_code
@@ -1500,6 +1721,8 @@ StreamState *QuicConnection::find_retired_stream_state(std::uint64_t stream_id) 
         }
     }
     if (const auto *range = find_retired_compact_stream_range(stream_id); range != nullptr) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.1
+        // # A QUIC endpoint MUST NOT reuse a stream ID within a connection.
         retired_peer_stream_lookup_scratch_ = make_retired_peer_stream_state(stream_id, *range);
         return &retired_peer_stream_lookup_scratch_;
     }
@@ -1686,10 +1909,43 @@ CodecResult<bool> QuicConnection::validate_retired_peer_reset_stream_frame(
     return CodecResult<bool>::success(true);
 }
 
+CodecResult<bool>
+QuicConnection::commit_peer_stream_final_size_to_connection_flow_control(StreamState &stream,
+                                                                         std::uint64_t frame_type) {
+    if (!stream.peer_final_size.has_value()) {
+        return CodecResult<bool>::success(true);
+    }
+    if (stream.highest_received_offset >= *stream.peer_final_size) {
+        return CodecResult<bool>::success(true);
+    }
+
+    const auto final_size_delta = *stream.peer_final_size - stream.highest_received_offset;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+    // # The receiver MUST use the final size of the stream to account for all
+    // # bytes sent on the stream in its connection-level flow controller.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.9
+    // # The sum of the final sizes on all streams -- including streams in
+    // # terminal states -- MUST NOT exceed the value advertised by a receiver.
+    if (connection_flow_control_.received_committed >
+            connection_flow_control_.advertised_max_data ||
+        final_size_delta > connection_flow_control_.advertised_max_data -
+                               connection_flow_control_.received_committed) {
+        return CodecResult<bool>::failure(flow_control_error(frame_type));
+    }
+
+    connection_flow_control_.received_committed += final_size_delta;
+    stream.highest_received_offset = *stream.peer_final_size;
+    stream.receive_flow_control_consumed = *stream.peer_final_size;
+    return CodecResult<bool>::success(true);
+}
+
 bool QuicConnection::try_retire_stream_to_peer_range(const StreamState &stream) {
     if (stream.id_info.initiator != StreamInitiator::peer) {
         return false;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.4
+    // # Both endpoints MUST maintain flow control state for the stream in the
+    // # unterminated direction until that direction enters a terminal state.
     if (!stream.peer_fin_delivered || stream.peer_reset_received || !stream.peer_final_size ||
         !stream.send_final_size || stream.reset_state != StreamControlFrameState::none ||
         stream.stop_sending_state != StreamControlFrameState::none ||
@@ -1815,6 +2071,9 @@ void QuicConnection::maybe_retire_stream(std::uint64_t stream_id) {
     if (stream == streams_.end()) {
         return;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.4
+    // # Both endpoints MUST maintain flow control state for the stream in the
+    // # unterminated direction until that direction enters a terminal state.
     if (!stream_receive_terminal(stream->second) || !stream_send_terminal(stream->second) ||
         stream->second.has_pending_send() || stream->second.has_outstanding_send()) {
         return;
@@ -1842,11 +2101,37 @@ void QuicConnection::maybe_retire_stream(std::uint64_t stream_id) {
     invalidate_active_stream_lookup_cache();
 }
 
+StreamState *QuicConnection::open_peer_initiated_stream_with_predecessors(std::uint64_t stream_id) {
+    StreamState *target = nullptr;
+    for (std::uint64_t candidate = stream_id & 0x03u; candidate <= stream_id; candidate += 4u) {
+        auto *stream = find_stream_state(candidate);
+        if (stream == nullptr) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-3.2
+            // # Before a stream is created, all streams of the same type with lower-
+            // # numbered stream IDs MUST be created.
+            auto it = streams_.emplace_hint(streams_.end(), candidate,
+                                            make_implicit_stream_state(candidate, config_.role));
+            initialize_stream_flow_control(it->second);
+            stream = &it->second;
+        }
+        if (candidate == stream_id) {
+            target = stream;
+        }
+    }
+
+    invalidate_active_stream_lookup_cache();
+    return target;
+}
+
 StreamStateResult<StreamState *> QuicConnection::get_or_open_local_stream(std::uint64_t stream_id) {
     if (auto *existing = find_active_stream_state(stream_id); existing != nullptr) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.1
+        // # A QUIC endpoint MUST NOT reuse a stream ID within a connection.
         return StreamStateResult<StreamState *>::success(existing);
     }
     if (auto *existing = find_retired_stream_state(stream_id); existing != nullptr) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.1
+        // # A QUIC endpoint MUST NOT reuse a stream ID within a connection.
         return StreamStateResult<StreamState *>::success(existing);
     }
 
@@ -1857,6 +2142,17 @@ StreamStateResult<StreamState *> QuicConnection::get_or_open_local_stream(std::u
         return StreamStateResult<StreamState *>::failure(code, stream_id);
     }
     if (!stream_open_limits_.can_open_local_stream(stream_id, config_.role)) {
+        const auto id_info = classify_stream_id(stream_id, config_.role);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+        // # An endpoint that is unable to open a new stream due to the peer's
+        // # limits SHOULD send a STREAMS_BLOCKED frame (Section 19.14).
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.14
+        // # A sender SHOULD send a STREAMS_BLOCKED frame (type=0x16 or 0x17)
+        // # when it wishes to open a stream but is unable to do so due to the
+        // # maximum stream limit set by its peer; see Section 19.11.
+        stream_open_limits_.queue_streams_blocked(
+            id_info.direction == StreamDirection::bidirectional ? StreamLimitType::bidirectional
+                                                                : StreamLimitType::unidirectional);
         return StreamStateResult<StreamState *>::failure(StreamStateErrorCode::invalid_stream_id,
                                                          stream_id);
     }
@@ -1891,14 +2187,30 @@ QuicConnection::get_existing_receive_stream(std::uint64_t stream_id) {
 
 CodecResult<StreamState *> QuicConnection::get_or_open_receive_stream(std::uint64_t stream_id) {
     if (auto *existing = find_active_stream_state(stream_id); existing != nullptr) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.1
+        // # A QUIC endpoint MUST NOT reuse a stream ID within a connection.
         return CodecResult<StreamState *>::success(existing);
     }
     if (auto *existing = find_retired_stream_state(stream_id); existing != nullptr) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.1
+        // # A QUIC endpoint MUST NOT reuse a stream ID within a connection.
         return CodecResult<StreamState *>::success(existing);
     }
 
     const auto id_info = classify_stream_id(stream_id, config_.role);
     if (!id_info.local_can_receive) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.8
+        // # An endpoint MUST terminate the connection with error
+        // # STREAM_STATE_ERROR if it receives a STREAM frame for a locally
+        // # initiated stream that has not yet been created, or for a send-only
+        // # stream.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.4
+        // # An endpoint that receives a RESET_STREAM frame for a send-only
+        // # stream MUST terminate the connection with error STREAM_STATE_ERROR.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.13
+        // # An endpoint that receives a STREAM_DATA_BLOCKED frame for a
+        // # send-only stream MUST terminate the connection with error
+        // # STREAM_STATE_ERROR.
         return CodecResult<StreamState *>::failure(stream_state_error(/*frame_type=*/0));
     }
     if (stream_id == kCompatibilityStreamId && id_info.initiator == StreamInitiator::local) {
@@ -1914,25 +2226,36 @@ CodecResult<StreamState *> QuicConnection::get_or_open_receive_stream(std::uint6
         !is_peer_implicit_stream_open_allowed_by_limits(stream_id, config_.role,
                                                         peer_stream_open_limits())) {
         if (id_info.initiator != StreamInitiator::peer) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-19.8
+            // # An endpoint MUST terminate the connection with error
+            // # STREAM_STATE_ERROR if it receives a STREAM frame for a locally
+            // # initiated stream that has not yet been created, or for a send-only
+            // # stream.
             return CodecResult<StreamState *>::failure(stream_state_error(/*frame_type=*/0));
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+        // # An endpoint that receives a frame with a stream ID exceeding the
+        // # limit it has sent MUST treat this as a connection error of type
+        // # STREAM_LIMIT_ERROR; see Section 11 for details on error handling.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.11
+        // # An endpoint MUST terminate a connection with an error of type
+        // # STREAM_LIMIT_ERROR if a peer opens more streams than was permitted.
         return CodecResult<StreamState *>::failure(stream_limit_error(/*frame_type=*/0));
     }
 
-    auto it = streams_.emplace_hint(streams_.end(), stream_id,
-                                    make_implicit_stream_state(stream_id, config_.role));
-    initialize_stream_flow_control(it->second);
-    active_stream_lookup_cache_.valid = true;
-    active_stream_lookup_cache_.stream_id = stream_id;
-    active_stream_lookup_cache_.stream = it;
-    return CodecResult<StreamState *>::success(&it->second);
+    auto *stream = open_peer_initiated_stream_with_predecessors(stream_id);
+    return CodecResult<StreamState *>::success(stream);
 }
 
 CodecResult<StreamState *> QuicConnection::get_or_open_send_stream(std::uint64_t stream_id) {
     if (auto *existing = find_active_stream_state(stream_id); existing != nullptr) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.1
+        // # A QUIC endpoint MUST NOT reuse a stream ID within a connection.
         return CodecResult<StreamState *>::success(existing);
     }
     if (auto *existing = find_retired_stream_state(stream_id); existing != nullptr) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-2.1
+        // # A QUIC endpoint MUST NOT reuse a stream ID within a connection.
         return CodecResult<StreamState *>::success(existing);
     }
 
@@ -1955,17 +2278,43 @@ CodecResult<StreamState *> QuicConnection::get_or_open_send_stream(std::uint64_t
         return CodecResult<StreamState *>::failure(stream_limit_error(/*frame_type=*/0));
     }
 
-    auto it = streams_.emplace_hint(streams_.end(), stream_id,
-                                    make_implicit_stream_state(stream_id, config_.role));
-    initialize_stream_flow_control(it->second);
-    active_stream_lookup_cache_.valid = true;
-    active_stream_lookup_cache_.stream_id = stream_id;
-    active_stream_lookup_cache_.stream = it;
-    return CodecResult<StreamState *>::success(&it->second);
+    auto *stream = open_peer_initiated_stream_with_predecessors(stream_id);
+    return CodecResult<StreamState *>::success(stream);
 }
 
 CodecResult<StreamState *>
-QuicConnection::get_or_open_send_stream_for_peer_stop(std::uint64_t stream_id) {
+QuicConnection::get_existing_send_stream_for_peer_control(std::uint64_t stream_id) {
+    if (auto *existing = find_active_stream_state(stream_id); existing != nullptr) {
+        return CodecResult<StreamState *>::success(existing);
+    }
+    if (auto *existing = find_retired_stream_state(stream_id); existing != nullptr) {
+        return CodecResult<StreamState *>::success(existing);
+    }
+
+    const auto id_info = classify_stream_id(stream_id, config_.role);
+    if (!id_info.local_can_send) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.5
+        // # An endpoint that receives a STOP_SENDING frame for a receive-only
+        // # stream MUST terminate the connection with error STREAM_STATE_ERROR.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+        // # An endpoint that receives a MAX_STREAM_DATA frame for a
+        // # receive-only stream MUST terminate the connection with error
+        // # STREAM_STATE_ERROR.
+        return CodecResult<StreamState *>::failure(stream_state_error(/*frame_type=*/0));
+    }
+
+    if (id_info.initiator == StreamInitiator::local) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.5
+        // # Receiving a STOP_SENDING frame for a locally initiated stream
+        // # that has not yet been created MUST be treated as a connection
+        // # error of type STREAM_STATE_ERROR.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.10
+        // # Receiving a MAX_STREAM_DATA frame for a locally initiated
+        // # stream that has not yet been created MUST be treated as a
+        // # connection error of type STREAM_STATE_ERROR.
+        return CodecResult<StreamState *>::failure(stream_state_error(/*frame_type=*/0));
+    }
+
     return get_or_open_send_stream(stream_id);
 }
 
@@ -2028,6 +2377,10 @@ bool QuicConnection::has_pending_application_send() const {
     }
     if (local_stream_limit_state_.max_streams_bidi_state == StreamControlFrameState::pending ||
         local_stream_limit_state_.max_streams_uni_state == StreamControlFrameState::pending) {
+        return true;
+    }
+    if (stream_open_limits_.streams_blocked_bidi_state == StreamControlFrameState::pending ||
+        stream_open_limits_.streams_blocked_uni_state == StreamControlFrameState::pending) {
         return true;
     }
 
@@ -2108,7 +2461,9 @@ bool QuicConnection::has_pending_application_control_send(bool application_ack_d
         (connection_flow_control_.max_data_state == StreamControlFrameState::pending) ||
         (connection_flow_control_.data_blocked_state == StreamControlFrameState::pending) ||
         (local_stream_limit_state_.max_streams_bidi_state == StreamControlFrameState::pending) ||
-        (local_stream_limit_state_.max_streams_uni_state == StreamControlFrameState::pending)) {
+        (local_stream_limit_state_.max_streams_uni_state == StreamControlFrameState::pending) ||
+        (stream_open_limits_.streams_blocked_bidi_state == StreamControlFrameState::pending) ||
+        (stream_open_limits_.streams_blocked_uni_state == StreamControlFrameState::pending)) {
         return true;
     }
 
@@ -2436,6 +2791,10 @@ void QuicConnection::maybe_queue_connection_blocked_frame() {
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.12
+    // # A sender SHOULD send a DATA_BLOCKED frame (type=0x14) when it wishes
+    // # to send data but is unable to do so due to connection-level flow
+    // # control; see Section 4.
     connection_flow_control_.queue_data_blocked(connection_flow_control_.peer_max_data);
 }
 
@@ -2482,6 +2841,11 @@ void QuicConnection::maybe_refresh_peer_stream_limit(StreamState &stream) {
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # An endpoint MUST NOT wait to receive this signal before advertising
+    // # additional credit, since doing so will mean that the peer will be
+    // # blocked for at least an entire round trip, and potentially
+    // # indefinitely if the peer chooses not to send STREAMS_BLOCKED frames.
     stream.peer_stream_limit_released = true;
 
     const auto limits = peer_stream_open_limits();
@@ -2509,6 +2873,15 @@ bool QuicConnection::can_initiate_path_validation(QuicPathId path_id) const {
             return true;
         }
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # An endpoint that initiates migration and requires non-zero-length
+    // # connection IDs SHOULD ensure that the pool of connection IDs available
+    // # to its peer allows the peer to use a new connection ID on migration,
+    // # as the peer will be unable to respond if the pool is exhausted.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    // # An endpoint SHOULD NOT initiate migration with a peer that has
+    // # requested a zero-length connection ID, because traffic over the new
+    // # path might be trivially linkable to traffic over the old one.
     return select_peer_connection_id_sequence_for_path(path_id).has_value();
 }
 
@@ -2534,6 +2907,10 @@ void QuicConnection::retire_peer_connection_id_for_inactive_path(QuicPathId old_
     if (used_by_other_path) {
         return;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+    // # Endpoints SHOULD retire connection IDs when they are no longer actively
+    // # using either the local or destination address for which the connection ID
+    // # was used.
     queue_peer_connection_id_retirement(sequence_number);
 }
 
@@ -2579,6 +2956,15 @@ void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_loc
         if (!existing_path->second.mtu.viable) {
             return;
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+        // # Packets sent on the old path MUST NOT contribute to congestion
+        // # control or RTT estimation for the new path.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+        // # On confirming a peer's ownership of its new address, an endpoint
+        // # MUST immediately reset the congestion controller and round-trip
+        // # time estimator for the new path to initial values (see Appendices
+        // # A.3 and B.3 of [QUIC-RECOVERY]) unless the only change in the
+        // # peer's address is its port number.
         reset_recovery_for_new_path(path_id);
         const auto old_path_id = current_send_path_id_;
         if (current_send_path_id_.has_value()) {
@@ -2591,6 +2977,10 @@ void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_loc
         path.is_current_send_path = true;
         current_send_path_id_ = path_id;
         if (old_path_id.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+            // # As soon as path validation succeeds, the client SHOULD begin sending
+            // # all future packets to the new server address using the new connection
+            // # ID and discontinue use of the old server address.
             retire_peer_connection_id_for_inactive_path(*old_path_id, path_id);
         }
         return;
@@ -2614,7 +3004,12 @@ bool QuicConnection::anti_amplification_applies() const {
         return true;
     }
     return config_.role == EndpointRole::server && status_ != HandshakeStatus::idle &&
-           status_ != HandshakeStatus::failed && !peer_address_validated_;
+           (status_ != HandshakeStatus::failed ||
+            close_mode_ == QuicConnectionCloseMode::closing) &&
+           //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+           // # If the client IP address has changed, the server MUST adhere to
+           // # the anti-amplification limit; see Section 8.
+           !peer_address_validated_;
 }
 
 bool QuicConnection::anti_amplification_applies(QuicPathId path_id) const {
@@ -2644,6 +3039,10 @@ std::uint64_t QuicConnection::anti_amplification_send_budget() const {
         return kMaxUint64;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # Prior to validating the client address, servers MUST NOT send more
+    // # than three times as many bytes as the number of bytes they have
+    // # received.
     return anti_amplification_received_bytes_ * 3u;
 }
 
@@ -2654,6 +3053,11 @@ std::uint64_t QuicConnection::anti_amplification_send_budget(QuicPathId path_id)
         return kMaxUint64;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8
+    // # Therefore, after receiving packets from an address that is not yet
+    // # validated, an endpoint MUST limit the amount of data it sends to the
+    // # unvalidated address to three times the amount of data received from
+    // # that address.
     return path.anti_amplification_received_bytes * 3u;
 }
 
@@ -2701,6 +3105,15 @@ void QuicConnection::reset_recovery_for_new_path(QuicPathId path_id) {
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    // # Packets sent on the old path MUST NOT contribute to congestion control
+    // # or RTT estimation for the new path.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    // # On confirming a peer's ownership of its new address, an endpoint MUST
+    // # immediately reset the congestion controller and round-trip time
+    // # estimator for the new path to initial values (see Appendices A.3 and
+    // # B.3 of [QUIC-RECOVERY]) unless the only change in the peer's address is
+    // # its port number.
     congestion_controller_.reset_for_new_path();
     recovery_rtt_state_ = RecoveryRttState{};
     pto_count_ = 0;
@@ -2760,10 +3173,22 @@ QuicConnection::outbound_datagram_size_limit_for_path(std::optional<QuicPathId> 
         }
     }
 
+    if (path_id.has_value() &&
+        (peer_address_validated_ || close_mode_ == QuicConnectionCloseMode::closing) &&
+        anti_amplification_applies(*path_id)) {
+        const auto &path = paths_.at(*path_id);
+        return static_cast<std::size_t>(
+            std::min<std::uint64_t>(saturating_subtract(anti_amplification_send_budget(*path_id),
+                                                        path.anti_amplification_sent_bytes),
+                                    static_cast<std::uint64_t>(max_datagram_size)));
+    }
     if (!anti_amplification_applies()) {
         return max_datagram_size;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+    // # The server MUST also limit the number of bytes it sends before
+    // # validating the address of the client; see Section 8.
     return static_cast<std::size_t>(std::min<std::uint64_t>(
         anti_amplification_remaining_send_budget(), static_cast<std::uint64_t>(max_datagram_size)));
 }
@@ -2817,6 +3242,10 @@ void QuicConnection::note_pmtu_probe_acked(const SentPacketRecord &packet, QuicC
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+    // # An endpoint SHOULD use DPLPMTUD (Section 14.3) or PMTUD (Section
+    // # 14.2.1) to determine whether the path to a destination will support a
+    // # desired maximum datagram size without fragmentation.
     auto &path = ensure_path_state(packet.path_id);
     const auto probe_size = packet.pmtu_probe_size != 0
                                 ? std::optional<std::size_t>{packet.pmtu_probe_size}
@@ -2846,6 +3275,10 @@ void QuicConnection::note_pmtu_probe_lost(const SentPacketRecord &packet, QuicCo
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.4
+    // # Loss of a QUIC packet that is carried in a PMTU probe is therefore not a
+    // # reliable indication of congestion and SHOULD NOT trigger a congestion
+    // # control reaction; see Item 7 in Section 3 of [DPLPMTUD].
     auto &path = ensure_path_state(packet.path_id);
     if (should_clear_outstanding_pmtu_probe(path.mtu, packet.packet_number)) {
         if (packet.pmtu_probe_size > path.mtu.validated_datagram_size) {
@@ -2863,7 +3296,9 @@ void QuicConnection::note_inbound_datagram_bytes(std::size_t bytes) {
         return;
     }
 
-    if (status_ == HandshakeStatus::connected && peer_address_validated_) {
+    if ((status_ == HandshakeStatus::connected && peer_address_validated_) ||
+        (close_mode_ == QuicConnectionCloseMode::closing && peer_address_validated_ &&
+         paths_.contains(last_inbound_path_id_))) {
         auto &path = ensure_path_state(last_inbound_path_id_);
         const auto received = path.anti_amplification_received_bytes;
         auto increment = static_cast<std::uint64_t>(bytes);
@@ -2873,9 +3308,10 @@ void QuicConnection::note_inbound_datagram_bytes(std::size_t bytes) {
                 : received + increment;
         return;
     }
-    const bool server_before_address_validation = config_.role == EndpointRole::server &&
-                                                  status_ != HandshakeStatus::failed &&
-                                                  !peer_address_validated_;
+    const bool server_before_address_validation =
+        config_.role == EndpointRole::server &&
+        (status_ != HandshakeStatus::failed || close_mode_ == QuicConnectionCloseMode::closing) &&
+        !peer_address_validated_;
     if (!server_before_address_validation && !anti_amplification_applies()) {
         return;
     }
@@ -2930,6 +3366,9 @@ void QuicConnection::note_outbound_datagram_bytes(std::size_t bytes,
 }
 
 void QuicConnection::note_idle_peer_activity(QuicCoreTimePoint now) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.1
+    // # An endpoint restarts its idle timer when a packet from its peer is
+    // # received and processed successfully.
     last_peer_activity_time_ = now;
     idle_timeout_base_time_ = now;
     ack_eliciting_sent_since_idle_reset_ = false;
@@ -2940,6 +3379,10 @@ void QuicConnection::note_idle_ack_eliciting_send(QuicCoreTimePoint now) {
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.1
+    // # An endpoint also restarts its idle timer when sending an ack-eliciting
+    // # packet if no other ack-eliciting packets have been sent since last
+    // # receiving and processing a packet.
     idle_timeout_base_time_ = now;
     ack_eliciting_sent_since_idle_reset_ = true;
 }
@@ -2972,6 +3415,9 @@ void QuicConnection::set_path_peer_connection_id_sequence(PathState &path,
 void QuicConnection::update_spin_bit_on_receive(QuicPathId path_id, bool peer_spin_bit,
                                                 std::uint64_t packet_number) {
     if (latency_spin_bit_disabled_) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+        // # When the spin bit is disabled, endpoints MAY set the spin bit to any
+        // # value and MUST ignore any incoming value.
         return;
     }
     auto &path = ensure_path_state(path_id);
@@ -2990,6 +3436,9 @@ void QuicConnection::update_spin_bit_on_receive(QuicPathId path_id, bool peer_sp
 
 bool QuicConnection::outbound_spin_bit_for_path(std::optional<QuicPathId> path_id) const {
     if (latency_spin_bit_disabled_) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+        // # When the spin bit is disabled, endpoints MAY set the spin bit to any
+        // # value and MUST ignore any incoming value.
         return false;
     }
     const auto effective_path_id = path_id.has_value() ? path_id : current_send_path_id_;
@@ -3006,6 +3455,11 @@ bool QuicConnection::outbound_spin_bit_for_path(std::optional<QuicPathId> path_i
 
 void QuicConnection::disable_ecn_on_path(QuicPathId path_id) {
     auto &path = ensure_path_state(path_id);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+    // # If validation fails, then the endpoint MUST disable ECN.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+    // # Network routing and path elements can change mid-connection; an endpoint
+    // # MUST disable ECN if validation later fails.
     path.ecn.state = QuicPathEcnState::failed;
     path.ecn.has_last_peer_counts.fill(false);
     path.ecn.last_peer_counts = {};
@@ -3024,6 +3478,10 @@ QuicConnection::outbound_ecn_codepoint_for_path(std::optional<QuicPathId> path_i
     const auto path = paths_.find(*effective_path_id);
     if (path == paths_.end() || path->second.ecn.state == QuicPathEcnState::failed ||
         !is_ect_codepoint(path->second.ecn.transmit_mark)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+        // # It stops setting the ECT codepoint in IP packets that it sends,
+        // # assuming that either the network path or the peer does not support
+        // # ECN.
         return QuicEcnCodepoint::not_ect;
     }
 

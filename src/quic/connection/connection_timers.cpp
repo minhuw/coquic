@@ -77,6 +77,9 @@ std::optional<QuicCoreTimePoint> QuicConnection::loss_deadline() const {
             return std::nullopt;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
+        // # The PTO timer MUST NOT be set if a timer is set for time threshold
+        // # loss detection; see Section 6.1.2.
         return packet_space.recovery.time_threshold_deadline(tracked_packet->sent_time);
     };
 
@@ -134,10 +137,20 @@ std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
             return std::nullopt;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
+        // # When the PTO is armed for Initial or Handshake packet number spaces,
+        // # the max_ack_delay in the PTO period computation is set to 0
         return compute_pto_deadline(shared_rtt_state, max_ack_delay, tracked_packet->sent_time,
                                     effective_pto_count(packet_space));
     };
 
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
+    // # When ack-eliciting packets in multiple packet number spaces are in
+    // # flight, the timer MUST be set to the earlier value of the Initial and
+    // # Handshake packet number spaces.
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
+    // # An endpoint MUST NOT set its PTO timer for the Application Data
+    // # packet number space until the handshake is confirmed.
     auto regular_deadline =
         earliest_of({packet_space_pto_deadline(initial_space_, QuicCoreDuration{0}),
                      packet_space_pto_deadline(handshake_space_, QuicCoreDuration{0}),
@@ -206,13 +219,22 @@ std::optional<QuicCoreTimePoint> QuicConnection::ack_deadline() const {
 }
 
 QuicCoreDuration QuicConnection::path_validation_timeout_period() const {
-    const auto pto_reference =
+    const auto current_pto_reference =
         std::max(compute_pto_deadline(shared_recovery_rtt_state(), QuicCoreDuration{0},
                                       QuicCoreTimePoint{}, /*pto_count=*/0) -
                      QuicCoreTimePoint{},
                  QuicCoreClock::duration::zero());
-    return std::chrono::duration_cast<QuicCoreDuration>(pto_reference *
-                                                        kPersistentCongestionThreshold);
+    const auto new_path_pto_reference =
+        std::max(compute_pto_deadline(RecoveryRttState{}, QuicCoreDuration{0}, QuicCoreTimePoint{},
+                                      /*pto_count=*/0) -
+                     QuicCoreTimePoint{},
+                 QuicCoreClock::duration::zero());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.4
+    // # A value of three times the larger of the current PTO or the PTO for
+    // # the new path (using kInitialRtt, as defined in [QUIC-RECOVERY]) is
+    // # RECOMMENDED.
+    return std::chrono::duration_cast<QuicCoreDuration>(
+        std::max(current_pto_reference, new_path_pto_reference) * kPersistentCongestionThreshold);
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::idle_timeout_deadline() const {
@@ -234,6 +256,10 @@ std::optional<QuicCoreTimePoint> QuicConnection::idle_timeout_deadline() const {
                                       QuicCoreTimePoint{}, /*pto_count=*/0) -
                      QuicCoreTimePoint{},
                  QuicCoreClock::duration::zero());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.1
+    // # To avoid excessively small idle timeout periods, endpoints MUST
+    // # increase the idle timeout period to be at least three times the
+    // # current Probe Timeout (PTO).
     timeout = std::max(timeout, std::chrono::duration_cast<QuicCoreDuration>(
                                     pto_reference * kPersistentCongestionThreshold));
     return *idle_timeout_base_time_ + timeout;
@@ -306,6 +332,9 @@ void QuicConnection::detect_lost_packets(PacketSpaceState &packet_space, QuicCor
                                        : QuicCoreDuration{0};
         congestion_controller_.on_loss_event(now,
                                              latest_packet_sent_time(ack_eliciting_lost_packets));
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-7.6.2
+        // # When persistent congestion is declared, the sender's congestion
+        // # window MUST be reduced to the minimum congestion window
         if (establishes_persistent_congestion(ack_eliciting_lost_packets, shared_rtt_state,
                                               max_ack_delay)) {
             if (send_profile_enabled()) {
@@ -347,6 +376,10 @@ void QuicConnection::maybe_arm_pmtu_probe(QuicCoreTimePoint now) {
         path.mtu.next_probe_time = now + QuicCoreDuration{100000};
         return;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+    // # An endpoint SHOULD use DPLPMTUD (Section 14.3) or PMTUD (Section
+    // # 14.2.1) to determine whether the path to a destination will support a
+    // # desired maximum datagram size without fragmentation.
     const auto probe_size = next_pmtu_probe_size(path);
     if (!probe_size.has_value()) {
         maybe_trace_pmtu_no_probe(config_.source_connection_id, path);
@@ -458,6 +491,9 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
             compute_pto_deadline(shared_rtt_state, max_ack_delay, tracked_packet->sent_time,
                                  effective_pto_count(packet_space));
 
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.4
+        // # When a PTO timer expires, a sender MUST send at least one ack-
+        // # eliciting packet in the packet number space as a probe.
         const bool deadline_due = now >= packet_space_deadline;
         if (!deadline_due) {
             return;
@@ -481,6 +517,10 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
             return;
         }
         if (client_handshake_keepalive_due) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+            // # To
+            // # prevent this deadlock, clients MUST send a packet on a Probe Timeout
+            // # (PTO); see Section 6.2 of [QUIC-RECOVERY].
             selected_packet_space = client_handshake_keepalive_space;
             selected_deadline = client_handshake_keepalive_deadline;
         } else {
@@ -489,6 +529,9 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
         }
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
+    // # When a PTO timer expires, the PTO backoff MUST be increased,
+    // # resulting in the PTO period being set to twice its current value.
     ++pto_count_;
     remaining_pto_probe_datagrams_ = 0;
     bool armed_pto_probe = false;
@@ -540,6 +583,12 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     }
 
     if (armed_pto_probe) {
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.4
+        // # An endpoint
+        // # MAY send up to two full-sized datagrams containing ack-eliciting
+        // # packets to avoid an expensive consecutive PTO expiration due to a
+        // # single lost datagram or to transmit data from multiple packet number
+        // # spaces.
         remaining_pto_probe_datagrams_ = 2;
     }
 
@@ -594,6 +643,9 @@ SentPacketRecord QuicConnection::select_pto_probe(const PacketSpaceState &packet
             continue;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.4
+        // # Previously sent data MAY be sent if no new data can be
+        // # sent.
         ping_fallback = ping_fallback.value_or(SentPacketRecord{
             .packet_number = packet.packet_number,
             .ack_eliciting = true,
@@ -657,6 +709,22 @@ SentPacketRecord QuicConnection::select_pto_probe(const PacketSpaceState &packet
             const bool frame_mismatch =
                 std::tie(pending_frame.stream_type, pending_frame.maximum_streams) !=
                 std::tie(frame.stream_type, frame.maximum_streams);
+            return static_cast<bool>(frame_acknowledged | frame_mismatch);
+        });
+        std::erase_if(probe.streams_blocked_frames, [&](const StreamsBlockedFrame &frame) {
+            const bool frame_acknowledged = frame.stream_type == StreamLimitType::bidirectional
+                                                ? stream_open_limits_.streams_blocked_bidi_state ==
+                                                      StreamControlFrameState::acknowledged
+                                                : stream_open_limits_.streams_blocked_uni_state ==
+                                                      StreamControlFrameState::acknowledged;
+            const auto *pending_frame =
+                frame.stream_type == StreamLimitType::bidirectional
+                    ? &stream_open_limits_.pending_streams_blocked_bidi_frame
+                    : &stream_open_limits_.pending_streams_blocked_uni_frame;
+            const bool frame_mismatch =
+                !pending_frame->has_value() ||
+                std::tie((*pending_frame)->stream_type, (*pending_frame)->maximum_streams) !=
+                    std::tie(frame.stream_type, frame.maximum_streams);
             return static_cast<bool>(frame_acknowledged | frame_mismatch);
         });
         std::erase_if(probe.stream_data_blocked_frames, [&](const StreamDataBlockedFrame &frame) {
@@ -773,6 +841,10 @@ SentPacketRecord QuicConnection::select_pto_probe(const PacketSpaceState &packet
         return *ping_fallback;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.4
+    // # When there is no data to send, the sender SHOULD send
+    // # a PING or other ack-eliciting frame in a single packet, rearming the
+    // # PTO timer.
     return SentPacketRecord{
         .ack_eliciting = true,
         .in_flight = true,
@@ -1053,6 +1125,10 @@ bool QuicConnection::terminal_state_expired(QuicCoreTimePoint now) const {
 }
 
 void QuicConnection::enter_stateless_reset_draining(QuicCoreTimePoint now) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
+    // # If the last 16 bytes of the datagram are identical in value to a
+    // # stateless reset token, the endpoint MUST enter the draining period and
+    // # not send any further packets on this connection.
     enter_draining_state(now);
 }
 
@@ -1122,6 +1198,16 @@ void QuicConnection::start_client_if_needed(QuicCoreTimePoint now) {
                 (decoded_resumption_state_->application_context ==
                  config_.zero_rtt.application_context);
             if (enable_zero_rtt_attempt) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+                // # A client that attempts to send 0-RTT data MUST remember
+                // # all other transport parameters used by the server that it
+                // # is able to process.
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+                // # When sending frames in 0-RTT packets, a client MUST only
+                // # use remembered transport parameters; importantly, it MUST
+                // # NOT use updated values that it learns from the server's
+                // # updated transport parameters or from frames received in
+                // # 1-RTT packets.
                 peer_transport_parameters_ = decoded_resumption_state_->peer_transport_parameters;
                 note_endpoint_route_state_changed();
                 initialize_peer_flow_control_from_transport_parameters();

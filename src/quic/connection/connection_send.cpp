@@ -1340,6 +1340,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         if (!close_frame.has_value()) {
             return {};
         }
+        const auto &base_close_frame = close_frame.value();
         auto close_packet_space = &application_space_;
         if (application_space_.write_secret.has_value()) {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
@@ -1347,6 +1348,27 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             // # [QUIC-TLS]), an endpoint MUST send any CONNECTION_CLOSE frames
             // # in a 1-RTT packet.
         }
+        const auto close_frame_for_long_header = [&]() -> Frame {
+            const auto *application_close =
+                std::get_if<ApplicationConnectionCloseFrame>(&base_close_frame);
+            if (application_close == nullptr) {
+                return Frame{base_close_frame};
+            }
+
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+            // # A CONNECTION_CLOSE of type 0x1d MUST be replaced by a
+            // # CONNECTION_CLOSE of type 0x1c when sending the frame in Initial
+            // # or Handshake packets.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+            // # Endpoints MUST clear the value of the Reason Phrase field and
+            // # SHOULD use the APPLICATION_ERROR code when converting to a
+            // # CONNECTION_CLOSE of type 0x1c.
+            return Frame{TransportConnectionCloseFrame{
+                .error_code = static_cast<std::uint64_t>(QuicTransportErrorCode::application_error),
+                .frame_type = 0,
+                .reason = {},
+            }};
+        };
         std::optional<std::uint64_t> close_packet_number;
         ProtectedPacket packet;
         if (application_space_.write_secret.has_value()) {
@@ -1358,7 +1380,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 /*use_zero_rtt_packet_protection=*/false, current_version_,
                 application_destination_connection_id(), config_.source_connection_id,
                 application_write_key_phase_, kDefaultInitialPacketNumberLength,
-                *close_packet_number, std::vector<Frame>{*close_frame}, {});
+                *close_packet_number, std::vector<Frame>{base_close_frame}, {});
         } else if (handshake_space_.write_secret.has_value()) {
             close_packet_number = reserve_packet_number(handshake_space_);
             if (!close_packet_number.has_value()) {
@@ -1370,7 +1392,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 .source_connection_id = config_.source_connection_id,
                 .packet_number_length = kDefaultInitialPacketNumberLength,
                 .packet_number = *close_packet_number,
-                .frames = std::vector<Frame>{*close_frame},
+                .frames = std::vector<Frame>{close_frame_for_long_header()},
             };
         } else {
             close_packet_number = reserve_packet_number(initial_space_);
@@ -1384,7 +1406,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 .token = initial_token,
                 .packet_number_length = kDefaultInitialPacketNumberLength,
                 .packet_number = *close_packet_number,
-                .frames = std::vector<Frame>{*close_frame},
+                .frames = std::vector<Frame>{close_frame_for_long_header()},
             };
         }
         set_application_packet_spin_bit(packet, outbound_spin_bit_for_path(selected_send_path_id));
@@ -1410,7 +1432,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 .ecn = outbound_ecn_codepoint_for_path(selected_send_path_id),
             },
             /*packet_index=*/0, close_packet_metadata_length_for_tracking(candidate.value()));
-        mark_connection_close_frame_sent(*close_frame, now);
+        mark_connection_close_frame_sent(base_close_frame, now);
         last_drained_path_id_ = selected_send_path_id;
         last_drained_ecn_codepoint_ = outbound_ecn_codepoint_for_path(selected_send_path_id);
         last_drained_is_pmtu_probe_ = false;

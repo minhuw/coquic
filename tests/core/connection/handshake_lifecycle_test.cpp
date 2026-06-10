@@ -899,6 +899,91 @@ TEST(QuicCoreTest, ClosingTransportErrorUsesOneRttProtectionAfterHandshakeConfir
     EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 0u);
 }
 
+TEST(QuicCoreTest, ClosingApplicationCloseConvertsToTransportCloseInHandshakePacket) {
+    auto connection = make_connected_client_connection();
+    ASSERT_TRUE(connection
+                    .queue_application_close({
+                        .application_error_code = 77,
+                        .reason_phrase = "private app reason",
+                    })
+                    .has_value());
+    connection.mark_connection_close_frame_sent(
+        coquic::quic::Frame{optional_value_or_terminate(connection.pending_application_close_)},
+        coquic::quic::test::test_time(1));
+    connection.closing_close_packet_pending_ = true;
+    connection.application_space_.write_secret.reset();
+    connection.handshake_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x46});
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+
+    ASSERT_FALSE(datagram.empty());
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.front());
+    ASSERT_NE(handshake, nullptr);
+    ASSERT_EQ(handshake->frames.size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+    // # A CONNECTION_CLOSE of type 0x1d MUST be replaced by a CONNECTION_CLOSE
+    // # of type 0x1c when sending the frame in Initial or Handshake packets.
+    const auto *close =
+        std::get_if<coquic::quic::TransportConnectionCloseFrame>(&handshake->frames.front());
+    ASSERT_NE(close, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+    // # Endpoints MUST clear the value of the Reason Phrase field and SHOULD
+    // # use the APPLICATION_ERROR code when converting to a CONNECTION_CLOSE of
+    // # type 0x1c.
+    EXPECT_EQ(close->error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::application_error));
+    EXPECT_TRUE(close->reason.bytes.empty());
+    EXPECT_TRUE(connection.closing_application_close_.has_value());
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 1u);
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), 0u);
+}
+
+TEST(QuicCoreTest, ClosingApplicationCloseConvertsToTransportCloseInInitialPacket) {
+    auto connection = make_connected_client_connection();
+    ASSERT_TRUE(connection
+                    .queue_application_close({
+                        .application_error_code = 78,
+                        .reason_phrase = "private initial reason",
+                    })
+                    .has_value());
+    connection.mark_connection_close_frame_sent(
+        coquic::quic::Frame{optional_value_or_terminate(connection.pending_application_close_)},
+        coquic::quic::test::test_time(1));
+    connection.closing_close_packet_pending_ = true;
+    connection.application_space_.write_secret.reset();
+    connection.handshake_space_.write_secret.reset();
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+
+    ASSERT_FALSE(datagram.empty());
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets.front());
+    ASSERT_NE(initial, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+    // # A CONNECTION_CLOSE of type 0x1d MUST be replaced by a CONNECTION_CLOSE
+    // # of type 0x1c when sending the frame in Initial or Handshake packets.
+    const auto close = std::find_if(
+        initial->frames.begin(), initial->frames.end(), [](const coquic::quic::Frame &frame) {
+            return std::holds_alternative<coquic::quic::TransportConnectionCloseFrame>(frame);
+        });
+    ASSERT_NE(close, initial->frames.end());
+    const auto &close_frame = std::get<coquic::quic::TransportConnectionCloseFrame>(*close);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+    // # Endpoints MUST clear the value of the Reason Phrase field and SHOULD
+    // # use the APPLICATION_ERROR code when converting to a CONNECTION_CLOSE of
+    // # type 0x1c.
+    EXPECT_EQ(close_frame.error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::application_error));
+    EXPECT_TRUE(close_frame.reason.bytes.empty());
+    EXPECT_TRUE(connection.closing_application_close_.has_value());
+    EXPECT_EQ(tracked_packet_count(connection.initial_space_), 1u);
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), 0u);
+}
+
 TEST(QuicCoreTest, ClosingAndDrainingStatesPersistForThreePtoIntervals) {
     constexpr auto kPtoInterval = std::chrono::milliseconds(14);
     constexpr auto kClosePeriod = kPtoInterval * 3;

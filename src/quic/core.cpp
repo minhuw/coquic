@@ -1935,6 +1935,11 @@ QuicCore::take_client_new_token_for_open(const QuicCoreClientConnectionConfig &c
         // # When connecting to a server for which the client retains an
         // # applicable and unused token, it SHOULD include that token
         // # in the Token field of its Initial packet.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+        // # A client MUST NOT include a token that is not applicable to the
+        // # server that it is connecting to, unless the client has the
+        // # knowledge that the server that issued the token and the server the
+        // # client is connecting to are jointly managing the tokens.
         if (it->used || it->server_name != connection.server_name ||
             it->version != connection.initial_version || it->token.empty()) {
             continue;

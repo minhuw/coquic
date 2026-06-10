@@ -2448,6 +2448,12 @@ TEST(QuicCoreEndpointInternalTest, ClientStoresMostRecentUnusedNewTokenForOpen) 
         .token = bytes_from_ints({0x03}),
         .used = false,
     });
+    opening_client.client_new_tokens_.push_back(QuicCore::ClientStoredNewToken{
+        .server_name = "other.example",
+        .version = kQuicVersion1,
+        .token = bytes_from_ints({0x04}),
+        .used = false,
+    });
     auto opened = opening_client.advance_endpoint(
         QuicCoreOpenConnection{
             .connection = make_client_open_config(),
@@ -2465,6 +2471,11 @@ TEST(QuicCoreEndpointInternalTest, ClientStoresMostRecentUnusedNewTokenForOpen) 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
     // # The client MUST include the token in all Initial packets it sends,
     // # unless a Retry replaces the token with a newer one.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A client MUST NOT include a token that is not applicable to the server
+    // # that it is connecting to, unless the client has the knowledge that the
+    // # server that issued the token and the server the client is connecting to
+    // # are jointly managing the tokens.
     EXPECT_EQ(optional_ref_or_terminate(initial_token), bytes_from_ints({0x03}));
 }
 

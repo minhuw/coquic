@@ -2131,6 +2131,37 @@ TEST(QuicCoreEndpointInternalTest, StoredRetryAndNewTokensRejectAlreadyConsumedR
     EXPECT_TRUE(server.new_tokens_.contains(QuicCore::connection_id_key(new_token)));
 }
 
+TEST(QuicCoreEndpointInternalTest, NewTokensUseIndependentPerIssueBytes) {
+    QuicCore stateful_server(make_server_endpoint_config());
+    auto first_stateful = stateful_server.make_endpoint_new_token(
+        1, kQuicVersion1, 55, std::span<const std::byte>{}, coquic::quic::test::test_time(1));
+    auto second_stateful = stateful_server.make_endpoint_new_token(
+        2, kQuicVersion1, 55, std::span<const std::byte>{}, coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first_stateful.empty());
+    ASSERT_FALSE(second_stateful.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A server MUST ensure that every NEW_TOKEN frame it sends is unique
+    // # across all clients, with the exception of those sent to repair losses
+    // # of previously sent NEW_TOKEN frames.
+    EXPECT_NE(first_stateful, second_stateful);
+
+    auto sealed_config = make_server_endpoint_config();
+    sealed_config.address_validation_token_secret = make_address_validation_secret(0x4e);
+    QuicCore sealed_server(std::move(sealed_config));
+    auto identity = make_ipv4_identity(198, 51, 100, 9, 4433);
+    auto first_sealed = sealed_server.make_endpoint_new_token(3, kQuicVersion1, 56, identity,
+                                                              coquic::quic::test::test_time(1));
+    auto second_sealed = sealed_server.make_endpoint_new_token(4, kQuicVersion1, 56, identity,
+                                                               coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first_sealed.empty());
+    ASSERT_FALSE(second_sealed.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A server MUST ensure that every NEW_TOKEN frame it sends is unique
+    // # across all clients, with the exception of those sent to repair losses
+    // # of previously sent NEW_TOKEN frames.
+    EXPECT_NE(first_sealed, second_sealed);
+}
+
 TEST(QuicCoreEndpointInternalTest, RouteIdentityHelpersReuseStoredIdentityAndRejectDowngrade) {
     auto config = make_client_endpoint_config();
     config.allow_peer_address_change = true;
@@ -2435,6 +2466,46 @@ TEST(QuicCoreEndpointInternalTest, ClientStoresMostRecentUnusedNewTokenForOpen) 
     // # The client MUST include the token in all Initial packets it sends,
     // # unless a Retry replaces the token with a newer one.
     EXPECT_EQ(optional_ref_or_terminate(initial_token), bytes_from_ints({0x03}));
+}
+
+TEST(QuicCoreEndpointInternalTest, ClientDoesNotStoreRetryTokenForFutureOpen) {
+    QuicCore client(make_client_endpoint_config());
+    auto retry_open = make_client_open_config();
+    retry_open.retry_token = bytes_from_ints({0x72, 0x74, 0x72, 0x79});
+    auto retried = client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = std::move(retry_open),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(1));
+    auto retry_sends = send_effects_from(retried);
+    ASSERT_FALSE(retry_sends.empty());
+    auto retry_initial_token =
+        coquic::quic::test::client_initial_datagram_token(retry_sends.front().bytes);
+    ASSERT_TRUE(retry_initial_token.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(retry_initial_token),
+              bytes_from_ints({0x72, 0x74, 0x72, 0x79}));
+    ASSERT_TRUE(client.client_new_tokens_.empty());
+
+    auto future = client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(2),
+            .initial_route_handle = 18,
+        },
+        coquic::quic::test::test_time(2));
+    auto future_sends = send_effects_from(future);
+    ASSERT_FALSE(future_sends.empty());
+    auto future_initial_token =
+        coquic::quic::test::client_initial_datagram_token(future_sends.front().bytes);
+    ASSERT_TRUE(future_initial_token.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # The client MUST NOT use the token provided in a Retry for future
+    // # connections.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # In comparison, a token obtained in a Retry packet MUST be used
+    // # immediately during the connection attempt and cannot be used in
+    // # subsequent connection attempts.
+    EXPECT_TRUE(optional_ref_or_terminate(future_initial_token).empty());
 }
 // NOLINTEND(clang-analyzer-cplusplus.NewDeleteLeaks)
 

@@ -1610,6 +1610,10 @@ COQUIC_NO_PROFILE std::vector<std::byte> QuicCore::make_endpoint_new_token(
     std::span<const std::byte> address_validation_identity, QuicCoreTimePoint now) {
     if (endpoint_config_.address_validation_token_secret.has_value()) {
         std::vector<std::byte> nonce(16, std::byte{0x00});
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+        // # A server MUST ensure that every NEW_TOKEN frame it sends is unique
+        // # across all clients, with the exception of those sent to repair
+        // # losses of previously sent NEW_TOKEN frames.
         fill_random_bytes(nonce, endpoint_random_);
         nonce.back() = static_cast<std::byte>(std::to_integer<std::uint8_t>(nonce.back()) ^
                                               static_cast<std::uint8_t>(sequence & 0xffu));
@@ -1638,6 +1642,10 @@ COQUIC_NO_PROFILE std::vector<std::byte> QuicCore::make_endpoint_new_token(
     }
 
     std::vector<std::byte> token(24, std::byte{0x00});
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A server MUST ensure that every NEW_TOKEN frame it sends is unique
+    // # across all clients, with the exception of those sent to repair losses
+    // # of previously sent NEW_TOKEN frames.
     fill_random_bytes(token, endpoint_random_);
     token.front() = static_cast<std::byte>(std::to_integer<std::uint8_t>(token.front()) ^ 0x4eu);
     token.back() = static_cast<std::byte>(std::to_integer<std::uint8_t>(token.back()) ^
@@ -1886,6 +1894,13 @@ COQUIC_NO_PROFILE void QuicCore::remember_client_new_tokens(ConnectionEntry &ent
     }
 
     for (const auto &effect : result.effects) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+        // # The client MUST NOT use the token provided in a Retry for future
+        // # connections.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+        // # In comparison, a token obtained in a Retry packet MUST be used
+        // # immediately during the connection attempt and cannot be used in
+        // # subsequent connection attempts.
         const auto *new_token = std::get_if<QuicCoreNewTokenAvailable>(&effect);
         if (new_token == nullptr || new_token->token.empty() ||
             new_token->connection != entry.handle) {
@@ -2936,6 +2951,13 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                 // # When connecting to a server for which the client retains an
                 // # applicable and unused token, it SHOULD include that token
                 // # in the Token field of its Initial packet.
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+                // # The client MUST NOT use the token provided in a Retry for
+                // # future connections.
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+                // # In comparison, a token obtained in a Retry packet MUST be
+                // # used immediately during the connection attempt and cannot be
+                // # used in subsequent connection attempts.
                 retry_token = std::move(*stored_token);
             }
         }

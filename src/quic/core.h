@@ -99,6 +99,10 @@ struct QuicTransportConfig {
     std::uint64_t max_idle_timeout = 0;
     std::uint64_t max_udp_payload_size = 65527;
     bool pmtud_enabled = true;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.3
+    // # Endpoints SHOULD set the initial value of BASE_PLPMTU (Section 5.1 of
+    // # [DPLPMTUD]) to be consistent with QUIC's smallest allowed maximum
+    // # datagram size.
     std::size_t pmtud_base_datagram_size = 1200;
     // A value of 0 uses the per-path Ethernet default: 1472 bytes for IPv4 and 1452 for IPv6.
     std::size_t pmtud_max_datagram_size = 0;
@@ -108,6 +112,9 @@ struct QuicTransportConfig {
     std::uint64_t ack_delay_exponent = 3;
     std::uint64_t max_ack_delay = 25;
     std::uint64_t ack_eliciting_threshold = 2;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # The applicable subset of transport parameters that permit the sending
+    // # of application data SHOULD be set to non-zero values for 0-RTT.
     std::uint64_t initial_max_data = 1 << 20;
     std::uint64_t initial_max_stream_data_bidi_local = 256 << 10;
     std::uint64_t initial_max_stream_data_bidi_remote = 256 << 10;
@@ -118,6 +125,9 @@ struct QuicTransportConfig {
     QuicCongestionControlAlgorithm congestion_control = QuicCongestionControlAlgorithm::newreno;
     bool enable_hystart_plus_plus = true;
     bool send_stream_fairness = true;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+    // # Implementations MUST allow administrators of clients and servers to
+    // # disable the spin bit either globally or on a per-connection basis.
     bool enable_latency_spin_bit = false;
     bool grease_reserved_versions = false;
     bool grease_quic_bit = false;

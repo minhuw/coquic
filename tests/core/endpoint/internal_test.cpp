@@ -1670,6 +1670,8 @@ TEST(QuicCoreEndpointInternalTest, RetryTokensUseUnpredictablePerIssueBytes) {
         tokens.push_back(pending.token);
     }
     ASSERT_EQ(tokens.size(), 2u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+    // # An address validation token MUST be difficult to guess.
     EXPECT_NE(tokens[0], tokens[1]);
     for (auto &token : tokens) {
         EXPECT_EQ(token.size(), 16u);
@@ -2440,6 +2442,11 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetHelpersGenerateAndDetectResets)
     // # is 43 bytes or shorter SHOULD send a Stateless Reset that is one byte
     // # shorter than the packet it responds to.
     EXPECT_EQ(reset_datagram.bytes.size(), 42u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.3
+    // # An endpoint MUST ensure that every Stateless Reset that it sends is
+    // # smaller than the packet that triggered it, unless it maintains state
+    // # sufficient to prevent looping.
+    EXPECT_LT(reset_datagram.bytes.size(), unknown_short_header.size());
     //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
     // # Endpoints MUST send Stateless Resets formatted as a packet with a
     // # short header.
@@ -2453,19 +2460,67 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetHelpersGenerateAndDetectResets)
     EXPECT_TRUE(std::equal(token.begin(), token.end(),
                            reset_datagram.bytes.end() - static_cast<std::ptrdiff_t>(token.size())));
 
-    std::vector<std::byte> tiny_unknown_short_header(21, std::byte{0xaa});
-    tiny_unknown_short_header.front() = std::byte{0x40};
-    std::copy(connection_id.begin(), connection_id.end(), tiny_unknown_short_header.begin() + 1);
-    auto tiny_parsed = QuicCore::parse_endpoint_datagram(tiny_unknown_short_header);
-    auto tiny_parsed_datagram = optional_value_or_terminate(tiny_parsed);
-    auto tiny_stateless_reset = server.make_stateless_reset_for_unknown_cid(
-        tiny_parsed_datagram, tiny_unknown_short_header, 55, coquic::quic::test::test_time(0));
-    auto tiny_reset_datagram = optional_value_or_terminate(tiny_stateless_reset);
+    auto second_stateless_reset = server.make_stateless_reset_for_unknown_cid(
+        parsed_datagram, unknown_short_header, 55, coquic::quic::test::test_time(0));
+    auto second_reset_datagram = optional_value_or_terminate(second_stateless_reset);
+    auto first_random_prefix = reset_datagram.bytes.to_vector();
+    first_random_prefix.resize(first_random_prefix.size() - token.size());
+    auto second_random_prefix = second_reset_datagram.bytes.to_vector();
+    second_random_prefix.resize(second_random_prefix.size() - token.size());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # The remainder of the first byte and an arbitrary number of bytes
+    // # following it are set to values that SHOULD be indistinguishable from
+    // # random.
+    EXPECT_NE(first_random_prefix, second_random_prefix);
+
+    std::vector<std::byte> minimum_reset_unknown_short_header(21, std::byte{0xaa});
+    minimum_reset_unknown_short_header.front() = std::byte{0x40};
+    std::copy(connection_id.begin(), connection_id.end(),
+              minimum_reset_unknown_short_header.begin() + 1);
+    auto minimum_reset_parsed =
+        QuicCore::parse_endpoint_datagram(minimum_reset_unknown_short_header);
+    auto minimum_reset_parsed_datagram = optional_value_or_terminate(minimum_reset_parsed);
+    auto minimum_reset_stateless_reset = server.make_stateless_reset_for_unknown_cid(
+        minimum_reset_parsed_datagram, minimum_reset_unknown_short_header, 55,
+        coquic::quic::test::test_time(0));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.3
+    // # An endpoint MUST ensure that every Stateless Reset that it sends is
+    // # smaller than the packet that triggered it, unless it maintains state
+    // # sufficient to prevent looping.
+    EXPECT_FALSE(minimum_reset_stateless_reset.has_value());
+
+    std::vector<std::byte> small_unknown_short_header(22, std::byte{0xaa});
+    small_unknown_short_header.front() = std::byte{0x40};
+    std::copy(connection_id.begin(), connection_id.end(), small_unknown_short_header.begin() + 1);
+    auto small_parsed = QuicCore::parse_endpoint_datagram(small_unknown_short_header);
+    auto small_parsed_datagram = optional_value_or_terminate(small_parsed);
+    auto small_stateless_reset = server.make_stateless_reset_for_unknown_cid(
+        small_parsed_datagram, small_unknown_short_header, 55, coquic::quic::test::test_time(0));
+    auto small_reset_datagram = optional_value_or_terminate(small_stateless_reset);
     //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
     // # An endpoint MUST NOT send a Stateless Reset that is three times or
     // # more larger than the packet it receives to avoid being used for
     // # amplification.
-    EXPECT_EQ(tiny_reset_datagram.bytes.size(), 21u);
+    EXPECT_LT(small_reset_datagram.bytes.size(), small_unknown_short_header.size() * 3u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.3
+    // # An endpoint MUST ensure that every Stateless Reset that it sends is
+    // # smaller than the packet that triggered it, unless it maintains state
+    // # sufficient to prevent looping.
+    EXPECT_LT(small_reset_datagram.bytes.size(), small_unknown_short_header.size());
+
+    std::vector<std::byte> medium_unknown_short_header(64, std::byte{0xaa});
+    medium_unknown_short_header.front() = std::byte{0x40};
+    std::copy(connection_id.begin(), connection_id.end(), medium_unknown_short_header.begin() + 1);
+    auto medium_parsed = QuicCore::parse_endpoint_datagram(medium_unknown_short_header);
+    auto medium_parsed_datagram = optional_value_or_terminate(medium_parsed);
+    auto medium_stateless_reset = server.make_stateless_reset_for_unknown_cid(
+        medium_parsed_datagram, medium_unknown_short_header, 55, coquic::quic::test::test_time(0));
+    auto medium_reset_datagram = optional_value_or_terminate(medium_stateless_reset);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.3
+    // # An endpoint MUST ensure that every Stateless Reset that it sends is
+    // # smaller than the packet that triggered it, unless it maintains state
+    // # sufficient to prevent looping.
+    EXPECT_LT(medium_reset_datagram.bytes.size(), medium_unknown_short_header.size());
 
     QuicCore client(make_client_endpoint_config());
     client.peer_stateless_reset_tokens_.insert_or_assign(QuicCore::stateless_reset_token_key(token),
@@ -2572,6 +2627,30 @@ TEST(QuicCoreEndpointInternalTest, ConfiguredResetSecretSupportsUnknownCidAfterS
     token_source_config.stateless_reset_secret = reset_secret;
     const QuicConnection token_source(std::move(token_source_config));
     auto expected_token = token_source.local_connection_ids_.at(0).stateless_reset_token;
+    auto different_secret = reset_secret;
+    different_secret.front() =
+        static_cast<std::byte>(std::to_integer<std::uint8_t>(different_secret.front()) ^ 0x55u);
+    auto different_secret_token_source_config = coquic::quic::test::make_server_core_config();
+    different_secret_token_source_config.source_connection_id =
+        original_entry.connection->config_.source_connection_id;
+    different_secret_token_source_config.stateless_reset_secret = different_secret;
+    const QuicConnection different_secret_token_source(
+        std::move(different_secret_token_source_config));
+    auto different_cid_token_source_config = coquic::quic::test::make_server_core_config();
+    different_cid_token_source_config.source_connection_id =
+        original_entry.connection->config_.source_connection_id;
+    different_cid_token_source_config.source_connection_id.back() =
+        static_cast<std::byte>(std::to_integer<std::uint8_t>(
+                                   different_cid_token_source_config.source_connection_id.back()) ^
+                               0x11u);
+    different_cid_token_source_config.stateless_reset_secret = reset_secret;
+    const QuicConnection different_cid_token_source(std::move(different_cid_token_source_config));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+    // # The stateless reset token MUST be difficult to guess.
+    EXPECT_NE(different_secret_token_source.local_connection_ids_.at(0).stateless_reset_token,
+              expected_token);
+    EXPECT_NE(different_cid_token_source.local_connection_ids_.at(0).stateless_reset_token,
+              expected_token);
     original_entry.connection->local_connection_ids_.emplace(
         0, LocalConnectionIdRecord{
                .sequence_number = 0,
@@ -2606,6 +2685,31 @@ TEST(QuicCoreEndpointInternalTest, ConfiguredResetSecretSupportsUnknownCidAfterS
     EXPECT_TRUE(std::equal(expected_token.begin(), expected_token.end(),
                            reset_datagram.bytes.end() -
                                static_cast<std::ptrdiff_t>(expected_token.size())));
+
+    auto wrong_length_connection_id = connection_id;
+    wrong_length_connection_id.push_back(std::byte{0x80});
+    std::vector<std::byte> wrong_length_unknown_initial{
+        std::byte{0xc0}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x00}, std::byte{0x01}, static_cast<std::byte>(wrong_length_connection_id.size()),
+    };
+    wrong_length_unknown_initial.insert(wrong_length_unknown_initial.end(),
+                                        wrong_length_connection_id.begin(),
+                                        wrong_length_connection_id.end());
+    wrong_length_unknown_initial.push_back(std::byte{0x01});
+    wrong_length_unknown_initial.push_back(std::byte{0x11});
+    wrong_length_unknown_initial.push_back(std::byte{0x00});
+    wrong_length_unknown_initial.resize(64, std::byte{0xaa});
+    auto wrong_length_parsed = QuicCore::parse_endpoint_datagram(wrong_length_unknown_initial);
+    auto wrong_length_parsed_datagram = optional_value_or_terminate(wrong_length_parsed);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+    // # An endpoint that uses this design MUST either use the same connection
+    // # ID length for all connections or encode the length of the connection
+    // # ID such that it can be recovered without state.
+    EXPECT_FALSE(restarted
+                     .make_stateless_reset_for_unknown_cid(wrong_length_parsed_datagram,
+                                                           wrong_length_unknown_initial, 55,
+                                                           coquic::quic::test::test_time(10))
+                     .has_value());
 
     auto no_secret_config = make_server_endpoint_config();
     QuicCore no_secret(std::move(no_secret_config));

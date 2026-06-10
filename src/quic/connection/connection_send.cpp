@@ -2240,6 +2240,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                            !response_path->second.outstanding_challenge.has_value()) {
                     response_path->second.outstanding_challenge =
                         next_path_challenge_data(response_path->first);
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.3
+                    // # Servers SHOULD initiate path validation to the client's
+                    // # new address upon receiving a probe packet from a
+                    // # different address; see Section 8.
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
                     // # However, an endpoint SHOULD NOT send multiple PATH_CHALLENGE
                     // # frames in a single packet.
@@ -4407,6 +4411,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     : std::nullopt;
             if (ack_eliciting && !bypass_congestion_window &&
                 !congestion_controller_.can_send_ack_eliciting(candidate_datagram_size)) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-19.21
+                // # Extension frames MUST be congestion controlled and MUST cause an ACK
+                // # frame to be sent.
                 //= https://www.rfc-editor.org/rfc/rfc9002#section-7
                 // # An endpoint MUST NOT send a packet if it would cause bytes_in_flight
                 // # (see Appendix B.2) to be larger than the congestion window, unless

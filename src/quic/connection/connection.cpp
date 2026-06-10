@@ -5,6 +5,12 @@ namespace coquic::quic {
 
 QuicConnection::QuicConnection(QuicCoreConfig config)
     : config_(std::move(config)),
+      //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+      // # Even when the spin bit is not disabled by the administrator,
+      // # endpoints MUST disable their use of the spin bit for a random
+      // # selection of at least one in every 16 network paths, or for one in
+      // # every 16 connection IDs, in order to ensure that QUIC connections
+      // # that disable the spin bit are commonly observed on the network.
       latency_spin_bit_disabled_(config_.transport.enable_latency_spin_bit ? random_one_in_sixteen()
                                                                            : true),
       original_version_(config_.original_version), current_version_(config_.initial_version),
@@ -168,6 +174,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
     maybe_discard_server_zero_rtt_packet_space(now);
     maybe_discard_previous_application_read_secret(now);
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # For the purposes of avoiding amplification prior to address
+    // # validation, servers MUST count all of the payload bytes received in
+    // # datagrams that are uniquely attributed to a single connection.
     maybe_note_inbound_datagram_bytes(
         count_inbound_bytes, bytes, accepts_greased_quic_bit(),
         [&](std::size_t byte_count) { note_inbound_datagram_bytes(byte_count); });
@@ -923,6 +933,9 @@ CodecResult<bool> QuicConnection::queue_datagram_send_shared(SharedBytes bytes,
 
     if (!peer_transport_parameters_.has_value() ||
         peer_transport_parameters_->max_datagram_frame_size == 0) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.21
+        // # An extension to QUIC that wishes to use a new type of frame MUST
+        // # first ensure that a peer is able to understand the frame.
         //= https://www.rfc-editor.org/rfc/rfc9221#section-3
         // # An endpoint MUST NOT send DATAGRAM frames until it has received the
         // # max_datagram_frame_size transport parameter with a non-zero value

@@ -1576,6 +1576,10 @@ CodecResult<FrameDecodeResult> deserialize_frame(std::span<const std::byte> byte
         });
     case 0x02:
     case 0x03: {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3
+        // # QUIC implementations MUST properly handle both types, and, if
+        // # they have enabled ECN for packets they send, they SHOULD use the
+        // # information in the ECN section to manage their congestion state.
         const auto ack = decode_ack_frame(reader, frame_type == 0x03);
         if (!ack.has_value()) {
             return decode_failure(ack.error().code, ack.error().offset);
@@ -1839,6 +1843,10 @@ CodecResult<ReceivedFrameDecodeResult> deserialize_received_frame(const SharedBy
     }
 
     if (frame_type == 0x02 || frame_type == 0x03) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3
+        // # QUIC implementations MUST properly handle both types, and, if
+        // # they have enabled ECN for packets they send, they SHOULD use the
+        // # information in the ECN section to manage their congestion state.
         auto frame = decode_received_ack_frame(reader, frame_type == 0x03, bytes);
         if (!frame.has_value()) {
             return received_decode_failure(frame.error().code, frame.error().offset);
@@ -1900,6 +1908,10 @@ CodecResult<ReceivedAckFrameDecodeResult> deserialize_received_ack_frame(const S
         return received_ack_decode_failure(CodecErrorCode::unknown_frame_type, 0);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3
+    // # QUIC implementations MUST properly handle both types, and, if they
+    // # have enabled ECN for packets they send, they SHOULD use the
+    // # information in the ECN section to manage their congestion state.
     auto frame = decode_received_ack_frame(reader, frame_type == 0x03, bytes);
     if (!frame.has_value()) {
         return received_ack_decode_failure(frame.error().code, frame.error().offset);

@@ -87,6 +87,10 @@ class ScopedCoreTestFault {
     bool previous_ = false;
 };
 constexpr std::size_t kMinimumClientInitialDatagramBytes = 1200;
+//= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+// # An endpoint that uses this design MUST either use the same connection ID
+// # length for all connections or encode the length of the connection ID such
+// # that it can be recovered without state.
 constexpr std::size_t kEndpointConnectionIdLength = 8;
 constexpr std::size_t kMaxDatagramsPerDrain = 256;
 constexpr QuicPathId kDefaultPathId = 0;
@@ -614,6 +618,9 @@ should_remove_endpoint_connection_entry(const QuicConnection &quic_connection,
                                         const QuicCoreResult &drained_result,
                                         QuicCoreTimePoint now) {
     if (quic_connection.has_failed()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+        // # Servers that retain an open socket for accepting new connections
+        // # SHOULD NOT end the closing or draining state early.
         //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
         // # Once its closing or draining state ends, an endpoint SHOULD
         // # discard all connection state.
@@ -1185,6 +1192,8 @@ derive_stateless_reset_token(
     }
 
     std::array<std::byte, kStatelessResetTokenLength> token{};
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+    // # The stateless reset token MUST be difficult to guess.
     std::copy_n(reinterpret_cast<const std::byte *>(digest->data()), token.size(), token.begin());
     return token;
 }
@@ -1587,6 +1596,8 @@ COQUIC_NO_PROFILE std::vector<std::byte> QuicCore::make_endpoint_retry_token(
     }
 
     std::vector<std::byte> token(16, std::byte{0x00});
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+    // # An address validation token MUST be difficult to guess.
     fill_random_bytes(token, endpoint_random_);
     token.back() = static_cast<std::byte>(std::to_integer<std::uint8_t>(token.back()) ^
                                           static_cast<std::uint8_t>(sequence & 0xffu));
@@ -2051,6 +2062,10 @@ QuicCore::make_stateless_reset_for_unknown_cid(const ParsedEndpointDatagram &par
     std::optional<LocalStatelessResetTokenRoute> derived_token_route;
     if (token_it == local_stateless_reset_tokens_by_cid_.end() &&
         endpoint_config_.stateless_reset_secret.has_value() &&
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+        // # An endpoint that uses this design MUST either use the same
+        // # connection ID length for all connections or encode the length of
+        // # the connection ID such that it can be recovered without state.
         parsed.destination_connection_id.size() == kEndpointConnectionIdLength &&
         parsed.destination_connection_id.front() == kServerConnectionIdPrefix) {
         if (const auto token = derive_stateless_reset_token(
@@ -2069,10 +2084,17 @@ QuicCore::make_stateless_reset_for_unknown_cid(const ParsedEndpointDatagram &par
     if (token_route == nullptr) {
         return std::nullopt;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.3
+    // # An endpoint MUST ensure that every Stateless Reset that it sends is
+    // # smaller than the packet that triggered it, unless it maintains state
+    // # sufficient to prevent looping.
+    if (inbound_bytes.size() <= kMinimumStatelessResetDatagramSize) {
+        return std::nullopt;
+    }
 
     std::size_t reset_size = inbound_bytes.size() <= 43
                                  ? inbound_bytes.size() - 1u
-                                 : std::min<std::size_t>(inbound_bytes.size(), 64u);
+                                 : std::min<std::size_t>(inbound_bytes.size() - 1u, 64u);
     reset_size = std::max(reset_size, kMinimumStatelessResetDatagramSize);
     //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
     // # An endpoint that sends a Stateless Reset in response to a packet that
@@ -2083,11 +2105,15 @@ QuicCore::make_stateless_reset_for_unknown_cid(const ParsedEndpointDatagram &par
     // # more larger than the packet it receives to avoid being used for
     // # amplification.
     if (reset_size >= inbound_bytes.size() * 3u) {
-        reset_size = std::max(kMinimumStatelessResetDatagramSize, inbound_bytes.size());
+        reset_size = std::max(kMinimumStatelessResetDatagramSize, inbound_bytes.size() - 1u);
     }
 
     DatagramBuffer bytes;
     bytes.resize(reset_size, std::byte{0x00});
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # The remainder of the first byte and an arbitrary number of bytes
+    // # following it are set to values that SHOULD be indistinguishable from
+    // # random.
     fill_random_bytes(bytes.span(), endpoint_random_);
     auto reset_bytes = bytes.span();
     reset_bytes.front() = static_cast<std::byte>(

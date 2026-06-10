@@ -908,6 +908,23 @@ TEST(QuicCoreTest, PreferredAddressStartsIssuedConnectionIdsAtSequenceTwo) {
     EXPECT_EQ(connection.pending_new_connection_id_frames_.back().sequence_number, 7u);
 }
 
+TEST(QuicCoreTest, IssuedConnectionIdsUseDistinctStatelessResetTokens) {
+    auto connection = make_connected_server_connection();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 4;
+
+    connection.issue_spare_connection_ids();
+
+    ASSERT_GE(connection.local_connection_ids_.size(), 2u);
+    std::set<std::array<std::byte, 16>> stateless_reset_tokens;
+    for (const auto &[sequence_number, record] : connection.local_connection_ids_) {
+        static_cast<void>(sequence_number);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+        // # The same stateless reset token MUST NOT be used for multiple
+        // # connection IDs.
+        EXPECT_TRUE(stateless_reset_tokens.insert(record.stateless_reset_token).second);
+    }
+}
+
 TEST(QuicCoreTest, PreferredAddressSequenceOneCanBeRetired) {
     auto connection = make_connected_server_connection_with_preferred_address();
 
@@ -1084,6 +1101,59 @@ TEST(QuicCoreTest, CorruptedOneRttRequestConnectionIdBitflipDoesNotBlockValidRet
     EXPECT_EQ(received_value.bytes,
               coquic::quic::test::bytes_from_string("GET /abundant-subtropical-monk\r\n"));
     EXPECT_TRUE(received_value.fin);
+}
+
+TEST(QuicCoreTest, ClientInitialRetransmissionsUseSameDestinationConnectionIdBeforeServerPacket) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.initial_destination_connection_id = bytes_from_hex("8394c8f03e515708");
+    coquic::quic::QuicConnection connection(std::move(config));
+    connection.initial_space_.pending_probe_packet = coquic::quic::SentPacketRecord{
+        .packet_number = 0,
+        .ack_eliciting = true,
+        .in_flight = true,
+        .crypto_ranges =
+            {
+                coquic::quic::ByteRange{
+                    .offset = 0,
+                    .bytes = std::vector<std::byte>(64, std::byte{0x61}),
+                },
+            },
+    };
+
+    auto first_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first_datagram.empty());
+    connection.initial_space_.pending_probe_packet = coquic::quic::SentPacketRecord{
+        .packet_number = 1,
+        .ack_eliciting = true,
+        .in_flight = true,
+        .crypto_ranges =
+            {
+                coquic::quic::ByteRange{
+                    .offset = 0,
+                    .bytes = std::vector<std::byte>(64, std::byte{0x62}),
+                },
+            },
+    };
+
+    auto second_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(second_datagram.empty());
+
+    auto first_packets = decode_sender_datagram(connection, first_datagram);
+    auto second_packets = decode_sender_datagram(connection, second_datagram);
+    ASSERT_EQ(first_packets.size(), 1u);
+    ASSERT_EQ(second_packets.size(), 1u);
+    const auto *first_initial =
+        std::get_if<coquic::quic::ProtectedInitialPacket>(&first_packets.front());
+    const auto *second_initial =
+        std::get_if<coquic::quic::ProtectedInitialPacket>(&second_packets.front());
+    ASSERT_NE(first_initial, nullptr);
+    ASSERT_NE(second_initial, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+    // # Until a packet is received from the server, the client MUST use the
+    // # same Destination Connection ID value on all packets in this connection.
+    EXPECT_EQ(first_initial->destination_connection_id, second_initial->destination_connection_id);
+    EXPECT_EQ(first_initial->destination_connection_id,
+              connection.client_initial_destination_connection_id());
 }
 
 TEST(QuicCoreTest, ClientInitialRetransmissionsUseServerSourceConnectionIdAfterServerInitial) {

@@ -399,6 +399,11 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # A client MUST NOT use remembered values for the following parameters:
+    // # ack_delay_exponent, max_ack_delay, initial_source_connection_id,
+    // # original_destination_connection_id, preferred_address,
+    // # retry_source_connection_id, and stateless_reset_token.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
     // # The client MUST use the server's new values in the handshake instead;
     // # if the server does not provide new values, the default values are used.
     const auto peer_transport_parameters =
@@ -548,6 +553,15 @@ void QuicConnection::apply_path_mtu_update(
     // # of local and remote IP addresses.
     auto &path = ensure_path_state(path_id);
     if (max_udp_payload_size < kMinimumInitialDatagramSize) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+        // # If a QUIC endpoint determines that the PMTU between any pair of
+        // # local and remote IP addresses cannot support the smallest allowed
+        // # maximum datagram size of 1200 bytes, it MUST immediately cease
+        // # sending QUIC packets, except for those in PMTU probes or those
+        // # containing CONNECTION_CLOSE frames, on the affected path.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-14
+        // # QUIC MUST NOT be used if the network path cannot support a
+        // # maximum datagram size of at least 1200 bytes.
         path.mtu.viable = false;
         path.mtu.enabled = false;
         path.mtu.probe_ceiling = max_udp_payload_size;
@@ -581,6 +595,9 @@ void QuicConnection::apply_path_mtu_update(
     }
     path.mtu.probe_ceiling =
         std::min(path.mtu.probe_ceiling, outbound_datagram_size_ceiling_for_path(path_id));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+    // # An endpoint MUST NOT increase the PMTU based on ICMP messages; see
+    // # Item 6 in Section 3 of [DPLPMTUD].
     path.mtu.probe_ceiling = std::min(path.mtu.probe_ceiling, max_udp_payload_size);
     path.mtu.validated_datagram_size =
         std::min(path.mtu.validated_datagram_size, path.mtu.probe_ceiling);
@@ -655,6 +672,9 @@ void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_lo
     if (!validation_already_underway) {
         path.outstanding_challenge = next_path_challenge_data(path_id);
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    // # This timer SHOULD be set as described in Section 6.2.1 of
+    // # [QUIC-RECOVERY] and MUST NOT be more aggressive.
     path.validation_deadline = now + path_validation_timeout_period();
     current_send_path_id_ = path_id;
 }
@@ -1034,6 +1054,9 @@ void QuicConnection::issue_spare_connection_ids() {
         // # MUST NOT be issued more than once on the same connection.
         const auto connection_id =
             make_issued_connection_id(config_.source_connection_id, sequence_number);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+        // # The same stateless reset token MUST NOT be used for multiple
+        // # connection IDs.
         const auto stateless_reset_token = make_stateless_reset_token(
             connection_id, sequence_number, config_.stateless_reset_secret);
         local_connection_ids_[sequence_number] = LocalConnectionIdRecord{
@@ -1142,6 +1165,9 @@ ConnectionId QuicConnection::active_peer_destination_connection_id() const {
         // # or Retry packet.
         return peer_source_connection_id_.value();
     }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+    // # Until a packet is received from the server, the client MUST use the
+    // # same Destination Connection ID value on all packets in this connection.
     return config_.initial_destination_connection_id;
 }
 

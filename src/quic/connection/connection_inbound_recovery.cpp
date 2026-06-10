@@ -2181,6 +2181,10 @@ bool QuicConnection::process_single_path_simple_stream_ack_ecn(
     }
 
     if (delta_ce != 0) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3
+        // # QUIC implementations MUST properly handle both types, and, if
+        // # they have enabled ECN for packets they send, they SHOULD use the
+        // # information in the ECN section to manage their congestion state.
         latest_ecn_ce_sent_time = std::max(
             latest_ecn_ce_sent_time.value_or(latest_marked_sent_time), latest_marked_sent_time);
     }

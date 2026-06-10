@@ -586,6 +586,9 @@ TEST(QuicCoreTest, ClientUsesProtectedZeroRttPacketForEarlyApplicationSend) {
         EXPECT_EQ(stream->stream_data, coquic::quic::test::bytes_from_string("early-data"));
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # The applicable subset of transport parameters that permit the sending
+    // # of application data SHOULD be set to non-zero values for 0-RTT.
     EXPECT_TRUE(saw_stream);
 }
 
@@ -1593,6 +1596,11 @@ TEST(QuicCoreTest, AcceptedZeroRttAllowsNonRememberedAndOptionalParameterReducti
                                                                     SSL_EARLY_DATA_ACCEPTED, true);
 
     EXPECT_TRUE(connection.validate_peer_transport_parameters_if_ready().has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # A client MUST NOT use remembered values for the following parameters:
+    // # ack_delay_exponent, max_ack_delay, initial_source_connection_id,
+    // # original_destination_connection_id, preferred_address,
+    // # retry_source_connection_id, and stateless_reset_token.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
     // # The client MUST use the server's new values in the handshake instead;
     // # if the server does not provide new values, the default values are used.

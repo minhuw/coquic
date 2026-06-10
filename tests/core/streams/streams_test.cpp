@@ -567,11 +567,17 @@ TEST(QuicStreamsTest, LocalResetQueuesFinalSizeAndStopsRetransmittingStreamData)
         .bytes = bytes_from_string("hello"),
         .fin = false,
     });
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+    // # If any outstanding data is declared lost, the endpoint SHOULD send a
+    // # RESET_STREAM frame instead of retransmitting the data.
     EXPECT_FALSE(state.has_pending_send());
 
     state.mark_reset_frame_lost(reset_frame);
     EXPECT_TRUE(state.has_pending_send());
     const auto resent_reset = state.take_reset_frame();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+    // # If any outstanding data is declared lost, the endpoint SHOULD send a
+    // # RESET_STREAM frame instead of retransmitting the data.
     ASSERT_TRUE(resent_reset.has_value());
     if (!resent_reset.has_value()) {
         GTEST_FAIL() << "expected resent reset frame";

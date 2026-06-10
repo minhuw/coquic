@@ -233,6 +233,9 @@ StreamStateResult<bool> StreamState::validate_local_reset(std::uint64_t applicat
         //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
         // # The content of a RESET_STREAM frame MUST NOT change when it is
         // # sent again.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-3.5
+        // # If any outstanding data is declared lost, the endpoint SHOULD send
+        // # a RESET_STREAM frame instead of retransmitting the data.
         pending_reset_frame = ResetStreamFrame{
             .stream_id = stream_id,
             .application_protocol_error_code = application_error_code,

@@ -769,6 +769,9 @@ inline std::array<std::byte, 16> make_stateless_reset_token(
     std::span<const std::byte> connection_id, std::uint64_t sequence_number,
     const std::optional<QuicStatelessResetSecret> &configured_secret = std::nullopt) {
     std::array<std::byte, 16> token{};
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+    // # The same stateless reset token MUST NOT be used for multiple
+    // # connection IDs.
     const auto context = make_secret_derivation_context(
         connection_id, configured_secret.has_value() ? 0 : sequence_number);
     constexpr std::array label{
@@ -778,6 +781,8 @@ inline std::array<std::byte, 16> make_stateless_reset_token(
     const auto secret = configured_secret.has_value()
                             ? std::span<const std::byte>(*configured_secret)
                             : std::span<const std::byte>(quic_reset_token_secret());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+    // # The stateless reset token MUST be difficult to guess.
     if (const auto derived = prf_bytes<16>(secret, label, context)) {
         return *derived;
     }
@@ -843,6 +848,12 @@ make_path_challenge_data(std::span<const std::byte> local_connection_id, QuicPat
 }
 
 inline COQUIC_NO_PROFILE bool random_one_in_sixteen_from_openssl(std::uint8_t value) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+    // # Even when the spin bit is not disabled by the administrator,
+    // # endpoints MUST disable their use of the spin bit for a random
+    // # selection of at least one in every 16 network paths, or for one in
+    // # every 16 connection IDs, in order to ensure that QUIC connections that
+    // # disable the spin bit are commonly observed on the network.
     return (value & 0x0fu) == 0;
 }
 
@@ -1645,6 +1656,9 @@ template <typename FrameType> bool is_ack_eliciting_frame(const FrameType &frame
         true,  // CryptoFrame
         true,  // NewTokenFrame
         true,  // StreamFrame
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.21
+        // # Extension frames MUST be congestion controlled and MUST cause an ACK
+        // # frame to be sent.
         true,  // DatagramFrame
         true,  // MaxDataFrame
         true,  // MaxStreamDataFrame

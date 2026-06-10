@@ -2038,6 +2038,10 @@ TEST(QuicCoreTest, AntiAmplificationAccountingSaturatesBudgetAndCounters) {
               std::numeric_limits<std::uint64_t>::max());
 
     connection.anti_amplification_received_bytes_ = std::numeric_limits<std::uint64_t>::max() - 4u;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+    // # For the purposes of avoiding amplification prior to address
+    // # validation, servers MUST count all of the payload bytes received in
+    // # datagrams that are uniquely attributed to a single connection.
     connection.note_inbound_datagram_bytes(8);
     EXPECT_EQ(connection.anti_amplification_received_bytes_,
               std::numeric_limits<std::uint64_t>::max());

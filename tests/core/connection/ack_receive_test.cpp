@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "tests/support/core/connection_ack_test_support.h"
+#include "src/quic/connection/connection_internal.h"
 
 namespace {
 
@@ -93,11 +94,29 @@ TEST(QuicCoreTest, LatencySpinBitIsDisabledUnlessConfigured) {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
     // # When the spin bit is disabled, endpoints MAY set the spin bit to any
     // # value and MUST ignore any incoming value.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+    // # Implementations MUST allow administrators of clients and servers to
+    // # disable the spin bit either globally or on a per-connection basis.
     EXPECT_FALSE(connection.outbound_spin_bit_for_path(0));
 
     connection.update_spin_bit_on_receive(0, /*peer_spin_bit=*/false, /*packet_number=*/1);
     EXPECT_TRUE(path.spin.value);
     EXPECT_FALSE(path.spin.largest_peer_packet_number.has_value());
+}
+
+TEST(QuicCoreTest, LatencySpinBitRandomDisableSelectsOneInSixteen) {
+    std::size_t disabled_count = 0;
+    for (std::uint8_t value = 0; value < 64; ++value) {
+        disabled_count += coquic::quic::random_one_in_sixteen_from_openssl(value) ? 1u : 0u;
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+    // # Even when the spin bit is not disabled by the administrator, endpoints
+    // # MUST disable their use of the spin bit for a random selection of at
+    // # least one in every 16 network paths, or for one in every 16 connection
+    // # IDs, in order to ensure that QUIC connections that disable the spin bit
+    // # are commonly observed on the network.
+    EXPECT_EQ(disabled_count, 4u);
 }
 
 TEST(QuicCoreTest, LatencySpinBitFollowsPeerOnPrimaryPathWhenEnabled) {
@@ -1256,6 +1275,10 @@ TEST(QuicCoreTest, AckProcessingTreatsCeCounterGrowthAsSingleCongestionEvent) {
                                                 /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
                                                 /*suppress_pto_reset=*/false);
     ASSERT_TRUE(first.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3
+    // # QUIC implementations MUST properly handle both types, and, if they
+    // # have enabled ECN for packets they send, they SHOULD use the
+    // # information in the ECN section to manage their congestion state.
     auto first_reduction = connection.congestion_controller_.congestion_window();
 
     auto second = connection.process_inbound_ack(connection.application_space_,

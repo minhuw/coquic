@@ -334,6 +334,10 @@ TEST(QuicFrameTest, RoundTripsAckWithoutEcn) {
 
     const auto *ack = std::get_if<AckFrame>(&decoded.value().frame);
     ASSERT_NE(ack, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3
+    // # QUIC implementations MUST properly handle both types, and, if they
+    // # have enabled ECN for packets they send, they SHOULD use the
+    // # information in the ECN section to manage their congestion state.
     EXPECT_FALSE(ack->ecn_counts.has_value());
     EXPECT_EQ(ack->largest_acknowledged, 42u);
     ASSERT_EQ(ack->additional_ranges.size(), 1u);
@@ -361,6 +365,10 @@ TEST(QuicFrameTest, RoundTripsAckWithEcn) {
 
     const auto *ack = std::get_if<AckFrame>(&decoded.value().frame);
     ASSERT_NE(ack, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.3
+    // # QUIC implementations MUST properly handle both types, and, if they
+    // # have enabled ECN for packets they send, they SHOULD use the
+    // # information in the ECN section to manage their congestion state.
     if (!ack->ecn_counts.has_value()) {
         FAIL() << "expected ECN counts";
     }

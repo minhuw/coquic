@@ -315,6 +315,9 @@ TEST(QuicCoreTest, ApplicationSendAckOnlyFallbackCarriesCurrentPathValidationFra
     // # An endpoint MAY include other frames with the PATH_CHALLENGE and
     // # PATH_RESPONSE frames used for path validation.
     EXPECT_TRUE(saw_path_response);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.3
+    // # Servers SHOULD initiate path validation to the client's new address
+    // # upon receiving a probe packet from a different address; see Section 8.
     EXPECT_TRUE(saw_path_challenge);
 }
 
@@ -665,6 +668,63 @@ TEST(QuicCoreTest, PathChallengeQueuesMatchingPathResponseOnSamePath) {
                                     frame);
                             }),
               1);
+}
+
+TEST(QuicCoreTest, PathMtuUpdateBelowMinimumMarksPathNotViableAndBlocksSend) {
+    auto connection = make_connected_client_connection();
+    connection.last_validated_path_id_ = 7;
+    connection.current_send_path_id_ = 7;
+    auto &path = connection.ensure_path_state(7);
+    path.validated = true;
+    path.is_current_send_path = true;
+    path.mtu.viable = true;
+    path.mtu.enabled = true;
+    path.mtu.validated_datagram_size = 1200;
+    path.mtu.probe_ceiling = 1452;
+
+    connection.apply_path_mtu_update(7, 1199);
+
+    EXPECT_FALSE(path.mtu.viable);
+    EXPECT_FALSE(path.mtu.enabled);
+    EXPECT_EQ(path.mtu.probe_ceiling, 1199u);
+    EXPECT_FALSE(path.mtu.outstanding_probe_packet_number.has_value());
+    EXPECT_EQ(connection.outbound_datagram_size_limit(), 0u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+    // # If a QUIC endpoint determines that the PMTU between any pair of local
+    // # and remote IP addresses cannot support the smallest allowed maximum
+    // # datagram size of 1200 bytes, it MUST immediately cease sending QUIC
+    // # packets, except for those in PMTU probes or those containing
+    // # CONNECTION_CLOSE frames, on the affected path.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14
+    // # QUIC MUST NOT be used if the network path cannot support a
+    // # maximum datagram size of at least 1200 bytes.
+    EXPECT_FALSE(connection.has_pending_application_send());
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
+}
+
+TEST(QuicCoreTest, PathMtuUpdateDoesNotIncreaseValidatedDatagramSizeFromIcmp) {
+    auto connection = make_connected_client_connection();
+    connection.last_validated_path_id_ = 7;
+    connection.current_send_path_id_ = 7;
+    auto &path = connection.ensure_path_state(7);
+    path.validated = true;
+    path.is_current_send_path = true;
+    path.mtu.viable = true;
+    path.mtu.enabled = true;
+    path.mtu.base_datagram_size = 1200;
+    path.mtu.validated_datagram_size = 1200;
+    path.mtu.probe_ceiling = 1452;
+    path.mtu.search_low = 1200;
+
+    connection.apply_path_mtu_update(7, 1400);
+
+    EXPECT_TRUE(path.mtu.viable);
+    EXPECT_EQ(path.mtu.probe_ceiling, 1200u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+    // # An endpoint MUST NOT increase the PMTU based on ICMP messages; see
+    // # Item 6 in Section 3 of [DPLPMTUD].
+    EXPECT_EQ(path.mtu.validated_datagram_size, 1200u);
+    EXPECT_EQ(connection.outbound_datagram_size_limit(), 1200u);
 }
 
 TEST(QuicCoreTest, FirstServerResponseToProbingPacketOnNewPathAlsoIncludesPathChallenge) {
@@ -1357,6 +1417,11 @@ TEST(QuicCoreTest, PathValidationStartArmsDeadline) {
 
     ASSERT_TRUE(connection.paths_.contains(7));
     auto validation_deadline = connection.paths_.at(7).validation_deadline;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
+    // # This timer SHOULD be set as described in Section 6.2.1 of
+    // # [QUIC-RECOVERY] and MUST NOT be more aggressive.
+    EXPECT_EQ(optional_value_or_terminate(validation_deadline),
+              now + connection.path_validation_timeout_period());
     EXPECT_GT(optional_value_or_terminate(validation_deadline), now);
     EXPECT_FALSE(connection.path_validation_timed_out(7, coquic::quic::test::test_time(99)));
 }

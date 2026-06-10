@@ -746,6 +746,9 @@ TEST(QuicCoreTest, DatagramSendReportsPeerSupportAndSizeLocalErrors) {
         },
         coquic::quic::test::test_time(1));
     ASSERT_TRUE(unsupported.local_error.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.21
+    // # An extension to QUIC that wishes to use a new type of frame MUST first
+    // # ensure that a peer is able to understand the frame.
     EXPECT_EQ(optional_ref_or_terminate(unsupported.local_error).code,
               coquic::quic::QuicCoreLocalErrorCode::datagram_not_supported);
     EXPECT_FALSE(optional_ref_or_terminate(unsupported.local_error).stream_id.has_value());
@@ -1530,6 +1533,15 @@ TEST(QuicCoreTest, LostDatagramFrameIsNotRetransmitted) {
     auto sent_packet = first_tracked_packet(connection.application_space_);
     if (!sent_packet.ack_eliciting) {
         ADD_FAILURE() << "DATAGRAM packet was not ack eliciting";
+    }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.21
+    // # Extension frames MUST be congestion controlled and MUST cause an ACK
+    // # frame to be sent.
+    if (!sent_packet.in_flight) {
+        ADD_FAILURE() << "DATAGRAM packet was not congestion controlled";
+    }
+    if (sent_packet.bytes_in_flight == 0) {
+        ADD_FAILURE() << "DATAGRAM packet did not contribute bytes in flight";
     }
     if (sent_packet_has_stream_frames_for_tests(sent_packet)) {
         ADD_FAILURE() << "DATAGRAM packet unexpectedly carried stream frames";

@@ -163,8 +163,16 @@ struct StreamFlowControlState {
 struct StreamOpenLimits {
     std::uint64_t peer_max_bidirectional = 0;
     std::uint64_t peer_max_unidirectional = 0;
+    std::optional<StreamsBlockedFrame> pending_streams_blocked_bidi_frame;
+    StreamControlFrameState streams_blocked_bidi_state = StreamControlFrameState::none;
+    std::optional<StreamsBlockedFrame> pending_streams_blocked_uni_frame;
+    StreamControlFrameState streams_blocked_uni_state = StreamControlFrameState::none;
 
     bool can_open_local_stream(std::uint64_t stream_id, EndpointRole local_role) const;
+    void queue_streams_blocked(StreamLimitType stream_type);
+    std::vector<StreamsBlockedFrame> take_streams_blocked_frames();
+    void acknowledge_streams_blocked_frame(const StreamsBlockedFrame &frame);
+    void mark_streams_blocked_frame_lost(const StreamsBlockedFrame &frame);
     void note_peer_max_streams(StreamLimitType stream_type, std::uint64_t maximum_streams);
 };
 

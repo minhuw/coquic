@@ -3875,8 +3875,8 @@ inline std::size_t retransmittable_probe_frame_count(const SentPacketRecord &pac
            packet.reset_stream_frames.size() + packet.stop_sending_frames.size() +
            packet.new_connection_id_frames.size() + packet.retire_connection_id_frames.size() +
            packet.max_stream_data_frames.size() + packet.max_streams_frames.size() +
-           packet.stream_data_blocked_frames.size() + packet_stream_frame_count(packet) +
-           static_cast<std::size_t>(packet.has_handshake_done) +
+           packet.streams_blocked_frames.size() + packet.stream_data_blocked_frames.size() +
+           packet_stream_frame_count(packet) + static_cast<std::size_t>(packet.has_handshake_done) +
            static_cast<std::size_t>(packet.max_data_frame.has_value()) +
            static_cast<std::size_t>(packet.data_blocked_frame.has_value());
 }
@@ -3886,10 +3886,10 @@ inline bool packet_has_only_stream_frame_metadata(const SentPacketRecord &packet
            packet.reset_stream_frames.empty() && packet.stop_sending_frames.empty() &&
            packet.new_connection_id_frames.empty() && packet.retire_connection_id_frames.empty() &&
            packet.max_stream_data_frames.empty() && packet.max_streams_frames.empty() &&
-           packet.stream_data_blocked_frames.empty() && packet.max_data_frame == std::nullopt &&
-           packet.data_blocked_frame == std::nullopt && !packet.has_handshake_done &&
-           !packet.is_pmtu_probe && !packet.has_ping && !packet.force_ack &&
-           !packet.largest_received_packet_number_acked.has_value() &&
+           packet.streams_blocked_frames.empty() && packet.stream_data_blocked_frames.empty() &&
+           packet.max_data_frame == std::nullopt && packet.data_blocked_frame == std::nullopt &&
+           !packet.has_handshake_done && !packet.is_pmtu_probe && !packet.has_ping &&
+           !packet.force_ack && !packet.largest_received_packet_number_acked.has_value() &&
            packet.qlog_packet_snapshot == nullptr && !packet.qlog_pto_probe &&
            packet.stream_fragments.empty() && sent_packet_has_stream_frames(packet);
 }
@@ -3972,6 +3972,7 @@ inline std::size_t application_ack_eliciting_frame_count(
     bool has_path_response_frame, bool has_path_challenge_frame,
     std::span<const MaxStreamDataFrame> max_stream_data_frames,
     std::span<const MaxStreamsFrame> max_streams_frames,
+    std::span<const StreamsBlockedFrame> streams_blocked_frames,
     std::span<const ResetStreamFrame> reset_stream_frames,
     std::span<const StopSendingFrame> stop_sending_frames,
     const std::optional<DataBlockedFrame> &data_blocked_frame,
@@ -3980,9 +3981,9 @@ inline std::size_t application_ack_eliciting_frame_count(
     std::span<const StreamFrameSendFragment> stream_fragments) {
     return new_token_frames.size() + new_connection_id_frames.size() +
            retire_connection_id_frames.size() + max_stream_data_frames.size() +
-           max_streams_frames.size() + reset_stream_frames.size() + stop_sending_frames.size() +
-           stream_data_blocked_frames.size() + stream_fragments.size() +
-           static_cast<std::size_t>(include_handshake_done) +
+           max_streams_frames.size() + streams_blocked_frames.size() + reset_stream_frames.size() +
+           stop_sending_frames.size() + stream_data_blocked_frames.size() +
+           stream_fragments.size() + static_cast<std::size_t>(include_handshake_done) +
            static_cast<std::size_t>(has_path_response_frame) +
            static_cast<std::size_t>(has_path_challenge_frame) +
            static_cast<std::size_t>(max_data_frame.has_value()) +

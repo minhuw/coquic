@@ -698,6 +698,22 @@ SentPacketRecord QuicConnection::select_pto_probe(const PacketSpaceState &packet
                 std::tie(frame.stream_type, frame.maximum_streams);
             return static_cast<bool>(frame_acknowledged | frame_mismatch);
         });
+        std::erase_if(probe.streams_blocked_frames, [&](const StreamsBlockedFrame &frame) {
+            const bool frame_acknowledged = frame.stream_type == StreamLimitType::bidirectional
+                                                ? stream_open_limits_.streams_blocked_bidi_state ==
+                                                      StreamControlFrameState::acknowledged
+                                                : stream_open_limits_.streams_blocked_uni_state ==
+                                                      StreamControlFrameState::acknowledged;
+            const auto *pending_frame =
+                frame.stream_type == StreamLimitType::bidirectional
+                    ? &stream_open_limits_.pending_streams_blocked_bidi_frame
+                    : &stream_open_limits_.pending_streams_blocked_uni_frame;
+            const bool frame_mismatch =
+                !pending_frame->has_value() ||
+                std::tie((*pending_frame)->stream_type, (*pending_frame)->maximum_streams) !=
+                    std::tie(frame.stream_type, frame.maximum_streams);
+            return static_cast<bool>(frame_acknowledged | frame_mismatch);
+        });
         std::erase_if(probe.stream_data_blocked_frames, [&](const StreamDataBlockedFrame &frame) {
             const auto stream = streams_.find(frame.stream_id);
             if (stream == streams_.end()) {

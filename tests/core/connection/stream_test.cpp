@@ -2482,6 +2482,126 @@ TEST(QuicCoreTest, QueueStreamSendRejectsInvalidIdsAndClosedSendSide) {
     EXPECT_EQ(closed.error().code, coquic::quic::StreamStateErrorCode::send_side_closed);
 }
 
+TEST(QuicCoreTest, PeerStreamOpenLimitsTrackStreamsBlockedAcrossQueueLossAndAck) {
+    coquic::quic::StreamOpenLimits limits;
+    limits.peer_max_bidirectional = 2;
+    limits.peer_max_unidirectional = 3;
+
+    limits.queue_streams_blocked(coquic::quic::StreamLimitType::bidirectional);
+    ASSERT_TRUE(limits.pending_streams_blocked_bidi_frame.has_value());
+    EXPECT_EQ(limits.streams_blocked_bidi_state, coquic::quic::StreamControlFrameState::pending);
+
+    auto first_frames = limits.take_streams_blocked_frames();
+    ASSERT_EQ(first_frames.size(), 1u);
+    EXPECT_EQ(first_frames.front().stream_type, coquic::quic::StreamLimitType::bidirectional);
+    EXPECT_EQ(first_frames.front().maximum_streams, 2u);
+    EXPECT_EQ(limits.streams_blocked_bidi_state, coquic::quic::StreamControlFrameState::sent);
+
+    limits.mark_streams_blocked_frame_lost(first_frames.front());
+    EXPECT_EQ(limits.streams_blocked_bidi_state, coquic::quic::StreamControlFrameState::pending);
+
+    auto retry_frames = limits.take_streams_blocked_frames();
+    ASSERT_EQ(retry_frames.size(), 1u);
+    limits.acknowledge_streams_blocked_frame(retry_frames.front());
+    EXPECT_EQ(limits.streams_blocked_bidi_state,
+              coquic::quic::StreamControlFrameState::acknowledged);
+
+    limits.queue_streams_blocked(coquic::quic::StreamLimitType::bidirectional);
+    ASSERT_TRUE(limits.pending_streams_blocked_bidi_frame.has_value());
+    limits.note_peer_max_streams(coquic::quic::StreamLimitType::bidirectional, 4);
+    EXPECT_EQ(limits.streams_blocked_bidi_state, coquic::quic::StreamControlFrameState::none);
+    EXPECT_FALSE(limits.pending_streams_blocked_bidi_frame.has_value());
+
+    limits.queue_streams_blocked(coquic::quic::StreamLimitType::unidirectional);
+    auto uni_frames = limits.take_streams_blocked_frames();
+    ASSERT_EQ(uni_frames.size(), 1u);
+    EXPECT_EQ(uni_frames.front().stream_type, coquic::quic::StreamLimitType::unidirectional);
+    EXPECT_EQ(uni_frames.front().maximum_streams, 3u);
+}
+
+TEST(QuicCoreTest, LocalOpenBlockedByPeerLimitSendsStreamsBlockedFrame) {
+    auto connection = make_connected_client_connection();
+    auto payload = bytes_from_ints({0x61});
+    connection.stream_open_limits_.peer_max_bidirectional = 1;
+
+    auto blocked = connection.queue_stream_send(/*stream_id=*/4, payload, false);
+
+    ASSERT_FALSE(blocked.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # An endpoint that is unable to open a new stream due to the peer's
+    // # limits SHOULD send a STREAMS_BLOCKED frame (Section 19.14).
+    EXPECT_EQ(blocked.error().code, coquic::quic::StreamStateErrorCode::invalid_stream_id);
+
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(application, nullptr);
+
+    const coquic::quic::StreamsBlockedFrame *blocked_frame = nullptr;
+    bool saw_stream = false;
+    for (const auto &frame : application->frames) {
+        if (const auto *candidate = std::get_if<coquic::quic::StreamsBlockedFrame>(&frame)) {
+            blocked_frame = candidate;
+        }
+        saw_stream = saw_stream || std::holds_alternative<coquic::quic::StreamFrame>(frame);
+    }
+
+    ASSERT_NE(blocked_frame, nullptr);
+    EXPECT_EQ(blocked_frame->stream_type, coquic::quic::StreamLimitType::bidirectional);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.14
+    // # A sender SHOULD send a STREAMS_BLOCKED frame (type=0x16 or 0x17) when
+    // # it wishes to open a stream but is unable to do so due to the maximum
+    // # stream limit set by its peer; see Section 19.11.
+    EXPECT_EQ(blocked_frame->maximum_streams, 1u);
+    EXPECT_FALSE(saw_stream);
+
+    ASSERT_EQ(tracked_packet_count(connection.application_space_), 1u);
+    const auto sent = first_tracked_packet(connection.application_space_);
+    ASSERT_EQ(sent.streams_blocked_frames.size(), 1u);
+    EXPECT_EQ(connection.stream_open_limits_.streams_blocked_bidi_state,
+              coquic::quic::StreamControlFrameState::sent);
+
+    connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(
+            connection.application_space_.recovery.handle_for_packet_number(sent.packet_number)));
+    EXPECT_EQ(connection.stream_open_limits_.streams_blocked_bidi_state,
+              coquic::quic::StreamControlFrameState::pending);
+}
+
+TEST(QuicCoreTest, LocalOpenBlockedByPeerUnidirectionalLimitSendsStreamsBlockedFrame) {
+    auto connection = make_connected_client_connection();
+    connection.stream_open_limits_.peer_max_unidirectional = 0;
+    auto blocked = connection.queue_stream_send(/*stream_id=*/2, bytes_from_ints({0x61}), false);
+
+    ASSERT_FALSE(blocked.has_value());
+    ASSERT_EQ(blocked.error().code, coquic::quic::StreamStateErrorCode::invalid_stream_id);
+    ASSERT_EQ(connection.stream_open_limits_.streams_blocked_uni_state,
+              coquic::quic::StreamControlFrameState::pending);
+
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(application, nullptr);
+
+    const coquic::quic::StreamsBlockedFrame *blocked_frame = nullptr;
+    for (const auto &frame : application->frames) {
+        if (const auto *candidate = std::get_if<coquic::quic::StreamsBlockedFrame>(&frame)) {
+            blocked_frame = candidate;
+        }
+    }
+
+    ASSERT_NE(blocked_frame, nullptr);
+    EXPECT_EQ(blocked_frame->stream_type, coquic::quic::StreamLimitType::unidirectional);
+    EXPECT_EQ(blocked_frame->maximum_streams, 0u);
+}
+
 TEST(QuicCoreTest, QueueStreamSendReturnsSuccessWithoutOpeningStreamWhenConnectionAlreadyFailed) {
     auto connection = make_connected_client_connection();
     connection.status_ = coquic::quic::HandshakeStatus::failed;

@@ -2370,6 +2370,9 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
     for (const auto &frame : packet.max_streams_frames) {
         local_stream_limit_state_.acknowledge_max_streams_frame(frame);
     }
+    for (const auto &frame : packet.streams_blocked_frames) {
+        stream_open_limits_.acknowledge_streams_blocked_frame(frame);
+    }
     if (!packet.new_connection_id_frames.empty()) {
         std::erase_if(pending_new_connection_id_frames_, [&](const NewConnectionIdFrame &pending) {
             return std::ranges::any_of(
@@ -2419,6 +2422,7 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
         packet.max_data_frame.reset();
         packet.max_stream_data_frames.clear();
         packet.max_streams_frames.clear();
+        packet.streams_blocked_frames.clear();
         packet.data_blocked_frame.reset();
         packet.stream_data_blocked_frames.clear();
         packet.first_stream_frame_metadata.reset();
@@ -2560,6 +2564,9 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
     }
     for (const auto &frame : packet.max_streams_frames) {
         local_stream_limit_state_.mark_max_streams_frame_lost(frame);
+    }
+    for (const auto &frame : packet.streams_blocked_frames) {
+        stream_open_limits_.mark_streams_blocked_frame_lost(frame);
     }
     const bool lost_handshake_done =
         packet.has_handshake_done &

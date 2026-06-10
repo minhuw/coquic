@@ -788,6 +788,7 @@ void PacketSpaceRecovery::reclaim_retired_packet_storage(SentPacketRecord &packe
     packet.max_data_frame.reset();
     std::vector<MaxStreamDataFrame>().swap(packet.max_stream_data_frames);
     std::vector<MaxStreamsFrame>().swap(packet.max_streams_frames);
+    std::vector<StreamsBlockedFrame>().swap(packet.streams_blocked_frames);
     packet.data_blocked_frame.reset();
     std::vector<StreamDataBlockedFrame>().swap(packet.stream_data_blocked_frames);
     packet.first_stream_frame_metadata.reset();

@@ -1987,6 +1987,17 @@ StreamStateResult<StreamState *> QuicConnection::get_or_open_local_stream(std::u
         return StreamStateResult<StreamState *>::failure(code, stream_id);
     }
     if (!stream_open_limits_.can_open_local_stream(stream_id, config_.role)) {
+        const auto id_info = classify_stream_id(stream_id, config_.role);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+        // # An endpoint that is unable to open a new stream due to the peer's
+        // # limits SHOULD send a STREAMS_BLOCKED frame (Section 19.14).
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-19.14
+        // # A sender SHOULD send a STREAMS_BLOCKED frame (type=0x16 or 0x17)
+        // # when it wishes to open a stream but is unable to do so due to the
+        // # maximum stream limit set by its peer; see Section 19.11.
+        stream_open_limits_.queue_streams_blocked(
+            id_info.direction == StreamDirection::bidirectional ? StreamLimitType::bidirectional
+                                                                : StreamLimitType::unidirectional);
         return StreamStateResult<StreamState *>::failure(StreamStateErrorCode::invalid_stream_id,
                                                          stream_id);
     }
@@ -2213,6 +2224,10 @@ bool QuicConnection::has_pending_application_send() const {
         local_stream_limit_state_.max_streams_uni_state == StreamControlFrameState::pending) {
         return true;
     }
+    if (stream_open_limits_.streams_blocked_bidi_state == StreamControlFrameState::pending ||
+        stream_open_limits_.streams_blocked_uni_state == StreamControlFrameState::pending) {
+        return true;
+    }
 
     if (!pending_datagram_send_queue_.empty()) {
         return true;
@@ -2291,7 +2306,9 @@ bool QuicConnection::has_pending_application_control_send(bool application_ack_d
         (connection_flow_control_.max_data_state == StreamControlFrameState::pending) ||
         (connection_flow_control_.data_blocked_state == StreamControlFrameState::pending) ||
         (local_stream_limit_state_.max_streams_bidi_state == StreamControlFrameState::pending) ||
-        (local_stream_limit_state_.max_streams_uni_state == StreamControlFrameState::pending)) {
+        (local_stream_limit_state_.max_streams_uni_state == StreamControlFrameState::pending) ||
+        (stream_open_limits_.streams_blocked_bidi_state == StreamControlFrameState::pending) ||
+        (stream_open_limits_.streams_blocked_uni_state == StreamControlFrameState::pending)) {
         return true;
     }
 

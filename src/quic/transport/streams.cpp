@@ -58,6 +58,36 @@ bool stream_data_blocked_frame_matches(const std::optional<StreamDataBlockedFram
            std::tie(frame.stream_id, frame.maximum_stream_data);
 }
 
+bool streams_blocked_frame_matches(const std::optional<StreamsBlockedFrame> &candidate,
+                                   const StreamsBlockedFrame &frame) {
+    if (!candidate.has_value()) {
+        return false;
+    }
+
+    return std::tie(candidate->stream_type, candidate->maximum_streams) ==
+           std::tie(frame.stream_type, frame.maximum_streams);
+}
+
+StreamControlFrameState *streams_blocked_state_for(StreamOpenLimits &limits,
+                                                   StreamLimitType stream_type) {
+    return stream_type == StreamLimitType::bidirectional ? &limits.streams_blocked_bidi_state
+                                                         : &limits.streams_blocked_uni_state;
+}
+
+std::optional<StreamsBlockedFrame> *pending_streams_blocked_frame_for(StreamOpenLimits &limits,
+                                                                      StreamLimitType stream_type) {
+    return stream_type == StreamLimitType::bidirectional
+               ? &limits.pending_streams_blocked_bidi_frame
+               : &limits.pending_streams_blocked_uni_frame;
+}
+
+const std::optional<StreamsBlockedFrame> *
+pending_streams_blocked_frame_for(const StreamOpenLimits &limits, StreamLimitType stream_type) {
+    return stream_type == StreamLimitType::bidirectional
+               ? &limits.pending_streams_blocked_bidi_frame
+               : &limits.pending_streams_blocked_uni_frame;
+}
+
 } // namespace
 
 bool StreamFrameSendFragment::has_cached_stream_frame_header() const {
@@ -184,6 +214,67 @@ bool StreamOpenLimits::can_open_local_stream(std::uint64_t stream_id,
     return stream_index < peer_max_unidirectional;
 }
 
+void StreamOpenLimits::queue_streams_blocked(StreamLimitType stream_type) {
+    const auto maximum_streams = stream_type == StreamLimitType::bidirectional
+                                     ? peer_max_bidirectional
+                                     : peer_max_unidirectional;
+    auto *pending_frame = pending_streams_blocked_frame_for(*this, stream_type);
+    auto *state = streams_blocked_state_for(*this, stream_type);
+    if (pending_frame->has_value() && (*pending_frame)->maximum_streams == maximum_streams &&
+        *state != StreamControlFrameState::none) {
+        return;
+    }
+
+    *pending_frame = StreamsBlockedFrame{
+        .stream_type = stream_type,
+        .maximum_streams = maximum_streams,
+    };
+    *state = StreamControlFrameState::pending;
+}
+
+std::vector<StreamsBlockedFrame> StreamOpenLimits::take_streams_blocked_frames() {
+    std::vector<StreamsBlockedFrame> frames;
+    if (streams_blocked_bidi_state == StreamControlFrameState::pending &&
+        pending_streams_blocked_bidi_frame.has_value()) {
+        streams_blocked_bidi_state = StreamControlFrameState::sent;
+        frames.push_back(*pending_streams_blocked_bidi_frame);
+    }
+    if (streams_blocked_uni_state == StreamControlFrameState::pending &&
+        pending_streams_blocked_uni_frame.has_value()) {
+        streams_blocked_uni_state = StreamControlFrameState::sent;
+        frames.push_back(*pending_streams_blocked_uni_frame);
+    }
+
+    return frames;
+}
+
+void StreamOpenLimits::acknowledge_streams_blocked_frame(const StreamsBlockedFrame &frame) {
+    auto *state = streams_blocked_state_for(*this, frame.stream_type);
+    if (*state == StreamControlFrameState::none) {
+        return;
+    }
+    const auto *pending_frame = pending_streams_blocked_frame_for(*this, frame.stream_type);
+    if (!streams_blocked_frame_matches(*pending_frame, frame)) {
+        return;
+    }
+
+    *state = StreamControlFrameState::acknowledged;
+}
+
+void StreamOpenLimits::mark_streams_blocked_frame_lost(const StreamsBlockedFrame &frame) {
+    auto *state = streams_blocked_state_for(*this, frame.stream_type);
+    if (*state == StreamControlFrameState::none ||
+        *state == StreamControlFrameState::acknowledged) {
+        return;
+    }
+    const auto *pending_frame = pending_streams_blocked_frame_for(*this, frame.stream_type);
+    if (!streams_blocked_frame_matches(*pending_frame, frame)) {
+        return;
+    }
+
+    *state = StreamControlFrameState::pending;
+}
+
 void StreamOpenLimits::note_peer_max_streams(StreamLimitType stream_type,
                                              std::uint64_t maximum_streams) {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
@@ -192,12 +283,23 @@ void StreamOpenLimits::note_peer_max_streams(StreamLimitType stream_type,
     //= https://www.rfc-editor.org/rfc/rfc9000#section-19.11
     // # MAX_STREAMS frames that do not increase the stream limit MUST be
     // # ignored.
-    if (stream_type == StreamLimitType::bidirectional) {
-        peer_max_bidirectional = std::max(peer_max_bidirectional, maximum_streams);
+    auto *current_limit = &peer_max_bidirectional;
+    if (stream_type == StreamLimitType::unidirectional) {
+        current_limit = &peer_max_unidirectional;
+    }
+
+    if (maximum_streams <= *current_limit) {
         return;
     }
 
-    peer_max_unidirectional = std::max(peer_max_unidirectional, maximum_streams);
+    *current_limit = maximum_streams;
+    const auto *pending_frame = pending_streams_blocked_frame_for(*this, stream_type);
+    if (!pending_frame->has_value() || (*pending_frame)->maximum_streams >= maximum_streams) {
+        return;
+    }
+
+    *pending_streams_blocked_frame_for(*this, stream_type) = std::nullopt;
+    *streams_blocked_state_for(*this, stream_type) = StreamControlFrameState::none;
 }
 
 StreamStateResult<bool> StreamState::validate_local_send(bool fin) {

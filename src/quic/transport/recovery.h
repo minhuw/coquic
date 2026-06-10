@@ -61,6 +61,7 @@ struct SentPacketRecord { // NOLINT(clang-analyzer-optin.performance.Padding)
     std::optional<MaxDataFrame> max_data_frame;
     std::vector<MaxStreamDataFrame> max_stream_data_frames;
     std::vector<MaxStreamsFrame> max_streams_frames;
+    std::vector<StreamsBlockedFrame> streams_blocked_frames;
     std::optional<DataBlockedFrame> data_blocked_frame;
     std::vector<StreamDataBlockedFrame> stream_data_blocked_frames;
     std::optional<StreamFrameSendMetadata> first_stream_frame_metadata;

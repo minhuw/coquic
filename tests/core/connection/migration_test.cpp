@@ -86,6 +86,10 @@ TEST(QuicCoreTest, ConnectedServerQueuesSpareConnectionIdsForMigration) {
 
     EXPECT_TRUE(
         std::any_of(application->frames.begin(), application->frames.end(), [](const auto &frame) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+            // # To ensure that migration is possible and packets sent on
+            // # different paths cannot be correlated, endpoints SHOULD provide
+            // # new connection IDs before peers migrate; see Section 5.1.1.
             return std::holds_alternative<coquic::quic::NewConnectionIdFrame>(frame);
         }));
 }
@@ -711,6 +715,33 @@ TEST(QuicCoreTest, LocalMigrationWithoutUnusedPeerConnectionIdIsRejected) {
     EXPECT_EQ(connection.current_send_path_id_, 3u);
 }
 
+TEST(QuicCoreTest, LocalMigrationWithZeroLengthPeerConnectionIdIsRejected) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+    connection.peer_connection_ids_.clear();
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = {},
+    };
+    connection.active_peer_connection_id_sequence_ = 0;
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::active);
+
+    ASSERT_FALSE(requested.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    // # An endpoint SHOULD NOT initiate migration with a peer that has
+    // # requested a zero-length connection ID, because traffic over the new
+    // # path might be trivially linkable to traffic over the old one.
+    EXPECT_FALSE(connection.paths_.contains(7));
+    EXPECT_EQ(connection.current_send_path_id_, 3u);
+}
+
 TEST(QuicCoreTest, ValidatedLocalMigrationRetiresPreviousPathPeerConnectionId) {
     auto connection = make_connected_client_connection();
     connection.paths_.clear();
@@ -1278,6 +1309,53 @@ TEST(QuicCoreTest, PreferredAddressMigrationSendsOnlyProbingFramesUntilValidated
     // # ID and discontinue use of the old server address.
     EXPECT_EQ(connection.last_drained_path_id(), 7u);
     EXPECT_TRUE(datagram_has_application_stream(connection, stream_datagram));
+}
+
+TEST(QuicCoreTest, PreferredAddressValidationFailureContinuesOnOriginalPath) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+    auto &peer_parameters = optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_parameters.active_connection_id_limit = 8;
+    peer_parameters.preferred_address = coquic::quic::PreferredAddress{
+        .ipv4_address = {std::byte{127}, std::byte{0}, std::byte{0}, std::byte{2}},
+        .ipv4_port = 4444,
+        .connection_id = bytes_from_ints({0x41, 0x42}),
+    };
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa, 0xab}),
+    };
+    connection.active_peer_connection_id_sequence_ = 0;
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::preferred_address,
+        coquic::quic::test::test_time(1));
+    ASSERT_TRUE(requested.has_value());
+    ASSERT_TRUE(connection.paths_.contains(7));
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+
+    connection.paths_.at(7).validation_deadline = coquic::quic::test::test_time(2);
+    connection.on_timeout(coquic::quic::test::test_time(3));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+    // # If path validation fails, the client MUST continue sending all future
+    // # packets to the server's original IP address.
+    EXPECT_EQ(connection.current_send_path_id_, 3u);
+    EXPECT_TRUE(connection.paths_.at(3).is_current_send_path);
+    EXPECT_FALSE(connection.paths_.at(7).is_current_send_path);
+
+    ASSERT_TRUE(connection
+                    .queue_stream_send(
+                        0, coquic::quic::test::bytes_from_string("after-preferred-fail"), false)
+                    .has_value());
+    auto stream_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(4));
+    ASSERT_FALSE(stream_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 3u);
 }
 
 TEST(QuicCoreTest, PreferredAddressMigrationDefersOldCidRetirementUntilAfterPathResponse) {

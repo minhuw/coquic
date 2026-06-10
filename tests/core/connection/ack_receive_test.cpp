@@ -97,6 +97,9 @@ TEST(QuicCoreTest, LatencySpinBitIsDisabledUnlessConfigured) {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
     // # Implementations MUST allow administrators of clients and servers to
     // # disable the spin bit either globally or on a per-connection basis.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+    // # An endpoint that does not support this feature MUST disable it, as
+    // # defined below.
     EXPECT_FALSE(connection.outbound_spin_bit_for_path(0));
 
     connection.update_spin_bit_on_receive(0, /*peer_spin_bit=*/false, /*packet_number=*/1);

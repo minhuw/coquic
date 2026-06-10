@@ -1193,6 +1193,12 @@ void QuicConnection::start_client_if_needed(QuicCoreTimePoint now) {
                 // # A client that attempts to send 0-RTT data MUST remember
                 // # all other transport parameters used by the server that it
                 // # is able to process.
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+                // # When sending frames in 0-RTT packets, a client MUST only
+                // # use remembered transport parameters; importantly, it MUST
+                // # NOT use updated values that it learns from the server's
+                // # updated transport parameters or from frames received in
+                // # 1-RTT packets.
                 peer_transport_parameters_ = decoded_resumption_state_->peer_transport_parameters;
                 note_endpoint_route_state_changed();
                 initialize_peer_flow_control_from_transport_parameters();

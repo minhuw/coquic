@@ -1597,6 +1597,11 @@ TEST(QuicCoreTest, AcceptedZeroRttAllowsNonRememberedAndOptionalParameterReducti
 
     EXPECT_TRUE(connection.validate_peer_transport_parameters_if_ready().has_value());
     //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # When sending frames in 0-RTT packets, a client MUST only use remembered
+    // # transport parameters; importantly, it MUST NOT use updated values that
+    // # it learns from the server's updated transport parameters or from frames
+    // # received in 1-RTT packets.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
     // # A client MUST NOT use remembered values for the following parameters:
     // # ack_delay_exponent, max_ack_delay, initial_source_connection_id,
     // # original_destination_connection_id, preferred_address,

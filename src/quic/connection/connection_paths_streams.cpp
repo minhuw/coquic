@@ -364,6 +364,11 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
 
     if (config_.role == EndpointRole::client && decoded_resumption_state_.has_value() &&
         peer_transport_parameters_.has_value() && !tls_->handshake_complete()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+        // # When sending frames in 0-RTT packets, a client MUST only use
+        // # remembered transport parameters; importantly, it MUST NOT use
+        // # updated values that it learns from the server's updated transport
+        // # parameters or from frames received in 1-RTT packets.
         return CodecResult<bool>::success(true);
     }
 
@@ -1053,6 +1058,10 @@ void QuicConnection::issue_spare_connection_ids() {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
     // # An endpoint SHOULD ensure that its peer has a sufficient number of
     // # available and unused connection IDs.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    // # To ensure that migration is possible and packets sent on different
+    // # paths cannot be correlated, endpoints SHOULD provide new connection
+    // # IDs before peers migrate; see Section 5.1.1.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
     // # An endpoint MUST NOT provide more connection IDs than the peer's limit.
     while (count_active_connection_ids(local_connection_ids_) < peer_limit) {
@@ -2734,6 +2743,10 @@ bool QuicConnection::can_initiate_path_validation(QuicPathId path_id) const {
     // # connection IDs SHOULD ensure that the pool of connection IDs available
     // # to its peer allows the peer to use a new connection ID on migration,
     // # as the peer will be unable to respond if the pool is exhausted.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    // # An endpoint SHOULD NOT initiate migration with a peer that has
+    // # requested a zero-length connection ID, because traffic over the new
+    // # path might be trivially linkable to traffic over the old one.
     return select_peer_connection_id_sequence_for_path(path_id).has_value();
 }
 

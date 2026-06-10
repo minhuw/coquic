@@ -11,6 +11,9 @@ QuicConnection::QuicConnection(QuicCoreConfig config)
       // # selection of at least one in every 16 network paths, or for one in
       // # every 16 connection IDs, in order to ensure that QUIC connections
       // # that disable the spin bit are commonly observed on the network.
+      //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+      // # An endpoint that does not support this feature MUST disable it, as
+      // # defined below.
       latency_spin_bit_disabled_(config_.transport.enable_latency_spin_bit ? random_one_in_sixteen()
                                                                            : true),
       original_version_(config_.original_version), current_version_(config_.initial_version),
@@ -1196,6 +1199,9 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
         // # To protect the connection from failing due to such a spurious
         // # migration, an endpoint MUST revert to using the last validated peer
         // # address when validation of a new peer address fails.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+        // # If path validation fails, the client MUST continue sending all
+        // # future packets to the server's original IP address.
         current_send_path_id_ = last_validated_path_id_;
         ensure_path_state(*last_validated_path_id_).is_current_send_path = true;
     }

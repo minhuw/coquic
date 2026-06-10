@@ -2858,6 +2858,9 @@ bool QuicConnection::anti_amplification_applies() const {
     return config_.role == EndpointRole::server && status_ != HandshakeStatus::idle &&
            (status_ != HandshakeStatus::failed ||
             close_mode_ == QuicConnectionCloseMode::closing) &&
+           //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+           // # If the client IP address has changed, the server MUST adhere to
+           // # the anti-amplification limit; see Section 8.
            !peer_address_validated_;
 }
 

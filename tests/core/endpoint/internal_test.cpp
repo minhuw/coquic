@@ -1961,6 +1961,43 @@ TEST(QuicCoreEndpointInternalTest, SealedNewTokenSurvivesRestartAndIsSingleUse) 
     auto accept_lifecycle = lifecycle_events_from(accepted_initial);
     ASSERT_FALSE(accept_lifecycle.empty());
     EXPECT_EQ(accept_lifecycle.front().event, QuicCoreConnectionLifecycle::accepted);
+
+    auto changed_address_server_config = make_server_endpoint_config();
+    changed_address_server_config.application_protocol = "coquic";
+    changed_address_server_config.address_validation_token_secret =
+        make_address_validation_secret(0x40);
+    QuicCore changed_address_server(std::move(changed_address_server_config));
+    auto changed_address_open = make_client_open_config(5);
+    changed_address_open.retry_token = original.make_endpoint_new_token(
+        11, kQuicVersion1, 92, identity, coquic::quic::test::test_time(100));
+    QuicCore changed_address_client(make_client_endpoint_config());
+    auto changed_address_initial = changed_address_client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = std::move(changed_address_open),
+            .initial_route_handle = 92,
+        },
+        coquic::quic::test::test_time(101));
+    auto changed_address_sends = send_effects_from(changed_address_initial);
+    ASSERT_FALSE(changed_address_sends.empty());
+    auto changed_address_result = changed_address_server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = changed_address_sends.front().bytes,
+            .route_handle = 92,
+            .address_validation_identity = bytes_from_ints({0x20, 0x01, 0x0d, 0xba}),
+        },
+        coquic::quic::test::test_time(102));
+    auto changed_address_lifecycle = lifecycle_events_from(changed_address_result);
+    ASSERT_FALSE(changed_address_lifecycle.empty());
+    ASSERT_EQ(changed_address_server.connection_count(), 1u);
+    const auto changed_handle = changed_address_lifecycle.front().connection;
+    auto &changed_connection = *changed_address_server.connections_.at(changed_handle).connection;
+    EXPECT_FALSE(changed_connection.peer_address_validated_);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+    // # If the client IP address has changed, the server MUST adhere to the
+    // # anti-amplification limit; see Section 8.
+    EXPECT_TRUE(changed_connection.anti_amplification_applies());
+    EXPECT_EQ(changed_connection.anti_amplification_send_budget(),
+              changed_connection.anti_amplification_received_bytes_ * 3u);
 }
 
 TEST(QuicCoreEndpointInternalTest, SealedNewTokenCanValidateWithPreviousSecret) {

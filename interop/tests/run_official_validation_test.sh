@@ -29,6 +29,7 @@ cat >"${complete_results}" <<'JSON'
   "results": [[
     {"name": "handshake", "result": "succeeded"},
     {"name": "transfer", "result": "failed"},
+    {"name": "retry", "result": "peer_broken"},
     {"name": "ipv6", "result": "unsupported"}
   ]],
   "measurements": [[
@@ -38,10 +39,42 @@ cat >"${complete_results}" <<'JSON'
 JSON
 
 validate_official_results \
-  "${complete_results}" coquic quic-go handshake,transfer,ipv6,goodput
+  "${complete_results}" coquic quic-go handshake,transfer,retry,ipv6,goodput
+
+rendered_json="${tmpdir}/rendered-interop-results.json"
+rendered_summary="${tmpdir}/rendered-interop-results.md"
+python3 scripts/render-interop-results.py \
+  --result complete="${complete_results}" \
+  --event-name test \
+  --commit test \
+  --json-out "${rendered_json}" >"${rendered_summary}"
+
+python3 - "${rendered_json}" "${rendered_summary}" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+summary = pathlib.Path(sys.argv[2]).read_text()
+source = data["sources"][0]
+if source.get("peer_broken") != 1:
+    raise SystemExit("expected rendered source to count peer_broken results")
+retry = next(row for row in data["rows"] if row["name"] == "retry")
+if retry["result"] != "peer_broken":
+    raise SystemExit("expected rendered retry row to preserve peer_broken result")
+if "1 peer-broken" not in summary or "### Peer-Broken Cases" not in summary:
+    raise SystemExit("expected rendered summary to include peer-broken cases")
+PY
 
 if validate_official_results \
-  "${complete_results}" coquic quic-go handshake,transfer "succeeded,unsupported"
+  "${complete_results}" coquic quic-go handshake,retry "succeeded,unsupported"
+then
+  echo "expected peer-broken testcase to be rejected by strict validation" >&2
+  exit 1
+fi
+
+if validate_official_results \
+  "${complete_results}" coquic quic-go handshake,transfer "succeeded,unsupported,peer_broken"
 then
   echo "expected failed testcase to be rejected by strict validation" >&2
   exit 1
@@ -95,16 +128,16 @@ connectionmigration = next(
     entry for entry in data["results"][0]
     if entry["name"] == "connectionmigration"
 )
-if connectionmigration["result"] != "unsupported":
-    raise SystemExit("expected xquic connectionmigration to be marked unsupported")
+if connectionmigration["result"] != "peer_broken":
+    raise SystemExit("expected xquic connectionmigration to be marked peer_broken")
 if "preferred-address active migration" not in connectionmigration.get("details", ""):
     raise SystemExit("expected xquic connectionmigration rationale details")
 xquic_crosstraffic = next(
     entry for entry in data["measurements"][0]
     if entry["name"] == "crosstraffic"
 )
-if xquic_crosstraffic["result"] != "unsupported":
-    raise SystemExit("expected xquic crosstraffic to be marked unsupported")
+if xquic_crosstraffic["result"] != "peer_broken":
+    raise SystemExit("expected xquic crosstraffic to be marked peer_broken")
 if "30-second request deadline" not in xquic_crosstraffic.get("details", ""):
     raise SystemExit("expected xquic crosstraffic rationale details")
 adjusted_names = {entry.get("name") for entry in data.get("coquic_compat_adjustments", [])}
@@ -142,8 +175,8 @@ results = {
 }
 for name in ("retry", "resumption", "zerortt"):
     entry = results[name]
-    if entry["result"] != "unsupported":
-        raise SystemExit(f"expected xquic server {name} to be marked unsupported")
+    if entry["result"] != "peer_broken":
+        raise SystemExit(f"expected xquic server {name} to be marked peer_broken")
     if "non-zero Token Length" not in entry.get("details", ""):
         raise SystemExit(f"expected xquic server {name} rationale details")
 if results["http3"]["result"] != "succeeded":
@@ -183,8 +216,8 @@ results = {
 }
 for name in ("amplificationlimit", "rebind-addr", "crosstraffic"):
     entry = results[name]
-    if entry["result"] != "unsupported":
-        raise SystemExit(f"expected mvfst {name} to be marked unsupported")
+    if entry["result"] != "peer_broken":
+        raise SystemExit(f"expected mvfst {name} to be marked peer_broken")
     if not entry.get("details"):
         raise SystemExit(f"expected mvfst {name} rationale details")
 adjustments = data.get("coquic_compat_adjustments", [])

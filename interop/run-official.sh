@@ -79,7 +79,7 @@ validate_official_results() {
   local server=$2
   local client=$3
   local requested_testcases=$4
-  local allowed_results=${5:-succeeded,unsupported,failed}
+  local allowed_results=${5:-succeeded,unsupported,peer_broken,failed}
 
   python3 - "${results_json}" "${server}" "${client}" "${requested_testcases}" "${allowed_results}" <<'PY'
 import json
@@ -247,7 +247,7 @@ def adjust_failed_entry(matrix_name, testcase, details):
             and entry.get("name") == testcase
             and entry.get("result") == "failed"
         ):
-            entry["result"] = "unsupported"
+            entry["result"] = "peer_broken"
             entry["details"] = details
             adjustments.append(
                 {
@@ -255,7 +255,7 @@ def adjust_failed_entry(matrix_name, testcase, details):
                     "client": client,
                     "name": testcase,
                     "from": "failed",
-                    "to": "unsupported",
+                    "to": "peer_broken",
                     "reason": details,
                 }
             )

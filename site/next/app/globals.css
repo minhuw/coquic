@@ -34,6 +34,7 @@
     --warning-soft: #fcf4d6;
     --warning-tooltip: #fffaf0;
     --danger-soft: #fff1f1;
+    --peer-broken-soft: rgb(91 95 199 / 13%);
     --known-broken-soft: rgb(154 61 128 / 13%);
     --code-bg: #f6f8fa;
     --pipe-border: rgb(22 22 22 / 14%);
@@ -53,6 +54,7 @@
     --packet: #a6c8ff;
     --packet-ink: #002d9c;
     --danger: #cf2d56;
+    --peer-broken: #5b5fc7;
     --known-broken: #9a3d80;
     --warning: #8d6d00;
     --ok: #1f8a65;
@@ -83,6 +85,7 @@
     --warning-soft: rgb(241 194 27 / 16%);
     --warning-tooltip: #241d0b;
     --danger-soft: rgb(255 126 182 / 14%);
+    --peer-broken-soft: rgb(166 169 255 / 16%);
     --known-broken-soft: rgb(212 160 199 / 16%);
     --code-bg: #0d1117;
     --pipe-border: rgb(166 200 255 / 20%);
@@ -102,6 +105,7 @@
     --packet: #78a9ff;
     --packet-ink: #d0e2ff;
     --danger: #ff7eb6;
+    --peer-broken: #a6a9ff;
     --known-broken: #d4a0c7;
     --warning: #f1c21b;
     --ok: #42be65;
@@ -3103,6 +3107,10 @@
 
   .test-cell.failed {
     @apply border-[rgba(207,45,86,0.28)] bg-[var(--danger-soft)] text-[var(--danger)];
+  }
+
+  .test-cell.peer-broken {
+    @apply border-[rgba(91,95,199,0.3)] bg-[var(--peer-broken-soft)] text-[var(--peer-broken)];
   }
 
   .test-cell.known-broken {

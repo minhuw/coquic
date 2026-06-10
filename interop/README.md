@@ -169,15 +169,17 @@ simulator, and iperf images, and runs the full QUIC testcase and measurement
 list through `interop/run-official.sh` in both directions for every configured
 peer.
 
-Official runner results marked `unsupported` are preserved in the summary and
-published matrix but do not fail the workflow. Results marked `failed` are also
-preserved in the published matrix and do not fail the workflow. Missing requested
-results, missing source snapshots, or malformed runner output still fail the
-workflow because they mean CI did not create a complete interop matrix.
+Official runner results marked `unsupported`, `peer_broken`, or `failed` are
+preserved in the summary and published matrix. Complete matrices with those
+statuses do not fail the workflow. Missing requested results, missing source
+snapshots, or malformed runner output still fail the workflow because they mean
+CI did not create a complete interop matrix.
 
-Known peer failures are not skipped. They are published as failures so the
-interop matrix reflects the official runner result, regardless of which endpoint
-caused the failure.
+Use `unsupported` for an unsupported endpoint/testcase combination. Use
+`peer_broken` when local analysis shows peer-side behavior caused the result.
+Known peer failures derived from upstream interop.seemann.io results are not
+skipped; they remain published as `failed` rows with a known peer-broken
+annotation unless the local result is explicitly classified as `peer_broken`.
 
 For local diagnosis, `INTEROP_RETRY_FAILED_TESTCASES=1` can retry a small set of
 simulator-sensitive cases in isolation after an initial `failed` result.

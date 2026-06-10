@@ -9,7 +9,8 @@ from pathlib import Path
 RESULT_ORDER = {
     "succeeded": 0,
     "unsupported": 1,
-    "failed": 2,
+    "peer_broken": 2,
+    "failed": 3,
 }
 
 
@@ -96,7 +97,7 @@ def result_entries(cell: object, field_name: str, path: Path) -> list[dict]:
 
 
 def status_counts(entries: list[dict]) -> dict:
-    counts = {"succeeded": 0, "failed": 0, "unsupported": 0, "other": 0}
+    counts = {"succeeded": 0, "failed": 0, "unsupported": 0, "peer_broken": 0, "other": 0}
     for entry in entries:
         result = str(entry.get("result", ""))
         if result in counts:
@@ -214,9 +215,11 @@ def build_known_broken_index(upstream_path: Path) -> dict[tuple[str, str, str], 
                             "failed": 0,
                             "succeeded": 0,
                             "unsupported": 0,
+                            "peer_broken": 0,
                             "other": 0,
                             "failed_peers": [],
                             "succeeded_peers": [],
+                            "peer_broken_peers": [],
                         },
                     )
                     if result == "failed":
@@ -227,6 +230,9 @@ def build_known_broken_index(upstream_path: Path) -> dict[tuple[str, str, str], 
                         observed["succeeded_peers"].append(counterpart)
                     elif result == "unsupported":
                         observed["unsupported"] = int(observed["unsupported"]) + 1
+                    elif result == "peer_broken":
+                        observed["peer_broken"] = int(observed["peer_broken"]) + 1
+                        observed["peer_broken_peers"].append(counterpart)
                     else:
                         observed["other"] = int(observed["other"]) + 1
 
@@ -252,7 +258,9 @@ def build_known_broken_index(upstream_path: Path) -> dict[tuple[str, str, str], 
             "succeeded_supported_peers": succeeded,
             "supported_peers": failed + succeeded + other,
             "unsupported_peers": int(observed["unsupported"]),
+            "peer_broken_supported_peers": int(observed["peer_broken"]),
             "failed_peers": sorted(str(peer) for peer in observed["failed_peers"]),
+            "diagnosed_peer_broken_peers": sorted(str(peer) for peer in observed["peer_broken_peers"]),
             "reason": "upstream peer fails this case against every supported peer",
         }
     return known
@@ -311,6 +319,7 @@ def rows_from_result(label: str, path: Path, data: dict) -> tuple[dict, list[dic
         "succeeded": counts["succeeded"],
         "failed": counts["failed"],
         "unsupported": counts["unsupported"],
+        "peer_broken": counts["peer_broken"],
         "other": counts["other"],
         "total": counts["total"],
     }
@@ -405,8 +414,26 @@ def print_summary(sources: list[dict], rows: list[dict], event_name: str, commit
         print(
             f"- `{markdown(source['label'])}`: `{markdown(source['server'])}` -> `{markdown(source['client'])}` "
             f"({source['succeeded']}/{source['total']} succeeded, "
-            f"{source['unsupported']} unsupported, {source['failed']} failed)"
+            f"{source.get('unsupported', 0)} unsupported, "
+            f"{source.get('peer_broken', 0)} peer-broken, "
+            f"{source.get('failed', 0)} failed)"
         )
+    print()
+    print("### Peer-Broken Cases")
+    print()
+    peer_broken = [row for row in rows if row["result"] == "peer_broken"]
+    if not peer_broken:
+        print("No loaded interop cases were classified as peer-broken.")
+    else:
+        print("| Peer | Direction | Case | Details |")
+        print("| --- | --- | --- | --- |")
+        for row in peer_broken:
+            print(
+                f"| {markdown(row['peer'])}"
+                f" | {markdown(row['direction'])}"
+                f" | {markdown(row['name'])}"
+                f" | {markdown(row['details'])} |"
+            )
     print()
     print("### Failed Cases")
     print()

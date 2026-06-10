@@ -119,6 +119,9 @@ function resultToken(result) {
   if (result === "failed") {
     return "fail";
   }
+  if (isPeerBrokenResult(result)) {
+    return "pb";
+  }
   if (isSkippedResult(result)) {
     return "n/a";
   }
@@ -143,6 +146,9 @@ function resultClass(result, row) {
   if (isSkippedResult(result)) {
     return "unsupported";
   }
+  if (isPeerBrokenResult(result)) {
+    return "peer-broken";
+  }
   if (result === "succeeded" || result === "failed") {
     return result;
   }
@@ -151,6 +157,10 @@ function resultClass(result, row) {
 
 function isSkippedResult(result) {
   return result === "unsupported";
+}
+
+function isPeerBrokenResult(result) {
+  return result === "peer_broken";
 }
 
 function knownBrokenTitle(row) {
@@ -175,6 +185,9 @@ function resultLabel(result, row) {
   }
   if (isSkippedResult(result)) {
     return "unsupported";
+  }
+  if (isPeerBrokenResult(result)) {
+    return "peer-broken";
   }
   if (result === "succeeded") {
     return "pass";
@@ -310,6 +323,7 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
   let sawUnknown = false;
   let sawSucceeded = false;
   let sawUnsupported = false;
+  let sawPeerBroken = false;
   for (const test of tests) {
     const row = rowByLaneAndTest.get(`${laneKey}:${test}`);
     if (!row) {
@@ -328,6 +342,10 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
       sawUnsupported = true;
       continue;
     }
+    if (isPeerBrokenResult(result)) {
+      sawPeerBroken = true;
+      continue;
+    }
     if (result === "succeeded") {
       sawSucceeded = true;
       continue;
@@ -339,6 +357,9 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
   }
   if (sawUnknown) {
     return "unknown";
+  }
+  if (sawPeerBroken) {
+    return "peer_broken";
   }
   if (sawSucceeded) {
     return "succeeded";
@@ -353,6 +374,9 @@ function legendCategoryForResult(result, row) {
   if (isSkippedResult(result)) {
     return "unsupported";
   }
+  if (isPeerBrokenResult(result)) {
+    return "peer-broken";
+  }
   if (result === "succeeded") {
     return "pass";
   }
@@ -366,6 +390,7 @@ function updateLegendCounts(lanes, tests, rowByLaneAndTest) {
   const counts = {
     pass: 0,
     unsupported: 0,
+    "peer-broken": 0,
     failed: 0,
     "known-broken": 0,
     "not-reported": 0,

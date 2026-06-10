@@ -25,6 +25,7 @@
 #define MODE_CODE_BULK 0U
 #define MODE_CODE_RR 1U
 #define MODE_CODE_CRR 2U
+#define MODE_CODE_PERSISTENT_RR 3U
 #define DIRECTION_CODE_UPLOAD 0U
 #define DIRECTION_CODE_DOWNLOAD 1U
 #define MAX_DATAGRAM_SIZE 1350
@@ -160,6 +161,13 @@ struct stream_ctx_s {
     int request_fin;
     int response_fin;
     int fin_sent;
+    int persistent_rr;
+    uint64_t response_pending;
+    uint64_t *persistent_started_at;
+    uint8_t *persistent_counts;
+    size_t persistent_head;
+    size_t persistent_len;
+    size_t persistent_cap;
     uint64_t started_at;
     stream_ctx_t *next;
 };
@@ -293,6 +301,9 @@ static uint8_t mode_code(const char *mode) {
     if (strcmp(mode, "crr") == 0) {
         return MODE_CODE_CRR;
     }
+    if (strcmp(mode, "persistent-rr") == 0) {
+        return MODE_CODE_PERSISTENT_RR;
+    }
     return MODE_CODE_BULK;
 }
 
@@ -316,7 +327,8 @@ static uint8_t *frame_control_message(uint8_t type, const uint8_t *payload, uint
 }
 
 static uint64_t rr_connection_target(const config_t *cfg) {
-    if (strcmp(cfg->mode, "rr") == 0 && cfg->requests.set) {
+    if ((strcmp(cfg->mode, "rr") == 0 || strcmp(cfg->mode, "persistent-rr") == 0) &&
+        cfg->requests.set) {
         return cfg->connections < cfg->requests.value ? cfg->connections : cfg->requests.value;
     }
     return cfg->connections;
@@ -402,10 +414,12 @@ static int decode_session_start_payload(const uint8_t *payload, size_t len,
     start->connections = decode_be64(payload + 63);
     start->requests_in_flight = decode_be64(payload + 71);
     if ((start->mode != MODE_CODE_BULK && start->mode != MODE_CODE_RR &&
-         start->mode != MODE_CODE_CRR) ||
+         start->mode != MODE_CODE_CRR && start->mode != MODE_CODE_PERSISTENT_RR) ||
         (start->direction != DIRECTION_CODE_UPLOAD &&
          start->direction != DIRECTION_CODE_DOWNLOAD) ||
-        start->streams == 0 || start->connections == 0 || start->requests_in_flight == 0) {
+        start->streams == 0 || start->connections == 0 || start->requests_in_flight == 0 ||
+        (start->mode == MODE_CODE_PERSISTENT_RR &&
+         (start->request_bytes == 0 || start->response_bytes == 0))) {
         return -1;
     }
     return 0;
@@ -423,7 +437,8 @@ static uint64_t server_response_bytes(const perf_session_start_t *start,
     if (start->mode == MODE_CODE_BULK && start->direction == DIRECTION_CODE_DOWNLOAD) {
         return start->response_bytes;
     }
-    if (start->mode == MODE_CODE_RR || start->mode == MODE_CODE_CRR) {
+    if (start->mode == MODE_CODE_RR || start->mode == MODE_CODE_CRR ||
+        start->mode == MODE_CODE_PERSISTENT_RR) {
         return start->response_bytes;
     }
     return 0;
@@ -439,8 +454,8 @@ static int should_send_complete(conn_ctx_t *conn) {
            (start->mode == MODE_CODE_BULK && start->total_bytes.set &&
             start->direction == DIRECTION_CODE_UPLOAD &&
             conn->server_requests_completed >= start->streams) ||
-           (start->mode == MODE_CODE_RR && start->requests.set &&
-            conn->server_requests_completed >= start->requests.value);
+           ((start->mode == MODE_CODE_RR || start->mode == MODE_CODE_PERSISTENT_RR) &&
+            start->requests.set && conn->server_requests_completed >= start->requests.value);
 }
 
 static void set_stream_send_buffer(stream_ctx_t *s, uint8_t *buf, size_t len, int fin) {
@@ -548,8 +563,18 @@ static void parse_args(config_t *cfg, int argc, char **argv) {
         fprintf(stderr, "xquic-perf only supports the socket backend\n");
         exit(2);
     }
+    if (strcmp(cfg->mode, "bulk") != 0 && strcmp(cfg->mode, "rr") != 0 &&
+        strcmp(cfg->mode, "crr") != 0 && strcmp(cfg->mode, "persistent-rr") != 0) {
+        fprintf(stderr, "unsupported mode: %s\n", cfg->mode);
+        exit(2);
+    }
     if (cfg->streams == 0 || cfg->connections == 0 || cfg->requests_in_flight == 0) {
         fprintf(stderr, "streams, connections, and requests-in-flight must be greater than zero\n");
+        exit(2);
+    }
+    if (strcmp(cfg->mode, "persistent-rr") == 0 &&
+        (cfg->request_bytes == 0 || cfg->response_bytes == 0)) {
+        fprintf(stderr, "persistent-rr requires nonzero request and response bytes\n");
         exit(2);
     }
 }
@@ -697,6 +722,8 @@ static void remove_stream(conn_ctx_t *conn, stream_ctx_t *stream) {
             *slot = stream->next;
             free(stream->send_buf);
             free(stream->control_in);
+            free(stream->persistent_started_at);
+            free(stream->persistent_counts);
             free(stream);
             return;
         }
@@ -721,6 +748,8 @@ static void cleanup_ctx(perf_ctx_t *ctx) {
             stream_ctx_t *next_stream = stream->next;
             free(stream->send_buf);
             free(stream->control_in);
+            free(stream->persistent_started_at);
+            free(stream->persistent_counts);
             free(stream);
             stream = next_stream;
         }
@@ -732,6 +761,46 @@ static void cleanup_ctx(perf_ctx_t *ctx) {
     ctx->completed = NULL;
     ctx->completed_len = 0;
     ctx->completed_cap = 0;
+}
+
+static int persistent_queue_push(stream_ctx_t *stream, uint64_t started_at, int counts) {
+    if (stream->persistent_len == stream->persistent_cap) {
+        size_t next_cap = stream->persistent_cap == 0 ? 8 : stream->persistent_cap * 2;
+        uint64_t *next_started = (uint64_t *)malloc(next_cap * sizeof(next_started[0]));
+        uint8_t *next_counts = (uint8_t *)malloc(next_cap * sizeof(next_counts[0]));
+        if (next_started == NULL || next_counts == NULL) {
+            free(next_started);
+            free(next_counts);
+            return -1;
+        }
+        for (size_t i = 0; i < stream->persistent_len; ++i) {
+            size_t old = (stream->persistent_head + i) % stream->persistent_cap;
+            next_started[i] = stream->persistent_started_at[old];
+            next_counts[i] = stream->persistent_counts[old];
+        }
+        free(stream->persistent_started_at);
+        free(stream->persistent_counts);
+        stream->persistent_started_at = next_started;
+        stream->persistent_counts = next_counts;
+        stream->persistent_cap = next_cap;
+        stream->persistent_head = 0;
+    }
+    size_t index = (stream->persistent_head + stream->persistent_len) % stream->persistent_cap;
+    stream->persistent_started_at[index] = started_at;
+    stream->persistent_counts[index] = counts ? 1 : 0;
+    ++stream->persistent_len;
+    return 0;
+}
+
+static int persistent_queue_pop(stream_ctx_t *stream, uint64_t *started_at, int *counts) {
+    if (stream->persistent_len == 0) {
+        return -1;
+    }
+    *started_at = stream->persistent_started_at[stream->persistent_head];
+    *counts = stream->persistent_counts[stream->persistent_head] != 0;
+    stream->persistent_head = (stream->persistent_head + 1) % stream->persistent_cap;
+    --stream->persistent_len;
+    return 0;
 }
 
 static void push_completed(perf_ctx_t *ctx, completed_stream_t item) {
@@ -782,9 +851,13 @@ static void try_stream_send(stream_ctx_t *stream) {
 
         if (stream->conn->ctx->is_server) {
             uint64_t response_remaining = stream->response_bytes - stream->response_sent;
+            if (response_remaining == 0 && stream->persistent_rr && !stream->request_fin) {
+                return;
+            }
             size_t chunk = (size_t)(response_remaining < WRITE_CHUNK_SIZE ? response_remaining
                                                                           : WRITE_CHUNK_SIZE);
-            uint8_t fin = response_remaining == chunk;
+            uint8_t fin =
+                response_remaining == chunk && (!stream->persistent_rr || stream->request_fin);
             uint8_t *base = stream->send_buf != NULL ? stream->send_buf : NULL;
             ssize_t ret = xqc_stream_send(stream->stream, base, chunk, fin);
             if (ret == -XQC_EAGAIN) {
@@ -810,8 +883,11 @@ static void try_stream_send(stream_ctx_t *stream) {
         }
 
         size_t remaining = stream->send_len - stream->sent;
+        if (remaining == 0 && stream->persistent_rr && !stream->request_fin) {
+            return;
+        }
         size_t chunk = remaining < WRITE_CHUNK_SIZE ? remaining : WRITE_CHUNK_SIZE;
-        uint8_t fin = chunk == remaining;
+        uint8_t fin = chunk == remaining && (!stream->persistent_rr || stream->request_fin);
         ssize_t ret = xqc_stream_send(stream->stream, stream->send_buf + stream->sent, chunk, fin);
         if (ret == -XQC_EAGAIN) {
             return;
@@ -944,8 +1020,50 @@ static xqc_int_t stream_read_notify(xqc_stream_t *stream, void *strm_user_data) 
                 continue;
             }
             s->request_bytes = s->conn->session_start.request_bytes;
+            s->persistent_rr = s->conn->session_start.mode == MODE_CODE_PERSISTENT_RR;
             s->request_received += (uint64_t)ret;
-            if (fin) {
+            if (s->persistent_rr) {
+                while (s->request_received >= s->request_bytes) {
+                    s->request_received -= s->request_bytes;
+                    s->conn->server_bytes_received += s->request_bytes;
+                    s->conn->server_requests_completed++;
+                    s->response_bytes += s->conn->session_start.response_bytes;
+                    s->send_len = (size_t)(s->response_bytes < WRITE_CHUNK_SIZE ? s->response_bytes
+                                                                                : WRITE_CHUNK_SIZE);
+                    if (s->send_buf == NULL) {
+                        s->send_buf = (uint8_t *)malloc(s->send_len == 0 ? 1 : s->send_len);
+                        if (s->send_buf == NULL) {
+                            set_error(ctx, "xquic response allocation failed");
+                            return XQC_ERROR;
+                        }
+                        memset(s->send_buf, 0x5a, s->send_len);
+                    }
+                    s->conn->server_bytes_sent += s->conn->session_start.response_bytes;
+                    try_stream_send(s);
+                }
+                if (fin) {
+                    if (s->request_received != 0) {
+                        set_error(ctx, "xquic server received unexpected request byte count");
+                        return XQC_ERROR;
+                    }
+                    s->request_fin = 1;
+                    try_stream_send(s);
+                }
+                if (should_send_complete(s->conn) && s->conn->control_stream != NULL) {
+                    size_t msg_len = 0;
+                    uint8_t *msg = encode_session_complete_message(
+                        s->conn->server_bytes_sent, s->conn->server_bytes_received,
+                        s->conn->server_requests_completed, &msg_len);
+                    if (msg == NULL) {
+                        set_error(ctx, "xquic session_complete allocation failed");
+                        return XQC_ERROR;
+                    }
+                    set_stream_send_buffer(s->conn->control_stream, msg, msg_len, 1);
+                    s->conn->server_complete_sent = 1;
+                    try_stream_send(s->conn->control_stream);
+                }
+                return XQC_OK;
+            } else if (fin) {
                 if (s->request_fin) {
                     return XQC_OK;
                 }
@@ -991,6 +1109,37 @@ static xqc_int_t stream_read_notify(xqc_stream_t *stream, void *strm_user_data) 
         } else {
             uint64_t received = (uint64_t)ret;
             s->received += received;
+            if (s->persistent_rr) {
+                s->response_pending += received;
+                while (s->response_pending >= ctx->cfg.response_bytes) {
+                    uint64_t started_at = 0;
+                    int counts = 0;
+                    if (persistent_queue_pop(s, &started_at, &counts) != 0) {
+                        set_error(ctx, "xquic persistent-rr response without pending request");
+                        return XQC_ERROR;
+                    }
+                    s->response_pending -= ctx->cfg.response_bytes;
+                    if (counts && now_us() >= ctx->measure_start_us) {
+                        completed_stream_t done;
+                        memset(&done, 0, sizeof(done));
+                        done.counts = 1;
+                        done.request_bytes = ctx->cfg.request_bytes;
+                        done.received = ctx->cfg.response_bytes;
+                        done.latency_us = now_us() - started_at;
+                        push_completed(ctx, done);
+                    }
+                }
+                if (fin) {
+                    if (s->response_pending != 0 || s->persistent_len != 0) {
+                        set_error(ctx, "xquic persistent-rr stream closed with pending responses");
+                        return XQC_ERROR;
+                    }
+                    xqc_stream_set_user_data(stream, NULL);
+                    remove_stream(s->conn, s);
+                    return XQC_OK;
+                }
+                continue;
+            }
             if (ctx->count_stream_bytes && s->counts && now_us() >= ctx->measure_start_us) {
                 ctx->live_bytes_received += received;
             }
@@ -1471,12 +1620,70 @@ static stream_ctx_t *open_request(perf_ctx_t *ctx, conn_ctx_t *conn, int counts,
     return s;
 }
 
+static stream_ctx_t *persistent_stream_for_conn(conn_ctx_t *conn) {
+    for (stream_ctx_t *s = conn->streams; s != NULL; s = s->next) {
+        if (!s->is_control && s->persistent_rr) {
+            return s;
+        }
+    }
+    return NULL;
+}
+
+static stream_ctx_t *send_persistent_rr_request(perf_ctx_t *ctx, conn_ctx_t *conn, int counts) {
+    if (conn == NULL) {
+        set_error(ctx, "xquic connection missing");
+        return NULL;
+    }
+    stream_ctx_t *s = persistent_stream_for_conn(conn);
+    if (s == NULL) {
+        s = add_stream(conn);
+        if (s == NULL) {
+            set_error(ctx, "xquic stream allocation failed");
+            return NULL;
+        }
+        s->response_bytes = ctx->cfg.response_bytes;
+        s->persistent_rr = 1;
+        s->send_len = 0;
+        s->send_buf = (uint8_t *)malloc(1);
+        if (s->send_buf == NULL) {
+            set_error(ctx, "xquic request allocation failed");
+            return NULL;
+        }
+        s->send_buf[0] = 0x5a;
+        s->stream = xqc_stream_create(ctx->engine, &conn->cid, NULL, s);
+        if (s->stream == NULL) {
+            set_error(ctx, "xqc_stream_create failed");
+            remove_stream(conn, s);
+            return NULL;
+        }
+    }
+    if (persistent_queue_push(s, now_us(), counts) != 0) {
+        set_error(ctx, "xquic persistent-rr queue allocation failed");
+        return NULL;
+    }
+    size_t old_len = s->send_len;
+    size_t add_len = (size_t)ctx->cfg.request_bytes;
+    size_t next_len = old_len + add_len;
+    uint8_t *next = (uint8_t *)realloc(s->send_buf, next_len == 0 ? 1 : next_len);
+    if (next == NULL) {
+        set_error(ctx, "xquic request allocation failed");
+        return NULL;
+    }
+    memset(next + old_len, 0x5a, add_len);
+    s->send_buf = next;
+    s->send_len = next_len;
+    s->fin_sent = 0;
+    try_stream_send(s);
+    xqc_engine_main_logic(ctx->engine);
+    return s;
+}
+
 static size_t active_streams(perf_ctx_t *ctx) {
     size_t count = 0;
     for (conn_ctx_t *c = ctx->conns; c != NULL; c = c->next) {
         for (stream_ctx_t *s = c->streams; s != NULL; s = s->next) {
             if (!s->is_control) {
-                count++;
+                count += s->persistent_rr ? s->persistent_len : 1;
             }
         }
     }
@@ -1487,7 +1694,7 @@ static size_t active_streams_for_conn(conn_ctx_t *conn) {
     size_t count = 0;
     for (stream_ctx_t *s = conn->streams; s != NULL; s = s->next) {
         if (!s->is_control) {
-            count++;
+            count += s->persistent_rr ? s->persistent_len : 1;
         }
     }
     return count;
@@ -1510,8 +1717,17 @@ static void open_rr_refill(config_t *cfg, perf_ctx_t *ctx, uint64_t *started,
             if (!cfg->requests.set && now_us() >= deadline) {
                 return;
             }
-            open_request(ctx, conn, cfg->requests.set || now_us() >= measure_start,
-                         cfg->request_bytes, cfg->response_bytes);
+            if (strcmp(cfg->mode, "persistent-rr") == 0) {
+                if (send_persistent_rr_request(
+                        ctx, conn, cfg->requests.set || now_us() >= measure_start) == NULL) {
+                    return;
+                }
+            } else {
+                if (open_request(ctx, conn, cfg->requests.set || now_us() >= measure_start,
+                                 cfg->request_bytes, cfg->response_bytes) == NULL) {
+                    return;
+                }
+            }
             conn->started_requests++;
             (*started)++;
         }
@@ -1555,6 +1771,19 @@ static void consume_completed_bulk(perf_ctx_t *ctx, counters_t *c, uint64_t meas
         }
     }
     ctx->completed_len = 0;
+}
+
+static void close_persistent_rr_streams(perf_ctx_t *ctx) {
+    for (conn_ctx_t *conn = ctx->conns; conn != NULL; conn = conn->next) {
+        for (stream_ctx_t *s = conn->streams; s != NULL; s = s->next) {
+            if (!s->is_control && s->persistent_rr && !s->request_fin) {
+                s->request_fin = 1;
+                s->fin_sent = 0;
+                try_stream_send(s);
+            }
+        }
+    }
+    xqc_engine_main_logic(ctx->engine);
 }
 
 static void refill_timed_bulk(config_t *cfg, perf_ctx_t *ctx, uint64_t deadline) {
@@ -1666,6 +1895,14 @@ static void run_rr(config_t *cfg, counters_t *c) {
         drive_once(ctx, deadline);
         consume_completed(ctx, c, measure_start, 0);
         open_rr_refill(cfg, ctx, &started, measure_start, deadline);
+    }
+    if (strcmp(cfg->mode, "persistent-rr") == 0) {
+        close_persistent_rr_streams(ctx);
+        uint64_t drain_deadline = now_us() + DRAIN_TIMEOUT_US;
+        while (!ctx->error && active_streams(ctx) > 0 && now_us() < drain_deadline) {
+            drive_once(ctx, drain_deadline);
+            consume_completed(ctx, c, measure_start, 0);
+        }
     }
     if (ctx->error) {
         fprintf(stderr, "%s\n", ctx->error_message);
@@ -1891,7 +2128,7 @@ static void run_client(config_t *cfg) {
             run_fixed_bulk(cfg, &counters);
             emit_summary(cfg, &counters, now_us() - start, NULL);
         }
-    } else if (strcmp(cfg->mode, "rr") == 0) {
+    } else if (strcmp(cfg->mode, "rr") == 0 || strcmp(cfg->mode, "persistent-rr") == 0) {
         run_rr(cfg, &counters);
         emit_summary(cfg, &counters, cfg->requests.set ? now_us() - start : cfg->duration_us, NULL);
     } else if (strcmp(cfg->mode, "crr") == 0) {

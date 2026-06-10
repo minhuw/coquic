@@ -7,7 +7,7 @@ import ssl
 import sys
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 from aioquic.asyncio import connect, serve
@@ -27,6 +27,7 @@ DRAIN_TIMEOUT = 2.0
 MODE_BULK = "bulk"
 MODE_RR = "rr"
 MODE_CRR = "crr"
+MODE_PERSISTENT_RR = "persistent-rr"
 DIRECTION_UPLOAD = "upload"
 DIRECTION_DOWNLOAD = "download"
 DIRECTION_STAY = "stay"
@@ -85,6 +86,20 @@ class CompletedStream:
     received: int
     latency: float
     connection_index: int = 0
+
+
+@dataclass
+class PersistentRequest:
+    started_at: float
+    counts: bool
+
+
+@dataclass
+class PersistentResult:
+    bytes_sent: int = 0
+    bytes_received: int = 0
+    requests_completed: int = 0
+    latencies: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -203,7 +218,7 @@ def parse_args(argv: list[str]) -> Config:
 
 
 def validate_config(cfg: Config) -> None:
-    if cfg.mode not in (MODE_BULK, MODE_RR, MODE_CRR):
+    if cfg.mode not in (MODE_BULK, MODE_RR, MODE_CRR, MODE_PERSISTENT_RR):
         raise SystemExit(f"unsupported mode: {cfg.mode}")
     if cfg.io_backend != "socket":
         raise SystemExit("aioquic-perf only supports the socket backend")
@@ -217,6 +232,8 @@ def validate_config(cfg: Config) -> None:
         raise SystemExit(f"unsupported direction: {cfg.direction}")
     if cfg.streams <= 0 or cfg.connections <= 0 or cfg.requests_in_flight <= 0:
         raise SystemExit("streams, connections, and requests-in-flight must be greater than zero")
+    if cfg.mode == MODE_PERSISTENT_RR and (cfg.request_bytes <= 0 or cfg.response_bytes <= 0):
+        raise SystemExit("persistent-rr requires nonzero request and response bytes")
 
 
 def aioquic_cc(label: str) -> str:
@@ -290,6 +307,9 @@ async def handle_server_stream(
             writer.write_eof()
             await writer.drain()
             return
+        if session.start.mode == MODE_PERSISTENT_RR:
+            await handle_persistent_rr_server_stream(reader, writer, session)
+            return
         received = 0
         while True:
             data = await reader.read(READ_CHUNK_SIZE)
@@ -321,6 +341,34 @@ async def handle_server_stream(
             return
 
 
+async def handle_persistent_rr_server_stream(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    session: ServerSession,
+) -> None:
+    pending = 0
+    payload = b"\x5a" * WRITE_CHUNK_SIZE
+    while True:
+        data = await reader.read(READ_CHUNK_SIZE)
+        if not data:
+            break
+        session.bytes_received += len(data)
+        pending += len(data)
+        while pending >= session.start.request_bytes:
+            remaining = session.start.response_bytes
+            while remaining > 0:
+                chunk = min(remaining, len(payload))
+                writer.write(payload[:chunk])
+                await writer.drain()
+                remaining -= chunk
+            session.bytes_sent += session.start.response_bytes
+            session.requests_completed += 1
+            pending -= session.start.request_bytes
+            await maybe_send_session_complete(session)
+    writer.write_eof()
+    await writer.drain()
+
+
 @asynccontextmanager
 async def open_connection(cfg: Config):
     async with connect(
@@ -346,6 +394,9 @@ async def run_client(cfg: Config) -> dict:
             elapsed = time.monotonic() - started
     elif cfg.mode == MODE_RR:
         await run_rr(cfg, start, counters)
+        elapsed = time.monotonic() - started if cfg.requests.set else cfg.duration
+    elif cfg.mode == MODE_PERSISTENT_RR:
+        await run_persistent_rr(cfg, start, counters)
         elapsed = time.monotonic() - started if cfg.requests.set else cfg.duration
     elif cfg.mode == MODE_CRR:
         await run_crr(cfg, counters)
@@ -511,6 +562,94 @@ async def run_rr(cfg: Config, start: SessionStart, counters: Counters) -> None:
         await close_connections(connections)
 
 
+async def run_persistent_rr(cfg: Config, start: SessionStart, counters: Counters) -> None:
+    measure_start = time.monotonic() + cfg.warmup
+    measure_deadline = measure_start + cfg.duration
+    connections = await open_connections(cfg, start, rr_connection_target(cfg))
+    try:
+        tasks = []
+        for index, connection in enumerate(connections):
+            request_limit = (
+                rr_request_limit_for_connection(cfg, index) if cfg.requests.set else None
+            )
+            tasks.append(
+                asyncio.create_task(
+                    run_persistent_rr_connection(
+                        connection.protocol,
+                        cfg,
+                        measure_start,
+                        measure_deadline,
+                        request_limit,
+                    )
+                )
+            )
+        for result in await asyncio.gather(*tasks):
+            counters.bytes_sent += result.bytes_sent
+            counters.bytes_received += result.bytes_received
+            counters.requests_completed += result.requests_completed
+            counters.latencies.extend(result.latencies)
+    finally:
+        await close_connections(connections)
+
+
+async def run_persistent_rr_connection(
+    protocol: QuicConnectionProtocol,
+    cfg: Config,
+    measure_start: float,
+    measure_deadline: float,
+    request_limit: int | None,
+) -> PersistentResult:
+    reader, writer = await protocol.create_stream()
+    payload = b"\x5a" * WRITE_CHUNK_SIZE
+    result = PersistentResult()
+    outstanding: list[PersistentRequest] = []
+    started = 0
+    pending_read = 0
+
+    def can_start(now: float) -> bool:
+        if request_limit is not None:
+            return started < request_limit
+        return now < measure_deadline
+
+    async def send_one(now: float) -> None:
+        nonlocal started
+        remaining = cfg.request_bytes
+        while remaining > 0:
+            chunk = min(remaining, len(payload))
+            writer.write(payload[:chunk])
+            await writer.drain()
+            remaining -= chunk
+        counts = cfg.requests.set or now >= measure_start
+        outstanding.append(PersistentRequest(started_at=now, counts=counts))
+        started += 1
+        if counts:
+            result.bytes_sent += cfg.request_bytes
+
+    try:
+        while len(outstanding) < cfg.requests_in_flight and can_start(time.monotonic()):
+            await send_one(time.monotonic())
+        while outstanding or (request_limit is None and time.monotonic() < measure_deadline):
+            data = await asyncio.wait_for(reader.read(READ_CHUNK_SIZE), timeout=HANDSHAKE_TIMEOUT)
+            if not data:
+                break
+            now = time.monotonic()
+            pending_read += len(data)
+            while pending_read >= cfg.response_bytes and outstanding:
+                request = outstanding.pop(0)
+                pending_read -= cfg.response_bytes
+                if request.counts and now >= measure_start:
+                    result.bytes_received += cfg.response_bytes
+                    result.requests_completed += 1
+                    result.latencies.append(now - request.started_at)
+                while len(outstanding) < cfg.requests_in_flight and can_start(now):
+                    await send_one(now)
+        writer.write_eof()
+        await writer.drain()
+        return result
+    finally:
+        writer.close()
+
+
 async def run_crr(cfg: Config, counters: Counters) -> None:
     measure_start = time.monotonic() + cfg.warmup
     measure_deadline = measure_start + cfg.duration
@@ -572,7 +711,7 @@ async def open_connections(
     try:
         for index in range(count):
             connection_start = start
-            if cfg.mode == MODE_RR and cfg.requests.set:
+            if cfg.mode in (MODE_RR, MODE_PERSISTENT_RR) and cfg.requests.set:
                 connection_start = replace(
                     start,
                     requests=OptionalU64(
@@ -702,7 +841,7 @@ def make_session_start(cfg: Config) -> SessionStart:
 
 
 def rr_connection_target(cfg: Config) -> int:
-    if cfg.mode == MODE_RR and cfg.requests.set:
+    if cfg.mode in (MODE_RR, MODE_PERSISTENT_RR) and cfg.requests.set:
         return min(cfg.connections, cfg.requests.value)
     return cfg.connections
 
@@ -732,7 +871,7 @@ def can_start_rr_request(
 
 
 def validate_session_start(start: SessionStart) -> None:
-    if start.mode not in (MODE_BULK, MODE_RR, MODE_CRR):
+    if start.mode not in (MODE_BULK, MODE_RR, MODE_CRR, MODE_PERSISTENT_RR):
         raise RuntimeError("malformed session_start mode")
     if start.direction not in (DIRECTION_UPLOAD, DIRECTION_DOWNLOAD):
         raise RuntimeError("malformed session_start direction")
@@ -748,7 +887,7 @@ def server_response_bytes(start: SessionStart, requests_completed: int) -> int:
         return per_stream + (1 if stream_index < remainder else 0)
     if start.mode == MODE_BULK and start.direction == DIRECTION_DOWNLOAD:
         return start.response_bytes
-    if start.mode in (MODE_RR, MODE_CRR):
+    if start.mode in (MODE_RR, MODE_CRR, MODE_PERSISTENT_RR):
         return start.response_bytes
     return 0
 
@@ -767,7 +906,7 @@ async def maybe_send_session_complete(session: ServerSession) -> None:
         and start.total_bytes.set
         and session.requests_completed >= start.streams
     ) or (
-        start.mode == MODE_RR
+        start.mode in (MODE_RR, MODE_PERSISTENT_RR)
         and start.requests.set
         and session.requests_completed >= start.requests.value
     )
@@ -898,6 +1037,8 @@ def mode_code(mode: str) -> int:
         return 1
     if mode == MODE_CRR:
         return 2
+    if mode == MODE_PERSISTENT_RR:
+        return 3
     return 0
 
 
@@ -906,6 +1047,8 @@ def mode_from_code(code: int) -> str:
         return MODE_RR
     if code == 2:
         return MODE_CRR
+    if code == 3:
+        return MODE_PERSISTENT_RR
     return MODE_BULK
 
 

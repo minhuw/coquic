@@ -341,6 +341,8 @@ func modeToU8(mode config.Mode) byte {
 		return 1
 	case config.ModeCRR:
 		return 2
+	case config.ModePersistentRR:
+		return 3
 	default:
 		return 0
 	}
@@ -354,6 +356,8 @@ func parseMode(value byte) (config.Mode, bool) {
 		return config.ModeRR, true
 	case 2:
 		return config.ModeCRR, true
+	case 3:
+		return config.ModePersistentRR, true
 	default:
 		return 0, false
 	}

@@ -32,9 +32,10 @@ const (
 )
 
 const (
-	modeBulk = "bulk"
-	modeRR   = "rr"
-	modeCRR  = "crr"
+	modeBulk         = "bulk"
+	modeRR           = "rr"
+	modeCRR          = "crr"
+	modePersistentRR = "persistent-rr"
 )
 
 const (
@@ -218,6 +219,14 @@ type rrStreamResult struct {
 	err             error
 }
 
+type persistentRRResult struct {
+	bytesSent         uint64
+	bytesReceived     uint64
+	requestsCompleted uint64
+	latencies         []time.Duration
+	err               error
+}
+
 type serverSession struct {
 	conn *quic.Conn
 
@@ -228,6 +237,11 @@ type serverSession struct {
 	bytesReceived     atomic.Uint64
 	requestsCompleted atomic.Uint64
 	completeOnce      sync.Once
+}
+
+type persistentRequest struct {
+	startedAt time.Time
+	counts    bool
 }
 
 func main() {
@@ -316,7 +330,7 @@ func parseArgs(args []string) (config, error) {
 	if fs.NArg() != 0 {
 		return cfg, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
-	if cfg.mode != modeBulk && cfg.mode != modeRR && cfg.mode != modeCRR {
+	if cfg.mode != modeBulk && cfg.mode != modeRR && cfg.mode != modeCRR && cfg.mode != modePersistentRR {
 		return cfg, fmt.Errorf("unsupported mode: %s", cfg.mode)
 	}
 	if cfg.ioBackend != "socket" && cfg.ioBackend != "io_uring" {
@@ -332,6 +346,9 @@ func parseArgs(args []string) (config, error) {
 	}
 	if cfg.streams == 0 || cfg.connections == 0 || cfg.requestsInFlight == 0 {
 		return cfg, errors.New("streams, connections, and requests-in-flight must be greater than zero")
+	}
+	if cfg.mode == modePersistentRR && (cfg.requestBytes == 0 || cfg.responseBytes == 0) {
+		return cfg, errors.New("persistent-rr requires nonzero request and response bytes")
 	}
 	if cfg.port > 65535 {
 		return cfg, errors.New("port must fit in uint16")
@@ -421,6 +438,10 @@ func handleServerConnection(conn *quic.Conn) {
 }
 
 func handleServerDataStream(session *serverSession, stream *quic.Stream) {
+	if session.start.mode == modePersistentRR {
+		handlePersistentRRServerStream(session, stream)
+		return
+	}
 	received, err := copyAndCount(io.Discard, stream)
 	if err != nil {
 		return
@@ -464,6 +485,40 @@ func handleServerDataStream(session *serverSession, stream *quic.Stream) {
 	}
 }
 
+func handlePersistentRRServerStream(session *serverSession, stream *quic.Stream) {
+	buf := make([]byte, 64*1024)
+	var pending uint64
+	for {
+		n, err := stream.Read(buf)
+		if n > 0 {
+			byteCount := uint64(n)
+			session.bytesReceived.Add(byteCount)
+			pending += byteCount
+			for pending >= session.start.requestBytes {
+				sent, writeErr := writeN(stream, session.start.responseBytes)
+				session.bytesSent.Add(sent)
+				if writeErr != nil {
+					return
+				}
+				requestsCompleted := session.requestsCompleted.Add(1)
+				pending -= session.start.requestBytes
+				if shouldSendSessionComplete(session, requestsCompleted) {
+					session.completeOnce.Do(func() {
+						_ = sendControlMessage(session.control, encodeSessionComplete(sessionComplete{
+							bytesSent:         session.bytesSent.Load(),
+							bytesReceived:     session.bytesReceived.Load(),
+							requestsCompleted: session.requestsCompleted.Load(),
+						}), true)
+					})
+				}
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
 func shouldSendSessionComplete(session *serverSession, requestsCompleted uint64) bool {
 	if session.start.mode == modeBulk && session.start.totalBytes.set &&
 		requestsCompleted >= session.start.streams {
@@ -474,7 +529,8 @@ func shouldSendSessionComplete(session *serverSession, requestsCompleted uint64)
 		requestsCompleted >= session.start.streams {
 		return true
 	}
-	return session.start.mode == modeRR && session.start.requests.set &&
+	return (session.start.mode == modeRR || session.start.mode == modePersistentRR) &&
+		session.start.requests.set &&
 		requestsCompleted >= session.start.requests.value
 }
 
@@ -538,6 +594,13 @@ func runClient(cfg config) (runSummary, error) {
 		} else {
 			elapsed = cfg.duration
 		}
+	case modePersistentRR:
+		err = runPersistentRR(cfg, connections, counters)
+		if cfg.requests.set {
+			elapsed = time.Since(runStart)
+		} else {
+			elapsed = cfg.duration
+		}
 	case modeCRR:
 		err = runCRR(cfg, start, counters, dialer)
 		if cfg.requests.set {
@@ -564,7 +627,7 @@ func runClient(cfg config) (runSummary, error) {
 	summary.BytesReceived = counters.bytesReceived.Load()
 	summary.RequestsCompleted = counters.requestsCompleted.Load()
 	summary.SkippedSetupErrors = counters.skippedSetupErrors.Load()
-	if cfg.mode == modeRR || cfg.mode == modeCRR || !expectsSessionComplete(cfg) {
+	if cfg.mode == modeRR || cfg.mode == modePersistentRR || cfg.mode == modeCRR || !expectsSessionComplete(cfg) {
 		summary.ServerCounters.BytesSent = summary.BytesReceived
 		summary.ServerCounters.BytesReceived = summary.BytesSent
 		summary.ServerCounters.RequestsCompleted = summary.RequestsCompleted
@@ -599,7 +662,7 @@ func expectsSessionComplete(cfg config) bool {
 	if cfg.mode == modeBulk && cfg.totalBytes.set {
 		return true
 	}
-	return cfg.mode == modeRR && cfg.requests.set
+	return (cfg.mode == modeRR || cfg.mode == modePersistentRR) && cfg.requests.set
 }
 
 func newClientDialer(cfg config) (*clientDialer, error) {
@@ -627,7 +690,7 @@ func openConnections(ctx context.Context, dialer *clientDialer, cfg config, star
 	connections := make([]connectionState, 0, intCap(count))
 	for i := uint64(0); i < count; i++ {
 		connectionStart := start
-		if connectionStart.mode == modeRR && connectionStart.requests.set {
+		if (connectionStart.mode == modeRR || connectionStart.mode == modePersistentRR) && connectionStart.requests.set {
 			connectionStart.requests.value = rrRequestLimitForConnection(cfg, i)
 		}
 		conn, err := dialer.dialConnection(ctx, cfg)
@@ -909,8 +972,131 @@ func runRR(cfg config, connections []connectionState, counters *measuredCounters
 	return nil
 }
 
+func runPersistentRR(cfg config, connections []connectionState, counters *measuredCounters) error {
+	measureStart := time.Now().Add(cfg.warmup)
+	measureDeadline := measureStart.Add(cfg.duration)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	resultCh := make(chan persistentRRResult, len(connections))
+	var remaining uint64
+	if cfg.requests.set {
+		remaining = cfg.requests.value
+	}
+	for index, connection := range connections {
+		limit := uint64(0)
+		if cfg.requests.set {
+			limit = rrRequestLimitForConnection(cfg, uint64(index))
+		}
+		go func(conn *quic.Conn, requestLimit uint64) {
+			resultCh <- runPersistentRRConnection(ctx, cfg, conn, measureStart, measureDeadline, requestLimit)
+		}(connection.conn, limit)
+	}
+
+	for range connections {
+		result := <-resultCh
+		if result.err != nil {
+			return result.err
+		}
+		counters.bytesSent.Add(result.bytesSent)
+		counters.bytesReceived.Add(result.bytesReceived)
+		counters.requestsCompleted.Add(result.requestsCompleted)
+		counters.latencyMu.Lock()
+		counters.latencies = append(counters.latencies, result.latencies...)
+		counters.latencyMu.Unlock()
+		if cfg.requests.set {
+			if result.requestsCompleted > remaining {
+				remaining = 0
+			} else {
+				remaining -= result.requestsCompleted
+			}
+		}
+	}
+	return nil
+}
+
+func runPersistentRRConnection(
+	ctx context.Context,
+	cfg config,
+	conn *quic.Conn,
+	measureStart time.Time,
+	measureDeadline time.Time,
+	requestLimit uint64,
+) persistentRRResult {
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return persistentRRResult{err: err}
+	}
+	var result persistentRRResult
+	outstanding := make([]persistentRequest, 0, cfg.requestsInFlight)
+	started := uint64(0)
+	var pendingRead uint64
+	buf := make([]byte, 64*1024)
+
+	canStart := func(now time.Time) bool {
+		if cfg.requests.set {
+			return started < requestLimit
+		}
+		return now.Before(measureDeadline)
+	}
+	sendOne := func(now time.Time) error {
+		if _, err := writeN(stream, cfg.requestBytes); err != nil {
+			return err
+		}
+		counts := cfg.requests.set || now.After(measureStart)
+		outstanding = append(outstanding, persistentRequest{startedAt: now, counts: counts})
+		started++
+		if counts {
+			result.bytesSent += cfg.requestBytes
+		}
+		return nil
+	}
+
+	for uint64(len(outstanding)) < cfg.requestsInFlight && canStart(time.Now()) {
+		if err := sendOne(time.Now()); err != nil {
+			return persistentRRResult{err: err}
+		}
+	}
+	for {
+		if len(outstanding) == 0 && (cfg.requests.set || time.Now().After(measureDeadline)) {
+			break
+		}
+		n, err := stream.Read(buf)
+		if n > 0 {
+			now := time.Now()
+			pendingRead += uint64(n)
+			for pendingRead >= cfg.responseBytes && len(outstanding) > 0 {
+				request := outstanding[0]
+				copy(outstanding, outstanding[1:])
+				outstanding = outstanding[:len(outstanding)-1]
+				pendingRead -= cfg.responseBytes
+				if request.counts && now.After(measureStart) {
+					result.bytesReceived += cfg.responseBytes
+					result.requestsCompleted++
+					result.latencies = append(result.latencies, now.Sub(request.startedAt))
+				}
+				for uint64(len(outstanding)) < cfg.requestsInFlight && canStart(now) {
+					if err := sendOne(now); err != nil {
+						return persistentRRResult{err: err}
+					}
+				}
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) && len(outstanding) == 0 {
+				break
+			}
+			return persistentRRResult{err: err}
+		}
+	}
+	if err := stream.Close(); err != nil {
+		return persistentRRResult{err: err}
+	}
+	return result
+}
+
 func rrConnectionTarget(cfg config) uint64 {
-	if cfg.mode == modeRR && cfg.requests.set && cfg.requests.value < cfg.connections {
+	if (cfg.mode == modeRR || cfg.mode == modePersistentRR) && cfg.requests.set && cfg.requests.value < cfg.connections {
 		return cfg.requests.value
 	}
 	return cfg.connections
@@ -1105,7 +1291,7 @@ func readControlMessage(r io.Reader) (controlMessage, error) {
 			connections:      binary.BigEndian.Uint64(payload[63:71]),
 			requestsInFlight: binary.BigEndian.Uint64(payload[71:79]),
 		}
-		if msg.start.mode != modeBulk && msg.start.mode != modeRR && msg.start.mode != modeCRR {
+		if msg.start.mode != modeBulk && msg.start.mode != modeRR && msg.start.mode != modeCRR && msg.start.mode != modePersistentRR {
 			return msg, errors.New("malformed session_start mode")
 		}
 		if msg.start.direction != directionUpload && msg.start.direction != directionDownload {
@@ -1207,6 +1393,8 @@ func modeCode(mode string) byte {
 		return 1
 	case modeCRR:
 		return 2
+	case modePersistentRR:
+		return 3
 	default:
 		return 0
 	}
@@ -1227,6 +1415,8 @@ func modeFromCode(value byte) string {
 		return modeRR
 	case 2:
 		return modeCRR
+	case 3:
+		return modePersistentRR
 	default:
 		return "unknown"
 	}

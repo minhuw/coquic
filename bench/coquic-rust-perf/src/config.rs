@@ -28,6 +28,8 @@ pub enum Mode {
     Bulk,
     Rr,
     Crr,
+    #[serde(rename = "persistent-rr")]
+    PersistentRr,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
@@ -177,6 +179,11 @@ pub fn parse_runtime_args(args: impl IntoIterator<Item = String>) -> Result<Perf
     if config.streams == 0 || config.connections == 0 || config.requests_in_flight == 0 {
         return Err(PerfError::new(usage()));
     }
+    if config.mode == Mode::PersistentRr
+        && (config.request_bytes == 0 || config.response_bytes == 0)
+    {
+        return Err(PerfError::new(usage()));
+    }
 
     Ok(config)
 }
@@ -282,6 +289,7 @@ fn parse_mode(value: &str) -> Result<Mode> {
         "bulk" => Ok(Mode::Bulk),
         "rr" => Ok(Mode::Rr),
         "crr" => Ok(Mode::Crr),
+        "persistent-rr" => Ok(Mode::PersistentRr),
         _ => Err(PerfError::new(usage())),
     }
 }
@@ -309,6 +317,7 @@ pub fn mode_name(mode: Mode) -> &'static str {
         Mode::Bulk => "bulk",
         Mode::Rr => "rr",
         Mode::Crr => "crr",
+        Mode::PersistentRr => "persistent-rr",
     }
 }
 
@@ -331,7 +340,7 @@ pub fn congestion_control_name(congestion_control: CongestionControl) -> &'stati
 fn usage() -> &'static str {
     "usage: coquic-rust-perf [server|client] [--host HOST] [--port PORT] \
      [--io-backend socket] [--congestion-control newreno|cubic|bbr|copa] \
-     [--mode bulk|rr|crr] [--direction upload|download] [--request-bytes N] \
+     [--mode bulk|rr|crr|persistent-rr] [--direction upload|download] [--request-bytes N] \
      [--response-bytes N] [--streams N] [--connections N] \
      [--requests-in-flight N] [--requests N] [--total-bytes N] \
      [--warmup 250ms|2s] [--duration 250ms|2s] \

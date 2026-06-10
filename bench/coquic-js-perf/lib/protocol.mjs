@@ -306,11 +306,11 @@ function appendU64(out, value) {
 }
 
 function modeToU8(mode) {
-  return { [Mode.BULK]: 0, [Mode.RR]: 1, [Mode.CRR]: 2 }[mode];
+  return { [Mode.BULK]: 0, [Mode.RR]: 1, [Mode.CRR]: 2, [Mode.PERSISTENT_RR]: 3 }[mode];
 }
 
 function parseMode(value) {
-  return { 0: Mode.BULK, 1: Mode.RR, 2: Mode.CRR }[value] ?? null;
+  return { 0: Mode.BULK, 1: Mode.RR, 2: Mode.CRR, 3: Mode.PERSISTENT_RR }[value] ?? null;
 }
 
 function directionToU8(direction) {

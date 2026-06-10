@@ -28,6 +28,7 @@
 #define MODE_CODE_BULK 0U
 #define MODE_CODE_RR 1U
 #define MODE_CODE_CRR 2U
+#define MODE_CODE_PERSISTENT_RR 3U
 #define DIRECTION_CODE_UPLOAD 0U
 #define DIRECTION_CODE_DOWNLOAD 1U
 #define TRANSFER_CONNECTION_WINDOW (32ULL * 1024ULL * 1024ULL)
@@ -126,6 +127,13 @@ typedef struct stream_ctx_t {
     uint64_t response_received;
     uint64_t response_sent;
     uint64_t started_at;
+    int persistent_rr;
+    uint64_t response_pending;
+    uint64_t *persistent_started_at;
+    uint8_t *persistent_counts;
+    size_t persistent_head;
+    size_t persistent_len;
+    size_t persistent_cap;
 } stream_ctx_t;
 
 typedef struct perf_session_start_t {
@@ -366,7 +374,8 @@ static config_t parse_args(int argc, char **argv) {
             exit(2);
         }
     }
-    if (!is_mode(&cfg, "bulk") && !is_mode(&cfg, "rr") && !is_mode(&cfg, "crr")) {
+    if (!is_mode(&cfg, "bulk") && !is_mode(&cfg, "rr") && !is_mode(&cfg, "crr") &&
+        !is_mode(&cfg, "persistent-rr")) {
         fprintf(stderr, "unsupported mode: %s\n", cfg.mode);
         exit(2);
     }
@@ -397,6 +406,10 @@ static config_t parse_args(int argc, char **argv) {
     }
     if (cfg.streams == 0 || cfg.connections == 0 || cfg.requests_in_flight == 0) {
         fprintf(stderr, "streams, connections, and requests-in-flight must be greater than zero\n");
+        exit(2);
+    }
+    if (is_mode(&cfg, "persistent-rr") && (cfg.request_bytes == 0 || cfg.response_bytes == 0)) {
+        fprintf(stderr, "persistent-rr requires nonzero request and response bytes\n");
         exit(2);
     }
     return cfg;
@@ -509,6 +522,8 @@ static void remove_stream(app_ctx_t *app, stream_ctx_t *stream) {
             *pp = stream->next;
             free(stream->control_out);
             free(stream->control_in);
+            free(stream->persistent_started_at);
+            free(stream->persistent_counts);
             free(stream);
             return;
         }
@@ -521,9 +536,51 @@ static void free_streams(app_ctx_t *app) {
         stream_ctx_t *next = app->streams->next;
         free(app->streams->control_out);
         free(app->streams->control_in);
+        free(app->streams->persistent_started_at);
+        free(app->streams->persistent_counts);
         free(app->streams);
         app->streams = next;
     }
+}
+
+static int persistent_queue_push(stream_ctx_t *stream, uint64_t started_at, int counts) {
+    if (stream->persistent_len == stream->persistent_cap) {
+        size_t new_cap = stream->persistent_cap ? stream->persistent_cap * 2 : 8;
+        uint64_t *new_started = (uint64_t *)malloc(new_cap * sizeof(new_started[0]));
+        uint8_t *new_counts = (uint8_t *)malloc(new_cap * sizeof(new_counts[0]));
+        if (new_started == NULL || new_counts == NULL) {
+            free(new_started);
+            free(new_counts);
+            return -1;
+        }
+        for (size_t i = 0; i < stream->persistent_len; ++i) {
+            size_t old = (stream->persistent_head + i) % stream->persistent_cap;
+            new_started[i] = stream->persistent_started_at[old];
+            new_counts[i] = stream->persistent_counts[old];
+        }
+        free(stream->persistent_started_at);
+        free(stream->persistent_counts);
+        stream->persistent_started_at = new_started;
+        stream->persistent_counts = new_counts;
+        stream->persistent_cap = new_cap;
+        stream->persistent_head = 0;
+    }
+    size_t index = (stream->persistent_head + stream->persistent_len) % stream->persistent_cap;
+    stream->persistent_started_at[index] = started_at;
+    stream->persistent_counts[index] = counts ? 1 : 0;
+    ++stream->persistent_len;
+    return 0;
+}
+
+static int persistent_queue_pop(stream_ctx_t *stream, uint64_t *started_at, int *counts) {
+    if (stream->persistent_len == 0) {
+        return -1;
+    }
+    *started_at = stream->persistent_started_at[stream->persistent_head];
+    *counts = stream->persistent_counts[stream->persistent_head] != 0;
+    stream->persistent_head = (stream->persistent_head + 1) % stream->persistent_cap;
+    --stream->persistent_len;
+    return 0;
 }
 
 static void encode_be32(uint8_t *out, uint32_t value) {
@@ -560,6 +617,9 @@ static uint8_t mode_code(const char *mode) {
     if (strcmp(mode, "crr") == 0) {
         return MODE_CODE_CRR;
     }
+    if (strcmp(mode, "persistent-rr") == 0) {
+        return MODE_CODE_PERSISTENT_RR;
+    }
     return MODE_CODE_BULK;
 }
 
@@ -583,7 +643,7 @@ static uint8_t *frame_control_message(uint8_t type, const uint8_t *payload, uint
 }
 
 static uint64_t rr_connection_target(const config_t *cfg) {
-    if (is_mode(cfg, "rr") && cfg->requests.set) {
+    if ((is_mode(cfg, "rr") || is_mode(cfg, "persistent-rr")) && cfg->requests.set) {
         return cfg->connections < cfg->requests.value ? cfg->connections : cfg->requests.value;
     }
     return cfg->connections;
@@ -669,10 +729,12 @@ static int decode_session_start_payload(const uint8_t *payload, size_t len,
     start->connections = decode_be64(payload + 63);
     start->requests_in_flight = decode_be64(payload + 71);
     if ((start->mode != MODE_CODE_BULK && start->mode != MODE_CODE_RR &&
-         start->mode != MODE_CODE_CRR) ||
+         start->mode != MODE_CODE_CRR && start->mode != MODE_CODE_PERSISTENT_RR) ||
         (start->direction != DIRECTION_CODE_UPLOAD &&
          start->direction != DIRECTION_CODE_DOWNLOAD) ||
-        start->streams == 0 || start->connections == 0 || start->requests_in_flight == 0) {
+        start->streams == 0 || start->connections == 0 || start->requests_in_flight == 0 ||
+        (start->mode == MODE_CODE_PERSISTENT_RR &&
+         (start->request_bytes == 0 || start->response_bytes == 0))) {
         return -1;
     }
     return 0;
@@ -704,10 +766,19 @@ static uint64_t active_streams_on_connection(app_ctx_t *app, picoquic_cnx_t *cnx
     uint64_t active = 0;
     for (stream_ctx_t *stream = app->streams; stream != NULL; stream = stream->next) {
         if (!stream->is_server && stream->stream_id != CONTROL_STREAM_ID && stream->cnx == cnx) {
-            active++;
+            active += stream->persistent_rr ? stream->persistent_len : 1;
         }
     }
     return active;
+}
+
+static stream_ctx_t *persistent_stream_on_connection(app_ctx_t *app, picoquic_cnx_t *cnx) {
+    for (stream_ctx_t *stream = app->streams; stream != NULL; stream = stream->next) {
+        if (!stream->is_server && stream->persistent_rr && stream->cnx == cnx) {
+            return stream;
+        }
+    }
+    return NULL;
 }
 
 static uint64_t connection_index_for(app_ctx_t *app, picoquic_cnx_t *cnx) {
@@ -738,6 +809,38 @@ static int open_request_stream(app_ctx_t *app, uint64_t request_bytes, uint64_t 
     stream->started_at = picoquic_current_time();
     if (picoquic_mark_active_stream(cnx, stream_id, 1, stream) != 0) {
         remove_stream(app, stream);
+        set_error(app, "picoquic_mark_active_stream failed");
+        return -1;
+    }
+    app->active_streams++;
+    app->started_requests++;
+    uint64_t index = connection_index_for(app, cnx);
+    if (index < app->connection_count) {
+        app->connection_requests_started[index]++;
+    }
+    return 0;
+}
+
+static int send_persistent_rr_request(app_ctx_t *app, picoquic_cnx_t *cnx, int counts) {
+    stream_ctx_t *stream = persistent_stream_on_connection(app, cnx);
+    if (stream == NULL) {
+        uint64_t stream_id = picoquic_get_next_local_stream_id(cnx, 0);
+        stream = alloc_stream(app, stream_id, 0);
+        if (stream == NULL) {
+            return -1;
+        }
+        stream->counts = counts;
+        stream->cnx = cnx;
+        stream->request_bytes = 0;
+        stream->response_bytes = app->cfg.response_bytes;
+        stream->persistent_rr = 1;
+    }
+    if (persistent_queue_push(stream, picoquic_current_time(), counts) != 0) {
+        set_error(app, "out of memory queuing persistent-rr request");
+        return -1;
+    }
+    stream->request_bytes += app->cfg.request_bytes;
+    if (picoquic_mark_active_stream(cnx, stream->stream_id, 1, stream) != 0) {
         set_error(app, "picoquic_mark_active_stream failed");
         return -1;
     }
@@ -821,8 +924,12 @@ static int open_rr_streams(app_ctx_t *app) {
             }
             int counts = now >= app->measure_start;
             app->next_connection = i;
-            if (open_request_stream(app, app->cfg.request_bytes, app->cfg.response_bytes, counts) !=
-                0) {
+            if (is_mode(&app->cfg, "persistent-rr")) {
+                if (send_persistent_rr_request(app, cnx, counts) != 0) {
+                    return -1;
+                }
+            } else if (open_request_stream(app, app->cfg.request_bytes, app->cfg.response_bytes,
+                                           counts) != 0) {
                 return -1;
             }
         }
@@ -853,7 +960,7 @@ static void maybe_finish_client(app_ctx_t *app) {
         }
         return;
     }
-    if (is_mode(&app->cfg, "rr")) {
+    if (is_mode(&app->cfg, "rr") || is_mode(&app->cfg, "persistent-rr")) {
         if (app->cfg.requests.set) {
             if (app->started_requests >= app->cfg.requests.value && app->active_streams == 0) {
                 app->finished = 1;
@@ -888,7 +995,11 @@ static int provide_client_data(stream_ctx_t *stream, uint8_t *context, size_t le
     uint64_t sent = stream->request_sent;
     uint64_t remaining = total > sent ? total - sent : 0;
     size_t to_send = remaining < (uint64_t)length ? (size_t)remaining : length;
-    int is_fin = (uint64_t)to_send == remaining;
+    int is_fin = (uint64_t)to_send == remaining && (!stream->persistent_rr || stream->request_fin);
+    if (to_send == 0 && !is_fin) {
+        (void)picoquic_provide_stream_data_buffer(context, 0, 0, 0);
+        return 0;
+    }
     uint8_t *buffer = picoquic_provide_stream_data_buffer(context, to_send, is_fin, !is_fin);
     if (buffer == NULL && to_send > 0) {
         return -1;
@@ -924,7 +1035,11 @@ static int provide_server_data(stream_ctx_t *stream, uint8_t *context, size_t le
                              ? stream->response_bytes - stream->response_sent
                              : 0;
     size_t to_send = remaining < (uint64_t)length ? (size_t)remaining : length;
-    int is_fin = (uint64_t)to_send == remaining;
+    int is_fin = (uint64_t)to_send == remaining && (!stream->persistent_rr || stream->request_fin);
+    if (to_send == 0 && !is_fin) {
+        (void)picoquic_provide_stream_data_buffer(context, 0, 0, 0);
+        return 0;
+    }
     uint8_t *buffer = picoquic_provide_stream_data_buffer(context, to_send, is_fin, !is_fin);
     if (buffer == NULL && to_send > 0) {
         return -1;
@@ -955,7 +1070,8 @@ static uint64_t server_response_bytes(const app_ctx_t *app, uint64_t requests_co
     if (start->mode == MODE_CODE_BULK && start->direction == DIRECTION_CODE_DOWNLOAD) {
         return start->response_bytes;
     }
-    if (start->mode == MODE_CODE_RR || start->mode == MODE_CODE_CRR) {
+    if (start->mode == MODE_CODE_RR || start->mode == MODE_CODE_CRR ||
+        start->mode == MODE_CODE_PERSISTENT_RR) {
         return start->response_bytes;
     }
     return 0;
@@ -971,8 +1087,8 @@ static int should_send_complete(const app_ctx_t *app) {
            (start->mode == MODE_CODE_BULK && start->total_bytes.set &&
             start->direction == DIRECTION_CODE_UPLOAD &&
             app->server_requests_completed >= start->streams) ||
-           (start->mode == MODE_CODE_RR && start->requests.set &&
-            app->server_requests_completed >= start->requests.value);
+           ((start->mode == MODE_CODE_RR || start->mode == MODE_CODE_PERSISTENT_RR) &&
+            start->requests.set && app->server_requests_completed >= start->requests.value);
 }
 
 static int receive_server_stream(app_ctx_t *app, picoquic_cnx_t *cnx, uint64_t stream_id,
@@ -1031,9 +1147,31 @@ static int receive_server_stream(app_ctx_t *app, picoquic_cnx_t *cnx, uint64_t s
         return 0;
     }
     stream->request_bytes = app->session_start.request_bytes;
+    stream->persistent_rr = app->session_start.mode == MODE_CODE_PERSISTENT_RR;
     stream->request_received += length;
     app->server_bytes_received += length;
-    if (fin) {
+    if (stream->persistent_rr) {
+        while (stream->request_received >= stream->request_bytes) {
+            stream->request_received -= stream->request_bytes;
+            app->server_requests_completed++;
+            stream->response_bytes += app->session_start.response_bytes;
+            if (picoquic_mark_active_stream(cnx, stream_id, 1, stream) != 0) {
+                set_error(app, "server failed to mark response stream active");
+                return -1;
+            }
+        }
+        if (fin) {
+            if (stream->request_received != 0) {
+                set_error(app, "picoquic-perf request byte count mismatch");
+                return -1;
+            }
+            stream->request_fin = 1;
+            if (picoquic_mark_active_stream(cnx, stream_id, 1, stream) != 0) {
+                set_error(app, "server failed to mark response stream active");
+                return -1;
+            }
+        }
+    } else if (fin) {
         if (stream->request_received != stream->request_bytes) {
             set_error(app, "picoquic-perf request byte count mismatch");
             return -1;
@@ -1079,6 +1217,32 @@ static int complete_client_stream(app_ctx_t *app, picoquic_cnx_t *cnx, stream_ct
     return 0;
 }
 
+static int complete_persistent_client_responses(app_ctx_t *app, stream_ctx_t *stream) {
+    while (stream->response_pending >= app->cfg.response_bytes) {
+        uint64_t started_at = 0;
+        int counts = 0;
+        if (persistent_queue_pop(stream, &started_at, &counts) != 0) {
+            set_error(app, "persistent-rr response without pending request");
+            return -1;
+        }
+        stream->response_pending -= app->cfg.response_bytes;
+        if (counts && picoquic_current_time() >= app->measure_start) {
+            app->counters.bytes_sent += app->cfg.request_bytes;
+            app->counters.bytes_received += app->cfg.response_bytes;
+            app->counters.requests_completed++;
+            if (latency_push(&app->counters.latencies, picoquic_current_time() - started_at) != 0) {
+                set_error(app, "out of memory recording latency");
+                return -1;
+            }
+        }
+        if (app->active_streams > 0) {
+            app->active_streams--;
+        }
+    }
+    maybe_finish_client(app);
+    return 0;
+}
+
 static int handle_client_control(app_ctx_t *app, picoquic_cnx_t *cnx, stream_ctx_t *stream,
                                  uint8_t *bytes, size_t length, int fin) {
     if (length != 0) {
@@ -1116,7 +1280,7 @@ static int handle_client_control(app_ctx_t *app, picoquic_cnx_t *cnx, stream_ctx
                     if (is_mode(&app->cfg, "bulk")) {
                         return open_bulk_streams(app);
                     }
-                    if (is_mode(&app->cfg, "rr")) {
+                    if (is_mode(&app->cfg, "rr") || is_mode(&app->cfg, "persistent-rr")) {
                         return open_rr_streams(app);
                     }
                 }
@@ -1179,6 +1343,21 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
                                              event == picoquic_callback_stream_fin);
             }
             stream->response_received += length;
+            if (stream->persistent_rr) {
+                stream->response_pending += length;
+                if (complete_persistent_client_responses(app, stream) != 0) {
+                    return -1;
+                }
+                if (event == picoquic_callback_stream_fin) {
+                    if (stream->response_pending != 0 || stream->persistent_len != 0) {
+                        set_error(app, "persistent-rr stream closed with pending responses");
+                        return -1;
+                    }
+                    picoquic_unlink_app_stream_ctx(cnx, stream->stream_id);
+                    remove_stream(app, stream);
+                }
+                return 0;
+            }
             if (event == picoquic_callback_stream_fin) {
                 return complete_client_stream(app, cnx, stream);
             }
@@ -1195,7 +1374,9 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
             return -1;
         }
         if (stream->is_server) {
-            if (stream->stream_id != CONTROL_STREAM_ID && !stream->request_fin) {
+            if (stream->stream_id != CONTROL_STREAM_ID && !stream->request_fin &&
+                (!stream->persistent_rr || stream->response_sent >= stream->response_bytes)) {
+                (void)picoquic_provide_stream_data_buffer(bytes, 0, 0, 0);
                 return 0;
             }
             if (provide_server_data(stream, bytes, length) != 0) {
@@ -1393,6 +1574,13 @@ static int connect_clients(app_ctx_t *app, picoquic_quic_t *quic) {
 }
 
 static void close_client_connections(app_ctx_t *app) {
+    for (stream_ctx_t *stream = app->streams; stream != NULL; stream = stream->next) {
+        if (!stream->is_server && stream->persistent_rr && !stream->request_fin &&
+            stream->cnx != NULL) {
+            stream->request_fin = 1;
+            (void)picoquic_mark_active_stream(stream->cnx, stream->stream_id, 1, stream);
+        }
+    }
     for (uint64_t i = 0; i < app->connection_count; ++i) {
         picoquic_cnx_t *cnx = app->connections == NULL ? NULL : app->connections[i];
         if (cnx != NULL && picoquic_get_cnx_state(cnx) < picoquic_state_disconnecting) {

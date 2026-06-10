@@ -280,6 +280,7 @@ case "${preset}" in
     runs=(
       "socket bulk download 0 65536 none 1 1 1 0ms 5s"
       "socket rr stay 32 48 none 1 1 4 0ms 5s"
+      "socket persistent-rr stay 32 48 none 1 1 4 0ms 5s"
       "socket crr stay 24 24 none 1 2 1 0ms 5s"
     )
     ;;
@@ -287,6 +288,7 @@ case "${preset}" in
     runs=(
       "socket bulk download 0 1048576 none 4 1 1 0ms 60s"
       "socket rr stay 32 32 none 1 128 4 5s 45s"
+      "socket persistent-rr stay 32 32 none 1 128 4 5s 45s"
       "socket crr stay 32 32 none 1 64 1 5s 45s"
     )
     ;;

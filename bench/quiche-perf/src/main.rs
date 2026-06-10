@@ -4,7 +4,7 @@ use quiche::{Connection, ConnectionId};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::Serialize;
 use std::cmp;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -23,6 +23,7 @@ const TOKEN: Token = Token(0);
 const MODE_BULK: &str = "bulk";
 const MODE_RR: &str = "rr";
 const MODE_CRR: &str = "crr";
+const MODE_PERSISTENT_RR: &str = "persistent-rr";
 const DIRECTION_UPLOAD: &str = "upload";
 const DIRECTION_DOWNLOAD: &str = "download";
 const DIRECTION_STAY: &str = "stay";
@@ -179,6 +180,15 @@ struct ClientStream {
     request_bytes: u64,
     counts: bool,
     start: Instant,
+    persistent: bool,
+    closing: bool,
+    response_pending: u64,
+    outstanding: VecDeque<PersistentRequest>,
+}
+
+struct PersistentRequest {
+    started_at: Instant,
+    counts: bool,
 }
 
 struct QuicheClient {
@@ -191,6 +201,7 @@ struct QuicheClient {
     buf: [u8; READ_CHUNK_SIZE],
     next_stream_id: u64,
     streams: HashMap<u64, ClientStream>,
+    persistent_stream_id: Option<u64>,
 }
 
 struct CrrClient {
@@ -206,6 +217,7 @@ struct ServerStream {
     request_fin: bool,
     response_sent: u64,
     response_fin: bool,
+    persistent: bool,
 }
 
 struct ServerClient {
@@ -345,7 +357,7 @@ fn parse_args(args: &[String]) -> Result<Config, AnyError> {
         }
     }
 
-    if ![MODE_BULK, MODE_RR, MODE_CRR].contains(&cfg.mode.as_str()) {
+    if ![MODE_BULK, MODE_RR, MODE_CRR, MODE_PERSISTENT_RR].contains(&cfg.mode.as_str()) {
         return Err(format!("unsupported mode: {}", cfg.mode).into());
     }
     if cfg.io_backend != "socket" && cfg.io_backend != "io_uring" {
@@ -371,6 +383,9 @@ fn parse_args(args: &[String]) -> Result<Config, AnyError> {
         return Err(
             "streams, connections, and requests-in-flight must be greater than zero".into(),
         );
+    }
+    if cfg.mode == MODE_PERSISTENT_RR && (cfg.request_bytes == 0 || cfg.response_bytes == 0) {
+        return Err("persistent-rr requires nonzero request and response bytes".into());
     }
     Ok(cfg)
 }
@@ -517,6 +532,21 @@ fn handle_server_client(client: &mut ServerClient) -> Result<(), AnyError> {
                             .streams
                             .entry(stream_id)
                             .or_insert_with(|| ServerStream::new(&start));
+                        if start.mode == MODE_PERSISTENT_RR {
+                            let completed = state.receive_persistent(&buf[..read]);
+                            client.bytes_received += read as u64;
+                            if completed != 0 {
+                                client.requests_completed += completed;
+                                state.response_bytes += start.response_bytes * completed;
+                                state.persistent = true;
+                                state.request_fin = false;
+                                state.response_fin = false;
+                            }
+                            if fin {
+                                state.request_fin = true;
+                            }
+                            continue;
+                        }
                         state.receive(&buf[..read], fin)?;
                         client.bytes_received += read as u64;
                         if fin {
@@ -549,7 +579,9 @@ fn handle_server_client(client: &mut ServerClient) -> Result<(), AnyError> {
     let ready: Vec<u64> = client
         .streams
         .iter()
-        .filter_map(|(id, state)| (state.request_fin && !state.response_fin).then_some(*id))
+        .filter_map(|(id, state)| {
+            ((state.persistent || state.request_fin) && !state.response_fin).then_some(*id)
+        })
         .collect();
     for stream_id in ready {
         let sent = if let Some(state) = client.streams.get_mut(&stream_id) {
@@ -655,7 +687,7 @@ fn maybe_send_session_complete(client: &mut ServerClient) -> Result<(), AnyError
             && start.direction == DIRECTION_UPLOAD
             && start.total_bytes.set
             && client.requests_completed >= start.streams)
-        || (start.mode == MODE_RR
+        || ((start.mode == MODE_RR || start.mode == MODE_PERSISTENT_RR)
             && start.requests.set
             && client.requests_completed >= start.requests.value);
     if !complete {
@@ -684,7 +716,18 @@ impl ServerStream {
             request_fin: false,
             response_sent: 0,
             response_fin: false,
+            persistent: start.mode == MODE_PERSISTENT_RR,
         }
+    }
+
+    fn receive_persistent(&mut self, bytes: &[u8]) -> u64 {
+        self.request_received += bytes.len() as u64;
+        if self.request_bytes == 0 {
+            return 0;
+        }
+        let completed = self.request_received / self.request_bytes;
+        self.request_received %= self.request_bytes;
+        completed
     }
 
     fn receive(&mut self, bytes: &[u8], fin: bool) -> Result<(), AnyError> {
@@ -703,18 +746,21 @@ impl ServerStream {
     }
 
     fn write_response(&mut self, conn: &mut Connection, stream_id: u64) -> Result<(), AnyError> {
-        if !self.request_fin || self.response_fin {
+        if (!self.persistent && !self.request_fin) || self.response_fin {
             return Ok(());
         }
         let data = [0x5a_u8; WRITE_CHUNK_SIZE];
         loop {
             let remaining = self.response_bytes.saturating_sub(self.response_sent);
+            if remaining == 0 {
+                break;
+            }
             let chunk = cmp::min(remaining, data.len() as u64) as usize;
-            let fin = chunk as u64 == remaining;
+            let fin = !self.persistent && chunk as u64 == remaining;
             match conn.stream_send(stream_id, &data[..chunk], fin) {
                 Ok(written) => {
                     self.response_sent += written as u64;
-                    if fin && written == chunk {
+                    if !self.persistent && fin && written == chunk {
                         self.response_fin = true;
                         break;
                     }
@@ -723,6 +769,13 @@ impl ServerStream {
                     }
                 }
                 Err(quiche::Error::Done) => break,
+                Err(err) => return Err(err.into()),
+            }
+        }
+        if self.persistent && self.request_fin && self.response_sent >= self.response_bytes {
+            match conn.stream_send(stream_id, &[], true) {
+                Ok(_) => self.response_fin = true,
+                Err(quiche::Error::Done) => {}
                 Err(err) => return Err(err.into()),
             }
         }
@@ -765,6 +818,14 @@ fn run_client(cfg: &Config, summary: &mut RunSummary) -> Result<(), AnyError> {
         }
         MODE_RR => {
             run_rr(cfg, &start, &mut counters)?;
+            if cfg.requests.set {
+                run_start.elapsed()
+            } else {
+                cfg.duration
+            }
+        }
+        MODE_PERSISTENT_RR => {
+            run_persistent_rr(cfg, &start, &mut counters)?;
             if cfg.requests.set {
                 run_start.elapsed()
             } else {
@@ -949,8 +1010,102 @@ fn run_rr(cfg: &Config, start: &SessionStart, counters: &mut Counters) -> Result
     Ok(())
 }
 
+fn run_persistent_rr(
+    cfg: &Config,
+    start: &SessionStart,
+    counters: &mut Counters,
+) -> Result<(), AnyError> {
+    let mut clients = open_connections(cfg, start, rr_connection_target(cfg))?;
+    let measure_start = Instant::now() + cfg.warmup;
+    let measure_deadline = measure_start + cfg.duration;
+    let mut started_by_connection = vec![0_u64; clients.len()];
+
+    for (index, client) in clients.iter_mut().enumerate() {
+        while persistent_outstanding(client) < cfg.requests_in_flight {
+            if !can_start_persistent_rr_request(
+                cfg,
+                &started_by_connection,
+                index,
+                measure_deadline,
+            ) {
+                break;
+            }
+            client.send_persistent_rr_request(
+                cfg.requests.set || Instant::now() >= measure_start,
+                cfg.request_bytes,
+                cfg.response_bytes,
+            )?;
+            started_by_connection[index] += 1;
+        }
+    }
+
+    loop {
+        if persistent_rr_done(cfg, &clients, measure_deadline) {
+            break;
+        }
+        let mut made_progress = false;
+        for client in &mut clients {
+            for completed in client.drive(Some(Instant::now()))? {
+                made_progress = true;
+                if completed.counts && Instant::now() >= measure_start {
+                    counters.bytes_sent += completed.request_bytes;
+                    counters.bytes_received += completed.received;
+                    counters.requests_completed += 1;
+                    counters.latencies.push(completed.latency);
+                }
+            }
+        }
+        for (index, client) in clients.iter_mut().enumerate() {
+            while persistent_outstanding(client) < cfg.requests_in_flight {
+                if !can_start_persistent_rr_request(
+                    cfg,
+                    &started_by_connection,
+                    index,
+                    measure_deadline,
+                ) {
+                    break;
+                }
+                client.send_persistent_rr_request(
+                    cfg.requests.set || Instant::now() >= measure_start,
+                    cfg.request_bytes,
+                    cfg.response_bytes,
+                )?;
+                started_by_connection[index] += 1;
+            }
+        }
+        if !made_progress {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    for client in &mut clients {
+        client.close_persistent_rr_stream()?;
+        client.drain(DRAIN_TIMEOUT)?;
+    }
+    Ok(())
+}
+
+fn persistent_outstanding(client: &QuicheClient) -> u64 {
+    let Some(stream_id) = client.persistent_stream_id else {
+        return 0;
+    };
+    client
+        .streams
+        .get(&stream_id)
+        .map(|stream| stream.outstanding.len() as u64)
+        .unwrap_or(0)
+}
+
+fn persistent_rr_done(cfg: &Config, clients: &[QuicheClient], measure_deadline: Instant) -> bool {
+    if cfg.requests.set {
+        return clients
+            .iter()
+            .all(|client| persistent_outstanding(client) == 0);
+    }
+    Instant::now() >= measure_deadline
+}
+
 fn rr_connection_target(cfg: &Config) -> u64 {
-    if cfg.mode == MODE_RR && cfg.requests.set {
+    if (cfg.mode == MODE_RR || cfg.mode == MODE_PERSISTENT_RR) && cfg.requests.set {
         cfg.connections.min(cfg.requests.value)
     } else {
         cfg.connections
@@ -979,6 +1134,19 @@ fn can_start_rr_request(
     started < cfg.requests.value
         && started_by_connection[connection_index]
             < rr_request_limit_for_connection(cfg, connection_index as u64)
+}
+
+fn can_start_persistent_rr_request(
+    cfg: &Config,
+    started_by_connection: &[u64],
+    connection_index: usize,
+    measure_deadline: Instant,
+) -> bool {
+    if cfg.requests.set {
+        return started_by_connection[connection_index]
+            < rr_request_limit_for_connection(cfg, connection_index as u64);
+    }
+    Instant::now() < measure_deadline
 }
 
 fn run_crr(cfg: &Config, counters: &mut Counters) -> Result<(), AnyError> {
@@ -1194,8 +1362,8 @@ impl QuicheClient {
             buf: [0; READ_CHUNK_SIZE],
             next_stream_id: FIRST_DATA_STREAM_ID,
             streams: HashMap::new(),
+            persistent_stream_id: None,
         };
-        client.try_send_control()?;
         client.flush()?;
         Ok(client)
     }
@@ -1206,6 +1374,7 @@ impl QuicheClient {
         request_bytes: u64,
         response_bytes: u64,
     ) -> Result<(), AnyError> {
+        self.wait_for_bidi_stream_slot(Instant::now() + Duration::from_secs(10))?;
         let stream_id = self.next_stream_id;
         self.next_stream_id += 4;
         let send_buf = vec![0x5a; int_cap(request_bytes)];
@@ -1220,8 +1389,74 @@ impl QuicheClient {
                 request_bytes,
                 counts,
                 start: Instant::now(),
+                persistent: false,
+                closing: false,
+                response_pending: 0,
+                outstanding: VecDeque::new(),
             },
         );
+        self.try_send_stream(stream_id)?;
+        self.flush()?;
+        Ok(())
+    }
+
+    fn send_persistent_rr_request(
+        &mut self,
+        counts: bool,
+        request_bytes: u64,
+        response_bytes: u64,
+    ) -> Result<(), AnyError> {
+        let stream_id = match self.persistent_stream_id {
+            Some(stream_id) => stream_id,
+            None => {
+                self.wait_for_bidi_stream_slot(Instant::now() + Duration::from_secs(10))?;
+                let stream_id = self.next_stream_id;
+                self.next_stream_id += 4;
+                self.persistent_stream_id = Some(stream_id);
+                self.streams.insert(
+                    stream_id,
+                    ClientStream {
+                        send_buf: Vec::new(),
+                        sent: 0,
+                        fin_sent: false,
+                        received: 0,
+                        response_bytes,
+                        request_bytes,
+                        counts: false,
+                        start: Instant::now(),
+                        persistent: true,
+                        closing: false,
+                        response_pending: 0,
+                        outstanding: VecDeque::new(),
+                    },
+                );
+                stream_id
+            }
+        };
+        let Some(stream) = self.streams.get_mut(&stream_id) else {
+            return Err("quiche persistent-rr stream missing".into());
+        };
+        stream
+            .send_buf
+            .extend(std::iter::repeat(0x5a).take(int_cap(request_bytes)));
+        stream.outstanding.push_back(PersistentRequest {
+            started_at: Instant::now(),
+            counts,
+        });
+        stream.request_bytes = request_bytes;
+        stream.response_bytes = response_bytes;
+        self.try_send_stream(stream_id)?;
+        self.flush()?;
+        Ok(())
+    }
+
+    fn close_persistent_rr_stream(&mut self) -> Result<(), AnyError> {
+        let Some(stream_id) = self.persistent_stream_id else {
+            return Ok(());
+        };
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.closing = true;
+        }
         self.try_send_stream(stream_id)?;
         self.flush()?;
         Ok(())
@@ -1237,6 +1472,7 @@ impl QuicheClient {
             (None, Some(b)) => Some(b),
             (None, None) => None,
         };
+        let timeout = timeout.map(|timeout| timeout.min(Duration::from_millis(1)));
         let timeout_is_quic = match (quic_timeout, deadline_timeout) {
             (Some(a), Some(b)) => a <= b,
             (Some(_), None) => true,
@@ -1246,8 +1482,6 @@ impl QuicheClient {
         if self.events.is_empty() && timeout_is_quic {
             self.conn.on_timeout();
         }
-
-        self.try_send_control()?;
 
         'read: loop {
             let (len, from) = match self.socket.recv_from(&mut self.buf) {
@@ -1260,6 +1494,10 @@ impl QuicheClient {
                 from,
             };
             let _ = self.conn.recv(&mut self.buf[..len], recv_info);
+        }
+
+        if self.conn.is_established() || self.conn.is_in_early_data() {
+            self.try_send_control()?;
         }
 
         let writable: Vec<u64> = self.conn.writable().collect();
@@ -1292,6 +1530,26 @@ impl QuicheClient {
                         }
                     }
                 } else if let Some(state) = self.streams.get_mut(&stream_id) {
+                    if state.persistent {
+                        state.received += read as u64;
+                        state.response_pending += read as u64;
+                        while state.response_pending >= state.response_bytes
+                            && !state.outstanding.is_empty()
+                        {
+                            state.response_pending -= state.response_bytes;
+                            let request = state.outstanding.pop_front().expect("checked non-empty");
+                            completed.push(CompletedStream {
+                                counts: request.counts,
+                                request_bytes: state.request_bytes,
+                                received: state.response_bytes,
+                                latency: request.started_at.elapsed(),
+                            });
+                        }
+                        if fin {
+                            self.streams.remove(&stream_id);
+                        }
+                        continue;
+                    }
                     state.received += read as u64;
                     if fin {
                         if state.received != state.response_bytes {
@@ -1315,6 +1573,16 @@ impl QuicheClient {
         }
         self.flush()?;
         Ok(completed)
+    }
+
+    fn wait_for_bidi_stream_slot(&mut self, deadline: Instant) -> Result<(), AnyError> {
+        while self.conn.peer_streams_left_bidi() == 0 {
+            if Instant::now() >= deadline {
+                return Err("quiche peer bidirectional stream limit timed out".into());
+            }
+            let _ = self.drive(Some(deadline))?;
+        }
+        Ok(())
     }
 
     fn control_ready(&self) -> bool {
@@ -1343,7 +1611,18 @@ impl QuicheClient {
         while !state.fin_sent {
             let remaining = &state.send_buf[state.sent..];
             let chunk = cmp::min(remaining.len(), WRITE_CHUNK_SIZE);
-            let fin = state.sent + chunk == state.send_buf.len();
+            if chunk == 0 {
+                if state.persistent && !state.closing {
+                    break;
+                }
+                match self.conn.stream_send(stream_id, &[], true) {
+                    Ok(_) => state.fin_sent = true,
+                    Err(quiche::Error::Done) => break,
+                    Err(err) => return Err(err.into()),
+                }
+                break;
+            }
+            let fin = !state.persistent && state.sent + chunk == state.send_buf.len();
             match self.conn.stream_send(stream_id, &remaining[..chunk], fin) {
                 Ok(written) => {
                     state.sent += written;
@@ -1356,6 +1635,21 @@ impl QuicheClient {
                     }
                 }
                 Err(quiche::Error::Done) => break,
+                Err(err) => return Err(err.into()),
+            }
+        }
+        if state.persistent && state.sent != 0 {
+            state.send_buf.drain(..state.sent);
+            state.sent = 0;
+        }
+        if state.persistent
+            && state.closing
+            && !state.fin_sent
+            && state.sent == state.send_buf.len()
+        {
+            match self.conn.stream_send(stream_id, &[], true) {
+                Ok(_) => state.fin_sent = true,
+                Err(quiche::Error::Done) => {}
                 Err(err) => return Err(err.into()),
             }
         }
@@ -1395,13 +1689,48 @@ fn open_connections(
     let mut clients = Vec::with_capacity(int_cap(count));
     for index in 0..count {
         let mut connection_start = start.clone();
-        if cfg.mode == MODE_RR && cfg.requests.set {
+        if (cfg.mode == MODE_RR || cfg.mode == MODE_PERSISTENT_RR) && cfg.requests.set {
             connection_start.requests = OptionalU64 {
                 value: rr_request_limit_for_connection(cfg, index),
                 set: true,
             };
         }
-        clients.push(QuicheClient::connect(cfg, &connection_start)?);
+        clients.push(QuicheClient::start_connecting(cfg, &connection_start)?);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut all_ready = true;
+        let mut made_progress = false;
+
+        for client in &mut clients {
+            if client.control_ready() {
+                continue;
+            }
+
+            all_ready = false;
+            client.drive(Some(Instant::now()))?;
+
+            if client.conn.is_closed() {
+                return Err("quiche connection closed during handshake".into());
+            }
+
+            if client.control_ready() {
+                made_progress = true;
+            }
+        }
+
+        if all_ready {
+            break;
+        }
+
+        if Instant::now() >= deadline {
+            return Err("quiche handshake timed out".into());
+        }
+
+        if !made_progress {
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
     Ok(clients)
 }
@@ -1423,7 +1752,7 @@ fn make_session_start(cfg: &Config) -> SessionStart {
 }
 
 fn validate_session_start(start: &SessionStart) -> Result<(), AnyError> {
-    if ![MODE_BULK, MODE_RR, MODE_CRR].contains(&start.mode.as_str()) {
+    if ![MODE_BULK, MODE_RR, MODE_CRR, MODE_PERSISTENT_RR].contains(&start.mode.as_str()) {
         return Err("malformed session_start mode".into());
     }
     if ![DIRECTION_UPLOAD, DIRECTION_DOWNLOAD].contains(&start.direction.as_str()) {
@@ -1431,6 +1760,9 @@ fn validate_session_start(start: &SessionStart) -> Result<(), AnyError> {
     }
     if start.streams == 0 || start.connections == 0 || start.requests_in_flight == 0 {
         return Err("malformed session_start counts".into());
+    }
+    if start.mode == MODE_PERSISTENT_RR && (start.request_bytes == 0 || start.response_bytes == 0) {
+        return Err("persistent-rr requires nonzero request and response bytes".into());
     }
     Ok(())
 }
@@ -1609,6 +1941,7 @@ fn mode_code(mode: &str) -> u8 {
     match mode {
         MODE_RR => 1,
         MODE_CRR => 2,
+        MODE_PERSISTENT_RR => 3,
         _ => 0,
     }
 }
@@ -1617,6 +1950,7 @@ fn mode_from_code(code: u8) -> &'static str {
     match code {
         1 => MODE_RR,
         2 => MODE_CRR,
+        3 => MODE_PERSISTENT_RR,
         _ => MODE_BULK,
     }
 }

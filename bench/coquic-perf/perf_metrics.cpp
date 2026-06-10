@@ -28,6 +28,8 @@ std::string mode_name(QuicPerfMode mode) {
         return "rr";
     case QuicPerfMode::crr:
         return "crr";
+    case QuicPerfMode::persistent_rr:
+        return "persistent-rr";
     }
     return "unknown";
 }

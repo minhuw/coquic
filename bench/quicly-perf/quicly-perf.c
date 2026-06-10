@@ -45,6 +45,7 @@
 #define MODE_CODE_BULK 0
 #define MODE_CODE_RR 1
 #define MODE_CODE_CRR 2
+#define MODE_CODE_PERSISTENT_RR 3
 #define DIRECTION_CODE_UPLOAD 0
 #define DIRECTION_CODE_DOWNLOAD 1
 #define DEFAULT_MAX_RUN_REQUESTS 4096ULL
@@ -140,6 +141,14 @@ typedef struct {
     uint64_t request_bytes;
     uint64_t response_bytes;
     int counts_latency;
+    int persistent_rr;
+    uint64_t response_pending;
+    quicly_stream_t *persistent_stream;
+    uint64_t *persistent_started_at;
+    uint8_t *persistent_counts;
+    size_t persistent_head;
+    size_t persistent_len;
+    size_t persistent_cap;
     int failed;
     int session_ready;
     uint8_t control_bytes[64];
@@ -186,7 +195,10 @@ typedef struct {
     uint64_t request_bytes;
     uint64_t response_bytes;
     uint64_t request_read;
+    uint64_t response_sent;
     int ready_to_send;
+    int persistent_rr;
+    int request_fin;
     int send_closed;
 } server_stream_data_t;
 
@@ -197,6 +209,7 @@ typedef struct {
     uint64_t response_read;
     uint64_t started_at;
     int counts_latency;
+    int persistent_rr;
     int completed;
     int counted;
 } client_stream_data_t;
@@ -217,6 +230,7 @@ static void client_on_receive(quicly_stream_t *stream, size_t off, const void *s
 static void client_on_destroy(quicly_stream_t *stream, quicly_error_t err);
 static quicly_error_t on_stream_open(quicly_stream_open_t *self, quicly_stream_t *stream);
 static quicly_error_t drive_client_once(int fd, quicly_conn_t *conn, int64_t max_wait_ms);
+static int write_request_body(quicly_stream_t *stream, client_batch_t *batch);
 
 static void *checked_calloc(size_t count, size_t size) {
     void *ptr = calloc(count, size);
@@ -404,7 +418,8 @@ static int is_direction(const config_t *cfg, const char *direction) {
 }
 
 static void validate_config(const config_t *cfg) {
-    if (!is_mode(cfg, "bulk") && !is_mode(cfg, "rr") && !is_mode(cfg, "crr")) {
+    if (!is_mode(cfg, "bulk") && !is_mode(cfg, "rr") && !is_mode(cfg, "crr") &&
+        !is_mode(cfg, "persistent-rr")) {
         fprintf(stderr, "unsupported mode: %s\n", cfg->mode);
         exit(2);
     }
@@ -434,6 +449,10 @@ static void validate_config(const config_t *cfg) {
     }
     if (cfg->streams == 0 || cfg->connections == 0 || cfg->requests_in_flight == 0) {
         fprintf(stderr, "streams, connections, and requests-in-flight must be greater than zero\n");
+        exit(2);
+    }
+    if (is_mode(cfg, "persistent-rr") && (cfg->request_bytes == 0 || cfg->response_bytes == 0)) {
+        fprintf(stderr, "persistent-rr requires nonzero request and response bytes\n");
         exit(2);
     }
 }
@@ -542,6 +561,8 @@ static void free_batch(client_batch_t *batch) {
         return;
     }
     free(batch->counters.latencies.values);
+    free(batch->persistent_started_at);
+    free(batch->persistent_counts);
     free(batch);
 }
 
@@ -551,6 +572,46 @@ static void finish_batch(client_batch_t *batch, counters_t *counters) {
     }
     counters_merge(counters, &batch->counters);
     free_batch(batch);
+}
+
+static int persistent_queue_push(client_batch_t *batch, uint64_t started_at, int counts_latency) {
+    if (batch->persistent_len == batch->persistent_cap) {
+        size_t new_cap = batch->persistent_cap ? batch->persistent_cap * 2 : 8;
+        uint64_t *new_started = malloc(new_cap * sizeof(new_started[0]));
+        uint8_t *new_counts = malloc(new_cap * sizeof(new_counts[0]));
+        if (new_started == NULL || new_counts == NULL) {
+            free(new_started);
+            free(new_counts);
+            return -1;
+        }
+        for (size_t i = 0; i != batch->persistent_len; ++i) {
+            size_t old = (batch->persistent_head + i) % batch->persistent_cap;
+            new_started[i] = batch->persistent_started_at[old];
+            new_counts[i] = batch->persistent_counts[old];
+        }
+        free(batch->persistent_started_at);
+        free(batch->persistent_counts);
+        batch->persistent_started_at = new_started;
+        batch->persistent_counts = new_counts;
+        batch->persistent_cap = new_cap;
+        batch->persistent_head = 0;
+    }
+    size_t index = (batch->persistent_head + batch->persistent_len) % batch->persistent_cap;
+    batch->persistent_started_at[index] = started_at;
+    batch->persistent_counts[index] = counts_latency ? 1 : 0;
+    ++batch->persistent_len;
+    return 0;
+}
+
+static int persistent_queue_pop(client_batch_t *batch, uint64_t *started_at, int *counts_latency) {
+    if (batch->persistent_len == 0) {
+        return -1;
+    }
+    *started_at = batch->persistent_started_at[batch->persistent_head];
+    *counts_latency = batch->persistent_counts[batch->persistent_head] != 0;
+    batch->persistent_head = (batch->persistent_head + 1) % batch->persistent_cap;
+    --batch->persistent_len;
+    return 0;
 }
 
 static int compare_u64(const void *a, const void *b) {
@@ -631,6 +692,9 @@ static uint8_t mode_code(const char *mode) {
     if (strcmp(mode, "crr") == 0) {
         return MODE_CODE_CRR;
     }
+    if (strcmp(mode, "persistent-rr") == 0) {
+        return MODE_CODE_PERSISTENT_RR;
+    }
     return MODE_CODE_BULK;
 }
 
@@ -641,10 +705,12 @@ static uint8_t direction_code(const char *direction) {
 static int valid_session_start(const perf_session_start_t *start) {
     return start->started &&
            (start->mode == MODE_CODE_BULK || start->mode == MODE_CODE_RR ||
-            start->mode == MODE_CODE_CRR) &&
+            start->mode == MODE_CODE_CRR || start->mode == MODE_CODE_PERSISTENT_RR) &&
            (start->direction == DIRECTION_CODE_UPLOAD ||
             start->direction == DIRECTION_CODE_DOWNLOAD) &&
-           start->streams != 0 && start->connections != 0 && start->requests_in_flight != 0;
+           start->streams != 0 && start->connections != 0 && start->requests_in_flight != 0 &&
+           (start->mode != MODE_CODE_PERSISTENT_RR ||
+            (start->request_bytes != 0 && start->response_bytes != 0));
 }
 
 static int decode_session_start_payload(const uint8_t *payload, size_t len,
@@ -706,7 +772,7 @@ static uint8_t *encode_session_start_message(const config_t *cfg, uint64_t reque
 }
 
 static uint64_t rr_connection_target(const config_t *cfg) {
-    if (is_mode(cfg, "rr") && cfg->requests.set) {
+    if ((is_mode(cfg, "rr") || is_mode(cfg, "persistent-rr")) && cfg->requests.set) {
         return cfg->connections < cfg->requests.value ? cfg->connections : cfg->requests.value;
     }
     return cfg->connections;
@@ -824,7 +890,8 @@ static uint64_t server_response_bytes(const perf_session_start_t *start,
     if (start->mode == MODE_CODE_BULK && start->direction == DIRECTION_CODE_DOWNLOAD) {
         return start->response_bytes;
     }
-    if (start->mode == MODE_CODE_RR || start->mode == MODE_CODE_CRR) {
+    if (start->mode == MODE_CODE_RR || start->mode == MODE_CODE_CRR ||
+        start->mode == MODE_CODE_PERSISTENT_RR) {
         return start->response_bytes;
     }
     return 0;
@@ -840,8 +907,8 @@ static int should_send_complete(server_conn_data_t *conn_data) {
            (start->mode == MODE_CODE_BULK && start->total_bytes.set &&
             start->direction == DIRECTION_CODE_UPLOAD &&
             conn_data->requests_completed >= start->streams) ||
-           (start->mode == MODE_CODE_RR && start->requests.set &&
-            conn_data->requests_completed >= start->requests.value);
+           ((start->mode == MODE_CODE_RR || start->mode == MODE_CODE_PERSISTENT_RR) &&
+            start->requests.set && conn_data->requests_completed >= start->requests.value);
 }
 
 static int send_control_on_stream(quicly_stream_t *stream, uint8_t *message, size_t len,
@@ -1099,6 +1166,7 @@ static void server_on_receive(quicly_stream_t *stream, size_t off, const void *s
     if (conn_data == NULL || !conn_data->start.started) {
         return;
     }
+    data->persistent_rr = conn_data->start.mode == MODE_CODE_PERSISTENT_RR;
 
     for (;;) {
         ptls_iovec_t input = quicly_streambuf_ingress_get(stream);
@@ -1110,7 +1178,22 @@ static void server_on_receive(quicly_stream_t *stream, size_t off, const void *s
         quicly_streambuf_ingress_shift(stream, input.len);
     }
 
-    if (quicly_recvstate_transfer_complete(&stream->recvstate)) {
+    if (data->persistent_rr) {
+        while (data->request_read >= conn_data->start.request_bytes) {
+            data->request_read -= conn_data->start.request_bytes;
+            ++conn_data->requests_completed;
+            data->response_bytes += conn_data->start.response_bytes;
+            data->ready_to_send = 1;
+        }
+        if (quicly_recvstate_transfer_complete(&stream->recvstate)) {
+            if (data->request_read != 0) {
+                quicly_reset_stream(stream, QUICLY_ERROR_FROM_APPLICATION_ERROR_CODE(1));
+                return;
+            }
+            data->request_fin = 1;
+            data->ready_to_send = 1;
+        }
+    } else if (quicly_recvstate_transfer_complete(&stream->recvstate)) {
         data->request_bytes = conn_data->start.request_bytes;
         if (data->request_read != data->request_bytes) {
             quicly_reset_stream(stream, QUICLY_ERROR_FROM_APPLICATION_ERROR_CODE(1));
@@ -1126,11 +1209,19 @@ static void server_on_receive(quicly_stream_t *stream, size_t off, const void *s
     }
 
     const quicly_streambuf_sendvec_callbacks_t *callbacks = sized_text_callbacks();
-    quicly_sendbuf_vec_t vec = {callbacks, data->response_bytes, NULL};
-    quicly_streambuf_egress_write_vec(stream, &vec);
-    quicly_streambuf_egress_shutdown(stream);
-    conn_data->bytes_sent += data->response_bytes;
-    data->send_closed = 1;
+    uint64_t pending = data->response_bytes - data->response_sent;
+    if (pending != 0) {
+        quicly_sendbuf_vec_t vec = {callbacks, pending, NULL};
+        quicly_streambuf_egress_write_vec(stream, &vec);
+        data->response_sent += pending;
+        conn_data->bytes_sent += pending;
+    }
+    if ((!data->persistent_rr || data->request_fin) &&
+        data->response_sent >= data->response_bytes) {
+        quicly_streambuf_egress_shutdown(stream);
+        data->send_closed = 1;
+    }
+    data->ready_to_send = 0;
     quicly_stream_t *control = quicly_get_stream(stream->conn, CONTROL_STREAM_ID);
     if (control != NULL) {
         maybe_send_server_complete(control, conn_data);
@@ -1159,6 +1250,32 @@ static void client_count_stream(client_stream_data_t *data) {
     }
     if (data->counts_latency) {
         latency_push(&batch->counters.latencies, now_us() - data->started_at);
+    }
+}
+
+static void client_count_persistent_responses(client_stream_data_t *data) {
+    client_batch_t *batch = data->batch;
+    if (batch == NULL || batch->response_bytes == 0) {
+        return;
+    }
+    while (batch->response_pending >= batch->response_bytes) {
+        uint64_t started_at = 0;
+        int counts_latency = 0;
+        if (persistent_queue_pop(batch, &started_at, &counts_latency) != 0) {
+            set_batch_failure(batch, "persistent-rr response without pending request");
+            return;
+        }
+        batch->response_pending -= batch->response_bytes;
+        batch->counters.bytes_sent += batch->request_bytes;
+        batch->counters.bytes_received += batch->response_bytes;
+        ++batch->counters.requests_completed;
+        ++batch->completed_requests;
+        if (batch->active_requests > 0) {
+            --batch->active_requests;
+        }
+        if (counts_latency) {
+            latency_push(&batch->counters.latencies, now_us() - started_at);
+        }
     }
 }
 
@@ -1196,9 +1313,23 @@ static void client_on_receive(quicly_stream_t *stream, size_t off, const void *s
     }
     if (input.len != 0) {
         data->response_read += input.len;
+        if (data->persistent_rr && data->batch != NULL) {
+            data->batch->response_pending += input.len;
+        }
         quicly_streambuf_ingress_shift(stream, input.len);
+        if (data->persistent_rr) {
+            client_count_persistent_responses(data);
+        }
     }
     if (quicly_recvstate_transfer_complete(&stream->recvstate)) {
+        if (data->persistent_rr) {
+            if (data->batch != NULL &&
+                (data->batch->response_pending != 0 || data->batch->persistent_len != 0)) {
+                set_batch_failure(data->batch,
+                                  "persistent-rr stream closed with pending responses");
+            }
+            return;
+        }
         data->completed = 1;
         client_count_stream(data);
     }
@@ -1207,7 +1338,7 @@ static void client_on_receive(quicly_stream_t *stream, size_t off, const void *s
 static void client_on_destroy(quicly_stream_t *stream, quicly_error_t err) {
     (void)err;
     client_stream_data_t *data = stream->data;
-    if (stream->stream_id != CONTROL_STREAM_ID) {
+    if (stream->stream_id != CONTROL_STREAM_ID && !data->persistent_rr) {
         client_count_stream(data);
     }
     quicly_streambuf_destroy(stream, err);
@@ -1415,6 +1546,18 @@ static int open_request_stream(quicly_conn_t *conn, client_batch_t *batch, int c
     data->started_at = now_us();
     data->counts_latency = counts && batch->counts_latency;
 
+    if (write_request_body(stream, batch) != 0) {
+        return -1;
+    }
+    if (quicly_streambuf_egress_shutdown(stream) != 0) {
+        set_batch_failure(batch, "could not close request stream send side");
+        return -1;
+    }
+    ++batch->active_requests;
+    return 0;
+}
+
+static int write_request_body(quicly_stream_t *stream, client_batch_t *batch) {
     static const uint8_t zeros[WRITE_CHUNK_SIZE] = {0};
     uint64_t sent = 0;
     while (sent < batch->request_bytes) {
@@ -1426,12 +1569,50 @@ static int open_request_stream(quicly_conn_t *conn, client_batch_t *batch, int c
         }
         sent += chunk;
     }
-    if (quicly_streambuf_egress_shutdown(stream) != 0) {
-        set_batch_failure(batch, "could not close request stream send side");
+    return 0;
+}
+
+static int open_persistent_rr_stream(quicly_conn_t *conn, client_batch_t *batch) {
+    if (batch->persistent_stream != NULL) {
+        return 0;
+    }
+    quicly_stream_t *stream = NULL;
+    quicly_error_t ret = quicly_open_stream(conn, &stream, 0);
+    if (ret != 0) {
+        set_batch_failure(batch, "quicly_open_stream persistent-rr failed");
+        return -1;
+    }
+    client_stream_data_t *data = stream->data;
+    data->batch = batch;
+    data->response_bytes = batch->response_bytes;
+    data->persistent_rr = 1;
+    batch->persistent_stream = stream;
+    return 0;
+}
+
+static int send_persistent_rr_request(quicly_conn_t *conn, client_batch_t *batch,
+                                      int counts_latency) {
+    if (open_persistent_rr_stream(conn, batch) != 0) {
+        return -1;
+    }
+    if (write_request_body(batch->persistent_stream, batch) != 0) {
+        return -1;
+    }
+    if (persistent_queue_push(batch, now_us(), counts_latency && batch->counts_latency) != 0) {
+        set_batch_failure(batch, "out of memory");
         return -1;
     }
     ++batch->active_requests;
+    ++batch->started_requests;
     return 0;
+}
+
+static void close_persistent_rr_stream(client_batch_t *batch) {
+    if (batch == NULL || batch->persistent_stream == NULL) {
+        return;
+    }
+    (void)quicly_streambuf_egress_shutdown(batch->persistent_stream);
+    batch->persistent_stream = NULL;
 }
 
 static int open_control_stream(quicly_conn_t *conn, const config_t *cfg, client_batch_t *batch,
@@ -1533,12 +1714,19 @@ static int refill_rr_clients(client_conn_t *clients, size_t count, const config_
             if (deadline_us != 0 && now_us() >= deadline_us) {
                 return 0;
             }
-            if (open_request_stream(clients[i].conn, batch, counts_latency) != 0) {
-                snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
-                return -1;
+            if (batch->persistent_rr) {
+                if (send_persistent_rr_request(clients[i].conn, batch, counts_latency) != 0) {
+                    snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
+                    return -1;
+                }
+            } else {
+                if (open_request_stream(clients[i].conn, batch, counts_latency) != 0) {
+                    snprintf(failure_reason, failure_reason_len, "%s", batch->failure_reason);
+                    return -1;
+                }
+                ++batch->started_requests;
             }
             ++*started;
-            ++batch->started_requests;
         }
     }
     return 0;
@@ -1602,6 +1790,12 @@ static void close_client_session(client_conn_t *client) {
         return;
     }
     if (client->conn != NULL) {
+        if (client->batch != NULL && client->batch->persistent_rr) {
+            close_persistent_rr_stream(client->batch);
+            if (client->fd >= 0) {
+                (void)send_pending(client->fd, client->conn);
+            }
+        }
         quicly_free(client->conn);
         client->conn = NULL;
     }
@@ -1674,6 +1868,7 @@ static int init_client_session(const config_t *cfg, client_conn_t *client,
     client->batch->request_bytes = request_bytes;
     client->batch->response_bytes = response_bytes;
     client->batch->counts_latency = counts_latency;
+    client->batch->persistent_rr = is_mode(cfg, "persistent-rr");
     client->conn = connect_client(cfg, &sa, failure_reason, failure_reason_len);
     if (client->conn == NULL) {
         free_batch(client->batch);
@@ -1711,7 +1906,7 @@ static client_conn_t *open_client_sessions(const config_t *cfg, size_t count,
         clients[i].fd = -1;
         config_t connection_cfg = *cfg;
         uint64_t connection_expected_requests = expected_requests;
-        if (is_mode(cfg, "rr") && cfg->requests.set) {
+        if ((is_mode(cfg, "rr") || is_mode(cfg, "persistent-rr")) && cfg->requests.set) {
             connection_expected_requests = rr_request_limit_for_connection(cfg, (uint64_t)i);
             connection_cfg.requests.value = connection_expected_requests;
             connection_cfg.requests.set = 1;
@@ -2072,7 +2267,7 @@ static run_summary_t run_client(const config_t *cfg) {
     int rc;
     if (is_mode(cfg, "bulk")) {
         rc = run_bulk(cfg, &counters, failure_reason, sizeof(failure_reason));
-    } else if (is_mode(cfg, "rr")) {
+    } else if (is_mode(cfg, "rr") || is_mode(cfg, "persistent-rr")) {
         rc = run_rr(cfg, &counters, failure_reason, sizeof(failure_reason));
     } else {
         rc = run_crr(cfg, &counters, failure_reason, sizeof(failure_reason));

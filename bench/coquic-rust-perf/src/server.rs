@@ -20,6 +20,7 @@ struct Session {
     bytes_sent: u64,
     bytes_received: u64,
     requests_completed: u64,
+    persistent_rr_pending_request_bytes: HashMap<StreamId, u64>,
 }
 
 impl Session {
@@ -31,6 +32,7 @@ impl Session {
             bytes_sent: 0,
             bytes_received: 0,
             requests_completed: 0,
+            persistent_rr_pending_request_bytes: HashMap::new(),
         }
     }
 }
@@ -67,6 +69,7 @@ enum ServerCommand {
         connection: ConnectionHandle,
         stream_id: StreamId,
         bytes: u64,
+        fin: bool,
     },
     SendControl {
         connection: ConnectionHandle,
@@ -244,9 +247,13 @@ impl Server<'_> {
                 .get_mut(&connection)
                 .ok_or_else(|| PerfError::new("data stream for unknown session"))?;
             session.bytes_received += bytes.len() as u64;
-            if fin {
+            if fin && start.mode != Mode::PersistentRr {
                 session.requests_completed += 1;
             }
+        }
+
+        if start.mode == Mode::PersistentRr {
+            return self.handle_persistent_rr_data(connection, stream_id, bytes.len() as u64, fin);
         }
 
         match (start.mode, start.direction, fin) {
@@ -255,6 +262,7 @@ impl Server<'_> {
                     connection,
                     stream_id,
                     bytes: start.response_bytes,
+                    fin: true,
                 });
                 if let Some(session) = self.sessions.get_mut(&connection) {
                     session.bytes_sent += start.response_bytes;
@@ -274,6 +282,7 @@ impl Server<'_> {
                     connection,
                     stream_id,
                     bytes: target_bytes,
+                    fin: true,
                 });
                 let should_complete = if let Some(session) = self.sessions.get_mut(&connection) {
                     session.bytes_sent += target_bytes;
@@ -304,6 +313,7 @@ impl Server<'_> {
                     connection,
                     stream_id,
                     bytes: start.response_bytes,
+                    fin: true,
                 });
                 if let Some(session) = self.sessions.get_mut(&connection) {
                     session.bytes_sent += start.response_bytes;
@@ -330,6 +340,58 @@ impl Server<'_> {
         Ok(commands)
     }
 
+    fn handle_persistent_rr_data(
+        &mut self,
+        connection: ConnectionHandle,
+        stream_id: StreamId,
+        byte_count: u64,
+        fin: bool,
+    ) -> Result<Vec<ServerCommand>> {
+        let mut commands = Vec::new();
+        let Some(session) = self.sessions.get_mut(&connection) else {
+            return Ok(commands);
+        };
+        let Some(start) = session.start.clone() else {
+            return Ok(commands);
+        };
+        let request_bytes = start.request_bytes;
+        let response_bytes = start.response_bytes;
+        let mut send_complete = false;
+        let pending_request_bytes = session
+            .persistent_rr_pending_request_bytes
+            .entry(stream_id)
+            .or_insert(0);
+        *pending_request_bytes = pending_request_bytes.saturating_add(byte_count);
+        while *pending_request_bytes >= request_bytes {
+            commands.push(ServerCommand::SendResponse {
+                connection,
+                stream_id,
+                bytes: response_bytes,
+                fin: false,
+            });
+            session.bytes_sent += response_bytes;
+            session.requests_completed += 1;
+            *pending_request_bytes -= request_bytes;
+            if start
+                .requests
+                .map(|requests| session.requests_completed >= requests)
+                .unwrap_or(false)
+            {
+                send_complete = true;
+                break;
+            }
+        }
+        if fin {
+            session.persistent_rr_pending_request_bytes.remove(&stream_id);
+        }
+        if send_complete {
+            if let Some(command) = self.make_complete_command(connection) {
+                commands.push(command);
+            }
+        }
+        Ok(commands)
+    }
+
     fn execute_command(
         &mut self,
         command: ServerCommand,
@@ -340,7 +402,8 @@ impl Server<'_> {
                 connection,
                 stream_id,
                 bytes,
-            } => self.send_response_body(connection, stream_id, bytes, now),
+                fin,
+            } => self.send_response_body(connection, stream_id, bytes, fin, now),
             ServerCommand::SendControl {
                 connection,
                 message,
@@ -353,6 +416,7 @@ impl Server<'_> {
         connection: ConnectionHandle,
         stream_id: StreamId,
         bytes: u64,
+        fin: bool,
         now: coquic::TimeUs,
     ) -> Result<QueryResult> {
         let endpoint = &self.endpoint;
@@ -361,7 +425,7 @@ impl Server<'_> {
         endpoint
             .connection(connection)
             .stream(stream_id)
-            .send(payload, true, now)
+            .send(payload, fin, now)
             .map_err(Into::into)
     }
 
@@ -433,6 +497,10 @@ pub fn validate_session_start(start: &SessionStart) -> Option<String> {
     }
     if start.requests_in_flight == 0 {
         return Some("requests_in_flight must be greater than zero".to_owned());
+    }
+    if start.mode == Mode::PersistentRr && (start.request_bytes == 0 || start.response_bytes == 0)
+    {
+        return Some("persistent-rr requires nonzero request and response bytes".to_owned());
     }
     None
 }

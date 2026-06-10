@@ -51,8 +51,12 @@ class ConnectionState:
     close_requested: bool = False
     control_bytes: bytearray = field(default_factory=bytearray)
     outstanding_requests: dict[int, OutstandingRequest] = field(default_factory=dict)
+    persistent_rr_outstanding_requests: list[OutstandingRequest] = field(default_factory=list)
     active_bulk_streams: dict[int, bool] = field(default_factory=dict)
     next_stream_id: int = FIRST_DATA_STREAM_ID
+    persistent_rr_stream_id: int | None = None
+    persistent_rr_fin_sent: bool = False
+    persistent_rr_response_pending_bytes: int = 0
     request_limit: int | None = None
     requests_started: int = 0
     server_complete_counted: bool = False
@@ -149,7 +153,11 @@ class Client:
                 self.summary.elapsed_ms = duration_millis(
                     self.result_elapsed_seconds(now)
                 )
-                if self.timed_rr_mode() or self.timed_crr_mode():
+                if (
+                    self.timed_rr_mode()
+                    or self.timed_persistent_rr_mode()
+                    or self.timed_crr_mode()
+                ):
                     self.summary.server_counters = ServerCounters(
                         bytes_sent=self.summary.bytes_received,
                         bytes_received=self.summary.bytes_sent,
@@ -272,6 +280,9 @@ class Client:
 
         if self.timed_bulk_mode():
             return self.handle_bulk_data(connection, stream_id, data, fin, now)
+
+        if self.config.mode == Mode.PERSISTENT_RR:
+            return self.handle_persistent_rr_data(connection, stream_id, data, now)
 
         if self.config.mode in (Mode.RR, Mode.CRR):
             return self.handle_request_response_data(
@@ -400,6 +411,32 @@ class Client:
             return self.close_connection(connection, b"done")
         return []
 
+    def handle_persistent_rr_data(
+        self, connection: int, stream_id: int, data: bytes, now: int
+    ) -> list[ClientCommand]:
+        state = self.connections.get(connection)
+        if state is None or state.persistent_rr_stream_id != stream_id:
+            return []
+
+        response_bytes = self.config.response_bytes
+        state.persistent_rr_response_pending_bytes += len(data)
+        while (
+            state.persistent_rr_response_pending_bytes >= response_bytes
+            and state.persistent_rr_outstanding_requests
+        ):
+            request = state.persistent_rr_outstanding_requests.pop(0)
+            state.persistent_rr_response_pending_bytes -= response_bytes
+            if request.counts_toward_measurement:
+                self.summary.bytes_received += response_bytes
+                self.summary.latency_samples.append((now - request.started_at) / 1_000_000)
+                self.summary.requests_completed += 1
+
+        if self.phase == BenchmarkPhase.DRAIN:
+            if not state.persistent_rr_outstanding_requests:
+                return self.maybe_close_persistent_rr_connection(connection)
+            return []
+        return self.maybe_issue_persistent_rr_requests(connection, now)
+
     def execute_command(self, command: ClientCommand, now: int) -> coquic.QueryResult:
         if isinstance(command, OpenConnectionCommand):
             config = self.make_client_config(self.next_connection_index)
@@ -424,6 +461,7 @@ class Client:
         commands: list[ClientCommand] = []
         commands.extend(self.maybe_start_bulk_streams(connection, now))
         commands.extend(self.maybe_issue_rr_requests(connection, now))
+        commands.extend(self.maybe_issue_persistent_rr_requests(connection, now))
         commands.extend(self.maybe_issue_crr_request(connection, now))
         return commands
 
@@ -501,6 +539,63 @@ class Client:
             self.requests_started += 1
         return commands
 
+    def maybe_issue_persistent_rr_requests(
+        self, connection: int, now: int
+    ) -> list[ClientCommand]:
+        commands: list[ClientCommand] = []
+        if (
+            self.config.mode != Mode.PERSISTENT_RR
+            or not self.benchmark_accepts_new_work()
+        ):
+            return commands
+        state = self.connections.get(connection)
+        if (
+            state is None
+            or not state.session_ready
+            or state.control_complete
+            or state.close_requested
+            or state.persistent_rr_fin_sent
+        ):
+            return commands
+        if state.persistent_rr_stream_id is None:
+            state.persistent_rr_stream_id = self.next_stream_id(connection)
+
+        while len(state.persistent_rr_outstanding_requests) < self.config.requests_in_flight and (
+            self.config.requests is None or self.requests_started < self.config.requests
+        ) and (
+            state.request_limit is None
+            or state.requests_started < state.request_limit
+        ):
+            counts = (
+                self.config.requests is not None
+                or self.phase == BenchmarkPhase.MEASURE
+            )
+            state.persistent_rr_outstanding_requests.append(
+                OutstandingRequest(now, counts)
+            )
+            state.requests_started += 1
+            self.requests_started += 1
+            if counts:
+                self.summary.bytes_sent += self.config.request_bytes
+            commands.append(
+                SendStreamCommand(
+                    connection,
+                    state.persistent_rr_stream_id,
+                    make_payload(self.config.request_bytes),
+                    False,
+                )
+            )
+
+        if (
+            self.config.requests is not None
+            and (
+                state.request_limit is None
+                or state.requests_started >= state.request_limit
+            )
+        ):
+            commands.extend(self.maybe_finish_persistent_rr_stream(connection))
+        return commands
+
     def maybe_issue_crr_request(self, connection: int, now: int) -> list[ClientCommand]:
         commands: list[ClientCommand] = []
         if self.config.mode != Mode.CRR:
@@ -564,6 +659,48 @@ class Client:
         ):
             return []
         return self.close_connection(connection, b"timed rr drain complete")
+
+    def maybe_finish_persistent_rr_stream(self, connection: int) -> list[ClientCommand]:
+        state = self.connections.get(connection)
+        if (
+            state is None
+            or state.persistent_rr_fin_sent
+            or state.persistent_rr_stream_id is None
+        ):
+            if (
+                state is not None
+                and self.phase == BenchmarkPhase.DRAIN
+                and not state.persistent_rr_outstanding_requests
+            ):
+                return self.maybe_close_persistent_rr_connection(connection)
+            return []
+        state.persistent_rr_fin_sent = True
+        commands = [
+            SendStreamCommand(
+                connection,
+                state.persistent_rr_stream_id,
+                b"",
+                True,
+            )
+        ]
+        if self.phase == BenchmarkPhase.DRAIN and not state.persistent_rr_outstanding_requests:
+            commands.extend(self.maybe_close_persistent_rr_connection(connection))
+        return commands
+
+    def maybe_close_persistent_rr_connection(self, connection: int) -> list[ClientCommand]:
+        force = self.timed_persistent_rr_mode() and self.phase == BenchmarkPhase.DRAIN
+        state = self.connections.get(connection)
+        if (
+            state is None
+            or state.close_requested
+            or (not force and state.persistent_rr_outstanding_requests)
+        ):
+            return []
+        commands: list[ClientCommand] = []
+        if not state.persistent_rr_fin_sent:
+            commands.extend(self.maybe_finish_persistent_rr_stream(connection))
+        commands.extend(self.close_connection(connection, b"persistent rr drain complete"))
+        return commands
 
     def maybe_close_bulk_connection(self, connection: int) -> list[ClientCommand]:
         state = self.connections.get(connection)
@@ -657,6 +794,8 @@ class Client:
         for handle in list(self.connections.keys()):
             if self.config.mode == Mode.RR:
                 commands = self.maybe_close_rr_connection(handle)
+            elif self.config.mode == Mode.PERSISTENT_RR:
+                commands = self.maybe_finish_persistent_rr_stream(handle)
             elif self.config.mode == Mode.CRR:
                 commands = self.maybe_close_crr_connection(handle)
             elif self.timed_bulk_mode():
@@ -670,6 +809,9 @@ class Client:
     def timed_rr_mode(self) -> bool:
         return self.config.mode == Mode.RR and self.config.requests is None
 
+    def timed_persistent_rr_mode(self) -> bool:
+        return self.config.mode == Mode.PERSISTENT_RR and self.config.requests is None
+
     def timed_crr_mode(self) -> bool:
         return self.config.mode == Mode.CRR and self.config.requests is None
 
@@ -679,6 +821,7 @@ class Client:
     def timed_mode(self) -> bool:
         return (
             self.timed_rr_mode()
+            or self.timed_persistent_rr_mode()
             or self.timed_crr_mode()
             or self.timed_bulk_mode()
         )
@@ -747,6 +890,21 @@ class Client:
                 )
             )
 
+        if self.config.mode == Mode.PERSISTENT_RR:
+            if self.timed_persistent_rr_mode():
+                return self.phase == BenchmarkPhase.DRAIN and all(
+                    state.close_requested for state in self.connections.values()
+                )
+            return (
+                self.config.requests is not None
+                and self.summary.requests_completed >= self.config.requests
+                and all(
+                    state.control_complete
+                    and not state.persistent_rr_outstanding_requests
+                    for state in self.connections.values()
+                )
+            )
+
         if self.timed_crr_mode():
             return self.phase == BenchmarkPhase.DRAIN and all(
                 state.close_requested for state in self.connections.values()
@@ -801,7 +959,7 @@ def make_payload(size: int) -> bytes:
 
 
 def request_limit_for_connection(config: PerfConfig, connection_index: int) -> int | None:
-    if config.mode != Mode.RR or config.requests is None:
+    if config.mode not in (Mode.RR, Mode.PERSISTENT_RR) or config.requests is None:
         return None
     connections = rr_connection_target(config)
     base = config.requests // connections
@@ -810,7 +968,7 @@ def request_limit_for_connection(config: PerfConfig, connection_index: int) -> i
 
 
 def rr_connection_target(config: PerfConfig) -> int:
-    if config.mode == Mode.RR and config.requests is not None:
+    if config.mode in (Mode.RR, Mode.PERSISTENT_RR) and config.requests is not None:
         return min(config.connections, config.requests)
     return config.connections
 

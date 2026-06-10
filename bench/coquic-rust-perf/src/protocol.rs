@@ -310,6 +310,7 @@ fn mode_to_u8(mode: Mode) -> u8 {
         Mode::Bulk => 0,
         Mode::Rr => 1,
         Mode::Crr => 2,
+        Mode::PersistentRr => 3,
     }
 }
 
@@ -318,6 +319,7 @@ fn parse_mode(value: u8) -> Option<Mode> {
         0 => Some(Mode::Bulk),
         1 => Some(Mode::Rr),
         2 => Some(Mode::Crr),
+        3 => Some(Mode::PersistentRr),
         _ => None,
     }
 }

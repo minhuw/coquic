@@ -26,14 +26,16 @@ class Session {
     this.bytesSent = 0;
     this.bytesReceived = 0;
     this.requestsCompleted = 0;
+    this.persistentPending = new Map();
   }
 }
 
 class SendResponseCommand {
-  constructor(connection, streamId, bytes) {
+  constructor(connection, streamId, bytes, fin = true) {
     this.connection = connection;
     this.streamId = streamId;
     this.bytes = bytes;
+    this.fin = fin;
   }
 }
 
@@ -174,6 +176,9 @@ class Server {
     }
 
     this.recordStreamData(session, data, fin);
+    if (session.start.mode === Mode.PERSISTENT_RR) {
+      return this.handlePersistentRrData(connection, streamId, session, data.length, fin);
+    }
     if (!fin) {
       return [];
     }
@@ -213,9 +218,31 @@ class Server {
 
   recordStreamData(session, data, fin) {
     session.bytesReceived += data.length;
-    if (fin) {
+    if (fin && session.start?.mode !== Mode.PERSISTENT_RR) {
       session.requestsCompleted += 1;
     }
+  }
+
+  handlePersistentRrData(connection, streamId, session, byteCount, fin) {
+    const start = session.start;
+    let pending = (session.persistentPending.get(streamId) ?? 0) + byteCount;
+    const commands = [];
+    while (pending >= start.requestBytes) {
+      commands.push(new SendResponseCommand(connection, streamId, start.responseBytes, false));
+      session.bytesSent += start.responseBytes;
+      session.requestsCompleted += 1;
+      pending -= start.requestBytes;
+      if (start.requests != null && session.requestsCompleted >= start.requests) {
+        commands.push(...this.completeSession(connection));
+        break;
+      }
+    }
+    if (fin) {
+      session.persistentPending.delete(streamId);
+    } else {
+      session.persistentPending.set(streamId, pending);
+    }
+    return commands;
   }
 
   handleBulkStreamFin(connection, streamId, session) {
@@ -271,7 +298,7 @@ class Server {
       return this.endpoint
         .connection(command.connection)
         .stream(command.streamId)
-        .send(this.cachedPayload(command.bytes), true, now);
+        .send(this.cachedPayload(command.bytes), command.fin, now);
     }
 
     const fin =
@@ -344,6 +371,12 @@ function validateSessionStart(start) {
   }
   if (start.requestsInFlight === 0) {
     return "requests_in_flight must be greater than zero";
+  }
+  if (
+    start.mode === Mode.PERSISTENT_RR &&
+    (start.requestBytes === 0 || start.responseBytes === 0)
+  ) {
+    return "persistent-rr requires nonzero request and response bytes";
   }
   return null;
 }

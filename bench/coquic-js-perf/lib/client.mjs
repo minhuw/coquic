@@ -46,8 +46,12 @@ class ConnectionState {
     this.closeRequested = false;
     this.controlBytes = [];
     this.outstandingRequests = new Map();
+    this.persistentRequests = [];
     this.activeBulkStreams = new Map();
     this.nextStreamId = FIRST_DATA_STREAM_ID;
+    this.persistentStreamId = null;
+    this.persistentFinSent = false;
+    this.persistentPendingRead = 0;
     this.requestLimit = null;
     this.requestsStarted = 0;
     this.serverCompleteCounted = false;
@@ -135,7 +139,7 @@ class Client {
         }
         this.summary.status = "ok";
         this.summary.elapsed_ms = durationMillis(this.resultElapsedSeconds(now));
-        if (this.timedRrMode() || this.timedCrrMode()) {
+        if (this.timedRrMode() || this.timedPersistentRrMode() || this.timedCrrMode()) {
           this.summary.server_counters = {
             bytes_sent: this.summary.bytes_received,
             bytes_received: this.summary.bytes_sent,
@@ -270,6 +274,9 @@ class Client {
     if (this.timedBulkMode()) {
       return this.handleBulkData(connection, streamId, data, fin, now);
     }
+    if (this.config.mode === Mode.PERSISTENT_RR) {
+      return this.handlePersistentRrData(connection, streamId, data, now);
+    }
     if (this.config.mode === Mode.RR || this.config.mode === Mode.CRR) {
       return this.handleRequestResponseData(connection, streamId, data, fin, now);
     }
@@ -372,6 +379,32 @@ class Client {
     return commands;
   }
 
+  handlePersistentRrData(connection, streamId, data, now) {
+    const state = this.connections.get(connection);
+    if (state == null || state.persistentStreamId !== streamId) {
+      return [];
+    }
+    state.persistentPendingRead += data.length;
+    while (
+      state.persistentPendingRead >= this.config.responseBytes &&
+      state.persistentRequests.length > 0
+    ) {
+      const request = state.persistentRequests.shift();
+      state.persistentPendingRead -= this.config.responseBytes;
+      if (request.countsTowardMeasurement) {
+        this.summary.bytes_received += this.config.responseBytes;
+        this.summary.latency_samples.push((now - request.startedAt) / 1_000_000);
+        this.summary.requests_completed += 1;
+      }
+    }
+    if (this.phase === BenchmarkPhase.DRAIN) {
+      return state.persistentRequests.length === 0
+        ? this.maybeClosePersistentRrConnection(connection)
+        : [];
+    }
+    return this.maybeIssuePersistentRrRequests(connection, now);
+  }
+
   finishRequestResponseStream(connection, streamId, state, request, now) {
     if (request.countsTowardMeasurement) {
       this.summary.latency_samples.push((now - request.startedAt) / 1_000_000);
@@ -412,6 +445,7 @@ class Client {
     return [
       ...this.maybeStartBulkStreams(connection),
       ...this.maybeIssueRrRequests(connection, now),
+      ...this.maybeIssuePersistentRrRequests(connection, now),
       ...this.maybeIssueCrrRequest(connection, now),
     ];
   }
@@ -499,6 +533,56 @@ class Client {
     return commands;
   }
 
+  maybeIssuePersistentRrRequests(connection, now) {
+    const commands = [];
+    if (this.config.mode !== Mode.PERSISTENT_RR || !this.benchmarkAcceptsNewWork()) {
+      return commands;
+    }
+    const state = this.connections.get(connection);
+    if (
+      state == null ||
+      !state.sessionReady ||
+      state.controlComplete ||
+      state.closeRequested ||
+      state.persistentFinSent
+    ) {
+      return commands;
+    }
+    if (state.persistentStreamId == null) {
+      state.persistentStreamId = this.nextStreamId(connection);
+    }
+
+    while (
+      state.persistentRequests.length < this.config.requestsInFlight &&
+      (this.config.requests == null || this.requestsStarted < this.config.requests) &&
+      (state.requestLimit == null || state.requestsStarted < state.requestLimit)
+    ) {
+      const counts = this.config.requests != null || this.phase === BenchmarkPhase.MEASURE;
+      state.persistentRequests.push(new OutstandingRequest(now, counts));
+      state.requestsStarted += 1;
+      this.requestsStarted += 1;
+      if (counts) {
+        this.summary.bytes_sent += this.config.requestBytes;
+      }
+      commands.push(
+        new SendStreamCommand(
+          connection,
+          state.persistentStreamId,
+          makePayload(this.config.requestBytes),
+          false,
+        ),
+      );
+    }
+
+    if (
+      this.config.requests != null &&
+      (state.requestLimit == null || state.requestsStarted >= state.requestLimit)
+    ) {
+      commands.push(...this.maybeFinishPersistentRrStream(connection));
+    }
+    return commands;
+  }
+
   maybeIssueCrrRequest(connection, now) {
     const commands = [];
     if (this.config.mode !== Mode.CRR) {
@@ -565,6 +649,47 @@ class Client {
       return [];
     }
     return this.closeConnection(connection, Buffer.from("timed rr drain complete"));
+  }
+
+  maybeFinishPersistentRrStream(connection) {
+    const state = this.connections.get(connection);
+    if (state == null) {
+      return [];
+    }
+    if (state.persistentStreamId == null) {
+      return this.phase === BenchmarkPhase.DRAIN && state.persistentRequests.length === 0
+        ? this.maybeClosePersistentRrConnection(connection)
+        : [];
+    }
+    if (state.persistentFinSent) {
+      return this.phase === BenchmarkPhase.DRAIN && state.persistentRequests.length === 0
+        ? this.maybeClosePersistentRrConnection(connection)
+        : [];
+    }
+    state.persistentFinSent = true;
+    const commands = [
+      new SendStreamCommand(connection, state.persistentStreamId, Buffer.alloc(0), true),
+    ];
+    if (this.phase === BenchmarkPhase.DRAIN && state.persistentRequests.length === 0) {
+      commands.push(...this.maybeClosePersistentRrConnection(connection));
+    }
+    return commands;
+  }
+
+  maybeClosePersistentRrConnection(connection) {
+    const force = this.timedPersistentRrMode() && this.phase === BenchmarkPhase.DRAIN;
+    const state = this.connections.get(connection);
+    if (
+      state == null ||
+      state.closeRequested ||
+      (!force && state.persistentRequests.length > 0)
+    ) {
+      return [];
+    }
+    if (!state.persistentFinSent) {
+      return this.maybeFinishPersistentRrStream(connection);
+    }
+    return this.closeConnection(connection, Buffer.from("persistent rr drain complete"));
   }
 
   maybeCloseBulkConnection(connection) {
@@ -662,6 +787,9 @@ class Client {
       for (const request of state.outstandingRequests.values()) {
         request.countsTowardMeasurement = false;
       }
+      for (const request of state.persistentRequests) {
+        request.countsTowardMeasurement = false;
+      }
       for (const streamId of state.activeBulkStreams.keys()) {
         state.activeBulkStreams.set(streamId, true);
       }
@@ -682,6 +810,8 @@ class Client {
       let commands = [];
       if (this.config.mode === Mode.RR) {
         commands = this.maybeCloseRrConnection(handle);
+      } else if (this.config.mode === Mode.PERSISTENT_RR) {
+        commands = this.maybeFinishPersistentRrStream(handle);
       } else if (this.config.mode === Mode.CRR) {
         commands = this.maybeCloseCrrConnection(handle);
       } else if (this.timedBulkMode()) {
@@ -698,6 +828,10 @@ class Client {
     return this.config.mode === Mode.RR && this.config.requests == null;
   }
 
+  timedPersistentRrMode() {
+    return this.config.mode === Mode.PERSISTENT_RR && this.config.requests == null;
+  }
+
   timedCrrMode() {
     return this.config.mode === Mode.CRR && this.config.requests == null;
   }
@@ -707,7 +841,12 @@ class Client {
   }
 
   timedMode() {
-    return this.timedRrMode() || this.timedCrrMode() || this.timedBulkMode();
+    return (
+      this.timedRrMode() ||
+      this.timedPersistentRrMode() ||
+      this.timedCrrMode() ||
+      this.timedBulkMode()
+    );
   }
 
   benchmarkAcceptsNewWork() {
@@ -793,6 +932,22 @@ class Client {
       );
     }
 
+    if (this.config.mode === Mode.PERSISTENT_RR) {
+      if (this.timedPersistentRrMode()) {
+        return (
+          this.phase === BenchmarkPhase.DRAIN &&
+          Array.from(this.connections.values()).every((state) => state.closeRequested)
+        );
+      }
+      return (
+        this.config.requests != null &&
+        this.summary.requests_completed >= this.config.requests &&
+        Array.from(this.connections.values()).every(
+          (state) => state.controlComplete && state.persistentRequests.length === 0,
+        )
+      );
+    }
+
     if (this.timedCrrMode()) {
       return (
         this.phase === BenchmarkPhase.DRAIN &&
@@ -856,7 +1011,10 @@ function makePayload(size) {
 }
 
 function requestLimitForConnection(config, connectionIndex) {
-  if (config.mode !== Mode.RR || config.requests == null) {
+  if (
+    (config.mode !== Mode.RR && config.mode !== Mode.PERSISTENT_RR) ||
+    config.requests == null
+  ) {
     return null;
   }
   const connections = rrConnectionTarget(config);
@@ -866,7 +1024,7 @@ function requestLimitForConnection(config, connectionIndex) {
 }
 
 function rrConnectionTarget(config) {
-  if (config.mode === Mode.RR && config.requests != null) {
+  if ((config.mode === Mode.RR || config.mode === Mode.PERSISTENT_RR) && config.requests != null) {
     return Math.min(config.connections, config.requests);
   }
   return config.connections;

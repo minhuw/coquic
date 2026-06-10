@@ -66,6 +66,9 @@ class QuicPerfClient {
         std::vector<OutstandingRequest> outstanding_requests;
         std::unordered_map<std::uint64_t, bool> active_bulk_streams;
         std::uint64_t next_stream_id = kQuicPerfFirstDataStreamId;
+        std::optional<std::uint64_t> persistent_rr_stream_id;
+        bool persistent_rr_fin_sent = false;
+        std::size_t persistent_rr_response_pending_bytes = 0;
         std::uint64_t bytes_sent = 0;
         std::uint64_t bytes_received = 0;
         std::optional<std::size_t> request_limit;
@@ -83,6 +86,7 @@ class QuicPerfClient {
     std::optional<quic::QuicCoreTimePoint>
     next_wait_wakeup(std::optional<quic::QuicCoreTimePoint> core_next_wakeup) const;
     bool timed_rr_mode() const;
+    bool timed_persistent_rr_mode() const;
     bool timed_crr_mode() const;
     bool timed_bulk_mode() const;
     bool timed_mode() const;
@@ -99,8 +103,14 @@ class QuicPerfClient {
     bool run_complete() const;
     bool maybe_start_bulk_streams(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool maybe_issue_rr_requests(ConnectionState &connection, quic::QuicCoreTimePoint now);
+    bool maybe_issue_persistent_rr_requests(ConnectionState &connection,
+                                            quic::QuicCoreTimePoint now);
     bool maybe_issue_crr_request(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool maybe_close_rr_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);
+    bool maybe_finish_persistent_rr_stream(ConnectionState &connection,
+                                           quic::QuicCoreTimePoint now);
+    bool maybe_close_persistent_rr_connection(ConnectionState &connection,
+                                              quic::QuicCoreTimePoint now);
     bool maybe_close_crr_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);
     std::size_t active_crr_connection_count() const;
     quic::QuicCoreDuration result_elapsed(quic::QuicCoreTimePoint now) const;

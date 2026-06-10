@@ -12,7 +12,7 @@ use crate::protocol::{
 use crate::{PerfError, Result};
 use coquic::quic::{ClientConfig, Endpoint};
 use coquic::{ConnectionHandle, Lifecycle, QueryResult, StateChange, StreamId};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 const IDLE_TIMEOUT: Duration = Duration::from_millis(1000);
@@ -38,8 +38,12 @@ struct ConnectionState {
     close_requested: bool,
     control_bytes: Vec<u8>,
     outstanding_requests: HashMap<StreamId, OutstandingRequest>,
+    persistent_rr_outstanding_requests: VecDeque<OutstandingRequest>,
     active_bulk_streams: HashMap<StreamId, bool>,
     next_stream_id: StreamId,
+    persistent_rr_stream_id: Option<StreamId>,
+    persistent_rr_fin_sent: bool,
+    persistent_rr_response_pending_bytes: u64,
     request_limit: Option<usize>,
     requests_started: usize,
     server_complete_counted: bool,
@@ -53,8 +57,12 @@ impl ConnectionState {
             close_requested: false,
             control_bytes: Vec::new(),
             outstanding_requests: HashMap::new(),
+            persistent_rr_outstanding_requests: VecDeque::new(),
             active_bulk_streams: HashMap::new(),
             next_stream_id: FIRST_DATA_STREAM_ID,
+            persistent_rr_stream_id: None,
+            persistent_rr_fin_sent: false,
+            persistent_rr_response_pending_bytes: 0,
             request_limit,
             requests_started: 0,
             server_complete_counted: false,
@@ -154,7 +162,10 @@ impl Client<'_> {
                 }
                 self.summary.status = "ok".to_owned();
                 self.summary.elapsed_ms = duration_millis(self.result_elapsed(now));
-                if self.timed_rr_mode() || self.timed_crr_mode() {
+                if self.timed_rr_mode()
+                    || self.timed_persistent_rr_mode()
+                    || self.timed_crr_mode()
+                {
                     self.summary.server_counters = ServerCounters {
                         bytes_sent: self.summary.bytes_received,
                         bytes_received: self.summary.bytes_sent,
@@ -399,6 +410,43 @@ impl Client<'_> {
             return Ok(commands);
         }
 
+        if self.config.mode == Mode::PersistentRr {
+            let Some(state) = self.connections.get_mut(&connection) else {
+                return Ok(commands);
+            };
+            if state.persistent_rr_stream_id != Some(stream_id) {
+                return Ok(commands);
+            }
+            state.persistent_rr_response_pending_bytes = state
+                .persistent_rr_response_pending_bytes
+                .saturating_add(bytes.len() as u64);
+            let response_bytes = self.config.response_bytes as u64;
+            while state.persistent_rr_response_pending_bytes >= response_bytes
+                && !state.persistent_rr_outstanding_requests.is_empty()
+            {
+                let request = state
+                    .persistent_rr_outstanding_requests
+                    .pop_front()
+                    .expect("checked non-empty");
+                state.persistent_rr_response_pending_bytes -= response_bytes;
+                if request.counts_toward_measurement {
+                    self.summary.bytes_received += response_bytes;
+                    self.summary.latency_samples.push(Duration::from_micros(
+                        now.saturating_sub(request.started_at),
+                    ));
+                    self.summary.requests_completed += 1;
+                }
+            }
+            if self.phase == BenchmarkPhase::Drain {
+                if state.persistent_rr_outstanding_requests.is_empty() {
+                    commands.extend(self.maybe_close_persistent_rr_connection(connection)?);
+                }
+                return Ok(commands);
+            }
+            commands.extend(self.maybe_issue_persistent_rr_requests(connection, now)?);
+            return Ok(commands);
+        }
+
         if self.config.mode == Mode::Rr || self.config.mode == Mode::Crr {
             let request = self
                 .connections
@@ -486,6 +534,7 @@ impl Client<'_> {
         let mut commands = Vec::new();
         commands.extend(self.maybe_start_bulk_streams(connection, now)?);
         commands.extend(self.maybe_issue_rr_requests(connection, now)?);
+        commands.extend(self.maybe_issue_persistent_rr_requests(connection, now)?);
         commands.extend(self.maybe_issue_crr_request(connection, now)?);
         Ok(commands)
     }
@@ -634,6 +683,112 @@ impl Client<'_> {
         Ok(commands)
     }
 
+    fn maybe_issue_persistent_rr_requests(
+        &mut self,
+        connection: ConnectionHandle,
+        now: u64,
+    ) -> Result<Vec<ClientCommand>> {
+        let mut commands = Vec::new();
+        if self.config.mode != Mode::PersistentRr || !self.benchmark_accepts_new_work() {
+            return Ok(commands);
+        }
+        let ready = self
+            .connections
+            .get(&connection)
+            .map(|state| {
+                state.session_ready
+                    && !state.control_complete
+                    && !state.close_requested
+                    && !state.persistent_rr_fin_sent
+            })
+            .unwrap_or(false);
+        if !ready {
+            return Ok(commands);
+        }
+
+        let needs_stream = self
+            .connections
+            .get(&connection)
+            .map(|state| state.persistent_rr_stream_id.is_none())
+            .unwrap_or(false);
+        if needs_stream {
+            let stream_id = self.next_stream_id(connection)?;
+            if let Some(state) = self.connections.get_mut(&connection) {
+                state.persistent_rr_stream_id = Some(stream_id);
+            }
+        }
+
+        while self
+            .connections
+            .get(&connection)
+            .map(|state| {
+                state.persistent_rr_outstanding_requests.len() < self.config.requests_in_flight
+            })
+            .unwrap_or(false)
+            && self
+                .config
+                .requests
+                .map(|requests| self.requests_started < requests)
+                .unwrap_or(true)
+            && self
+                .connections
+                .get(&connection)
+                .map(|state| {
+                    state
+                        .request_limit
+                        .map(|limit| state.requests_started < limit)
+                        .unwrap_or(true)
+                })
+                .unwrap_or(false)
+        {
+            let counts_toward_measurement =
+                self.config.requests.is_some() || self.phase == BenchmarkPhase::Measure;
+            let stream_id = self
+                .connections
+                .get(&connection)
+                .and_then(|state| state.persistent_rr_stream_id)
+                .ok_or_else(|| PerfError::new("persistent rr stream missing"))?;
+            let state = self
+                .connections
+                .get_mut(&connection)
+                .ok_or_else(|| PerfError::new("persistent rr request for unknown connection"))?;
+            state
+                .persistent_rr_outstanding_requests
+                .push_back(OutstandingRequest {
+                    started_at: now,
+                    counts_toward_measurement,
+                });
+            state.requests_started += 1;
+            self.requests_started += 1;
+            if counts_toward_measurement {
+                self.summary.bytes_sent += self.config.request_bytes as u64;
+            }
+            commands.push(ClientCommand::SendStream {
+                connection,
+                stream_id,
+                bytes: make_payload(self.config.request_bytes),
+                fin: false,
+            });
+        }
+
+        if self.config.requests.is_some()
+            && self
+                .connections
+                .get(&connection)
+                .map(|state| {
+                    state
+                        .request_limit
+                        .map(|limit| state.requests_started >= limit)
+                        .unwrap_or(true)
+                })
+                .unwrap_or(false)
+        {
+            commands.extend(self.maybe_finish_persistent_rr_stream(connection)?);
+        }
+
+        Ok(commands)
+    }
+
     fn maybe_issue_crr_request(
         &mut self,
         connection: ConnectionHandle,
@@ -729,6 +884,66 @@ impl Client<'_> {
             return Ok(Vec::new());
         }
         self.close_connection(connection, b"timed rr drain complete")
+    }
+
+    fn maybe_finish_persistent_rr_stream(
+        &mut self,
+        connection: ConnectionHandle,
+    ) -> Result<Vec<ClientCommand>> {
+        let mut commands = Vec::new();
+        let Some(state) = self.connections.get_mut(&connection) else {
+            return Ok(commands);
+        };
+        let Some(stream_id) = state.persistent_rr_stream_id else {
+            if self.phase == BenchmarkPhase::Drain
+                && state.persistent_rr_outstanding_requests.is_empty()
+            {
+                commands.extend(self.maybe_close_persistent_rr_connection(connection)?);
+            }
+            return Ok(commands);
+        };
+        if state.persistent_rr_fin_sent {
+            if self.phase == BenchmarkPhase::Drain
+                && state.persistent_rr_outstanding_requests.is_empty()
+            {
+                commands.extend(self.maybe_close_persistent_rr_connection(connection)?);
+            }
+            return Ok(commands);
+        }
+
+        state.persistent_rr_fin_sent = true;
+        commands.push(ClientCommand::SendStream {
+            connection,
+            stream_id,
+            bytes: Vec::new(),
+            fin: true,
+        });
+        if self.phase == BenchmarkPhase::Drain
+            && state.persistent_rr_outstanding_requests.is_empty()
+        {
+            commands.extend(self.maybe_close_persistent_rr_connection(connection)?);
+        }
+        Ok(commands)
+    }
+
+    fn maybe_close_persistent_rr_connection(
+        &mut self,
+        connection: ConnectionHandle,
+    ) -> Result<Vec<ClientCommand>> {
+        let force_timed_drain_close =
+            self.timed_persistent_rr_mode() && self.phase == BenchmarkPhase::Drain;
+        let Some(state) = self.connections.get(&connection) else {
+            return Ok(Vec::new());
+        };
+        if state.close_requested
+            || (!force_timed_drain_close && !state.persistent_rr_outstanding_requests.is_empty())
+        {
+            return Ok(Vec::new());
+        }
+        if !state.persistent_rr_fin_sent {
+            return self.maybe_finish_persistent_rr_stream(connection);
+        }
+        self.close_connection(connection, b"persistent rr drain complete")
     }
 
     fn maybe_close_bulk_connection(
@@ -845,6 +1060,9 @@ impl Client<'_> {
             for request in state.outstanding_requests.values_mut() {
                 request.counts_toward_measurement = false;
             }
+            for request in &mut state.persistent_rr_outstanding_requests {
+                request.counts_toward_measurement = false;
+            }
             for counts in state.active_bulk_streams.values_mut() {
                 *counts = true;
             }
@@ -866,6 +1084,8 @@ impl Client<'_> {
         for handle in handles {
             let commands = if self.config.mode == Mode::Rr {
                 self.maybe_close_rr_connection(handle)?
+            } else if self.config.mode == Mode::PersistentRr {
+                self.maybe_finish_persistent_rr_stream(handle)?
             } else if self.config.mode == Mode::Crr {
                 self.maybe_close_crr_connection(handle)?
             } else if self.timed_bulk_mode() {
@@ -885,6 +1105,10 @@ impl Client<'_> {
         self.config.mode == Mode::Rr && self.config.requests.is_none()
     }
 
+    fn timed_persistent_rr_mode(&self) -> bool {
+        self.config.mode == Mode::PersistentRr && self.config.requests.is_none()
+    }
+
     fn timed_crr_mode(&self) -> bool {
         self.config.mode == Mode::Crr && self.config.requests.is_none()
     }
@@ -894,7 +1118,10 @@ impl Client<'_> {
     }
 
     fn timed_mode(&self) -> bool {
-        self.timed_rr_mode() || self.timed_crr_mode() || self.timed_bulk_mode()
+        self.timed_rr_mode()
+            || self.timed_persistent_rr_mode()
+            || self.timed_crr_mode()
+            || self.timed_bulk_mode()
     }
 
     fn benchmark_accepts_new_work(&self) -> bool {
@@ -985,6 +1212,20 @@ impl Client<'_> {
                         state.control_complete && state.outstanding_requests.is_empty()
                     })
             }
+            Mode::PersistentRr => {
+                if self.timed_persistent_rr_mode() {
+                    return self.phase == BenchmarkPhase::Drain
+                        && self.connections.values().all(|state| state.close_requested);
+                }
+                self.config
+                    .requests
+                    .map(|requests| self.summary.requests_completed >= requests as u64)
+                    .unwrap_or(false)
+                    && self.connections.values().all(|state| {
+                        state.control_complete
+                            && state.persistent_rr_outstanding_requests.is_empty()
+                    })
+            }
             Mode::Crr => {
                 if self.timed_crr_mode() {
                     return self.phase == BenchmarkPhase::Drain
@@ -1050,7 +1291,7 @@ impl Client<'_> {
 }
 
 fn request_limit_for_connection(config: &PerfConfig, connection_index: usize) -> Option<usize> {
-    if config.mode != Mode::Rr {
+    if config.mode != Mode::Rr && config.mode != Mode::PersistentRr {
         return None;
     }
     let requests = config.requests?;
@@ -1061,7 +1302,7 @@ fn request_limit_for_connection(config: &PerfConfig, connection_index: usize) ->
 }
 
 fn rr_connection_target(config: &PerfConfig) -> usize {
-    if config.mode == Mode::Rr {
+    if config.mode == Mode::Rr || config.mode == Mode::PersistentRr {
         if let Some(requests) = config.requests {
             return config.connections.min(requests);
         }

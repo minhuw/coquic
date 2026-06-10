@@ -13,7 +13,7 @@
 namespace coquic::perf {
 
 enum class QuicPerfRole : std::uint8_t { server, client };
-enum class QuicPerfMode : std::uint8_t { bulk, rr, crr };
+enum class QuicPerfMode : std::uint8_t { bulk, rr, crr, persistent_rr };
 enum class QuicPerfDirection : std::uint8_t { upload, download };
 
 struct QuicPerfConfig {

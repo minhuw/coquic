@@ -1,6 +1,7 @@
 use msquic_async::{msquic, Connection, Listener, Stream, StreamType};
 use serde::Serialize;
 use std::cmp;
+use std::collections::VecDeque;
 use std::env;
 use std::fs;
 use std::future::poll_fn;
@@ -33,6 +34,7 @@ const MESSAGE_SESSION_COMPLETE: u8 = 4;
 const MODE_BULK: &str = "bulk";
 const MODE_RR: &str = "rr";
 const MODE_CRR: &str = "crr";
+const MODE_PERSISTENT_RR: &str = "persistent-rr";
 const DIRECTION_UPLOAD: &str = "upload";
 const DIRECTION_DOWNLOAD: &str = "download";
 const DIRECTION_STAY: &str = "stay";
@@ -143,6 +145,20 @@ struct BulkStreamResult {
     sent: u64,
     received: u64,
     err: Option<String>,
+}
+
+#[derive(Default)]
+struct PersistentRRResult {
+    bytes_sent: u64,
+    bytes_received: u64,
+    requests_completed: u64,
+    latencies: Vec<Duration>,
+    err: Option<String>,
+}
+
+struct PersistentRequest {
+    started_at: Instant,
+    counts: bool,
 }
 
 struct ServerSession {
@@ -323,7 +339,7 @@ fn parse_args(args: &[String]) -> Result<Config, AnyError> {
         }
     }
 
-    if ![MODE_BULK, MODE_RR, MODE_CRR].contains(&cfg.mode.as_str()) {
+    if ![MODE_BULK, MODE_RR, MODE_CRR, MODE_PERSISTENT_RR].contains(&cfg.mode.as_str()) {
         return Err(format!("unsupported mode: {}", cfg.mode).into());
     }
     if cfg.io_backend != "socket" && cfg.io_backend != "io_uring" {
@@ -346,6 +362,9 @@ fn parse_args(args: &[String]) -> Result<Config, AnyError> {
         return Err(
             "streams, connections, and requests-in-flight must be greater than zero".into(),
         );
+    }
+    if cfg.mode == MODE_PERSISTENT_RR && (cfg.request_bytes == 0 || cfg.response_bytes == 0) {
+        return Err("persistent-rr requires nonzero request and response bytes".into());
     }
     Ok(cfg)
 }
@@ -425,6 +444,10 @@ async fn handle_server_data_stream(
     session: Arc<ServerSession>,
     mut stream: Stream,
 ) -> Result<(), AnyError> {
+    if session.start.mode == MODE_PERSISTENT_RR {
+        return handle_persistent_rr_server_stream(session, stream).await;
+    }
+
     let received = copy_and_count_with_timeout(&mut stream).await?;
     session
         .bytes_received
@@ -452,7 +475,47 @@ async fn handle_server_data_stream(
     }
     finish_stream_write(&mut stream).await?;
 
-    if should_send_session_complete(&session, requests_completed)
+    maybe_send_session_complete(&session, requests_completed).await?;
+    Ok(())
+}
+
+async fn handle_persistent_rr_server_stream(
+    session: Arc<ServerSession>,
+    mut stream: Stream,
+) -> Result<(), AnyError> {
+    let mut pending = 0_u64;
+    let mut buf = vec![0_u8; READ_CHUNK_SIZE];
+    loop {
+        let read = timeout_result(
+            "msquic stream read",
+            STREAM_IO_TIMEOUT,
+            stream.read(&mut buf),
+        )
+        .await?;
+        if read == 0 {
+            break;
+        }
+        session
+            .bytes_received
+            .fetch_add(read as u64, Ordering::Relaxed);
+        pending += read as u64;
+        while pending >= session.start.request_bytes {
+            let sent = write_n_with_timeout(&mut stream, session.start.response_bytes).await?;
+            session.bytes_sent.fetch_add(sent, Ordering::Relaxed);
+            let requests_completed = session.requests_completed.fetch_add(1, Ordering::Relaxed) + 1;
+            pending -= session.start.request_bytes;
+            maybe_send_session_complete(&session, requests_completed).await?;
+        }
+    }
+    finish_stream_write(&mut stream).await?;
+    Ok(())
+}
+
+async fn maybe_send_session_complete(
+    session: &Arc<ServerSession>,
+    requests_completed: u64,
+) -> Result<(), AnyError> {
+    if should_send_session_complete(session, requests_completed)
         && session
             .completed
             .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
@@ -486,7 +549,7 @@ fn should_send_session_complete(session: &ServerSession, requests_completed: u64
     {
         return true;
     }
-    session.start.mode == MODE_RR
+    (session.start.mode == MODE_RR || session.start.mode == MODE_PERSISTENT_RR)
         && session.start.requests.set
         && requests_completed >= session.start.requests.value
 }
@@ -540,6 +603,14 @@ async fn run_client(cfg: &Config) -> Result<RunSummary, AnyError> {
                 cfg.duration
             }
         }
+        MODE_PERSISTENT_RR => {
+            run_persistent_rr(cfg, &connections, counters.clone()).await?;
+            if cfg.requests.set {
+                run_start.elapsed()
+            } else {
+                cfg.duration
+            }
+        }
         MODE_CRR => {
             run_crr(cfg, &start, counters.clone(), client_context).await?;
             if cfg.requests.set {
@@ -565,7 +636,11 @@ async fn run_client(cfg: &Config) -> Result<RunSummary, AnyError> {
     summary.bytes_received = counters.bytes_received.load(Ordering::Relaxed);
     summary.requests_completed = counters.requests_completed.load(Ordering::Relaxed);
     summary.skipped_setup_errors = counters.skipped_setup_errors.load(Ordering::Relaxed);
-    if cfg.mode == MODE_RR || cfg.mode == MODE_CRR || !expects_session_complete(cfg) {
+    if cfg.mode == MODE_RR
+        || cfg.mode == MODE_PERSISTENT_RR
+        || cfg.mode == MODE_CRR
+        || !expects_session_complete(cfg)
+    {
         summary.server_counters.bytes_sent = summary.bytes_received;
         summary.server_counters.bytes_received = summary.bytes_sent;
         summary.server_counters.requests_completed = summary.requests_completed;
@@ -608,7 +683,8 @@ fn new_run_summary(cfg: &Config) -> RunSummary {
 }
 
 fn expects_session_complete(cfg: &Config) -> bool {
-    (cfg.mode == MODE_BULK && cfg.total_bytes.set) || (cfg.mode == MODE_RR && cfg.requests.set)
+    (cfg.mode == MODE_BULK && cfg.total_bytes.set)
+        || ((cfg.mode == MODE_RR || cfg.mode == MODE_PERSISTENT_RR) && cfg.requests.set)
 }
 
 fn client_msquic_context(cfg: &Config) -> Result<ClientMsQuicContext, AnyError> {
@@ -693,7 +769,9 @@ async fn open_connections(
     let mut out = Vec::with_capacity(int_cap(count));
     for index in 0..count {
         let mut connection_start = start.clone();
-        if connection_start.mode == MODE_RR && connection_start.requests.set {
+        if (connection_start.mode == MODE_RR || connection_start.mode == MODE_PERSISTENT_RR)
+            && connection_start.requests.set
+        {
             connection_start.requests.value = rr_request_limit_for_connection(cfg, index);
         }
         let conn = Connection::new(&context.registration)?;
@@ -1046,8 +1124,172 @@ async fn run_rr(
     Ok(())
 }
 
+async fn run_persistent_rr(
+    cfg: &Config,
+    connections: &[ConnectionState],
+    counters: Arc<MeasuredCounters>,
+) -> Result<(), AnyError> {
+    let measure_start = Instant::now() + cfg.warmup;
+    let measure_deadline = measure_start + cfg.duration;
+    let (tx, mut rx) = mpsc::channel(connections.len().max(1));
+    for (index, connection) in connections.iter().enumerate() {
+        let cfg = cfg.clone();
+        let conn = connection.conn.clone();
+        let tx = tx.clone();
+        let request_limit = if cfg.requests.set {
+            rr_request_limit_for_connection(&cfg, index as u64)
+        } else {
+            0
+        };
+        tokio::spawn(async move {
+            let result = run_persistent_rr_connection(
+                &cfg,
+                conn,
+                measure_start,
+                measure_deadline,
+                request_limit,
+            )
+            .await;
+            let _ = tx.send(result).await;
+        });
+    }
+    drop(tx);
+    while let Some(result) = rx.recv().await {
+        if let Some(err) = result.err {
+            return Err(err.into());
+        }
+        counters
+            .bytes_sent
+            .fetch_add(result.bytes_sent, Ordering::Relaxed);
+        counters
+            .bytes_received
+            .fetch_add(result.bytes_received, Ordering::Relaxed);
+        counters
+            .requests_completed
+            .fetch_add(result.requests_completed, Ordering::Relaxed);
+        counters.latencies.lock().await.extend(result.latencies);
+    }
+    Ok(())
+}
+
+async fn run_persistent_rr_connection(
+    cfg: &Config,
+    conn: Connection,
+    measure_start: Instant,
+    measure_deadline: Instant,
+    request_limit: u64,
+) -> PersistentRRResult {
+    let run = async {
+        let mut stream =
+            open_bidi_stream(&conn, "msquic persistent-rr stream open", SETUP_TIMEOUT).await?;
+        let mut result = PersistentRRResult::default();
+        let mut outstanding: VecDeque<PersistentRequest> =
+            VecDeque::with_capacity(int_cap(cfg.requests_in_flight));
+        let mut started = 0_u64;
+        let mut pending_read = 0_u64;
+        let mut buf = vec![0_u8; READ_CHUNK_SIZE];
+
+        while outstanding.len() < cfg.requests_in_flight as usize
+            && can_start_persistent_rr(cfg, started, request_limit, measure_deadline)
+        {
+            send_persistent_rr_request(
+                cfg,
+                &mut stream,
+                &mut outstanding,
+                &mut result,
+                &mut started,
+                measure_start,
+            )
+            .await?;
+        }
+
+        while !outstanding.is_empty() || (!cfg.requests.set && Instant::now() < measure_deadline) {
+            let read = timeout_result(
+                "msquic stream read",
+                STREAM_IO_TIMEOUT,
+                stream.read(&mut buf),
+            )
+            .await?;
+            if read == 0 {
+                break;
+            }
+            let now = Instant::now();
+            pending_read += read as u64;
+            while pending_read >= cfg.response_bytes && !outstanding.is_empty() {
+                let request = outstanding.pop_front().expect("checked non-empty");
+                pending_read -= cfg.response_bytes;
+                if request.counts && now >= measure_start {
+                    result.bytes_received += cfg.response_bytes;
+                    result.requests_completed += 1;
+                    result
+                        .latencies
+                        .push(now.duration_since(request.started_at));
+                }
+                while outstanding.len() < cfg.requests_in_flight as usize
+                    && can_start_persistent_rr(cfg, started, request_limit, measure_deadline)
+                {
+                    send_persistent_rr_request(
+                        cfg,
+                        &mut stream,
+                        &mut outstanding,
+                        &mut result,
+                        &mut started,
+                        measure_start,
+                    )
+                    .await?;
+                }
+            }
+        }
+        finish_stream_write(&mut stream).await?;
+        Ok::<PersistentRRResult, AnyError>(result)
+    }
+    .await;
+    match run {
+        Ok(result) => result,
+        Err(err) => PersistentRRResult {
+            err: Some(err.to_string()),
+            ..PersistentRRResult::default()
+        },
+    }
+}
+
+fn can_start_persistent_rr(
+    cfg: &Config,
+    started: u64,
+    request_limit: u64,
+    measure_deadline: Instant,
+) -> bool {
+    if cfg.requests.set {
+        started < request_limit
+    } else {
+        Instant::now() < measure_deadline
+    }
+}
+
+async fn send_persistent_rr_request(
+    cfg: &Config,
+    stream: &mut Stream,
+    outstanding: &mut VecDeque<PersistentRequest>,
+    result: &mut PersistentRRResult,
+    started: &mut u64,
+    measure_start: Instant,
+) -> Result<(), AnyError> {
+    let now = Instant::now();
+    write_n_with_timeout(stream, cfg.request_bytes).await?;
+    let counts = cfg.requests.set || now >= measure_start;
+    outstanding.push_back(PersistentRequest {
+        started_at: now,
+        counts,
+    });
+    *started += 1;
+    if counts {
+        result.bytes_sent += cfg.request_bytes;
+    }
+    Ok(())
+}
+
 fn rr_connection_target(cfg: &Config) -> u64 {
-    if cfg.mode == MODE_RR && cfg.requests.set {
+    if (cfg.mode == MODE_RR || cfg.mode == MODE_PERSISTENT_RR) && cfg.requests.set {
         cfg.connections.min(cfg.requests.value)
     } else {
         cfg.connections
@@ -1322,11 +1564,13 @@ async fn read_control_message(recv: &mut Stream) -> Result<ControlMessage, AnyEr
                 connections: u64::from_be_bytes(payload[63..71].try_into().unwrap()),
                 requests_in_flight: u64::from_be_bytes(payload[71..79].try_into().unwrap()),
             };
-            if ![MODE_BULK, MODE_RR, MODE_CRR].contains(&start.mode.as_str())
+            if ![MODE_BULK, MODE_RR, MODE_CRR, MODE_PERSISTENT_RR].contains(&start.mode.as_str())
                 || ![DIRECTION_UPLOAD, DIRECTION_DOWNLOAD].contains(&start.direction.as_str())
                 || start.streams == 0
                 || start.connections == 0
                 || start.requests_in_flight == 0
+                || (start.mode == MODE_PERSISTENT_RR
+                    && (start.request_bytes == 0 || start.response_bytes == 0))
             {
                 return Err("malformed session_start".into());
             }
@@ -1439,6 +1683,7 @@ fn mode_code(mode: &str) -> u8 {
     match mode {
         MODE_RR => 1,
         MODE_CRR => 2,
+        MODE_PERSISTENT_RR => 3,
         _ => 0,
     }
 }
@@ -1452,6 +1697,7 @@ fn mode_from_code(value: u8) -> &'static str {
         0 => MODE_BULK,
         1 => MODE_RR,
         2 => MODE_CRR,
+        3 => MODE_PERSISTENT_RR,
         _ => "unknown",
     }
 }

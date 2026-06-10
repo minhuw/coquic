@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <fstream>
 #include <future>
@@ -64,6 +65,7 @@ constexpr uint8_t kMessageSessionError = 3;
 constexpr uint8_t kModeCodeBulk = 0;
 constexpr uint8_t kModeCodeRr = 1;
 constexpr uint8_t kModeCodeCrr = 2;
+constexpr uint8_t kModeCodePersistentRr = 3;
 constexpr uint8_t kDirectionCodeUpload = 0;
 constexpr uint8_t kDirectionCodeDownload = 1;
 constexpr uint64_t kTransferConnectionWindow = 32ull * 1024ull * 1024ull;
@@ -75,6 +77,7 @@ constexpr auto kDrainTimeout = std::chrono::seconds(2);
 constexpr std::string_view kModeBulk = "bulk";
 constexpr std::string_view kModeRr = "rr";
 constexpr std::string_view kModeCrr = "crr";
+constexpr std::string_view kModePersistentRr = "persistent-rr";
 constexpr std::string_view kDirectionUpload = "upload";
 constexpr std::string_view kDirectionDownload = "download";
 constexpr std::string_view kDirectionStay = "stay";
@@ -159,6 +162,12 @@ struct CompletedStream {
     uint64_t requestBytes{0};
     uint64_t received{0};
     Duration latency{Duration::zero()};
+};
+
+struct PendingPersistentRequest {
+    bool counts{false};
+    uint64_t requestBytes{0};
+    Clock::time_point start{Clock::now()};
 };
 
 struct PerfSessionStart {
@@ -256,7 +265,8 @@ Config parseArgs(const std::vector<std::string> &args) {
         }
     }
 
-    if (cfg.mode != kModeBulk && cfg.mode != kModeRr && cfg.mode != kModeCrr) {
+    if (cfg.mode != kModeBulk && cfg.mode != kModeRr && cfg.mode != kModeCrr &&
+        cfg.mode != kModePersistentRr) {
         throw std::runtime_error("unsupported mode: " + cfg.mode);
     }
     if (cfg.ioBackend != "socket" && cfg.ioBackend != "io_uring") {
@@ -277,6 +287,10 @@ Config parseArgs(const std::vector<std::string> &args) {
     if (cfg.streams == 0 || cfg.connections == 0 || cfg.requestsInFlight == 0) {
         throw std::runtime_error(
             "streams, connections, and requests-in-flight must be greater than zero");
+    }
+    if (cfg.mode == kModePersistentRr && (cfg.requestBytes == 0 || cfg.responseBytes == 0)) {
+        throw std::runtime_error(
+            "persistent-rr request and response bytes must be greater than zero");
     }
     return cfg;
 }
@@ -509,6 +523,9 @@ uint8_t modeCode(const std::string &mode) {
     if (mode == kModeCrr) {
         return kModeCodeCrr;
     }
+    if (mode == kModePersistentRr) {
+        return kModeCodePersistentRr;
+    }
     return kModeCodeBulk;
 }
 
@@ -566,7 +583,7 @@ std::vector<uint8_t> frameControlMessage(uint8_t type, const std::vector<uint8_t
 }
 
 uint64_t rrConnectionTarget(const Config &cfg) {
-    if (cfg.mode == kModeRr && cfg.requests.set) {
+    if ((cfg.mode == kModeRr || cfg.mode == kModePersistentRr) && cfg.requests.set) {
         return std::min(cfg.connections, cfg.requests.value);
     }
     return cfg.connections;
@@ -594,7 +611,7 @@ bool canStartRrRequest(const Config &cfg, uint64_t started,
 
 Config configWithRrRequestLimit(const Config &cfg, uint64_t connectionIndex) {
     Config connectionCfg = cfg;
-    if (cfg.mode == kModeRr && cfg.requests.set) {
+    if ((cfg.mode == kModeRr || cfg.mode == kModePersistentRr) && cfg.requests.set) {
         connectionCfg.requests.value = rrRequestLimitForConnection(cfg, connectionIndex);
         connectionCfg.requests.set = true;
     }
@@ -665,9 +682,14 @@ PerfSessionStart decodeSessionStart(const std::vector<uint8_t> &payload) {
     start.streams = readU64(payload.data() + 55);
     start.connections = readU64(payload.data() + 63);
     start.requestsInFlight = readU64(payload.data() + 71);
-    if ((start.mode != kModeCodeBulk && start.mode != kModeCodeRr && start.mode != kModeCodeCrr) ||
+    if ((start.mode != kModeCodeBulk && start.mode != kModeCodeRr && start.mode != kModeCodeCrr &&
+         start.mode != kModeCodePersistentRr) ||
         (start.direction != kDirectionCodeUpload && start.direction != kDirectionCodeDownload) ||
         start.streams == 0 || start.connections == 0 || start.requestsInFlight == 0) {
+        throw std::runtime_error("malformed session_start");
+    }
+    if (start.mode == kModeCodePersistentRr &&
+        (start.requestBytes == 0 || start.responseBytes == 0)) {
         throw std::runtime_error("malformed session_start");
     }
     return start;
@@ -679,9 +701,11 @@ struct ServerStreamState {
     std::vector<uint8_t> controlOut;
     size_t controlSent{0};
     bool controlFin{false};
+    bool persistentRr{false};
     uint64_t requestBytes{0};
     uint64_t responseBytes{0};
     uint64_t requestReceived{0};
+    uint64_t responseLeft{0};
     uint64_t responseSent{0};
     bool requestFin{false};
     bool responseFin{false};
@@ -715,6 +739,7 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
         }
         if (!state.isControl) {
             state.requestBytes = session_.requestBytes;
+            state.persistentRr = session_.mode == kModeCodePersistentRr;
         }
         auto res = sock_->setReadCallback(id, this);
         if (res.hasError()) {
@@ -772,9 +797,40 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
             if (data) {
                 auto range = data->coalesce();
                 server_stream_state.requestReceived += range.size();
+                if (server_stream_state.persistentRr) {
+                    while (server_stream_state.requestReceived >=
+                           server_stream_state.requestBytes) {
+                        server_stream_state.requestReceived -= server_stream_state.requestBytes;
+                        uint64_t responseBytes = responseBytesForNextRequest();
+                        if (std::numeric_limits<uint64_t>::max() -
+                                server_stream_state.responseLeft <
+                            responseBytes) {
+                            sock_->close(quic::QuicError(quic::ApplicationErrorCode(1),
+                                                         "response byte counter overflow"));
+                            return;
+                        }
+                        server_stream_state.responseLeft += responseBytes;
+                    }
+                    if (server_stream_state.responseLeft > 0) {
+                        writeResponse(id, server_stream_state);
+                    }
+                }
             }
             if (eof) {
                 server_stream_state.requestFin = true;
+                if (server_stream_state.persistentRr) {
+                    if (server_stream_state.requestReceived != 0) {
+                        sock_->close(quic::QuicError(quic::ApplicationErrorCode(1),
+                                                     "partial persistent-rr request"));
+                        return;
+                    }
+                    writeResponse(id, server_stream_state);
+                    auto cb = sock_->setReadCallback(id, nullptr);
+                    if (cb.hasError()) {
+                        std::cerr << "mvfst server unset read callback failed\n";
+                    }
+                    return;
+                }
                 bool variableBulkUpload = session_.mode == kModeCodeBulk &&
                                           session_.direction == kDirectionCodeUpload &&
                                           session_.totalBytes.set;
@@ -852,6 +908,34 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
 
     void writeResponse(quic::StreamId id, ServerStreamState &state) noexcept {
         if (!state.requestFin || state.responseFin) {
+            if (!state.persistentRr) {
+                return;
+            }
+        }
+        if (state.persistentRr) {
+            while (state.responseLeft > 0) {
+                uint64_t remaining = state.responseLeft;
+                size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, kWriteChunkSize));
+                auto data = folly::IOBuf::create(chunk);
+                std::memset(data->writableData(), 0x5a, chunk);
+                data->append(chunk);
+                auto res = sock_->writeChain(id, std::move(data), false, nullptr);
+                if (res.hasError()) {
+                    auto notify = sock_->notifyPendingWriteOnStream(id, this);
+                    if (notify.hasError()) {
+                        std::cerr << "mvfst server notifyPendingWriteOnStream failed\n";
+                    }
+                    return;
+                }
+                state.responseLeft -= chunk;
+            }
+            if (state.requestFin && !state.responseFin) {
+                auto res = sock_->writeChain(id, nullptr, true, nullptr);
+                if (!res.hasError()) {
+                    state.responseFin = true;
+                    streams_.erase(id);
+                }
+            }
             return;
         }
         while (state.responseSent < state.responseBytes) {
@@ -940,6 +1024,7 @@ void runServer(const Config &cfg) {
 
 struct ClientStreamState {
     bool isControl{false};
+    bool persistentRr{false};
     std::vector<uint8_t> controlOut;
     std::vector<uint8_t> controlIn;
     size_t sent{0};
@@ -947,9 +1032,12 @@ struct ClientStreamState {
     uint64_t responseBytes{0};
     uint64_t requestSent{0};
     uint64_t received{0};
+    uint64_t responsePending{0};
     bool counts{false};
     bool finSent{false};
+    bool requestFin{false};
     Clock::time_point start{Clock::now()};
+    std::deque<PendingPersistentRequest> pendingPersistent;
 };
 
 class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
@@ -1025,6 +1113,20 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
             if (!client_) {
                 return;
             }
+            std::optional<quic::StreamId> persistentStream;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                persistentStream = persistentStream_;
+                if (persistentStream.has_value()) {
+                    auto iter = streams_.find(*persistentStream);
+                    if (iter != streams_.end()) {
+                        iter->second.requestFin = true;
+                    }
+                }
+            }
+            if (persistentStream.has_value()) {
+                sendStream(*persistentStream);
+            }
             std::vector<quic::StreamId> streams;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -1072,6 +1174,86 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                 return;
             }
             sendStream(streamId);
+        });
+    }
+
+    void openPersistentRequest(bool counts, uint64_t requestBytes, uint64_t responseBytes) {
+        evb_->runInEventBaseThreadAndWait([&, counts, requestBytes, responseBytes] {
+            if (!sessionReady_) {
+                setError("mvfst session is not ready");
+                return;
+            }
+            quic::StreamId streamId = 0;
+            bool created = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (persistentStream_.has_value()) {
+                    streamId = *persistentStream_;
+                    auto iter = streams_.find(streamId);
+                    if (iter == streams_.end()) {
+                        error_ = "mvfst persistent-rr stream is missing";
+                        cond_.notify_all();
+                        return;
+                    }
+                    if (std::numeric_limits<uint64_t>::max() - iter->second.requestBytes <
+                        requestBytes) {
+                        error_ = "mvfst persistent-rr request byte counter overflow";
+                        cond_.notify_all();
+                        return;
+                    }
+                    iter->second.requestBytes += requestBytes;
+                    iter->second.responseBytes = responseBytes;
+                    iter->second.pendingPersistent.push_back({counts, requestBytes, Clock::now()});
+                    created = false;
+                } else {
+                    created = true;
+                }
+            }
+            if (!created) {
+                sendStream(streamId);
+                return;
+            }
+            auto idResult = client_->createBidirectionalStream();
+            if (idResult.hasError()) {
+                setError("mvfst createBidirectionalStream failed");
+                return;
+            }
+            streamId = *idResult;
+            ClientStreamState state;
+            state.persistentRr = true;
+            state.requestBytes = requestBytes;
+            state.responseBytes = responseBytes;
+            state.pendingPersistent.push_back({counts, requestBytes, Clock::now()});
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                streams_.emplace(streamId, std::move(state));
+                persistentStream_ = streamId;
+            }
+            auto cb = client_->setReadCallback(streamId, this);
+            if (cb.hasError()) {
+                setError("mvfst setReadCallback failed");
+                return;
+            }
+            sendStream(streamId);
+        });
+    }
+
+    void finishPersistentRequests() {
+        evb_->runInEventBaseThreadAndWait([&] {
+            std::optional<quic::StreamId> streamId;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                streamId = persistentStream_;
+                if (streamId.has_value()) {
+                    auto iter = streams_.find(*streamId);
+                    if (iter != streams_.end()) {
+                        iter->second.requestFin = true;
+                    }
+                }
+            }
+            if (streamId.has_value()) {
+                sendStream(*streamId);
+            }
         });
     }
 
@@ -1161,10 +1343,44 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                         handleControlLocked(iter->second);
                     } else {
                         iter->second.received += data->computeChainDataLength();
+                        if (iter->second.persistentRr) {
+                            iter->second.responsePending += data->computeChainDataLength();
+                            while (iter->second.responseBytes != 0 &&
+                                   iter->second.responsePending >= iter->second.responseBytes &&
+                                   !iter->second.pendingPersistent.empty()) {
+                                PendingPersistentRequest pending =
+                                    iter->second.pendingPersistent.front();
+                                iter->second.pendingPersistent.pop_front();
+                                iter->second.responsePending -= iter->second.responseBytes;
+                                completed.counts = pending.counts;
+                                completed.requestBytes = pending.requestBytes;
+                                completed.received = iter->second.responseBytes;
+                                completed.latency = Clock::now() - pending.start;
+                                completed_.push_back(completed);
+                                cond_.notify_all();
+                            }
+                            if (iter->second.responseBytes != 0 &&
+                                iter->second.responsePending >= iter->second.responseBytes &&
+                                iter->second.pendingPersistent.empty()) {
+                                error_ = "mvfst persistent-rr received too many response bytes";
+                                streams_.erase(iter);
+                                done = true;
+                            }
+                        }
                     }
                 }
                 if (eof) {
                     if (iter->second.isControl) {
+                        streams_.erase(iter);
+                        done = true;
+                    } else if (iter->second.persistentRr) {
+                        if (!iter->second.pendingPersistent.empty() ||
+                            iter->second.responsePending != 0) {
+                            error_ = "mvfst persistent-rr stream closed with pending responses";
+                        }
+                        if (persistentStream_ == id) {
+                            persistentStream_.reset();
+                        }
                         streams_.erase(iter);
                         done = true;
                     } else if (iter->second.received != iter->second.responseBytes) {
@@ -1177,9 +1393,9 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                         completed.received = iter->second.received;
                         completed.latency = Clock::now() - iter->second.start;
                         completed_.push_back(completed);
+                        streams_.erase(iter);
+                        done = true;
                     }
-                    streams_.erase(iter);
-                    done = true;
                 }
             }
             if (done) {
@@ -1210,7 +1426,12 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
     size_t activeRequestStreamsLocked() const {
         size_t count = 0;
         for (const auto &[_, stream] : streams_) {
-            if (!stream.isControl) {
+            if (stream.isControl) {
+                continue;
+            }
+            if (stream.persistentRr) {
+                count += stream.pendingPersistent.size();
+            } else {
                 ++count;
             }
         }
@@ -1319,6 +1540,7 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                 }
                 size_t chunk = 0;
                 bool eof = false;
+                bool persistentDrained = false;
                 quic::BufPtr data;
                 if (snapshot.isControl) {
                     size_t remaining = snapshot.controlOut.size() - snapshot.sent;
@@ -1329,11 +1551,16 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                 } else {
                     uint64_t remaining = snapshot.requestBytes - snapshot.requestSent;
                     chunk = static_cast<size_t>(std::min<uint64_t>(remaining, kWriteChunkSize));
-                    eof = chunk == remaining;
+                    eof = chunk == remaining && (!snapshot.persistentRr || snapshot.requestFin);
+                    persistentDrained =
+                        snapshot.persistentRr && chunk == remaining && !snapshot.requestFin;
                     data = chunk == 0 ? nullptr : folly::IOBuf::create(chunk);
                     if (chunk != 0) {
                         std::memset(data->writableData(), 0x5a, chunk);
                         data->append(chunk);
+                    }
+                    if (chunk == 0 && !eof) {
+                        return;
                     }
                 }
                 auto res = client_->writeChain(id, std::move(data), eof, nullptr);
@@ -1359,7 +1586,7 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                         iter->second.finSent = true;
                     }
                 }
-                if (eof) {
+                if (eof || persistentDrained) {
                     return;
                 }
             }
@@ -1379,6 +1606,7 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
     bool sessionReady_{false};
     std::string error_;
     std::map<quic::StreamId, ClientStreamState> streams_;
+    std::optional<quic::StreamId> persistentStream_;
     std::vector<CompletedStream> completed_;
 };
 
@@ -1491,8 +1719,13 @@ void runRr(const Config &cfg, Counters &counters) {
             if (!canStartRrRequest(cfg, started, startedByConnection, index)) {
                 break;
             }
-            client->openRequest(cfg.requests.set || Clock::now() >= measureStart, cfg.requestBytes,
-                                cfg.responseBytes);
+            if (cfg.mode == kModePersistentRr) {
+                client->openPersistentRequest(cfg.requests.set || Clock::now() >= measureStart,
+                                              cfg.requestBytes, cfg.responseBytes);
+            } else {
+                client->openRequest(cfg.requests.set || Clock::now() >= measureStart,
+                                    cfg.requestBytes, cfg.responseBytes);
+            }
             ++started;
             ++startedByConnection[index];
         }
@@ -1518,10 +1751,28 @@ void runRr(const Config &cfg, Counters &counters) {
                 if (!cfg.requests.set && Clock::now() >= deadline) {
                     break;
                 }
-                client->openRequest(cfg.requests.set || Clock::now() >= measureStart,
-                                    cfg.requestBytes, cfg.responseBytes);
+                if (cfg.mode == kModePersistentRr) {
+                    client->openPersistentRequest(cfg.requests.set || Clock::now() >= measureStart,
+                                                  cfg.requestBytes, cfg.responseBytes);
+                } else {
+                    client->openRequest(cfg.requests.set || Clock::now() >= measureStart,
+                                        cfg.requestBytes, cfg.responseBytes);
+                }
                 ++started;
                 ++startedByConnection[index];
+            }
+        }
+    }
+    if (cfg.mode == kModePersistentRr) {
+        for (auto &client : clients) {
+            client->finishPersistentRequests();
+        }
+        auto drainDeadline = Clock::now() + kDrainTimeout;
+        while (std::any_of(clients.begin(), clients.end(),
+                           [](const auto &client) { return client->hasStreams(); }) &&
+               Clock::now() < drainDeadline) {
+            for (auto &client : clients) {
+                collectCompleted(client->driveUntil(drainDeadline, false), counters, measureStart);
             }
         }
     }
@@ -1599,8 +1850,11 @@ RunSummary runClient(const Config &cfg) {
             runFixedBulk(cfg, counters);
             elapsed = Clock::now() - runStart;
         }
-    } else if (cfg.mode == kModeRr) {
+    } else if (cfg.mode == kModeRr || cfg.mode == kModePersistentRr) {
         runRr(cfg, counters);
+        if (!cfg.requests.set && counters.requestsCompleted == 0) {
+            throw std::runtime_error("mvfst RR completed zero requests");
+        }
         elapsed = cfg.requests.set ? Clock::now() - runStart : cfg.duration;
     } else {
         runCrr(cfg, counters);

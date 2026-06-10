@@ -254,11 +254,11 @@ def _append_u64(out: bytearray, value: int) -> None:
 
 
 def _mode_to_u8(mode: Mode) -> int:
-    return {Mode.BULK: 0, Mode.RR: 1, Mode.CRR: 2}[mode]
+    return {Mode.BULK: 0, Mode.RR: 1, Mode.CRR: 2, Mode.PERSISTENT_RR: 3}[mode]
 
 
 def _parse_mode(value: int) -> Mode | None:
-    return {0: Mode.BULK, 1: Mode.RR, 2: Mode.CRR}.get(value)
+    return {0: Mode.BULK, 1: Mode.RR, 2: Mode.CRR, 3: Mode.PERSISTENT_RR}.get(value)
 
 
 def _direction_to_u8(direction: Direction) -> int:

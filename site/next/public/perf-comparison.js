@@ -234,6 +234,14 @@ const modeConfig = {
     unit: "req/s",
     decimals: 0,
   },
+  "persistent-rr": {
+    title: "Persistent Request/Response",
+    metric: "requests_per_s",
+    metricLabel: "Requests",
+    metricDetail: "Reqs/s",
+    unit: "req/s",
+    decimals: 0,
+  },
   crr: {
     title: "Connection Request/Response",
     metric: "requests_per_s",

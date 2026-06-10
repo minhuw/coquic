@@ -58,6 +58,10 @@ std::optional<std::string> validate_perf_session_start(const QuicPerfSessionStar
     if (start.requests_in_flight == 0) {
         return "requests_in_flight must be greater than zero";
     }
+    if (start.mode == QuicPerfMode::persistent_rr &&
+        (start.request_bytes == 0 || start.response_bytes == 0)) {
+        return "persistent-rr requires nonzero request and response bytes";
+    }
     return std::nullopt;
 }
 
@@ -186,6 +190,7 @@ int QuicPerfServer::run() {
             std::any_of(sessions_.begin(), sessions_.end(), [](const auto &entry) {
                 return entry.second.start.has_value() &&
                        (entry.second.start->mode == QuicPerfMode::rr ||
+                        entry.second.start->mode == QuicPerfMode::persistent_rr ||
                         entry.second.start->mode == QuicPerfMode::crr);
             });
         if (interactive_pending && !drain_pending_backend_events()) {
@@ -328,7 +333,7 @@ bool QuicPerfServer::handle_stream_data(Session &session,
         }
 
         session.bytes_received += received.byte_count();
-        if (received.fin) {
+        if (received.fin && session.start->mode != QuicPerfMode::persistent_rr) {
             ++session.requests_completed;
         }
 
@@ -405,6 +410,51 @@ bool QuicPerfServer::handle_stream_data(Session &session,
                                          });
         }
 
+        if (session.start->mode == QuicPerfMode::persistent_rr) {
+            const auto request_bytes = static_cast<std::size_t>(session.start->request_bytes);
+            const auto response_bytes = static_cast<std::size_t>(session.start->response_bytes);
+            auto &pending_request_bytes =
+                session.persistent_rr_pending_request_bytes[received.stream_id];
+            pending_request_bytes += received.byte_count();
+            while (pending_request_bytes >= request_bytes) {
+                auto send_result = advance_endpoint(
+                    quic::QuicCoreConnectionCommand{
+                        .connection = session.connection,
+                        .input =
+                            quic::QuicCoreSendSharedStreamData{
+                                .stream_id = received.stream_id,
+                                .bytes = session.fixed_response_payload,
+                                .fin = false,
+                            },
+                    },
+                    now);
+                if (send_result.local_error.has_value() || send_result.send_sink_failed ||
+                    !send_buffer_.append_or_flush(*backend_, send_result)) {
+                    return false;
+                }
+                session.bytes_sent += response_bytes;
+                ++session.requests_completed;
+                pending_request_bytes -= request_bytes;
+                if (session.start->requests.has_value() &&
+                    session.requests_completed >= *session.start->requests) {
+                    session.complete_sent = true;
+                    completed_session_seen_ = true;
+                    if (!send_control(session, QuicPerfSessionComplete{
+                                                   .bytes_sent = session.bytes_sent,
+                                                   .bytes_received = session.bytes_received,
+                                                   .requests_completed = session.requests_completed,
+                                               })) {
+                        return false;
+                    }
+                    break;
+                }
+            }
+            if (received.fin) {
+                session.persistent_rr_pending_request_bytes.erase(received.stream_id);
+            }
+            return true;
+        }
+
         if ((session.start->mode == QuicPerfMode::rr || session.start->mode == QuicPerfMode::crr) &&
             received.fin) {
             // Request/response modes answer each finished request stream with one response body.
@@ -464,7 +514,9 @@ bool QuicPerfServer::handle_stream_data(Session &session,
 
     // A valid start message arms the session and acknowledges readiness on the control stream.
     session.start = *start;
-    if (session.start->mode == QuicPerfMode::rr || session.start->mode == QuicPerfMode::crr ||
+    if (session.start->mode == QuicPerfMode::rr ||
+        session.start->mode == QuicPerfMode::persistent_rr ||
+        session.start->mode == QuicPerfMode::crr ||
         (session.start->mode == QuicPerfMode::bulk &&
          session.start->direction == QuicPerfDirection::download &&
          !session.start->total_bytes.has_value())) {

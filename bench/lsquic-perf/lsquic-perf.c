@@ -31,6 +31,7 @@
 #define MODE_CODE_BULK 0U
 #define MODE_CODE_RR 1U
 #define MODE_CODE_CRR 2U
+#define MODE_CODE_PERSISTENT_RR 3U
 #define DIRECTION_CODE_UPLOAD 0U
 #define DIRECTION_CODE_DOWNLOAD 1U
 #define DEFAULT_MAX_RUN_REQUESTS 4096ULL
@@ -122,6 +123,7 @@ typedef struct {
 } latency_summary_t;
 
 typedef struct client_state client_state_t;
+struct lsquic_stream_ctx;
 
 typedef struct {
     int started;
@@ -142,11 +144,13 @@ struct lsquic_conn_ctx {
     client_state_t *state;
     lsquic_conn_t *conn;
     struct service_port *sport;
+    struct lsquic_stream_ctx *persistent_stream;
     uint64_t active_streams;
     uint64_t started_requests;
     uint64_t request_limit;
     int ready;
     int control_opened;
+    int persistent_stream_pending;
     int session_ready;
     int closing;
     perf_session_start_t session_start;
@@ -156,7 +160,10 @@ struct lsquic_conn_ctx {
 struct lsquic_stream_ctx {
     client_state_t *state;
     struct lsquic_conn_ctx *conn_ctx;
+    lsquic_stream_t *stream;
     int is_control;
+    int persistent_rr;
+    int request_fin;
     uint8_t *control_out;
     uint8_t *control_in;
     size_t control_len;
@@ -168,7 +175,12 @@ struct lsquic_stream_ctx {
     uint64_t response_bytes;
     uint64_t request_sent;
     uint64_t response_read;
+    uint64_t response_pending;
     uint64_t started_at;
+    uint64_t *latency_starts;
+    size_t latency_head;
+    size_t latency_len;
+    size_t latency_cap;
     int counts_latency;
     int completed;
     struct {
@@ -311,12 +323,17 @@ static int is_mode(const config_t *cfg, const char *mode) {
     return strcmp(cfg->mode, mode) == 0;
 }
 
+static int is_rr_like_mode(const config_t *cfg) {
+    return is_mode(cfg, "rr") || is_mode(cfg, "persistent-rr");
+}
+
 static int is_direction(const config_t *cfg, const char *direction) {
     return strcmp(cfg->direction, direction) == 0;
 }
 
 static void validate_config(const config_t *cfg) {
-    if (!is_mode(cfg, "bulk") && !is_mode(cfg, "rr") && !is_mode(cfg, "crr")) {
+    if (!is_mode(cfg, "bulk") && !is_mode(cfg, "rr") && !is_mode(cfg, "crr") &&
+        !is_mode(cfg, "persistent-rr")) {
         fprintf(stderr, "unsupported mode: %s\n", cfg->mode);
         exit(2);
     }
@@ -345,6 +362,10 @@ static void validate_config(const config_t *cfg) {
     }
     if (cfg->streams == 0 || cfg->connections == 0 || cfg->requests_in_flight == 0) {
         fprintf(stderr, "streams, connections, and requests-in-flight must be greater than zero\n");
+        exit(2);
+    }
+    if (is_mode(cfg, "persistent-rr") && (cfg->request_bytes == 0 || cfg->response_bytes == 0)) {
+        fprintf(stderr, "persistent-rr request and response bytes must be greater than zero\n");
         exit(2);
     }
 }
@@ -456,6 +477,9 @@ static uint8_t mode_code(const char *mode) {
     if (strcmp(mode, "crr") == 0) {
         return MODE_CODE_CRR;
     }
+    if (strcmp(mode, "persistent-rr") == 0) {
+        return MODE_CODE_PERSISTENT_RR;
+    }
     return MODE_CODE_BULK;
 }
 
@@ -538,10 +562,14 @@ static int decode_session_start_payload(const uint8_t *payload, size_t len,
     start->connections = decode_be64(payload + 63);
     start->requests_in_flight = decode_be64(payload + 71);
     if ((start->mode != MODE_CODE_BULK && start->mode != MODE_CODE_RR &&
-         start->mode != MODE_CODE_CRR) ||
+         start->mode != MODE_CODE_CRR && start->mode != MODE_CODE_PERSISTENT_RR) ||
         (start->direction != DIRECTION_CODE_UPLOAD &&
          start->direction != DIRECTION_CODE_DOWNLOAD) ||
         start->streams == 0 || start->connections == 0 || start->requests_in_flight == 0) {
+        return -1;
+    }
+    if (start->mode == MODE_CODE_PERSISTENT_RR &&
+        (start->request_bytes == 0 || start->response_bytes == 0)) {
         return -1;
     }
     return 0;
@@ -646,6 +674,11 @@ static void set_failure(client_state_t *state, const char *message) {
     }
 }
 
+static int is_client_shutdown_io_error(const struct lsquic_stream_ctx *stream_ctx) {
+    return errno == EBADF && stream_ctx->state && stream_ctx->state->stop_starting &&
+           (!stream_ctx->conn_ctx || stream_ctx->conn_ctx->closing);
+}
+
 static uint64_t scenario_request_bytes(const config_t *cfg) {
     if (is_mode(cfg, "bulk") && is_direction(cfg, "upload")) {
         return cfg->request_bytes > cfg->response_bytes ? cfg->request_bytes : cfg->response_bytes;
@@ -682,7 +715,7 @@ static uint64_t per_conn_stream_limit(const config_t *cfg) {
 }
 
 static uint64_t rr_connection_target(const config_t *cfg) {
-    if (is_mode(cfg, "rr") && cfg->requests.set) {
+    if (is_rr_like_mode(cfg) && cfg->requests.set) {
         return cfg->connections < cfg->requests.value ? cfg->connections : cfg->requests.value;
     }
     return cfg->connections;
@@ -708,12 +741,97 @@ static int should_start_request(const client_state_t *state) {
     return now_us() < state->deadline_us;
 }
 
+static int persistent_latency_push(struct lsquic_stream_ctx *stream_ctx, uint64_t value) {
+    if (stream_ctx->latency_len == stream_ctx->latency_cap) {
+        size_t new_cap = stream_ctx->latency_cap ? stream_ctx->latency_cap * 2 : 16;
+        uint64_t *new_values = malloc(new_cap * sizeof(new_values[0]));
+        if (!new_values) {
+            return -1;
+        }
+        for (size_t i = 0; i < stream_ctx->latency_len; ++i) {
+            new_values[i] =
+                stream_ctx
+                    ->latency_starts[(stream_ctx->latency_head + i) % stream_ctx->latency_cap];
+        }
+        free(stream_ctx->latency_starts);
+        stream_ctx->latency_starts = new_values;
+        stream_ctx->latency_head = 0;
+        stream_ctx->latency_cap = new_cap;
+    }
+    size_t index = (stream_ctx->latency_head + stream_ctx->latency_len) % stream_ctx->latency_cap;
+    stream_ctx->latency_starts[index] = value;
+    ++stream_ctx->latency_len;
+    return 0;
+}
+
+static int persistent_latency_pop(struct lsquic_stream_ctx *stream_ctx, uint64_t *value) {
+    if (stream_ctx->latency_len == 0) {
+        return 0;
+    }
+    *value = stream_ctx->latency_starts[stream_ctx->latency_head];
+    stream_ctx->latency_head = (stream_ctx->latency_head + 1) % stream_ctx->latency_cap;
+    --stream_ctx->latency_len;
+    if (stream_ctx->latency_len == 0) {
+        stream_ctx->latency_head = 0;
+    }
+    return 1;
+}
+
+static int can_start_persistent_request(client_state_t *state, struct lsquic_conn_ctx *conn_ctx) {
+    if (!conn_ctx || !conn_ctx->ready || !conn_ctx->session_ready || conn_ctx->closing ||
+        !should_start_request(state)) {
+        return 0;
+    }
+    if (state->active_streams >= inflight_limit(&state->cfg) ||
+        conn_ctx->active_streams >= per_conn_stream_limit(&state->cfg)) {
+        return 0;
+    }
+    if (state->cfg.requests.set && conn_ctx->started_requests >= conn_ctx->request_limit) {
+        return 0;
+    }
+    return 1;
+}
+
+static int start_persistent_request(client_state_t *state, struct lsquic_conn_ctx *conn_ctx,
+                                    struct lsquic_stream_ctx *stream_ctx) {
+    if (!can_start_persistent_request(state, conn_ctx)) {
+        return 0;
+    }
+    uint64_t request_bytes = scenario_request_bytes(&state->cfg);
+    uint64_t response_bytes = scenario_response_bytes(&state->cfg);
+    if (request_bytes == 0 || response_bytes == 0) {
+        set_failure(state, "persistent-rr request and response bytes must be nonzero");
+        return -1;
+    }
+    if (UINT64_MAX - stream_ctx->request_bytes < request_bytes) {
+        set_failure(state, "persistent-rr request byte counter overflow");
+        return -1;
+    }
+    if (persistent_latency_push(stream_ctx, now_us()) != 0) {
+        set_failure(state, "out of memory queuing persistent-rr request");
+        return -1;
+    }
+    stream_ctx->response_bytes = response_bytes;
+    stream_ctx->request_bytes += request_bytes;
+    stream_ctx->counts_latency = 1;
+    ++state->started_requests;
+    ++state->active_streams;
+    ++conn_ctx->started_requests;
+    ++conn_ctx->active_streams;
+    lsquic_stream_wantwrite(stream_ctx->stream, 1);
+    return 1;
+}
+
 static void close_all_connections(client_state_t *state) {
     struct lsquic_conn_ctx *conn_ctx = state->conns;
     while (conn_ctx) {
         struct lsquic_conn_ctx *next = conn_ctx->next;
         if (!conn_ctx->closing) {
             conn_ctx->closing = 1;
+            if (conn_ctx->persistent_stream && !conn_ctx->persistent_stream->request_fin) {
+                conn_ctx->persistent_stream->request_fin = 1;
+                lsquic_stream_wantwrite(conn_ctx->persistent_stream->stream, 1);
+            }
             lsquic_conn_close(conn_ctx->conn);
         }
         conn_ctx = next;
@@ -725,11 +843,36 @@ static void maybe_finish_client(client_state_t *state);
 static void try_open_streams_on_conn(client_state_t *state, struct lsquic_conn_ctx *conn_ctx) {
     const uint64_t global_limit = inflight_limit(&state->cfg);
     const uint64_t conn_limit = per_conn_stream_limit(&state->cfg);
+    if (!conn_ctx) {
+        return;
+    }
+    if (is_mode(&state->cfg, "persistent-rr")) {
+        if (!conn_ctx->ready || !conn_ctx->session_ready || conn_ctx->closing) {
+            return;
+        }
+        if (!conn_ctx->persistent_stream && !conn_ctx->persistent_stream_pending &&
+            should_start_request(state) &&
+            state->active_streams + state->pending_streams < global_limit &&
+            conn_ctx->active_streams < conn_limit &&
+            (!state->cfg.requests.set || conn_ctx->started_requests < conn_ctx->request_limit) &&
+            lsquic_conn_n_avail_streams(conn_ctx->conn) > 0) {
+            ++state->pending_streams;
+            conn_ctx->persistent_stream_pending = 1;
+            lsquic_conn_make_stream(conn_ctx->conn);
+        }
+        while (conn_ctx->persistent_stream) {
+            int started = start_persistent_request(state, conn_ctx, conn_ctx->persistent_stream);
+            if (started <= 0) {
+                break;
+            }
+        }
+        return;
+    }
     while (conn_ctx->ready && conn_ctx->session_ready && !conn_ctx->closing &&
            should_start_request(state) &&
            state->active_streams + state->pending_streams < global_limit &&
            conn_ctx->active_streams < conn_limit &&
-           (!is_mode(&state->cfg, "rr") || !state->cfg.requests.set ||
+           (!is_rr_like_mode(&state->cfg) || !state->cfg.requests.set ||
             conn_ctx->started_requests < conn_ctx->request_limit) &&
            lsquic_conn_n_avail_streams(conn_ctx->conn) > 0) {
         ++state->pending_streams;
@@ -942,11 +1085,16 @@ static lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, lsquic_str
     DEBUG_LOG(
         "client new stream stream=%p pending=%" PRIu64 " started=%" PRIu64 " target=%" PRIu64 "\n",
         (void *)stream, state->pending_streams, state->started_requests, state->target_requests);
+    struct lsquic_conn_ctx *conn_ctx =
+        stream ? lsquic_conn_get_ctx(lsquic_stream_conn(stream)) : NULL;
     if ((uint64_t)lsquic_stream_id(stream) == CONTROL_STREAM_ID &&
         state->pending_control_streams > 0) {
         --state->pending_control_streams;
     } else if (state->pending_streams > 0) {
         --state->pending_streams;
+        if (is_mode(&state->cfg, "persistent-rr") && conn_ctx) {
+            conn_ctx->persistent_stream_pending = 0;
+        }
     }
     if (!stream || !should_start_request(state)) {
         if (stream) {
@@ -955,7 +1103,6 @@ static lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, lsquic_str
         maybe_finish_client(state);
         return NULL;
     }
-    struct lsquic_conn_ctx *conn_ctx = lsquic_conn_get_ctx(lsquic_stream_conn(stream));
     struct lsquic_stream_ctx *stream_ctx = calloc(1, sizeof(*stream_ctx));
     if (!stream_ctx) {
         perror("calloc");
@@ -963,11 +1110,12 @@ static lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, lsquic_str
     }
     stream_ctx->state = state;
     stream_ctx->conn_ctx = conn_ctx;
+    stream_ctx->stream = stream;
     if ((uint64_t)lsquic_stream_id(stream) == CONTROL_STREAM_ID) {
         stream_ctx->is_control = 1;
         stream_ctx->control_fin = 1;
         config_t connection_cfg = state->cfg;
-        if (is_mode(&state->cfg, "rr") && state->cfg.requests.set && conn_ctx) {
+        if (is_rr_like_mode(&state->cfg) && state->cfg.requests.set && conn_ctx) {
             connection_cfg.requests.value = conn_ctx->request_limit;
             connection_cfg.requests.set = 1;
         }
@@ -988,6 +1136,25 @@ static lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, lsquic_str
         free(stream_ctx);
         maybe_finish_client(state);
         return NULL;
+    }
+    if (is_mode(&state->cfg, "persistent-rr")) {
+        stream_ctx->persistent_rr = 1;
+        if (conn_ctx) {
+            conn_ctx->persistent_stream = stream_ctx;
+        }
+        int started = start_persistent_request(state, conn_ctx, stream_ctx);
+        if (started <= 0) {
+            if (started == 0) {
+                set_failure(state, "could not start persistent-rr request");
+            }
+            lsquic_stream_close(stream);
+            free(stream_ctx);
+            maybe_finish_client(state);
+            return NULL;
+        }
+        try_open_streams_on_conn(state, conn_ctx);
+        lsquic_stream_wantread(stream, 1);
+        return stream_ctx;
     }
     stream_ctx->request_bytes = scenario_request_bytes(&state->cfg);
     stream_ctx->response_bytes = scenario_response_bytes(&state->cfg);
@@ -1017,6 +1184,9 @@ static void client_on_write(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
             if (nw > 0) {
                 stream_ctx->control_sent += (size_t)nw;
             } else if (nw < 0 && errno != EWOULDBLOCK) {
+                if (is_client_shutdown_io_error(stream_ctx)) {
+                    return;
+                }
                 set_failure(stream_ctx->state, strerror(errno));
                 lsquic_stream_close(stream);
                 return;
@@ -1039,6 +1209,9 @@ static void client_on_write(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
         if (nw > 0) {
             stream_ctx->request_sent += (uint64_t)nw;
         } else if (nw < 0 && errno != EWOULDBLOCK) {
+            if (is_client_shutdown_io_error(stream_ctx)) {
+                return;
+            }
             set_failure(stream_ctx->state, strerror(errno));
             lsquic_stream_close(stream);
             return;
@@ -1047,8 +1220,44 @@ static void client_on_write(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
         }
     }
     lsquic_stream_wantwrite(stream, 0);
-    lsquic_stream_shutdown(stream, 1);
+    if (stream_ctx->persistent_rr) {
+        (void)lsquic_stream_flush(stream);
+        if (stream_ctx->request_fin) {
+            lsquic_stream_shutdown(stream, 1);
+        }
+    } else {
+        lsquic_stream_shutdown(stream, 1);
+    }
     lsquic_stream_wantread(stream, 1);
+}
+
+static int count_persistent_client_responses(struct lsquic_stream_ctx *stream_ctx) {
+    client_state_t *state = stream_ctx->state;
+    while (stream_ctx->response_pending >= stream_ctx->response_bytes &&
+           stream_ctx->latency_len > 0) {
+        uint64_t started_at = 0;
+        (void)persistent_latency_pop(stream_ctx, &started_at);
+        stream_ctx->response_pending -= stream_ctx->response_bytes;
+        state->counters.bytes_sent += scenario_request_bytes(&state->cfg);
+        state->counters.bytes_received += stream_ctx->response_bytes;
+        ++state->counters.requests_completed;
+        latency_push(&state->counters.latencies, now_us() - started_at);
+        if (state->active_streams > 0) {
+            --state->active_streams;
+        }
+        if (stream_ctx->conn_ctx && stream_ctx->conn_ctx->active_streams > 0) {
+            --stream_ctx->conn_ctx->active_streams;
+        }
+    }
+    if (stream_ctx->response_pending >= stream_ctx->response_bytes &&
+        stream_ctx->latency_len == 0) {
+        set_failure(state, "persistent-rr received too many response bytes");
+        lsquic_stream_close(stream_ctx->stream);
+        return -1;
+    }
+    try_open_streams_on_conn(state, stream_ctx->conn_ctx);
+    maybe_finish_client(state);
+    return 0;
 }
 
 static void client_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
@@ -1081,6 +1290,9 @@ static void client_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
             } else if (errno == EWOULDBLOCK) {
                 break;
             } else {
+                if (is_client_shutdown_io_error(stream_ctx)) {
+                    return;
+                }
                 set_failure(stream_ctx->state, strerror(errno));
                 lsquic_stream_close(stream);
                 return;
@@ -1112,7 +1324,18 @@ static void client_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
         ssize_t nr = lsquic_stream_read(stream, buf, sizeof(buf));
         if (nr > 0) {
             stream_ctx->response_read += (uint64_t)nr;
+            if (stream_ctx->persistent_rr) {
+                stream_ctx->response_pending += (uint64_t)nr;
+                if (count_persistent_client_responses(stream_ctx) != 0) {
+                    return;
+                }
+            }
         } else if (nr == 0) {
+            if (stream_ctx->persistent_rr && stream_ctx->latency_len != 0) {
+                set_failure(stream_ctx->state, "persistent-rr stream closed with pending requests");
+                lsquic_stream_close(stream);
+                return;
+            }
             stream_ctx->completed = 1;
             lsquic_stream_wantread(stream, 0);
             lsquic_stream_shutdown(stream, 0);
@@ -1120,6 +1343,9 @@ static void client_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
         } else if (errno == EWOULDBLOCK) {
             return;
         } else {
+            if (is_client_shutdown_io_error(stream_ctx)) {
+                return;
+            }
             set_failure(stream_ctx->state, strerror(errno));
             lsquic_stream_close(stream);
             return;
@@ -1134,6 +1360,17 @@ static void client_on_close(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
               stream_ctx->response_read, stream_ctx->response_bytes);
     client_state_t *state = stream_ctx->state;
     if (stream_ctx->is_control) {
+        free(stream_ctx->control_out);
+        free(stream_ctx->control_in);
+        free(stream_ctx);
+        maybe_finish_client(state);
+        return;
+    }
+    if (stream_ctx->persistent_rr) {
+        if (stream_ctx->conn_ctx && stream_ctx->conn_ctx->persistent_stream == stream_ctx) {
+            stream_ctx->conn_ctx->persistent_stream = NULL;
+        }
+        free(stream_ctx->latency_starts);
         free(stream_ctx->control_out);
         free(stream_ctx->control_in);
         free(stream_ctx);
@@ -1284,7 +1521,10 @@ static void server_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     if (!stream_ctx->server.shape_set) {
         stream_ctx->server.request_bytes = stream_ctx->conn_ctx->session_start.request_bytes;
         stream_ctx->server.response_bytes = stream_ctx->conn_ctx->session_start.response_bytes;
-        stream_ctx->server.response_left = stream_ctx->server.response_bytes;
+        stream_ctx->persistent_rr =
+            stream_ctx->conn_ctx->session_start.mode == MODE_CODE_PERSISTENT_RR;
+        stream_ctx->server.response_left =
+            stream_ctx->persistent_rr ? 0 : stream_ctx->server.response_bytes;
         stream_ctx->server.shape_set = 1;
     }
     for (;;) {
@@ -1303,7 +1543,22 @@ static void server_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
         }
     }
 
-    if (stream_ctx->server.request_read >= stream_ctx->server.request_bytes) {
+    if (stream_ctx->persistent_rr) {
+        if (stream_ctx->server.request_fin &&
+            stream_ctx->server.request_read % stream_ctx->server.request_bytes != 0) {
+            lsquic_stream_close(stream);
+            return;
+        }
+        while (stream_ctx->server.request_read >= stream_ctx->server.request_bytes) {
+            stream_ctx->server.request_read -= stream_ctx->server.request_bytes;
+            if (UINT64_MAX - stream_ctx->server.response_left < stream_ctx->server.response_bytes) {
+                lsquic_stream_close(stream);
+                return;
+            }
+            stream_ctx->server.response_left += stream_ctx->server.response_bytes;
+            stream_ctx->server.ready_to_send = 1;
+        }
+    } else if (stream_ctx->server.request_read >= stream_ctx->server.request_bytes) {
         stream_ctx->server.ready_to_send = 1;
     }
     if (stream_ctx->server.ready_to_send) {
@@ -1355,7 +1610,10 @@ static void server_on_write(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
         }
     }
     lsquic_stream_wantwrite(stream, 0);
-    lsquic_stream_shutdown(stream, 1);
+    (void)lsquic_stream_flush(stream);
+    if (!stream_ctx->persistent_rr || stream_ctx->server.request_fin) {
+        lsquic_stream_shutdown(stream, 1);
+    }
 }
 
 static void server_on_close(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
@@ -1364,6 +1622,7 @@ static void server_on_close(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     if (stream_ctx) {
         free(stream_ctx->control_out);
         free(stream_ctx->control_in);
+        free(stream_ctx->latency_starts);
     }
     free(stream_ctx);
 }

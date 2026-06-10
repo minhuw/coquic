@@ -75,6 +75,7 @@ std::optional<QuicPerfMode> parse_mode(std::uint8_t value) {
     case QuicPerfMode::bulk:
     case QuicPerfMode::rr:
     case QuicPerfMode::crr:
+    case QuicPerfMode::persistent_rr:
         return static_cast<QuicPerfMode>(value);
     }
     return std::nullopt;

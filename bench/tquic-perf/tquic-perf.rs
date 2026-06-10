@@ -29,6 +29,7 @@ const MESSAGE_SESSION_COMPLETE: u8 = 4;
 const MODE_CODE_BULK: u8 = 0;
 const MODE_CODE_RR: u8 = 1;
 const MODE_CODE_CRR: u8 = 2;
+const MODE_CODE_PERSISTENT_RR: u8 = 3;
 const DIRECTION_CODE_UPLOAD: u8 = 0;
 const DIRECTION_CODE_DOWNLOAD: u8 = 1;
 const MAX_BUF_SIZE: usize = 65_536;
@@ -43,6 +44,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const MODE_BULK: &str = "bulk";
 const MODE_RR: &str = "rr";
 const MODE_CRR: &str = "crr";
+const MODE_PERSISTENT_RR: &str = "persistent-rr";
 const DIRECTION_UPLOAD: &str = "upload";
 const DIRECTION_DOWNLOAD: &str = "download";
 const DIRECTION_STAY: &str = "stay";
@@ -148,7 +150,18 @@ struct ClientStream {
     request_bytes: u64,
     response_bytes: u64,
     request_sent: u64,
+    request_fin_sent: bool,
     response_received: u64,
+    started_at: Instant,
+    counts: bool,
+    persistent: bool,
+    closing: bool,
+    response_pending: u64,
+    chunk_request_bytes: u64,
+    outstanding: VecDeque<PersistentRequest>,
+}
+
+struct PersistentRequest {
     started_at: Instant,
     counts: bool,
 }
@@ -165,6 +178,7 @@ struct ClientConn {
     control_sent: usize,
     control_recv: Vec<u8>,
     streams: HashMap<u64, ClientStream>,
+    persistent_stream: Option<u64>,
 }
 
 struct ClientShared {
@@ -223,8 +237,10 @@ struct ServerStream {
     request_bytes: u64,
     response_bytes: u64,
     request_received: u64,
+    request_fin: bool,
     response_sent: u64,
     response_fin: bool,
+    persistent: bool,
 }
 
 #[derive(Default)]
@@ -377,7 +393,7 @@ fn parse_args(args: &[String]) -> Result<Config, AnyError> {
 }
 
 fn validate_config(cfg: &Config) -> Result<(), AnyError> {
-    if ![MODE_BULK, MODE_RR, MODE_CRR].contains(&cfg.mode.as_str()) {
+    if ![MODE_BULK, MODE_RR, MODE_CRR, MODE_PERSISTENT_RR].contains(&cfg.mode.as_str()) {
         return Err(format!("unsupported mode: {}", cfg.mode).into());
     }
     if cfg.io_backend != "socket" {
@@ -408,6 +424,9 @@ fn validate_config(cfg: &Config) -> Result<(), AnyError> {
             "streams, connections, and requests-in-flight must be greater than zero".into(),
         );
     }
+    if cfg.mode == MODE_PERSISTENT_RR && (cfg.request_bytes == 0 || cfg.response_bytes == 0) {
+        return Err("persistent-rr requires nonzero request and response bytes".into());
+    }
     Ok(())
 }
 
@@ -425,6 +444,7 @@ fn mode_code(mode: &str) -> u8 {
     match mode {
         MODE_RR => MODE_CODE_RR,
         MODE_CRR => MODE_CODE_CRR,
+        MODE_PERSISTENT_RR => MODE_CODE_PERSISTENT_RR,
         _ => MODE_CODE_BULK,
     }
 }
@@ -541,6 +561,7 @@ fn decode_control_message(data: &[u8]) -> Result<ControlMessage, AnyError> {
                 MODE_CODE_BULK => MODE_BULK,
                 MODE_CODE_RR => MODE_RR,
                 MODE_CODE_CRR => MODE_CRR,
+                MODE_CODE_PERSISTENT_RR => MODE_PERSISTENT_RR,
                 _ => return Err("malformed session_start mode".into()),
             };
             let direction = match payload[5] {
@@ -574,6 +595,11 @@ fn decode_control_message(data: &[u8]) -> Result<ControlMessage, AnyError> {
             };
             if start.streams == 0 || start.connections == 0 || start.requests_in_flight == 0 {
                 return Err("malformed session_start counts".into());
+            }
+            if start.mode == MODE_PERSISTENT_RR
+                && (start.request_bytes == 0 || start.response_bytes == 0)
+            {
+                return Err("persistent-rr requires nonzero request and response bytes".into());
             }
             msg.start = Some(start);
         }
@@ -611,7 +637,7 @@ fn server_response_bytes(start: &SessionStart, requests_completed: u64) -> u64 {
     if start.mode == MODE_BULK && start.direction == DIRECTION_DOWNLOAD {
         return start.response_bytes;
     }
-    if start.mode == MODE_RR || start.mode == MODE_CRR {
+    if start.mode == MODE_RR || start.mode == MODE_CRR || start.mode == MODE_PERSISTENT_RR {
         return start.response_bytes;
     }
     0
@@ -632,7 +658,7 @@ fn should_send_complete(conn_state: &ServerConn) -> bool {
             && start.direction == DIRECTION_UPLOAD
             && start.total_bytes.set
             && conn_state.requests_completed >= start.streams)
-        || (start.mode == MODE_RR
+        || ((start.mode == MODE_RR || start.mode == MODE_PERSISTENT_RR)
             && start.requests.set
             && conn_state.requests_completed >= start.requests.value)
 }
@@ -683,6 +709,17 @@ fn run_client(cfg: &Config) -> Result<RunSummary, AnyError> {
             open_connections(&mut driver, rr_connection_target(cfg))?;
             let run_start = Instant::now();
             run_rr(cfg, &mut driver, &mut counters)?;
+            if cfg.requests.set {
+                run_start.elapsed()
+            } else {
+                cfg.duration
+            }
+        }
+        MODE_PERSISTENT_RR => {
+            let mut driver = new_client_driver(cfg)?;
+            open_connections(&mut driver, rr_connection_target(cfg))?;
+            let run_start = Instant::now();
+            run_persistent_rr(cfg, &mut driver, &mut counters)?;
             if cfg.requests.set {
                 run_start.elapsed()
             } else {
@@ -963,7 +1000,7 @@ fn fill_rr_streams(
 }
 
 fn rr_connection_target(cfg: &Config) -> u64 {
-    if cfg.mode == MODE_RR && cfg.requests.set {
+    if (cfg.mode == MODE_RR || cfg.mode == MODE_PERSISTENT_RR) && cfg.requests.set {
         cfg.connections.min(cfg.requests.value)
     } else {
         cfg.connections
@@ -971,7 +1008,7 @@ fn rr_connection_target(cfg: &Config) -> u64 {
 }
 
 fn rr_request_limit_for_connection(cfg: &Config, connection_position: u64) -> Option<u64> {
-    if cfg.mode != MODE_RR || !cfg.requests.set {
+    if (cfg.mode != MODE_RR && cfg.mode != MODE_PERSISTENT_RR) || !cfg.requests.set {
         return None;
     }
     let connections = rr_connection_target(cfg);
@@ -1007,6 +1044,212 @@ fn rr_done(cfg: &Config, driver: &ClientDriver, measure_deadline: Instant) -> bo
         return started_requests(driver) >= cfg.requests.value && active_streams(driver) == 0;
     }
     Instant::now() >= measure_deadline
+}
+
+fn run_persistent_rr(
+    cfg: &Config,
+    driver: &mut ClientDriver,
+    counters: &mut Counters,
+) -> Result<(), AnyError> {
+    let measure_start = Instant::now() + cfg.warmup;
+    let measure_deadline = measure_start + cfg.duration;
+    fill_persistent_rr_streams(cfg, driver, measure_start, measure_deadline)?;
+    loop {
+        if persistent_rr_done(cfg, driver, measure_deadline) {
+            break;
+        }
+        driver.io.process_once(DRIVE_TICK)?;
+        drain_completed(driver, counters, true, Some(measure_deadline))?;
+        fill_persistent_rr_streams(cfg, driver, measure_start, measure_deadline)?;
+        check_client_failure(driver)?;
+    }
+    close_persistent_rr_streams(driver)?;
+    let drain_deadline = Instant::now() + DRAIN_TIMEOUT;
+    while active_streams(driver) != 0 && Instant::now() < drain_deadline {
+        driver.io.process_once(DRIVE_TICK)?;
+        drain_completed(driver, counters, true, Some(measure_deadline))?;
+        check_client_failure(driver)?;
+    }
+    Ok(())
+}
+
+fn fill_persistent_rr_streams(
+    cfg: &Config,
+    driver: &mut ClientDriver,
+    measure_start: Instant,
+    measure_deadline: Instant,
+) -> Result<(), AnyError> {
+    let ready = ready_conn_indices(driver);
+    for conn_index in ready {
+        while persistent_outstanding_for_conn(driver, conn_index) < cfg.requests_in_flight {
+            if !can_start_persistent_rr_request(cfg, driver, conn_index, measure_deadline) {
+                break;
+            }
+            send_persistent_rr_request(
+                driver,
+                conn_index,
+                cfg.request_bytes,
+                cfg.response_bytes,
+                cfg.requests.set || Instant::now() >= measure_start,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn persistent_outstanding_for_conn(driver: &ClientDriver, conn_index: u64) -> u64 {
+    let shared = driver.shared.borrow();
+    let Some(conn) = shared.conns.get(&conn_index) else {
+        return 0;
+    };
+    let Some(stream_id) = conn.persistent_stream else {
+        return 0;
+    };
+    conn.streams
+        .get(&stream_id)
+        .map(|stream| stream.outstanding.len() as u64)
+        .unwrap_or(0)
+}
+
+fn persistent_rr_done(cfg: &Config, driver: &ClientDriver, measure_deadline: Instant) -> bool {
+    if cfg.requests.set {
+        let shared = driver.shared.borrow();
+        return shared.started_requests >= cfg.requests.value
+            && shared.conns.values().all(|conn| {
+                let Some(stream_id) = conn.persistent_stream else {
+                    return true;
+                };
+                conn.streams
+                    .get(&stream_id)
+                    .map(|stream| stream.outstanding.is_empty())
+                    .unwrap_or(true)
+            });
+    }
+    Instant::now() >= measure_deadline
+}
+
+fn can_start_persistent_rr_request(
+    cfg: &Config,
+    driver: &ClientDriver,
+    conn_index: u64,
+    measure_deadline: Instant,
+) -> bool {
+    if !cfg.requests.set {
+        return Instant::now() < measure_deadline;
+    }
+    let shared = driver.shared.borrow();
+    if shared.started_requests >= cfg.requests.value {
+        return false;
+    }
+    shared
+        .conns
+        .get(&conn_index)
+        .map(|conn| {
+            conn.request_limit
+                .map(|limit| conn.requests_started < limit)
+                .unwrap_or(true)
+        })
+        .unwrap_or(false)
+}
+
+fn send_persistent_rr_request(
+    driver: &mut ClientDriver,
+    conn_index: u64,
+    request_bytes: u64,
+    response_bytes: u64,
+    counts: bool,
+) -> Result<(), AnyError> {
+    let conn = driver
+        .io
+        .endpoint
+        .conn_get_mut(conn_index)
+        .ok_or_else(|| format!("missing tquic connection {conn_index}"))?;
+    let stream_id = {
+        let mut shared = driver.shared.borrow_mut();
+        let conn_state = shared
+            .conns
+            .get_mut(&conn_index)
+            .ok_or_else(|| format!("missing tquic connection state {conn_index}"))?;
+        match conn_state.persistent_stream {
+            Some(stream_id) => stream_id,
+            None => {
+                let stream_id = conn.stream_bidi_new(0, false)?;
+                conn.stream_want_read(stream_id, true)?;
+                conn_state.streams.insert(
+                    stream_id,
+                    ClientStream {
+                        request_bytes: 0,
+                        response_bytes,
+                        request_sent: 0,
+                        request_fin_sent: false,
+                        response_received: 0,
+                        started_at: Instant::now(),
+                        counts: false,
+                        persistent: true,
+                        closing: false,
+                        response_pending: 0,
+                        chunk_request_bytes: request_bytes,
+                        outstanding: VecDeque::new(),
+                    },
+                );
+                conn_state.persistent_stream = Some(stream_id);
+                shared.active_streams += 1;
+                stream_id
+            }
+        }
+    };
+    {
+        let mut shared = driver.shared.borrow_mut();
+        let conn_state = shared
+            .conns
+            .get_mut(&conn_index)
+            .ok_or_else(|| format!("missing tquic connection state {conn_index}"))?;
+        let stream = conn_state
+            .streams
+            .get_mut(&stream_id)
+            .ok_or_else(|| format!("missing tquic persistent stream {stream_id}"))?;
+        stream.request_bytes += request_bytes;
+        stream.response_bytes = response_bytes;
+        stream.chunk_request_bytes = request_bytes;
+        stream.outstanding.push_back(PersistentRequest {
+            started_at: Instant::now(),
+            counts,
+        });
+        conn_state.requests_started += 1;
+        shared.started_requests += 1;
+    }
+    let mut shared = driver.shared.borrow_mut();
+    client_write_stream(&mut shared, conn, stream_id);
+    Ok(())
+}
+
+fn close_persistent_rr_streams(driver: &mut ClientDriver) -> Result<(), AnyError> {
+    let pairs: Vec<(u64, u64)> = {
+        let shared = driver.shared.borrow();
+        shared
+            .conns
+            .iter()
+            .filter_map(|(conn_index, conn)| conn.persistent_stream.map(|id| (*conn_index, id)))
+            .collect()
+    };
+    for (conn_index, stream_id) in pairs {
+        let Some(conn) = driver.io.endpoint.conn_get_mut(conn_index) else {
+            continue;
+        };
+        {
+            let mut shared = driver.shared.borrow_mut();
+            if let Some(stream) = shared
+                .conns
+                .get_mut(&conn_index)
+                .and_then(|conn| conn.streams.get_mut(&stream_id))
+            {
+                stream.closing = true;
+            }
+        }
+        let mut shared = driver.shared.borrow_mut();
+        client_write_stream(&mut shared, conn, stream_id);
+    }
+    Ok(())
 }
 
 fn run_crr(
@@ -1131,9 +1374,15 @@ fn open_request_stream(
                 request_bytes,
                 response_bytes,
                 request_sent: 0,
+                request_fin_sent: false,
                 response_received: 0,
                 started_at: Instant::now(),
                 counts,
+                persistent: false,
+                closing: false,
+                response_pending: 0,
+                chunk_request_bytes: request_bytes,
+                outstanding: VecDeque::new(),
             },
         );
         conn_state.requests_started += 1;
@@ -1386,7 +1635,7 @@ fn client_write_stream(shared: &mut ClientShared, conn: &mut Connection, stream_
         let remaining = total - stream.request_sent;
         let chunk_len = cmp::min(WRITE_CHUNK_SIZE as u64, remaining) as usize;
         let chunk = vec![0x5a; chunk_len];
-        let fin = stream.request_sent + chunk_len as u64 == total;
+        let fin = !stream.persistent && stream.request_sent + chunk_len as u64 == total;
         match conn.stream_write(stream_id, Bytes::from(chunk), fin) {
             Ok(0) | Err(QuicError::Done) => {
                 let _ = conn.stream_want_write(stream_id, true);
@@ -1394,6 +1643,9 @@ fn client_write_stream(shared: &mut ClientShared, conn: &mut Connection, stream_
             }
             Ok(written) => {
                 stream.request_sent += written as u64;
+                if fin && written == chunk_len {
+                    stream.request_fin_sent = true;
+                }
                 if written < chunk_len {
                     let _ = conn.stream_want_write(stream_id, true);
                     return;
@@ -1408,9 +1660,30 @@ fn client_write_stream(shared: &mut ClientShared, conn: &mut Connection, stream_
             }
         }
     }
-    if total == 0 {
+    if stream.persistent {
+        if stream.closing && !stream.request_fin_sent {
+            match conn.stream_write(stream_id, Bytes::new(), true) {
+                Ok(_) => stream.request_fin_sent = true,
+                Err(QuicError::Done) => {
+                    let _ = conn.stream_want_write(stream_id, true);
+                    return;
+                }
+                Err(err) => {
+                    set_client_failure(
+                        shared,
+                        format!("tquic stream {stream_id} finish failed: {err:?}"),
+                    );
+                    return;
+                }
+            }
+        }
+        let want_write = stream.closing && !stream.request_fin_sent;
+        let _ = conn.stream_want_write(stream_id, want_write);
+        return;
+    }
+    if total == 0 && !stream.request_fin_sent {
         match conn.stream_write(stream_id, Bytes::new(), true) {
-            Ok(_) => {}
+            Ok(_) => stream.request_fin_sent = true,
             Err(QuicError::Done) => {
                 let _ = conn.stream_want_write(stream_id, true);
                 return;
@@ -1529,8 +1802,10 @@ fn client_read_stream(shared: &mut ClientShared, conn: &mut Connection, stream_i
     let Some(index) = conn.index() else {
         return;
     };
-    let mut completed = None;
+    let mut completed = Vec::new();
     let mut failure = None;
+    let mut remove_stream = false;
+    let mut completed_nonpersistent = false;
     {
         let Some(conn_state) = shared.conns.get_mut(&index) else {
             return;
@@ -1542,6 +1817,32 @@ fn client_read_stream(shared: &mut ClientShared, conn: &mut Connection, stream_i
         loop {
             match conn.stream_read(stream_id, &mut buf) {
                 Ok((read, fin)) => {
+                    if stream.persistent {
+                        stream.response_received += read as u64;
+                        stream.response_pending += read as u64;
+                        while stream.response_pending >= stream.response_bytes
+                            && !stream.outstanding.is_empty()
+                        {
+                            stream.response_pending -= stream.response_bytes;
+                            let request =
+                                stream.outstanding.pop_front().expect("checked non-empty");
+                            completed.push(CompletedStream {
+                                conn_index: index,
+                                counts: request.counts,
+                                request_bytes: stream.chunk_request_bytes,
+                                received: stream.response_bytes,
+                                latency: request.started_at.elapsed(),
+                            });
+                        }
+                        if fin {
+                            remove_stream = true;
+                            break;
+                        }
+                        if read == 0 {
+                            break;
+                        }
+                        continue;
+                    }
                     stream.response_received += read as u64;
                     if fin {
                         if stream.response_received != stream.response_bytes {
@@ -1550,13 +1851,14 @@ fn client_read_stream(shared: &mut ClientShared, conn: &mut Connection, stream_i
                                 stream.response_received, stream.response_bytes
                             ));
                         } else {
-                            completed = Some(CompletedStream {
+                            completed.push(CompletedStream {
                                 conn_index: index,
                                 counts: stream.counts,
                                 request_bytes: stream.request_bytes,
                                 received: stream.response_received,
                                 latency: stream.started_at.elapsed(),
                             });
+                            completed_nonpersistent = true;
                         }
                         break;
                     }
@@ -1575,12 +1877,17 @@ fn client_read_stream(shared: &mut ClientShared, conn: &mut Connection, stream_i
     if let Some(failure) = failure {
         set_client_failure(shared, failure);
     }
-    if let Some(done) = completed {
+    if !completed.is_empty() {
+        shared.completed.extend(completed);
+    }
+    if remove_stream || completed_nonpersistent {
         if let Some(conn_state) = shared.conns.get_mut(&index) {
             conn_state.streams.remove(&stream_id);
+            if conn_state.persistent_stream == Some(stream_id) {
+                conn_state.persistent_stream = None;
+            }
         }
         shared.active_streams = shared.active_streams.saturating_sub(1);
-        shared.completed.push_back(done);
     }
 }
 
@@ -1690,17 +1997,48 @@ fn server_read_stream(conns: &mut HashMap<u64, ServerConn>, conn: &mut Connectio
     let Some(start) = conn_state.start.clone() else {
         return;
     };
-    let stream = conn_state
-        .streams
-        .entry(stream_id)
-        .or_insert_with(ServerStream::default);
-    stream.request_bytes = start.request_bytes;
+    {
+        let stream = conn_state
+            .streams
+            .entry(stream_id)
+            .or_insert_with(ServerStream::default);
+        stream.request_bytes = start.request_bytes;
+        stream.persistent = start.mode == MODE_PERSISTENT_RR;
+    }
     let mut buf = [0u8; READ_CHUNK_SIZE];
+    let mut want_write = false;
     loop {
         match conn.stream_read(stream_id, &mut buf) {
             Ok((read, fin)) => {
-                stream.request_received += read as u64;
                 conn_state.bytes_received += read as u64;
+                let stream = conn_state
+                    .streams
+                    .get_mut(&stream_id)
+                    .expect("server stream exists");
+                stream.request_received += read as u64;
+                let persistent = stream.persistent;
+                if persistent {
+                    while stream.request_received >= stream.request_bytes {
+                        stream.request_received -= stream.request_bytes;
+                        conn_state.requests_completed += 1;
+                        stream.response_bytes =
+                            stream.response_bytes.saturating_add(start.response_bytes);
+                        stream.response_fin = false;
+                    }
+                    if fin {
+                        stream.request_fin = true;
+                        let _ = conn.stream_want_read(stream_id, false);
+                    }
+                    if stream.response_sent < stream.response_bytes
+                        || (stream.request_fin && !stream.response_fin)
+                    {
+                        want_write = true;
+                    }
+                    if read == 0 {
+                        break;
+                    }
+                    continue;
+                }
                 if fin {
                     if stream.request_received != stream.request_bytes {
                         let _ = conn.close(true, 1, b"bad request");
@@ -1710,9 +2048,8 @@ fn server_read_stream(conns: &mut HashMap<u64, ServerConn>, conn: &mut Connectio
                     stream.response_bytes =
                         server_response_bytes(&start, conn_state.requests_completed);
                     let _ = conn.stream_want_read(stream_id, false);
-                    let _ = conn.stream_want_write(stream_id, true);
-                    server_write_stream(conns, conn, stream_id);
-                    return;
+                    want_write = true;
+                    break;
                 }
                 if read == 0 {
                     break;
@@ -1724,6 +2061,10 @@ fn server_read_stream(conns: &mut HashMap<u64, ServerConn>, conn: &mut Connectio
                 break;
             }
         }
+    }
+    if want_write {
+        let _ = conn.stream_want_write(stream_id, true);
+        server_write_stream(conns, conn, stream_id);
     }
 }
 
@@ -1790,7 +2131,8 @@ fn server_write_stream(
     while stream.response_sent < stream.response_bytes {
         let remaining = stream.response_bytes - stream.response_sent;
         let chunk_len = cmp::min(WRITE_CHUNK_SIZE as u64, remaining) as usize;
-        let fin = stream.response_sent + chunk_len as u64 == stream.response_bytes;
+        let fin =
+            !stream.persistent && stream.response_sent + chunk_len as u64 == stream.response_bytes;
         let chunk = vec![0x5a; chunk_len];
         match conn.stream_write(stream_id, Bytes::from(chunk), fin) {
             Ok(0) | Err(QuicError::Done) => {
@@ -1799,13 +2141,13 @@ fn server_write_stream(
             }
             Ok(written) => {
                 stream.response_sent += written as u64;
+                conn_state.bytes_sent += written as u64;
                 if written < chunk_len {
                     let _ = conn.stream_want_write(stream_id, true);
                     return;
                 }
                 if fin {
                     stream.response_fin = true;
-                    conn_state.bytes_sent += stream.response_bytes;
                 }
             }
             Err(_) => {
@@ -1814,7 +2156,9 @@ fn server_write_stream(
             }
         }
     }
-    if !stream.response_fin {
+    if stream.persistent && !stream.request_fin {
+        let _ = conn.stream_want_write(stream_id, false);
+    } else if !stream.response_fin {
         match conn.stream_write(stream_id, Bytes::new(), true) {
             Ok(_) => stream.response_fin = true,
             Err(QuicError::Done) => {

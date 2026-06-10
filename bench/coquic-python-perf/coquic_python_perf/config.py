@@ -29,6 +29,7 @@ class Mode(Enum):
     BULK = "bulk"
     RR = "rr"
     CRR = "crr"
+    PERSISTENT_RR = "persistent-rr"
 
 
 class Direction(Enum):
@@ -89,6 +90,11 @@ def parse_runtime_args(args: list[str]) -> PerfConfig:
     if config.mode != Mode.BULK and saw_direction:
         raise PerfError(usage())
     if config.streams == 0 or config.connections == 0 or config.requests_in_flight == 0:
+        raise PerfError(usage())
+    if (
+        config.mode == Mode.PERSISTENT_RR
+        and (config.request_bytes == 0 or config.response_bytes == 0)
+    ):
         raise PerfError(usage())
     return config
 

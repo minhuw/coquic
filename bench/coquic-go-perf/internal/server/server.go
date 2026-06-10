@@ -21,6 +21,7 @@ type session struct {
 	bytesSent         uint64
 	bytesReceived     uint64
 	requestsCompleted uint64
+	persistentPending map[coquic.StreamID]uint64
 }
 
 type commandKind int
@@ -35,6 +36,7 @@ type serverCommand struct {
 	connection coquic.ConnectionHandle
 	streamID   coquic.StreamID
 	bytes      uint64
+	fin        bool
 	message    protocol.ControlMessage
 }
 
@@ -187,7 +189,7 @@ func (s *Server) collectResultCommands(result *coquic.QueryResult) ([]serverComm
 			switch effect.Lifecycle {
 			case coquic.LifecycleAccepted:
 				s.acceptedSession = true
-				s.sessions[effect.Connection] = &session{}
+				s.sessions[effect.Connection] = &session{persistentPending: make(map[coquic.StreamID]uint64)}
 			case coquic.LifecycleClosed:
 				current := s.sessions[effect.Connection]
 				if current != nil &&
@@ -229,6 +231,9 @@ func (s *Server) handleStreamData(
 		return nil, nil
 	}
 	s.recordStreamData(current, data, fin)
+	if current.start.Mode == config.ModePersistentRR {
+		return s.handlePersistentRRData(connection, streamID, current, uint64(len(data)), fin)
+	}
 	if !fin {
 		return nil, nil
 	}
@@ -271,9 +276,46 @@ func (s *Server) handleControlStreamData(
 
 func (s *Server) recordStreamData(current *session, data []byte, fin bool) {
 	current.bytesReceived += uint64(len(data))
-	if fin {
+	if fin && current.start != nil && current.start.Mode != config.ModePersistentRR {
 		current.requestsCompleted++
 	}
+}
+
+func (s *Server) handlePersistentRRData(
+	connection coquic.ConnectionHandle,
+	streamID coquic.StreamID,
+	current *session,
+	byteCount uint64,
+	fin bool,
+) ([]serverCommand, error) {
+	start := current.start
+	if start == nil {
+		return nil, nil
+	}
+	pending := current.persistentPending[streamID] + byteCount
+	commands := make([]serverCommand, 0)
+	for pending >= start.RequestBytes {
+		commands = append(commands, serverCommand{
+			kind:       commandSendResponse,
+			connection: connection,
+			streamID:   streamID,
+			bytes:      start.ResponseBytes,
+			fin:        false,
+		})
+		current.bytesSent += start.ResponseBytes
+		current.requestsCompleted++
+		pending -= start.RequestBytes
+		if start.Requests != nil && current.requestsCompleted >= *start.Requests {
+			commands = append(commands, s.completeSession(connection)...)
+			break
+		}
+	}
+	if fin {
+		delete(current.persistentPending, streamID)
+	} else {
+		current.persistentPending[streamID] = pending
+	}
+	return commands, nil
 }
 
 func (s *Server) handleBulkStreamFin(
@@ -320,6 +362,7 @@ func (s *Server) handleBulkDownloadFin(
 		connection: connection,
 		streamID:   streamID,
 		bytes:      target,
+		fin:        true,
 	})
 	current.bytesSent += target
 	if start.TotalBytes != nil && current.requestsCompleted >= start.Streams {
@@ -342,6 +385,7 @@ func (s *Server) handleRequestResponseFin(
 		connection: connection,
 		streamID:   streamID,
 		bytes:      start.ResponseBytes,
+		fin:        true,
 	}}
 	current.bytesSent += start.ResponseBytes
 	if start.Mode == config.ModeRR &&
@@ -363,7 +407,7 @@ func (s *Server) completeSession(connection coquic.ConnectionHandle) []serverCom
 func (s *Server) executeCommand(command serverCommand, now coquic.TimeUs) (*coquic.QueryResult, error) {
 	switch command.kind {
 	case commandSendResponse:
-		return s.endpoint.SendStream(command.connection, command.streamID, s.cachedPayload(command.bytes), true, now)
+		return s.endpoint.SendStream(command.connection, command.streamID, s.cachedPayload(command.bytes), command.fin, now)
 	case commandSendControl:
 		fin := false
 		switch command.message.(type) {
@@ -453,6 +497,9 @@ func ValidateSessionStart(start protocol.SessionStart) string {
 	}
 	if start.RequestsInFlight == 0 {
 		return "requests_in_flight must be greater than zero"
+	}
+	if start.Mode == config.ModePersistentRR && (start.RequestBytes == 0 || start.ResponseBytes == 0) {
+		return "persistent-rr requires nonzero request and response bytes"
 	}
 	return ""
 }

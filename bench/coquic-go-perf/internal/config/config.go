@@ -38,6 +38,7 @@ const (
 	ModeBulk Mode = iota
 	ModeRR
 	ModeCRR
+	ModePersistentRR
 )
 
 type Direction int
@@ -242,6 +243,9 @@ func ParseRuntimeArgs(args []string) (PerfConfig, error) {
 	if config.Streams == 0 || config.Connections == 0 || config.RequestsInFlight == 0 {
 		return PerfConfig{}, fmt.Errorf("%s", Usage())
 	}
+	if config.Mode == ModePersistentRR && (config.RequestBytes == 0 || config.ResponseBytes == 0) {
+		return PerfConfig{}, fmt.Errorf("%s", Usage())
+	}
 
 	return config, nil
 }
@@ -325,6 +329,8 @@ func ModeName(mode Mode) string {
 		return "rr"
 	case ModeCRR:
 		return "crr"
+	case ModePersistentRR:
+		return "persistent-rr"
 	default:
 		return "unknown"
 	}
@@ -359,7 +365,7 @@ func CongestionControlName(cc coquic.CongestionControl) string {
 func Usage() string {
 	return "usage: coquic-go-perf [server|client] [--host HOST] [--port PORT] " +
 		"[--io-backend socket] [--congestion-control newreno|cubic|bbr|copa] " +
-		"[--mode bulk|rr|crr] [--direction upload|download] [--request-bytes N] " +
+		"[--mode bulk|rr|crr|persistent-rr] [--direction upload|download] [--request-bytes N] " +
 		"[--response-bytes N] [--streams N] [--connections N] " +
 		"[--requests-in-flight N] [--requests N] [--total-bytes N] " +
 		"[--warmup 250ms|2s] [--duration 250ms|2s] " +
@@ -376,6 +382,8 @@ func parseMode(value string) (Mode, error) {
 		return ModeRR, nil
 	case "crr":
 		return ModeCRR, nil
+	case "persistent-rr":
+		return ModePersistentRR, nil
 	default:
 		return 0, fmt.Errorf("%s", Usage())
 	}

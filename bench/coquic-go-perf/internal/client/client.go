@@ -35,8 +35,12 @@ type connectionState struct {
 	closeRequested        bool
 	controlBytes          []byte
 	outstandingRequests   map[coquic.StreamID]outstandingRequest
+	persistentRequests    []outstandingRequest
 	activeBulkStreams     map[coquic.StreamID]bool
 	nextStreamID          coquic.StreamID
+	persistentStreamID    *coquic.StreamID
+	persistentFinSent     bool
+	persistentPendingRead uint64
 	requestLimit          *uint64
 	requestsStarted       uint64
 	serverCompleteCounted bool
@@ -157,7 +161,7 @@ func (c *Client) run() (metrics.RunSummary, error) {
 			}
 			c.summary.Status = "ok"
 			c.summary.ElapsedMs = metrics.DurationMillis(c.resultElapsed(now))
-			if c.timedRRMode() || c.timedCRRMode() {
+			if c.timedRRMode() || c.timedPersistentRRMode() || c.timedCRRMode() {
 				c.summary.ServerCounters = metrics.ServerCounters{
 					BytesSent:         c.summary.BytesReceived,
 					BytesReceived:     c.summary.BytesSent,
@@ -328,6 +332,9 @@ func (c *Client) handleStreamData(
 	if c.timedBulkMode() {
 		return c.handleBulkData(connection, streamID, data, fin, now)
 	}
+	if c.config.Mode == config.ModePersistentRR {
+		return c.handlePersistentRRData(connection, streamID, data, now)
+	}
 	if c.config.Mode == config.ModeRR || c.config.Mode == config.ModeCRR {
 		return c.handleRequestResponseData(connection, streamID, data, fin, now)
 	}
@@ -463,6 +470,39 @@ func (c *Client) handleRequestResponseData(
 	return c.finishRequestResponseStream(connection, streamID, state, request, now)
 }
 
+func (c *Client) handlePersistentRRData(
+	connection coquic.ConnectionHandle,
+	streamID coquic.StreamID,
+	data []byte,
+	now coquic.TimeUs,
+) ([]clientCommand, error) {
+	state := c.connections[connection]
+	if state == nil || state.persistentStreamID == nil || *state.persistentStreamID != streamID {
+		return nil, nil
+	}
+	state.persistentPendingRead += uint64(len(data))
+	responseBytes := c.config.ResponseBytes
+	for state.persistentPendingRead >= responseBytes && len(state.persistentRequests) > 0 {
+		request := state.persistentRequests[0]
+		copy(state.persistentRequests, state.persistentRequests[1:])
+		state.persistentRequests = state.persistentRequests[:len(state.persistentRequests)-1]
+		state.persistentPendingRead -= responseBytes
+		if request.countsTowardMeasurement {
+			c.summary.BytesReceived += responseBytes
+			elapsed := time.Duration(uint64(now-request.startedAt)) * time.Microsecond
+			c.summary.LatencySamples = append(c.summary.LatencySamples, elapsed)
+			c.summary.RequestsCompleted++
+		}
+	}
+	if c.phase == phaseDrain {
+		if len(state.persistentRequests) == 0 {
+			return c.maybeClosePersistentRRConnection(connection)
+		}
+		return nil, nil
+	}
+	return c.maybeIssuePersistentRRRequests(connection, now)
+}
+
 func (c *Client) finishRequestResponseStream(
 	connection coquic.ConnectionHandle,
 	streamID coquic.StreamID,
@@ -515,6 +555,11 @@ func (c *Client) startWorkForConnection(connection coquic.ConnectionHandle, now 
 	}
 	commands = append(commands, next...)
 	next, err = c.maybeIssueRRRequests(connection, now)
+	if err != nil {
+		return nil, err
+	}
+	commands = append(commands, next...)
+	next, err = c.maybeIssuePersistentRRRequests(connection, now)
 	if err != nil {
 		return nil, err
 	}
@@ -636,6 +681,56 @@ func (c *Client) maybeIssueRRRequests(connection coquic.ConnectionHandle, now co
 	return commands, nil
 }
 
+func (c *Client) maybeIssuePersistentRRRequests(connection coquic.ConnectionHandle, now coquic.TimeUs) ([]clientCommand, error) {
+	if c.config.Mode != config.ModePersistentRR || !c.benchmarkAcceptsNewWork() {
+		return nil, nil
+	}
+	state := c.connections[connection]
+	if state == nil || !state.sessionReady || state.controlComplete || state.closeRequested || state.persistentFinSent {
+		return nil, nil
+	}
+	if state.persistentStreamID == nil {
+		streamID, err := c.nextStreamID(connection)
+		if err != nil {
+			return nil, err
+		}
+		state.persistentStreamID = &streamID
+	}
+
+	commands := make([]clientCommand, 0)
+	for uint64(len(state.persistentRequests)) < c.config.RequestsInFlight &&
+		(c.config.Requests == nil || c.requestsStarted < *c.config.Requests) &&
+		(state.requestLimit == nil || state.requestsStarted < *state.requestLimit) {
+		counts := c.config.Requests != nil || c.phase == phaseMeasure
+		state.persistentRequests = append(state.persistentRequests, outstandingRequest{
+			startedAt:               now,
+			countsTowardMeasurement: counts,
+		})
+		state.requestsStarted++
+		c.requestsStarted++
+		if counts {
+			c.summary.BytesSent += c.config.RequestBytes
+		}
+		commands = append(commands, clientCommand{
+			kind:       commandSendStream,
+			connection: connection,
+			streamID:   *state.persistentStreamID,
+			bytes:      makePayload(c.config.RequestBytes),
+			fin:        false,
+		})
+	}
+
+	if c.config.Requests != nil &&
+		(state.requestLimit == nil || state.requestsStarted >= *state.requestLimit) {
+		next, err := c.maybeFinishPersistentRRStream(connection)
+		if err != nil {
+			return nil, err
+		}
+		commands = append(commands, next...)
+	}
+	return commands, nil
+}
+
 func (c *Client) maybeIssueCRRRequest(connection coquic.ConnectionHandle, now coquic.TimeUs) ([]clientCommand, error) {
 	if c.config.Mode != config.ModeCRR {
 		return nil, nil
@@ -708,6 +803,53 @@ func (c *Client) maybeCloseRRConnection(connection coquic.ConnectionHandle) ([]c
 		return nil, nil
 	}
 	return c.closeConnection(connection, []byte("timed rr drain complete"))
+}
+
+func (c *Client) maybeFinishPersistentRRStream(connection coquic.ConnectionHandle) ([]clientCommand, error) {
+	state := c.connections[connection]
+	if state == nil {
+		return nil, nil
+	}
+	if state.persistentStreamID == nil {
+		if c.phase == phaseDrain && len(state.persistentRequests) == 0 {
+			return c.maybeClosePersistentRRConnection(connection)
+		}
+		return nil, nil
+	}
+	if state.persistentFinSent {
+		if c.phase == phaseDrain && len(state.persistentRequests) == 0 {
+			return c.maybeClosePersistentRRConnection(connection)
+		}
+		return nil, nil
+	}
+	state.persistentFinSent = true
+	commands := []clientCommand{{
+		kind:       commandSendStream,
+		connection: connection,
+		streamID:   *state.persistentStreamID,
+		bytes:      nil,
+		fin:        true,
+	}}
+	if c.phase == phaseDrain && len(state.persistentRequests) == 0 {
+		next, err := c.maybeClosePersistentRRConnection(connection)
+		if err != nil {
+			return nil, err
+		}
+		commands = append(commands, next...)
+	}
+	return commands, nil
+}
+
+func (c *Client) maybeClosePersistentRRConnection(connection coquic.ConnectionHandle) ([]clientCommand, error) {
+	force := c.timedPersistentRRMode() && c.phase == phaseDrain
+	state := c.connections[connection]
+	if state == nil || state.closeRequested || (!force && len(state.persistentRequests) != 0) {
+		return nil, nil
+	}
+	if !state.persistentFinSent {
+		return c.maybeFinishPersistentRRStream(connection)
+	}
+	return c.closeConnection(connection, []byte("persistent rr drain complete"))
 }
 
 func (c *Client) maybeCloseBulkConnection(connection coquic.ConnectionHandle) ([]clientCommand, error) {
@@ -818,6 +960,9 @@ func (c *Client) enterMeasurePhase(now coquic.TimeUs) {
 			request.countsTowardMeasurement = false
 			state.outstandingRequests[streamID] = request
 		}
+		for index := range state.persistentRequests {
+			state.persistentRequests[index].countsTowardMeasurement = false
+		}
 		for streamID := range state.activeBulkStreams {
 			state.activeBulkStreams[streamID] = true
 		}
@@ -848,6 +993,8 @@ func (c *Client) enterDrainPhase(now coquic.TimeUs) error {
 		switch {
 		case c.config.Mode == config.ModeRR:
 			commands, err = c.maybeCloseRRConnection(handle)
+		case c.config.Mode == config.ModePersistentRR:
+			commands, err = c.maybeFinishPersistentRRStream(handle)
 		case c.config.Mode == config.ModeCRR:
 			commands, err = c.maybeCloseCRRConnection(handle)
 		case c.timedBulkMode():
@@ -873,6 +1020,10 @@ func (c *Client) timedRRMode() bool {
 	return c.config.Mode == config.ModeRR && c.config.Requests == nil
 }
 
+func (c *Client) timedPersistentRRMode() bool {
+	return c.config.Mode == config.ModePersistentRR && c.config.Requests == nil
+}
+
 func (c *Client) timedCRRMode() bool {
 	return c.config.Mode == config.ModeCRR && c.config.Requests == nil
 }
@@ -882,7 +1033,7 @@ func (c *Client) timedBulkMode() bool {
 }
 
 func (c *Client) timedMode() bool {
-	return c.timedRRMode() || c.timedCRRMode() || c.timedBulkMode()
+	return c.timedRRMode() || c.timedPersistentRRMode() || c.timedCRRMode() || c.timedBulkMode()
 }
 
 func (c *Client) benchmarkAcceptsNewWork() bool {
@@ -988,6 +1139,27 @@ func (c *Client) runComplete() bool {
 			}
 		}
 		return true
+	case config.ModePersistentRR:
+		if c.timedPersistentRRMode() {
+			if c.phase != phaseDrain {
+				return false
+			}
+			for _, state := range c.connections {
+				if !state.closeRequested {
+					return false
+				}
+			}
+			return true
+		}
+		if c.config.Requests == nil || c.summary.RequestsCompleted < *c.config.Requests {
+			return false
+		}
+		for _, state := range c.connections {
+			if !state.controlComplete || len(state.persistentRequests) != 0 {
+				return false
+			}
+		}
+		return true
 	case config.ModeCRR:
 		if c.timedCRRMode() {
 			if c.phase != phaseDrain {
@@ -1016,7 +1188,7 @@ func (c *Client) initialConnectionTarget() uint64 {
 }
 
 func (c *Client) requestLimitForConnection(connectionIndex uint64) *uint64 {
-	if c.config.Mode != config.ModeRR || c.config.Requests == nil {
+	if (c.config.Mode != config.ModeRR && c.config.Mode != config.ModePersistentRR) || c.config.Requests == nil {
 		return nil
 	}
 	connections := c.rrConnectionTarget()
@@ -1030,7 +1202,9 @@ func (c *Client) requestLimitForConnection(connectionIndex uint64) *uint64 {
 }
 
 func (c *Client) rrConnectionTarget() uint64 {
-	if c.config.Mode == config.ModeRR && c.config.Requests != nil && *c.config.Requests < c.config.Connections {
+	if (c.config.Mode == config.ModeRR || c.config.Mode == config.ModePersistentRR) &&
+		c.config.Requests != nil &&
+		*c.config.Requests < c.config.Connections {
 		return *c.config.Requests
 	}
 	return c.config.Connections

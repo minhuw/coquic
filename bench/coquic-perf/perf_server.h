@@ -33,6 +33,7 @@ class QuicPerfServer {
         std::uint64_t bytes_received = 0;
         std::uint64_t requests_completed = 0;
         quic::SharedBytes fixed_response_payload;
+        std::unordered_map<std::uint64_t, std::size_t> persistent_rr_pending_request_bytes;
     };
 
     quic::QuicCoreResult advance_endpoint(quic::QuicCoreEndpointInput input,

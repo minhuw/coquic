@@ -45,7 +45,8 @@ std::optional<QuicPerfControlMessage> take_control_message(std::vector<std::byte
 }
 
 std::size_t rr_connection_target(const QuicPerfConfig &config) {
-    if (config.mode == QuicPerfMode::rr && config.requests.has_value()) {
+    if ((config.mode == QuicPerfMode::rr || config.mode == QuicPerfMode::persistent_rr) &&
+        config.requests.has_value()) {
         return std::min(config.connections, *config.requests);
     }
     return config.connections;
@@ -53,7 +54,8 @@ std::size_t rr_connection_target(const QuicPerfConfig &config) {
 
 std::optional<std::size_t> request_limit_for_connection(const QuicPerfConfig &config,
                                                         std::size_t connection_index) {
-    if (config.mode != QuicPerfMode::rr || !config.requests.has_value()) {
+    if ((config.mode != QuicPerfMode::rr && config.mode != QuicPerfMode::persistent_rr) ||
+        !config.requests.has_value()) {
         return std::nullopt;
     }
     const auto connections = rr_connection_target(config);
@@ -183,6 +185,10 @@ bool QuicPerfClient::timed_rr_mode() const {
     return config_.mode == QuicPerfMode::rr && !config_.requests.has_value();
 }
 
+bool QuicPerfClient::timed_persistent_rr_mode() const {
+    return config_.mode == QuicPerfMode::persistent_rr && !config_.requests.has_value();
+}
+
 bool QuicPerfClient::timed_crr_mode() const {
     return config_.mode == QuicPerfMode::crr && !config_.requests.has_value();
 }
@@ -192,7 +198,7 @@ bool QuicPerfClient::timed_bulk_mode() const {
 }
 
 bool QuicPerfClient::timed_mode() const {
-    return timed_rr_mode() || timed_crr_mode() || timed_bulk_mode();
+    return timed_rr_mode() || timed_persistent_rr_mode() || timed_crr_mode() || timed_bulk_mode();
 }
 
 bool QuicPerfClient::benchmark_accepts_new_work() const {
@@ -230,7 +236,7 @@ QuicPerfClient::next_wait_wakeup(std::optional<quic::QuicCoreTimePoint> core_nex
 }
 
 quic::QuicCoreDuration QuicPerfClient::result_elapsed(quic::QuicCoreTimePoint now) const {
-    if (timed_rr_mode() || timed_crr_mode() || timed_bulk_mode()) {
+    if (timed_rr_mode() || timed_persistent_rr_mode() || timed_crr_mode() || timed_bulk_mode()) {
         if (phase_ == BenchmarkPhase::warmup) {
             return quic::QuicCoreDuration{0};
         }
@@ -276,6 +282,10 @@ void QuicPerfClient::enter_measure_phase(quic::QuicCoreTimePoint now) {
         for (auto &[_, connection] : connections_) {
             (void)maybe_issue_rr_requests(connection, now);
         }
+    } else if (timed_persistent_rr_mode()) {
+        for (auto &[_, connection] : connections_) {
+            (void)maybe_issue_persistent_rr_requests(connection, now);
+        }
     } else if (timed_crr_mode()) {
         (void)maybe_open_crr_connections(now);
         for (auto &[_, connection] : connections_) {
@@ -300,6 +310,18 @@ void QuicPerfClient::enter_drain_phase(quic::QuicCoreTimePoint now) {
             auto it = connections_.find(handle);
             if (it != connections_.end()) {
                 (void)maybe_close_rr_connection(it->second, now);
+            }
+        }
+    } else if (config_.mode == QuicPerfMode::persistent_rr) {
+        std::vector<quic::QuicConnectionHandle> handles;
+        handles.reserve(connections_.size());
+        for (const auto &[handle, _] : connections_) {
+            handles.push_back(handle);
+        }
+        for (const auto handle : handles) {
+            auto it = connections_.find(handle);
+            if (it != connections_.end()) {
+                (void)maybe_finish_persistent_rr_stream(it->second, now);
             }
         }
     } else if (config_.mode == QuicPerfMode::crr) {
@@ -412,7 +434,7 @@ int QuicPerfClient::run() {
             }
             summary_.status = "ok";
             summary_.elapsed = result_elapsed(current);
-            if (timed_rr_mode() || timed_crr_mode()) {
+            if (timed_rr_mode() || timed_persistent_rr_mode() || timed_crr_mode()) {
                 summary_.server_bytes_sent = summary_.bytes_received;
                 summary_.server_bytes_received = summary_.bytes_sent;
                 summary_.server_requests_completed = summary_.requests_completed;
@@ -491,7 +513,8 @@ int QuicPerfClient::run() {
             if (!handle_result(std::move(inbound_result), event_handling_time)) {
                 return fail("client inbound datagram failed");
             }
-            if (config_.mode == QuicPerfMode::rr || config_.mode == QuicPerfMode::crr) {
+            if (config_.mode == QuicPerfMode::rr || config_.mode == QuicPerfMode::persistent_rr ||
+                config_.mode == QuicPerfMode::crr) {
                 if (!drain_pending_backend_events()) {
                     return fail("client interactive queued receive drain failed");
                 }
@@ -704,6 +727,7 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
                 maybe_start_timed_benchmark(now);
                 if (!maybe_start_bulk_streams(connection, now) ||
                     !maybe_issue_rr_requests(connection, now) ||
+                    !maybe_issue_persistent_rr_requests(connection, now) ||
                     !maybe_issue_crr_request(connection, now)) {
                     return false;
                 }
@@ -762,6 +786,39 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
             return maybe_close_bulk_connection(connection, now);
         }
         return true;
+    }
+
+    if (config_.mode == QuicPerfMode::persistent_rr) {
+        if (connection.persistent_rr_stream_id != received.stream_id) {
+            return true;
+        }
+
+        connection.bytes_received += received.byte_count();
+        std::size_t response_bytes = static_cast<std::size_t>(config_.response_bytes);
+        if (response_bytes == 0) {
+            response_bytes = 1;
+        }
+        connection.persistent_rr_response_pending_bytes += received.byte_count();
+        while (connection.persistent_rr_response_pending_bytes >= response_bytes &&
+               !connection.outstanding_requests.empty()) {
+            const auto request = connection.outstanding_requests.front();
+            if (request.counts_toward_measurement) {
+                summary_.bytes_received += response_bytes;
+                summary_.latency_samples.push_back(
+                    std::chrono::duration_cast<quic::QuicCoreDuration>(now - request.started_at));
+                ++summary_.requests_completed;
+            }
+            connection.outstanding_requests.erase(connection.outstanding_requests.begin());
+            connection.persistent_rr_response_pending_bytes -= response_bytes;
+        }
+
+        if (phase_ == BenchmarkPhase::drain) {
+            if (connection.outstanding_requests.empty()) {
+                return maybe_close_persistent_rr_connection(connection, now);
+            }
+            return true;
+        }
+        return maybe_issue_persistent_rr_requests(connection, now);
     }
 
     if (config_.mode == QuicPerfMode::rr || config_.mode == QuicPerfMode::crr) {
@@ -853,6 +910,22 @@ bool QuicPerfClient::run_complete() const {
     }
     case QuicPerfMode::rr:
         if (timed_rr_mode()) {
+            if (phase_ != BenchmarkPhase::drain) {
+                return false;
+            }
+            return std::all_of(connections_.begin(), connections_.end(), [](const auto &entry) {
+                return timed_rr_drain_connection_complete(entry.second.close_requested,
+                                                          entry.second.outstanding_requests.size());
+            });
+        }
+        if (!config_.requests.has_value() || summary_.requests_completed < *config_.requests) {
+            return false;
+        }
+        return std::all_of(connections_.begin(), connections_.end(), [](const auto &entry) {
+            return entry.second.control_complete && entry.second.outstanding_requests.empty();
+        });
+    case QuicPerfMode::persistent_rr:
+        if (timed_persistent_rr_mode()) {
             if (phase_ != BenchmarkPhase::drain) {
                 return false;
             }
@@ -1031,6 +1104,70 @@ bool QuicPerfClient::maybe_issue_rr_requests(ConnectionState &connection,
     return true;
 }
 
+bool QuicPerfClient::maybe_issue_persistent_rr_requests(ConnectionState &connection,
+                                                        quic::QuicCoreTimePoint now) {
+    if (config_.mode != QuicPerfMode::persistent_rr || !connection.session_ready ||
+        connection.control_complete || connection.close_requested ||
+        connection.persistent_rr_fin_sent || !benchmark_accepts_new_work()) {
+        return true;
+    }
+
+    if (!connection.persistent_rr_stream_id.has_value()) {
+        const auto stream_id = connection.next_stream_id;
+        connection.next_stream_id = next_client_perf_stream_id(stream_id);
+        connection.persistent_rr_stream_id = stream_id;
+    }
+
+    while (connection.outstanding_requests.size() < config_.requests_in_flight &&
+           (!config_.requests.has_value() || requests_started_ < *config_.requests) &&
+           (!connection.request_limit.has_value() ||
+            connection.requests_started < *connection.request_limit)) {
+        const auto counts_toward_measurement =
+            config_.requests.has_value() || phase_ == BenchmarkPhase::measure;
+        connection.outstanding_requests.push_back(OutstandingRequest{
+            .stream_id = *connection.persistent_rr_stream_id,
+            .started_at = now,
+            .counts_toward_measurement = counts_toward_measurement,
+        });
+        auto send_result = advance_endpoint(
+            quic::QuicCoreConnectionCommand{
+                .connection = connection.handle,
+                .input =
+                    quic::QuicCoreSendSharedStreamData{
+                        .stream_id = *connection.persistent_rr_stream_id,
+                        .bytes = request_payload_,
+                        .fin = false,
+                    },
+            },
+            now);
+        if (send_result.local_error.has_value() || send_result.send_sink_failed) {
+            summary_.failure_reason = "client persistent rr request local error";
+            connection.outstanding_requests.pop_back();
+            return false;
+        }
+        if (!send_buffer_.append_or_flush(*backend_, send_result)) {
+            summary_.failure_reason = "client persistent rr request flush failed";
+            connection.outstanding_requests.pop_back();
+            return false;
+        }
+
+        ++requests_started_;
+        ++connection.requests_started;
+        connection.bytes_sent += config_.request_bytes;
+        if (counts_toward_measurement) {
+            summary_.bytes_sent += config_.request_bytes;
+        }
+    }
+
+    if (config_.requests.has_value() &&
+        (!connection.request_limit.has_value() ||
+         connection.requests_started >= *connection.request_limit)) {
+        return maybe_finish_persistent_rr_stream(connection, now);
+    }
+
+    return true;
+}
+
 bool QuicPerfClient::maybe_issue_crr_request(ConnectionState &connection,
                                              quic::QuicCoreTimePoint now) {
     if (config_.mode != QuicPerfMode::crr || !connection.session_ready ||
@@ -1103,6 +1240,67 @@ bool QuicPerfClient::maybe_close_rr_connection(ConnectionState &connection,
                 quic::QuicCoreCloseConnection{
                     .application_error_code = 0,
                     .reason_phrase = "timed rr drain complete",
+                },
+        },
+        now);
+    return handle_result(std::move(close_result), now);
+}
+
+bool QuicPerfClient::maybe_finish_persistent_rr_stream(ConnectionState &connection,
+                                                       quic::QuicCoreTimePoint now) {
+    if (connection.persistent_rr_fin_sent || !connection.persistent_rr_stream_id.has_value()) {
+        if (phase_ == BenchmarkPhase::drain && connection.outstanding_requests.empty()) {
+            return maybe_close_persistent_rr_connection(connection, now);
+        }
+        return true;
+    }
+
+    connection.persistent_rr_fin_sent = true;
+    auto fin_result = advance_endpoint(
+        quic::QuicCoreConnectionCommand{
+            .connection = connection.handle,
+            .input =
+                quic::QuicCoreSendSharedStreamData{
+                    .stream_id = *connection.persistent_rr_stream_id,
+                    .bytes = quic::SharedBytes{},
+                    .fin = true,
+                },
+        },
+        now);
+    if (fin_result.local_error.has_value() || fin_result.send_sink_failed ||
+        !send_buffer_.append_or_flush(*backend_, fin_result)) {
+        summary_.failure_reason = "client persistent rr stream fin failed";
+        return false;
+    }
+
+    if (phase_ == BenchmarkPhase::drain && connection.outstanding_requests.empty()) {
+        return maybe_close_persistent_rr_connection(connection, now);
+    }
+    return true;
+}
+
+bool QuicPerfClient::maybe_close_persistent_rr_connection(ConnectionState &connection,
+                                                          quic::QuicCoreTimePoint now) {
+    const bool force_timed_drain_close =
+        timed_persistent_rr_mode() && phase_ == BenchmarkPhase::drain;
+    if (connection.close_requested ||
+        (!force_timed_drain_close && !connection.outstanding_requests.empty())) {
+        return true;
+    }
+
+    if (!connection.persistent_rr_fin_sent && !maybe_finish_persistent_rr_stream(connection, now)) {
+        return false;
+    }
+
+    connection.close_requested = true;
+    closing_connections_.insert(connection.handle);
+    auto close_result = advance_endpoint(
+        quic::QuicCoreConnectionCommand{
+            .connection = connection.handle,
+            .input =
+                quic::QuicCoreCloseConnection{
+                    .application_error_code = 0,
+                    .reason_phrase = "persistent rr drain complete",
                 },
         },
         now);

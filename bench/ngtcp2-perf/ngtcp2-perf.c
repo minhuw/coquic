@@ -36,6 +36,7 @@
 #define MODE_CODE_BULK 0U
 #define MODE_CODE_RR 1U
 #define MODE_CODE_CRR 2U
+#define MODE_CODE_PERSISTENT_RR 3U
 #define DIRECTION_CODE_UPLOAD 0U
 #define DIRECTION_CODE_DOWNLOAD 1U
 #define DEFAULT_MAX_RUN_REQUESTS 4096ULL
@@ -170,7 +171,17 @@ typedef struct stream_ctx {
     int server_shape_set;
     int write_fin_sent;
     int server_ready_to_send;
+    int persistent_rr;
+    uint64_t response_pending;
+    uint64_t *persistent_started_at;
+    uint8_t *persistent_counts;
+    size_t persistent_head;
+    size_t persistent_len;
+    size_t persistent_cap;
 } stream_ctx_t;
+
+static int persistent_queue_push(stream_ctx_t *stream, uint64_t started_at, int counts_latency);
+static int persistent_queue_pop(stream_ctx_t *stream, uint64_t *started_at, int *counts_latency);
 
 struct perf_conn {
     config_t cfg;
@@ -396,7 +407,8 @@ static ngtcp2_cc_algo ngtcp2_cc(const char *label) {
 }
 
 static void validate_config(const config_t *cfg) {
-    if (!is_mode(cfg, "bulk") && !is_mode(cfg, "rr") && !is_mode(cfg, "crr")) {
+    if (!is_mode(cfg, "bulk") && !is_mode(cfg, "rr") && !is_mode(cfg, "crr") &&
+        !is_mode(cfg, "persistent-rr")) {
         fprintf(stderr, "unsupported mode: %s\n", cfg->mode);
         exit(2);
     }
@@ -425,6 +437,10 @@ static void validate_config(const config_t *cfg) {
     }
     if (cfg->streams == 0 || cfg->connections == 0 || cfg->requests_in_flight == 0) {
         fprintf(stderr, "streams, connections, and requests-in-flight must be greater than zero\n");
+        exit(2);
+    }
+    if (is_mode(cfg, "persistent-rr") && (cfg->request_bytes == 0 || cfg->response_bytes == 0)) {
+        fprintf(stderr, "persistent-rr requires nonzero request and response bytes\n");
         exit(2);
     }
 }
@@ -525,6 +541,9 @@ static uint8_t mode_code(const char *mode) {
     if (strcmp(mode, "crr") == 0) {
         return MODE_CODE_CRR;
     }
+    if (strcmp(mode, "persistent-rr") == 0) {
+        return MODE_CODE_PERSISTENT_RR;
+    }
     return MODE_CODE_BULK;
 }
 
@@ -533,7 +552,7 @@ static uint8_t direction_code(const char *direction) {
 }
 
 static uint64_t rr_connection_target(const config_t *cfg) {
-    if (is_mode(cfg, "rr") && cfg->requests.set) {
+    if ((is_mode(cfg, "rr") || is_mode(cfg, "persistent-rr")) && cfg->requests.set) {
         return cfg->connections < cfg->requests.value ? cfg->connections : cfg->requests.value;
     }
     return cfg->connections;
@@ -634,10 +653,12 @@ static int decode_session_start_payload(const uint8_t *payload, size_t len,
     start->connections = decode_be64(payload + 63);
     start->requests_in_flight = decode_be64(payload + 71);
     if ((start->mode != MODE_CODE_BULK && start->mode != MODE_CODE_RR &&
-         start->mode != MODE_CODE_CRR) ||
+         start->mode != MODE_CODE_CRR && start->mode != MODE_CODE_PERSISTENT_RR) ||
         (start->direction != DIRECTION_CODE_UPLOAD &&
          start->direction != DIRECTION_CODE_DOWNLOAD) ||
-        start->streams == 0 || start->connections == 0 || start->requests_in_flight == 0) {
+        start->streams == 0 || start->connections == 0 || start->requests_in_flight == 0 ||
+        (start->mode == MODE_CODE_PERSISTENT_RR &&
+         (start->request_bytes == 0 || start->response_bytes == 0))) {
         return -1;
     }
     return 0;
@@ -876,6 +897,8 @@ static void conn_remove_stream(perf_conn_t *pc, stream_ctx_t *stream) {
             stream->next = NULL;
             free(stream->control_out);
             free(stream->control_in);
+            free(stream->persistent_started_at);
+            free(stream->persistent_counts);
             free(stream);
             return;
         }
@@ -931,6 +954,26 @@ static void maybe_count_client_stream(perf_conn_t *pc, stream_ctx_t *stream) {
     if (stream->counts_latency) {
         latency_push(&pc->counters->latencies, now_us() - stream->started_at);
     }
+}
+
+static int maybe_count_persistent_client_responses(perf_conn_t *pc, stream_ctx_t *stream) {
+    while (stream->response_pending >= pc->cfg.response_bytes) {
+        uint64_t started_at = 0;
+        int counts_latency = 0;
+        if (persistent_queue_pop(stream, &started_at, &counts_latency) != 0) {
+            set_failure(pc, "ngtcp2 persistent-rr response without pending request");
+            return -1;
+        }
+        stream->response_pending -= pc->cfg.response_bytes;
+        pc->counters->bytes_sent += pc->cfg.request_bytes;
+        pc->counters->bytes_received += pc->cfg.response_bytes;
+        ++pc->counters->requests_completed;
+        ++pc->completed_requests;
+        if (counts_latency) {
+            latency_push(&pc->counters->latencies, now_us() - started_at);
+        }
+    }
+    return 0;
 }
 
 static int append_control_bytes(perf_conn_t *pc, stream_ctx_t *stream, const uint8_t *data,
@@ -1092,22 +1135,55 @@ static int recv_stream_data_cb(ngtcp2_conn *conn, uint32_t flags, int64_t stream
         }
         if (!stream->server_shape_set) {
             stream->request_bytes = pc->session_start.request_bytes;
-            stream->response_bytes = pc->session_start.response_bytes;
+            stream->persistent_rr = pc->session_start.mode == MODE_CODE_PERSISTENT_RR;
+            stream->response_bytes = stream->persistent_rr ? 0 : pc->session_start.response_bytes;
             stream->server_shape_set = 1;
         }
         stream->request_received += datalen;
         pc->server_bytes_received += datalen;
-        if (stream->request_received >= stream->request_bytes) {
-            stream->server_ready_to_send = 1;
-        }
-        if (flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
-            stream->request_fin = 1;
+        if (stream->persistent_rr) {
+            while (stream->request_received >= stream->request_bytes) {
+                stream->request_received -= stream->request_bytes;
+                ++pc->server_requests_completed;
+                stream->response_bytes += pc->session_start.response_bytes;
+                stream->server_ready_to_send = 1;
+            }
+            if (flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
+                if (stream->request_received != 0) {
+                    set_failure(pc, "ngtcp2 persistent-rr request byte count mismatch");
+                    return NGTCP2_ERR_CALLBACK_FAILURE;
+                }
+                stream->request_fin = 1;
+                stream->server_ready_to_send = 1;
+            }
+        } else {
             if (stream->request_received >= stream->request_bytes) {
                 stream->server_ready_to_send = 1;
+            }
+            if (flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
+                stream->request_fin = 1;
+                if (stream->request_received >= stream->request_bytes) {
+                    stream->server_ready_to_send = 1;
+                }
             }
         }
     } else {
         stream->response_received += datalen;
+        if (stream->persistent_rr) {
+            stream->response_pending += datalen;
+            if (maybe_count_persistent_client_responses(pc, stream) != 0) {
+                return NGTCP2_ERR_CALLBACK_FAILURE;
+            }
+            if (flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
+                if (stream->response_pending != 0 || stream->persistent_len != 0) {
+                    set_failure(pc, "ngtcp2 persistent-rr stream closed with pending responses");
+                    return NGTCP2_ERR_CALLBACK_FAILURE;
+                }
+            }
+            ngtcp2_conn_extend_max_stream_offset(conn, stream_id, datalen);
+            ngtcp2_conn_extend_max_offset(conn, datalen);
+            return 0;
+        }
         if (stream->response_received > stream->response_bytes) {
             set_failure(pc, "ngtcp2-perf received too many response bytes");
             return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -1304,9 +1380,51 @@ static void free_streams(stream_ctx_t *stream) {
         stream_ctx_t *next = stream->next;
         free(stream->control_out);
         free(stream->control_in);
+        free(stream->persistent_started_at);
+        free(stream->persistent_counts);
         free(stream);
         stream = next;
     }
+}
+
+static int persistent_queue_push(stream_ctx_t *stream, uint64_t started_at, int counts_latency) {
+    if (stream->persistent_len == stream->persistent_cap) {
+        size_t new_cap = stream->persistent_cap ? stream->persistent_cap * 2 : 8;
+        uint64_t *new_started = malloc(new_cap * sizeof(new_started[0]));
+        uint8_t *new_counts = malloc(new_cap * sizeof(new_counts[0]));
+        if (!new_started || !new_counts) {
+            free(new_started);
+            free(new_counts);
+            return -1;
+        }
+        for (size_t i = 0; i < stream->persistent_len; ++i) {
+            size_t old = (stream->persistent_head + i) % stream->persistent_cap;
+            new_started[i] = stream->persistent_started_at[old];
+            new_counts[i] = stream->persistent_counts[old];
+        }
+        free(stream->persistent_started_at);
+        free(stream->persistent_counts);
+        stream->persistent_started_at = new_started;
+        stream->persistent_counts = new_counts;
+        stream->persistent_cap = new_cap;
+        stream->persistent_head = 0;
+    }
+    size_t index = (stream->persistent_head + stream->persistent_len) % stream->persistent_cap;
+    stream->persistent_started_at[index] = started_at;
+    stream->persistent_counts[index] = counts_latency ? 1 : 0;
+    ++stream->persistent_len;
+    return 0;
+}
+
+static int persistent_queue_pop(stream_ctx_t *stream, uint64_t *started_at, int *counts_latency) {
+    if (stream->persistent_len == 0) {
+        return -1;
+    }
+    *started_at = stream->persistent_started_at[stream->persistent_head];
+    *counts_latency = stream->persistent_counts[stream->persistent_head] != 0;
+    stream->persistent_head = (stream->persistent_head + 1) % stream->persistent_cap;
+    --stream->persistent_len;
+    return 0;
 }
 
 static void free_conn(perf_conn_t *pc, int free_ssl_ctx) {
@@ -1391,16 +1509,23 @@ static int select_writable_stream(perf_conn_t *pc, int64_t *stream_id, ngtcp2_ve
             if (!stream->server_ready_to_send || stream->write_fin_sent) {
                 continue;
             }
+            if (stream->persistent_rr && stream->response_sent >= stream->response_bytes &&
+                !stream->request_fin) {
+                continue;
+            }
             *stream_id = stream->stream_id;
             if (stream->response_sent < stream->response_bytes) {
                 uint64_t left = stream->response_bytes - stream->response_sent;
                 size_t chunk = left > sizeof(zeros) ? sizeof(zeros) : (size_t)left;
                 datav->base = zeros;
                 datav->len = chunk;
-                if (chunk == left) {
+                if (chunk == left && (!stream->persistent_rr || stream->request_fin)) {
                     *flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
                 }
                 return 1;
+            }
+            if (stream->persistent_rr && !stream->request_fin) {
+                continue;
             }
             *flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
             return 1;
@@ -1409,16 +1534,23 @@ static int select_writable_stream(perf_conn_t *pc, int64_t *stream_id, ngtcp2_ve
         if (stream->write_fin_sent) {
             continue;
         }
+        if (stream->persistent_rr && stream->request_sent >= stream->request_bytes &&
+            !stream->request_fin) {
+            continue;
+        }
         *stream_id = stream->stream_id;
         if (stream->request_sent < stream->request_bytes) {
             uint64_t left = stream->request_bytes - stream->request_sent;
             size_t chunk = left > sizeof(zeros) ? sizeof(zeros) : (size_t)left;
             datav->base = zeros;
             datav->len = chunk;
-            if (chunk == left) {
+            if (chunk == left && (!stream->persistent_rr || stream->request_fin)) {
                 *flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
             }
             return 1;
+        }
+        if (stream->persistent_rr && !stream->request_fin) {
+            continue;
         }
         *flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
         return 1;
@@ -1445,7 +1577,8 @@ static void note_stream_write(perf_conn_t *pc, int64_t stream_id, ngtcp2_ssize w
         stream->request_sent += written;
     }
     if ((flags & NGTCP2_WRITE_STREAM_FLAG_FIN) && (datalen == 0 || written >= datalen)) {
-        if (pc->is_server && !stream->is_control && !stream->write_fin_sent) {
+        if (pc->is_server && !stream->is_control && !stream->persistent_rr &&
+            !stream->write_fin_sent) {
             ++pc->server_requests_completed;
         }
         stream->write_fin_sent = 1;
@@ -1542,6 +1675,44 @@ static int open_request_stream(perf_conn_t *pc, uint64_t request_bytes, uint64_t
         return -1;
     }
     conn_add_stream(pc, stream);
+    ++pc->started_requests;
+    return 0;
+}
+
+static stream_ctx_t *find_persistent_rr_stream(perf_conn_t *pc) {
+    for (stream_ctx_t *stream = pc->streams; stream; stream = stream->next) {
+        if (!stream->is_control && stream->persistent_rr) {
+            return stream;
+        }
+    }
+    return NULL;
+}
+
+static int send_persistent_rr_request(perf_conn_t *pc, int counts_latency) {
+    stream_ctx_t *stream = find_persistent_rr_stream(pc);
+    if (!stream) {
+        stream = calloc(1, sizeof(*stream));
+        if (!stream) {
+            set_failure(pc, "out of memory");
+            return -1;
+        }
+        stream->conn = pc;
+        stream->response_bytes = pc->cfg.response_bytes;
+        stream->persistent_rr = 1;
+        int rv = ngtcp2_conn_open_bidi_stream(pc->conn, &stream->stream_id, stream);
+        if (rv != 0) {
+            free(stream);
+            set_failure_liberr(pc, "ngtcp2_conn_open_bidi_stream persistent-rr", rv);
+            return -1;
+        }
+        conn_add_stream(pc, stream);
+    }
+    if (persistent_queue_push(stream, now_us(), counts_latency) != 0) {
+        set_failure(pc, "out of memory");
+        return -1;
+    }
+    stream->request_bytes += pc->cfg.request_bytes;
+    stream->write_fin_sent = 0;
     ++pc->started_requests;
     return 0;
 }
@@ -1746,7 +1917,12 @@ static int refill_rr_connections(perf_conn_t **conns, size_t count, const config
             if (deadline != 0 && now_us() >= deadline) {
                 return 0;
             }
-            if (open_request_stream(pc, cfg->request_bytes, cfg->response_bytes, 1) != 0) {
+            if (is_mode(cfg, "persistent-rr")) {
+                if (send_persistent_rr_request(pc, 1) != 0) {
+                    snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
+                    return -1;
+                }
+            } else if (open_request_stream(pc, cfg->request_bytes, cfg->response_bytes, 1) != 0) {
                 snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
                 return -1;
             }
@@ -1797,7 +1973,7 @@ static perf_conn_t **open_client_connections(const config_t *cfg, counters_t *co
     }
     for (size_t i = 0; i < *count; ++i) {
         config_t connection_cfg = *cfg;
-        if (is_mode(cfg, "rr") && cfg->requests.set) {
+        if ((is_mode(cfg, "rr") || is_mode(cfg, "persistent-rr")) && cfg->requests.set) {
             connection_cfg.requests.value = rr_request_limit_for_connection(cfg, (uint64_t)i);
             connection_cfg.requests.set = 1;
         }
@@ -1843,6 +2019,15 @@ static int open_batch_distributed(perf_conn_t **conns, size_t count, uint64_t re
 }
 
 static void send_connection_close(perf_conn_t *pc) {
+    if (!pc->is_server) {
+        for (stream_ctx_t *stream = pc->streams; stream; stream = stream->next) {
+            if (!stream->is_control && stream->persistent_rr && !stream->request_fin) {
+                stream->request_fin = 1;
+                stream->write_fin_sent = 0;
+            }
+        }
+        (void)conn_write(pc);
+    }
     if (pc->is_server) {
         maybe_send_server_complete(pc);
         (void)conn_write(pc);
@@ -2194,7 +2379,7 @@ static run_summary_t run_client(const config_t *cfg) {
     int rc;
     if (is_mode(cfg, "bulk")) {
         rc = run_bulk(cfg, counters, failure_reason, sizeof(failure_reason));
-    } else if (is_mode(cfg, "rr")) {
+    } else if (is_mode(cfg, "rr") || is_mode(cfg, "persistent-rr")) {
         rc = run_rr(cfg, counters, failure_reason, sizeof(failure_reason));
     } else {
         rc = run_crr(cfg, counters, failure_reason, sizeof(failure_reason));

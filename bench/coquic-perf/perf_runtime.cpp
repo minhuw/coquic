@@ -23,7 +23,7 @@ constexpr std::uint64_t kPerfCopaInteractiveAckElicitingThreshold = 8;
 constexpr std::string_view kPerfUsageLine =
     "usage: coquic-perf [server|client] [--host HOST] [--port PORT] "
     "[--io-backend socket|io_uring] [--congestion-control newreno|cubic|bbr|copa] "
-    "[--mode bulk|rr|crr] "
+    "[--mode bulk|rr|crr|persistent-rr] "
     "[--direction upload|download] [--request-bytes N] [--response-bytes N] "
     "[--streams N] [--connections N] [--requests-in-flight N] [--requests N] "
     "[--total-bytes N] [--warmup 250ms|2s] [--duration 250ms|2s] "
@@ -84,6 +84,9 @@ std::optional<QuicPerfMode> parse_mode_arg(std::string_view value) {
     }
     if (value == "crr") {
         return QuicPerfMode::crr;
+    }
+    if (value == "persistent-rr") {
+        return QuicPerfMode::persistent_rr;
     }
     return std::nullopt;
 }
@@ -407,6 +410,11 @@ std::optional<QuicPerfConfig> parse_perf_runtime_args(int argc, char **argv) {
         print_usage();
         return std::nullopt;
     }
+    if (config.mode == QuicPerfMode::persistent_rr &&
+        (config.request_bytes == 0 || config.response_bytes == 0)) {
+        print_usage();
+        return std::nullopt;
+    }
     return config;
 }
 
@@ -452,7 +460,8 @@ quic::QuicCoreEndpointConfig make_perf_client_endpoint_config(const QuicPerfConf
     };
     endpoint_config.emit_shared_receive_stream_data = true;
     endpoint_config.defer_inbound_application_send_drain =
-        config.mode == QuicPerfMode::rr || config.mode == QuicPerfMode::crr;
+        config.mode == QuicPerfMode::rr || config.mode == QuicPerfMode::crr ||
+        config.mode == QuicPerfMode::persistent_rr;
     endpoint_config.transport.congestion_control = config.congestion_control;
     endpoint_config.transport.enable_hystart_plus_plus = perf_enable_hystart_plus_plus(config);
     endpoint_config.transport.send_stream_fairness = perf_send_stream_fairness(config);

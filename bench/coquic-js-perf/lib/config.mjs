@@ -29,6 +29,7 @@ export const Mode = Object.freeze({
   BULK: "bulk",
   RR: "rr",
   CRR: "crr",
+  PERSISTENT_RR: "persistent-rr",
 });
 
 export const Direction = Object.freeze({
@@ -93,6 +94,12 @@ export function parseRuntimeArgs(args) {
     throw new PerfError(usage());
   }
   if (config.streams === 0 || config.connections === 0 || config.requestsInFlight === 0) {
+    throw new PerfError(usage());
+  }
+  if (
+    config.mode === Mode.PERSISTENT_RR &&
+    (config.requestBytes === 0 || config.responseBytes === 0)
+  ) {
     throw new PerfError(usage());
   }
   return config;
@@ -219,7 +226,12 @@ function parseRole(value) {
 }
 
 function parseMode(value) {
-  if (value === Mode.BULK || value === Mode.RR || value === Mode.CRR) {
+  if (
+    value === Mode.BULK ||
+    value === Mode.RR ||
+    value === Mode.CRR ||
+    value === Mode.PERSISTENT_RR
+  ) {
     return value;
   }
   throw new PerfError(usage());
@@ -293,7 +305,7 @@ export function usage() {
   return (
     "usage: coquic-js-perf [server|client] [--host HOST] [--port PORT] " +
     "[--io-backend socket] [--congestion-control newreno|cubic|bbr|copa] " +
-    "[--mode bulk|rr|crr] [--direction upload|download] [--request-bytes N] " +
+    "[--mode bulk|rr|crr|persistent-rr] [--direction upload|download] [--request-bytes N] " +
     "[--response-bytes N] [--streams N] [--connections N] " +
     "[--requests-in-flight N] [--requests N] [--total-bytes N] " +
     "[--warmup 250ms|2s] [--duration 250ms|2s] " +

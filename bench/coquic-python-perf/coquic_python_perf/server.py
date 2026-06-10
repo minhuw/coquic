@@ -32,6 +32,7 @@ class Session:
     bytes_sent: int = 0
     bytes_received: int = 0
     requests_completed: int = 0
+    persistent_rr_pending_request_bytes: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,7 @@ class SendResponseCommand:
     connection: int
     stream_id: int
     bytes: int
+    fin: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +176,8 @@ class Server:
             return []
 
         self.record_stream_data(session, data, fin)
+        if session.start.mode == Mode.PERSISTENT_RR:
+            return self.handle_persistent_rr_data(connection, stream_id, session, data, fin)
         if not fin:
             return []
         if session.start.mode == Mode.BULK:
@@ -212,7 +216,7 @@ class Server:
 
     def record_stream_data(self, session: Session, data: bytes, fin: bool) -> None:
         session.bytes_received += len(data)
-        if fin:
+        if fin and session.start is not None and session.start.mode != Mode.PERSISTENT_RR:
             session.requests_completed += 1
 
     def handle_bulk_stream_fin(
@@ -268,6 +272,41 @@ class Server:
             commands.extend(self.complete_session(connection))
         return commands
 
+    def handle_persistent_rr_data(
+        self,
+        connection: int,
+        stream_id: int,
+        session: Session,
+        data: bytes,
+        fin: bool,
+    ) -> list[ServerCommand]:
+        start = session.start
+        if start is None:
+            return []
+        pending = session.persistent_rr_pending_request_bytes.get(stream_id, 0)
+        pending += len(data)
+        commands: list[ServerCommand] = []
+        while pending >= start.request_bytes:
+            commands.append(
+                SendResponseCommand(
+                    connection, stream_id, start.response_bytes, fin=False
+                )
+            )
+            session.bytes_sent += start.response_bytes
+            session.requests_completed += 1
+            pending -= start.request_bytes
+            if (
+                start.requests is not None
+                and session.requests_completed >= start.requests
+            ):
+                commands.extend(self.complete_session(connection))
+                break
+        if fin:
+            session.persistent_rr_pending_request_bytes.pop(stream_id, None)
+        else:
+            session.persistent_rr_pending_request_bytes[stream_id] = pending
+        return commands
+
     def complete_session(self, connection: int) -> list[ServerCommand]:
         complete = self.make_complete_command(connection)
         return [complete] if complete is not None else []
@@ -278,7 +317,7 @@ class Server:
             return (
                 self.endpoint.connection(command.connection)
                 .stream(command.stream_id)
-                .send(payload, True, now)
+                .send(payload, command.fin, now)
             )
 
         fin = isinstance(command.message, (SessionError, SessionComplete))
@@ -347,6 +386,11 @@ def validate_session_start(start: SessionStart) -> str | None:
         return "connections must be greater than zero"
     if start.requests_in_flight == 0:
         return "requests_in_flight must be greater than zero"
+    if (
+        start.mode == Mode.PERSISTENT_RR
+        and (start.request_bytes == 0 or start.response_bytes == 0)
+    ):
+        return "persistent-rr requires nonzero request and response bytes"
     return None
 
 

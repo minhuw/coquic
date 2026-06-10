@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env,
     error::Error,
     fs::File,
@@ -32,6 +32,7 @@ const MESSAGE_SESSION_COMPLETE: u8 = 4;
 const MODE_CODE_BULK: u8 = 0;
 const MODE_CODE_RR: u8 = 1;
 const MODE_CODE_CRR: u8 = 2;
+const MODE_CODE_PERSISTENT_RR: u8 = 3;
 const DIRECTION_CODE_UPLOAD: u8 = 0;
 const DIRECTION_CODE_DOWNLOAD: u8 = 1;
 const DEFAULT_MAX_RUN_REQUESTS: u64 = 4096;
@@ -189,6 +190,15 @@ struct ClientStream {
     send_closed: bool,
     response_fin: bool,
     counted: bool,
+    persistent: bool,
+    closing: bool,
+    response_pending: u64,
+    chunk_request_bytes: u64,
+    outstanding: VecDeque<PersistentRequest>,
+}
+
+struct PersistentRequest {
+    started_at: Instant,
 }
 
 struct ClientBatch {
@@ -204,13 +214,22 @@ struct ClientBatch {
     control_closed: bool,
     session_ready: bool,
     streams: HashMap<StreamId, ClientStream>,
+    persistent: bool,
+    persistent_stream: Option<StreamId>,
 }
 
 impl ClientBatch {
     fn new(cfg: &Config, target_requests: u64, shape: RequestShape) -> Self {
+        let max_active_requests = if cfg.mode == "rr" || cfg.mode == "persistent-rr" {
+            Some(cfg.requests_in_flight.max(1))
+        } else if cfg.mode == "bulk" && target_requests == u64::MAX {
+            Some(cfg.streams.max(1))
+        } else {
+            None
+        };
         Self {
             target_requests,
-            max_active_requests: None,
+            max_active_requests,
             started_requests: 0,
             completed_requests: 0,
             shape,
@@ -218,7 +237,8 @@ impl ClientBatch {
             control_out: encode_session_start(&make_session_start_from_shape(
                 cfg,
                 shape,
-                if cfg.mode == "rr" && target_requests != u64::MAX {
+                if (cfg.mode == "rr" || cfg.mode == "persistent-rr") && target_requests != u64::MAX
+                {
                     Some(target_requests)
                 } else {
                     None
@@ -229,6 +249,8 @@ impl ClientBatch {
             control_closed: false,
             session_ready: false,
             streams: HashMap::new(),
+            persistent: cfg.mode == "persistent-rr",
+            persistent_stream: None,
         }
     }
 
@@ -333,6 +355,9 @@ impl ClientBatch {
         if !self.session_ready {
             return Ok(());
         }
+        if self.persistent {
+            return self.open_persistent_stream(conn);
+        }
         while self.started_requests < self.target_requests {
             if let Some(max_active_requests) = self.max_active_requests {
                 if self.active_requests() >= max_active_requests {
@@ -353,6 +378,11 @@ impl ClientBatch {
                             send_closed: false,
                             response_fin: false,
                             counted: false,
+                            persistent: false,
+                            closing: false,
+                            response_pending: 0,
+                            chunk_request_bytes: self.shape.request_bytes,
+                            outstanding: VecDeque::new(),
                         },
                     );
                     self.started_requests += 1;
@@ -364,6 +394,61 @@ impl ClientBatch {
                     return Err(format!("neqo stream_create failed: {err}"));
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn open_persistent_stream(&mut self, conn: &mut Connection) -> Result<(), String> {
+        let stream_id = match self.persistent_stream {
+            Some(stream_id) => stream_id,
+            None => match conn.stream_create(StreamType::BiDi) {
+                Ok(stream_id) => {
+                    self.persistent_stream = Some(stream_id);
+                    self.streams.insert(
+                        stream_id,
+                        ClientStream {
+                            request_bytes: 0,
+                            response_bytes: self.shape.response_bytes,
+                            request_sent: 0,
+                            response_received: 0,
+                            started_at: Instant::now(),
+                            counts_latency: self.shape.counts_latency,
+                            send_closed: false,
+                            response_fin: false,
+                            counted: false,
+                            persistent: true,
+                            closing: false,
+                            response_pending: 0,
+                            chunk_request_bytes: self.shape.request_bytes,
+                            outstanding: VecDeque::new(),
+                        },
+                    );
+                    stream_id
+                }
+                Err(neqo_transport::Error::StreamLimit)
+                | Err(neqo_transport::Error::ConnectionState) => return Ok(()),
+                Err(err) => return Err(format!("neqo stream_create failed: {err}")),
+            },
+        };
+
+        while self.started_requests < self.target_requests {
+            if let Some(max_active_requests) = self.max_active_requests {
+                if self.active_requests() >= max_active_requests {
+                    break;
+                }
+            }
+            let stream = self
+                .streams
+                .get_mut(&stream_id)
+                .ok_or_else(|| "neqo persistent stream missing".to_string())?;
+            stream.request_bytes += self.shape.request_bytes;
+            stream.response_bytes = self.shape.response_bytes;
+            stream.chunk_request_bytes = self.shape.request_bytes;
+            stream.outstanding.push_back(PersistentRequest {
+                started_at: Instant::now(),
+            });
+            self.started_requests += 1;
+            self.write_stream(conn, stream_id)?;
         }
         Ok(())
     }
@@ -393,6 +478,9 @@ impl ClientBatch {
                 continue;
             }
 
+            if stream.persistent && !stream.closing {
+                return Ok(());
+            }
             conn.stream_close_send(stream_id)
                 .map_err(|err| format!("neqo stream_close_send failed: {err}"))?;
             stream.send_closed = true;
@@ -443,6 +531,24 @@ impl ClientBatch {
                 Err(err) => return Err(format!("neqo stream_recv failed: {err}")),
             };
             if read > 0 {
+                if stream.persistent {
+                    stream.response_received += read as u64;
+                    stream.response_pending += read as u64;
+                    while stream.response_pending >= stream.response_bytes
+                        && !stream.outstanding.is_empty()
+                    {
+                        stream.response_pending -= stream.response_bytes;
+                        let request = stream.outstanding.pop_front().expect("checked non-empty");
+                        counters.bytes_sent += stream.chunk_request_bytes;
+                        counters.bytes_received += stream.response_bytes;
+                        counters.requests_completed += 1;
+                        self.completed_requests += 1;
+                        if stream.counts_latency {
+                            counters.latencies.push(request.started_at.elapsed());
+                        }
+                    }
+                    continue;
+                }
                 stream.response_received += read as u64;
                 if stream.response_received > stream.response_bytes {
                     return Err(format!(
@@ -460,6 +566,9 @@ impl ClientBatch {
             }
         }
 
+        if stream.persistent {
+            return Ok(());
+        }
         if stream.response_fin && !stream.counted {
             if stream.response_received != stream.response_bytes {
                 return Err(format!(
@@ -514,6 +623,16 @@ impl ClientBatch {
         }
         Ok(())
     }
+
+    fn close_persistent_streams(&mut self, conn: &mut Connection) -> Result<(), String> {
+        let Some(stream_id) = self.persistent_stream else {
+            return Ok(());
+        };
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.closing = true;
+        }
+        self.write_stream(conn, stream_id)
+    }
 }
 
 #[derive(Default)]
@@ -526,6 +645,8 @@ struct ServerStream {
     ready_to_send: bool,
     send_closed: bool,
     shape_set: bool,
+    persistent: bool,
+    request_fin: bool,
 }
 
 #[derive(Default)]
@@ -645,7 +766,12 @@ impl PerfServer {
         let stream = conn_state.streams.entry(stream_id).or_default();
         if !stream.shape_set {
             stream.request_bytes = session.request_bytes;
-            stream.response_bytes = session.response_bytes;
+            stream.response_bytes = if session.mode == "persistent-rr" {
+                0
+            } else {
+                session.response_bytes
+            };
+            stream.persistent = session.mode == "persistent-rr";
             stream.shape_set = true;
         }
         let mut buf = [0u8; 8192];
@@ -660,11 +786,29 @@ impl PerfServer {
             }
 
             stream.request_received += read as u64;
-            if stream.request_received >= stream.request_bytes {
-                stream.ready_to_send = true;
-            }
-            if fin && stream.request_received >= stream.request_bytes {
-                stream.ready_to_send = true;
+            if stream.persistent {
+                while stream.request_received >= stream.request_bytes {
+                    stream.request_received -= stream.request_bytes;
+                    stream.response_bytes =
+                        stream.response_bytes.saturating_add(session.response_bytes);
+                    stream.ready_to_send = true;
+                }
+                if fin {
+                    if stream.request_received != 0 {
+                        return Err(
+                            "neqo persistent-rr stream ended with partial request".to_string()
+                        );
+                    }
+                    stream.request_fin = true;
+                    stream.ready_to_send = true;
+                }
+            } else {
+                if stream.request_received >= stream.request_bytes {
+                    stream.ready_to_send = true;
+                }
+                if fin && stream.request_received >= stream.request_bytes {
+                    stream.ready_to_send = true;
+                }
             }
             if read == 0 {
                 break;
@@ -750,6 +894,10 @@ impl PerfServer {
                 continue;
             }
 
+            if stream.persistent && !stream.request_fin {
+                stream.ready_to_send = false;
+                return Ok(());
+            }
             conn_ref
                 .borrow_mut()
                 .stream_close_send(stream_id)
@@ -917,7 +1065,7 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
 }
 
 fn validate_config(cfg: &Config) -> Result<(), String> {
-    if cfg.mode != "bulk" && cfg.mode != "rr" && cfg.mode != "crr" {
+    if cfg.mode != "bulk" && cfg.mode != "rr" && cfg.mode != "crr" && cfg.mode != "persistent-rr" {
         return Err(format!("unsupported mode: {}", cfg.mode));
     }
     if cfg.io_backend != "socket" {
@@ -940,6 +1088,9 @@ fn validate_config(cfg: &Config) -> Result<(), String> {
         return Err(
             "streams, connections, and requests-in-flight must be greater than zero".to_string(),
         );
+    }
+    if cfg.mode == "persistent-rr" && (cfg.request_bytes == 0 || cfg.response_bytes == 0) {
+        return Err("persistent-rr requires nonzero request and response bytes".to_string());
     }
     Ok(())
 }
@@ -984,6 +1135,7 @@ fn mode_code(mode: &str) -> u8 {
     match mode {
         "rr" => MODE_CODE_RR,
         "crr" => MODE_CODE_CRR,
+        "persistent-rr" => MODE_CODE_PERSISTENT_RR,
         _ => MODE_CODE_BULK,
     }
 }
@@ -1083,6 +1235,7 @@ fn decode_control_message(data: &[u8]) -> Result<ControlMessage, String> {
                 MODE_CODE_BULK => "bulk",
                 MODE_CODE_RR => "rr",
                 MODE_CODE_CRR => "crr",
+                MODE_CODE_PERSISTENT_RR => "persistent-rr",
                 _ => return Err("malformed session_start mode".to_string()),
             };
             let direction = match payload[5] {
@@ -1116,6 +1269,11 @@ fn decode_control_message(data: &[u8]) -> Result<ControlMessage, String> {
             };
             if start.streams == 0 || start.connections == 0 || start.requests_in_flight == 0 {
                 return Err("malformed session_start counts".to_string());
+            }
+            if start.mode == "persistent-rr"
+                && (start.request_bytes == 0 || start.response_bytes == 0)
+            {
+                return Err("persistent-rr requires nonzero request and response bytes".to_string());
             }
             msg.start = Some(start);
         }
@@ -1257,6 +1415,34 @@ async fn wait_socket(socket: &UdpSocket, timeout: Option<Duration>) -> Result<()
     }
 }
 
+async fn wait_client_sockets(
+    clients: &[NeqoClientBatch],
+    timeout: Option<Duration>,
+) -> Result<(), AnyError> {
+    let wait = timeout.unwrap_or(DEFAULT_WAIT).min(DEFAULT_WAIT);
+    if wait.is_zero() || clients.is_empty() {
+        return Ok(());
+    }
+
+    let mut readable = FuturesUnordered::new();
+    for client in clients {
+        readable.push(client.socket.readable());
+    }
+
+    match time::timeout(wait, readable.next()).await {
+        Ok(Some(result)) => result.map(|_| ()).map_err(AnyError::from),
+        Ok(None) | Err(_) => Ok(()),
+    }
+}
+
+fn earlier_timeout(current: Option<Duration>, next: Option<Duration>) -> Option<Duration> {
+    match (current, next) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(timeout), None) | (None, Some(timeout)) => Some(timeout),
+        (None, None) => None,
+    }
+}
+
 async fn run_request_batch(
     cfg: &Config,
     count: u64,
@@ -1335,18 +1521,19 @@ async fn open_client_batches(
     shape: RequestShape,
 ) -> Result<Vec<NeqoClientBatch>, String> {
     let mut clients = Vec::new();
-    let count = if cfg.mode == "rr" && cfg.requests.set {
+    let count = if (cfg.mode == "rr" || cfg.mode == "persistent-rr") && cfg.requests.set {
         rr_connection_target(cfg)
     } else {
         cfg.connections
     };
     for index in 0..count {
         let (socket, local_addr, conn) = connect_client(cfg).await?;
-        let connection_target = if cfg.mode == "rr" && cfg.requests.set {
-            rr_request_limit_for_connection(cfg, index)
-        } else {
-            target_requests
-        };
+        let connection_target =
+            if (cfg.mode == "rr" || cfg.mode == "persistent-rr") && cfg.requests.set {
+                rr_request_limit_for_connection(cfg, index)
+            } else {
+                target_requests
+            };
         clients.push(NeqoClientBatch {
             socket,
             local_addr,
@@ -1407,32 +1594,33 @@ async fn drive_batches(
         let timeout = drain_client_output(&mut client.conn, &client.socket)
             .await
             .map_err(|err| format!("neqo output failed: {err}"))?;
-        next_timeout = next_timeout.or(timeout);
+        next_timeout = earlier_timeout(next_timeout, timeout);
     }
     for client in clients.iter_mut() {
-        drain_client_socket(&client.socket, &mut client.conn, client.local_addr)
+        let timeout = drain_client_socket(&client.socket, &mut client.conn, client.local_addr)
             .await
             .map_err(|err| format!("neqo socket read failed: {err}"))?;
+        next_timeout = earlier_timeout(next_timeout, timeout);
     }
     if total_active(clients) > 0 || clients.iter().any(|client| !client.batch.session_ready) {
-        if let Some(first) = clients.first() {
-            wait_socket(&first.socket, next_timeout)
-                .await
-                .map_err(|err| format!("neqo socket wait failed: {err}"))?;
-        }
+        wait_client_sockets(clients, next_timeout)
+            .await
+            .map_err(|err| format!("neqo socket wait failed: {err}"))?;
     }
     Ok(())
 }
 
 async fn close_batches(clients: &mut [NeqoClientBatch]) {
     for client in clients {
+        let _ = client.batch.close_persistent_streams(&mut client.conn);
+        let _ = drain_client_output(&mut client.conn, &client.socket).await;
         client.conn.close(Instant::now(), 0, "done");
         let _ = drain_client_output(&mut client.conn, &client.socket).await;
     }
 }
 
 fn rr_connection_target(cfg: &Config) -> u64 {
-    if cfg.mode == "rr" && cfg.requests.set {
+    if (cfg.mode == "rr" || cfg.mode == "persistent-rr") && cfg.requests.set {
         cfg.connections.min(cfg.requests.value)
     } else {
         cfg.connections
@@ -1623,7 +1811,7 @@ async fn run_client(cfg: &Config) -> RunSummary<'_> {
     let measure_start = Instant::now();
     let rc = if cfg.mode == "bulk" {
         run_bulk(cfg, &mut counters).await
-    } else if cfg.mode == "rr" {
+    } else if cfg.mode == "rr" || cfg.mode == "persistent-rr" {
         run_rr(cfg, &mut counters).await
     } else {
         run_crr(cfg, &mut counters).await

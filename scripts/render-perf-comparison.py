@@ -9,7 +9,8 @@ from pathlib import Path
 MODE_ORDER = {
     "bulk": 0,
     "rr": 1,
-    "crr": 2,
+    "persistent-rr": 2,
+    "crr": 3,
 }
 
 CONGESTION_ORDER = {
@@ -115,6 +116,7 @@ def mode_display_name(mode: str) -> str:
     names = {
         "bulk": "Bulk Download",
         "rr": "Request/Response",
+        "persistent-rr": "Persistent Request/Response",
         "crr": "Connection Request/Response",
     }
     return names.get(mode, mode)

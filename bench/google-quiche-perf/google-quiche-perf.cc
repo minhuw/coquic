@@ -2,6 +2,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <fstream>
 #include <iostream>
@@ -66,6 +67,7 @@ constexpr uint8_t kMessageSessionError = 3;
 constexpr uint8_t kModeCodeBulk = 0;
 constexpr uint8_t kModeCodeRr = 1;
 constexpr uint8_t kModeCodeCrr = 2;
+constexpr uint8_t kModeCodePersistentRr = 3;
 constexpr uint8_t kDirectionCodeUpload = 0;
 constexpr uint8_t kDirectionCodeDownload = 1;
 constexpr uint64_t kDefaultMaxRunRequests = 4096;
@@ -175,7 +177,8 @@ Duration ParseDuration(std::string_view text) {
 }
 
 void ValidateConfig(const Config &cfg) {
-    if (cfg.mode != "bulk" && cfg.mode != "rr" && cfg.mode != "crr") {
+    if (cfg.mode != "bulk" && cfg.mode != "rr" && cfg.mode != "crr" &&
+        cfg.mode != "persistent-rr") {
         throw std::runtime_error(absl::StrCat("unsupported mode: ", cfg.mode));
     }
     if (cfg.io_backend != "socket") {
@@ -199,6 +202,10 @@ void ValidateConfig(const Config &cfg) {
         throw std::runtime_error(
             "streams, connections, and requests-in-flight must be greater than "
             "zero");
+    }
+    if (cfg.mode == "persistent-rr" && (cfg.request_bytes == 0 || cfg.response_bytes == 0)) {
+        throw std::runtime_error(
+            "persistent-rr request and response bytes must be greater than zero");
     }
 }
 
@@ -396,6 +403,9 @@ uint8_t ModeCode(const std::string &mode) {
     if (mode == "crr") {
         return kModeCodeCrr;
     }
+    if (mode == "persistent-rr") {
+        return kModeCodePersistentRr;
+    }
     return kModeCodeBulk;
 }
 
@@ -441,7 +451,7 @@ std::vector<char> FrameControlMessage(uint8_t type, const std::vector<char> &pay
 }
 
 uint64_t RrConnectionTarget(const Config &cfg) {
-    if (cfg.mode == "rr" && cfg.requests.set) {
+    if ((cfg.mode == "rr" || cfg.mode == "persistent-rr") && cfg.requests.set) {
         return std::min(cfg.connections, cfg.requests.value);
     }
     return cfg.connections;
@@ -470,7 +480,7 @@ bool CanStartRrRequest(const Config &cfg, uint64_t started,
 
 Config ConfigWithRrRequestLimit(const Config &cfg, uint64_t connection_index) {
     Config connection_cfg = cfg;
-    if (cfg.mode == "rr" && cfg.requests.set) {
+    if ((cfg.mode == "rr" || cfg.mode == "persistent-rr") && cfg.requests.set) {
         connection_cfg.requests.value = RrRequestLimitForConnection(cfg, connection_index);
         connection_cfg.requests.set = true;
     }
@@ -555,9 +565,14 @@ PerfSessionStart DecodeSessionStart(absl::string_view payload) {
     start.streams = ReadU64(payload.data() + 55);
     start.connections = ReadU64(payload.data() + 63);
     start.requests_in_flight = ReadU64(payload.data() + 71);
-    if ((start.mode != kModeCodeBulk && start.mode != kModeCodeRr && start.mode != kModeCodeCrr) ||
+    if ((start.mode != kModeCodeBulk && start.mode != kModeCodeRr && start.mode != kModeCodeCrr &&
+         start.mode != kModeCodePersistentRr) ||
         (start.direction != kDirectionCodeUpload && start.direction != kDirectionCodeDownload) ||
         start.streams == 0 || start.connections == 0 || start.requests_in_flight == 0) {
+        throw std::runtime_error("malformed session_start");
+    }
+    if (start.mode == kModeCodePersistentRr &&
+        (start.request_bytes == 0 || start.response_bytes == 0)) {
         throw std::runtime_error("malformed session_start");
     }
     return start;
@@ -575,6 +590,12 @@ struct StreamCompletion {
     Duration latency = Duration::zero();
 };
 
+struct PendingPersistentRequest {
+    bool counts = false;
+    uint64_t request_bytes = 0;
+    Clock::time_point start = Clock::now();
+};
+
 class PerfClientSession;
 class PerfServerSession;
 
@@ -585,11 +606,14 @@ class PerfStream : public quic::QuicStream {
 
     void StartClientRequest(uint64_t request_bytes, uint64_t response_bytes, bool counts,
                             Clock::time_point start);
+    void StartPersistentClient();
+    void FinishPersistentClient();
     void StartClientControl(std::vector<char> bytes);
     void SetServerSession(PerfServerSession *server_session);
 
     void OnDataAvailable() override;
     void OnCanWriteNewData() override;
+    void OnClose() override;
     void OnStreamReset(const quic::QuicRstStreamFrame &frame) override;
 
   private:
@@ -600,6 +624,7 @@ class PerfStream : public quic::QuicStream {
     void SendMore();
     void SendControl();
     void CompleteClientStream();
+    void CompletePersistentClientResponses();
     void FailClientStream(std::string message);
 
     const bool is_server_;
@@ -621,7 +646,12 @@ class PerfStream : public quic::QuicStream {
     bool response_fin_sent_ = false;
     bool peer_fin_read_ = false;
     bool client_done_ = false;
+    bool persistent_client_ = false;
+    bool persistent_server_ = false;
     bool counts_ = false;
+    uint64_t persistent_response_pending_ = 0;
+    uint64_t server_response_left_ = 0;
+    std::deque<PendingPersistentRequest> pending_persistent_;
     Clock::time_point start_ = Clock::now();
 };
 
@@ -708,6 +738,36 @@ class PerfClientSession : public PerfSessionBase,
         return true;
     }
 
+    bool OpenPersistentRequest(uint64_t request_bytes, uint64_t response_bytes, bool counts) {
+        if (!session_ready_) {
+            return false;
+        }
+        if (persistent_stream_ != nullptr) {
+            ++active_requests_;
+            persistent_stream_->StartClientRequest(request_bytes, response_bytes, counts,
+                                                   Clock::now());
+            return true;
+        }
+        if (!CanOpenNextOutgoingBidirectionalStream()) {
+            return false;
+        }
+        quic::QuicStreamId id = GetNextOutgoingBidirectionalStreamId();
+        auto stream = std::make_unique<PerfStream>(id, this, /*is_server=*/false, this);
+        PerfStream *request_stream = stream.get();
+        ActivateStream(std::move(stream));
+        persistent_stream_ = request_stream;
+        request_stream->StartPersistentClient();
+        ++active_requests_;
+        request_stream->StartClientRequest(request_bytes, response_bytes, counts, Clock::now());
+        return true;
+    }
+
+    void FinishPersistentRequests() {
+        if (persistent_stream_ != nullptr) {
+            persistent_stream_->FinishPersistentClient();
+        }
+    }
+
     bool OpenControl(const Config &cfg) {
         if (control_opened_ || !CanOpenNextOutgoingBidirectionalStream()) {
             return session_ready_;
@@ -742,9 +802,16 @@ class PerfClientSession : public PerfSessionBase,
                               std::chrono::duration_cast<Duration>(Clock::now() - start)});
     }
 
-    void OnStreamFailed(std::string message) {
-        if (active_requests_ > 0) {
+    void OnPersistentStreamClosed(PerfStream *stream) {
+        if (persistent_stream_ == stream) {
+            persistent_stream_ = nullptr;
+        }
+    }
+
+    void OnStreamFailed(std::string message, uint64_t failed_requests = 1) {
+        while (failed_requests > 0 && active_requests_ > 0) {
             --active_requests_;
+            --failed_requests;
         }
         if (error_message_.empty()) {
             error_message_ = std::move(message);
@@ -820,6 +887,7 @@ class PerfClientSession : public PerfSessionBase,
   private:
     quic::QuicServerId server_id_;
     quic::QuicCryptoClientConfig *crypto_config_;
+    PerfStream *persistent_stream_ = nullptr;
     uint64_t active_requests_ = 0;
     bool control_opened_ = false;
     bool session_ready_ = false;
@@ -846,6 +914,10 @@ class PerfServerSession : public PerfSessionBase {
 
     uint64_t RequestBytes() const {
         return session_start_.request_bytes;
+    }
+
+    bool IsPersistentRr() const {
+        return session_start_.mode == kModeCodePersistentRr;
     }
 
     bool AllowsVariableBulkUpload() const {
@@ -916,10 +988,33 @@ PerfStream::PerfStream(quic::QuicStreamId id, quic::QuicSession *session, bool i
 
 void PerfStream::StartClientRequest(uint64_t request_bytes, uint64_t response_bytes, bool counts,
                                     Clock::time_point start) {
+    if (persistent_client_) {
+        if (UINT64_MAX - request_bytes_ < request_bytes) {
+            FailClientStream("Google QUICHE persistent-rr request byte counter overflow");
+            return;
+        }
+        request_bytes_ += request_bytes;
+        response_bytes_ = response_bytes;
+        pending_persistent_.push_back({counts, request_bytes, start});
+        SendMore();
+        return;
+    }
     request_bytes_ = request_bytes;
     response_bytes_ = response_bytes;
     counts_ = counts;
     start_ = start;
+    SendMore();
+}
+
+void PerfStream::StartPersistentClient() {
+    persistent_client_ = true;
+}
+
+void PerfStream::FinishPersistentClient() {
+    if (!persistent_client_ || request_fin_sent_) {
+        return;
+    }
+    request_complete_ = true;
     SendMore();
 }
 
@@ -947,7 +1042,23 @@ size_t PerfStream::ConsumeServerBytes(absl::string_view data) {
         return data.size();
     }
     request_bytes_ = server_session_->RequestBytes();
+    persistent_server_ = server_session_->IsPersistentRr();
     request_received_ += data.size();
+    if (persistent_server_) {
+        while (request_received_ >= request_bytes_) {
+            request_received_ -= request_bytes_;
+            uint64_t response_bytes = server_session_->ResponseBytesForNextRequest();
+            if (UINT64_MAX - server_response_left_ < response_bytes) {
+                Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
+                return data.size();
+            }
+            server_response_left_ += response_bytes;
+        }
+        if (server_response_left_ > 0) {
+            SendMore();
+        }
+        return data.size();
+    }
     if (!server_session_->AllowsVariableBulkUpload() && request_received_ > request_bytes_) {
         Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
     }
@@ -982,6 +1093,11 @@ size_t PerfStream::ConsumeClientBytes(absl::string_view data) {
             } catch (const std::exception &) {
             }
         }
+        return data.size();
+    }
+    if (persistent_client_) {
+        persistent_response_pending_ += data.size();
+        CompletePersistentClientResponses();
         return data.size();
     }
     uint64_t remaining = response_bytes_ - response_received_;
@@ -1033,6 +1149,15 @@ void PerfStream::OnPeerFin() {
             return;
         }
         request_bytes_ = server_session_->RequestBytes();
+        if (persistent_server_) {
+            if (request_received_ != 0) {
+                Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
+                return;
+            }
+            request_complete_ = true;
+            SendMore();
+            return;
+        }
         if (!server_session_->AllowsVariableBulkUpload() && request_received_ != request_bytes_) {
             Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
             return;
@@ -1040,6 +1165,14 @@ void PerfStream::OnPeerFin() {
         response_bytes_ = server_session_->ResponseBytesForNextRequest();
         request_complete_ = true;
         SendMore();
+        return;
+    }
+
+    if (persistent_client_) {
+        if (!pending_persistent_.empty() || persistent_response_pending_ != 0) {
+            FailClientStream("Google QUICHE persistent-rr stream closed with pending responses");
+            Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
+        }
         return;
     }
 
@@ -1071,7 +1204,27 @@ void PerfStream::SendMore() {
         return;
     }
     if (is_server_) {
-        while (request_complete_ && !response_fin_sent_ && CanWriteNewData()) {
+        while (CanWriteNewData()) {
+            if (persistent_server_) {
+                if (server_response_left_ == 0) {
+                    if (request_complete_ && !response_fin_sent_) {
+                        WriteOrBufferData(absl::string_view(), true, nullptr);
+                        response_fin_sent_ = true;
+                    }
+                    break;
+                }
+                uint64_t remaining = server_response_left_;
+                size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, kWriteChunkSize));
+                WriteOrBufferData(ZeroChunk(chunk), false, nullptr);
+                server_response_left_ -= chunk;
+                if (chunk == 0 || !CanWriteNewData()) {
+                    break;
+                }
+                continue;
+            }
+            if (!request_complete_ || response_fin_sent_) {
+                break;
+            }
             uint64_t remaining = response_bytes_ - response_sent_;
             size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, kWriteChunkSize));
             bool send_fin = chunk == remaining;
@@ -1090,11 +1243,14 @@ void PerfStream::SendMore() {
     while (!request_fin_sent_ && CanWriteNewData()) {
         uint64_t remaining = request_bytes_ - request_sent_;
         size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, kWriteChunkSize));
-        bool send_fin = chunk == remaining;
+        bool send_fin = chunk == remaining && (!persistent_client_ || request_complete_);
         WriteOrBufferData(ZeroChunk(chunk), send_fin, nullptr);
         request_sent_ += chunk;
         if (send_fin) {
             request_fin_sent_ = true;
+        }
+        if (persistent_client_ && chunk == remaining && !request_complete_) {
+            break;
         }
         if (chunk == 0 || !CanWriteNewData()) {
             break;
@@ -1104,6 +1260,13 @@ void PerfStream::SendMore() {
 
 void PerfStream::OnCanWriteNewData() {
     SendMore();
+}
+
+void PerfStream::OnClose() {
+    if (persistent_client_ && client_session_ != nullptr) {
+        client_session_->OnPersistentStreamClosed(this);
+    }
+    quic::QuicStream::OnClose();
 }
 
 void PerfStream::OnStreamReset(const quic::QuicRstStreamFrame &frame) {
@@ -1123,13 +1286,33 @@ void PerfStream::CompleteClientStream() {
     }
 }
 
+void PerfStream::CompletePersistentClientResponses() {
+    while (response_bytes_ != 0 && persistent_response_pending_ >= response_bytes_ &&
+           !pending_persistent_.empty()) {
+        PendingPersistentRequest pending = pending_persistent_.front();
+        pending_persistent_.pop_front();
+        persistent_response_pending_ -= response_bytes_;
+        if (client_session_ != nullptr) {
+            client_session_->OnStreamComplete(pending.request_bytes, response_bytes_,
+                                              pending.counts, pending.start);
+        }
+    }
+    if (response_bytes_ != 0 && persistent_response_pending_ >= response_bytes_ &&
+        pending_persistent_.empty()) {
+        FailClientStream("Google QUICHE persistent-rr received too many response bytes");
+        Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
+    }
+}
+
 void PerfStream::FailClientStream(std::string message) {
     if (client_done_) {
         return;
     }
     client_done_ = true;
     if (client_session_ != nullptr) {
-        client_session_->OnStreamFailed(std::move(message));
+        uint64_t failed_requests =
+            persistent_client_ ? std::max<uint64_t>(1, pending_persistent_.size()) : 1;
+        client_session_->OnStreamFailed(std::move(message), failed_requests);
     }
 }
 
@@ -1137,6 +1320,7 @@ class PerfClient;
 
 void CheckClient(const PerfClient &client);
 std::vector<StreamCompletion> DriveClient(PerfClient *client);
+std::vector<StreamCompletion> TakeClientCompletions(PerfClient *client);
 
 class PerfClient : public quic::QuicClientBase {
   public:
@@ -1323,6 +1507,11 @@ void CheckClient(const PerfClient &client) {
 
 std::vector<StreamCompletion> DriveClient(PerfClient *client) {
     client->WaitForEvents();
+    return TakeClientCompletions(client);
+}
+
+std::vector<StreamCompletion> TakeClientCompletions(PerfClient *client) {
+    client->WaitForEventsPostprocessing();
     CheckClient(*client);
     return client->perf_session()->TakeCompletions();
 }
@@ -1354,8 +1543,27 @@ std::vector<StreamCompletion> OpenRequestOrThrow(PerfClient *client, uint64_t re
     return completions;
 }
 
+std::vector<StreamCompletion> OpenRrRequestOrThrow(const Config &cfg, PerfClient *client,
+                                                   uint64_t request_bytes, uint64_t response_bytes,
+                                                   bool counts) {
+    if (cfg.mode != "persistent-rr") {
+        return OpenRequestOrThrow(client, request_bytes, response_bytes, counts);
+    }
+    std::vector<StreamCompletion> completions;
+    while (!client->perf_session()->OpenPersistentRequest(request_bytes, response_bytes, counts)) {
+        for (const StreamCompletion &completion : DriveClient(client)) {
+            completions.push_back(completion);
+        }
+    }
+    CheckClient(*client);
+    return completions;
+}
+
 void DrainClient(PerfClient *client) {
     Clock::time_point deadline = Clock::now() + kDrainTimeout;
+    if (client->perf_session() != nullptr) {
+        client->perf_session()->FinishPersistentRequests();
+    }
     while (client->perf_session()->active_requests() > 0 && Clock::now() < deadline) {
         (void)DriveClient(client);
     }
@@ -1434,8 +1642,8 @@ void RunRr(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_loo
                 break;
             }
             for (const StreamCompletion &completion :
-                 OpenRequestOrThrow(client.get(), cfg.request_bytes, cfg.response_bytes,
-                                    cfg.requests.set || Clock::now() >= measure_start)) {
+                 OpenRrRequestOrThrow(cfg, client.get(), cfg.request_bytes, cfg.response_bytes,
+                                      cfg.requests.set || Clock::now() >= measure_start)) {
                 AddCompletion(completion, counters, true, true);
             }
             ++started;
@@ -1454,8 +1662,9 @@ void RunRr(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_loo
             break;
         }
 
+        event_loop->RunEventLoopOnce(quic::QuicTimeDelta::Zero());
         for (auto &client : clients) {
-            for (const StreamCompletion &completion : DriveClient(client.get())) {
+            for (const StreamCompletion &completion : TakeClientCompletions(client.get())) {
                 AddCompletion(completion, counters, true, true);
             }
         }
@@ -1470,8 +1679,8 @@ void RunRr(const Config &cfg, Counters *counters, quic::QuicEventLoop *event_loo
                     break;
                 }
                 for (const StreamCompletion &completion :
-                     OpenRequestOrThrow(client.get(), cfg.request_bytes, cfg.response_bytes,
-                                        cfg.requests.set || Clock::now() >= measure_start)) {
+                     OpenRrRequestOrThrow(cfg, client.get(), cfg.request_bytes, cfg.response_bytes,
+                                          cfg.requests.set || Clock::now() >= measure_start)) {
                     AddCompletion(completion, counters, true, true);
                 }
                 ++started;
@@ -1581,7 +1790,7 @@ RunSummary RunClient(const Config &cfg) {
     try {
         if (cfg.mode == "bulk") {
             RunBulk(cfg, &counters, event_loop.get());
-        } else if (cfg.mode == "rr") {
+        } else if (cfg.mode == "rr" || cfg.mode == "persistent-rr") {
             RunRr(cfg, &counters, event_loop.get());
         } else {
             RunCrr(cfg, &counters, event_loop.get());

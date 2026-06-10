@@ -1858,6 +1858,9 @@ COQUIC_NO_PROFILE void QuicCore::maybe_queue_server_new_token(ConnectionEntry &e
                                      .expires_at = now + kNewTokenLifetime,
                                      .used = false,
                                  });
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+    // # After verifying a new client address, the server SHOULD send new
+    // # address validation tokens (Section 8) to the client.
     entry.connection->queue_new_token(std::move(token));
     entry.new_token_issued_routes.push_back(*route_handle);
 }

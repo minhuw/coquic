@@ -2327,6 +2327,37 @@ TEST(QuicCoreEndpointInternalTest, ExpiredRetryAndNewTokensAreRemoved) {
     EXPECT_TRUE(server.new_tokens_.empty());
 }
 
+TEST(QuicCoreEndpointInternalTest, ServerQueuesNewTokenForValidatedMigratedClientRoute) {
+    auto server_config = make_server_endpoint_config();
+    server_config.application_protocol = "coquic";
+    QuicCore server(std::move(server_config));
+
+    auto entry = make_server_connection_entry(1);
+    entry.connection = std::make_unique<QuicConnection>(make_connected_server_connection());
+    auto &connection = *entry.connection;
+    connection.current_send_path_id_ = 7;
+    connection.last_validated_path_id_ = 7;
+    auto &migrated_path = connection.ensure_path_state(7);
+    migrated_path.validated = true;
+    migrated_path.is_current_send_path = true;
+    entry.default_route_handle = 11;
+    entry.route_handle_by_path_id.emplace(7, 55);
+    entry.path_id_by_route_handle.emplace(55, 7);
+
+    server.maybe_queue_server_new_token(entry, coquic::quic::test::test_time(1));
+
+    ASSERT_EQ(connection.pending_new_token_frames_.size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+    // # After verifying a new client address, the server SHOULD send new
+    // # address validation tokens (Section 8) to the client.
+    EXPECT_FALSE(connection.pending_new_token_frames_.front().token.empty());
+    ASSERT_EQ(entry.new_token_issued_routes.size(), 1u);
+    EXPECT_EQ(entry.new_token_issued_routes.front(), 55u);
+
+    server.maybe_queue_server_new_token(entry, coquic::quic::test::test_time(2));
+    EXPECT_EQ(connection.pending_new_token_frames_.size(), 1u);
+}
+
 // NOLINTBEGIN(clang-analyzer-cplusplus.NewDeleteLeaks)
 TEST(QuicCoreEndpointInternalTest, ClientStoresMostRecentUnusedNewTokenForOpen) {
     QuicCore client(make_client_endpoint_config());

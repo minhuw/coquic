@@ -191,8 +191,14 @@ annotation unless the local result is explicitly classified as `peer_broken`.
 For local diagnosis, `INTEROP_RETRY_FAILED_TESTCASES=1` can retry a small set of
 simulator-sensitive cases in isolation after an initial `failed` result.
 Recovered results are marked as `succeeded` in the JSON snapshot and listed
-under `coquic_retried_testcases`. CI leaves this disabled so it reports the
-first official runner result.
+under `coquic_retried_testcases`. CI enables isolated retries so transient
+simulator failures do not hide the stable matrix result.
+
+For local diagnosis, the wrapper preserves the official runner's per-testcase
+logs and pcaps by default. Set `INTEROP_PRESERVE_TESTCASE_LOGS=0` to keep only
+`results.json`, wrapper output, and retry outputs. CI uses this compact mode to
+avoid exhausting runner disk space while copying large simulator pcaps from
+full-matrix crosstraffic runs.
 
 The image verification scripts live under `interop/tests/`.
 

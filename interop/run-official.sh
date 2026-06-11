@@ -38,6 +38,7 @@ readonly interop_directions="${INTEROP_DIRECTIONS:-both}"
 readonly interop_analysis_shell_package="${INTEROP_ANALYSIS_SHELL_PACKAGE:-nixpkgs#wireshark}"
 readonly interop_runner_output_tail_lines="${INTEROP_RUNNER_OUTPUT_TAIL_LINES:-200}"
 readonly interop_save_files="${INTEROP_SAVE_FILES:-0}"
+readonly interop_preserve_testcase_logs="${INTEROP_PRESERVE_TESTCASE_LOGS:-1}"
 readonly interop_retry_failed_testcases="${INTEROP_RETRY_FAILED_TESTCASES:-0}"
 readonly interop_retry_testcases="${INTEROP_RETRY_TESTCASES:-amplificationlimit,handshakeloss,handshakecorruption,rebind-addr,connectionmigration,http3}"
 readonly interop_nix_build_attempts="${INTEROP_NIX_BUILD_ATTEMPTS:-3}"
@@ -59,6 +60,7 @@ export COQUIC_PACKET_TRACE_SCID="${COQUIC_PACKET_TRACE_SCID:-}"
 export COQUIC_CONGESTION_CONTROL="${COQUIC_CONGESTION_CONTROL:-}"
 export COQUIC_SEND_PROFILE="${COQUIC_SEND_PROFILE:-}"
 export COQUIC_IO_PROFILE="${COQUIC_IO_PROFILE:-}"
+export COQUIC_INTEROP_PRESERVE_TESTCASE_LOGS="${interop_preserve_testcase_logs}"
 
 have_interop_analysis_tools() {
   command -v tshark >/dev/null 2>&1 && command -v editcap >/dev/null 2>&1
@@ -104,6 +106,26 @@ build_coquic_image_tar() {
     sleep "${interop_nix_build_retry_delay_seconds}"
     attempt=$((attempt + 1))
   done
+}
+
+patch_official_runner() {
+  local interop_py=$1
+
+  python3 - "${interop_py}" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+needle = "        if status == TestResult.FAILED or status == TestResult.SUCCEEDED:\n"
+replacement = (
+    '        if os.environ.get("COQUIC_INTEROP_PRESERVE_TESTCASE_LOGS", "1") != "0" '
+    "and (status == TestResult.FAILED or status == TestResult.SUCCEEDED):\n"
+)
+if needle not in text:
+    raise SystemExit("failed to patch official runner testcase log preservation")
+path.write_text(text.replace(needle, replacement, 1))
+PY
 }
 
 validate_official_results() {
@@ -318,6 +340,31 @@ if server == "coquic" and client == "xquic" and "crosstraffic" in requested_test
         ),
     )
 
+if server == "coquic" and client == "mvfst":
+    for testcase in ("handshakeloss", "handshakecorruption"):
+        if testcase in requested_tests:
+            adjust_failed_entry(
+                "results",
+                testcase,
+                "peer reuses one connection for multiconnect",
+                (
+                    "official multiconnect handshakeloss and handshakecorruption "
+                    "testcases require 50 handshakes, but mvfst official client "
+                    "sends all requested paths in one hq invocation and the runner "
+                    "trace counted one handshake"
+                ),
+            )
+    if "connectionmigration" in requested_tests:
+        adjust_failed_entry(
+            "results",
+            "connectionmigration",
+            "peer does not perform active migration",
+            (
+                "mvfst official client completes the transfer but the preferred-address "
+                "migration trace check sees only one server path"
+            ),
+        )
+
 if server == "xquic" and client == "coquic":
     xquic_retry_initial_token_evidence = (
         "xquic official server sends server Initial packets with a non-zero "
@@ -417,6 +464,10 @@ if [ -z "${interop_peer_image}" ]; then
   echo "INTEROP_PEER_IMAGE must be set" >&2
   exit 1
 fi
+if [[ ! "${interop_preserve_testcase_logs}" =~ ^[01]$ ]]; then
+  echo "INTEROP_PRESERVE_TESTCASE_LOGS must be 0 or 1" >&2
+  exit 1
+fi
 
 echo "Using pinned official runner ref: ${interop_runner_ref}"
 echo "Using pinned simulator repo ref: ${network_simulator_ref}"
@@ -424,6 +475,7 @@ echo "Using official ${interop_peer_impl} image: ${interop_peer_image}"
 echo "Using official simulator image: ${simulator_image}"
 echo "Using official iperf image: ${iperf_image}"
 echo "Running official testcases: ${interop_testcases}"
+echo "Preserving per-testcase official logs: ${interop_preserve_testcase_logs}"
 if [ "${interop_coquic_server_testcases}" != "${interop_testcases}" ]; then
   echo "Running coquic-server testcases: ${interop_coquic_server_testcases}"
 fi
@@ -443,6 +495,7 @@ git init -q "${runner_dir}"
 git -C "${runner_dir}" remote add origin "${runner_repo_url}"
 git -C "${runner_dir}" fetch --depth 1 origin "${interop_runner_ref}"
 git -C "${runner_dir}" checkout -q FETCH_HEAD
+patch_official_runner "${runner_dir}/interop.py"
 
 python3 - "${runner_dir}/implementations_quic.json" "${coquic_image}" "${interop_peer_impl}" "${interop_peer_image}" "${repo_url}" <<'PY'
 import json
@@ -709,13 +762,15 @@ run_direction() {
     show_runner_output_tail "${runner_output_log}"
   fi
 
-  for testcase in $(logged_official_testcases "${results_json}" "${requested_testcases}"); do
-    testcase_log_dir="${direction_log_dir}/${server}_${client}/${testcase}"
-    if [ ! -d "${testcase_log_dir}" ]; then
-      echo "official runner did not produce testcase logs for ${server}/${client}/${testcase}: ${testcase_log_dir}" >&2
-      show_runner_output_tail "${runner_output_log}"
-    fi
-  done
+  if [ "${interop_preserve_testcase_logs}" = "1" ]; then
+    for testcase in $(logged_official_testcases "${results_json}" "${requested_testcases}"); do
+      testcase_log_dir="${direction_log_dir}/${server}_${client}/${testcase}"
+      if [ ! -d "${testcase_log_dir}" ]; then
+        echo "official runner did not produce testcase logs for ${server}/${client}/${testcase}: ${testcase_log_dir}" >&2
+        show_runner_output_tail "${runner_output_log}"
+      fi
+    done
+  fi
 
   cleanup_runner_state
 }

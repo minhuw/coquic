@@ -110,6 +110,7 @@ jobs:
           INTEROP_PEER_IMAGE: ${{ matrix.image }}
           INTEROP_DIRECTIONS: both
           INTEROP_RETRY_FAILED_TESTCASES: "1"
+          INTEROP_PRESERVE_TESTCASE_LOGS: "0"
           COQUIC_CONGESTION_CONTROL: ${{ matrix.congestion_control || '' }}
         run: bash interop/run-official.sh
 
@@ -193,6 +194,7 @@ jobs:
           INTEROP_PEER_IMAGE: coquic-interop:quictls-musl
           INTEROP_DIRECTIONS: coquic-server
           INTEROP_RETRY_FAILED_TESTCASES: "1"
+          INTEROP_PRESERVE_TESTCASE_LOGS: "0"
         run: bash interop/run-official.sh
 
       - name: Publish self Interop Summary

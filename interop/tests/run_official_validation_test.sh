@@ -106,6 +106,22 @@ SH
 
 test_build_coquic_image_tar_retries
 
+patched_runner="${tmpdir}/interop.py"
+cat >"${patched_runner}" <<'PY'
+import os
+
+def run():
+    if True:
+        if status == TestResult.FAILED or status == TestResult.SUCCEEDED:
+            copy_logs()
+PY
+
+patch_official_runner "${patched_runner}"
+if ! rg -q 'COQUIC_INTEROP_PRESERVE_TESTCASE_LOGS' "${patched_runner}"; then
+  echo "expected official runner patch to gate per-testcase log copying" >&2
+  exit 1
+fi
+
 validate_official_results \
   "${complete_results}" coquic quic-go handshake,transfer,retry,ipv6,goodput
 
@@ -245,6 +261,60 @@ if adjusted_names != {"connectionmigration", "crosstraffic"}:
     raise SystemExit("expected compatibility adjustment audit trail")
 if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
     raise SystemExit("expected compatibility adjustments to include reason and evidence")
+PY
+
+mvfst_client_results="${tmpdir}/mvfst-client-results.json"
+cat >"${mvfst_client_results}" <<'JSON'
+{
+  "servers": ["coquic"],
+  "clients": ["mvfst"],
+  "results": [[
+    {"name": "handshakeloss", "result": "failed"},
+    {"name": "handshakecorruption", "result": "failed"},
+    {"name": "connectionmigration", "result": "failed"},
+    {"name": "zerortt", "result": "failed"}
+  ]],
+  "measurements": [[]]
+}
+JSON
+
+apply_official_result_compatibility_adjustments \
+  "${mvfst_client_results}" coquic mvfst \
+  handshakeloss,handshakecorruption,connectionmigration,zerortt
+
+python3 - "${mvfst_client_results}" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+results = {
+    entry["name"]: entry
+    for entry in data["results"][0]
+}
+for name in ("handshakeloss", "handshakecorruption"):
+    entry = results[name]
+    if entry["result"] != "peer_broken":
+        raise SystemExit(f"expected mvfst client {name} to be marked peer_broken")
+    if entry.get("details") != "peer reuses one connection for multiconnect":
+        raise SystemExit(f"expected mvfst client {name} public reason")
+    if "require 50 handshakes" not in entry.get("evidence", ""):
+        raise SystemExit(f"expected mvfst client {name} evidence")
+connectionmigration = results["connectionmigration"]
+if connectionmigration["result"] != "peer_broken":
+    raise SystemExit("expected mvfst client connectionmigration to be marked peer_broken")
+if connectionmigration.get("details") != "peer does not perform active migration":
+    raise SystemExit("expected mvfst client connectionmigration public reason")
+if "sees only one server path" not in connectionmigration.get("evidence", ""):
+    raise SystemExit("expected mvfst client connectionmigration evidence")
+if results["zerortt"]["result"] != "failed":
+    raise SystemExit("expected mvfst client zerortt to remain failed")
+adjustments = data.get("coquic_compat_adjustments", [])
+adjusted_names = {entry.get("name") for entry in adjustments}
+if adjusted_names != {"handshakeloss", "handshakecorruption", "connectionmigration"}:
+    raise SystemExit("expected mvfst client compatibility adjustment audit trail")
+if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
+    raise SystemExit("expected mvfst client audit trail to include reason and evidence")
 PY
 
 xquic_server_results="${tmpdir}/xquic-server-results.json"

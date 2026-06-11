@@ -425,7 +425,7 @@ def print_summary(sources: list[dict], rows: list[dict], event_name: str, commit
     if not peer_broken:
         print("No loaded interop cases were classified as peer-broken.")
     else:
-        print("| Peer | Direction | Case | Details |")
+        print("| Peer | Direction | Case | Reason |")
         print("| --- | --- | --- | --- |")
         for row in peer_broken:
             print(

@@ -237,7 +237,7 @@ requested_tests = {test for test in sys.argv[4].split(",") if test}
 data = json.loads(results_path.read_text())
 adjustments = list(data.get("coquic_compat_adjustments", []))
 
-def adjust_failed_entry(matrix_name, testcase, details):
+def adjust_failed_entry(matrix_name, testcase, public_reason, evidence):
     matrix = data.get(matrix_name, [[]])
     if not matrix or not isinstance(matrix[0], list):
         return
@@ -248,7 +248,8 @@ def adjust_failed_entry(matrix_name, testcase, details):
             and entry.get("result") == "failed"
         ):
             entry["result"] = "peer_broken"
-            entry["details"] = details
+            entry["details"] = public_reason
+            entry["evidence"] = evidence
             adjustments.append(
                 {
                     "server": server,
@@ -256,7 +257,8 @@ def adjust_failed_entry(matrix_name, testcase, details):
                     "name": testcase,
                     "from": "failed",
                     "to": "peer_broken",
-                    "reason": details,
+                    "reason": public_reason,
+                    "evidence": evidence,
                 }
             )
             return
@@ -265,6 +267,7 @@ if server == "coquic" and client == "xquic" and "connectionmigration" in request
     adjust_failed_entry(
         "results",
         "connectionmigration",
+        "peer does not initiate preferred-address migration",
         (
             "xquic official transfer client does not initiate preferred-address "
             "active migration"
@@ -275,6 +278,7 @@ if server == "coquic" and client == "xquic" and "crosstraffic" in requested_test
     adjust_failed_entry(
         "measurements",
         "crosstraffic",
+        "peer aborts crosstraffic transfer before completion",
         (
             "xquic official client stops the crosstraffic response after its "
             "30-second request deadline before the 25 MiB transfer completes "
@@ -283,7 +287,7 @@ if server == "coquic" and client == "xquic" and "crosstraffic" in requested_test
     )
 
 if server == "xquic" and client == "coquic":
-    xquic_retry_initial_token_details = (
+    xquic_retry_initial_token_evidence = (
         "xquic official server sends server Initial packets with a non-zero "
         "Token Length after Retry; RFC 9000 Section 17.2.2 requires clients "
         "to discard or close on those packets"
@@ -293,7 +297,8 @@ if server == "xquic" and client == "coquic":
             adjust_failed_entry(
                 "results",
                 testcase,
-                xquic_retry_initial_token_details,
+                "peer sends invalid post-Retry server Initial",
+                xquic_retry_initial_token_evidence,
             )
 
 if server == "mvfst" and client == "coquic":
@@ -301,6 +306,7 @@ if server == "mvfst" and client == "coquic":
         adjust_failed_entry(
             "results",
             "amplificationlimit",
+            "peer exceeds anti-amplification limit",
             (
                 "mvfst official server exceeds the anti-amplification limit after "
                 "receiving one client Initial in the droplist scenario"
@@ -310,6 +316,7 @@ if server == "mvfst" and client == "coquic":
         adjust_failed_entry(
             "results",
             "rebind-addr",
+            "peer omits PATH_CHALLENGE on the new address",
             (
                 "mvfst official server's first packet on the new client address "
                 "does not include PATH_CHALLENGE"
@@ -319,6 +326,7 @@ if server == "mvfst" and client == "coquic":
         adjust_failed_entry(
             "measurements",
             "crosstraffic",
+            "peer resets crosstraffic response stream",
             (
                 "mvfst official server resets the HTTP/0.9 response stream before "
                 "completing the crosstraffic transfer"

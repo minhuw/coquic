@@ -130,19 +130,26 @@ connectionmigration = next(
 )
 if connectionmigration["result"] != "peer_broken":
     raise SystemExit("expected xquic connectionmigration to be marked peer_broken")
-if "preferred-address active migration" not in connectionmigration.get("details", ""):
-    raise SystemExit("expected xquic connectionmigration rationale details")
+if connectionmigration.get("details") != "peer does not initiate preferred-address migration":
+    raise SystemExit("expected xquic connectionmigration public reason")
+if "preferred-address active migration" not in connectionmigration.get("evidence", ""):
+    raise SystemExit("expected xquic connectionmigration evidence")
 xquic_crosstraffic = next(
     entry for entry in data["measurements"][0]
     if entry["name"] == "crosstraffic"
 )
 if xquic_crosstraffic["result"] != "peer_broken":
     raise SystemExit("expected xquic crosstraffic to be marked peer_broken")
-if "30-second request deadline" not in xquic_crosstraffic.get("details", ""):
-    raise SystemExit("expected xquic crosstraffic rationale details")
-adjusted_names = {entry.get("name") for entry in data.get("coquic_compat_adjustments", [])}
+if xquic_crosstraffic.get("details") != "peer aborts crosstraffic transfer before completion":
+    raise SystemExit("expected xquic crosstraffic public reason")
+if "30-second request deadline" not in xquic_crosstraffic.get("evidence", ""):
+    raise SystemExit("expected xquic crosstraffic evidence")
+adjustments = data.get("coquic_compat_adjustments", [])
+adjusted_names = {entry.get("name") for entry in adjustments}
 if adjusted_names != {"connectionmigration", "crosstraffic"}:
     raise SystemExit("expected compatibility adjustment audit trail")
+if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
+    raise SystemExit("expected compatibility adjustments to include reason and evidence")
 PY
 
 xquic_server_results="${tmpdir}/xquic-server-results.json"
@@ -177,13 +184,20 @@ for name in ("retry", "resumption", "zerortt"):
     entry = results[name]
     if entry["result"] != "peer_broken":
         raise SystemExit(f"expected xquic server {name} to be marked peer_broken")
-    if "non-zero Token Length" not in entry.get("details", ""):
-        raise SystemExit(f"expected xquic server {name} rationale details")
+    if entry.get("details") != "peer sends invalid post-Retry server Initial":
+        raise SystemExit(f"expected xquic server {name} public reason")
+    if "non-zero Token Length" not in entry.get("evidence", ""):
+        raise SystemExit(f"expected xquic server {name} evidence")
+    if "RFC 9000 Section 17.2.2" not in entry.get("evidence", ""):
+        raise SystemExit(f"expected xquic server {name} RFC evidence")
 if results["http3"]["result"] != "succeeded":
     raise SystemExit("expected xquic server http3 result to be unchanged")
-adjusted_names = {entry.get("name") for entry in data.get("coquic_compat_adjustments", [])}
+adjustments = data.get("coquic_compat_adjustments", [])
+adjusted_names = {entry.get("name") for entry in adjustments}
 if adjusted_names != {"retry", "resumption", "zerortt"}:
     raise SystemExit("expected xquic server compatibility adjustment audit trail")
+if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
+    raise SystemExit("expected xquic server audit trail to include reason and evidence")
 PY
 
 mvfst_results="${tmpdir}/mvfst-results.json"
@@ -219,11 +233,15 @@ for name in ("amplificationlimit", "rebind-addr", "crosstraffic"):
     if entry["result"] != "peer_broken":
         raise SystemExit(f"expected mvfst {name} to be marked peer_broken")
     if not entry.get("details"):
-        raise SystemExit(f"expected mvfst {name} rationale details")
+        raise SystemExit(f"expected mvfst {name} public reason")
+    if not entry.get("evidence"):
+        raise SystemExit(f"expected mvfst {name} evidence")
 adjustments = data.get("coquic_compat_adjustments", [])
 adjusted_names = {entry.get("name") for entry in adjustments}
 if adjusted_names != {"amplificationlimit", "rebind-addr", "crosstraffic"}:
     raise SystemExit("expected mvfst compatibility adjustment audit trail")
+if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
+    raise SystemExit("expected mvfst audit trail to include reason and evidence")
 PY
 
 echo "run-official result validation ok"

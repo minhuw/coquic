@@ -176,7 +176,14 @@ snapshots, or malformed runner output still fail the workflow because they mean
 CI did not create a complete interop matrix.
 
 Use `unsupported` for an unsupported endpoint/testcase combination. Use
-`peer_broken` when local analysis shows peer-side behavior caused the result.
+`peer_broken` only after local trace analysis shows the peer violates the QUIC
+RFC or an official interop testcase requirement. If the peer succeeds with
+another implementation, classify the result manually from the traces rather than
+assuming either CoQUIC or the peer is correct. Periodically rerun `peer_broken`
+cases against updated peer images and remove the classification when the peer is
+fixed. Published `peer_broken` rows use a short public reason; the JSON audit
+trail keeps the longer diagnostic evidence.
+
 Known peer failures derived from upstream interop.seemann.io results are not
 skipped; they remain published as `failed` rows with a known peer-broken
 annotation unless the local result is explicitly classified as `peer_broken`.

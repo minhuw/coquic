@@ -777,6 +777,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
 
     if (config_.role == EndpointRole::client && application_space_.write_secret.has_value() &&
         zero_rtt_space_.write_secret.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.3
+        // # Therefore, a client SHOULD discard 0-RTT keys as soon as it
+        // # installs 1-RTT keys as they have no use after that moment.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-5.6
+        // # Once a client has installed 1-RTT keys, it MUST NOT send any more
+        // # 0-RTT packets.
         discard_packet_space_state(zero_rtt_space_);
     }
     queue_client_handshake_recovery_probe();
@@ -789,6 +795,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         (handshake_space_.send_crypto.has_pending_data() ||
          handshake_space_.pending_probe_packet.has_value());
     if (client_will_send_handshake_packet) {
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.1
+        // # Thus, a client MUST discard Initial keys when it first sends a
+        // # Handshake packet and a server MUST discard Initial keys when it
+        // # first successfully processes a Handshake packet.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.1
+        // # Endpoints MUST NOT send Initial packets after this point.
         discard_initial_packet_space();
     }
 
@@ -1246,6 +1258,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             if (config_.role == EndpointRole::client) {
                 for (const auto &packet : datagram_packets) {
                     if (std::holds_alternative<ProtectedHandshakePacket>(packet)) {
+                        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.1
+                        // # Thus, a client MUST discard Initial keys when it
+                        // # first sends a Handshake packet and a server MUST
+                        // # discard Initial keys when it first successfully
+                        // # processes a Handshake packet.
+                        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.1
+                        // # Endpoints MUST NOT send Initial packets after this point.
                         discard_initial_packet_space();
                         break;
                     }
@@ -2242,6 +2261,14 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                         *largest_acked >= *current_write_phase_first_packet_number_;
                 }
                 if (can_initiate_local_key_update) {
+                    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.1
+                    // # An endpoint MUST NOT initiate a key update prior to
+                    // # having confirmed the handshake (Section 4.1.2).
+                    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.1
+                    // # An endpoint MUST NOT initiate a subsequent key update
+                    // # unless it has received an acknowledgment for a packet
+                    // # that was sent protected with keys from the current key
+                    // # phase.
                     const auto next_read_secret =
                         derive_next_traffic_secret(*application_space_.read_secret);
                     if (!next_read_secret.has_value()) {
@@ -2275,6 +2302,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     application_space_.write_secret = next_write_secret.value();
                     application_write_key_phase_ = !application_write_key_phase_;
                     reset_serialize_context_cache();
+                    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+                    // # Endpoints MUST count the number of encrypted packets
+                    // # for each set of keys.
                     current_application_write_key_encrypted_packets_ = 0;
                     ++current_application_write_key_generation_;
                     local_key_update_requested_ = false;
@@ -3926,6 +3956,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             const auto include_handshake_done =
                 !use_zero_rtt_packet_protection && config_.role == EndpointRole::server &&
                 handshake_done_state_ == StreamControlFrameState::pending;
+            //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.2
+            // # The server MUST send a HANDSHAKE_DONE frame as soon as the
+            // # handshake is complete.
             //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
             // # Servers MUST NOT send a HANDSHAKE_DONE frame before completing
             // # the handshake.

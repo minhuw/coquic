@@ -956,6 +956,11 @@ CodecResult<bool> QuicConnection::detect_old_key_ack_of_current_key_phase_packet
                                                  current_application_write_key_generation_) ||
                 acked_current_key_update_generation(packet,
                                                     current_application_write_key_generation_)) {
+                //= https://www.rfc-editor.org/rfc/rfc9001#section-6.2
+                // # An endpoint that receives an acknowledgment that is carried
+                // # in a packet protected with old keys where any acknowledged
+                // # packet was protected with newer keys MAY treat that as a
+                // # connection error of type KEY_UPDATE_ERROR.
                 const auto error = key_update_error();
                 queue_transport_close_for_error(now, error);
                 return CodecResult<bool>::failure(error);

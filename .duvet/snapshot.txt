@@ -1451,7 +1451,7 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
   SECTION: [Transport Parameter Definitions](#section-18.2)
     TEXT[!MUST,implementation,test]: This transport parameter MUST NOT be sent
     TEXT[!MUST,implementation,test]:       by a client but MAY be sent by a server.
-    TEXT[implementation,test]: Values below 1200 are invalid.
+    TEXT[!MUST,implementation,test]: Values below 1200 are invalid.
     TEXT[!SHOULD,implementation]: This value
     TEXT[!SHOULD,implementation]:       SHOULD include the receiver's expected delays in alarms firing.
     TEXT[implementation,test]: Values of 2^14 or greater are invalid.
@@ -1806,140 +1806,142 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9001
   SECTION: [Carrying TLS Messages](#section-4)
-    TEXT[!MUST]: If QUIC needs to retransmit that data, it MUST use
-    TEXT[!MUST]:    the same keys even if TLS has already updated to newer keys.
-    TEXT[!SHOULD]: When packets of different types need to be sent,
-    TEXT[!SHOULD]:    endpoints SHOULD use coalesced packets to send them in the same UDP
-    TEXT[!SHOULD]:    datagram.
+    TEXT[!MUST,implementation]: If QUIC needs to retransmit that data, it MUST use
+    TEXT[!MUST,implementation]:    the same keys even if TLS has already updated to newer keys.
+    TEXT[!SHOULD,todo]: When packets of different types need to be sent,
+    TEXT[!SHOULD,todo]:    endpoints SHOULD use coalesced packets to send them in the same UDP
+    TEXT[!SHOULD,todo]:    datagram.
 
   SECTION: [Handshake Confirmed](#section-4.1.2)
-    TEXT[!MUST]: The server MUST send a
-    TEXT[!MUST]:    HANDSHAKE_DONE frame as soon as the handshake is complete.
-    TEXT[!MAY]:    Additionally, a client MAY consider the handshake to be confirmed
-    TEXT[!MAY]:    when it receives an acknowledgment for a 1-RTT packet.
+    TEXT[!MUST,implementation]: The server MUST send a
+    TEXT[!MUST,implementation]:    HANDSHAKE_DONE frame as soon as the handshake is complete.
+    TEXT[!MAY,todo]:    Additionally, a client MAY consider the handshake to be confirmed
+    TEXT[!MAY,todo]:    when it receives an acknowledgment for a 1-RTT packet.
 
   SECTION: [Sending and Receiving Handshake Messages](#section-4.1.3)
-    TEXT[!MUST]:    *  If the packet is from a previously installed encryption level, it
-    TEXT[!MUST]:       MUST NOT contain data that extends past the end of previously
-    TEXT[!MUST]:       received data in that flow.
-    TEXT[!MUST]: Implementations MUST treat any
-    TEXT[!MUST]:       violations of this requirement as a connection error of type
-    TEXT[!MUST]:       PROTOCOL_VIOLATION.
-    TEXT[!MUST]: When TLS
-    TEXT[!MUST]:       provides keys for a higher encryption level, if there is data from
-    TEXT[!MUST]:       a previous encryption level that TLS has not consumed, this MUST
-    TEXT[!MUST]:       be treated as a connection error of type PROTOCOL_VIOLATION.
+    TEXT[!MUST,todo]:    *  If the packet is from a previously installed encryption level, it
+    TEXT[!MUST,todo]:       MUST NOT contain data that extends past the end of previously
+    TEXT[!MUST,todo]:       received data in that flow.
+    TEXT[!MUST,todo]: Implementations MUST treat any
+    TEXT[!MUST,todo]:       violations of this requirement as a connection error of type
+    TEXT[!MUST,todo]:       PROTOCOL_VIOLATION.
+    TEXT[!MUST,todo]: When TLS
+    TEXT[!MUST,todo]:       provides keys for a higher encryption level, if there is data from
+    TEXT[!MUST,todo]:       a previous encryption level that TLS has not consumed, this MUST
+    TEXT[!MUST,todo]:       be treated as a connection error of type PROTOCOL_VIOLATION.
+    TEXT[implementation]: QUIC is responsible for buffering handshake bytes that arrive
+    TEXT[implementation]:    out of order or for encryption levels that are not yet ready.
 
   SECTION: [Encryption Level Changes](#section-4.1.4)
-    TEXT[!SHOULD]: While waiting for TLS processing to
-    TEXT[!SHOULD]:    complete, an endpoint SHOULD buffer received packets if they might be
-    TEXT[!SHOULD]:    processed using keys that are not yet available.
-    TEXT[!SHOULD]: An endpoint SHOULD
-    TEXT[!SHOULD]:    continue to respond to packets that can be processed during this
-    TEXT[!SHOULD]:    time.
+    TEXT[!SHOULD,implementation]: While waiting for TLS processing to
+    TEXT[!SHOULD,implementation]:    complete, an endpoint SHOULD buffer received packets if they might be
+    TEXT[!SHOULD,implementation]:    processed using keys that are not yet available.
+    TEXT[!SHOULD,todo]: An endpoint SHOULD
+    TEXT[!SHOULD,todo]:    continue to respond to packets that can be processed during this
+    TEXT[!SHOULD,todo]:    time.
 
   SECTION: [TLS Version](#section-4.2)
     TEXT[!MUST,implementation]:    Clients MUST NOT offer TLS versions older than 1.3.
-    TEXT[!MUST]: An endpoint MUST terminate the connection if a
-    TEXT[!MUST]:    version of TLS older than 1.3 is negotiated.
+    TEXT[!MUST,implementation]: An endpoint MUST terminate the connection if a
+    TEXT[!MUST,implementation]:    version of TLS older than 1.3 is negotiated.
 
   SECTION: [ClientHello Size](#section-4.3)
-    TEXT[!MAY]: To
-    TEXT[!MAY]:    avoid this, servers MAY use the Retry feature (see Section 8.1 of
-    TEXT[!MAY]:    [QUIC-TRANSPORT]) to only buffer partial ClientHello messages from
-    TEXT[!MAY]:    clients with a validated address.
+    TEXT[!MAY,todo]: To
+    TEXT[!MAY,todo]:    avoid this, servers MAY use the Retry feature (see Section 8.1 of
+    TEXT[!MAY,todo]:    [QUIC-TRANSPORT]) to only buffer partial ClientHello messages from
+    TEXT[!MAY,todo]:    clients with a validated address.
 
   SECTION: [Peer Authentication](#section-4.4)
-    TEXT[!MUST]:    A client MUST authenticate the identity of the server.
-    TEXT[!MAY]:    A server MAY request that the client authenticate during the
-    TEXT[!MAY]:    handshake.
-    TEXT[!MAY]: A server MAY refuse a connection if the client is unable
-    TEXT[!MAY]:    to authenticate when requested.
-    TEXT[!MUST]:    A server MUST NOT use post-handshake client authentication (as
-    TEXT[!MUST]:    defined in Section 4.6.2 of [TLS13]) because the multiplexing offered
-    TEXT[!MUST]:    by QUIC prevents clients from correlating the certificate request
-    TEXT[!MUST]:    with the application-level event that triggered it (see
-    TEXT[!MUST]:    [HTTP2-TLS13]).
-    TEXT[!MUST]: More specifically, servers MUST NOT send post-
-    TEXT[!MUST]:    handshake TLS CertificateRequest messages, and clients MUST treat
-    TEXT[!MUST]:    receipt of such messages as a connection error of type
-    TEXT[!MUST]:    PROTOCOL_VIOLATION.
+    TEXT[!MUST,implementation]:    A client MUST authenticate the identity of the server.
+    TEXT[!MAY,implementation]:    A server MAY request that the client authenticate during the
+    TEXT[!MAY,implementation]:    handshake.
+    TEXT[!MAY,implementation]: A server MAY refuse a connection if the client is unable
+    TEXT[!MAY,implementation]:    to authenticate when requested.
+    TEXT[!MUST,todo]:    A server MUST NOT use post-handshake client authentication (as
+    TEXT[!MUST,todo]:    defined in Section 4.6.2 of [TLS13]) because the multiplexing offered
+    TEXT[!MUST,todo]:    by QUIC prevents clients from correlating the certificate request
+    TEXT[!MUST,todo]:    with the application-level event that triggered it (see
+    TEXT[!MUST,todo]:    [HTTP2-TLS13]).
+    TEXT[!MUST,todo]: More specifically, servers MUST NOT send post-
+    TEXT[!MUST,todo]:    handshake TLS CertificateRequest messages, and clients MUST treat
+    TEXT[!MUST,todo]:    receipt of such messages as a connection error of type
+    TEXT[!MUST,todo]:    PROTOCOL_VIOLATION.
 
   SECTION: [Session Resumption](#section-4.5)
-    TEXT[!SHOULD]: Clients SHOULD NOT reuse tickets as
-    TEXT[!SHOULD]:    that allows entities other than the server to correlate connections;
-    TEXT[!SHOULD]:    see Appendix C.4 of [TLS13].
+    TEXT[!SHOULD,todo]: Clients SHOULD NOT reuse tickets as
+    TEXT[!SHOULD,todo]:    that allows entities other than the server to correlate connections;
+    TEXT[!SHOULD,todo]:    see Appendix C.4 of [TLS13].
 
   SECTION: [Enabling 0-RTT](#section-4.6.1)
     TEXT[!MUST,test]:    Servers MUST NOT send the early_data extension with a
     TEXT[!MUST,test]:    max_early_data_size field set to any value other than 0xffffffff.
-    TEXT[!MUST]:    client MUST treat receipt of a NewSessionTicket that contains an
-    TEXT[!MUST]:    early_data extension with any other value as a connection error of
-    TEXT[!MUST]:    type PROTOCOL_VIOLATION.
+    TEXT[!MUST,todo]:    client MUST treat receipt of a NewSessionTicket that contains an
+    TEXT[!MUST,todo]:    early_data extension with any other value as a connection error of
+    TEXT[!MUST,todo]:    type PROTOCOL_VIOLATION.
 
   SECTION: [Accepting and Rejecting 0-RTT](#section-4.6.2)
-    TEXT[!MUST]: When rejecting 0-RTT, a server MUST NOT
-    TEXT[!MUST]:    process any 0-RTT packets, even if it could.
-    TEXT[!SHOULD]: When 0-RTT was
-    TEXT[!SHOULD]:    rejected, a client SHOULD treat receipt of an acknowledgment for a
-    TEXT[!SHOULD]:    0-RTT packet as a connection error of type PROTOCOL_VIOLATION, if it
-    TEXT[!SHOULD]:    is able to detect the condition.
-    TEXT[!MUST]: The client therefore MUST reset the state of all
-    TEXT[!MUST]:    streams, including application state bound to those streams.
-    TEXT[!MAY]:    A client MAY reattempt 0-RTT if it receives a Retry or Version
-    TEXT[!MAY]:    Negotiation packet.
+    TEXT[!MUST,todo]: When rejecting 0-RTT, a server MUST NOT
+    TEXT[!MUST,todo]:    process any 0-RTT packets, even if it could.
+    TEXT[!SHOULD,todo]: When 0-RTT was
+    TEXT[!SHOULD,todo]:    rejected, a client SHOULD treat receipt of an acknowledgment for a
+    TEXT[!SHOULD,todo]:    0-RTT packet as a connection error of type PROTOCOL_VIOLATION, if it
+    TEXT[!SHOULD,todo]:    is able to detect the condition.
+    TEXT[!MUST,todo]: The client therefore MUST reset the state of all
+    TEXT[!MUST,todo]:    streams, including application state bound to those streams.
+    TEXT[!MAY,todo]:    A client MAY reattempt 0-RTT if it receives a Retry or Version
+    TEXT[!MAY,todo]:    Negotiation packet.
 
   SECTION: [HelloRetryRequest](#section-4.7)
-    TEXT[!SHOULD]: Although it is in principle possible to use this feature
-    TEXT[!SHOULD]:    for address verification, QUIC implementations SHOULD instead use the
-    TEXT[!SHOULD]:    Retry feature; see Section 8.1 of [QUIC-TRANSPORT].
+    TEXT[!SHOULD,todo]: Although it is in principle possible to use this feature
+    TEXT[!SHOULD,todo]:    for address verification, QUIC implementations SHOULD instead use the
+    TEXT[!SHOULD,todo]:    Retry feature; see Section 8.1 of [QUIC-TRANSPORT].
 
   SECTION: [TLS Errors](#section-4.8)
-    TEXT[!MUST]: As QUIC provides
-    TEXT[!MUST]:    alternative mechanisms for connection termination and the TLS
-    TEXT[!MUST]:    connection is only closed if an error is encountered, a QUIC endpoint
-    TEXT[!MUST]:    MUST treat any alert from TLS as if it were at the "fatal" level.
-    TEXT[!MAY]: Endpoints MAY use a generic
-    TEXT[!MAY]:    error code to avoid possibly exposing confidential information.
+    TEXT[!MUST,implementation]: As QUIC provides
+    TEXT[!MUST,implementation]:    alternative mechanisms for connection termination and the TLS
+    TEXT[!MUST,implementation]:    connection is only closed if an error is encountered, a QUIC endpoint
+    TEXT[!MUST,implementation]:    MUST treat any alert from TLS as if it were at the "fatal" level.
+    TEXT[!MAY,todo]: Endpoints MAY use a generic
+    TEXT[!MAY,todo]:    error code to avoid possibly exposing confidential information.
 
   SECTION: [Discarding Unused Keys](#section-4.9)
-    TEXT[!MUST]: If packets from a lower encryption level contain
-    TEXT[!MUST]:    CRYPTO frames, frames that retransmit that data MUST be sent at the
-    TEXT[!MUST]:    same encryption level.
-    TEXT[!MUST]:    Though an endpoint might retain older keys, new data MUST be sent at
-    TEXT[!MUST]:    the highest currently available encryption level.
-    TEXT[!MAY]: These packets MAY also include PADDING frames.
+    TEXT[!MUST,implementation]: If packets from a lower encryption level contain
+    TEXT[!MUST,implementation]:    CRYPTO frames, frames that retransmit that data MUST be sent at the
+    TEXT[!MUST,implementation]:    same encryption level.
+    TEXT[!MUST,todo]:    Though an endpoint might retain older keys, new data MUST be sent at
+    TEXT[!MUST,todo]:    the highest currently available encryption level.
+    TEXT[!MAY,todo]: These packets MAY also include PADDING frames.
 
   SECTION: [Discarding Initial Keys](#section-4.9.1)
-    TEXT[!MUST]:    Thus, a client MUST discard Initial keys when it first sends a
-    TEXT[!MUST]:    Handshake packet and a server MUST discard Initial keys when it first
-    TEXT[!MUST]:    successfully processes a Handshake packet.
-    TEXT[!MUST]: Endpoints MUST NOT send
-    TEXT[!MUST]:    Initial packets after this point.
+    TEXT[!MUST,implementation]:    Thus, a client MUST discard Initial keys when it first sends a
+    TEXT[!MUST,implementation]:    Handshake packet and a server MUST discard Initial keys when it first
+    TEXT[!MUST,implementation]:    successfully processes a Handshake packet.
+    TEXT[!MUST,implementation]: Endpoints MUST NOT send
+    TEXT[!MUST,implementation]:    Initial packets after this point.
 
   SECTION: [Discarding Handshake Keys](#section-4.9.2)
-    TEXT[!MUST]:    An endpoint MUST discard its Handshake keys when the TLS handshake is
-    TEXT[!MUST]:    confirmed (Section 4.1.2).
+    TEXT[!MUST,implementation]:    An endpoint MUST discard its Handshake keys when the TLS handshake is
+    TEXT[!MUST,implementation]:    confirmed (Section 4.1.2).
 
   SECTION: [Discarding 0-RTT Keys](#section-4.9.3)
-    TEXT[!SHOULD]:    Therefore, a client SHOULD discard 0-RTT keys as soon as it installs
-    TEXT[!SHOULD]:    1-RTT keys as they have no use after that moment.
-    TEXT[!MAY]:    Additionally, a server MAY discard 0-RTT keys as soon as it receives
-    TEXT[!MAY]:    a 1-RTT packet.
-    TEXT[!MAY]: Servers MAY temporarily retain
-    TEXT[!MAY]:    0-RTT keys to allow decrypting reordered packets without requiring
-    TEXT[!MAY]:    their contents to be retransmitted with 1-RTT keys.
-    TEXT[!MUST]: After receiving
-    TEXT[!MUST]:    a 1-RTT packet, servers MUST discard 0-RTT keys within a short time;
-    TEXT[!MUST]:    the RECOMMENDED time period is three times the Probe Timeout (PTO,
-    TEXT[!MUST]:    see [QUIC-RECOVERY]).
-    TEXT[!MAY]: A server MAY discard 0-RTT keys earlier if it
-    TEXT[!MAY]:    determines that it has received all 0-RTT packets, which can be done
-    TEXT[!MAY]:    by keeping track of missing packet numbers.
+    TEXT[!SHOULD,implementation]:    Therefore, a client SHOULD discard 0-RTT keys as soon as it installs
+    TEXT[!SHOULD,implementation]:    1-RTT keys as they have no use after that moment.
+    TEXT[!MAY,implementation]:    Additionally, a server MAY discard 0-RTT keys as soon as it receives
+    TEXT[!MAY,implementation]:    a 1-RTT packet.
+    TEXT[!MAY,implementation]: Servers MAY temporarily retain
+    TEXT[!MAY,implementation]:    0-RTT keys to allow decrypting reordered packets without requiring
+    TEXT[!MAY,implementation]:    their contents to be retransmitted with 1-RTT keys.
+    TEXT[!MUST,implementation]: After receiving
+    TEXT[!MUST,implementation]:    a 1-RTT packet, servers MUST discard 0-RTT keys within a short time;
+    TEXT[!MUST,implementation]:    the RECOMMENDED time period is three times the Probe Timeout (PTO,
+    TEXT[!MUST,implementation]:    see [QUIC-RECOVERY]).
+    TEXT[!MAY,todo]: A server MAY discard 0-RTT keys earlier if it
+    TEXT[!MAY,todo]:    determines that it has received all 0-RTT packets, which can be done
+    TEXT[!MAY,todo]:    by keeping track of missing packet numbers.
 
   SECTION: [Packet Protection Keys](#section-5.1)
-    TEXT[!MUST]:    Other versions of TLS MUST provide a similar function in order to be
-    TEXT[!MUST]:    used with QUIC.
+    TEXT[!MUST,todo]:    Other versions of TLS MUST provide a similar function in order to be
+    TEXT[!MUST,todo]:    used with QUIC.
 
   SECTION: [Initial Secrets](#section-5.2)
     TEXT[!SHOULD,implementation,test]:    Future versions of QUIC SHOULD generate a new salt value, thus
@@ -1949,278 +1951,277 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9001
     TEXT[!MUST,test]:    TLS 1.3.
 
   SECTION: [AEAD Usage](#section-5.3)
-    TEXT[!MUST]: A cipher suite MUST NOT be
-    TEXT[!MUST]:    negotiated unless a header protection scheme is defined for the
-    TEXT[!MUST]:    cipher suite.
-    TEXT[!MUST]:    An endpoint MUST NOT reject a ClientHello that offers a cipher suite
-    TEXT[!MUST]:    that it does not support, or it would be impossible to deploy a new
-    TEXT[!MUST]:    cipher suite.
-    TEXT[!MUST]: An endpoint MUST initiate a key update
-    TEXT[!MUST]:    (Section 6) prior to exceeding any limit set for the AEAD that is in
-    TEXT[!MUST]:    use.
+    TEXT[!MUST,implementation]: A cipher suite MUST NOT be
+    TEXT[!MUST,implementation]:    negotiated unless a header protection scheme is defined for the
+    TEXT[!MUST,implementation]:    cipher suite.
+    TEXT[!MUST,todo]:    An endpoint MUST NOT reject a ClientHello that offers a cipher suite
+    TEXT[!MUST,todo]:    that it does not support, or it would be impossible to deploy a new
+    TEXT[!MUST,todo]:    cipher suite.
+    TEXT[!MUST,implementation]: An endpoint MUST initiate a key update
+    TEXT[!MUST,implementation]:    (Section 6) prior to exceeding any limit set for the AEAD that is in
+    TEXT[!MUST,implementation]:    use.
 
   SECTION: [Header Protection Application](#section-5.4.1)
-    TEXT[!MUST]:    Before a TLS cipher suite can be used with QUIC, a header protection
-    TEXT[!MUST]:    algorithm MUST be specified for the AEAD used with that cipher suite.
+    TEXT[!MUST,implementation]:    Before a TLS cipher suite can be used with QUIC, a header protection
+    TEXT[!MUST,implementation]:    algorithm MUST be specified for the AEAD used with that cipher suite.
 
   SECTION: [Header Protection Sample](#section-5.4.2)
     TEXT[!MUST,test]:    An endpoint MUST discard packets that are not long enough to contain
     TEXT[!MUST,test]:    a complete sample.
 
   SECTION: [Receiving Protected Packets](#section-5.5)
-    TEXT[!MUST]:    Once an endpoint successfully receives a packet with a given packet
-    TEXT[!MUST]:    number, it MUST discard all packets in the same packet number space
-    TEXT[!MUST]:    with higher packet numbers if they cannot be successfully unprotected
-    TEXT[!MUST]:    with either the same key, or -- if there is a key update -- a
-    TEXT[!MUST]:    subsequent packet protection key; see Section 6.
-    TEXT[!MUST]: Similarly, a packet
-    TEXT[!MUST]:    that appears to trigger a key update but cannot be unprotected
-    TEXT[!MUST]:    successfully MUST be discarded.
+    TEXT[!MUST,implementation]:    Once an endpoint successfully receives a packet with a given packet
+    TEXT[!MUST,implementation]:    number, it MUST discard all packets in the same packet number space
+    TEXT[!MUST,implementation]:    with higher packet numbers if they cannot be successfully unprotected
+    TEXT[!MUST,implementation]:    with either the same key, or -- if there is a key update -- a
+    TEXT[!MUST,implementation]:    subsequent packet protection key; see Section 6.
+    TEXT[!MUST,implementation]: Similarly, a packet
+    TEXT[!MUST,implementation]:    that appears to trigger a key update but cannot be unprotected
+    TEXT[!MUST,implementation]:    successfully MUST be discarded.
 
   SECTION: [Use of 0-RTT Keys](#section-5.6)
-    TEXT[!MUST]: A client
-    TEXT[!MUST]:    therefore MUST NOT use 0-RTT for application data unless specifically
-    TEXT[!MUST]:    requested by the application that is in use.
-    TEXT[!MUST]:    An application protocol that uses QUIC MUST include a profile that
-    TEXT[!MUST]:    defines acceptable use of 0-RTT; otherwise, 0-RTT can only be used to
-    TEXT[!MUST]:    carry QUIC frames that do not carry application data.
-    TEXT[!MAY]:    A client MAY wish to apply additional restrictions on what data it
-    TEXT[!MAY]:    sends prior to the completion of the TLS handshake.
-    TEXT[!SHOULD]: A client SHOULD stop sending 0-RTT data
-    TEXT[!SHOULD]:    if it receives an indication that 0-RTT data has been rejected.
-    TEXT[!MUST]:    A server MUST NOT use 0-RTT keys to protect packets; it uses 1-RTT
-    TEXT[!MUST]:    keys to protect acknowledgments of 0-RTT packets.
-    TEXT[!MUST]: A client MUST NOT
-    TEXT[!MUST]:    attempt to decrypt 0-RTT packets it receives and instead MUST discard
-    TEXT[!MUST]:    them.
-    TEXT[!MUST]:    Once a client has installed 1-RTT keys, it MUST NOT send any more
-    TEXT[!MUST]:    0-RTT packets.
+    TEXT[!MUST,implementation]: A client
+    TEXT[!MUST,implementation]:    therefore MUST NOT use 0-RTT for application data unless specifically
+    TEXT[!MUST,implementation]:    requested by the application that is in use.
+    TEXT[!MUST,todo]:    An application protocol that uses QUIC MUST include a profile that
+    TEXT[!MUST,todo]:    defines acceptable use of 0-RTT; otherwise, 0-RTT can only be used to
+    TEXT[!MUST,todo]:    carry QUIC frames that do not carry application data.
+    TEXT[!MAY,todo]:    A client MAY wish to apply additional restrictions on what data it
+    TEXT[!MAY,todo]:    sends prior to the completion of the TLS handshake.
+    TEXT[!SHOULD,todo]: A client SHOULD stop sending 0-RTT data
+    TEXT[!SHOULD,todo]:    if it receives an indication that 0-RTT data has been rejected.
+    TEXT[!MUST,implementation]:    A server MUST NOT use 0-RTT keys to protect packets; it uses 1-RTT
+    TEXT[!MUST,implementation]:    keys to protect acknowledgments of 0-RTT packets.
+    TEXT[!MUST,todo]: A client MUST NOT
+    TEXT[!MUST,todo]:    attempt to decrypt 0-RTT packets it receives and instead MUST discard
+    TEXT[!MUST,todo]:    them.
+    TEXT[!MUST,implementation]:    Once a client has installed 1-RTT keys, it MUST NOT send any more
+    TEXT[!MUST,implementation]:    0-RTT packets.
 
   SECTION: [Receiving Out-of-Order Protected Packets](#section-5.7)
-    TEXT[!MUST]: Endpoints in either role MUST NOT decrypt 1-RTT packets from
-    TEXT[!MUST]:    their peer prior to completing the handshake.
-    TEXT[!MUST]: A server MUST NOT process
-    TEXT[!MUST]:    incoming 1-RTT protected packets before the TLS handshake is
-    TEXT[!MUST]:    complete.
-    TEXT[!MAY]: Received
-    TEXT[!MAY]:    packets protected with 1-RTT keys MAY be stored and later decrypted
-    TEXT[!MAY]:    and used once the handshake is complete.
-    TEXT[!MAY]: The server MAY retain these packets for
-    TEXT[!MAY]:    later decryption in anticipation of receiving a ClientHello.
-    TEXT[!MUST]: Even if it has 1-RTT secrets, a client MUST NOT
-    TEXT[!MUST]:    process incoming 1-RTT protected packets before the TLS handshake is
-    TEXT[!MUST]:    complete.
+    TEXT[!MUST,todo]: Endpoints in either role MUST NOT decrypt 1-RTT packets from
+    TEXT[!MUST,todo]:    their peer prior to completing the handshake.
+    TEXT[!MUST,implementation]: A server MUST NOT process
+    TEXT[!MUST,implementation]:    incoming 1-RTT protected packets before the TLS handshake is
+    TEXT[!MUST,implementation]:    complete.
+    TEXT[!MAY,implementation]: Received
+    TEXT[!MAY,implementation]:    packets protected with 1-RTT keys MAY be stored and later decrypted
+    TEXT[!MAY,implementation]:    and used once the handshake is complete.
+    TEXT[!MAY,todo]: The server MAY retain these packets for
+    TEXT[!MAY,todo]:    later decryption in anticipation of receiving a ClientHello.
+    TEXT[!MUST,todo]: Even if it has 1-RTT secrets, a client MUST NOT
+    TEXT[!MUST,todo]:    process incoming 1-RTT protected packets before the TLS handshake is
+    TEXT[!MUST,todo]:    complete.
 
   SECTION: [Key Update](#section-6)
-    TEXT[!MAY]:    Once the handshake is confirmed (see Section 4.1.2), an endpoint MAY
-    TEXT[!MAY]:    initiate a key update.
-    TEXT[!MUST]: Endpoints
-    TEXT[!MUST]:    MUST NOT send a TLS KeyUpdate message.
-    TEXT[!MUST]: Endpoints MUST treat the
-    TEXT[!MUST]:    receipt of a TLS KeyUpdate message as a connection error of type
-    TEXT[!MUST]:    0x010a, equivalent to a fatal TLS alert of unexpected_message; see
-    TEXT[!MUST]:    Section 4.8.
+    TEXT[!MAY,implementation]:    Once the handshake is confirmed (see Section 4.1.2), an endpoint MAY
+    TEXT[!MAY,implementation]:    initiate a key update.
+    TEXT[!MUST,todo]: Endpoints
+    TEXT[!MUST,todo]:    MUST NOT send a TLS KeyUpdate message.
+    TEXT[!MUST,todo]: Endpoints MUST treat the
+    TEXT[!MUST,todo]:    receipt of a TLS KeyUpdate message as a connection error of type
+    TEXT[!MUST,todo]:    0x010a, equivalent to a fatal TLS alert of unexpected_message; see
+    TEXT[!MUST,todo]:    Section 4.8.
 
   SECTION: [Initiating a Key Update](#section-6.1)
-    TEXT[!MUST]:    An endpoint MUST NOT initiate a key update prior to having confirmed
-    TEXT[!MUST]:    the handshake (Section 4.1.2).
-    TEXT[!MUST]: An endpoint MUST NOT initiate a
-    TEXT[!MUST]:    subsequent key update unless it has received an acknowledgment for a
-    TEXT[!MUST]:    packet that was sent protected with keys from the current key phase.
-    TEXT[!MUST]:    An endpoint MUST retain old keys until it has successfully
-    TEXT[!MUST]:    unprotected a packet sent using the new keys.
-    TEXT[!SHOULD]: An endpoint SHOULD
-    TEXT[!SHOULD]:    retain old keys for some time after unprotecting a packet sent using
-    TEXT[!SHOULD]:    the new keys.
+    TEXT[!MUST,implementation]:    An endpoint MUST NOT initiate a key update prior to having confirmed
+    TEXT[!MUST,implementation]:    the handshake (Section 4.1.2).
+    TEXT[!MUST,implementation]: An endpoint MUST NOT initiate a
+    TEXT[!MUST,implementation]:    subsequent key update unless it has received an acknowledgment for a
+    TEXT[!MUST,implementation]:    packet that was sent protected with keys from the current key phase.
+    TEXT[!MUST,implementation]:    An endpoint MUST retain old keys until it has successfully
+    TEXT[!MUST,implementation]:    unprotected a packet sent using the new keys.
+    TEXT[!SHOULD,implementation]: An endpoint SHOULD
+    TEXT[!SHOULD,implementation]:    retain old keys for some time after unprotecting a packet sent using
+    TEXT[!SHOULD,implementation]:    the new keys.
 
   SECTION: [Responding to a Key Update](#section-6.2)
-    TEXT[!MUST]: The endpoint MUST update its
-    TEXT[!MUST]:    send keys to the corresponding key phase in response, as described in
-    TEXT[!MUST]:    Section 6.1.
-    TEXT[!MUST]: Sending keys MUST be updated before sending an
-    TEXT[!MUST]:    acknowledgment for the packet that was received with updated keys.
-    TEXT[!MAY]: An endpoint
-    TEXT[!MAY]:    MAY treat such consecutive key updates as a connection error of type
-    TEXT[!MAY]:    KEY_UPDATE_ERROR.
-    TEXT[!MAY]:    An endpoint that receives an acknowledgment that is carried in a
-    TEXT[!MAY]:    packet protected with old keys where any acknowledged packet was
-    TEXT[!MAY]:    protected with newer keys MAY treat that as a connection error of
-    TEXT[!MAY]:    type KEY_UPDATE_ERROR.
+    TEXT[!MUST,implementation]: The endpoint MUST update its
+    TEXT[!MUST,implementation]:    send keys to the corresponding key phase in response, as described in
+    TEXT[!MUST,implementation]:    Section 6.1.
+    TEXT[!MUST,implementation]: Sending keys MUST be updated before sending an
+    TEXT[!MUST,implementation]:    acknowledgment for the packet that was received with updated keys.
+    TEXT[!MAY,implementation]: An endpoint
+    TEXT[!MAY,implementation]:    MAY treat such consecutive key updates as a connection error of type
+    TEXT[!MAY,implementation]:    KEY_UPDATE_ERROR.
+    TEXT[!MAY,implementation]:    An endpoint that receives an acknowledgment that is carried in a
+    TEXT[!MAY,implementation]:    packet protected with old keys where any acknowledged packet was
+    TEXT[!MAY,implementation]:    protected with newer keys MAY treat that as a connection error of
+    TEXT[!MAY,implementation]:    type KEY_UPDATE_ERROR.
 
   SECTION: [Timing of Receive Key Generation](#section-6.3)
-    TEXT[!MUST]:    Endpoints responding to an apparent key update MUST NOT generate a
-    TEXT[!MUST]:    timing side-channel signal that might indicate that the Key Phase bit
-    TEXT[!MUST]:    was invalid (see Section 9.5).
-    TEXT[!MAY]: An endpoint MAY
-    TEXT[!MAY]:    generate new keys as part of packet processing, but this creates a
-    TEXT[!MAY]:    timing signal that could be used by an attacker to learn when key
-    TEXT[!MAY]:    updates happen and thus leak the value of the Key Phase bit.
-    TEXT[!MAY]: For a short period after a key
-    TEXT[!MAY]:    update completes, up to the PTO, endpoints MAY defer generation of
-    TEXT[!MAY]:    the next set of receive packet protection keys.
-    TEXT[!SHOULD]:    Once generated, the next set of packet protection keys SHOULD be
-    TEXT[!SHOULD]:    retained, even if the packet that was received was subsequently
-    TEXT[!SHOULD]:    discarded.
-    TEXT[!MUST]:    For this reason, endpoints MUST be able to retain two sets of packet
-    TEXT[!MUST]:    protection keys for receiving packets: the current and the next.
+    TEXT[!MUST,todo]:    Endpoints responding to an apparent key update MUST NOT generate a
+    TEXT[!MUST,todo]:    timing side-channel signal that might indicate that the Key Phase bit
+    TEXT[!MUST,todo]:    was invalid (see Section 9.5).
+    TEXT[!MAY,implementation]: An endpoint MAY
+    TEXT[!MAY,implementation]:    generate new keys as part of packet processing, but this creates a
+    TEXT[!MAY,implementation]:    timing signal that could be used by an attacker to learn when key
+    TEXT[!MAY,implementation]:    updates happen and thus leak the value of the Key Phase bit.
+    TEXT[!MAY,todo]: For a short period after a key
+    TEXT[!MAY,todo]:    update completes, up to the PTO, endpoints MAY defer generation of
+    TEXT[!MAY,todo]:    the next set of receive packet protection keys.
+    TEXT[!SHOULD,implementation]:    Once generated, the next set of packet protection keys SHOULD be
+    TEXT[!SHOULD,implementation]:    retained, even if the packet that was received was subsequently
+    TEXT[!SHOULD,implementation]:    discarded.
+    TEXT[!MUST,implementation]:    For this reason, endpoints MUST be able to retain two sets of packet
+    TEXT[!MUST,implementation]:    protection keys for receiving packets: the current and the next.
 
   SECTION: [Sending with Updated Keys](#section-6.4)
-    TEXT[!MUST]:    Packets with higher packet numbers MUST be protected with either the
-    TEXT[!MUST]:    same or newer packet protection keys than packets with lower packet
-    TEXT[!MUST]:    numbers.
-    TEXT[!MUST]: An endpoint that successfully removes protection with old
-    TEXT[!MUST]:    keys when newer keys were used for packets with lower packet numbers
-    TEXT[!MUST]:    MUST treat this as a connection error of type KEY_UPDATE_ERROR.
+    TEXT[!MUST,todo]:    Packets with higher packet numbers MUST be protected with either the
+    TEXT[!MUST,todo]:    same or newer packet protection keys than packets with lower packet
+    TEXT[!MUST,todo]:    numbers.
+    TEXT[!MUST,todo]: An endpoint that successfully removes protection with old
+    TEXT[!MUST,todo]:    keys when newer keys were used for packets with lower packet numbers
+    TEXT[!MUST,todo]:    MUST treat this as a connection error of type KEY_UPDATE_ERROR.
 
   SECTION: [Receiving with Different Keys](#section-6.5)
-    TEXT[!MAY]:    An endpoint MAY allow a period of approximately the Probe Timeout
-    TEXT[!MAY]:    (PTO; see [QUIC-RECOVERY]) after promoting the next set of receive
-    TEXT[!MAY]:    keys to be current before it creates the subsequent set of packet
-    TEXT[!MAY]:    protection keys.
-    TEXT[!MAY]: These updated keys MAY replace the previous keys at
-    TEXT[!MAY]:    that time.
-    TEXT[!SHOULD]: Endpoints SHOULD wait three times
-    TEXT[!SHOULD]:    the PTO before initiating a key update after receiving an
-    TEXT[!SHOULD]:    acknowledgment that confirms that the previous key update was
-    TEXT[!SHOULD]:    received.
-    TEXT[!SHOULD]:    An endpoint SHOULD retain old read keys for no more than three times
-    TEXT[!SHOULD]:    the PTO after having received a packet protected using the new keys.
-    TEXT[!SHOULD]:    After this period, old read keys and their corresponding secrets
-    TEXT[!SHOULD]:    SHOULD be discarded.
+    TEXT[!MAY,todo]:    An endpoint MAY allow a period of approximately the Probe Timeout
+    TEXT[!MAY,todo]:    (PTO; see [QUIC-RECOVERY]) after promoting the next set of receive
+    TEXT[!MAY,todo]:    keys to be current before it creates the subsequent set of packet
+    TEXT[!MAY,todo]:    protection keys.
+    TEXT[!MAY,todo]: These updated keys MAY replace the previous keys at
+    TEXT[!MAY,todo]:    that time.
+    TEXT[!SHOULD,implementation]: Endpoints SHOULD wait three times
+    TEXT[!SHOULD,implementation]:    the PTO before initiating a key update after receiving an
+    TEXT[!SHOULD,implementation]:    acknowledgment that confirms that the previous key update was
+    TEXT[!SHOULD,implementation]:    received.
+    TEXT[!SHOULD,implementation]:    An endpoint SHOULD retain old read keys for no more than three times
+    TEXT[!SHOULD,implementation]:    the PTO after having received a packet protected using the new keys.
+    TEXT[!SHOULD,implementation]:    After this period, old read keys and their corresponding secrets
+    TEXT[!SHOULD,implementation]:    SHOULD be discarded.
 
   SECTION: [Limits on AEAD Usage](#section-6.6)
-    TEXT[!MUST]:    Endpoints MUST count the number of encrypted packets for each set of
-    TEXT[!MUST]:    keys.
-    TEXT[!MUST]: If the total number of encrypted packets with the same key
-    TEXT[!MUST]:    exceeds the confidentiality limit for the selected AEAD, the endpoint
-    TEXT[!MUST]:    MUST stop using those keys.
-    TEXT[!MUST]: Endpoints MUST initiate a key update
-    TEXT[!MUST]:    before sending more protected packets than the confidentiality limit
-    TEXT[!MUST]:    for the selected AEAD permits.
-    TEXT[!MUST]: If a key update is not possible or
-    TEXT[!MUST]:    integrity limits are reached, the endpoint MUST stop using the
-    TEXT[!MUST]:    connection and only send stateless resets in response to receiving
-    TEXT[!MUST]:    packets.
-    TEXT[!SHOULD]: It is RECOMMENDED that endpoints immediately close the
-    TEXT[!SHOULD]:    connection with a connection error of type AEAD_LIMIT_REACHED before
-    TEXT[!SHOULD]:    reaching a state where key updates are not possible.
-    TEXT[!MUST]:    In addition to counting packets sent, endpoints MUST count the number
-    TEXT[!MUST]:    of received packets that fail authentication during the lifetime of a
-    TEXT[!MUST]:    connection.
-    TEXT[!MUST]: If the total number of received packets that fail
-    TEXT[!MUST]:    authentication within the connection, across all keys, exceeds the
-    TEXT[!MUST]:    integrity limit for the selected AEAD, the endpoint MUST immediately
-    TEXT[!MUST]:    close the connection with a connection error of type
-    TEXT[!MUST]:    AEAD_LIMIT_REACHED and not process any more packets.
-    TEXT[!MAY]:    Endpoints that limit the size of packets MAY use higher
-    TEXT[!MAY]:    confidentiality and integrity limits; see Appendix B for details.
-    TEXT[!MAY]:    Future analyses and specifications MAY relax confidentiality or
-    TEXT[!MAY]:    integrity limits for an AEAD.
-    TEXT[!MUST]:    Any TLS cipher suite that is specified for use with QUIC MUST define
-    TEXT[!MUST]:    limits on the use of the associated AEAD function that preserves
-    TEXT[!MUST]:    margins for confidentiality and integrity.
-    TEXT[!MUST]: That is, limits MUST be
-    TEXT[!MUST]:    specified for the number of packets that can be authenticated and for
-    TEXT[!MUST]:    the number of packets that can fail authentication.
+    TEXT[!MUST,implementation]:    Endpoints MUST count the number of encrypted packets for each set of
+    TEXT[!MUST,implementation]:    keys.
+    TEXT[!MUST,implementation]: If the total number of encrypted packets with the same key
+    TEXT[!MUST,implementation]:    exceeds the confidentiality limit for the selected AEAD, the endpoint
+    TEXT[!MUST,implementation]:    MUST stop using those keys.
+    TEXT[!MUST,implementation]: Endpoints MUST initiate a key update
+    TEXT[!MUST,implementation]:    before sending more protected packets than the confidentiality limit
+    TEXT[!MUST,implementation]:    for the selected AEAD permits.
+    TEXT[!MUST,implementation]: If a key update is not possible or
+    TEXT[!MUST,implementation]:    integrity limits are reached, the endpoint MUST stop using the
+    TEXT[!MUST,implementation]:    connection and only send stateless resets in response to receiving
+    TEXT[!MUST,implementation]:    packets.
+    TEXT[!SHOULD,implementation]: It is RECOMMENDED that endpoints immediately close the
+    TEXT[!SHOULD,implementation]:    connection with a connection error of type AEAD_LIMIT_REACHED before
+    TEXT[!SHOULD,implementation]:    reaching a state where key updates are not possible.
+    TEXT[!MUST,implementation]:    In addition to counting packets sent, endpoints MUST count the number
+    TEXT[!MUST,implementation]:    of received packets that fail authentication during the lifetime of a
+    TEXT[!MUST,implementation]:    connection.
+    TEXT[!MUST,implementation]: If the total number of received packets that fail
+    TEXT[!MUST,implementation]:    authentication within the connection, across all keys, exceeds the
+    TEXT[!MUST,implementation]:    integrity limit for the selected AEAD, the endpoint MUST immediately
+    TEXT[!MUST,implementation]:    close the connection with a connection error of type
+    TEXT[!MUST,implementation]:    AEAD_LIMIT_REACHED and not process any more packets.
+    TEXT[!MAY,todo]:    Endpoints that limit the size of packets MAY use higher
+    TEXT[!MAY,todo]:    confidentiality and integrity limits; see Appendix B for details.
+    TEXT[!MAY,todo]:    Future analyses and specifications MAY relax confidentiality or
+    TEXT[!MAY,todo]:    integrity limits for an AEAD.
+    TEXT[!MUST,implementation]:    Any TLS cipher suite that is specified for use with QUIC MUST define
+    TEXT[!MUST,implementation]:    limits on the use of the associated AEAD function that preserves
+    TEXT[!MUST,implementation]:    margins for confidentiality and integrity.
+    TEXT[!MUST,implementation]: That is, limits MUST be
+    TEXT[!MUST,implementation]:    specified for the number of packets that can be authenticated and for
+    TEXT[!MUST,implementation]:    the number of packets that can fail authentication.
 
   SECTION: [Security of Initial Messages](#section-7)
-    TEXT[!SHOULD]: Implementations
-    TEXT[!SHOULD]:    SHOULD use caution in relying on any data that is contained in
-    TEXT[!SHOULD]:    Initial packets that is not otherwise authenticated.
+    TEXT[!SHOULD,todo]: Implementations
+    TEXT[!SHOULD,todo]:    SHOULD use caution in relying on any data that is contained in
+    TEXT[!SHOULD,todo]:    Initial packets that is not otherwise authenticated.
 
   SECTION: [Protocol Negotiation](#section-8.1)
-    TEXT[!MUST]: Unless another
-    TEXT[!MUST]:    mechanism is used for agreeing on an application protocol, endpoints
-    TEXT[!MUST]:    MUST use ALPN for this purpose.
-    TEXT[!MUST]:    When using ALPN, endpoints MUST immediately close a connection (see
-    TEXT[!MUST]:    Section 10.2 of [QUIC-TRANSPORT]) with a no_application_protocol TLS
-    TEXT[!MUST]:    alert (QUIC error code 0x0178; see Section 4.8) if an application
-    TEXT[!MUST]:    protocol is not negotiated.
-    TEXT[!MUST]: While [ALPN] only specifies that servers
-    TEXT[!MUST]:    use this alert, QUIC clients MUST use error 0x0178 to terminate a
-    TEXT[!MUST]:    connection when ALPN negotiation fails.
-    TEXT[!MAY]:    An application protocol MAY restrict the QUIC versions that it can
-    TEXT[!MAY]:    operate over.
-    TEXT[!MUST]: Servers MUST select an application protocol compatible
-    TEXT[!MUST]:    with the QUIC version that the client has selected.
-    TEXT[!MUST]: The server MUST
-    TEXT[!MUST]:    treat the inability to select a compatible application protocol as a
-    TEXT[!MUST]:    connection error of type 0x0178 (no_application_protocol).
-    TEXT[!MUST]:    Similarly, a client MUST treat the selection of an incompatible
-    TEXT[!MUST]:    application protocol by a server as a connection error of type
-    TEXT[!MUST]:    0x0178.
+    TEXT[!MUST,implementation]: Unless another
+    TEXT[!MUST,implementation]:    mechanism is used for agreeing on an application protocol, endpoints
+    TEXT[!MUST,implementation]:    MUST use ALPN for this purpose.
+    TEXT[!MUST,implementation]:    When using ALPN, endpoints MUST immediately close a connection (see
+    TEXT[!MUST,implementation]:    Section 10.2 of [QUIC-TRANSPORT]) with a no_application_protocol TLS
+    TEXT[!MUST,implementation]:    alert (QUIC error code 0x0178; see Section 4.8) if an application
+    TEXT[!MUST,implementation]:    protocol is not negotiated.
+    TEXT[!MUST,todo]: While [ALPN] only specifies that servers
+    TEXT[!MUST,todo]:    use this alert, QUIC clients MUST use error 0x0178 to terminate a
+    TEXT[!MUST,todo]:    connection when ALPN negotiation fails.
+    TEXT[!MAY,todo]:    An application protocol MAY restrict the QUIC versions that it can
+    TEXT[!MAY,todo]:    operate over.
+    TEXT[!MUST,implementation]: Servers MUST select an application protocol compatible
+    TEXT[!MUST,implementation]:    with the QUIC version that the client has selected.
+    TEXT[!MUST,implementation]: The server MUST
+    TEXT[!MUST,implementation]:    treat the inability to select a compatible application protocol as a
+    TEXT[!MUST,implementation]:    connection error of type 0x0178 (no_application_protocol).
+    TEXT[!MUST,todo]:    Similarly, a client MUST treat the selection of an incompatible
+    TEXT[!MUST,todo]:    application protocol by a server as a connection error of type
+    TEXT[!MUST,todo]:    0x0178.
 
   SECTION: [QUIC Transport Parameters Extension](#section-8.2)
     TEXT[test]:    The quic_transport_parameters extension is carried in the ClientHello
     TEXT[test]:    and the EncryptedExtensions messages during the handshake.
     TEXT[!MUST,implementation]: Endpoints
-    TEXT[!MUST,implementation]:    MUST send the quic_transport_parameters extension;
-    TEXT[!MUST]:  endpoints that
-    TEXT[!MUST]:    receive ClientHello or EncryptedExtensions messages without the
-    TEXT[!MUST]:    quic_transport_parameters extension MUST close the connection with an
-    TEXT[!MUST]:    error of type 0x016d (equivalent to a fatal TLS missing_extension
-    TEXT[!MUST]:    alert, see Section 4.8).
-    TEXT[!MUST]:    Endpoints MUST NOT send this extension in a TLS connection that does
-    TEXT[!MUST]:    not use QUIC (such as the use of TLS with TCP defined in [TLS13]).
-    TEXT[!MUST]:    fatal unsupported_extension alert MUST be sent by an implementation
-    TEXT[!MUST]:    that supports this extension if the extension is received when the
-    TEXT[!MUST]:    transport is not QUIC.
+    TEXT[!MUST,implementation]:    MUST send the quic_transport_parameters extension; endpoints that
+    TEXT[!MUST,implementation]:    receive ClientHello or EncryptedExtensions messages without the
+    TEXT[!MUST,implementation]:    quic_transport_parameters extension MUST close the connection with an
+    TEXT[!MUST,implementation]:    error of type 0x016d (equivalent to a fatal TLS missing_extension
+    TEXT[!MUST,implementation]:    alert, see Section 4.8).
+    TEXT[!MUST,implementation]:    Endpoints MUST NOT send this extension in a TLS connection that does
+    TEXT[!MUST,implementation]:    not use QUIC (such as the use of TLS with TCP defined in [TLS13]).
+    TEXT[!MUST,todo]:    fatal unsupported_extension alert MUST be sent by an implementation
+    TEXT[!MUST,todo]:    that supports this extension if the extension is received when the
+    TEXT[!MUST,todo]:    transport is not QUIC.
 
   SECTION: [Removing the EndOfEarlyData Message](#section-8.3)
-    TEXT[!MUST]:    Clients MUST NOT send the EndOfEarlyData message.
-    TEXT[!MUST]: A server MUST
-    TEXT[!MUST]:    treat receipt of a CRYPTO frame in a 0-RTT packet as a connection
-    TEXT[!MUST]:    error of type PROTOCOL_VIOLATION.
+    TEXT[!MUST,todo]:    Clients MUST NOT send the EndOfEarlyData message.
+    TEXT[!MUST,implementation]: A server MUST
+    TEXT[!MUST,implementation]:    treat receipt of a CRYPTO frame in a 0-RTT packet as a connection
+    TEXT[!MUST,implementation]:    error of type PROTOCOL_VIOLATION.
 
   SECTION: [Prohibit TLS Middlebox Compatibility Mode](#section-8.4)
-    TEXT[!MUST]: A client MUST NOT request the use of the
-    TEXT[!MUST]:    TLS 1.3 compatibility mode.
-    TEXT[!SHOULD]: A server SHOULD treat the receipt of a
-    TEXT[!SHOULD]:    TLS ClientHello with a non-empty legacy_session_id field as a
-    TEXT[!SHOULD]:    connection error of type PROTOCOL_VIOLATION.
+    TEXT[!MUST,todo]: A client MUST NOT request the use of the
+    TEXT[!MUST,todo]:    TLS 1.3 compatibility mode.
+    TEXT[!SHOULD,todo]: A server SHOULD treat the receipt of a
+    TEXT[!SHOULD,todo]:    TLS ClientHello with a non-empty legacy_session_id field as a
+    TEXT[!SHOULD,todo]:    connection error of type PROTOCOL_VIOLATION.
 
   SECTION: [Replay Attacks with 0-RTT](#section-9.2)
-    TEXT[!MUST]:    Endpoints MUST implement and use the replay protections described in
-    TEXT[!MUST]:    [TLS13], however it is recognized that these protections are
-    TEXT[!MUST]:    imperfect.
-    TEXT[!MUST]: These MUST NOT be
-    TEXT[!MUST]:    used to communicate application semantics between endpoints; clients
-    TEXT[!MUST]:    MUST treat them as opaque values.
-    TEXT[!MUST]: An application
-    TEXT[!MUST]:    protocol that uses QUIC MUST describe how the protocol uses 0-RTT and
-    TEXT[!MUST]:    the measures that are employed to protect against replay attack.
-    TEXT[!MUST]:    QUIC extensions MUST either describe how replay attacks affect their
-    TEXT[!MUST]:    operation or prohibit the use of the extension in 0-RTT.
-    TEXT[!MUST]: Application
-    TEXT[!MUST]:    protocols MUST either prohibit the use of extensions that carry
-    TEXT[!MUST]:    application semantics in 0-RTT or provide replay mitigation
-    TEXT[!MUST]:    strategies.
+    TEXT[!MUST,todo]:    Endpoints MUST implement and use the replay protections described in
+    TEXT[!MUST,todo]:    [TLS13], however it is recognized that these protections are
+    TEXT[!MUST,todo]:    imperfect.
+    TEXT[!MUST,todo]: These MUST NOT be
+    TEXT[!MUST,todo]:    used to communicate application semantics between endpoints; clients
+    TEXT[!MUST,todo]:    MUST treat them as opaque values.
+    TEXT[!MUST,todo]: An application
+    TEXT[!MUST,todo]:    protocol that uses QUIC MUST describe how the protocol uses 0-RTT and
+    TEXT[!MUST,todo]:    the measures that are employed to protect against replay attack.
+    TEXT[!MUST,todo]:    QUIC extensions MUST either describe how replay attacks affect their
+    TEXT[!MUST,todo]:    operation or prohibit the use of the extension in 0-RTT.
+    TEXT[!MUST,todo]: Application
+    TEXT[!MUST,todo]:    protocols MUST either prohibit the use of extensions that carry
+    TEXT[!MUST,todo]:    application semantics in 0-RTT or provide replay mitigation
+    TEXT[!MUST,todo]:    strategies.
 
   SECTION: [Packet Reflection Attack Mitigation](#section-9.3)
-    TEXT[!MUST]: First, the packet
-    TEXT[!MUST]:    containing a ClientHello MUST be padded to a minimum size.
+    TEXT[!MUST,todo]: First, the packet
+    TEXT[!MUST,todo]:    containing a ClientHello MUST be padded to a minimum size.
 
   SECTION: [Header Protection Analysis](#section-9.4)
-    TEXT[!MUST]:    Future header protection variants based on this construction MUST use
-    TEXT[!MUST]:    a PRF to ensure equivalent security guarantees.
+    TEXT[!MUST,todo]:    Future header protection variants based on this construction MUST use
+    TEXT[!MUST,todo]:    a PRF to ensure equivalent security guarantees.
 
   SECTION: [Header Protection Timing Side Channels](#section-9.5)
-    TEXT[!MUST]: For authentication to be
-    TEXT[!MUST]:    free from side channels, the entire process of header protection
-    TEXT[!MUST]:    removal, packet number recovery, and packet protection removal MUST
-    TEXT[!MUST]:    be applied together without timing and other side channels.
-    TEXT[!MUST]:    For the sending of packets, construction and protection of packet
-    TEXT[!MUST]:    payloads and packet numbers MUST be free from side channels that
-    TEXT[!MUST]:    would reveal the packet number or its encoded size.
-    TEXT[!SHOULD]: After
-    TEXT[!SHOULD]:    receiving a key update, an endpoint SHOULD generate and save the next
-    TEXT[!SHOULD]:    set of receive packet protection keys, as described in Section 6.3.
+    TEXT[!MUST,todo]: For authentication to be
+    TEXT[!MUST,todo]:    free from side channels, the entire process of header protection
+    TEXT[!MUST,todo]:    removal, packet number recovery, and packet protection removal MUST
+    TEXT[!MUST,todo]:    be applied together without timing and other side channels.
+    TEXT[!MUST,todo]:    For the sending of packets, construction and protection of packet
+    TEXT[!MUST,todo]:    payloads and packet numbers MUST be free from side channels that
+    TEXT[!MUST,todo]:    would reveal the packet number or its encoded size.
+    TEXT[!SHOULD,implementation]: After
+    TEXT[!SHOULD,implementation]:    receiving a key update, an endpoint SHOULD generate and save the next
+    TEXT[!SHOULD,implementation]:    set of receive packet protection keys, as described in Section 6.3.
 
   SECTION: [Key Diversity](#section-9.6)
-    TEXT[!SHOULD]:    To preserve this separation,
-    TEXT[!SHOULD,implementation,test]: a new version of QUIC SHOULD define new
-    TEXT[!SHOULD,implementation,test]:    labels for key derivation for packet protection key and IV, plus the
-    TEXT[!SHOULD,implementation,test]:    header protection keys.
+    TEXT[!SHOULD,todo]:    To preserve this separation,
+    TEXT[!SHOULD,implementation,test,todo]: a new version of QUIC SHOULD define new
+    TEXT[!SHOULD,implementation,test,todo]:    labels for key derivation for packet protection key and IV, plus the
+    TEXT[!SHOULD,implementation,test,todo]:    header protection keys.
     TEXT[!SHOULD,implementation]: New QUIC versions SHOULD define a new salt value used in
     TEXT[!SHOULD,implementation]:    calculating initial secrets.
 

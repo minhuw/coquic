@@ -155,6 +155,13 @@ ReliableSendBuffer::take_ranges_by_state(SegmentState state, std::size_t &remain
             .offset = it->first,
             .bytes =
                 SharedBytes{
+                    //= https://www.rfc-editor.org/rfc/rfc9001#section-4
+                    // # If QUIC needs to retransmit that data, it MUST use
+                    // # the same keys even if TLS has already updated to newer keys.
+                    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9
+                    // # If packets from a lower encryption level contain
+                    // # CRYPTO frames, frames that retransmit that data MUST
+                    // # be sent at the same encryption level.
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
                     // # The data at a given offset MUST NOT change if it is sent
                     // # multiple times
@@ -635,6 +642,13 @@ CodecResult<ContiguousReceiveBytes> ReliableReceiveBuffer::push_shared(std::uint
         if (!can_buffer_range(offset, bytes)) {
             return crypto_buffer_exceeded_failure<ContiguousReceiveBytes>();
         }
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3
+        // # QUIC is responsible for buffering handshake bytes that arrive out
+        // # of order or for encryption levels that are not yet ready.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.4
+        // # While waiting for TLS processing to complete, an endpoint SHOULD
+        // # buffer received packets if they might be processed using keys that
+        // # are not yet available.
         buffer_range(offset, bytes);
     }
 

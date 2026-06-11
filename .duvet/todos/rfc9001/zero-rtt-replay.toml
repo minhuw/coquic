@@ -1,0 +1,179 @@
+# RFC 9001 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.6.2"
+# report-id = 583
+quote = '''
+When rejecting 0-RTT, a server MUST NOT
+process any 0-RTT packets, even if it could.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.6.2"
+# report-id = 584
+quote = '''
+When 0-RTT was
+rejected, a client SHOULD treat receipt of an acknowledgment for a
+0-RTT packet as a connection error of type PROTOCOL_VIOLATION, if it
+is able to detect the condition.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.6.2"
+# report-id = 585
+quote = '''
+The client therefore MUST reset the state of all
+streams, including application state bound to those streams.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.6.2"
+# report-id = 586
+quote = '''
+A client MAY reattempt 0-RTT if it receives a Retry or Version
+Negotiation packet.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.9.3"
+# report-id = 597
+quote = '''
+A server MAY discard 0-RTT keys earlier if it
+determines that it has received all 0-RTT packets, which can be done
+by keeping track of missing packet numbers.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-5.6"
+# report-id = 614
+quote = '''
+An application protocol that uses QUIC MUST include a profile that
+defines acceptable use of 0-RTT; otherwise, 0-RTT can only be used to
+carry QUIC frames that do not carry application data.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-5.6"
+# report-id = 615
+quote = '''
+A client MAY wish to apply additional restrictions on what data it
+sends prior to the completion of the TLS handshake.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-5.6"
+# report-id = 616
+quote = '''
+A client SHOULD stop sending 0-RTT data
+if it receives an indication that 0-RTT data has been rejected.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-9.2"
+# report-id = 674
+quote = '''
+Endpoints MUST implement and use the replay protections described in
+[TLS13], however it is recognized that these protections are
+imperfect.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-9.2"
+# report-id = 675
+quote = '''
+These MUST NOT be
+used to communicate application semantics between endpoints; clients
+MUST treat them as opaque values.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-9.2"
+# report-id = 676
+quote = '''
+An application
+protocol that uses QUIC MUST describe how the protocol uses 0-RTT and
+the measures that are employed to protect against replay attack.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-9.2"
+# report-id = 677
+quote = '''
+QUIC extensions MUST either describe how replay attacks affect their
+operation or prohibit the use of the extension in 0-RTT.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-9.2"
+# report-id = 678
+quote = '''
+Application
+protocols MUST either prohibit the use of extensions that carry
+application semantics in 0-RTT or provide replay mitigation
+strategies.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/39"
+reason = '''
+0-RTT rejection, retry, replay-protection, and application-profile policy needs implementation, documentation, or stronger tests.
+'''
+tags = ["rfc9001"]

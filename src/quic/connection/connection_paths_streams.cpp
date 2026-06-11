@@ -393,6 +393,12 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
     }
     if (!received_peer_transport_parameters && !peer_transport_parameters_.has_value()) {
         if (tls_->handshake_complete()) {
+            //= https://www.rfc-editor.org/rfc/rfc9001#section-8.2
+            // # Endpoints MUST send the quic_transport_parameters extension;
+            // # endpoints that receive ClientHello or EncryptedExtensions
+            // # messages without the quic_transport_parameters extension MUST
+            // # close the connection with an error of type 0x016d (equivalent
+            // # to a fatal TLS missing_extension alert, see Section 4.8).
             return CodecResult<bool>::failure(CodecError{
                 .code = CodecErrorCode::invalid_packet_protection_state,
                 .offset = 0,
@@ -473,6 +479,9 @@ void QuicConnection::update_handshake_status() {
         if (config_.role == EndpointRole::server) {
             confirm_handshake();
             if (handshake_done_state_ == StreamControlFrameState::none) {
+                //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.2
+                // # The server MUST send a HANDSHAKE_DONE frame as soon as
+                // # the handshake is complete.
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-19.20
                 // # Servers MUST NOT send a HANDSHAKE_DONE frame before
                 // # completing the handshake.
@@ -496,6 +505,9 @@ void QuicConnection::confirm_handshake() {
         discard_handshake_packet_space_after_ack_ = true;
         return;
     }
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.2
+    // # An endpoint MUST discard its Handshake keys when the TLS handshake is
+    // # confirmed (Section 4.1.2).
     discard_handshake_packet_space();
 }
 
@@ -1442,6 +1454,12 @@ void QuicConnection::discard_initial_packet_space() {
     recovery_rtt_state_ = shared_recovery_rtt_state();
     initial_packet_space_discarded_ = true;
     server_initial_crypto_scan_prefix_.clear();
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.1
+    // # Thus, a client MUST discard Initial keys when it first sends a
+    // # Handshake packet and a server MUST discard Initial keys when it first
+    // # successfully processes a Handshake packet.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.1
+    // # Endpoints MUST NOT send Initial packets after this point.
     discard_packet_space_state(initial_space_);
     pto_count_ = 0;
 }
@@ -1625,10 +1643,24 @@ bool QuicConnection::note_aead_encryption_attempt(std::size_t packet_count, Quic
         return true;
     }
     if (current_application_write_key_encrypted_packets_ > *limit - packet_count) {
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+        // # If the total number of encrypted packets with the same key
+        // # exceeds the confidentiality limit for the selected AEAD, the
+        // # endpoint MUST stop using those keys.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+        // # If a key update is not possible or integrity limits are reached,
+        // # the endpoint MUST stop using the connection and only send stateless
+        // # resets in response to receiving packets.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+        // # It is RECOMMENDED that endpoints immediately close the connection
+        // # with a connection error of type AEAD_LIMIT_REACHED before reaching a
+        // # state where key updates are not possible.
         queue_transport_close_for_error(now, aead_limit_reached_error());
         return false;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+    // # Endpoints MUST count the number of encrypted packets for each set of keys.
     current_application_write_key_encrypted_packets_ += packet_count;
     maybe_request_proactive_key_update();
     return true;
@@ -1646,6 +1678,12 @@ void QuicConnection::maybe_request_proactive_key_update() {
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.3
+    // # An endpoint MUST initiate a key update (Section 6) prior to exceeding
+    // # any limit set for the AEAD that is in use.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+    // # Endpoints MUST initiate a key update before sending more protected
+    // # packets than the confidentiality limit for the selected AEAD permits.
     request_key_update();
 }
 
@@ -1655,6 +1693,10 @@ bool QuicConnection::note_packet_authentication_failure(const CodecError &error,
         return true;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+    // # In addition to counting packets sent, endpoints MUST count the number
+    // # of received packets that fail authentication during the lifetime of a
+    // # connection.
     ++failed_authentication_packets_;
     if (connection_drain_test_hooks().force_aead_integrity_limit) {
         queue_transport_close_for_error(now, aead_limit_reached_error());
@@ -1667,6 +1709,12 @@ bool QuicConnection::note_packet_authentication_failure(const CodecError &error,
     const auto limit =
         integrity_limit_for_cipher_suite(application_space_.read_secret->cipher_suite);
     if (limit.has_value() && failed_authentication_packets_ > *limit) {
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+        // # If the total number of received packets that fail authentication
+        // # within the connection, across all keys, exceeds the integrity
+        // # limit for the selected AEAD, the endpoint MUST immediately close
+        // # the connection with a connection error of type AEAD_LIMIT_REACHED
+        // # and not process any more packets.
         queue_transport_close_for_error(now, aead_limit_reached_error());
         return false;
     }

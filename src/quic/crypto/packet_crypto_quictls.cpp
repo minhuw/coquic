@@ -1118,6 +1118,9 @@ CodecResult<std::size_t> open_payload_into(const OpenPayloadIntoInput &input) {
 CodecResult<std::size_t> make_header_protection_mask_into(CipherSuite cipher_suite,
                                                           HeaderProtectionMaskInput input,
                                                           std::span<std::byte> mask) {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.4.1
+    // # Before a TLS cipher suite can be used with QUIC, a header protection
+    // # algorithm MUST be specified for the AEAD used with that cipher suite.
     const auto parameters = cipher_suite_parameters(cipher_suite);
     if (!parameters.has_value()) {
         return CodecResult<std::size_t>::failure(parameters.error().code, 0);

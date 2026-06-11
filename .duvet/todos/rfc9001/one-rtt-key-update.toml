@@ -1,0 +1,165 @@
+# RFC 9001 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-5.6"
+# report-id = 618
+quote = '''
+A client MUST NOT
+attempt to decrypt 0-RTT packets it receives and instead MUST discard
+them.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/40"
+reason = '''
+1-RTT pre-handshake processing and key-update ordering/timing hardening is incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-5.7"
+# report-id = 620
+quote = '''
+Endpoints in either role MUST NOT decrypt 1-RTT packets from
+their peer prior to completing the handshake.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/40"
+reason = '''
+1-RTT pre-handshake processing and key-update ordering/timing hardening is incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-5.7"
+# report-id = 623
+quote = '''
+The server MAY retain these packets for
+later decryption in anticipation of receiving a ClientHello.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/40"
+reason = '''
+1-RTT pre-handshake processing and key-update ordering/timing hardening is incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-5.7"
+# report-id = 624
+quote = '''
+Even if it has 1-RTT secrets, a client MUST NOT
+process incoming 1-RTT protected packets before the TLS handshake is
+complete.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/40"
+reason = '''
+1-RTT pre-handshake processing and key-update ordering/timing hardening is incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-6.3"
+# report-id = 633
+quote = '''
+Endpoints responding to an apparent key update MUST NOT generate a
+timing side-channel signal that might indicate that the Key Phase bit
+was invalid (see Section 9.5).
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/40"
+reason = '''
+1-RTT pre-handshake processing and key-update ordering/timing hardening is incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-6.3"
+# report-id = 635
+quote = '''
+For a short period after a key
+update completes, up to the PTO, endpoints MAY defer generation of
+the next set of receive packet protection keys.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/40"
+reason = '''
+1-RTT pre-handshake processing and key-update ordering/timing hardening is incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-6.4"
+# report-id = 638
+quote = '''
+Packets with higher packet numbers MUST be protected with either the
+same or newer packet protection keys than packets with lower packet
+numbers.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/40"
+reason = '''
+1-RTT pre-handshake processing and key-update ordering/timing hardening is incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-6.4"
+# report-id = 639
+quote = '''
+An endpoint that successfully removes protection with old
+keys when newer keys were used for packets with lower packet numbers
+MUST treat this as a connection error of type KEY_UPDATE_ERROR.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/40"
+reason = '''
+1-RTT pre-handshake processing and key-update ordering/timing hardening is incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-6.5"
+# report-id = 640
+quote = '''
+An endpoint MAY allow a period of approximately the Probe Timeout
+(PTO; see [QUIC-RECOVERY]) after promoting the next set of receive
+keys to be current before it creates the subsequent set of packet
+protection keys.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/40"
+reason = '''
+1-RTT pre-handshake processing and key-update ordering/timing hardening is incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-6.5"
+# report-id = 641
+quote = '''
+These updated keys MAY replace the previous keys at
+that time.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/40"
+reason = '''
+1-RTT pre-handshake processing and key-update ordering/timing hardening is incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-6.6"
+# report-id = 652
+quote = '''
+Endpoints that limit the size of packets MAY use higher
+confidentiality and integrity limits; see Appendix B for details.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/40"
+reason = '''
+AEAD limit policy currently uses conservative fixed limits and does not implement packet-size-dependent higher limits.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-6.6"
+# report-id = 653
+quote = '''
+Future analyses and specifications MAY relax confidentiality or
+integrity limits for an AEAD.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/40"
+reason = '''
+Future AEAD limit relaxations are not yet modeled in CoQUIC policy and should be considered with key-update hardening work.
+'''
+tags = ["rfc9001"]

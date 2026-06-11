@@ -930,6 +930,10 @@ void QuicConnection::arm_server_zero_rtt_discard_deadline(QuicCoreTimePoint now)
     const auto single_pto = compute_pto_deadline(shared_recovery_rtt_state(), max_ack_delay, now,
                                                  /*pto_count=*/0) -
                             now;
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.3
+    // # After receiving a 1-RTT packet, servers MUST discard 0-RTT keys
+    // # within a short time; the RECOMMENDED time period is three times the
+    // # Probe Timeout (PTO, see [QUIC-RECOVERY]).
     server_zero_rtt_discard_deadline_ = now + single_pto * 3;
 }
 
@@ -939,11 +943,25 @@ void QuicConnection::maybe_discard_server_zero_rtt_packet_space(QuicCoreTimePoin
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.3
+    // # After receiving a 1-RTT packet, servers MUST discard 0-RTT keys
+    // # within a short time; the RECOMMENDED time period is three times the
+    // # Probe Timeout (PTO, see [QUIC-RECOVERY]).
     discard_packet_space_state(zero_rtt_space_);
     server_zero_rtt_discard_deadline_.reset();
 }
 
 void QuicConnection::retain_previous_application_read_secret(QuicCoreTimePoint now) {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.1
+    // # An endpoint SHOULD retain old keys for some time after unprotecting a
+    // # packet sent using the new keys.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.5
+    // # Endpoints SHOULD wait three times the PTO before initiating a key
+    // # update after receiving an acknowledgment that confirms that the
+    // # previous key update was received.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.5
+    // # An endpoint SHOULD retain old read keys for no more than three times
+    // # the PTO after having received a packet protected using the new keys.
     previous_application_read_secret_ = application_space_.read_secret;
     previous_application_read_key_phase_ = application_read_key_phase_;
     previous_application_read_secret_discard_deadline_ =
@@ -963,6 +981,16 @@ CodecResult<bool> QuicConnection::refresh_next_application_read_secret() {
         return CodecResult<bool>::failure(next_read_secret.error());
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.3
+    // # An endpoint MAY generate new keys as part of packet processing, but
+    // # this creates a timing signal that could be used by an attacker to
+    // # learn when key updates happen and thus leak the value of the Key Phase bit.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.3
+    // # For this reason, endpoints MUST be able to retain two sets of packet
+    // # protection keys for receiving packets: the current and the next.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-9.5
+    // # After receiving a key update, an endpoint SHOULD generate and save the
+    // # next set of receive packet protection keys, as described in Section 6.3.
     next_application_read_secret_ = next_read_secret.value();
     next_application_read_secret_source_generation_ = application_read_secret_generation_;
     next_application_read_key_phase_ = !application_read_key_phase_;
@@ -1082,6 +1110,9 @@ void QuicConnection::maybe_discard_previous_application_read_secret(QuicCoreTime
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.5
+    // # After this period, old read keys and their corresponding secrets
+    // # SHOULD be discarded.
     previous_application_read_secret_.reset();
     previous_application_read_secret_discard_deadline_.reset();
     static_cast<void>(ensure_next_application_read_secret());
@@ -1193,6 +1224,9 @@ void QuicConnection::start_client_if_needed(QuicCoreTimePoint now) {
         if (decoded_resumption_state_.has_value()) {
             tls_resumption_state = decoded_resumption_state_->tls_state;
             enable_zero_rtt_attempt =
+                //= https://www.rfc-editor.org/rfc/rfc9001#section-5.6
+                // # A client therefore MUST NOT use 0-RTT for application data
+                // # unless specifically requested by the application that is in use.
                 config_.zero_rtt.attempt &
                 (decoded_resumption_state_->quic_version == current_version_) &
                 (decoded_resumption_state_->application_protocol == config_.application_protocol) &

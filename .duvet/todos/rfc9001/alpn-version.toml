@@ -1,0 +1,42 @@
+# RFC 9001 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-8.1"
+# report-id = 662
+quote = '''
+While [ALPN] only specifies that servers
+use this alert, QUIC clients MUST use error 0x0178 to terminate a
+connection when ALPN negotiation fails.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/41"
+reason = '''
+Client-side ALPN failure mapping and application-protocol QUIC-version compatibility policy are not yet fully implemented or tested.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-8.1"
+# report-id = 663
+quote = '''
+An application protocol MAY restrict the QUIC versions that it can
+operate over.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/41"
+reason = '''
+Client-side ALPN failure mapping and application-protocol QUIC-version compatibility policy are not yet fully implemented or tested.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-8.1"
+# report-id = 666
+quote = '''
+Similarly, a client MUST treat the selection of an incompatible
+application protocol by a server as a connection error of type
+0x0178.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/41"
+reason = '''
+Client-side ALPN failure mapping and application-protocol QUIC-version compatibility policy are not yet fully implemented or tested.
+'''
+tags = ["rfc9001"]

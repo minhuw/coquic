@@ -147,6 +147,9 @@ void QuicConnection::queue_new_token(std::vector<std::byte> token) {
 }
 
 void QuicConnection::request_key_update() {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6
+    // # Once the handshake is confirmed (see Section 4.1.2), an endpoint MAY
+    // # initiate a key update.
     local_key_update_requested_ = true;
     if (!local_key_update_initiated_) {
         current_write_phase_first_packet_number_ = application_space_.next_send_packet_number;

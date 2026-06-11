@@ -340,6 +340,14 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         const bool short_header_packet =
             (std::to_integer<std::uint8_t>(packet_bytes.front()) & 0x80u) == 0;
         if (short_header_packet && application_space_.read_secret.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9001#section-6.3
+            // # For this reason, endpoints MUST be able to retain two sets of
+            // # packet protection keys for receiving packets: the current and
+            // # the next.
+            //= https://www.rfc-editor.org/rfc/rfc9001#section-6.3
+            // # Once generated, the next set of packet protection keys SHOULD be
+            // # retained, even if the packet that was received was subsequently
+            // # discarded.
             const auto next_read_ready = ensure_next_application_read_secret();
             if (!next_read_ready.has_value()) {
                 return fail_with_codec_error("derive_next_traffic_secret", next_read_ready.error());
@@ -411,6 +419,17 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                         return false;
                     }
 
+                    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.1
+                    // # An endpoint MUST retain old keys until it has
+                    // # successfully unprotected a packet sent using the new keys.
+                    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.2
+                    // # The endpoint MUST update its send keys to the
+                    // # corresponding key phase in response, as described in
+                    // # Section 6.1.
+                    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.2
+                    // # Sending keys MUST be updated before sending an
+                    // # acknowledgment for the packet that was received with
+                    // # updated keys.
                     retain_previous_application_read_secret(now);
                     promote_next_application_read_secret();
                     const auto following_read_secret = refresh_next_application_read_secret();
@@ -440,6 +459,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 if (packet_targets_discarded_long_header_space(packet_bytes)) {
                     return true;
                 }
+                //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.4
+                // # While waiting for TLS processing to complete, an endpoint
+                // # SHOULD buffer received packets if they might be processed
+                // # using keys that are not yet available.
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
                 // # For example, if decryption fails (because the keys are not
                 // # available or for any other reason), the receiver MAY either
@@ -689,6 +712,13 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
             return false;
         };
 
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-6.3
+        // # For this reason, endpoints MUST be able to retain two sets of
+        // # packet protection keys for receiving packets: the current and the next.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-6.3
+        // # Once generated, the next set of packet protection keys SHOULD be
+        // # retained, even if the packet that was received was subsequently
+        // # discarded.
         const auto next_read_ready = ensure_next_application_read_secret();
         if (!next_read_ready.has_value()) {
             return fail_with_codec_error("derive_next_traffic_secret", next_read_ready.error());
@@ -732,6 +762,17 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                                                      next_write_secret.error());
                     }
 
+                    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.1
+                    // # An endpoint MUST retain old keys until it has
+                    // # successfully unprotected a packet sent using the new keys.
+                    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.2
+                    // # The endpoint MUST update its send keys to the
+                    // # corresponding key phase in response, as described in
+                    // # Section 6.1.
+                    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.2
+                    // # Sending keys MUST be updated before sending an
+                    // # acknowledgment for the packet that was received with
+                    // # updated keys.
                     retain_previous_application_read_secret(now);
                     promote_next_application_read_secret();
                     const auto following_read_secret = refresh_next_application_read_secret();

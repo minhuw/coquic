@@ -1534,6 +1534,14 @@ inline CodecError optimistic_ack_protocol_violation_error(std::size_t offset = 0
 }
 
 inline CodecError key_update_error() {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.2
+    // # An endpoint MAY treat such consecutive key updates as a connection
+    // # error of type KEY_UPDATE_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.2
+    // # An endpoint that receives an acknowledgment that is carried in a packet
+    // # protected with old keys where any acknowledged packet was protected
+    // # with newer keys MAY treat that as a connection error of type
+    // # KEY_UPDATE_ERROR.
     return transport_codec_error(CodecErrorCode::invalid_packet_protection_state,
                                  QuicTransportErrorCode::key_update_error, /*frame_type=*/0);
 }
@@ -1566,6 +1574,14 @@ inline CodecError connection_id_limit_error(std::uint64_t frame_type, std::size_
 }
 
 inline CodecError aead_limit_reached_error() {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+    // # If a key update is not possible or integrity limits are reached, the
+    // # endpoint MUST stop using the connection and only send stateless resets
+    // # in response to receiving packets.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+    // # It is RECOMMENDED that endpoints immediately close the connection with
+    // # a connection error of type AEAD_LIMIT_REACHED before reaching a state
+    // # where key updates are not possible.
     return CodecError{
         .code = CodecErrorCode::invalid_packet_protection_state,
         .offset = 0,
@@ -1780,6 +1796,12 @@ inline bool has_in_flight_ack_eliciting_packet(const PacketSpaceState &packet_sp
 
 inline bool should_ignore_received_packet(const PacketSpaceState &packet_space,
                                           std::uint64_t packet_number) {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.5
+    // # Once an endpoint successfully receives a packet with a given packet
+    // # number, it MUST discard all packets in the same packet number space
+    // # with higher packet numbers if they cannot be successfully unprotected
+    // # with either the same key, or -- if there is a key update -- a
+    // # subsequent packet protection key; see Section 6.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
     // # A receiver MUST discard a newly unprotected packet unless it is
     // # certain that it has not processed another packet with the same packet
@@ -1897,6 +1919,12 @@ inline bool should_defer_protected_one_rtt_packet(const ProtectedOneRttPacket &p
     }
 
     if (local_role == EndpointRole::server) {
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-5.7
+        // # A server MUST NOT process incoming 1-RTT protected packets before
+        // # the TLS handshake is complete.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-5.7
+        // # Received packets protected with 1-RTT keys MAY be stored and later
+        // # decrypted and used once the handshake is complete.
         return true;
     }
 
@@ -1912,6 +1940,12 @@ inline bool should_defer_protected_one_rtt_packet(const ReceivedProtectedOneRttP
     }
 
     if (local_role == EndpointRole::server) {
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-5.7
+        // # A server MUST NOT process incoming 1-RTT protected packets before
+        // # the TLS handshake is complete.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-5.7
+        // # Received packets protected with 1-RTT keys MAY be stored and later
+        // # decrypted and used once the handshake is complete.
         return true;
     }
 
@@ -1932,6 +1966,12 @@ should_defer_protected_one_rtt_packet(const ReceivedProtectedOneRttAckOnlyPacket
                                       EndpointRole local_role, HandshakeStatus status) {
     static_cast<void>(packet);
     static_cast<void>(local_role);
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.7
+    // # A server MUST NOT process incoming 1-RTT protected packets before the
+    // # TLS handshake is complete.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.7
+    // # Received packets protected with 1-RTT keys MAY be stored and later
+    // # decrypted and used once the handshake is complete.
     return status == HandshakeStatus::in_progress && local_role == EndpointRole::server;
 }
 
@@ -2033,6 +2073,9 @@ inline bool is_discardable_short_header_packet_error(CodecErrorCode code) {
 }
 
 inline bool can_retry_short_header_with_next_key_phase(CodecErrorCode code) {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.5
+    // # Similarly, a packet that appears to trigger a key update but cannot be
+    // # unprotected successfully MUST be discarded.
     static constexpr std::array kRetryableErrors = {
         CodecErrorCode::invalid_packet_protection_state,
         CodecErrorCode::unsupported_packet_type,
@@ -2046,6 +2089,14 @@ inline std::optional<std::uint64_t>
 confidentiality_limit_for_cipher_suite(CipherSuite cipher_suite) {
     if (cipher_suite == CipherSuite::tls_aes_128_gcm_sha256 ||
         cipher_suite == CipherSuite::tls_aes_256_gcm_sha384) {
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+        // # Any TLS cipher suite that is specified for use with QUIC MUST
+        // # define limits on the use of the associated AEAD function that
+        // # preserves margins for confidentiality and integrity.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+        // # That is, limits MUST be specified for the number of packets that
+        // # can be authenticated and for the number of packets that can fail
+        // # authentication.
         return kAesGcmConfidentialityLimit;
     }
     return std::nullopt;
@@ -2063,6 +2114,14 @@ proactive_key_update_packet_limit_for_cipher_suite(CipherSuite cipher_suite) {
 inline std::optional<std::uint64_t> integrity_limit_for_cipher_suite(CipherSuite cipher_suite) {
     if (cipher_suite == CipherSuite::tls_aes_128_gcm_sha256 ||
         cipher_suite == CipherSuite::tls_aes_256_gcm_sha384) {
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+        // # Any TLS cipher suite that is specified for use with QUIC MUST
+        // # define limits on the use of the associated AEAD function that
+        // # preserves margins for confidentiality and integrity.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-6.6
+        // # That is, limits MUST be specified for the number of packets that
+        // # can be authenticated and for the number of packets that can fail
+        // # authentication.
         return kAesGcmIntegrityLimit;
     }
     if (cipher_suite == CipherSuite::tls_chacha20_poly1305_sha256) {
@@ -2943,6 +3002,12 @@ should_defer_short_header_packet_before_server_handshake_complete(bool allow_def
                                                                   bool short_header_packet,
                                                                   EndpointRole role,
                                                                   HandshakeStatus status) {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.7
+    // # A server MUST NOT process incoming 1-RTT protected packets before the
+    // # TLS handshake is complete.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.7
+    // # Received packets protected with 1-RTT keys MAY be stored and later
+    // # decrypted and used once the handshake is complete.
     return static_cast<unsigned>(allow_defer) & static_cast<unsigned>(short_header_packet) &
            static_cast<unsigned>(role == EndpointRole::server) &
            static_cast<unsigned>(status == HandshakeStatus::in_progress);
@@ -3088,6 +3153,15 @@ handshake_packet_space_has_sendable_data(const PacketSpaceState &packet_space,
 inline COQUIC_NO_PROFILE bool
 can_send_zero_rtt_application_packets(EndpointRole role, HandshakeStatus status,
                                       const PacketSpaceState &zero_rtt_space) {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.6
+    // # A client therefore MUST NOT use 0-RTT for application data unless
+    // # specifically requested by the application that is in use.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.6
+    // # A server MUST NOT use 0-RTT keys to protect packets; it uses 1-RTT
+    // # keys to protect acknowledgments of 0-RTT packets.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-5.6
+    // # Once a client has installed 1-RTT keys, it MUST NOT send any more
+    // # 0-RTT packets.
     return role == EndpointRole::client && status != HandshakeStatus::connected &&
            zero_rtt_space.write_secret.has_value();
 }
@@ -3292,6 +3366,13 @@ should_ensure_inbound_application_path(bool paths_empty, QuicPathId inbound_path
 
 inline COQUIC_NO_PROFILE bool zero_rtt_state_present(bool read_secret_available,
                                                      bool write_secret_available) {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.3
+    // # Additionally, a server MAY discard 0-RTT keys as soon as it receives
+    // # a 1-RTT packet.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.3
+    // # Servers MAY temporarily retain 0-RTT keys to allow decrypting
+    // # reordered packets without requiring their contents to be retransmitted
+    // # with 1-RTT keys.
     return read_secret_available || write_secret_available;
 }
 

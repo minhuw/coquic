@@ -1,0 +1,184 @@
+# RFC 9001 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.4"
+# report-id = 578
+quote = '''
+A server MUST NOT use post-handshake client authentication (as
+defined in Section 4.6.2 of [TLS13]) because the multiplexing offered
+by QUIC prevents clients from correlating the certificate request
+with the application-level event that triggered it (see
+[HTTP2-TLS13]).
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS policy behavior is not yet explicitly implemented or tested for these RFC 9001 requirements.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.4"
+# report-id = 579
+quote = '''
+More specifically, servers MUST NOT send post-
+handshake TLS CertificateRequest messages, and clients MUST treat
+receipt of such messages as a connection error of type
+PROTOCOL_VIOLATION.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS policy behavior is not yet explicitly implemented or tested for these RFC 9001 requirements.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.5"
+# report-id = 580
+quote = '''
+Clients SHOULD NOT reuse tickets as
+that allows entities other than the server to correlate connections;
+see Appendix C.4 of [TLS13].
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS policy behavior is not yet explicitly implemented or tested for these RFC 9001 requirements.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.6.1"
+# report-id = 582
+quote = '''
+A
+client MUST treat receipt of a NewSessionTicket that contains an
+early_data extension with any other value as a connection error of
+type PROTOCOL_VIOLATION.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS policy behavior is not yet explicitly implemented or tested for these RFC 9001 requirements.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.7"
+# report-id = 587
+quote = '''
+Although it is in principle possible to use this feature
+for address verification, QUIC implementations SHOULD instead use the
+Retry feature; see Section 8.1 of [QUIC-TRANSPORT].
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS policy behavior is not yet explicitly implemented or tested for these RFC 9001 requirements.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-5.3"
+# report-id = 607
+quote = '''
+An endpoint MUST NOT reject a ClientHello that offers a cipher suite
+that it does not support, or it would be impossible to deploy a new
+cipher suite.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS policy behavior is not yet explicitly implemented or tested for these RFC 9001 requirements.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-6"
+# report-id = 657
+quote = '''
+Endpoints
+MUST NOT send a TLS KeyUpdate message.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS policy behavior is not yet explicitly implemented or tested for these RFC 9001 requirements.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-6"
+# report-id = 658
+quote = '''
+Endpoints MUST treat the
+receipt of a TLS KeyUpdate message as a connection error of type
+0x010a, equivalent to a fatal TLS alert of unexpected_message; see
+Section 4.8.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS policy behavior is not yet explicitly implemented or tested for these RFC 9001 requirements.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-8.2"
+# report-id = 669
+quote = '''
+A
+fatal unsupported_extension alert MUST be sent by an implementation
+that supports this extension if the extension is received when the
+transport is not QUIC.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS policy behavior is not yet explicitly implemented or tested for these RFC 9001 requirements.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-8.3"
+# report-id = 670
+quote = '''
+Clients MUST NOT send the EndOfEarlyData message.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS policy behavior is not yet explicitly implemented or tested for these RFC 9001 requirements.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-8.4"
+# report-id = 672
+quote = '''
+A client MUST NOT request the use of the
+TLS 1.3 compatibility mode.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS policy behavior is not yet explicitly implemented or tested for these RFC 9001 requirements.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-8.4"
+# report-id = 673
+quote = '''
+A server SHOULD treat the receipt of a
+TLS ClientHello with a non-empty legacy_session_id field as a
+connection error of type PROTOCOL_VIOLATION.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS policy behavior is not yet explicitly implemented or tested for these RFC 9001 requirements.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.8"
+# report-id = 589
+quote = '''
+Endpoints MAY use a generic
+error code to avoid possibly exposing confidential information.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/38"
+reason = '''
+TLS alert and error-code policy is not yet explicitly documented or tested for this RFC 9001 confidentiality option.
+'''
+tags = ["rfc9001"]

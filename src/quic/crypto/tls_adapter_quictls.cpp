@@ -198,10 +198,19 @@ cipher_suite_for_protocol_ids(std::optional<std::uint16_t> pending_protocol_id,
 
     switch (protocol_id.value()) {
     case tls_aes_128_gcm_sha256_id:
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-5.3
+        // # A cipher suite MUST NOT be negotiated unless a header protection
+        // # scheme is defined for the cipher suite.
         return CodecResult<CipherSuite>::success(CipherSuite::tls_aes_128_gcm_sha256);
     case tls_aes_256_gcm_sha384_id:
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-5.3
+        // # A cipher suite MUST NOT be negotiated unless a header protection
+        // # scheme is defined for the cipher suite.
         return CodecResult<CipherSuite>::success(CipherSuite::tls_aes_256_gcm_sha384);
     case tls_chacha20_poly1305_sha256_id:
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-5.3
+        // # A cipher suite MUST NOT be negotiated unless a header protection
+        // # scheme is defined for the cipher suite.
         return CodecResult<CipherSuite>::success(CipherSuite::tls_chacha20_poly1305_sha256);
     default:
         return CodecResult<CipherSuite>::failure(CodecErrorCode::unsupported_cipher_suite, 0);
@@ -237,6 +246,9 @@ COQUIC_NO_PROFILE bool post_handshake_failed(SSL *ssl) {
 COQUIC_NO_PROFILE bool configure_ctx_failed(SSL_CTX *ctx, const SSL_QUIC_METHOD *quic_method) {
     //= https://www.rfc-editor.org/rfc/rfc9001#section-4.2
     // # Clients MUST NOT offer TLS versions older than 1.3.
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.2
+    // # An endpoint MUST terminate the connection if a version of TLS older
+    // # than 1.3 is negotiated.
     return consume_tls_adapter_fault(TlsAdapterFaultPoint::initialize_ctx_config) ||
            SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION) != 1 ||
            SSL_CTX_set_max_proto_version(ctx, TLS1_3_VERSION) != 1 ||
@@ -364,6 +376,9 @@ COQUIC_NO_PROFILE bool ssl_quic_method_failed(SSL *ssl, const SSL_QUIC_METHOD *q
 COQUIC_NO_PROFILE void configure_rfc_quic_transport_extension(SSL *ssl) {
     //= https://www.rfc-editor.org/rfc/rfc9001#section-8.2
     // # Endpoints MUST send the quic_transport_parameters extension;
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-8.2
+    // # Endpoints MUST NOT send this extension in a TLS connection that does
+    // # not use QUIC (such as the use of TLS with TCP defined in [TLS13]).
     SSL_set_quic_transport_version(ssl, TLSEXT_TYPE_quic_transport_parameters);
 }
 
@@ -425,6 +440,9 @@ bool set_alpn_protos_failed(SSL *ssl, const std::vector<uint8_t> &encoded) {
 }
 
 bool client_alpn_failed(SSL *ssl, std::string_view application_protocol) {
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-8.1
+    // # Unless another mechanism is used for agreeing on an application
+    // # protocol, endpoints MUST use ALPN for this purpose.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-7
     // # Endpoints MUST explicitly negotiate an application protocol.
     const auto encoded = encode_application_protocol_list(application_protocol);
@@ -820,6 +838,15 @@ class TlsAdapter::Impl {
             !client_offered_application_protocol(std::span(in, in_len),
                                                  impl->config_.application_protocol)) {
             if (impl != nullptr) {
+                //= https://www.rfc-editor.org/rfc/rfc9001#section-8.1
+                // # When using ALPN, endpoints MUST immediately close a
+                // # connection (see Section 10.2 of [QUIC-TRANSPORT]) with a
+                // # no_application_protocol TLS alert (QUIC error code 0x0178;
+                // # see Section 4.8) if an application protocol is not negotiated.
+                //= https://www.rfc-editor.org/rfc/rfc9001#section-8.1
+                // # The server MUST treat the inability to select a compatible
+                // # application protocol as a connection error of type 0x0178
+                // # (no_application_protocol).
                 impl->sticky_error_ = tls_alert_error(SSL_AD_NO_APPLICATION_PROTOCOL);
             }
             return SSL_TLSEXT_ERR_ALERT_FATAL;
@@ -827,6 +854,9 @@ class TlsAdapter::Impl {
 
         //= https://www.rfc-editor.org/rfc/rfc9000#section-7
         // # Endpoints MUST explicitly negotiate an application protocol.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-8.1
+        // # Servers MUST select an application protocol compatible with the
+        // # QUIC version that the client has selected.
         *out = reinterpret_cast<const uint8_t *>(impl->config_.application_protocol.data());
         *out_len = static_cast<uint8_t>(impl->config_.application_protocol.size());
         impl->selected_application_protocol_ =
@@ -940,6 +970,13 @@ class TlsAdapter::Impl {
             return false;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.4
+        // # A client MUST authenticate the identity of the server.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.4
+        // # A server MAY request that the client authenticate during the handshake.
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.4
+        // # A server MAY refuse a connection if the client is unable to
+        // # authenticate when requested.
         SSL_CTX_set_verify(ctx, config_.verify_peer ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, nullptr);
         SSL_CTX_set_keylog_callback(ctx, &Impl::on_keylog_line);
         if (verify_paths_init_failed(config_.verify_peer, ctx)) {
@@ -972,6 +1009,9 @@ class TlsAdapter::Impl {
         }
 
         if (config_.role == EndpointRole::server) {
+            //= https://www.rfc-editor.org/rfc/rfc9001#section-8.1
+            // # Unless another mechanism is used for agreeing on an
+            // # application protocol, endpoints MUST use ALPN for this purpose.
             //= https://www.rfc-editor.org/rfc/rfc9000#section-7
             // # Endpoints MUST explicitly negotiate an application protocol.
             SSL_CTX_set_alpn_select_cb(ctx, &Impl::select_application_protocol, nullptr);
@@ -1170,6 +1210,11 @@ class TlsAdapter::Impl {
     }
 
     int on_send_alert(OSSL_ENCRYPTION_LEVEL, uint8_t alert) {
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.8
+        // # As QUIC provides alternative mechanisms for connection termination
+        // # and the TLS connection is only closed if an error is encountered,
+        // # a QUIC endpoint MUST treat any alert from TLS as if it were at the
+        // # "fatal" level.
         sticky_error_ = tls_alert_error(alert);
         return 0;
     }

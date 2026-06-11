@@ -1,0 +1,57 @@
+# RFC 9001 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-7"
+# report-id = 659
+quote = '''
+Implementations
+SHOULD use caution in relying on any data that is contained in
+Initial packets that is not otherwise authenticated.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/42"
+reason = '''
+Initial-packet trust boundaries, ClientHello padding, and packet-protection side-channel properties need an explicit implementation audit and tests where practical.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-9.3"
+# report-id = 679
+quote = '''
+First, the packet
+containing a ClientHello MUST be padded to a minimum size.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/42"
+reason = '''
+Initial-packet trust boundaries, ClientHello padding, and packet-protection side-channel properties need an explicit implementation audit and tests where practical.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-9.5"
+# report-id = 681
+quote = '''
+For authentication to be
+free from side channels, the entire process of header protection
+removal, packet number recovery, and packet protection removal MUST
+be applied together without timing and other side channels.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/42"
+reason = '''
+Initial-packet trust boundaries, ClientHello padding, and packet-protection side-channel properties need an explicit implementation audit and tests where practical.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-9.5"
+# report-id = 682
+quote = '''
+For the sending of packets, construction and protection of packet
+payloads and packet numbers MUST be free from side channels that
+would reveal the packet number or its encoded size.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/42"
+reason = '''
+Initial-packet trust boundaries, ClientHello padding, and packet-protection side-channel properties need an explicit implementation audit and tests where practical.
+'''
+tags = ["rfc9001"]

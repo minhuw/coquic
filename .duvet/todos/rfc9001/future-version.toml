@@ -1,0 +1,28 @@
+# RFC 9001 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-9.4"
+# report-id = 680
+quote = '''
+Future header protection variants based on this construction MUST use
+a PRF to ensure equivalent security guarantees.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/43"
+reason = '''
+This requirement applies to future QUIC versions or future header-protection variants and is tracked as future-version work.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-9.6"
+# report-id = 684
+quote = '''
+To preserve this separation, a new version of QUIC SHOULD define new
+labels for key derivation for packet protection key and IV, plus the
+header protection keys.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/43"
+reason = '''
+This requirement applies to future QUIC versions or future header-protection variants and is tracked as future-version work.
+'''
+tags = ["rfc9001"]

@@ -618,6 +618,9 @@ bool frame_allowed_in_protected_payload_packet_type(const ReceivedFrame &frame,
                                            std::holds_alternative<NewTokenFrame>(frame) |
                                            std::holds_alternative<PathResponseFrame>(frame) |
                                            std::holds_alternative<RetireConnectionIdFrame>(frame);
+        //= https://www.rfc-editor.org/rfc/rfc9001#section-8.3
+        // # A server MUST treat receipt of a CRYPTO frame in a 0-RTT packet as
+        // # a connection error of type PROTOCOL_VIOLATION.
         //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
         // # A server MAY treat receipt
         // # of these frames in 0-RTT packets as a connection error of type

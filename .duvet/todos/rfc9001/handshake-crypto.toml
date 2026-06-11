@@ -1,0 +1,138 @@
+# RFC 9001 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.1.2"
+# report-id = 566
+quote = '''
+Additionally, a client MAY consider the handshake to be confirmed
+when it receives an acknowledgment for a 1-RTT packet.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/37"
+reason = '''
+Handshake CRYPTO progression, partial ClientHello buffering, packetization, padding, and coalescing behavior needs implementation or stronger proof before these RFC 9001 requirements can be annotated as complete.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3"
+# report-id = 567
+quote = '''
+*  If the packet is from a previously installed encryption level, it
+MUST NOT contain data that extends past the end of previously
+received data in that flow.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/37"
+reason = '''
+Handshake CRYPTO progression, partial ClientHello buffering, packetization, padding, and coalescing behavior needs implementation or stronger proof before these RFC 9001 requirements can be annotated as complete.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3"
+# report-id = 568
+quote = '''
+Implementations MUST treat any
+violations of this requirement as a connection error of type
+PROTOCOL_VIOLATION.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/37"
+reason = '''
+Handshake CRYPTO progression, partial ClientHello buffering, packetization, padding, and coalescing behavior needs implementation or stronger proof before these RFC 9001 requirements can be annotated as complete.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.1.3"
+# report-id = 569
+quote = '''
+When TLS
+provides keys for a higher encryption level, if there is data from
+a previous encryption level that TLS has not consumed, this MUST
+be treated as a connection error of type PROTOCOL_VIOLATION.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/37"
+reason = '''
+Handshake CRYPTO progression, partial ClientHello buffering, packetization, padding, and coalescing behavior needs implementation or stronger proof before these RFC 9001 requirements can be annotated as complete.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.1.4"
+# report-id = 571
+quote = '''
+An endpoint SHOULD
+continue to respond to packets that can be processed during this
+time.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/37"
+reason = '''
+Handshake CRYPTO progression, partial ClientHello buffering, packetization, padding, and coalescing behavior needs implementation or stronger proof before these RFC 9001 requirements can be annotated as complete.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.3"
+# report-id = 574
+quote = '''
+To
+avoid this, servers MAY use the Retry feature (see Section 8.1 of
+[QUIC-TRANSPORT]) to only buffer partial ClientHello messages from
+clients with a validated address.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/37"
+reason = '''
+Handshake CRYPTO progression, partial ClientHello buffering, packetization, padding, and coalescing behavior needs implementation or stronger proof before these RFC 9001 requirements can be annotated as complete.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.9"
+# report-id = 599
+quote = '''
+Though an endpoint might retain older keys, new data MUST be sent at
+the highest currently available encryption level.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/37"
+reason = '''
+Handshake CRYPTO progression, partial ClientHello buffering, packetization, padding, and coalescing behavior needs implementation or stronger proof before these RFC 9001 requirements can be annotated as complete.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4.9"
+# report-id = 600
+quote = '''
+These packets MAY also include PADDING frames.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/37"
+reason = '''
+Handshake CRYPTO progression, partial ClientHello buffering, packetization, padding, and coalescing behavior needs implementation or stronger proof before these RFC 9001 requirements can be annotated as complete.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-4"
+# report-id = 602
+quote = '''
+When packets of different types need to be sent,
+endpoints SHOULD use coalesced packets to send them in the same UDP
+datagram.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/37"
+reason = '''
+Handshake CRYPTO progression, partial ClientHello buffering, packetization, padding, and coalescing behavior needs implementation or stronger proof before these RFC 9001 requirements can be annotated as complete.
+'''
+tags = ["rfc9001"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9001#section-5.1"
+# report-id = 603
+quote = '''
+Other versions of TLS MUST provide a similar function in order to be
+used with QUIC.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/37"
+reason = '''
+Handshake CRYPTO progression, partial ClientHello buffering, packetization, padding, and coalescing behavior needs implementation or stronger proof before these RFC 9001 requirements can be annotated as complete.
+'''
+tags = ["rfc9001"]

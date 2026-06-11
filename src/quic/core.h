@@ -110,6 +110,9 @@ struct QuicTransportConfig {
     bool disable_active_migration = false;
     std::optional<PreferredAddress> preferred_address;
     std::uint64_t ack_delay_exponent = 3;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # This value SHOULD include the receiver's expected delays in alarms
+    // # firing.
     std::uint64_t max_ack_delay = 25;
     std::uint64_t ack_eliciting_threshold = 2;
     //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
@@ -125,6 +128,8 @@ struct QuicTransportConfig {
     QuicCongestionControlAlgorithm congestion_control = QuicCongestionControlAlgorithm::newreno;
     bool enable_hystart_plus_plus = true;
     bool send_stream_fairness = true;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+    // # The spin bit is an OPTIONAL feature of this version of QUIC.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
     // # Implementations MUST allow administrators of clients and servers to
     // # disable the spin bit either globally or on a per-connection basis.
@@ -325,6 +330,7 @@ struct QuicCoreEndpointConfig {
     std::vector<std::uint32_t> supported_versions = {kQuicVersion1};
     bool verify_peer = true;
     bool retry_enabled = false;
+    std::size_t max_server_connections = 0;
     std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
     QuicTransportConfig transport;
@@ -427,6 +433,7 @@ struct QuicCoreInboundDatagram {
 struct QuicCorePathMtuUpdate {
     std::optional<QuicRouteHandle> route_handle;
     std::size_t max_udp_payload_size = 0;
+    std::vector<std::byte> quoted_packet;
 };
 
 struct QuicCoreSendStreamData {
@@ -716,6 +723,13 @@ class QuicCore {
         bool used = false;
     };
 
+    enum class AddressValidationTokenClassification : std::uint8_t {
+        missing,
+        unknown,
+        retry,
+        new_token,
+    };
+
     struct ClientStoredNewToken {
         std::string server_name;
         std::uint32_t version = kQuicVersion1;
@@ -787,6 +801,14 @@ class QuicCore {
         std::optional<QuicRouteHandle> route_handle = std::nullopt,
         std::span<const std::byte> address_validation_identity = std::span<const std::byte>{},
         QuicCoreTimePoint now = QuicCoreTimePoint{});
+    std::vector<std::byte>
+    make_initial_transport_close_packet_bytes(const ParsedEndpointDatagram &parsed,
+                                              std::uint64_t error_code,
+                                              ConnectionId source_connection_id);
+    std::vector<std::byte>
+    make_invalid_retry_token_close_packet_bytes(const ParsedEndpointDatagram &parsed);
+    std::vector<std::byte>
+    make_connection_refused_close_packet_bytes(const ParsedEndpointDatagram &parsed);
     std::optional<PendingRetryToken>
     take_retry_context(const ParsedEndpointDatagram &parsed,
                        const std::optional<QuicRouteHandle> &route_handle, QuicCoreTimePoint now,
@@ -794,6 +816,8 @@ class QuicCore {
     std::optional<StoredEndpointNewToken> take_new_token_context(
         const ParsedEndpointDatagram &parsed, const std::optional<QuicRouteHandle> &route_handle,
         QuicCoreTimePoint now, std::span<const std::byte> address_validation_identity);
+    AddressValidationTokenClassification
+    classify_address_validation_token(const ParsedEndpointDatagram &parsed) const;
     void maybe_queue_server_new_token(ConnectionEntry &entry, QuicCoreTimePoint now);
     void drain_queued_server_new_token(ConnectionEntry &entry, QuicCoreResult &drained,
                                        QuicCoreTimePoint now,
@@ -822,6 +846,8 @@ class QuicCore {
         std::span<const std::byte> proposed_identity) const;
     bool address_validation_identity_allowed_for_new_route(
         const ConnectionEntry *entry, std::span<const std::byte> address_validation_identity) const;
+    static bool preferred_address_migration_route_family_allowed(
+        const ConnectionEntry &entry, std::span<const std::byte> address_validation_identity);
     static std::vector<std::byte>
     make_version_negotiation_packet_bytes(const ParsedEndpointDatagram &parsed,
                                           std::span<const std::uint32_t> supported_versions,
@@ -830,6 +856,12 @@ class QuicCore {
                                                           const PendingRetryToken &pending);
     std::optional<QuicConnectionHandle>
     find_endpoint_connection_for_datagram(const ParsedEndpointDatagram &parsed) const;
+    std::optional<QuicConnectionHandle>
+    find_endpoint_connection_for_connection_id(std::span<const std::byte> connection_id) const;
+    bool quoted_packet_matches_connection(const ParsedEndpointDatagram &quoted,
+                                          QuicConnectionHandle handle) const;
+    bool path_mtu_update_matches_connection(const ConnectionEntry &entry,
+                                            const QuicCorePathMtuUpdate &update) const;
     void erase_endpoint_connection_routes(const ConnectionEntry &entry);
     void retire_endpoint_connection_routes(const ConnectionEntry &entry, QuicCoreTimePoint now);
     void purge_expired_local_stateless_reset_tokens(QuicCoreTimePoint now);

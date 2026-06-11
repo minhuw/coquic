@@ -591,6 +591,7 @@ SharedUdpBackendCore::wait(std::optional<QuicCoreTimePoint> next_wakeup) {
                 QuicIoPathMtuUpdate{
                     .route_handle = handle,
                     .max_udp_payload_size = update.max_udp_payload_size,
+                    .quoted_packet = std::move(update.quoted_packet),
                 },
         };
     }

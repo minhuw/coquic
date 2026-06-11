@@ -1,0 +1,83 @@
+target = "https://www.rfc-editor.org/rfc/rfc9000"
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-2.2"
+quote = '''
+; an endpoint MAY treat receipt of different data at
+the same offset within a stream as a connection error of type
+PROTOCOL_VIOLATION.
+'''
+reason = '''
+This is optional receiver policy. CoQUIC accepts overlapping stream bytes
+by retaining the first received data for an offset and discarding duplicate
+coverage, rather than closing the connection when a later overlap carries
+different bytes.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-3.1"
+quote = '''
+An endpoint MAY send a RESET_STREAM as the first frame that mentions
+a stream; this causes the sending part of that stream to open and
+then immediately transition to the "Reset Sent" state.
+'''
+reason = '''
+This is an optional stream-state transition. CoQUIC supports resetting a
+stream, but its application-facing stream creation path does not need to
+advertise this particular first-frame shortcut as a separate required
+feature.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-3.2"
+quote = '''
+An
+implementation MAY interrupt delivery of stream data, discard any
+data that was not consumed, and signal the receipt of the
+RESET_STREAM.
+'''
+reason = '''
+This is optional receive-side reset delivery policy. CoQUIC exposes peer
+stream reset events, while exact application delivery interruption and
+discard policy is an implementation choice rather than a mandatory
+transport requirement.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-3.3"
+quote = '''
+A receiver MAY send a STOP_SENDING frame in any state where it has
+not received a RESET_STREAM frame -- that is, states other than
+"Reset Recvd" or "Reset Read".
+'''
+reason = '''
+This is optional receiver behavior. CoQUIC sends STOP_SENDING for active
+receive-side cancellation paths, but it does not need to exercise every
+state in which STOP_SENDING is permitted.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-3.5"
+quote = '''
+If the stream is in the "Data Sent" state, the
+endpoint MAY defer sending the RESET_STREAM frame until the packets
+containing outstanding data are acknowledged or declared lost.
+'''
+reason = '''
+This is optional behavior after receiving STOP_SENDING for a stream whose
+data has already been sent. CoQUIC may send the reset promptly rather than
+using this deferral strategy.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-3.5"
+quote = '''
+An endpoint that sends a STOP_SENDING frame MAY ignore the
+error code in any RESET_STREAM frames subsequently received for that
+stream.
+'''
+reason = '''
+This is optional local policy for handling a peer RESET_STREAM after
+sending STOP_SENDING. CoQUIC records peer reset information; ignoring that
+application error code is allowed but not required.
+'''

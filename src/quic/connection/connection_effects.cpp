@@ -1,11 +1,77 @@
 #include "src/quic/connection/connection.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace coquic::quic {
+
+namespace {
+
+bool is_valid_utf8(std::string_view text) {
+    std::uint32_t codepoint = 0;
+    std::uint8_t continuation_bytes = 0;
+    std::uint8_t minimum_continuation_bytes = 0;
+    for (const unsigned char byte : text) {
+        if (continuation_bytes == 0) {
+            if (byte <= 0x7fu) {
+                continue;
+            }
+            if (byte >= 0xc2u && byte <= 0xdfu) {
+                codepoint = byte & 0x1fu;
+                continuation_bytes = 1;
+                minimum_continuation_bytes = 1;
+                continue;
+            }
+            if (byte >= 0xe0u && byte <= 0xefu) {
+                codepoint = byte & 0x0fu;
+                continuation_bytes = 2;
+                minimum_continuation_bytes = 2;
+                continue;
+            }
+            if (byte >= 0xf0u && byte <= 0xf4u) {
+                codepoint = byte & 0x07u;
+                continuation_bytes = 3;
+                minimum_continuation_bytes = 3;
+                continue;
+            }
+            return false;
+        }
+
+        if ((byte & 0xc0u) != 0x80u) {
+            return false;
+        }
+        codepoint = (codepoint << 6u) | (byte & 0x3fu);
+        --continuation_bytes;
+        if (continuation_bytes != 0) {
+            continue;
+        }
+        if ((minimum_continuation_bytes == 2 && codepoint < 0x800u) ||
+            (minimum_continuation_bytes == 3 && codepoint < 0x10000u) ||
+            (codepoint >= 0xd800u && codepoint <= 0xdfffu) || codepoint > 0x10ffffu) {
+            return false;
+        }
+    }
+    return continuation_bytes == 0;
+}
+
+std::vector<std::byte> connection_close_reason_bytes(std::string_view reason_phrase) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-19.19
+    // # This SHOULD be a UTF-8 encoded string [RFC3629], though the frame does
+    // # not carry information, such as language tags, that would aid
+    // # comprehension by any entity other than the one that created the text.
+    if (!is_valid_utf8(reason_phrase)) {
+        return {};
+    }
+    return std::vector<std::byte>(reinterpret_cast<const std::byte *>(reason_phrase.data()),
+                                  reinterpret_cast<const std::byte *>(reason_phrase.data()) +
+                                      reason_phrase.size());
+}
+
+} // namespace
 
 StreamStateResult<bool> QuicConnection::queue_stream_send(std::uint64_t stream_id,
                                                           std::span<const std::byte> bytes,
@@ -60,10 +126,7 @@ QuicConnection::queue_application_close(LocalApplicationCloseCommand command) {
         .error_code = command.application_error_code,
         .reason =
             ConnectionCloseReason{
-                .bytes = std::vector<std::byte>(
-                    reinterpret_cast<const std::byte *>(command.reason_phrase.data()),
-                    reinterpret_cast<const std::byte *>(command.reason_phrase.data()) +
-                        command.reason_phrase.size()),
+                .bytes = connection_close_reason_bytes(command.reason_phrase),
             },
     };
     local_application_close_sent_ = false;

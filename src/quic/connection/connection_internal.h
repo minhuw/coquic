@@ -67,6 +67,7 @@ constexpr std::size_t kMinimumInitialDatagramSize = 1200;
 constexpr std::size_t kMaximumDatagramSize = 1200;
 constexpr std::size_t kMaximumDeferredProtectedPackets = 32;
 constexpr std::uint8_t kDefaultInitialPacketNumberLength = 2;
+constexpr std::uint8_t kFullPacketNumberLength = 4;
 constexpr std::size_t kOneRttPacketProtectionTagLength = 16;
 constexpr std::size_t kShortHeaderProtectionSampleOffset = 4;
 constexpr std::uint64_t kMaxQuicVarInt = 4611686018427387903ull;
@@ -77,6 +78,7 @@ constexpr std::size_t kMaximumRememberedPmtudFailedProbeSizes = 16;
 constexpr std::size_t kPmtudIPv6EthernetUdpPayloadSize = 1452;
 constexpr std::size_t kPmtudIPv4EthernetUdpPayloadSize = 1472;
 constexpr std::size_t kQuicCoreSecretLength = 32;
+constexpr std::size_t kMaxConsecutiveNonproductivePackets = 128;
 constexpr std::uint64_t kFrameTypePadding = 0x00;
 constexpr std::uint64_t kFrameTypePing = 0x01;
 constexpr std::uint64_t kFrameTypeAck = 0x02;
@@ -693,6 +695,16 @@ inline COQUIC_NO_PROFILE bool random_one_in_sixteen_fallback() {
     return (fallback_random() & 0x0fu) == 0;
 }
 
+inline COQUIC_NO_PROFILE bool random_bool_for_disabled_spin_bit() {
+    std::uint8_t value = 0;
+    if (RAND_bytes(&value, 1) == 1) {
+        return (value & 0x01u) != 0;
+    }
+
+    static thread_local std::mt19937 fallback_random{std::random_device{}()};
+    return (fallback_random() & 0x01u) != 0;
+}
+
 inline std::uint64_t read_u64_be(std::span<const std::byte, sizeof(std::uint64_t)> bytes) {
     std::uint64_t value = 0;
     for (const auto byte : bytes) {
@@ -741,6 +753,10 @@ inline ConnectionId make_issued_connection_id(std::span<const std::byte> base_co
         std::byte{'c'}, std::byte{'o'}, std::byte{'q'}, std::byte{'u'}, std::byte{'i'},
         std::byte{'c'}, std::byte{' '}, std::byte{'c'}, std::byte{'i'}, std::byte{'d'},
     };
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1
+    // # Connection IDs MUST NOT contain any information that can be used by an
+    // # external observer (that is, one that does not cooperate with the issuer)
+    // # to correlate them with other connection IDs for the same connection.
     const auto derived = prf_bytes<32>(quic_connection_id_secret(), label, context);
     if (derived.has_value()) {
         std::copy_n(derived->begin(), connection_id.size(), connection_id.begin());
@@ -1365,6 +1381,10 @@ decode_resumption_state(std::span<const std::byte> bytes) {
 inline bool zero_rtt_transport_limits_not_reduced(const TransportParameters &remembered,
                                                   const TransportParameters &current) {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
+    // # A server MAY store and recover the previously sent values of the
+    // # max_idle_timeout, max_udp_payload_size, and disable_active_migration
+    // # parameters and reject 0-RTT if it selects smaller values.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
     // # If 0-RTT data is accepted by the server, the server MUST NOT reduce
     // # any limits or alter any values that might be violated by the client
     // # with its 0-RTT data.
@@ -1589,6 +1609,11 @@ transport_error_for_codec_error(CodecErrorCode code) {
     case CodecErrorCode::unsupported_cipher_suite:
     case CodecErrorCode::invalid_packet_protection_state:
         return QuicTransportErrorCode::transport_parameter_error;
+    case CodecErrorCode::crypto_buffer_exceeded:
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+        // # If an endpoint does not expand its buffer, it MUST close the
+        // # connection with a CRYPTO_BUFFER_EXCEEDED error code.
+        return QuicTransportErrorCode::crypto_buffer_exceeded;
     case CodecErrorCode::invalid_reserved_bits:
     case CodecErrorCode::unsupported_packet_type:
     case CodecErrorCode::malformed_short_header_context:
@@ -1809,6 +1834,15 @@ inline void schedule_application_ack_deadline(PacketSpaceState &packet_space, Qu
     }
 
     if (!packet_space.pending_ack_deadline.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+        // # When only non-ack-eliciting packets need to
+        // # be acknowledged, an endpoint MAY choose not to send an ACK frame with
+        // # outgoing frames until an ack-eliciting packet has been received.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.1
+        // # Every packet SHOULD be acknowledged at least once, and
+        // # ack-eliciting packets MUST be acknowledged at least once within the
+        // # maximum delay an endpoint communicated using the max_ack_delay
+        // # transport parameter; see Section 18.2.
         packet_space.pending_ack_deadline =
             now + transport_parameter_milliseconds(max_ack_delay_ms);
     }
@@ -2196,17 +2230,28 @@ inline COQUIC_NO_PROFILE bool peer_connection_id_route_changed(
     return active_peer_connection_id_sequence != 0;
 }
 
-inline bool should_adopt_supported_client_version(EndpointRole role, std::uint32_t packet_version,
+inline bool should_adopt_supported_client_version(EndpointRole role,
+                                                  std::span<const std::uint32_t> supported_versions,
+                                                  std::uint32_t packet_version,
                                                   std::uint32_t current_version) {
     return (role == EndpointRole::client) & (current_version == kQuicVersion1) &
-           is_supported_quic_version(packet_version) & (packet_version != current_version);
+           supports_version(supported_versions, packet_version) &
+           (packet_version != current_version);
 }
 
-inline bool should_drop_wrong_version_client_long_header(EndpointRole role,
-                                                         std::uint32_t packet_version,
-                                                         std::uint32_t current_version) {
-    return role == EndpointRole::client && current_version != kQuicVersion1 &&
-           packet_version != current_version;
+inline bool should_drop_wrong_version_client_long_header(
+    EndpointRole role, std::span<const std::uint32_t> supported_versions,
+    std::uint32_t packet_version, std::uint32_t current_version) {
+    if (role != EndpointRole::client || packet_version == current_version) {
+        return false;
+    }
+    if (current_version == kQuicVersion1 && supports_version(supported_versions, packet_version)) {
+        return false;
+    }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.1
+    // # If a client receives a packet that uses a different version than it
+    // # initially selected, it MUST discard that packet.
+    return true;
 }
 
 inline std::optional<QuicCoreTimePoint>
@@ -2402,9 +2447,48 @@ max_stream_frame_payload_for_wire_budget(std::uint64_t stream_id,
 
 inline COQUIC_NO_PROFILE std::size_t
 short_header_minimum_payload_bytes_for_header_sample(std::uint8_t packet_number_length) {
-    return packet_number_length >= kShortHeaderProtectionSampleOffset
-               ? 0
-               : kShortHeaderProtectionSampleOffset - packet_number_length;
+    const auto header_protection_payload_bytes =
+        packet_number_length >= kShortHeaderProtectionSampleOffset
+            ? 0
+            : kShortHeaderProtectionSampleOffset - packet_number_length;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # To achieve that end, the endpoint SHOULD ensure that all packets it
+    // # sends are at least 22 bytes longer than the minimum connection ID length
+    // # that it requests the peer to include in its packets, adding PADDING
+    // # frames as necessary.
+    return header_protection_payload_bytes + 1;
+}
+
+inline COQUIC_NO_PROFILE std::uint8_t
+packet_number_length_for_send(const PacketSpaceState &packet_space, std::uint64_t packet_number) {
+    const auto largest_acked = packet_space.recovery.largest_acked_packet_number();
+    if (!largest_acked.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.1
+        // # Prior to receiving an acknowledgment for a packet number space, the
+        // # full packet number MUST be included; it is not to be truncated, as
+        // # described below.
+        return kFullPacketNumberLength;
+    }
+
+    const auto difference = packet_number >= *largest_acked ? packet_number - *largest_acked
+                                                            : *largest_acked - packet_number;
+    for (std::uint8_t packet_number_length = 1; packet_number_length < kFullPacketNumberLength;
+         ++packet_number_length) {
+        const auto range = std::uint64_t{1} << (packet_number_length * 8);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.1
+        // # After an acknowledgment is received for a packet number space, the
+        // # sender MUST use a packet number size able to represent more than
+        // # twice as large a range as the difference between the largest
+        // # acknowledged packet number and the packet number being sent.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.1
+        // # An endpoint SHOULD use a large enough packet number encoding to allow
+        // # the packet number to be recovered even if the packet arrives after
+        // # packets that are sent afterwards.
+        if (range > difference * 2u) {
+            return packet_number_length;
+        }
+    }
+    return kFullPacketNumberLength;
 }
 
 inline COQUIC_NO_PROFILE bool one_rtt_stream_frame_must_have_length(const StreamFrame *stream,
@@ -2748,7 +2832,7 @@ inline std::size_t sanitize_pmtud_base(std::size_t value) {
 inline std::size_t initial_congestion_datagram_size(const QuicCoreConfig &config) {
     auto datagram_size = config.transport.pmtud_enabled
                              ? sanitize_pmtud_base(config.transport.pmtud_base_datagram_size)
-                             : config.max_outbound_datagram_size;
+                             : kMinimumInitialDatagramSize;
     datagram_size = std::min(datagram_size, config.max_outbound_datagram_size);
     if (config.transport.pmtud_max_datagram_size != 0) {
         datagram_size = std::min(datagram_size, config.transport.pmtud_max_datagram_size);
@@ -3316,7 +3400,7 @@ pmtud_next_probe_time(const PathMtuState &mtu, QuicCoreTimePoint now,
                : std::nullopt;
 }
 
-inline COQUIC_NO_PROFILE bool should_reset_client_handshake_peer_state_for_source(
+inline COQUIC_NO_PROFILE bool should_discard_client_long_header_with_changed_source_for_source(
     EndpointRole role, HandshakeStatus status, bool handshake_confirmed,
     const std::optional<ConnectionId> &peer_source_connection_id,
     const ConnectionId &source_connection_id) {
@@ -3668,11 +3752,19 @@ has_pending_ack_only_path_validation_frame(const std::map<QuicPathId, PathState>
         return true;
     }
     if (!current_send_path_id.has_value()) {
-        return false;
+        return std::ranges::any_of(paths, [](const auto &entry) {
+            return entry.second.challenge_pending && entry.second.outstanding_challenge.has_value();
+        });
     }
     const auto path = paths.find(*current_send_path_id);
-    return path != paths.end() && path->second.challenge_pending &&
-           path->second.outstanding_challenge.has_value();
+    if (path != paths.end() && path->second.challenge_pending &&
+        path->second.outstanding_challenge.has_value()) {
+        return true;
+    }
+    return std::ranges::any_of(paths, [&](const auto &entry) {
+        return entry.first != *current_send_path_id && entry.second.challenge_pending &&
+               entry.second.outstanding_challenge.has_value();
+    });
 }
 
 inline COQUIC_NO_PROFILE void

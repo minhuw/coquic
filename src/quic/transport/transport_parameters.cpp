@@ -691,6 +691,8 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
     // # An endpoint MUST treat receipt of a transport parameter with an
     // # invalid value as a connection error of type
     // # TRANSPORT_PARAMETER_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # Values of 2^14 or greater are invalid.
     if (parameters.max_ack_delay >= maximum_max_ack_delay) {
         return validation_failure();
     }

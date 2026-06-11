@@ -763,6 +763,7 @@ make_endpoint_inputs_from_io_event(const io::QuicIoEvent &event) {
             inputs.push_back(quic::QuicCorePathMtuUpdate{
                 .route_handle = event.path_mtu->route_handle,
                 .max_udp_payload_size = event.path_mtu->max_udp_payload_size,
+                .quoted_packet = event.path_mtu->quoted_packet,
             });
         }
         return inputs;

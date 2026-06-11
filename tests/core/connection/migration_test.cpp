@@ -210,6 +210,71 @@ TEST(QuicCoreTest, PeerMigrationCarriesApplicationProbePayloadUnderAmplification
     EXPECT_FALSE(connection.application_space_.pending_probe_packet.has_value());
 }
 
+TEST(QuicCoreTest, ApparentMigrationAlsoValidatesPreviouslyActivePath) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.congestion_controller_.congestion_window_ = std::size_t{1024} * 1024u;
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 7, {coquic::quic::PingFrame{}}));
+    connection.ensure_path_state(7).anti_amplification_received_bytes = 4000;
+
+    ASSERT_TRUE(connection.paths_.contains(7));
+    ASSERT_TRUE(connection.paths_.contains(3));
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_EQ(connection.previous_path_id_, 3u);
+    EXPECT_TRUE(connection.paths_.at(7).challenge_pending);
+    EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.3
+    // # In response to an apparent migration, endpoints MUST validate the
+    // # previously active path using a PATH_CHALLENGE frame.
+    EXPECT_TRUE(connection.paths_.at(3).challenge_pending);
+    ASSERT_TRUE(connection.paths_.at(3).outstanding_challenge.has_value());
+    EXPECT_TRUE(connection.paths_.at(3).validation_probe_only);
+    const auto previous_path_challenge =
+        optional_value_or_terminate(connection.paths_.at(3).outstanding_challenge);
+
+    auto new_path_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(new_path_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 7u);
+    EXPECT_TRUE(connection.paths_.at(3).challenge_pending);
+
+    auto previous_path_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(previous_path_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 3u);
+
+    auto previous_path_packets = decode_sender_datagram(connection, previous_path_datagram);
+    ASSERT_EQ(previous_path_packets.size(), 1u);
+    const auto *previous_path_packet =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&previous_path_packets.front());
+    ASSERT_NE(previous_path_packet, nullptr);
+
+    bool saw_previous_path_challenge = false;
+    for (const auto &frame : previous_path_packet->frames) {
+        const auto *challenge = std::get_if<coquic::quic::PathChallengeFrame>(&frame);
+        if (challenge == nullptr) {
+            continue;
+        }
+        saw_previous_path_challenge |= challenge->data == previous_path_challenge;
+    }
+    EXPECT_TRUE(saw_previous_path_challenge);
+    EXPECT_FALSE(connection.paths_.at(3).challenge_pending);
+    EXPECT_TRUE(connection.paths_.at(3).outstanding_challenge.has_value());
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 3,
+        {coquic::quic::PathResponseFrame{
+            .data = previous_path_challenge,
+        }}));
+    EXPECT_TRUE(connection.paths_.at(3).validated);
+    EXPECT_FALSE(connection.paths_.at(3).validation_probe_only);
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+}
+
 TEST(QuicCoreTest, MatchingPathResponsePromotesValidatedPeerMigrationPath) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;
@@ -1118,8 +1183,8 @@ TEST(QuicCoreTest, PeerMigrationKeepsPendingSendPathDespiteOldPathTraffic) {
                                                                           .first_ack_range = 0,
                                                                       }}));
 
-    EXPECT_EQ(connection.current_send_path_id_, 7u);
-    EXPECT_EQ(connection.previous_path_id_, 3u);
+    EXPECT_EQ(connection.current_send_path_id_, 3u);
+    EXPECT_EQ(connection.previous_path_id_, 7u);
     EXPECT_FALSE(connection.paths_.at(7).validated);
     EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
 }
@@ -1148,7 +1213,7 @@ TEST(QuicCoreTest, PeerMigrationViolationOfDisableActiveMigrationStartsPathValid
     EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
 }
 
-TEST(QuicCoreTest, PeerMigrationKeepsValidatingPathAcrossHigherNumberedValidatedPathPacket) {
+TEST(QuicCoreTest, PeerMigrationFollowsHigherNumberedPacketBackToValidatedPath) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;
     connection.current_send_path_id_ = 3;
@@ -1177,12 +1242,12 @@ TEST(QuicCoreTest, PeerMigrationKeepsValidatingPathAcrossHigherNumberedValidated
                         /*packet_number=*/101)
                     .has_value());
 
-    EXPECT_EQ(connection.current_send_path_id_, 7u);
-    EXPECT_EQ(connection.previous_path_id_, 3u);
+    EXPECT_EQ(connection.current_send_path_id_, 3u);
+    EXPECT_EQ(connection.previous_path_id_, 7u);
     EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
 }
 
-TEST(QuicCoreTest, PeerMigrationRebindKeepsOutstandingChallengeAcrossValidatedPathTraffic) {
+TEST(QuicCoreTest, PeerMigrationRebindBouncePreservesOutstandingChallenge) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;
     connection.current_send_path_id_ = 3;
@@ -1210,7 +1275,7 @@ TEST(QuicCoreTest, PeerMigrationRebindKeepsOutstandingChallengeAcrossValidatedPa
                         /*path_id=*/3, /*used_previous_application_read_secret=*/false,
                         /*packet_number=*/102)
                     .has_value());
-    ASSERT_EQ(connection.current_send_path_id_, 7u);
+    ASSERT_EQ(connection.current_send_path_id_, 3u);
 
     ASSERT_TRUE(connection
                     .process_inbound_application(
@@ -1342,6 +1407,7 @@ TEST(QuicCoreTest, PreferredAddressMigrationSendsOnlyProbingFramesUntilValidated
     connection.ensure_path_state(3).validated = true;
     connection.ensure_path_state(3).is_current_send_path = true;
     connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+    connection.local_transport_parameters_.active_connection_id_limit = 8;
     auto &peer_parameters = optional_ref_or_terminate(connection.peer_transport_parameters_);
     peer_parameters.active_connection_id_limit = 8;
     peer_parameters.preferred_address = coquic::quic::PreferredAddress{
@@ -1415,6 +1481,109 @@ TEST(QuicCoreTest, PreferredAddressMigrationSendsOnlyProbingFramesUntilValidated
     EXPECT_TRUE(datagram_has_application_stream(connection, stream_datagram));
 }
 
+TEST(QuicCoreTest, PreferredAddressSuccessAbandonsOriginalAddressValidation) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+    connection.local_transport_parameters_.active_connection_id_limit = 8;
+    auto &peer_parameters = optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_parameters.active_connection_id_limit = 8;
+    peer_parameters.preferred_address = coquic::quic::PreferredAddress{
+        .ipv4_address = {std::byte{127}, std::byte{0}, std::byte{0}, std::byte{2}},
+        .ipv4_port = 4444,
+        .connection_id = bytes_from_ints({0x41, 0x42}),
+    };
+    install_spare_peer_connection_id(connection);
+    connection.peer_connection_ids_[3] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 3,
+        .connection_id = bytes_from_ints({0x33, 0x34}),
+    };
+
+    connection.start_path_validation(9, /*initiated_locally=*/true,
+                                     coquic::quic::test::test_time(1));
+    ASSERT_TRUE(connection.paths_.contains(9));
+    ASSERT_TRUE(connection.paths_.at(9).outstanding_challenge.has_value());
+    const auto original_address_challenge =
+        optional_value_or_terminate(connection.paths_.at(9).outstanding_challenge);
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::preferred_address,
+        coquic::quic::test::test_time(2));
+    ASSERT_TRUE(requested.has_value());
+    ASSERT_TRUE(connection.paths_.contains(7));
+    ASSERT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+    const auto preferred_address_challenge =
+        optional_value_or_terminate(connection.paths_.at(7).outstanding_challenge);
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 7,
+        {coquic::quic::PathResponseFrame{
+            .data = preferred_address_challenge,
+        }}));
+
+    ASSERT_TRUE(connection.paths_.at(7).validated);
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.3
+    // # If path validation of the server's preferred address succeeds, the
+    // # client MUST abandon validation of the original address and migrate to
+    // # using the server's preferred address.
+    EXPECT_FALSE(connection.paths_.at(9).challenge_pending);
+    EXPECT_FALSE(connection.paths_.at(9).outstanding_challenge.has_value());
+    EXPECT_FALSE(connection.paths_.at(9).validation_deadline.has_value());
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 9,
+        {coquic::quic::PathResponseFrame{
+            .data = original_address_challenge,
+        }}));
+
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_FALSE(connection.paths_.at(9).validated);
+}
+
+TEST(QuicCoreTest, PreferredAddressMigrationValidatesOriginalAddressConcurrently) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+    connection.local_transport_parameters_.active_connection_id_limit = 8;
+    auto &peer_parameters = optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_parameters.active_connection_id_limit = 8;
+    peer_parameters.preferred_address = coquic::quic::PreferredAddress{
+        .ipv4_address = {std::byte{127}, std::byte{0}, std::byte{0}, std::byte{2}},
+        .ipv4_port = 4444,
+        .connection_id = bytes_from_ints({0x41, 0x42}),
+    };
+    install_spare_peer_connection_id(connection);
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::preferred_address,
+        coquic::quic::test::test_time(2));
+
+    ASSERT_TRUE(requested.has_value());
+    ASSERT_TRUE(connection.paths_.contains(3));
+    ASSERT_TRUE(connection.paths_.contains(7));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.3
+    // # In this case, the client SHOULD perform path validation to both the
+    // # original and preferred server address from the client's new address
+    // # concurrently.
+    EXPECT_TRUE(connection.paths_.at(3).challenge_pending);
+    EXPECT_TRUE(connection.paths_.at(3).outstanding_challenge.has_value());
+    EXPECT_TRUE(connection.paths_.at(3).validation_probe_only);
+    EXPECT_TRUE(connection.paths_.at(7).challenge_pending);
+    EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+    EXPECT_FALSE(connection.paths_.at(7).validation_probe_only);
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_EQ(connection.previous_path_id_, 3u);
+}
+
 TEST(QuicCoreTest, PreferredAddressValidationFailureContinuesOnOriginalPath) {
     auto connection = make_connected_client_connection();
     connection.paths_.clear();
@@ -1446,6 +1615,11 @@ TEST(QuicCoreTest, PreferredAddressValidationFailureContinuesOnOriginalPath) {
     connection.paths_.at(7).validation_deadline = coquic::quic::test::test_time(2);
     connection.on_timeout(coquic::quic::test::test_time(3));
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.3
+    // # If path validation of the server's preferred address fails but
+    // # validation of the server's original address succeeds, the client MAY
+    // # migrate to its new address and continue sending to the server's
+    // # original address.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
     // # If path validation fails, the client MUST continue sending all future
     // # packets to the server's original IP address.
@@ -1460,6 +1634,78 @@ TEST(QuicCoreTest, PreferredAddressValidationFailureContinuesOnOriginalPath) {
     auto stream_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(4));
     ASSERT_FALSE(stream_datagram.empty());
     EXPECT_EQ(connection.last_drained_path_id(), 3u);
+}
+
+TEST(QuicCoreTest, PreferredAddressSuccessDropsNewerPacketsOnOldPath) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 7;
+    auto &old_path = connection.ensure_path_state(3);
+    old_path.validated = true;
+    old_path.largest_inbound_application_packet_number = 100;
+    auto &preferred_path = connection.ensure_path_state(7);
+    preferred_path.validated = true;
+    preferred_path.is_current_send_path = true;
+    preferred_path.preferred_address_path = true;
+    connection.streams_.clear();
+
+    auto dropped = connection.process_inbound_application(
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::StreamFrame{
+                .has_offset = true,
+                .has_length = true,
+                .stream_id = 0,
+                .offset = 0,
+                .stream_data = coquic::quic::test::bytes_from_string("old-path"),
+            },
+        },
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/3,
+        /*used_previous_application_read_secret=*/false, /*packet_number=*/101);
+
+    ASSERT_TRUE(dropped.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+    // # The server SHOULD drop newer packets for this connection that are
+    // # received on the old IP address.
+    EXPECT_FALSE(connection.streams_.contains(0));
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 100u);
+}
+
+TEST(QuicCoreTest, PreferredAddressSuccessDropsNewerReceivedStreamPacketOnOldPath) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_inbound_path_id_ = 3;
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 7;
+    auto &old_path = connection.ensure_path_state(3);
+    old_path.validated = true;
+    old_path.largest_inbound_application_packet_number = 100;
+    auto &preferred_path = connection.ensure_path_state(7);
+    preferred_path.validated = true;
+    preferred_path.is_current_send_path = true;
+    preferred_path.preferred_address_path = true;
+    connection.streams_.clear();
+
+    auto dropped = connection.process_inbound_received_application_stream_packet(
+        101, /*spin_bit=*/false,
+        coquic::quic::ReceivedStreamFrame{
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 0,
+            .stream_data =
+                coquic::quic::SharedBytes(coquic::quic::test::bytes_from_string("old-path")),
+        },
+        coquic::quic::test::test_time(1), coquic::quic::QuicEcnCodepoint::not_ect);
+
+    ASSERT_TRUE(dropped.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+    // # The server SHOULD drop newer packets for this connection that are
+    // # received on the old IP address.
+    EXPECT_FALSE(connection.streams_.contains(0));
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 100u);
 }
 
 TEST(QuicCoreTest, PreferredAddressMigrationDefersOldCidRetirementUntilAfterPathResponse) {

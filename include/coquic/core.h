@@ -125,6 +125,8 @@ struct TransportConfig {
     bool enable_hystart_plus_plus = true;
     bool send_stream_fairness = true;
     //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+    // # The spin bit is an OPTIONAL feature of this version of QUIC.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
     // # Implementations MUST allow administrators of clients and servers to
     // # disable the spin bit either globally or on a per-connection basis.
     bool enable_latency_spin_bit = false;
@@ -152,6 +154,7 @@ struct EndpointConfig {
     std::vector<std::uint32_t> supported_versions = {1};
     bool verify_peer = true;
     bool retry_enabled = false;
+    std::size_t max_server_connections = 0;
     std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
     TransportConfig transport;

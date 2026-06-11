@@ -51,6 +51,7 @@ struct QuicIoEnginePathMtuUpdate {
     sockaddr_storage peer{};
     socklen_t peer_len = 0;
     std::size_t max_udp_payload_size = 0;
+    std::vector<std::byte> quoted_packet;
     quic::QuicCoreTimePoint now{};
 };
 

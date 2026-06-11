@@ -420,6 +420,7 @@ TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
     endpoint_config.emit_shared_receive_stream_data = 1;
     endpoint_config.enable_packet_inspection = 1;
     endpoint_config.allow_peer_address_change = 0;
+    endpoint_config.max_server_connections = 8;
 
     coquic_endpoint_t *endpoint = nullptr;
     ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);

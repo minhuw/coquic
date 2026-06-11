@@ -123,6 +123,7 @@ struct PathMtuUpdateResult {
     std::size_t max_udp_payload_size = 0;
     sockaddr_storage peer{};
     socklen_t peer_len = 0;
+    std::vector<std::byte> quoted_packet;
     QuicCoreTimePoint input_time{};
 };
 

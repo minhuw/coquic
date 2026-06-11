@@ -1349,6 +1349,64 @@ TEST(QuicCoreTest, MatchingPathResponseValidatesCandidatePath) {
     EXPECT_EQ(connection.last_validated_path_id_, 7u);
 }
 
+TEST(QuicCoreTest, ResponseToSmallPathChallengeQueuesExpandedPathValidation) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 9, {coquic::quic::PingFrame{}}));
+    connection.ensure_path_state(9).anti_amplification_received_bytes = 300;
+
+    auto first_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first_datagram.empty());
+    EXPECT_LT(first_datagram.size(), 1200u);
+
+    auto first_packets = decode_sender_datagram(connection, first_datagram);
+    ASSERT_EQ(first_packets.size(), 1u);
+    auto *first_packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&first_packets.front());
+    ASSERT_NE(first_packet, nullptr);
+    std::optional<std::array<std::byte, 8>> first_challenge;
+    for (const auto &frame : first_packet->frames) {
+        if (const auto *challenge = std::get_if<coquic::quic::PathChallengeFrame>(&frame)) {
+            first_challenge = challenge->data;
+        }
+    }
+    ASSERT_TRUE(first_challenge.has_value());
+    const auto first_challenge_value = optional_value_or_terminate(first_challenge);
+    EXPECT_FALSE(connection.paths_.at(9).outstanding_challenge_sent_with_expanded_datagram);
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 9, {coquic::quic::PathResponseFrame{.data = first_challenge_value}}));
+    ASSERT_TRUE(connection.paths_.contains(9));
+    EXPECT_TRUE(connection.paths_.at(9).validated);
+    EXPECT_TRUE(connection.paths_.at(9).path_mtu_validation_pending);
+    EXPECT_TRUE(connection.paths_.at(9).challenge_pending);
+    ASSERT_TRUE(connection.paths_.at(9).outstanding_challenge.has_value());
+    auto expanded_challenge =
+        optional_ref_or_terminate(connection.paths_.at(9).outstanding_challenge);
+    EXPECT_NE(expanded_challenge, first_challenge_value);
+
+    auto expanded_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(expanded_datagram.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+    // # To ensure that the path MTU is large enough, the endpoint
+    // # MUST perform a second path validation by sending a PATH_CHALLENGE
+    // # frame in a datagram of at least 1200 bytes.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.3
+    // # However, the endpoint MUST initiate another path validation with
+    // # an expanded datagram to verify that the path supports the required MTU.
+    EXPECT_GE(expanded_datagram.size(), 1200u);
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 9, {coquic::quic::PathResponseFrame{.data = expanded_challenge}}));
+    EXPECT_FALSE(connection.paths_.at(9).path_mtu_validation_pending);
+    EXPECT_FALSE(connection.paths_.at(9).challenge_pending);
+    EXPECT_FALSE(connection.paths_.at(9).outstanding_challenge.has_value());
+}
+
 TEST(QuicCoreTest, MatchingPathResponseSwitchesCurrentSendPathToValidatedPath) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;

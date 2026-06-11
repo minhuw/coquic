@@ -34,6 +34,18 @@ crypto_ack_delay_parameters(EncryptionLevel level,
     };
 }
 
+CodecError crypto_receive_error(const CodecError &error) {
+    if (error.code != CodecErrorCode::crypto_buffer_exceeded) {
+        return error;
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+    // # If an endpoint does not expand its buffer, it MUST close the
+    // # connection with a CRYPTO_BUFFER_EXCEEDED error code.
+    return transport_codec_error(error.code, QuicTransportErrorCode::crypto_buffer_exceeded,
+                                 kFrameTypeCrypto, error.offset);
+}
+
 } // namespace
 
 CodecResult<ConnectionId> QuicConnection::peek_client_initial_destination_connection_id(
@@ -238,10 +250,12 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
             using PacketType = std::decay_t<decltype(protected_packet)>;
             if constexpr (std::is_same_v<PacketType, ProtectedInitialPacket>) {
                 if (should_drop_wrong_version_client_long_header(
-                        config_.role, protected_packet.version, current_version_)) {
+                        config_.role, config_.supported_versions, protected_packet.version,
+                        current_version_)) {
                     return CodecResult<bool>::success(true);
                 }
-                if (should_adopt_supported_client_version(config_.role, protected_packet.version,
+                if (should_adopt_supported_client_version(config_.role, config_.supported_versions,
+                                                          protected_packet.version,
                                                           current_version_)) {
                     current_version_ = protected_packet.version;
                 }
@@ -256,6 +270,21 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                 if (initial_packet_space_discarded_) {
                     return CodecResult<bool>::success(true);
                 }
+                if (should_discard_client_long_header_with_changed_source(
+                        protected_packet.source_connection_id)) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+                    // # Once a client has received a valid Initial packet from
+                    // # the server, it MUST discard any subsequent packet it
+                    // # receives on that connection with a different Source
+                    // # Connection ID.
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+                    // # Any further changes to the Destination Connection ID are
+                    // # only permitted if the values are taken from
+                    // # NEW_CONNECTION_ID frames; if subsequent Initial packets
+                    // # include a different Source Connection ID, they MUST be
+                    // # discarded.
+                    return CodecResult<bool>::success(true);
+                }
                 const bool duplicate_initial_packet =
                     should_ignore_received_packet(initial_space_, protected_packet.packet_number);
                 note_authenticated_packet_number(initial_space_, protected_packet.packet_number);
@@ -268,10 +297,6 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                         queue_server_handshake_recovery_probes();
                     }
                     return CodecResult<bool>::success(true);
-                }
-                if (should_reset_client_handshake_peer_state(
-                        protected_packet.source_connection_id)) {
-                    reset_client_handshake_peer_state_for_new_source_connection_id();
                 }
                 const bool route_changed = peer_connection_id_route_changed(
                     peer_connection_ids_, protected_packet.source_connection_id,
@@ -325,14 +350,25 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                 return processed;
             } else if constexpr (std::is_same_v<PacketType, ProtectedHandshakePacket>) {
                 if (should_drop_wrong_version_client_long_header(
-                        config_.role, protected_packet.version, current_version_)) {
+                        config_.role, config_.supported_versions, protected_packet.version,
+                        current_version_)) {
                     return CodecResult<bool>::success(true);
                 }
-                if (should_adopt_supported_client_version(config_.role, protected_packet.version,
+                if (should_adopt_supported_client_version(config_.role, config_.supported_versions,
+                                                          protected_packet.version,
                                                           current_version_)) {
                     current_version_ = protected_packet.version;
                 }
                 if (handshake_packet_space_discarded_) {
+                    return CodecResult<bool>::success(true);
+                }
+                if (should_discard_client_long_header_with_changed_source(
+                        protected_packet.source_connection_id)) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+                    // # Once a client has received a valid Initial packet from
+                    // # the server, it MUST discard any subsequent packet it
+                    // # receives on that connection with a different Source
+                    // # Connection ID.
                     return CodecResult<bool>::success(true);
                 }
                 if (should_ignore_received_packet(handshake_space_,
@@ -344,10 +380,6 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                         has_ack_eliciting_frame(protected_packet.frames), now, ecn,
                         config_.transport.ack_eliciting_threshold);
                     return CodecResult<bool>::success(true);
-                }
-                if (should_reset_client_handshake_peer_state(
-                        protected_packet.source_connection_id)) {
-                    reset_client_handshake_peer_state_for_new_source_connection_id();
                 }
                 const bool route_changed = peer_connection_id_route_changed(
                     peer_connection_ids_, protected_packet.source_connection_id,
@@ -514,10 +546,12 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
             using PacketType = std::decay_t<decltype(protected_packet)>;
             if constexpr (std::is_same_v<PacketType, ReceivedProtectedInitialPacket>) {
                 if (should_drop_wrong_version_client_long_header(
-                        config_.role, protected_packet.version, current_version_)) {
+                        config_.role, config_.supported_versions, protected_packet.version,
+                        current_version_)) {
                     return CodecResult<bool>::success(true);
                 }
-                if (should_adopt_supported_client_version(config_.role, protected_packet.version,
+                if (should_adopt_supported_client_version(config_.role, config_.supported_versions,
+                                                          protected_packet.version,
                                                           current_version_)) {
                     current_version_ = protected_packet.version;
                 }
@@ -532,6 +566,21 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 if (initial_packet_space_discarded_) {
                     return CodecResult<bool>::success(true);
                 }
+                if (should_discard_client_long_header_with_changed_source(
+                        protected_packet.source_connection_id)) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+                    // # Once a client has received a valid Initial packet from
+                    // # the server, it MUST discard any subsequent packet it
+                    // # receives on that connection with a different Source
+                    // # Connection ID.
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+                    // # Any further changes to the Destination Connection ID are
+                    // # only permitted if the values are taken from
+                    // # NEW_CONNECTION_ID frames; if subsequent Initial packets
+                    // # include a different Source Connection ID, they MUST be
+                    // # discarded.
+                    return CodecResult<bool>::success(true);
+                }
                 const bool duplicate_initial_packet =
                     should_ignore_received_packet(initial_space_, protected_packet.packet_number);
                 note_authenticated_packet_number(initial_space_, protected_packet.packet_number);
@@ -544,10 +593,6 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                         queue_server_handshake_recovery_probes();
                     }
                     return CodecResult<bool>::success(true);
-                }
-                if (should_reset_client_handshake_peer_state(
-                        protected_packet.source_connection_id)) {
-                    reset_client_handshake_peer_state_for_new_source_connection_id();
                 }
                 const bool route_changed = peer_connection_id_route_changed(
                     peer_connection_ids_, protected_packet.source_connection_id,
@@ -586,14 +631,25 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 return processed;
             } else if constexpr (std::is_same_v<PacketType, ReceivedProtectedHandshakePacket>) {
                 if (should_drop_wrong_version_client_long_header(
-                        config_.role, protected_packet.version, current_version_)) {
+                        config_.role, config_.supported_versions, protected_packet.version,
+                        current_version_)) {
                     return CodecResult<bool>::success(true);
                 }
-                if (should_adopt_supported_client_version(config_.role, protected_packet.version,
+                if (should_adopt_supported_client_version(config_.role, config_.supported_versions,
+                                                          protected_packet.version,
                                                           current_version_)) {
                     current_version_ = protected_packet.version;
                 }
                 if (handshake_packet_space_discarded_) {
+                    return CodecResult<bool>::success(true);
+                }
+                if (should_discard_client_long_header_with_changed_source(
+                        protected_packet.source_connection_id)) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+                    // # Once a client has received a valid Initial packet from
+                    // # the server, it MUST discard any subsequent packet it
+                    // # receives on that connection with a different Source
+                    // # Connection ID.
                     return CodecResult<bool>::success(true);
                 }
                 if (should_ignore_received_packet(handshake_space_,
@@ -605,10 +661,6 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                         has_ack_eliciting_frame(protected_packet.frames), now, ecn,
                         config_.transport.ack_eliciting_threshold);
                     return CodecResult<bool>::success(true);
-                }
-                if (should_reset_client_handshake_peer_state(
-                        protected_packet.source_connection_id)) {
-                    reset_client_handshake_peer_state_for_new_source_connection_id();
                 }
                 const bool route_changed = peer_connection_id_route_changed(
                     peer_connection_ids_, protected_packet.source_connection_id,
@@ -811,7 +863,8 @@ std::optional<std::uint64_t> QuicConnection::reserve_packet_number(PacketSpaceSt
         //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
         // # If the packet number for sending reaches 2^62-1, the sender MUST
         // # close the connection without sending a CONNECTION_CLOSE frame or any
-        // # further packets;
+        // # further packets; an endpoint MAY send a Stateless Reset (Section 10.3)
+        // # in response to further packets that it receives.
         mark_silent_close();
         return std::nullopt;
     }
@@ -834,6 +887,9 @@ std::optional<std::uint64_t> QuicConnection::reserve_packet_number(PacketSpaceSt
     ++packet_space.optimistic_ack_skip_counter;
     if (should_skip_packet_number_for_optimistic_ack_detection(
             packet_space, packet_space.next_send_packet_number)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-21.4
+        // # An endpoint MAY skip packet numbers when sending packets to detect
+        // # this behavior.
         packet_space.optimistic_ack_skipped_packet_numbers.push_back(
             packet_space.next_send_packet_number);
         ++packet_space.next_send_packet_number;
@@ -968,6 +1024,7 @@ CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
 
         if (std::holds_alternative<TransportConnectionCloseFrame>(frame)) {
             enter_draining_state(now);
+            note_peer_progress();
             continue;
         }
 
@@ -975,7 +1032,11 @@ CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
                                                 (level == EncryptionLevel::application) &
                                                 std::holds_alternative<HandshakeDoneFrame>(frame);
         if (application_handshake_done) {
+            const bool handshake_was_confirmed = handshake_confirmed_;
             confirm_handshake();
+            if (!handshake_was_confirmed && handshake_confirmed_) {
+                note_peer_progress();
+            }
             continue;
         }
 
@@ -986,7 +1047,7 @@ CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
         const auto contiguous_bytes =
             packet_space.receive_crypto.push(crypto_frame->offset, crypto_frame->crypto_data);
         if (!contiguous_bytes.has_value()) {
-            return CodecResult<bool>::failure(contiguous_bytes.error());
+            return CodecResult<bool>::failure(crypto_receive_error(contiguous_bytes.error()));
         }
         if (contiguous_bytes.value().empty()) {
             continue;
@@ -1010,6 +1071,7 @@ CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
             return provided;
         }
 
+        note_peer_progress();
         install_available_secrets();
         collect_pending_tls_bytes();
     }
@@ -1046,6 +1108,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_crypto(
 
         if (std::holds_alternative<TransportConnectionCloseFrame>(frame)) {
             enter_draining_state(now);
+            note_peer_progress();
             continue;
         }
 
@@ -1053,7 +1116,11 @@ CodecResult<bool> QuicConnection::process_inbound_received_crypto(
                                                 (level == EncryptionLevel::application) &
                                                 std::holds_alternative<HandshakeDoneFrame>(frame);
         if (application_handshake_done) {
+            const bool handshake_was_confirmed = handshake_confirmed_;
             confirm_handshake();
+            if (!handshake_was_confirmed && handshake_confirmed_) {
+                note_peer_progress();
+            }
             continue;
         }
 
@@ -1064,7 +1131,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_crypto(
         const auto contiguous_bytes = packet_space.receive_crypto.push_shared(
             crypto_frame->offset, crypto_frame->crypto_data);
         if (!contiguous_bytes.has_value()) {
-            return CodecResult<bool>::failure(contiguous_bytes.error());
+            return CodecResult<bool>::failure(crypto_receive_error(contiguous_bytes.error()));
         }
         if (contiguous_bytes.value().empty()) {
             continue;
@@ -1088,6 +1155,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_crypto(
             return provided;
         }
 
+        note_peer_progress();
         install_available_secrets();
         collect_pending_tls_bytes();
     }
@@ -1167,6 +1235,12 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
     auto ack_result = packet_space.recovery.apply_ack_received(cursor, largest_acknowledged, now);
     if (send_profile_enabled()) {
         ++send_profile_counters().ack_frames;
+    }
+    const bool ack_made_progress =
+        !ack_result.acked_packets.empty() || !ack_result.late_acked_packets.empty() ||
+        !ack_result.lost_packets.empty() || ack_result.largest_acknowledged_was_newly_acked;
+    if (ack_made_progress) {
+        note_peer_progress();
     }
     maybe_complete_local_key_update_from_ack(packet_space, ack_result);
     auto &acked_packets = acked_packet_scratch_;
@@ -1342,6 +1416,10 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
                 path.ecn.last_peer_counts[packet_space_index] = current_counts;
                 path.ecn.has_last_peer_counts[packet_space_index] = true;
                 if (path.ecn.state == QuicPathEcnState::probing) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+                    // # Upon successful validation, an endpoint MAY continue
+                    // # to set an ECT codepoint in subsequent packets it sends,
+                    // # with the expectation that the path is ECN capable.
                     path.ecn.probing_packets_acked +=
                         summary.newly_acked_ect0 + summary.newly_acked_ect1;
                     path.ecn.state = QuicPathEcnState::capable;
@@ -2220,6 +2298,10 @@ bool QuicConnection::process_simple_stream_ack_ecn(
         path.ecn.last_peer_counts[packet_space_index] = current_counts;
         path.ecn.has_last_peer_counts[packet_space_index] = true;
         if (should_mark_ecn_probing_path_capable(path.ecn.state)) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+            // # Upon successful validation, an endpoint MAY continue to set an
+            // # ECT codepoint in subsequent packets it sends, with the
+            // # expectation that the path is ECN capable.
             path.ecn.probing_packets_acked += summary.newly_acked_ect0 + summary.newly_acked_ect1;
             path.ecn.state = QuicPathEcnState::capable;
         }
@@ -2283,6 +2365,10 @@ bool QuicConnection::process_single_path_simple_stream_ack_ecn(
     path.ecn.last_peer_counts[packet_space_index] = current_counts;
     path.ecn.has_last_peer_counts[packet_space_index] = true;
     if (path.ecn.state == QuicPathEcnState::probing) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
+        // # Upon successful validation, an endpoint MAY continue to set an ECT
+        // # codepoint in subsequent packets it sends, with the expectation
+        // # that the path is ECN capable.
         path.ecn.probing_packets_acked += newly_acked_ect0 + newly_acked_ect1;
         path.ecn.state = QuicPathEcnState::capable;
     }
@@ -2574,7 +2660,11 @@ QuicConnection::mark_lost_packet(PacketSpaceState &packet_space, RecoveryPacketH
     if (packet_space_is_application(packet_space, application_space_) &&
         current_send_path_id_.has_value()) {
         auto &path = ensure_path_state(*current_send_path_id_);
-        if (!path.validated & path.outstanding_challenge.has_value()) {
+        if ((!path.validated || path.path_mtu_validation_pending) &&
+            path.outstanding_challenge.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
+            // # An endpoint MAY send multiple PATH_CHALLENGE frames to guard
+            // # against packet loss.
             path.challenge_pending = true;
         }
     }
@@ -2742,6 +2832,13 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                   << " cwnd=" << congestion_controller_.congestion_window()
                   << " bif=" << congestion_controller_.bytes_in_flight() << '\n';
     }
+    if (!is_probing_only(frames) &&
+        should_drop_inbound_packet_on_old_path_after_preferred_success(path_id, packet_number)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+        // # The server SHOULD drop newer packets for this connection that are
+        // # received on the old IP address.
+        return CodecResult<bool>::success(true);
+    }
     if (path_id != current_send_path_id_.value_or(path_id) && !is_probing_only(frames) &&
         !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
@@ -2753,7 +2850,11 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
         // # An endpoint MUST perform path validation (Section 8.2) if it detects
         // # any change to a peer's address, unless it has previously validated
         // # that address.
+        const auto previous_send_path_id = current_send_path_id_;
         maybe_switch_to_path(path_id, /*initiated_locally=*/false, now);
+        if (current_send_path_id_ != previous_send_path_id) {
+            note_peer_progress();
+        }
     }
     if (!paths_.empty() | (path_id != 0) | current_send_path_id_.has_value()) {
         ensure_path_state(path_id);
@@ -2796,7 +2897,13 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             const auto contiguous_bytes = application_space_.receive_crypto.push(
                 crypto_frame->offset, crypto_frame->crypto_data);
             if (!contiguous_bytes.has_value()) {
-                return CodecResult<bool>::failure(contiguous_bytes.error());
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+                // # Once the handshake completes, if an endpoint is unable to
+                // # buffer all data in a CRYPTO frame, it MAY discard that
+                // # CRYPTO frame and all CRYPTO frames received in the future, or
+                // # it MAY close the connection with a CRYPTO_BUFFER_EXCEEDED
+                // # error code.
+                return CodecResult<bool>::failure(crypto_receive_error(contiguous_bytes.error()));
             }
             if (contiguous_bytes.value().empty()) {
                 continue;
@@ -2817,6 +2924,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 return provided;
             }
 
+            note_peer_progress();
             install_available_secrets();
             collect_pending_tls_bytes();
             continue;
@@ -2846,6 +2954,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 continue;
             }
 
+            const auto stream_count_before = streams_.size();
             auto stream = get_or_open_receive_stream(stream_frame->stream_id);
             if (!stream.has_value()) {
                 return CodecResult<bool>::failure(
@@ -2869,6 +2978,11 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             // # An endpoint MUST terminate a connection with an error of type
             // # FLOW_CONTROL_ERROR if it receives more data than the maximum data
             // # value that it has sent.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+            // # A server SHOULD treat a violation of remembered limits
+            // # (Section 7.4.1) as a connection error of an appropriate type
+            // # (for instance, a FLOW_CONTROL_ERROR for exceeding stream data
+            // # limits).
             if (connection_flow_control_.received_committed >
                     connection_flow_control_.advertised_max_data ||
                 received_delta > connection_flow_control_.advertised_max_data -
@@ -2877,6 +2991,9 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                     flow_control_error(stream_frame_type_for(*stream_frame)));
             }
             connection_flow_control_.received_committed += received_delta;
+            if (streams_.size() != stream_count_before || received_delta != 0) {
+                note_peer_progress();
+            }
 
             auto owned_contiguous_bytes =
                 stream_state->receive_buffer.push(stream_offset, stream_frame->stream_data);
@@ -2903,6 +3020,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 stream_state->receive_flow_control_consumed == *stream_state->peer_final_size &&
                 !stream_state->peer_fin_delivered;
             if (contiguous_size != 0 || fin_ready) {
+                note_peer_progress();
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
                 // # Endpoints MUST be able to deliver stream data to an
                 // # application as an ordered byte stream.
@@ -2959,6 +3077,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             // # When a QUIC endpoint receives a valid DATAGRAM frame, it SHOULD
             // # deliver the data to the application immediately, as long as it is
             // # able to process the frame and can store the contents in memory.
+            note_peer_progress();
             pending_datagram_receive_effects_.push_back(QuicCoreReceiveDatagramData{
                 .bytes = datagram_frame->data,
             });
@@ -3000,6 +3119,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 .application_error_code = reset_stream->application_protocol_error_code,
                 .final_size = reset_stream->final_size,
             });
+            note_peer_progress();
             maybe_refresh_peer_stream_limit(*stream_state);
             maybe_retire_stream(reset_stream->stream_id);
             continue;
@@ -3032,6 +3152,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 .stream_id = stop_sending->stream_id,
                 .application_error_code = stop_sending->application_protocol_error_code,
             });
+            note_peer_progress();
             continue;
         }
 
@@ -3041,7 +3162,11 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeMaxData));
             }
 
+            const auto previous_peer_max_data = connection_flow_control_.peer_max_data;
             connection_flow_control_.note_peer_max_data(max_data->maximum_data);
+            if (connection_flow_control_.peer_max_data != previous_peer_max_data) {
+                note_peer_progress();
+            }
             if (cached_total_queued_stream_bytes() <= connection_flow_control_.peer_max_data) {
                 connection_flow_control_.pending_data_blocked_frame = std::nullopt;
                 connection_flow_control_.data_blocked_state = StreamControlFrameState::none;
@@ -3068,7 +3193,12 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 fresh_sendable_bytes_for_cache(*stream_state);
             const auto previous_has_lost_send_data =
                 stream_has_lost_send_data_for_state_change(*stream_state);
+            const auto previous_peer_max_stream_data =
+                stream_state->flow_control.peer_max_stream_data;
             stream_state->note_peer_max_stream_data(max_stream_data->maximum_stream_data);
+            if (stream_state->flow_control.peer_max_stream_data != previous_peer_max_stream_data) {
+                note_peer_progress();
+            }
             note_stream_send_state_changed(previous_fresh_sendable_bytes,
                                            previous_has_lost_send_data, *stream_state);
             continue;
@@ -3080,8 +3210,16 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                     protocol_violation_error(frame_type_for_max_streams(max_streams->stream_type)));
             }
 
+            auto *previous_peer_max_streams =
+                max_streams->stream_type == StreamLimitType::bidirectional
+                    ? &stream_open_limits_.peer_max_bidirectional
+                    : &stream_open_limits_.peer_max_unidirectional;
+            const auto previous_limit = *previous_peer_max_streams;
             stream_open_limits_.note_peer_max_streams(max_streams->stream_type,
                                                       max_streams->maximum_streams);
+            if (*previous_peer_max_streams != previous_limit) {
+                note_peer_progress();
+            }
             continue;
         }
 
@@ -3091,8 +3229,10 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             }
 
             maybe_refresh_connection_credit_for_data_blocked(
-                *data_blocked, connection_flow_control_,
-                [&] { maybe_refresh_connection_receive_credit(/*force=*/true); });
+                *data_blocked, connection_flow_control_, [&] {
+                    maybe_refresh_connection_receive_credit(/*force=*/true);
+                    note_peer_progress();
+                });
             continue;
         }
 
@@ -3114,6 +3254,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             auto *stream_state = stream.value();
             maybe_refresh_stream_credit_for_data_blocked(*stream_data_blocked, *stream_state, [&] {
                 maybe_refresh_stream_receive_credit(*stream_state, /*force=*/true);
+                note_peer_progress();
             });
             continue;
         }
@@ -3128,9 +3269,13 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
         }
 
         if (const auto *new_connection_id = std::get_if<NewConnectionIdFrame>(&frame)) {
+            const auto previous_endpoint_route_generation = endpoint_route_generation();
             const auto stored = process_new_connection_id_frame(*new_connection_id);
             if (!stored.has_value()) {
                 return CodecResult<bool>::failure(stored.error());
+            }
+            if (endpoint_route_generation() != previous_endpoint_route_generation) {
+                note_peer_progress();
             }
             continue;
         }
@@ -3146,6 +3291,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             }
 
             respond_to_path_challenge(path_id, path_challenge->data);
+            note_peer_progress();
             continue;
         }
 
@@ -3171,23 +3317,21 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 had_outstanding_challenge &&
                 path->outstanding_challenge.value() == path_response->data;
             if (matched_outstanding_challenge) {
+                const bool validation_probe_only = path->validation_probe_only;
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
                 // # This requirement MUST NOT be enforced by the endpoint
                 // # that initiates path validation, as that would enable an
                 // # attack on migration; see Section 9.3.3.
-                path->validated = true;
-                path->challenge_pending = false;
-                path->validation_initiated_locally = false;
-                path->outstanding_challenge.reset();
-                path->validation_deadline.reset();
-                last_validated_path_id_ = validated_path_id;
-                if (current_send_path_id_ != validated_path_id) {
+                complete_path_validation(validated_path_id, *path, now);
+                note_peer_progress();
+                if (current_send_path_id_ != validated_path_id && !validation_probe_only) {
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
                     // # As soon as path validation succeeds, the client SHOULD begin sending
                     // # all future packets to the new server address using the new connection
                     // # ID and discontinue use of the old server address.
                     maybe_switch_to_path(validated_path_id, /*initiated_locally=*/false, now);
                 }
+                abandon_original_address_validation_after_preferred_success(validated_path_id);
                 if (current_send_path_id_ == validated_path_id && previous_path_id_.has_value()) {
                     retire_peer_connection_id_for_inactive_path(*previous_path_id_,
                                                                 validated_path_id);
@@ -3216,6 +3360,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                     frame_not_allowed_protocol_violation_error(kFrameTypeNewToken));
             }
             pending_received_new_tokens_.push_back(new_token->token);
+            note_peer_progress();
             continue;
         }
 
@@ -3224,6 +3369,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
         bool has_application_close = std::holds_alternative<ApplicationConnectionCloseFrame>(frame);
         if (has_transport_close | has_application_close) {
             enter_draining_state(now);
+            note_peer_progress();
             continue;
         }
 
@@ -3236,14 +3382,22 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 return CodecResult<bool>::failure(
                     frame_not_allowed_protocol_violation_error(kFrameTypeHandshakeDone));
             }
+            const bool handshake_was_confirmed = handshake_confirmed_;
             confirm_handshake();
+            if (!handshake_was_confirmed && handshake_confirmed_) {
+                note_peer_progress();
+            }
             continue;
         }
 
         const auto &retire_connection_id = std::get<RetireConnectionIdFrame>(frame);
+        const auto previous_endpoint_route_generation = endpoint_route_generation();
         auto retired = process_retire_connection_id_frame(retire_connection_id);
         if (!retired.has_value()) {
             return CodecResult<bool>::failure(retired.error());
+        }
+        if (endpoint_route_generation() != previous_endpoint_route_generation) {
+            note_peer_progress();
         }
         continue;
     }
@@ -3294,9 +3448,20 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                   << " cwnd=" << congestion_controller_.congestion_window()
                   << " bif=" << congestion_controller_.bytes_in_flight() << '\n';
     }
+    if (!probing_only &&
+        should_drop_inbound_packet_on_old_path_after_preferred_success(path_id, packet_number)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+        // # The server SHOULD drop newer packets for this connection that are
+        // # received on the old IP address.
+        return CodecResult<bool>::success(true);
+    }
     if (path_id != current_send_path_id_.value_or(path_id) && !probing_only &&
         !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
+        const auto previous_send_path_id = current_send_path_id_;
         maybe_switch_to_path(path_id, /*initiated_locally=*/false, now);
+        if (current_send_path_id_ != previous_send_path_id) {
+            note_peer_progress();
+        }
     }
     if (!paths_.empty() | (path_id != 0) | current_send_path_id_.has_value()) {
         ensure_path_state(path_id);
@@ -3339,7 +3504,13 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             const auto contiguous_bytes = application_space_.receive_crypto.push_shared(
                 crypto_frame->offset, crypto_frame->crypto_data);
             if (!contiguous_bytes.has_value()) {
-                return CodecResult<bool>::failure(contiguous_bytes.error());
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+                // # Once the handshake completes, if an endpoint is unable to
+                // # buffer all data in a CRYPTO frame, it MAY discard that
+                // # CRYPTO frame and all CRYPTO frames received in the future, or
+                // # it MAY close the connection with a CRYPTO_BUFFER_EXCEEDED
+                // # error code.
+                return CodecResult<bool>::failure(crypto_receive_error(contiguous_bytes.error()));
             }
             if (contiguous_bytes.value().empty()) {
                 continue;
@@ -3360,6 +3531,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 return provided;
             }
 
+            note_peer_progress();
             install_available_secrets();
             collect_pending_tls_bytes();
             continue;
@@ -3404,6 +3576,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             // # When a QUIC endpoint receives a valid DATAGRAM frame, it SHOULD
             // # deliver the data to the application immediately, as long as it is
             // # able to process the frame and can store the contents in memory.
+            note_peer_progress();
             pending_datagram_receive_effects_.push_back(QuicCoreReceiveDatagramData{
                 .shared_bytes = datagram_frame->data,
             });
@@ -3445,6 +3618,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 .application_error_code = reset_stream->application_protocol_error_code,
                 .final_size = reset_stream->final_size,
             });
+            note_peer_progress();
             maybe_refresh_peer_stream_limit(*stream_state);
             maybe_retire_stream(reset_stream->stream_id);
             continue;
@@ -3477,6 +3651,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 .stream_id = stop_sending->stream_id,
                 .application_error_code = stop_sending->application_protocol_error_code,
             });
+            note_peer_progress();
             continue;
         }
 
@@ -3486,7 +3661,11 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeMaxData));
             }
 
+            const auto previous_peer_max_data = connection_flow_control_.peer_max_data;
             connection_flow_control_.note_peer_max_data(max_data->maximum_data);
+            if (connection_flow_control_.peer_max_data != previous_peer_max_data) {
+                note_peer_progress();
+            }
             if (cached_total_queued_stream_bytes() <= connection_flow_control_.peer_max_data) {
                 connection_flow_control_.pending_data_blocked_frame = std::nullopt;
                 connection_flow_control_.data_blocked_state = StreamControlFrameState::none;
@@ -3513,7 +3692,12 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 fresh_sendable_bytes_for_cache(*stream_state);
             const auto previous_has_lost_send_data =
                 stream_has_lost_send_data_for_state_change(*stream_state);
+            const auto previous_peer_max_stream_data =
+                stream_state->flow_control.peer_max_stream_data;
             stream_state->note_peer_max_stream_data(max_stream_data->maximum_stream_data);
+            if (stream_state->flow_control.peer_max_stream_data != previous_peer_max_stream_data) {
+                note_peer_progress();
+            }
             note_stream_send_state_changed(previous_fresh_sendable_bytes,
                                            previous_has_lost_send_data, *stream_state);
             continue;
@@ -3525,8 +3709,16 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                     protocol_violation_error(frame_type_for_max_streams(max_streams->stream_type)));
             }
 
+            auto *previous_peer_max_streams =
+                max_streams->stream_type == StreamLimitType::bidirectional
+                    ? &stream_open_limits_.peer_max_bidirectional
+                    : &stream_open_limits_.peer_max_unidirectional;
+            const auto previous_limit = *previous_peer_max_streams;
             stream_open_limits_.note_peer_max_streams(max_streams->stream_type,
                                                       max_streams->maximum_streams);
+            if (*previous_peer_max_streams != previous_limit) {
+                note_peer_progress();
+            }
             continue;
         }
 
@@ -3536,8 +3728,10 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             }
 
             maybe_refresh_connection_credit_for_data_blocked(
-                *data_blocked, connection_flow_control_,
-                [&] { maybe_refresh_connection_receive_credit(/*force=*/true); });
+                *data_blocked, connection_flow_control_, [&] {
+                    maybe_refresh_connection_receive_credit(/*force=*/true);
+                    note_peer_progress();
+                });
             continue;
         }
 
@@ -3559,6 +3753,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             auto *stream_state = stream.value();
             maybe_refresh_stream_credit_for_data_blocked(*stream_data_blocked, *stream_state, [&] {
                 maybe_refresh_stream_receive_credit(*stream_state, /*force=*/true);
+                note_peer_progress();
             });
             continue;
         }
@@ -3573,9 +3768,13 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
         }
 
         if (const auto *new_connection_id = std::get_if<NewConnectionIdFrame>(&frame)) {
+            const auto previous_endpoint_route_generation = endpoint_route_generation();
             const auto stored = process_new_connection_id_frame(*new_connection_id);
             if (!stored.has_value()) {
                 return CodecResult<bool>::failure(stored.error());
+            }
+            if (endpoint_route_generation() != previous_endpoint_route_generation) {
+                note_peer_progress();
             }
             continue;
         }
@@ -3591,6 +3790,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             }
 
             respond_to_path_challenge(path_id, path_challenge->data);
+            note_peer_progress();
             continue;
         }
 
@@ -3616,18 +3816,16 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 had_outstanding_challenge &&
                 path->outstanding_challenge.value() == path_response->data;
             if (matched_outstanding_challenge) {
-                path->validated = true;
-                path->challenge_pending = false;
-                path->validation_initiated_locally = false;
-                path->outstanding_challenge.reset();
-                path->validation_deadline.reset();
-                last_validated_path_id_ = validated_path_id;
-                if (current_send_path_id_ != validated_path_id) {
+                const bool validation_probe_only = path->validation_probe_only;
+                complete_path_validation(validated_path_id, *path, now);
+                note_peer_progress();
+                if (current_send_path_id_ != validated_path_id && !validation_probe_only) {
                     maybe_switch_to_path(validated_path_id, /*initiated_locally=*/false, now);
                 } else if (previous_path_id_.has_value()) {
                     retire_peer_connection_id_for_inactive_path(*previous_path_id_,
                                                                 validated_path_id);
                 }
+                abandon_original_address_validation_after_preferred_success(validated_path_id);
             }
             if (traces_this_packet) {
                 std::cerr << "quic-packet-trace path-response scid="
@@ -3652,6 +3850,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                     frame_not_allowed_protocol_violation_error(kFrameTypeNewToken));
             }
             pending_received_new_tokens_.push_back(new_token->token);
+            note_peer_progress();
             continue;
         }
 
@@ -3660,6 +3859,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
         bool has_application_close = std::holds_alternative<ApplicationConnectionCloseFrame>(frame);
         if (has_transport_close | has_application_close) {
             enter_draining_state(now);
+            note_peer_progress();
             continue;
         }
 
@@ -3672,14 +3872,22 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                 return CodecResult<bool>::failure(
                     frame_not_allowed_protocol_violation_error(kFrameTypeHandshakeDone));
             }
+            const bool handshake_was_confirmed = handshake_confirmed_;
             confirm_handshake();
+            if (!handshake_was_confirmed && handshake_confirmed_) {
+                note_peer_progress();
+            }
             continue;
         }
 
         const auto &retire_connection_id = std::get<RetireConnectionIdFrame>(frame);
+        const auto previous_endpoint_route_generation = endpoint_route_generation();
         auto retired = process_retire_connection_id_frame(retire_connection_id);
         if (!retired.has_value()) {
             return CodecResult<bool>::failure(retired.error());
+        }
+        if (endpoint_route_generation() != previous_endpoint_route_generation) {
+            note_peer_progress();
         }
     }
 
@@ -3710,6 +3918,7 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
         return CodecResult<bool>::success(true);
     }
 
+    const auto stream_count_before = streams_.size();
     auto stream = get_or_open_receive_stream(stream_frame.stream_id);
     if (!stream.has_value()) {
         return CodecResult<bool>::failure(
@@ -3732,6 +3941,10 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
     // # An endpoint MUST terminate a connection with an error of type
     // # FLOW_CONTROL_ERROR if it receives more data than the maximum data
     // # value that it has sent.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+    // # A server SHOULD treat a violation of remembered limits
+    // # (Section 7.4.1) as a connection error of an appropriate type (for
+    // # instance, a FLOW_CONTROL_ERROR for exceeding stream data limits).
     if (connection_flow_control_.received_committed >
             connection_flow_control_.advertised_max_data ||
         received_delta > connection_flow_control_.advertised_max_data -
@@ -3739,6 +3952,9 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
         return CodecResult<bool>::failure(flow_control_error(stream_frame_type_for(stream_frame)));
     }
     connection_flow_control_.received_committed += received_delta;
+    if (streams_.size() != stream_count_before || received_delta != 0) {
+        note_peer_progress();
+    }
 
     const auto fast_contiguous_receive = config_.emit_shared_receive_stream_data
                                              ? stream_state->receive_buffer.try_accept_contiguous(
@@ -3775,6 +3991,7 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
         stream_state->receive_flow_control_consumed == *stream_state->peer_final_size &&
         !stream_state->peer_fin_delivered;
     if (contiguous_size != 0 || fin_ready) {
+        note_peer_progress();
         //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
         // # Endpoints MUST be able to deliver stream data to an application
         // # as an ordered byte stream.
@@ -3808,6 +4025,13 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
 CodecResult<bool> QuicConnection::process_inbound_received_application_stream_packet(
     std::uint64_t packet_number, bool spin_bit, const ReceivedStreamFrame &stream_frame,
     QuicCoreTimePoint now, QuicEcnCodepoint ecn) {
+    if (should_drop_inbound_packet_on_old_path_after_preferred_success(last_inbound_path_id_,
+                                                                       packet_number)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+        // # The server SHOULD drop newer packets for this connection that are
+        // # received on the old IP address.
+        return CodecResult<bool>::success(true);
+    }
     if (last_inbound_path_id_ != current_send_path_id_.value_or(last_inbound_path_id_) &&
         !should_keep_current_send_path_for_inbound_non_probing(last_inbound_path_id_,
                                                                packet_number)) {
@@ -3820,7 +4044,11 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_stream_pa
         // # An endpoint MUST perform path validation (Section 8.2) if it detects
         // # any change to a peer's address, unless it has previously validated
         // # that address.
+        const auto previous_send_path_id = current_send_path_id_;
         maybe_switch_to_path(last_inbound_path_id_, /*initiated_locally=*/false, now);
+        if (current_send_path_id_ != previous_send_path_id) {
+            note_peer_progress();
+        }
     }
     if (should_ensure_inbound_application_path(paths_.empty(), last_inbound_path_id_,
                                                current_send_path_id_)) {
@@ -3871,6 +4099,12 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_stream_pa
 CodecResult<bool> QuicConnection::process_inbound_received_application_ack_only(
     std::uint64_t packet_number, bool spin_bit, const ReceivedAckFrame &ack, QuicCoreTimePoint now,
     QuicEcnCodepoint ecn, QuicPathId path_id, bool used_previous_application_read_secret) {
+    if (should_drop_inbound_packet_on_old_path_after_preferred_success(path_id, packet_number)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+        // # The server SHOULD drop newer packets for this connection that are
+        // # received on the old IP address.
+        return CodecResult<bool>::success(true);
+    }
     if (path_id != current_send_path_id_.value_or(path_id) &&
         !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
@@ -3882,7 +4116,11 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_ack_only(
         // # An endpoint MUST perform path validation (Section 8.2) if it detects
         // # any change to a peer's address, unless it has previously validated
         // # that address.
+        const auto previous_send_path_id = current_send_path_id_;
         maybe_switch_to_path(path_id, /*initiated_locally=*/false, now);
+        if (current_send_path_id_ != previous_send_path_id) {
+            note_peer_progress();
+        }
     }
     if (should_ensure_inbound_application_path(paths_.empty(), path_id, current_send_path_id_)) {
         ensure_path_state(path_id);

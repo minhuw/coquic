@@ -10,9 +10,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MAY]:    deliver data out of order to a receiving application.
     TEXT[!MUST,implementation,test]: The data at a given offset MUST NOT change if it is sent
     TEXT[!MUST,implementation,test]:    multiple times
-    TEXT[!MUST]: ; an endpoint MAY treat receipt of different data at
-    TEXT[!MUST]:    the same offset within a stream as a connection error of type
-    TEXT[!MUST]:    PROTOCOL_VIOLATION.
+    TEXT[!MUST,exception]: ; an endpoint MAY treat receipt of different data at
+    TEXT[!MUST,exception]:    the same offset within a stream as a connection error of type
+    TEXT[!MUST,exception]:    PROTOCOL_VIOLATION.
     TEXT[!MUST,implementation,test]:    An endpoint MUST NOT send data on any stream without ensuring that it
     TEXT[!MUST,implementation,test]:    is within the flow control limits set by its peer.
 
@@ -21,17 +21,17 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    indicate the relative priority of streams.
 
   SECTION: [Sending Stream States](#section-3.1)
-    TEXT[!MAY]:    An endpoint MAY send a RESET_STREAM as the first frame that mentions
-    TEXT[!MAY]:    a stream; this causes the sending part of that stream to open and
-    TEXT[!MAY]:    then immediately transition to the "Reset Sent" state.
+    TEXT[!MAY,exception]:    An endpoint MAY send a RESET_STREAM as the first frame that mentions
+    TEXT[!MAY,exception]:    a stream; this causes the sending part of that stream to open and
+    TEXT[!MAY,exception]:    then immediately transition to the "Reset Sent" state.
 
   SECTION: [Receiving Stream States](#section-3.2)
     TEXT[!MUST,implementation,test]:    Before a stream is created, all streams of the same type with lower-
     TEXT[!MUST,implementation,test]:    numbered stream IDs MUST be created.
-    TEXT[!MAY]: An
-    TEXT[!MAY]:    implementation MAY interrupt delivery of stream data, discard any
-    TEXT[!MAY]:    data that was not consumed, and signal the receipt of the
-    TEXT[!MAY]:    RESET_STREAM.
+    TEXT[!MAY,exception]: An
+    TEXT[!MAY,exception]:    implementation MAY interrupt delivery of stream data, discard any
+    TEXT[!MAY,exception]:    data that was not consumed, and signal the receipt of the
+    TEXT[!MAY,exception]:    RESET_STREAM.
 
   SECTION: [Permitted Frame Types](#section-3.3)
     TEXT[!MUST,implementation,test]:    A sender MUST NOT send any of these frames from a terminal state
@@ -39,9 +39,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]: A sender MUST NOT send a STREAM or
     TEXT[!MUST,implementation,test]:    STREAM_DATA_BLOCKED frame for a stream in the "Reset Sent" state or
     TEXT[!MUST,implementation,test]:    any terminal state -- that is, after sending a RESET_STREAM frame.
-    TEXT[!MAY]:    A receiver MAY send a STOP_SENDING frame in any state where it has
-    TEXT[!MAY]:    not received a RESET_STREAM frame -- that is, states other than
-    TEXT[!MAY]:    "Reset Recvd" or "Reset Read".
+    TEXT[!MAY,exception]:    A receiver MAY send a STOP_SENDING frame in any state where it has
+    TEXT[!MAY,exception]:    not received a RESET_STREAM frame -- that is, states other than
+    TEXT[!MAY,exception]:    "Reset Recvd" or "Reset Read".
 
   SECTION: [Solicited State Transitions](#section-3.5)
     TEXT[!SHOULD,implementation,test]:    If the stream is in the "Recv" or "Size Known" state, the transport
@@ -50,25 +50,25 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]: An endpoint that receives a STOP_SENDING frame
     TEXT[!MUST,implementation,test]:    MUST send a RESET_STREAM frame if the stream is in the "Ready" or
     TEXT[!MUST,implementation,test]:    "Send" state.
-    TEXT[!MAY]: If the stream is in the "Data Sent" state, the
-    TEXT[!MAY]:    endpoint MAY defer sending the RESET_STREAM frame until the packets
-    TEXT[!MAY]:    containing outstanding data are acknowledged or declared lost.
+    TEXT[!MAY,exception]: If the stream is in the "Data Sent" state, the
+    TEXT[!MAY,exception]:    endpoint MAY defer sending the RESET_STREAM frame until the packets
+    TEXT[!MAY,exception]:    containing outstanding data are acknowledged or declared lost.
     TEXT[!SHOULD,implementation,test]: If
     TEXT[!SHOULD,implementation,test]:    any outstanding data is declared lost, the endpoint SHOULD send a
     TEXT[!SHOULD,implementation,test]:    RESET_STREAM frame instead of retransmitting the data.
     TEXT[!SHOULD,implementation,test]:    An endpoint SHOULD copy the error code from the STOP_SENDING frame to
     TEXT[!SHOULD,implementation,test]:    the RESET_STREAM frame it sends, but it can use any application error
     TEXT[!SHOULD,implementation,test]:    code.
-    TEXT[!MAY]: An endpoint that sends a STOP_SENDING frame MAY ignore the
-    TEXT[!MAY]:    error code in any RESET_STREAM frames subsequently received for that
-    TEXT[!MAY]:    stream.
+    TEXT[!MAY,exception]: An endpoint that sends a STOP_SENDING frame MAY ignore the
+    TEXT[!MAY,exception]:    error code in any RESET_STREAM frames subsequently received for that
+    TEXT[!MAY,exception]:    stream.
     TEXT[!SHOULD,implementation,test]:    STOP_SENDING SHOULD only be sent for a stream that has not been reset
     TEXT[!SHOULD,implementation,test]:    by the peer.
 
   SECTION: [Flow Control](#section-4)
-    TEXT[!SHOULD]:    To avoid excessive buffering at multiple layers, QUIC implementations
-    TEXT[!SHOULD]:    SHOULD provide an interface for the cryptographic protocol
-    TEXT[!SHOULD]:    implementation to communicate its buffering limits.
+    TEXT[!SHOULD,implementation]:    To avoid excessive buffering at multiple layers, QUIC implementations
+    TEXT[!SHOULD,implementation]:    SHOULD provide an interface for the cryptographic protocol
+    TEXT[!SHOULD,implementation]:    implementation to communicate its buffering limits.
 
   SECTION: [Data Flow Control](#section-4.1)
     TEXT[!MUST,implementation,test]:    Senders MUST NOT send data in excess of either limit.
@@ -80,15 +80,15 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]: A sender SHOULD send a
     TEXT[!SHOULD,implementation,test]:    STREAM_DATA_BLOCKED or DATA_BLOCKED frame to indicate to the receiver
     TEXT[!SHOULD,implementation,test]:    that it has data to write but is blocked by flow control limits.
-    TEXT[!SHOULD]: To keep the
-    TEXT[!SHOULD]:    connection from closing, a sender that is flow control limited SHOULD
-    TEXT[!SHOULD]:    periodically send a STREAM_DATA_BLOCKED or DATA_BLOCKED frame when it
-    TEXT[!SHOULD]:    has no ack-eliciting packets in flight.
+    TEXT[!SHOULD,implementation,test]: To keep the
+    TEXT[!SHOULD,implementation,test]:    connection from closing, a sender that is flow control limited SHOULD
+    TEXT[!SHOULD,implementation,test]:    periodically send a STREAM_DATA_BLOCKED or DATA_BLOCKED frame when it
+    TEXT[!SHOULD,implementation,test]:    has no ack-eliciting packets in flight.
 
   SECTION: [Increasing Flow Control Limits](#section-4.2)
-    TEXT[!MAY]:    To avoid blocking a sender, a receiver MAY send a MAX_STREAM_DATA or
-    TEXT[!MAY]:    MAX_DATA frame multiple times within a round trip or send it early
-    TEXT[!MAY]:    enough to allow time for loss of the frame and subsequent recovery.
+    TEXT[!MAY,implementation]:    To avoid blocking a sender, a receiver MAY send a MAX_STREAM_DATA or
+    TEXT[!MAY,implementation]:    MAX_DATA frame multiple times within a round trip or send it early
+    TEXT[!MAY,implementation]:    enough to allow time for loss of the frame and subsequent recovery.
     TEXT[!MUST,implementation,test]: Therefore, a receiver MUST NOT wait for a
     TEXT[!MUST,implementation,test]:    STREAM_DATA_BLOCKED or DATA_BLOCKED frame before sending a
     TEXT[!MUST,implementation,test]:    MAX_STREAM_DATA or MAX_DATA frame; doing so could result in the
@@ -137,16 +137,16 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    not to send STREAMS_BLOCKED frames.
 
   SECTION: [Connection ID](#section-5.1)
-    TEXT[!MUST]:    Connection IDs MUST NOT contain any information that can be used by
-    TEXT[!MUST]:    an external observer (that is, one that does not cooperate with the
-    TEXT[!MUST]:    issuer) to correlate them with other connection IDs for the same
-    TEXT[!MUST]:    connection.
+    TEXT[!MUST,implementation]:    Connection IDs MUST NOT contain any information that can be used by
+    TEXT[!MUST,implementation]:    an external observer (that is, one that does not cooperate with the
+    TEXT[!MUST,implementation]:    issuer) to correlate them with other connection IDs for the same
+    TEXT[!MUST,implementation]:    connection.
     TEXT[!MUST,implementation,test]: As a trivial example, this means the same connection ID
     TEXT[!MUST,implementation,test]:    MUST NOT be issued more than once on the same connection.
-    TEXT[!MUST]: An
-    TEXT[!MUST]:    endpoint MUST NOT use the same IP address and port for multiple
-    TEXT[!MUST]:    concurrent connections with zero-length connection IDs, unless it is
-    TEXT[!MUST]:    certain that those protocol features are not in use.
+    TEXT[!MUST,implementation]: An
+    TEXT[!MUST,implementation]:    endpoint MUST NOT use the same IP address and port for multiple
+    TEXT[!MUST,implementation]:    concurrent connections with zero-length connection IDs, unless it is
+    TEXT[!MUST,implementation]:    certain that those protocol features are not in use.
 
   SECTION: [Issuing Connection IDs](#section-5.1.1)
     TEXT[!MUST,implementation,test]: The sequence number on
@@ -173,14 +173,14 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MAY]: If an endpoint provided fewer connection IDs than the
     TEXT[!MAY]:    peer's active_connection_id_limit, it MAY supply a new connection ID
     TEXT[!MAY]:    when it receives a packet with a previously unused connection ID.
-    TEXT[!MAY]: An
-    TEXT[!MAY]:    endpoint MAY limit the total number of connection IDs issued for each
-    TEXT[!MAY]:    connection to avoid the risk of running out of connection IDs; see
-    TEXT[!MAY]:    Section 10.3.2.
-    TEXT[!MAY]: An endpoint MAY also limit the issuance of
-    TEXT[!MAY]:    connection IDs to reduce the amount of per-path state it maintains,
-    TEXT[!MAY]:    such as path validation status, as its peer might interact with it
-    TEXT[!MAY]:    over as many paths as there are issued connection IDs.
+    TEXT[!MAY,implementation]: An
+    TEXT[!MAY,implementation]:    endpoint MAY limit the total number of connection IDs issued for each
+    TEXT[!MAY,implementation]:    connection to avoid the risk of running out of connection IDs; see
+    TEXT[!MAY,implementation]:    Section 10.3.2.
+    TEXT[!MAY,implementation]: An endpoint MAY also limit the issuance of
+    TEXT[!MAY,implementation]:    connection IDs to reduce the amount of per-path state it maintains,
+    TEXT[!MAY,implementation]:    such as path validation status, as its peer might interact with it
+    TEXT[!MAY,implementation]:    over as many paths as there are issued connection IDs.
     TEXT[!SHOULD,implementation,test]:    An endpoint that initiates migration and requires non-zero-length
     TEXT[!SHOULD,implementation,test]:    connection IDs SHOULD ensure that the pool of connection IDs
     TEXT[!SHOULD,implementation,test]:    available to its peer allows the peer to use a new connection ID on
@@ -194,8 +194,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]: The endpoint SHOULD continue to
     TEXT[!SHOULD,implementation,test]:    accept the previously issued connection IDs until they are retired by
     TEXT[!SHOULD,implementation,test]:    the peer.
-    TEXT[!MAY]: If the endpoint can no longer process the indicated
-    TEXT[!MAY]:    connection IDs, it MAY close the connection.
+    TEXT[!MAY,implementation]: If the endpoint can no longer process the indicated
+    TEXT[!MAY,implementation]:    connection IDs, it MAY close the connection.
     TEXT[!MUST,implementation,test]:    Upon receipt of an increased Retire Prior To field, the peer MUST
     TEXT[!MUST,implementation,test]:    stop using the corresponding connection IDs and retire them with
     TEXT[!MUST,implementation,test]:    RETIRE_CONNECTION_ID frames before adding the newly provided
@@ -223,24 +223,24 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    changes made during that processing.
 
   SECTION: [Client Packet Handling](#section-5.2.1)
-    TEXT[!MAY]:    The client MAY drop these packets, or it MAY buffer them in
-    TEXT[!MAY]:    anticipation of later packets that allow it to compute the key.
-    TEXT[!MUST]:    If a client receives a packet that uses a different version than it
-    TEXT[!MUST]:    initially selected, it MUST discard that packet.
+    TEXT[!MAY,implementation]:    The client MAY drop these packets, or it MAY buffer them in
+    TEXT[!MAY,implementation]:    anticipation of later packets that allow it to compute the key.
+    TEXT[!MUST,implementation]:    If a client receives a packet that uses a different version than it
+    TEXT[!MUST,implementation]:    initially selected, it MUST discard that packet.
 
   SECTION: [Server Packet Handling](#section-5.2.2)
     TEXT[!SHOULD,implementation,test]:    If a server receives a packet that indicates an unsupported version
     TEXT[!SHOULD,implementation,test]:    and if the packet is large enough to initiate a new connection for
     TEXT[!SHOULD,implementation,test]:    any supported version, the server SHOULD send a Version Negotiation
     TEXT[!SHOULD,implementation,test]:    packet as described in Section 6.1.
-    TEXT[!MAY]: A server MAY limit the number of
-    TEXT[!MAY]:    packets to which it responds with a Version Negotiation packet.
+    TEXT[!MAY,implementation]: A server MAY limit the number of
+    TEXT[!MAY,implementation]:    packets to which it responds with a Version Negotiation packet.
     TEXT[!MUST,implementation,test]:    Servers MUST drop smaller packets that specify unsupported versions.
     TEXT[!SHOULD,implementation,test]: Servers SHOULD respond with a Version
     TEXT[!SHOULD,implementation,test]:    Negotiation packet, provided that the datagram is sufficiently long.
-    TEXT[!SHOULD]:    If a server refuses to accept a new connection, it SHOULD send an
-    TEXT[!SHOULD]:    Initial packet containing a CONNECTION_CLOSE frame with error code
-    TEXT[!SHOULD]:    CONNECTION_REFUSED.
+    TEXT[!SHOULD,implementation,test]:    If a server refuses to accept a new connection, it SHOULD send an
+    TEXT[!SHOULD,implementation,test]:    Initial packet containing a CONNECTION_CLOSE frame with error code
+    TEXT[!SHOULD,implementation,test]:    CONNECTION_REFUSED.
     TEXT[!MAY]:    If the packet is a 0-RTT packet, the server MAY buffer a limited
     TEXT[!MAY]:    number of these packets in anticipation of a late-arriving Initial
     TEXT[!MAY]:    packet.
@@ -258,17 +258,17 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,exception]:    avoid the creation of a stateless reset oracle; see Section 21.11.
 
   SECTION: [Version Negotiation](#section-6)
-    TEXT[!SHOULD]: Clients that support
-    TEXT[!SHOULD]:    multiple QUIC versions SHOULD ensure that the first UDP datagram they
-    TEXT[!SHOULD]:    send is sized to the largest of the minimum datagram sizes from all
-    TEXT[!SHOULD]:    versions they support, using PADDING frames (Section 19.1) as
-    TEXT[!SHOULD]:    necessary.
+    TEXT[!SHOULD,implementation]: Clients that support
+    TEXT[!SHOULD,implementation]:    multiple QUIC versions SHOULD ensure that the first UDP datagram they
+    TEXT[!SHOULD,implementation]:    send is sized to the largest of the minimum datagram sizes from all
+    TEXT[!SHOULD,implementation]:    versions they support, using PADDING frames (Section 19.1) as
+    TEXT[!SHOULD,implementation]:    necessary.
 
   SECTION: [Sending Version Negotiation Packets](#section-6.1)
     TEXT[!MUST,implementation,test]: An endpoint MUST NOT send a Version Negotiation packet
     TEXT[!MUST,implementation,test]:    in response to receiving a Version Negotiation packet.
-    TEXT[!MAY]:    A server MAY limit the number of Version Negotiation packets it
-    TEXT[!MAY]:    sends.
+    TEXT[!MAY,implementation]:    A server MAY limit the number of Version Negotiation packets it
+    TEXT[!MAY,implementation]:    sends.
 
   SECTION: [Handling Version Negotiation Packets](#section-6.2)
     TEXT[!MUST,implementation,test]:    A client that supports only this version of QUIC MUST abandon the
@@ -282,36 +282,40 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    lists the QUIC version selected by the client.
 
   SECTION: [Using Reserved Versions](#section-6.3)
-    TEXT[!MAY]:    Endpoints MAY add reserved versions to any field where unknown or
-    TEXT[!MAY]:    unsupported versions are ignored to test that a peer correctly
-    TEXT[!MAY]:    ignores the value.
+    TEXT[!MAY,implementation]:    Endpoints MAY add reserved versions to any field where unknown or
+    TEXT[!MAY,implementation]:    unsupported versions are ignored to test that a peer correctly
+    TEXT[!MAY,implementation]:    ignores the value.
     TEXT[!MAY]:    Endpoints MAY send packets with a reserved version to test that a
     TEXT[!MAY]:    peer correctly discards the packet.
 
   SECTION: [Cryptographic and Transport Handshake](#section-7)
-    TEXT[!MUST]: The cryptographic handshake MUST
-    TEXT[!MUST]:    provide the following properties:
+    TEXT[!MUST,implementation,test]: The cryptographic handshake MUST
+    TEXT[!MUST,implementation,test]:    provide the following properties:
     TEXT[!MUST,implementation,test]:    Endpoints MUST explicitly negotiate an application protocol.
 
   SECTION: [Negotiating Connection IDs](#section-7.2)
-    TEXT[!MUST]: This Destination Connection ID MUST be at least 8 bytes in
-    TEXT[!MUST]:    length.
+    TEXT[!MUST,implementation,test]: This Destination Connection ID MUST be at least 8 bytes in
+    TEXT[!MUST,implementation,test]:    length.
     TEXT[!MUST,implementation,test]: Until a packet is received from the server, the client MUST
     TEXT[!MUST,implementation,test]:    use the same Destination Connection ID value on all packets in this
     TEXT[!MUST,implementation,test]:    connection.
-    TEXT[!MUST]: Once a
-    TEXT[!MUST]:    client has received a valid Initial packet from the server, it MUST
-    TEXT[!MUST]:    discard any subsequent packet it receives on that connection with a
-    TEXT[!MUST]:    different Source Connection ID.
+    TEXT[implementation]:    The Destination Connection ID field from the first Initial packet
+    TEXT[implementation]:    sent by a client is used to determine packet protection keys for
+    TEXT[implementation]:    Initial packets.
+    TEXT[!MUST,implementation,test]: Once a
+    TEXT[!MUST,implementation,test]:    client has received a valid Initial packet from the server, it MUST
+    TEXT[!MUST,implementation,test]:    discard any subsequent packet it receives on that connection with a
+    TEXT[!MUST,implementation,test]:    different Source Connection ID.
     TEXT[!MUST,implementation,test]:    A client MUST change the Destination Connection ID it uses for
     TEXT[!MUST,implementation,test]:    sending packets in response to only the first received Initial or
     TEXT[!MUST,implementation,test]:    Retry packet.
     TEXT[!MUST,implementation,test]: A server MUST set the Destination Connection ID it
     TEXT[!MUST,implementation,test]:    uses for sending packets based on the first received Initial packet.
-    TEXT[!MUST]:    Any further changes to the Destination Connection ID are only
-    TEXT[!MUST]:    permitted if the values are taken from NEW_CONNECTION_ID frames; if
-    TEXT[!MUST]:    subsequent Initial packets include a different Source Connection ID,
-    TEXT[!MUST]:    they MUST be discarded.
+    TEXT[!MUST,implementation]:    Any further changes to the Destination Connection ID are only
+    TEXT[!MUST,implementation]:    permitted if the values are taken from NEW_CONNECTION_ID frames;
+    TEXT[!MUST,implementation,test]: if
+    TEXT[!MUST,implementation,test]:    subsequent Initial packets include a different Source Connection ID,
+    TEXT[!MUST,implementation,test]:    they MUST be discarded.
 
   SECTION: [Authenticating Connection IDs](#section-7.3)
     TEXT[!MUST,implementation,test]:    The values provided by a peer for these transport parameters MUST
@@ -360,9 +364,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]: The applicable
     TEXT[!SHOULD,implementation,test]:    subset of transport parameters that permit the sending of application
     TEXT[!SHOULD,implementation,test]:    data SHOULD be set to non-zero values for 0-RTT.
-    TEXT[!MAY]:    A server MAY store and recover the previously sent values of the
-    TEXT[!MAY]:    max_idle_timeout, max_udp_payload_size, and disable_active_migration
-    TEXT[!MAY]:    parameters and reject 0-RTT if it selects smaller values.
+    TEXT[!MAY,implementation]:    A server MAY store and recover the previously sent values of the
+    TEXT[!MAY,implementation]:    max_idle_timeout, max_udp_payload_size, and disable_active_migration
+    TEXT[!MAY,implementation]:    parameters and reject 0-RTT if it selects smaller values.
     TEXT[!MUST,implementation,test]:    A server MUST reject 0-RTT data if the restored values for transport
     TEXT[!MUST,implementation,test]:    parameters cannot be supported.
     TEXT[!MUST,implementation,test]:    When sending frames in 0-RTT packets, a client MUST only use
@@ -381,12 +385,12 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    received in out-of-order CRYPTO frames.
     TEXT[!MAY]: Endpoints MAY choose to
     TEXT[!MAY]:    allow more data to be buffered during the handshake.
-    TEXT[!MUST]: If an endpoint does not expand its buffer, it MUST close
-    TEXT[!MUST]:    the connection with a CRYPTO_BUFFER_EXCEEDED error code.
-    TEXT[!MAY]:    Once the handshake completes, if an endpoint is unable to buffer all
-    TEXT[!MAY]:    data in a CRYPTO frame, it MAY discard that CRYPTO frame and all
-    TEXT[!MAY]:    CRYPTO frames received in the future, or it MAY close the connection
-    TEXT[!MAY]:    with a CRYPTO_BUFFER_EXCEEDED error code.
+    TEXT[!MUST,implementation,test]: If an endpoint does not expand its buffer, it MUST close
+    TEXT[!MUST,implementation,test]:    the connection with a CRYPTO_BUFFER_EXCEEDED error code.
+    TEXT[!MAY,implementation]:    Once the handshake completes, if an endpoint is unable to buffer all
+    TEXT[!MAY,implementation]:    data in a CRYPTO frame, it MAY discard that CRYPTO frame and all
+    TEXT[!MAY,implementation]:    CRYPTO frames received in the future, or it MAY close the connection
+    TEXT[!MAY,implementation]:    with a CRYPTO_BUFFER_EXCEEDED error code.
     TEXT[!MUST,implementation,test]: Packets containing
     TEXT[!MUST,implementation,test]:    discarded CRYPTO frames MUST be acknowledged because the packet has
     TEXT[!MUST,implementation,test]:    been received and processed by the transport even though the CRYPTO
@@ -429,33 +433,33 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]: This token MUST be repeated by the client in all
     TEXT[!MUST,implementation,test]:    Initial packets it sends for that connection after it receives the
     TEXT[!MUST,implementation,test]:    Retry packet.
-    TEXT[!SHOULD]: Instead, the
-    TEXT[!SHOULD]:    server SHOULD immediately close (Section 10.2) the connection with an
-    TEXT[!SHOULD]:    INVALID_TOKEN error.
+    TEXT[!SHOULD,implementation]: Instead, the
+    TEXT[!SHOULD,implementation]:    server SHOULD immediately close (Section 10.2) the connection with an
+    TEXT[!SHOULD,implementation]:    INVALID_TOKEN error.
 
   SECTION: [Address Validation for Future Connections](#section-8.1.3)
-    TEXT[!MAY]:    A server MAY provide clients with an address validation token during
-    TEXT[!MAY]:    one connection that can be used on a subsequent connection.
+    TEXT[!MAY,implementation]:    A server MAY provide clients with an address validation token during
+    TEXT[!MAY,implementation]:    one connection that can be used on a subsequent connection.
     TEXT[!MUST,implementation,test]: The client
     TEXT[!MUST,implementation,test]:    MUST include the token in all Initial packets it sends, unless a
     TEXT[!MUST,implementation,test]:    Retry replaces the token with a newer one.
     TEXT[!MUST,implementation,test]: The client MUST NOT use
     TEXT[!MUST,implementation,test]:    the token provided in a Retry for future connections.
-    TEXT[!MAY,implementation,test]: Servers MAY
-    TEXT[!MAY,implementation,test]:    discard any Initial packet that does not carry the expected token.
+    TEXT[!MAY]: Servers MAY
+    TEXT[!MAY]:    discard any Initial packet that does not carry the expected token.
     TEXT[!SHOULD,implementation,test]: Thus, a token SHOULD have an
     TEXT[!SHOULD,implementation,test]:    expiration time, which could be either an explicit expiration time or
     TEXT[!SHOULD,implementation,test]:    an issued timestamp that can be used to dynamically calculate the
     TEXT[!SHOULD,implementation,test]:    expiration time.
-    TEXT[!MUST]:    A token issued with NEW_TOKEN MUST NOT include information that would
-    TEXT[!MUST]:    allow values to be linked by an observer to the connection on which
-    TEXT[!MUST]:    it was issued.
+    TEXT[!MUST,implementation,test]:    A token issued with NEW_TOKEN MUST NOT include information that would
+    TEXT[!MUST,implementation,test]:    allow values to be linked by an observer to the connection on which
+    TEXT[!MUST,implementation,test]:    it was issued.
     TEXT[!MUST,implementation,test]: A server MUST ensure that every NEW_TOKEN frame it sends
     TEXT[!MUST,implementation,test]:    is unique across all clients, with the exception of those sent to
     TEXT[!MUST,implementation,test]:    repair losses of previously sent NEW_TOKEN frames.
-    TEXT[!MAY]: Information that
-    TEXT[!MAY]:    allows the server to distinguish between tokens from Retry and
-    TEXT[!MAY]:    NEW_TOKEN MAY be accessible to entities other than the server.
+    TEXT[!MAY,implementation]: Information that
+    TEXT[!MAY,implementation]:    allows the server to distinguish between tokens from Retry and
+    TEXT[!MAY,implementation]:    NEW_TOKEN MAY be accessible to entities other than the server.
     TEXT[!SHOULD,implementation,test]: When connecting to a server for
     TEXT[!SHOULD,implementation,test]:    which the client retains an applicable and unused token, it SHOULD
     TEXT[!SHOULD,implementation,test]:    include that token in the Token field of its Initial packet.
@@ -475,13 +479,13 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    When a server receives an Initial packet with an address validation
     TEXT[!MUST,implementation,test]:    token, it MUST attempt to validate the token, unless it has already
     TEXT[!MUST,implementation,test]:    completed address validation.
-    TEXT[!SHOULD]: If the token is invalid, then the
-    TEXT[!SHOULD]:    server SHOULD proceed as if the client did not have a validated
-    TEXT[!SHOULD]:    address, including potentially sending a Retry packet.
+    TEXT[!SHOULD,implementation]: If the token is invalid, then the
+    TEXT[!SHOULD,implementation]:    server SHOULD proceed as if the client did not have a validated
+    TEXT[!SHOULD,implementation]:    address, including potentially sending a Retry packet.
     TEXT[!SHOULD,implementation,test]: If the validation succeeds, the server SHOULD then allow
     TEXT[!SHOULD,implementation,test]:    the handshake to proceed.
-    TEXT[!MAY]:    Clients MAY use tokens obtained on one connection for any connection
-    TEXT[!MAY]:    attempt using the same version.
+    TEXT[!MAY,implementation]:    Clients MAY use tokens obtained on one connection for any connection
+    TEXT[!MAY,implementation]:    attempt using the same version.
 
   SECTION: [Address Validation Token Integrity](#section-8.1.4)
     TEXT[!MUST,implementation,test]:    An address validation token MUST be difficult to guess.
@@ -505,18 +509,18 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]: Tokens that are provided
     TEXT[!SHOULD,implementation,test]:    in NEW_TOKEN frames (Section 19.7) need to be valid for longer but
     TEXT[!SHOULD,implementation,test]:    SHOULD NOT be accepted multiple times.
-    TEXT[!MAY]: Servers are encouraged to
-    TEXT[!MAY]:    allow tokens to be used only once, if possible; tokens MAY include
-    TEXT[!MAY]:    additional information about clients to further narrow applicability
-    TEXT[!MAY]:    or reuse.
+    TEXT[!MAY,implementation]: Servers are encouraged to
+    TEXT[!MAY,implementation]:    allow tokens to be used only once, if possible; tokens MAY include
+    TEXT[!MAY,implementation]:    additional information about clients to further narrow applicability
+    TEXT[!MAY,implementation]:    or reuse.
 
   SECTION: [Path Validation](#section-8.2)
     TEXT[!MAY,test]:    An endpoint MAY include other frames with the PATH_CHALLENGE and
     TEXT[!MAY,test]:    PATH_RESPONSE frames used for path validation.
 
   SECTION: [Initiating Path Validation](#section-8.2.1)
-    TEXT[!MAY]:    An endpoint MAY send multiple PATH_CHALLENGE frames to guard against
-    TEXT[!MAY]:    packet loss.
+    TEXT[!MAY,implementation]:    An endpoint MAY send multiple PATH_CHALLENGE frames to guard against
+    TEXT[!MAY,implementation]:    packet loss.
     TEXT[!SHOULD,implementation,test]: However, an endpoint SHOULD NOT send multiple
     TEXT[!SHOULD,implementation,test]:    PATH_CHALLENGE frames in a single packet.
     TEXT[!SHOULD,implementation,test]:    An endpoint SHOULD NOT probe a new path with packets containing a
@@ -529,9 +533,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    to at least the smallest allowed maximum datagram size of 1200 bytes,
     TEXT[!MUST,implementation,test]:    unless the anti-amplification limit for the path does not permit
     TEXT[!MUST,implementation,test]:    sending a datagram of this size.
-    TEXT[!MUST]: To ensure that the path MTU is large enough, the endpoint
-    TEXT[!MUST]:    MUST perform a second path validation by sending a PATH_CHALLENGE
-    TEXT[!MUST]:    frame in a datagram of at least 1200 bytes.
+    TEXT[!MUST,implementation,test]: To ensure that the path MTU is large enough, the endpoint
+    TEXT[!MUST,implementation,test]:    MUST perform a second path validation by sending a PATH_CHALLENGE
+    TEXT[!MUST,implementation,test]:    frame in a datagram of at least 1200 bytes.
     TEXT[!MUST,implementation,test]:    Unlike other cases where datagrams are expanded, endpoints MUST NOT
     TEXT[!MUST,implementation,test]:    discard datagrams that appear to be too small when they contain
     TEXT[!MUST,implementation,test]:    PATH_CHALLENGE or PATH_RESPONSE.
@@ -557,20 +561,20 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    response to one PATH_CHALLENGE frame; see Section 13.3.
 
   SECTION: [Successful Path Validation](#section-8.2.3)
-    TEXT[!MUST]: However, the endpoint MUST initiate
-    TEXT[!MUST]:    another path validation with an expanded datagram to verify that the
-    TEXT[!MUST]:    path supports the required MTU.
+    TEXT[!MUST,implementation,test]: However, the endpoint MUST initiate
+    TEXT[!MUST,implementation,test]:    another path validation with an expanded datagram to verify that the
+    TEXT[!MUST,implementation,test]:    path supports the required MTU.
 
   SECTION: [Failed Path Validation](#section-8.2.4)
     TEXT[!SHOULD,implementation,test]:    Endpoints SHOULD abandon path validation based on a timer.
     TEXT[!SHOULD,implementation,test]: A value of
     TEXT[!SHOULD,implementation,test]:    three times the larger of the current PTO or the PTO for the new path
     TEXT[!SHOULD,implementation,test]:    (using kInitialRtt, as defined in [QUIC-RECOVERY]) is RECOMMENDED.
-    TEXT[!MAY]: An endpoint
-    TEXT[!MAY]:    that has no valid network path to its peer MAY signal this using the
-    TEXT[!MAY]:    NO_VIABLE_PATH connection error, noting that this is only possible if
-    TEXT[!MAY]:    the network path exists but does not support the required MTU
-    TEXT[!MAY]:    (Section 14).
+    TEXT[!MAY,implementation]: An endpoint
+    TEXT[!MAY,implementation]:    that has no valid network path to its peer MAY signal this using the
+    TEXT[!MAY,implementation]:    NO_VIABLE_PATH connection error, noting that this is only possible if
+    TEXT[!MAY,implementation]:    the network path exists but does not support the required MTU
+    TEXT[!MAY,implementation]:    (Section 14).
 
   SECTION: [Connection Migration](#section-9)
     TEXT[!MUST,implementation,test]: An endpoint MUST NOT initiate
@@ -588,19 +592,19 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]: An endpoint MUST
     TEXT[!MUST,implementation,test]:    perform path validation (Section 8.2) if it detects any change to a
     TEXT[!MUST,implementation,test]:    peer's address, unless it has previously validated that address.
-    TEXT[!MAY]:    When an endpoint has no validated path on which to send packets, it
-    TEXT[!MAY]:    MAY discard connection state.
+    TEXT[!MAY,implementation]:    When an endpoint has no validated path on which to send packets, it
+    TEXT[!MAY,implementation]:    MAY discard connection state.
     TEXT[!MAY]: An endpoint capable of connection
     TEXT[!MAY]:    migration MAY wait for a new path to become available before
     TEXT[!MAY]:    discarding connection state.
-    TEXT[!MUST]: If a client receives
-    TEXT[!MUST]:    packets from an unknown server address, the client MUST discard these
-    TEXT[!MUST]:    packets.
+    TEXT[!MUST,implementation]: If a client receives
+    TEXT[!MUST,implementation]:    packets from an unknown server address, the client MUST discard these
+    TEXT[!MUST,implementation]:    packets.
 
   SECTION: [Probing a New Path](#section-9.1)
-    TEXT[!MAY]:    An endpoint MAY probe for peer reachability from a new local address
-    TEXT[!MAY]:    using path validation (Section 8.2) prior to migrating the connection
-    TEXT[!MAY]:    to the new local address.
+    TEXT[!MAY,implementation]:    An endpoint MAY probe for peer reachability from a new local address
+    TEXT[!MAY,implementation]:    using path validation (Section 8.2) prior to migrating the connection
+    TEXT[!MAY,implementation]:    to the new local address.
 
   SECTION: [Initiating Connection Migration](#section-9.2)
     TEXT[!MAY]: An endpoint MAY defer path
@@ -628,12 +632,12 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    If an endpoint has no state about the last validated peer address, it
     TEXT[!MUST,implementation,test]:    MUST close the connection silently by discarding all connection
     TEXT[!MUST,implementation,test]:    state.
-    TEXT[!MAY]: For instance, an endpoint MAY send a Stateless Reset in
-    TEXT[!MAY]:    response to any further incoming packets.
+    TEXT[!MAY,implementation]: For instance, an endpoint MAY send a Stateless Reset in
+    TEXT[!MAY,implementation]:    response to any further incoming packets.
 
   SECTION: [Off-Path Packet Forwarding](#section-9.3.3)
-    TEXT[!MUST]:    In response to an apparent migration, endpoints MUST validate the
-    TEXT[!MUST]:    previously active path using a PATH_CHALLENGE frame.
+    TEXT[!MUST,implementation,test]:    In response to an apparent migration, endpoints MUST validate the
+    TEXT[!MUST,implementation,test]:    previously active path using a PATH_CHALLENGE frame.
     TEXT[!SHOULD,implementation,test]:    An endpoint that receives a PATH_CHALLENGE on an active path SHOULD
     TEXT[!SHOULD,implementation,test]:    send a non-probing packet in response.
 
@@ -653,41 +657,41 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    [QUIC-RECOVERY] and MUST NOT be more aggressive.
 
   SECTION: [Privacy Implications of Connection Migration](#section-9.5)
-    TEXT[!MAY]:    At any time, endpoints MAY change the Destination Connection ID they
-    TEXT[!MAY]:    transmit with to a value that has not been used on another path.
+    TEXT[!MAY,implementation]:    At any time, endpoints MAY change the Destination Connection ID they
+    TEXT[!MAY,implementation]:    transmit with to a value that has not been used on another path.
     TEXT[!MUST,implementation,test]:    An endpoint MUST NOT reuse a connection ID when sending from more
     TEXT[!MUST,implementation,test]:    than one local address -- for example, when initiating connection
     TEXT[!MUST,implementation,test]:    migration as described in Section 9.2 or when probing a new network
     TEXT[!MUST,implementation,test]:    path as described in Section 9.1.
     TEXT[!MUST,implementation,test]:    Similarly, an endpoint MUST NOT reuse a connection ID when sending to
     TEXT[!MUST,implementation,test]:    more than one destination address.
-    TEXT[!MAY]: Due to network changes outside
-    TEXT[!MAY]:    the control of its peer, an endpoint might receive packets from a new
-    TEXT[!MAY]:    source address with the same Destination Connection ID field value,
-    TEXT[!MAY]:    in which case it MAY continue to use the current connection ID with
-    TEXT[!MAY]:    the new remote address while still sending from the same local
-    TEXT[!MAY]:    address.
+    TEXT[!MAY,implementation]: Due to network changes outside
+    TEXT[!MAY,implementation]:    the control of its peer, an endpoint might receive packets from a new
+    TEXT[!MAY,implementation]:    source address with the same Destination Connection ID field value,
+    TEXT[!MAY,implementation]:    in which case it MAY continue to use the current connection ID with
+    TEXT[!MAY,implementation]:    the new remote address while still sending from the same local
+    TEXT[!MAY,implementation]:    address.
     TEXT[!SHOULD,implementation,test]:    An endpoint SHOULD NOT initiate migration with a peer that has
     TEXT[!SHOULD,implementation,test]:    requested a zero-length connection ID, because traffic over the new
     TEXT[!SHOULD,implementation,test]:    path might be trivially linkable to traffic over the old one.
-    TEXT[!SHOULD]: Changing address
-    TEXT[!SHOULD]:    can cause a peer to reset its congestion control state (see
-    TEXT[!SHOULD]:    Section 9.4), so addresses SHOULD only be changed infrequently.
+    TEXT[!SHOULD,implementation]: Changing address
+    TEXT[!SHOULD,implementation]:    can cause a peer to reset its congestion control state (see
+    TEXT[!SHOULD,implementation]:    Section 9.4), so addresses SHOULD only be changed infrequently.
     TEXT[!SHOULD,implementation,test]: To ensure that migration is possible and
     TEXT[!SHOULD,implementation,test]:    packets sent on different paths cannot be correlated, endpoints
     TEXT[!SHOULD,implementation,test]:    SHOULD provide new connection IDs before peers migrate; see
     TEXT[!SHOULD,implementation,test]:    Section 5.1.1.
 
   SECTION: [Server's Preferred Address](#section-9.6)
-    TEXT[!SHOULD]: If a
-    TEXT[!SHOULD]:    client receives packets from a new server address when the client has
-    TEXT[!SHOULD]:    not initiated a migration to that address, the client SHOULD discard
-    TEXT[!SHOULD]:    these packets.
+    TEXT[!SHOULD,implementation]: If a
+    TEXT[!SHOULD,implementation]:    client receives packets from a new server address when the client has
+    TEXT[!SHOULD,implementation]:    not initiated a migration to that address, the client SHOULD discard
+    TEXT[!SHOULD,implementation]:    these packets.
 
   SECTION: [Communicating a Preferred Address](#section-9.6.1)
-    TEXT[!MAY]:    Servers MAY communicate a preferred address of each address family
-    TEXT[!MAY]:    (IPv4 and IPv6) to allow clients to pick the one most suited to their
-    TEXT[!MAY]:    network attachment.
+    TEXT[!MAY,implementation]:    Servers MAY communicate a preferred address of each address family
+    TEXT[!MAY,implementation]:    (IPv4 and IPv6) to allow clients to pick the one most suited to their
+    TEXT[!MAY,implementation]:    network attachment.
     TEXT[!SHOULD,implementation,test]:    Once the handshake is confirmed, the client SHOULD select one of the
     TEXT[!SHOULD,implementation,test]:    two addresses provided by the server and initiate path validation
     TEXT[!SHOULD,implementation,test]:    (see Section 8.2).
@@ -701,31 +705,31 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
   SECTION: [Migration to a Preferred Address](#section-9.6.2)
     TEXT[!MUST,implementation,test]:    A client that migrates to a preferred address MUST validate the
     TEXT[!MUST,implementation,test]:    address it chooses before migrating; see Section 21.5.3.
-    TEXT[!MUST]: The server MUST send non-
-    TEXT[!MUST]:    probing packets from its original address until it receives a non-
-    TEXT[!MUST]:    probing packet from the client at its preferred address and until the
-    TEXT[!MUST]:    server has validated the new path.
+    TEXT[!MUST,implementation]: The server MUST send non-
+    TEXT[!MUST,implementation]:    probing packets from its original address until it receives a non-
+    TEXT[!MUST,implementation]:    probing packet from the client at its preferred address and until the
+    TEXT[!MUST,implementation]:    server has validated the new path.
     TEXT[!MUST,implementation,test]:    The server MUST probe on the path toward the client from its
     TEXT[!MUST,implementation,test]:    preferred address.
-    TEXT[!SHOULD]: The server SHOULD drop
-    TEXT[!SHOULD]:    newer packets for this connection that are received on the old IP
-    TEXT[!SHOULD]:    address.
+    TEXT[!SHOULD,implementation,test]: The server SHOULD drop
+    TEXT[!SHOULD,implementation,test]:    newer packets for this connection that are received on the old IP
+    TEXT[!SHOULD,implementation,test]:    address.
     TEXT[!MAY]: The server MAY continue to process delayed packets that are
     TEXT[!MAY]:    received on the old IP address.
-    TEXT[!MUST]: A client MUST NOT use these for other connections,
-    TEXT[!MUST]:    including connections that are resumed from the current connection.
+    TEXT[!MUST,implementation]: A client MUST NOT use these for other connections,
+    TEXT[!MUST,implementation]:    including connections that are resumed from the current connection.
 
   SECTION: [Interaction of Client Migration and Preferred Address](#section-9.6.3)
-    TEXT[!SHOULD]: In this case, the client
-    TEXT[!SHOULD]:    SHOULD perform path validation to both the original and preferred
-    TEXT[!SHOULD]:    server address from the client's new address concurrently.
-    TEXT[!MUST]:    If path validation of the server's preferred address succeeds, the
-    TEXT[!MUST]:    client MUST abandon validation of the original address and migrate to
-    TEXT[!MUST]:    using the server's preferred address.
-    TEXT[!MAY]: If path validation of the
-    TEXT[!MAY]:    server's preferred address fails but validation of the server's
-    TEXT[!MAY]:    original address succeeds, the client MAY migrate to its new address
-    TEXT[!MAY]:    and continue sending to the server's original address.
+    TEXT[!SHOULD,implementation,test]: In this case, the client
+    TEXT[!SHOULD,implementation,test]:    SHOULD perform path validation to both the original and preferred
+    TEXT[!SHOULD,implementation,test]:    server address from the client's new address concurrently.
+    TEXT[!MUST,implementation,test]:    If path validation of the server's preferred address succeeds, the
+    TEXT[!MUST,implementation,test]:    client MUST abandon validation of the original address and migrate to
+    TEXT[!MUST,implementation,test]:    using the server's preferred address.
+    TEXT[!MAY,test]: If path validation of the
+    TEXT[!MAY,test]:    server's preferred address fails but validation of the server's
+    TEXT[!MAY,test]:    original address succeeds, the client MAY migrate to its new address
+    TEXT[!MAY,test]:    and continue sending to the server's original address.
     TEXT[!MUST]:    If packets received at the server's preferred address have a
     TEXT[!MUST]:    different source address than observed from the client during the
     TEXT[!MUST]:    handshake, the server MUST protect against potential attacks as
@@ -733,24 +737,24 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    Servers SHOULD initiate path validation to the client's new address
     TEXT[!SHOULD,implementation,test]:    upon receiving a probe packet from a different address; see
     TEXT[!SHOULD,implementation,test]:    Section 8.
-    TEXT[!SHOULD]:    A client that migrates to a new address SHOULD use a preferred
-    TEXT[!SHOULD]:    address from the same address family for the server.
-    TEXT[!MAY]: This
-    TEXT[!MAY]:    connection ID is provided to ensure that the client has a connection
-    TEXT[!MAY]:    ID available for migration, but the client MAY use this connection ID
-    TEXT[!MAY]:    on any path.
+    TEXT[!SHOULD,implementation,test]:    A client that migrates to a new address SHOULD use a preferred
+    TEXT[!SHOULD,implementation,test]:    address from the same address family for the server.
+    TEXT[!MAY,implementation]: This
+    TEXT[!MAY,implementation]:    connection ID is provided to ensure that the client has a connection
+    TEXT[!MAY,implementation]:    ID available for migration, but the client MAY use this connection ID
+    TEXT[!MAY,implementation]:    on any path.
 
   SECTION: [Use of IPv6 Flow Label and Migration](#section-9.7)
     TEXT[!SHOULD,implementation,test]:    Endpoints that send data using IPv6 SHOULD apply an IPv6 flow label
     TEXT[!SHOULD,implementation,test]:    in compliance with [RFC6437], unless the local API does not allow
     TEXT[!SHOULD,implementation,test]:    setting IPv6 flow labels.
-    TEXT[!MUST]:    The flow label generation MUST be designed to minimize the chances of
-    TEXT[!MUST]:    linkability with a previously used flow label, as a stable flow label
-    TEXT[!MUST]:    would enable correlating activity on multiple paths; see Section 9.5.
+    TEXT[!MUST,implementation]:    The flow label generation MUST be designed to minimize the chances of
+    TEXT[!MUST,implementation]:    linkability with a previously used flow label, as a stable flow label
+    TEXT[!MUST,implementation]:    would enable correlating activity on multiple paths; see Section 9.5.
 
   SECTION: [Connection Termination](#section-10)
-    TEXT[!MAY]:    An endpoint MAY discard connection state if it does not have a
-    TEXT[!MAY]:    validated path on which it can send packets; see Section 8.2.
+    TEXT[!MAY,implementation]:    An endpoint MAY discard connection state if it does not have a
+    TEXT[!MAY,implementation]:    validated path on which it can send packets; see Section 8.2.
 
   SECTION: [Idle Timeout](#section-10.1)
     TEXT[implementation,test]:    If a max_idle_timeout is specified by either endpoint in its
@@ -787,9 +791,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    state early.
     TEXT[!SHOULD,implementation,test]:    Once its closing or draining state ends, an endpoint SHOULD discard
     TEXT[!SHOULD,implementation,test]:    all connection state.
-    TEXT[!MAY]: The endpoint MAY send a Stateless Reset in
-    TEXT[!MAY]:    response to any further incoming packets belonging to this
-    TEXT[!MAY]:    connection.
+    TEXT[!MAY,implementation]: The endpoint MAY send a Stateless Reset in
+    TEXT[!MAY,implementation]:    response to any further incoming packets belonging to this
+    TEXT[!MAY,implementation]:    connection.
 
   SECTION: [Closing Connection State](#section-10.2.1)
     TEXT[!SHOULD,implementation,test]:    An endpoint SHOULD limit the rate at which it generates packets in
@@ -831,44 +835,44 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]: After the handshake is confirmed (see
     TEXT[!MUST,implementation,test]:    Section 4.1.2 of [QUIC-TLS]), an endpoint MUST send any
     TEXT[!MUST,implementation,test]:    CONNECTION_CLOSE frames in a 1-RTT packet.
-    TEXT[!MAY]: However, prior to
-    TEXT[!MAY]:    confirming the handshake, it is possible that more advanced packet
-    TEXT[!MAY]:    protection keys are not available to the peer, so another
-    TEXT[!MAY]:    CONNECTION_CLOSE frame MAY be sent in a packet that uses a lower
-    TEXT[!MAY]:    packet protection level.
-    TEXT[!SHOULD]: Under these
-    TEXT[!SHOULD]:       circumstances, a server SHOULD send a CONNECTION_CLOSE frame in
-    TEXT[!SHOULD]:       both Handshake and Initial packets to ensure that at least one of
-    TEXT[!SHOULD]:       them is processable by the client.
-    TEXT[!SHOULD]:    *  Prior to confirming the handshake, a peer might be unable to
-    TEXT[!SHOULD]:       process 1-RTT packets, so an endpoint SHOULD send a
-    TEXT[!SHOULD]:       CONNECTION_CLOSE frame in both Handshake and 1-RTT packets.
-    TEXT[!SHOULD]:       server SHOULD also send a CONNECTION_CLOSE frame in an Initial
-    TEXT[!SHOULD]:       packet.
+    TEXT[!MAY,implementation]: However, prior to
+    TEXT[!MAY,implementation]:    confirming the handshake, it is possible that more advanced packet
+    TEXT[!MAY,implementation]:    protection keys are not available to the peer, so another
+    TEXT[!MAY,implementation]:    CONNECTION_CLOSE frame MAY be sent in a packet that uses a lower
+    TEXT[!MAY,implementation]:    packet protection level.
+    TEXT[!SHOULD,implementation,test]: Under these
+    TEXT[!SHOULD,implementation,test]:       circumstances, a server SHOULD send a CONNECTION_CLOSE frame in
+    TEXT[!SHOULD,implementation,test]:       both Handshake and Initial packets to ensure that at least one of
+    TEXT[!SHOULD,implementation,test]:       them is processable by the client.
+    TEXT[!SHOULD,implementation,test]:    *  Prior to confirming the handshake, a peer might be unable to
+    TEXT[!SHOULD,implementation,test]:       process 1-RTT packets, so an endpoint SHOULD send a
+    TEXT[!SHOULD,implementation,test]:       CONNECTION_CLOSE frame in both Handshake and 1-RTT packets.
+    TEXT[!SHOULD,implementation,test]:       server SHOULD also send a CONNECTION_CLOSE frame in an Initial
+    TEXT[!SHOULD,implementation,test]:       packet.
     TEXT[!MUST,implementation,test]: A CONNECTION_CLOSE of type 0x1d MUST be replaced by a
     TEXT[!MUST,implementation,test]:    CONNECTION_CLOSE of type 0x1c when sending the frame in Initial or
     TEXT[!MUST,implementation,test]:    Handshake packets.
     TEXT[!MUST,implementation,test]: Endpoints MUST clear the value of the
     TEXT[!MUST,implementation,test]:    Reason Phrase field and SHOULD use the APPLICATION_ERROR code when
     TEXT[!MUST,implementation,test]:    converting to a CONNECTION_CLOSE of type 0x1c.
-    TEXT[!MAY]: For this
-    TEXT[!MAY]:    reason, endpoints MAY discard packets rather than immediately close
-    TEXT[!MAY]:    if errors are detected in packets that lack authentication.
+    TEXT[!MAY,implementation]: For this
+    TEXT[!MAY,implementation]:    reason, endpoints MAY discard packets rather than immediately close
+    TEXT[!MAY,implementation]:    if errors are detected in packets that lack authentication.
 
   SECTION: [Stateless Reset](#section-10.3)
-    TEXT[!MAY]: An
-    TEXT[!MAY]:    endpoint MAY send a Stateless Reset in response to receiving a packet
-    TEXT[!MAY]:    that it cannot associate with an active connection.
+    TEXT[!MAY,implementation]: An
+    TEXT[!MAY,implementation]:    endpoint MAY send a Stateless Reset in response to receiving a packet
+    TEXT[!MAY,implementation]:    that it cannot associate with an active connection.
     TEXT[!MUST,implementation,test]: An endpoint that wishes to communicate a fatal
     TEXT[!MUST,implementation,test]:    connection error MUST use a CONNECTION_CLOSE frame if it is able.
     TEXT[!SHOULD,implementation,test]: The remainder of the first byte
     TEXT[!SHOULD,implementation,test]:    and an arbitrary number of bytes following it are set to values that
     TEXT[!SHOULD,implementation,test]:    SHOULD be indistinguishable from random.
-    TEXT[!SHOULD]: To achieve that end,
-    TEXT[!SHOULD]:    the endpoint SHOULD ensure that all packets it sends are at least 22
-    TEXT[!SHOULD]:    bytes longer than the minimum connection ID length that it requests
-    TEXT[!SHOULD]:    the peer to include in its packets, adding PADDING frames as
-    TEXT[!SHOULD]:    necessary.
+    TEXT[!SHOULD,implementation,test]: To achieve that end,
+    TEXT[!SHOULD,implementation,test]:    the endpoint SHOULD ensure that all packets it sends are at least 22
+    TEXT[!SHOULD,implementation,test]:    bytes longer than the minimum connection ID length that it requests
+    TEXT[!SHOULD,implementation,test]:    the peer to include in its packets, adding PADDING frames as
+    TEXT[!SHOULD,implementation,test]:    necessary.
     TEXT[!SHOULD,implementation,test]: An
     TEXT[!SHOULD,implementation,test]:    endpoint that sends a Stateless Reset in response to a packet that is
     TEXT[!SHOULD,implementation,test]:    43 bytes or shorter SHOULD send a Stateless Reset that is one byte
@@ -887,8 +891,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MAY]:    long header.
 
   SECTION: [Detecting a Stateless Reset](#section-10.3.1)
-    TEXT[!MAY]:    Endpoints MAY skip this check if any packet from a datagram is
-    TEXT[!MAY]:    successfully processed.
+    TEXT[!MAY,implementation]:    Endpoints MAY skip this check if any packet from a datagram is
+    TEXT[!MAY,implementation]:    successfully processed.
     TEXT[!MUST,implementation,test]: However, the comparison MUST be performed
     TEXT[!MUST,implementation,test]:    when the first packet in an incoming datagram either cannot be
     TEXT[!MUST,implementation,test]:    associated with a connection or cannot be decrypted.
@@ -916,9 +920,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,exception]:    reused for new connections at nodes that share a static key.
     TEXT[!MUST,implementation,test]:    The same stateless reset token MUST NOT be used for multiple
     TEXT[!MUST,implementation,test]:    connection IDs.
-    TEXT[!MAY]: Endpoints are not required to compare new values
-    TEXT[!MAY]:    against all previous values, but a duplicate value MAY be treated as
-    TEXT[!MAY]:    a connection error of type PROTOCOL_VIOLATION.
+    TEXT[!MAY,implementation]: Endpoints are not required to compare new values
+    TEXT[!MAY,implementation]:    against all previous values, but a duplicate value MAY be treated as
+    TEXT[!MAY,implementation]:    a connection error of type PROTOCOL_VIOLATION.
 
   SECTION: [Looping](#section-10.3.3)
     TEXT[!MUST,implementation,test]:    An endpoint MUST ensure that every Stateless Reset that it sends is
@@ -930,10 +934,10 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    error to its peer.
     TEXT[!SHOULD,implementation,test]:    The most appropriate error code (Section 20) SHOULD be included in
     TEXT[!SHOULD,implementation,test]:    the frame that signals the error.
-    TEXT[!MAY]: In particular, an endpoint MAY use any applicable error
-    TEXT[!MAY]:    code when it detects an error condition; a generic error code (such
-    TEXT[!MAY]:    as PROTOCOL_VIOLATION or INTERNAL_ERROR) can always be used in place
-    TEXT[!MAY]:    of specific error codes.
+    TEXT[!MAY,implementation]: In particular, an endpoint MAY use any applicable error
+    TEXT[!MAY,implementation]:    code when it detects an error condition; a generic error code (such
+    TEXT[!MAY,implementation]:    as PROTOCOL_VIOLATION or INTERNAL_ERROR) can always be used in place
+    TEXT[!MAY,implementation]:    of specific error codes.
     TEXT[!MUST,implementation,test]:    stateless reset MUST NOT be used by an endpoint that has the state
     TEXT[!MUST,implementation,test]:    necessary to send a frame on the connection.
 
@@ -946,8 +950,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    endpoint SHOULD be prepared to retransmit a packet containing a
     TEXT[!SHOULD,implementation,test]:    CONNECTION_CLOSE frame if it receives more packets on a terminated
     TEXT[!SHOULD,implementation,test]:    connection.
-    TEXT[!MAY]:    As the AEAD for Initial packets does not provide strong
-    TEXT[!MAY]:    authentication, an endpoint MAY discard an invalid Initial packet.
+    TEXT[!MAY,implementation]:    As the AEAD for Initial packets does not provide strong
+    TEXT[!MAY,implementation]:    authentication, an endpoint MAY discard an invalid Initial packet.
 
   SECTION: [Stream Errors](#section-11.2)
     TEXT[!MUST,implementation,test]: RESET_STREAM MUST only be instigated by the
@@ -961,8 +965,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    An endpoint SHOULD include multiple frames in a single packet if they
     TEXT[!SHOULD,implementation,test]:    are to be sent at the same encryption level, instead of coalescing
     TEXT[!SHOULD,implementation,test]:    multiple packets at the same encryption level.
-    TEXT[!MAY]:    Receivers MAY route based on the information in the first packet
-    TEXT[!MAY]:    contained in a UDP datagram.
+    TEXT[!MAY,implementation]:    Receivers MAY route based on the information in the first packet
+    TEXT[!MAY,implementation]:    contained in a UDP datagram.
     TEXT[!MUST,implementation,test]: Senders MUST NOT coalesce QUIC packets
     TEXT[!MUST,implementation,test]:    with different connection IDs into a single UDP datagram.
     TEXT[!SHOULD,implementation,test]: Receivers
@@ -984,10 +988,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    number space in one connection.
     TEXT[!MUST,implementation,test]: If the packet number for sending
     TEXT[!MUST,implementation,test]:    reaches 2^62-1, the sender MUST close the connection without sending
-    TEXT[!MUST,implementation,test]:    a CONNECTION_CLOSE frame or any further packets;
-    TEXT[!MUST]:  an endpoint MAY send
-    TEXT[!MUST]:    a Stateless Reset (Section 10.3) in response to further packets that
-    TEXT[!MUST]:    it receives.
+    TEXT[!MUST,implementation,test]:    a CONNECTION_CLOSE frame or any further packets; an endpoint MAY send
+    TEXT[!MUST,implementation,test]:    a Stateless Reset (Section 10.3) in response to further packets that
+    TEXT[!MUST,implementation,test]:    it receives.
     TEXT[!MUST,implementation,test]:    A receiver MUST discard a newly unprotected packet unless it is
     TEXT[!MUST,implementation,test]:    certain that it has not processed another packet with the same packet
     TEXT[!MUST,implementation,test]:    number from the same packet number space.
@@ -1013,20 +1016,20 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MAY]:    a connection error of type PROTOCOL_VIOLATION.
 
   SECTION: [Frames and Number Spaces](#section-12.5)
-    TEXT[!MAY]:    *  PADDING, PING, and CRYPTO frames MAY appear in any packet number
-    TEXT[!MAY]:       space.
-    TEXT[!MAY]:    *  CONNECTION_CLOSE frames signaling errors at the QUIC layer (type
-    TEXT[!MAY]:       0x1c) MAY appear in any packet number space.
+    TEXT[!MAY,implementation]:    *  PADDING, PING, and CRYPTO frames MAY appear in any packet number
+    TEXT[!MAY,implementation]:       space.
+    TEXT[!MAY,implementation]:    *  CONNECTION_CLOSE frames signaling errors at the QUIC layer (type
+    TEXT[!MAY,implementation]:       0x1c) MAY appear in any packet number space.
     TEXT[!MUST,implementation,test]: CONNECTION_CLOSE
     TEXT[!MUST,implementation,test]:       frames signaling application errors (type 0x1d) MUST only appear
     TEXT[!MUST,implementation,test]:       in the application data packet number space.
-    TEXT[!MAY]:    *  ACK frames MAY appear in any packet number space but can only
-    TEXT[!MAY]:       acknowledge packets that appeared in that packet number space.
+    TEXT[!MAY,implementation]:    *  ACK frames MAY appear in any packet number space but can only
+    TEXT[!MAY,implementation]:       acknowledge packets that appeared in that packet number space.
     TEXT[!MUST,implementation,test]:    *  All other frame types MUST only be sent in the application data
     TEXT[!MUST,implementation,test]:       packet number space.
-    TEXT[!MAY]: A server MAY treat receipt
-    TEXT[!MAY]:    of these frames in 0-RTT packets as a connection error of type
-    TEXT[!MAY]:    PROTOCOL_VIOLATION.
+    TEXT[!MAY,implementation]: A server MAY treat receipt
+    TEXT[!MAY,implementation]:    of these frames in 0-RTT packets as a connection error of type
+    TEXT[!MAY,implementation]:    PROTOCOL_VIOLATION.
 
   SECTION: [Packetization and Reliability](#section-13)
     TEXT[!MAY]: A sender
@@ -1066,9 +1069,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]: An endpoint SHOULD
     TEXT[!SHOULD,implementation,test]:    send an ACK frame with other frames when there are new ack-eliciting
     TEXT[!SHOULD,implementation,test]:    packets to acknowledge.
-    TEXT[!MAY]: When only non-ack-eliciting packets need to
-    TEXT[!MAY]:    be acknowledged, an endpoint MAY choose not to send an ACK frame with
-    TEXT[!MAY]:    outgoing frames until an ack-eliciting packet has been received.
+    TEXT[!MAY,implementation]: When only non-ack-eliciting packets need to
+    TEXT[!MAY,implementation]:    be acknowledged, an endpoint MAY choose not to send an ACK frame with
+    TEXT[!MAY,implementation]:    outgoing frames until an ack-eliciting packet has been received.
     TEXT[!MUST,implementation,test]: In
     TEXT[!MUST,implementation,test]:    that case, an endpoint MUST NOT send an ack-eliciting frame in all
     TEXT[!MUST,implementation,test]:    packets that would otherwise be non-ack-eliciting, to avoid an
@@ -1088,8 +1091,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
   SECTION: [Acknowledgment Frequency](#section-13.2.2)
     TEXT[!SHOULD,implementation,test]:    A receiver SHOULD send an ACK frame after receiving at least two ack-
     TEXT[!SHOULD,implementation,test]:    eliciting packets.
-    TEXT[!MAY]:    A receiver MAY process multiple available packets before determining
-    TEXT[!MAY]:    whether to send an ACK frame in response.
+    TEXT[!MAY,implementation]:    A receiver MAY process multiple available packets before determining
+    TEXT[!MAY,implementation]:    whether to send an ACK frame in response.
 
   SECTION: [Managing ACK Ranges](#section-13.2.3)
     TEXT[!SHOULD,implementation,test]:    ACK frames SHOULD always acknowledge the most recently received
@@ -1100,9 +1103,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]: After receiving
     TEXT[!SHOULD,implementation,test]:    acknowledgments for an ACK frame, the receiver SHOULD stop tracking
     TEXT[!SHOULD,implementation,test]:    those acknowledged ACK Ranges.
-    TEXT[!MAY]: Receivers MAY also limit ACK
-    TEXT[!MAY]:    frame size further to preserve space for other frames or to limit the
-    TEXT[!MAY]:    capacity that acknowledgments consume.
+    TEXT[!MAY,implementation]: Receivers MAY also limit ACK
+    TEXT[!MAY,implementation]:    frame size further to preserve space for other frames or to limit the
+    TEXT[!MAY,implementation]:    capacity that acknowledgments consume.
     TEXT[!MUST,implementation,test]:    A receiver MUST retain an ACK Range unless it can ensure that it will
     TEXT[!MUST,implementation,test]:    not subsequently accept packets with numbers in that range.
     TEXT[implementation,test]:    Maintaining a minimum packet number that increases as ranges are
@@ -1117,9 +1120,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
   SECTION: [Measuring and Reporting Host Delay](#section-13.2.5)
     TEXT[!MUST,implementation,test]: An endpoint MUST NOT include delays that it
     TEXT[!MUST,implementation,test]:    does not control when populating the ACK Delay field in an ACK frame.
-    TEXT[!SHOULD]:    However, endpoints SHOULD include buffering delays caused by
-    TEXT[!SHOULD]:    unavailability of decryption keys, since these delays can be large
-    TEXT[!SHOULD]:    and are likely to be non-repeating.
+    TEXT[!SHOULD,implementation,test]:    However, endpoints SHOULD include buffering delays caused by
+    TEXT[!SHOULD,implementation,test]:    unavailability of decryption keys, since these delays can be large
+    TEXT[!SHOULD,implementation,test]:    and are likely to be non-repeating.
     TEXT[!SHOULD,implementation,test]:    When the measured acknowledgment delay is larger than its
     TEXT[!SHOULD,implementation,test]:    max_ack_delay, an endpoint SHOULD report the measured delay.
 
@@ -1133,10 +1136,10 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    acknowledged by the server in packets protected by 1-RTT keys.
 
   SECTION: [PADDING Frames Consume Congestion Window](#section-13.2.7)
-    TEXT[!SHOULD]: To
-    TEXT[!SHOULD]:    avoid a deadlock, a sender SHOULD ensure that other frames are sent
-    TEXT[!SHOULD]:    periodically in addition to PADDING frames to elicit acknowledgments
-    TEXT[!SHOULD]:    from the receiver.
+    TEXT[!SHOULD,implementation,test]: To
+    TEXT[!SHOULD,implementation,test]:    avoid a deadlock, a sender SHOULD ensure that other frames are sent
+    TEXT[!SHOULD,implementation,test]:    periodically in addition to PADDING frames to elicit acknowledgments
+    TEXT[!SHOULD,implementation,test]:    from the receiver.
 
   SECTION: [Retransmission of Information](#section-13.3)
     TEXT[!MUST,implementation,test]:       The content of a RESET_STREAM frame MUST NOT change when it is
@@ -1178,9 +1181,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[implementation,test]:    either the network path or the peer does not support ECN.
     TEXT[!MAY]:    Even if validation fails, an endpoint MAY revalidate ECN for the same
     TEXT[!MAY]:    path at any later time in the connection.
-    TEXT[!MAY]:    Upon successful validation, an endpoint MAY continue to set an ECT
-    TEXT[!MAY]:    codepoint in subsequent packets it sends, with the expectation that
-    TEXT[!MAY]:    the path is ECN capable.
+    TEXT[!MAY,implementation]:    Upon successful validation, an endpoint MAY continue to set an ECT
+    TEXT[!MAY,implementation]:    codepoint in subsequent packets it sends, with the expectation that
+    TEXT[!MAY,implementation]:    the path is ECN capable.
     TEXT[!MUST,implementation,test]: Network routing and path elements can
     TEXT[!MUST,implementation,test]:    change mid-connection; an endpoint MUST disable ECN if validation
     TEXT[!MUST,implementation,test]:    later fails.
@@ -1204,9 +1207,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]: Similarly, a server MUST expand the payload of all UDP
     TEXT[!MUST,implementation,test]:    datagrams carrying ack-eliciting Initial packets to at least the
     TEXT[!MUST,implementation,test]:    smallest allowed maximum datagram size of 1200 bytes.
-    TEXT[!MAY]:    Datagrams containing Initial packets MAY exceed 1200 bytes if the
-    TEXT[!MAY]:    sender believes that the network path and peer both support the size
-    TEXT[!MAY]:    that it chooses.
+    TEXT[!MAY,implementation]:    Datagrams containing Initial packets MAY exceed 1200 bytes if the
+    TEXT[!MAY,implementation]:    sender believes that the network path and peer both support the size
+    TEXT[!MAY,implementation]:    that it chooses.
     TEXT[!MUST,implementation,test]:    A server MUST discard an Initial packet that is carried in a UDP
     TEXT[!MUST,implementation,test]:    datagram with a payload that is smaller than the smallest allowed
     TEXT[!MUST,implementation,test]:    maximum datagram size of 1200 bytes.
@@ -1220,9 +1223,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    An endpoint SHOULD use DPLPMTUD (Section 14.3) or PMTUD
     TEXT[!SHOULD,implementation,test]:    (Section 14.2.1) to determine whether the path to a destination will
     TEXT[!SHOULD,implementation,test]:    support a desired maximum datagram size without fragmentation.
-    TEXT[!SHOULD]: In
-    TEXT[!SHOULD]:    the absence of these mechanisms, QUIC endpoints SHOULD NOT send
-    TEXT[!SHOULD]:    datagrams larger than the smallest allowed maximum datagram size.
+    TEXT[!SHOULD,implementation,test]: In
+    TEXT[!SHOULD,implementation,test]:    the absence of these mechanisms, QUIC endpoints SHOULD NOT send
+    TEXT[!SHOULD,implementation,test]:    datagrams larger than the smallest allowed maximum datagram size.
     TEXT[!SHOULD,implementation,test]: All QUIC
     TEXT[!SHOULD,implementation,test]:    packets that are not sent in a PMTU probe SHOULD be sized to fit
     TEXT[!SHOULD,implementation,test]:    within the maximum datagram size to avoid the datagram being
@@ -1232,29 +1235,29 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    datagram size of 1200 bytes, it MUST immediately cease sending QUIC
     TEXT[!MUST,implementation,test]:    packets, except for those in PMTU probes or those containing
     TEXT[!MUST,implementation,test]:    CONNECTION_CLOSE frames, on the affected path.
-    TEXT[!MAY]: An endpoint MAY
-    TEXT[!MAY]:    terminate the connection if an alternative path cannot be found.
+    TEXT[!MAY,implementation]: An endpoint MAY
+    TEXT[!MAY,implementation]:    terminate the connection if an alternative path cannot be found.
     TEXT[!SHOULD,implementation,test]:    QUIC implementations that implement any kind of PMTU discovery
     TEXT[!SHOULD,implementation,test]:    therefore SHOULD maintain a maximum datagram size for each
     TEXT[!SHOULD,implementation,test]:    combination of local and remote IP addresses.
-    TEXT[!MAY]:    A QUIC implementation MAY be more conservative in computing the
-    TEXT[!MAY]:    maximum datagram size to allow for unknown tunnel overheads or IP
-    TEXT[!MAY]:    header options/extensions.
+    TEXT[!MAY,implementation]:    A QUIC implementation MAY be more conservative in computing the
+    TEXT[!MAY,implementation]:    maximum datagram size to allow for unknown tunnel overheads or IP
+    TEXT[!MAY,implementation]:    header options/extensions.
 
   SECTION: [Handling of ICMP Messages by PMTUD](#section-14.2.1)
     TEXT[!MUST,implementation,test]:    An endpoint MUST ignore an ICMP message that claims the PMTU has
     TEXT[!MUST,implementation,test]:    decreased below QUIC's smallest allowed maximum datagram size.
-    TEXT[!SHOULD]:    QUIC endpoints using PMTUD SHOULD validate ICMP messages to protect
-    TEXT[!SHOULD]:    from packet injection as specified in [RFC8201] and Section 5.2 of
-    TEXT[!SHOULD]:    [RFC8085].
-    TEXT[!SHOULD]: This validation SHOULD use the quoted packet supplied in
-    TEXT[!SHOULD]:    the payload of an ICMP message to associate the message with a
-    TEXT[!SHOULD]:    corresponding transport connection (see Section 4.6.1 of [DPLPMTUD]).
-    TEXT[!MUST]:    ICMP message validation MUST include matching IP addresses and UDP
-    TEXT[!MUST]:    ports [RFC8085] and, when possible, connection IDs to an active QUIC
-    TEXT[!MUST]:    session.
-    TEXT[!SHOULD]: The endpoint SHOULD ignore all ICMP messages that fail
-    TEXT[!SHOULD]:    validation.
+    TEXT[!SHOULD,implementation]:    QUIC endpoints using PMTUD SHOULD validate ICMP messages to protect
+    TEXT[!SHOULD,implementation]:    from packet injection as specified in [RFC8201] and Section 5.2 of
+    TEXT[!SHOULD,implementation]:    [RFC8085].
+    TEXT[!SHOULD,implementation,test]: This validation SHOULD use the quoted packet supplied in
+    TEXT[!SHOULD,implementation,test]:    the payload of an ICMP message to associate the message with a
+    TEXT[!SHOULD,implementation,test]:    corresponding transport connection (see Section 4.6.1 of [DPLPMTUD]).
+    TEXT[!MUST,implementation]:    ICMP message validation MUST include matching IP addresses and UDP
+    TEXT[!MUST,implementation]:    ports [RFC8085] and, when possible, connection IDs to an active QUIC
+    TEXT[!MUST,implementation]:    session.
+    TEXT[!SHOULD,implementation,test]: The endpoint SHOULD ignore all ICMP messages that fail
+    TEXT[!SHOULD,implementation,test]:    validation.
     TEXT[!MUST,implementation,test]:    An endpoint MUST NOT increase the PMTU based on ICMP messages; see
     TEXT[!MUST,implementation,test]:    Item 6 in Section 3 of [DPLPMTUD].
     TEXT[!MAY]: Any reduction in QUIC's maximum
@@ -1274,26 +1277,26 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    control reaction; see Item 7 in Section 3 of [DPLPMTUD].
 
   SECTION: [Versions](#section-15)
-    TEXT[!MAY]:    client or server MAY advertise support for any of these reserved
-    TEXT[!MAY]:    versions.
-    TEXT[!MAY]:    Reserved version numbers will never represent a real protocol; a
-    TEXT[!MAY]:    client MAY use one of these version numbers with the expectation that
-    TEXT[!MAY]:    the server will initiate version negotiation; a server MAY advertise
-    TEXT[!MAY]:    support for one of these versions and can expect that clients ignore
-    TEXT[!MAY]:    the value.
+    TEXT[!MAY,implementation]:    client or server MAY advertise support for any of these reserved
+    TEXT[!MAY,implementation]:    versions.
+    TEXT[!MAY,implementation]:    Reserved version numbers will never represent a real protocol; a
+    TEXT[!MAY,implementation]:    client MAY use one of these version numbers with the expectation that
+    TEXT[!MAY,implementation]:    the server will initiate version negotiation; a server MAY advertise
+    TEXT[!MAY,implementation]:    support for one of these versions and can expect that clients ignore
+    TEXT[!MAY,implementation]:    the value.
 
   SECTION: [Packet Number Encoding and Decoding](#section-17.1)
-    TEXT[!MUST]:    Prior to receiving an acknowledgment for a packet number space, the
-    TEXT[!MUST]:    full packet number MUST be included; it is not to be truncated, as
-    TEXT[!MUST]:    described below.
-    TEXT[!MUST]:    After an acknowledgment is received for a packet number space, the
-    TEXT[!MUST]:    sender MUST use a packet number size able to represent more than
-    TEXT[!MUST]:    twice as large a range as the difference between the largest
-    TEXT[!MUST]:    acknowledged packet number and the packet number being sent.
-    TEXT[!SHOULD]: An endpoint SHOULD
-    TEXT[!SHOULD]:    use a large enough packet number encoding to allow the packet number
-    TEXT[!SHOULD]:    to be recovered even if the packet arrives after packets that are
-    TEXT[!SHOULD]:    sent afterwards.
+    TEXT[!MUST,implementation]:    Prior to receiving an acknowledgment for a packet number space, the
+    TEXT[!MUST,implementation]:    full packet number MUST be included; it is not to be truncated, as
+    TEXT[!MUST,implementation]:    described below.
+    TEXT[!MUST,implementation]:    After an acknowledgment is received for a packet number space, the
+    TEXT[!MUST,implementation]:    sender MUST use a packet number size able to represent more than
+    TEXT[!MUST,implementation]:    twice as large a range as the difference between the largest
+    TEXT[!MUST,implementation]:    acknowledged packet number and the packet number being sent.
+    TEXT[!SHOULD,implementation]: An endpoint SHOULD
+    TEXT[!SHOULD,implementation]:    use a large enough packet number encoding to allow the packet number
+    TEXT[!SHOULD,implementation]:    to be recovered even if the packet arrives after packets that are
+    TEXT[!SHOULD,implementation]:    sent afterwards.
     TEXT[implementation,test]:    Once header protection is removed, the packet number is decoded by
     TEXT[implementation,test]:    finding the packet number value that is closest to the next expected
     TEXT[implementation,test]:    packet.
@@ -1342,11 +1345,11 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:       to 0; clients that receive an Initial packet with a non-zero Token
     TEXT[!MUST,implementation,test]:       Length field MUST either discard the packet or generate a
     TEXT[!MUST,implementation,test]:       connection error of type PROTOCOL_VIOLATION.
-    TEXT[!MAY]: A server MAY send multiple Initial packets.
+    TEXT[!MAY,implementation]: A server MAY send multiple Initial packets.
 
   SECTION: [0-RTT](#section-17.2.3)
-    TEXT[!SHOULD]: A client SHOULD attempt
-    TEXT[!SHOULD]:    to resend data in 0-RTT packets after it sends a new Initial packet.
+    TEXT[!SHOULD,implementation,test]: A client SHOULD attempt
+    TEXT[!SHOULD,implementation,test]:    to resend data in 0-RTT packets after it sends a new Initial packet.
     TEXT[!MUST,implementation,test]:    New packet numbers MUST be used for any new packets that are sent; as
     TEXT[!MUST,implementation,test]:    described in Section 17.2.5.3, reusing packet numbers could
     TEXT[!MUST,implementation,test]:    compromise packet protection.
@@ -1354,13 +1357,13 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    packets from the server.
     TEXT[!MUST,implementation,test]: An acknowledgment for a 1-RTT
     TEXT[!MUST,implementation,test]:    packet MUST be carried in a 1-RTT packet.
-    TEXT[!SHOULD]:    A server SHOULD treat a violation of remembered limits
-    TEXT[!SHOULD]:    (Section 7.4.1) as a connection error of an appropriate type (for
-    TEXT[!SHOULD]:    instance, a FLOW_CONTROL_ERROR for exceeding stream data limits).
+    TEXT[!SHOULD,implementation,test]:    A server SHOULD treat a violation of remembered limits
+    TEXT[!SHOULD,implementation,test]:    (Section 7.4.1) as a connection error of an appropriate type (for
+    TEXT[!SHOULD,implementation,test]:    instance, a FLOW_CONTROL_ERROR for exceeding stream data limits).
 
   SECTION: [Handshake Packet](#section-17.2.4)
-    TEXT[!MAY]: Handshake packets MAY contain
-    TEXT[!MAY]:    CONNECTION_CLOSE frames of type 0x1c.
+    TEXT[!MAY,implementation]: Handshake packets MAY contain
+    TEXT[!MAY,implementation]:    CONNECTION_CLOSE frames of type 0x1c.
     TEXT[!MUST,implementation,test]: Endpoints MUST treat receipt
     TEXT[!MUST,implementation,test]:    of Handshake packets with other frames as a connection error of type
     TEXT[!MUST,implementation,test]:    PROTOCOL_VIOLATION.
@@ -1380,8 +1383,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]: The client MUST use the value from the Source
     TEXT[!MUST,implementation,test]:    Connection ID field of the Retry packet in the Destination Connection
     TEXT[!MUST,implementation,test]:    ID field of subsequent packets that it sends.
-    TEXT[!MAY]:    A server MAY send Retry packets in response to Initial and 0-RTT
-    TEXT[!MAY]:    packets.
+    TEXT[!MAY,implementation]:    A server MAY send Retry packets in response to Initial and 0-RTT
+    TEXT[!MAY,implementation]:    packets.
     TEXT[!MUST,implementation,test]: A server MUST NOT send more than one Retry
     TEXT[!MUST,implementation,test]:    packet in response to a single UDP datagram.
 
@@ -1401,15 +1404,15 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    logic; see Section 8.1.4.
 
   SECTION: [Continuing a Handshake after Retry](#section-17.2.5.3)
-    TEXT[!MUST]: A client MUST use the same
-    TEXT[!MUST]:    cryptographic handshake message it included in this packet.
+    TEXT[!MUST,implementation,test]: A client MUST use the same
+    TEXT[!MUST,implementation,test]:    cryptographic handshake message it included in this packet.
     TEXT[!MAY]: A server
     TEXT[!MAY]:    MAY treat a packet that contains a different cryptographic handshake
     TEXT[!MAY]:    message as a connection error or discard it.
-    TEXT[!MAY]:    A client MAY attempt 0-RTT after receiving a Retry packet by sending
-    TEXT[!MAY]:    0-RTT packets to the connection ID provided by the server.
-    TEXT[!MUST,implementation,test]:    A client MUST NOT reset the packet number for any packet number space
-    TEXT[!MUST,implementation,test]:    after processing a Retry packet.
+    TEXT[!MAY,implementation]:    A client MAY attempt 0-RTT after receiving a Retry packet by sending
+    TEXT[!MAY,implementation]:    0-RTT packets to the connection ID provided by the server.
+    TEXT[!MUST,test]:    A client MUST NOT reset the packet number for any packet number space
+    TEXT[!MUST,test]:    after processing a Retry packet.
     TEXT[!MAY]: A server MAY abort the connection if it
     TEXT[!MAY]:    detects that the client reset the packet number.
 
@@ -1425,7 +1428,7 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:       PROTOCOL_VIOLATION.
 
   SECTION: [Latency Spin Bit](#section-17.4)
-    TEXT[!MAY]:    The spin bit is an OPTIONAL feature of this version of QUIC.
+    TEXT[!MAY,implementation]:    The spin bit is an OPTIONAL feature of this version of QUIC.
     TEXT[!MUST,implementation,test]: An
     TEXT[!MUST,implementation,test]:    endpoint that does not support this feature MUST disable it, as
     TEXT[!MUST,implementation,test]:    defined below.
@@ -1440,23 +1443,24 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    network.
     TEXT[!MUST,implementation,test]:    When the spin bit is disabled, endpoints MAY set the spin bit to any
     TEXT[!MUST,implementation,test]:    value and MUST ignore any incoming value.
-    TEXT[!SHOULD]: It is RECOMMENDED that
-    TEXT[!SHOULD]:    endpoints set the spin bit to a random value either chosen
-    TEXT[!SHOULD]:    independently for each packet or chosen independently for each
-    TEXT[!SHOULD]:    connection ID.
+    TEXT[!SHOULD,implementation,test]: It is RECOMMENDED that
+    TEXT[!SHOULD,implementation,test]:    endpoints set the spin bit to a random value either chosen
+    TEXT[!SHOULD,implementation,test]:    independently for each packet or chosen independently for each
+    TEXT[!SHOULD,implementation,test]:    connection ID.
 
   SECTION: [Transport Parameter Definitions](#section-18.2)
     TEXT[!MUST,implementation,test]: This transport parameter MUST NOT be sent
     TEXT[!MUST,implementation,test]:       by a client but MAY be sent by a server.
     TEXT[implementation,test]: Values below 1200 are invalid.
-    TEXT[!SHOULD]: This value
-    TEXT[!SHOULD]:       SHOULD include the receiver's expected delays in alarms firing.
+    TEXT[!SHOULD,implementation]: This value
+    TEXT[!SHOULD,implementation]:       SHOULD include the receiver's expected delays in alarms firing.
+    TEXT[implementation,test]: Values of 2^14 or greater are invalid.
     TEXT[!MUST,implementation,test]: An endpoint that receives this transport
     TEXT[!MUST,implementation,test]:       parameter MUST NOT use a new local address when sending to the
     TEXT[!MUST,implementation,test]:       address that the peer used during the handshake.
-    TEXT[!MAY]: Servers MAY choose to only send a preferred address
-    TEXT[!MAY]:       of one address family by sending an all-zero address and port
-    TEXT[!MAY]:       (0.0.0.0:0 or [::]:0) for the other family.
+    TEXT[!MAY,implementation]: Servers MAY choose to only send a preferred address
+    TEXT[!MAY,implementation]:       of one address family by sending an all-zero address and port
+    TEXT[!MAY,implementation]:       (0.0.0.0:0 or [::]:0) for the other family.
     TEXT[!MUST,implementation,test]: A server
     TEXT[!MUST,implementation,test]:       that chooses a zero-length connection ID MUST NOT provide a
     TEXT[!MUST,implementation,test]:       preferred address.
@@ -1590,12 +1594,12 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]: Receipt
     TEXT[!MUST,implementation,test]:    of the same frame multiple times MUST NOT be treated as a connection
     TEXT[!MUST,implementation,test]:    error.
-    TEXT[!MAY]:    If an endpoint receives a NEW_CONNECTION_ID frame that repeats a
-    TEXT[!MAY]:    previously issued connection ID with a different Stateless Reset
-    TEXT[!MAY]:    Token field value or a different Sequence Number field value, or if a
-    TEXT[!MAY]:    sequence number is used for different connection IDs, the endpoint
-    TEXT[!MAY]:    MAY treat that receipt as a connection error of type
-    TEXT[!MAY]:    PROTOCOL_VIOLATION.
+    TEXT[!MAY,implementation]:    If an endpoint receives a NEW_CONNECTION_ID frame that repeats a
+    TEXT[!MAY,implementation]:    previously issued connection ID with a different Stateless Reset
+    TEXT[!MAY,implementation]:    Token field value or a different Sequence Number field value, or if a
+    TEXT[!MAY,implementation]:    sequence number is used for different connection IDs, the endpoint
+    TEXT[!MAY,implementation]:    MAY treat that receipt as a connection error of type
+    TEXT[!MAY,implementation]:    PROTOCOL_VIOLATION.
     TEXT[!MUST,implementation,test]: The value in the Retire Prior To field
     TEXT[!MUST,implementation,test]:    MUST be less than or equal to the value in the Sequence Number field.
     TEXT[!MUST,implementation,test]:    Receiving a value in the Retire Prior To field that is greater than
@@ -1633,10 +1637,10 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MAY]:    MAY generate a connection error of type PROTOCOL_VIOLATION.
 
   SECTION: [CONNECTION_CLOSE Frames](#section-19.19)
-    TEXT[!SHOULD]: This SHOULD be a UTF-8 encoded
-    TEXT[!SHOULD]:       string [RFC3629], though the frame does not carry information,
-    TEXT[!SHOULD]:       such as language tags, that would aid comprehension by any entity
-    TEXT[!SHOULD]:       other than the one that created the text.
+    TEXT[!SHOULD,implementation,test]: This SHOULD be a UTF-8 encoded
+    TEXT[!SHOULD,implementation,test]:       string [RFC3629], though the frame does not carry information,
+    TEXT[!SHOULD,implementation,test]:       such as language tags, that would aid comprehension by any entity
+    TEXT[!SHOULD,implementation,test]:       other than the one that created the text.
 
   SECTION: [HANDSHAKE_DONE Frames](#section-19.20)
     TEXT[!MUST,implementation,test]: Servers MUST
@@ -1658,8 +1662,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    usage and lifetime of address validation tokens; see Section 8.1.3.
 
   SECTION: [Optimistic ACK Attack](#section-21.4)
-    TEXT[!MAY]: An endpoint MAY skip packet numbers when sending
-    TEXT[!MAY]:    packets to detect this behavior.
+    TEXT[!MAY,implementation]: An endpoint MAY skip packet numbers when sending
+    TEXT[!MAY,implementation]:    packets to detect this behavior.
 
   SECTION: [Request Forgery Attacks](#section-21.5)
     TEXT[!SHOULD,exception]: QUIC
@@ -1673,8 +1677,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    prior to validating that address; see Section 8.
 
   SECTION: [Generic Request Forgery Countermeasures](#section-21.5.6)
-    TEXT[!MAY]: Endpoints MAY prevent connection attempts or
-    TEXT[!MAY]:    migration to a loopback address.
+    TEXT[!MAY,implementation]: Endpoints MAY prevent connection attempts or
+    TEXT[!MAY,implementation]:    migration to a loopback address.
     TEXT[!SHOULD,implementation,test]: Endpoints SHOULD NOT allow
     TEXT[!SHOULD,implementation,test]:    connections or migration to a loopback address if the same service
     TEXT[!SHOULD,implementation,test]:    was previously available at a different interface or if the address
@@ -1687,10 +1691,10 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MAY]:    including values from NEW_TOKEN frames in Initial packets or by only
     TEXT[!MAY]:    sending probing frames in packets prior to completing address
     TEXT[!MAY]:    validation.
-    TEXT[!MAY]: Endpoints MAY
-    TEXT[!MAY]:    choose to avoid sending datagrams to these ports or not send
-    TEXT[!MAY]:    datagrams that match these patterns prior to validating the
-    TEXT[!MAY]:    destination address.
+    TEXT[!MAY,implementation]: Endpoints MAY
+    TEXT[!MAY,implementation]:    choose to avoid sending datagrams to these ports or not send
+    TEXT[!MAY,implementation]:    datagrams that match these patterns prior to validating the
+    TEXT[!MAY,implementation]:    destination address.
     TEXT[!MAY]: Endpoints MAY retire connection IDs containing
     TEXT[!MAY]:    patterns known to be problematic without using them.
 
@@ -1707,12 +1711,12 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,exception]:    attacks.
 
   SECTION: [Peer Denial of Service](#section-21.9)
-    TEXT[!SHOULD]:    While there are legitimate uses for all messages, implementations
-    TEXT[!SHOULD]:    SHOULD track cost of processing relative to progress and treat
-    TEXT[!SHOULD]:    excessive quantities of any non-productive packets as indicative of
-    TEXT[!SHOULD]:    an attack.
-    TEXT[!MAY]: Endpoints MAY respond to this condition with a connection
-    TEXT[!MAY]:    error or by dropping packets.
+    TEXT[!SHOULD,implementation,test]:    While there are legitimate uses for all messages, implementations
+    TEXT[!SHOULD,implementation,test]:    SHOULD track cost of processing relative to progress and treat
+    TEXT[!SHOULD,implementation,test]:    excessive quantities of any non-productive packets as indicative of
+    TEXT[!SHOULD,implementation,test]:    an attack.
+    TEXT[!MAY,implementation]: Endpoints MAY respond to this condition with a connection
+    TEXT[!MAY,implementation]:    error or by dropping packets.
 
   SECTION: [Stateless Reset Oracle](#section-21.11)
     TEXT[!MUST,exception]: To defend
@@ -1731,22 +1735,22 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,exception]:    mechanism that is robust against version downgrade attacks.
 
   SECTION: [Provisional Registrations](#section-22.1.1)
-    TEXT[!MAY]:    Provisional registrations MAY omit the Specification and Notes
-    TEXT[!MAY]:    fields, plus any additional fields that might be required for a
-    TEXT[!MAY]:    permanent registration.
+    TEXT[!MAY,exception]:    Provisional registrations MAY omit the Specification and Notes
+    TEXT[!MAY,exception]:    fields, plus any additional fields that might be required for a
+    TEXT[!MAY,exception]:    permanent registration.
 
   SECTION: [Selecting Codepoints](#section-22.1.2)
     TEXT[!SHOULD,exception]:    New requests for codepoints from QUIC registries SHOULD use a
     TEXT[!SHOULD,exception]:    randomly selected codepoint that excludes both existing allocations
     TEXT[!SHOULD,exception]:    and the first unallocated codepoint in the selected space.
-    TEXT[!MAY]: Requests
-    TEXT[!MAY]:    for multiple codepoints MAY use a contiguous range.
+    TEXT[!MAY,exception]: Requests
+    TEXT[!MAY,exception]:    for multiple codepoints MAY use a contiguous range.
     TEXT[!SHOULD,exception]:    For codepoints that are encoded in variable-length integers
     TEXT[!SHOULD,exception]:    (Section 16), such as frame types, codepoints that encode to four or
     TEXT[!SHOULD,exception]:    eight bytes (that is, values 2^14 and above) SHOULD be used unless
     TEXT[!SHOULD,exception]:    the usage is especially sensitive to having a longer encoding.
-    TEXT[!MAY]:    Applications to register codepoints in QUIC registries MAY include a
-    TEXT[!MAY]:    requested codepoint as part of the registration.
+    TEXT[!MAY,exception]:    Applications to register codepoints in QUIC registries MAY include a
+    TEXT[!MAY,exception]:    requested codepoint as part of the registration.
     TEXT[!MUST,exception]: IANA MUST allocate
     TEXT[!MUST,exception]:    the selected codepoint if the codepoint is unassigned and the
     TEXT[!MUST,exception]:    requirements of the registration policy are met.
@@ -1762,15 +1766,15 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,exception]:    If any use of the codepoints is identified by this search or a
     TEXT[!MUST,exception]:    request to update the registration is made, the codepoint MUST NOT be
     TEXT[!MUST,exception]:    reclaimed.
-    TEXT[!MAY]:    If no use of the codepoint was identified and no request was made to
-    TEXT[!MAY]:    update the registration, the codepoint MAY be removed from the
-    TEXT[!MAY]:    registry.
+    TEXT[!MAY,exception]:    If no use of the codepoint was identified and no request was made to
+    TEXT[!MAY,exception]:    update the registration, the codepoint MAY be removed from the
+    TEXT[!MAY,exception]:    registry.
 
   SECTION: [Permanent Registrations](#section-22.1.4)
-    TEXT[!MAY]: The creation of a registry
-    TEXT[!MAY]:    MAY specify additional constraints on permanent registrations.
-    TEXT[!MAY]:    The creation of a registry MAY identify a range of codepoints where
-    TEXT[!MAY]:    registrations are governed by a different registration policy.
+    TEXT[!MAY,exception]: The creation of a registry
+    TEXT[!MAY,exception]:    MAY specify additional constraints on permanent registrations.
+    TEXT[!MAY,exception]:    The creation of a registry MAY identify a range of codepoints where
+    TEXT[!MAY,exception]:    registrations are governed by a different registration policy.
     TEXT[!MUST,exception]:    All registrations made by Standards Track publications MUST be
     TEXT[!MUST,exception]:    permanent.
 
@@ -1797,8 +1801,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
   SECTION: [QUIC Transport Error Codes Registry](#section-22.5)
     TEXT[!MUST,exception]:    In addition to the fields listed in Section 22.1.1, permanent
     TEXT[!MUST,exception]:    registrations in this registry MUST include the following fields:
-    TEXT[!MAY]:    Description:  A brief description of the error code semantics, which
-    TEXT[!MAY]:       MAY be a summary if a specification reference is provided.
+    TEXT[!MAY,exception]:    Description:  A brief description of the error code semantics, which
+    TEXT[!MAY,exception]:       MAY be a summary if a specification reference is provided.
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9001
   SECTION: [Carrying TLS Messages](#section-4)
@@ -2594,13 +2598,13 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
     TEXT[!MUST]:    On a given stream, receipt of multiple requests or receipt of an
     TEXT[!MUST]:    additional HTTP response following a final HTTP response MUST be
     TEXT[!MUST]:    treated as malformed.
-    TEXT[!MUST]:    Receipt of an invalid sequence of frames MUST be treated as a
-    TEXT[!MUST]:    connection error of type H3_FRAME_UNEXPECTED.
+    TEXT[!MUST,implementation]:    Receipt of an invalid sequence of frames MUST be treated as a
+    TEXT[!MUST,implementation]:    connection error of type H3_FRAME_UNEXPECTED.
     TEXT[!MAY]:    A server MAY send one or more PUSH_PROMISE frames before, after, or
     TEXT[!MAY]:    interleaved with the frames of a response message.
-    TEXT[!MUST]: PUSH_PROMISE frames are not permitted on push streams;
-    TEXT[!MUST]:    a pushed response that includes PUSH_PROMISE frames MUST be treated
-    TEXT[!MUST]:    as a connection error of type H3_FRAME_UNEXPECTED.
+    TEXT[!MUST,implementation]: PUSH_PROMISE frames are not permitted on push streams;
+    TEXT[!MUST,implementation]:    a pushed response that includes PUSH_PROMISE frames MUST be treated
+    TEXT[!MUST,implementation]:    as a connection error of type H3_FRAME_UNEXPECTED.
     TEXT[!MAY]:    Frames of unknown types (Section 9), including reserved frames
     TEXT[!MAY]:    (Section 7.2.8) MAY be sent on a request or push stream before,
     TEXT[!MAY]:    after, or interleaved with other frames described in this section.
@@ -2882,8 +2886,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
     TEXT[!MUST]:    identifiers, but the identifier in each frame MUST NOT be greater
     TEXT[!MUST]:    than the identifier in any previous frame, since clients might
     TEXT[!MUST]:    already have retried unprocessed requests on another HTTP connection.
-    TEXT[!MUST]:    Receiving a GOAWAY containing a larger identifier than previously
-    TEXT[!MUST]:    received MUST be treated as a connection error of type H3_ID_ERROR.
+    TEXT[!MUST,implementation]:    Receiving a GOAWAY containing a larger identifier than previously
+    TEXT[!MUST,implementation]:    received MUST be treated as a connection error of type H3_ID_ERROR.
     TEXT[!MAY]: Like the server,
     TEXT[!MAY]:    the client MAY send subsequent GOAWAY frames so long as the specified
     TEXT[!MAY]:    push ID is no greater than any previously sent value.
@@ -2948,21 +2952,21 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
     TEXT[!MUST]:    header.
 
   SECTION: [Control Streams](#section-6.2.1)
-    TEXT[!MUST]:    Each side MUST initiate a single control stream at the beginning of
-    TEXT[!MUST]:    the connection and send its SETTINGS frame as the first frame on this
-    TEXT[!MUST]:    stream.
-    TEXT[!MUST]: If the first frame of the control stream is any other frame
-    TEXT[!MUST]:    type, this MUST be treated as a connection error of type
-    TEXT[!MUST]:    H3_MISSING_SETTINGS.
-    TEXT[!MUST]: Only one control stream per peer is permitted;
-    TEXT[!MUST]:    receipt of a second stream claiming to be a control stream MUST be
-    TEXT[!MUST]:    treated as a connection error of type H3_STREAM_CREATION_ERROR.
-    TEXT[!MUST]: The
-    TEXT[!MUST]:    sender MUST NOT close the control stream, and the receiver MUST NOT
-    TEXT[!MUST]:    request that the sender close the control stream.
-    TEXT[!MUST]: If either control
-    TEXT[!MUST]:    stream is closed at any point, this MUST be treated as a connection
-    TEXT[!MUST]:    error of type H3_CLOSED_CRITICAL_STREAM.
+    TEXT[!MUST,implementation]:    Each side MUST initiate a single control stream at the beginning of
+    TEXT[!MUST,implementation]:    the connection and send its SETTINGS frame as the first frame on this
+    TEXT[!MUST,implementation]:    stream.
+    TEXT[!MUST,implementation]: If the first frame of the control stream is any other frame
+    TEXT[!MUST,implementation]:    type, this MUST be treated as a connection error of type
+    TEXT[!MUST,implementation]:    H3_MISSING_SETTINGS.
+    TEXT[!MUST,implementation]: Only one control stream per peer is permitted;
+    TEXT[!MUST,implementation]:    receipt of a second stream claiming to be a control stream MUST be
+    TEXT[!MUST,implementation]:    treated as a connection error of type H3_STREAM_CREATION_ERROR.
+    TEXT[!MUST,implementation]: The
+    TEXT[!MUST,implementation]:    sender MUST NOT close the control stream, and the receiver MUST NOT
+    TEXT[!MUST,implementation]:    request that the sender close the control stream.
+    TEXT[!MUST,implementation]: If either control
+    TEXT[!MUST,implementation]:    stream is closed at any point, this MUST be treated as a connection
+    TEXT[!MUST,implementation]:    error of type H3_CLOSED_CRITICAL_STREAM.
     TEXT[!SHOULD]:    Because the contents of the control stream are used to manage the
     TEXT[!SHOULD]:    behavior of other streams, endpoints SHOULD provide enough flow-
     TEXT[!SHOULD]:    control credit to keep the peer's control stream from becoming
@@ -3036,13 +3040,13 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
     TEXT[!MUST]: Receiving a
     TEXT[!MUST]:    CANCEL_PUSH frame on a stream other than the control stream MUST be
     TEXT[!MUST]:    treated as a connection error of type H3_FRAME_UNEXPECTED.
-    TEXT[!MUST]: If a CANCEL_PUSH frame is received that
-    TEXT[!MUST]:    references a push ID greater than currently allowed on the
-    TEXT[!MUST]:    connection, this MUST be treated as a connection error of type
-    TEXT[!MUST]:    H3_ID_ERROR.
-    TEXT[!MUST]: If a server receives a CANCEL_PUSH frame for a push
-    TEXT[!MUST]:    ID that has not yet been mentioned by a PUSH_PROMISE frame, this MUST
-    TEXT[!MUST]:    be treated as a connection error of type H3_ID_ERROR.
+    TEXT[!MUST,implementation]: If a CANCEL_PUSH frame is received that
+    TEXT[!MUST,implementation]:    references a push ID greater than currently allowed on the
+    TEXT[!MUST,implementation]:    connection, this MUST be treated as a connection error of type
+    TEXT[!MUST,implementation]:    H3_ID_ERROR.
+    TEXT[!MUST,implementation]: If a server receives a CANCEL_PUSH frame for a push
+    TEXT[!MUST,implementation]:    ID that has not yet been mentioned by a PUSH_PROMISE frame, this MUST
+    TEXT[!MUST,implementation]:    be treated as a connection error of type H3_ID_ERROR.
 
   SECTION: [SETTINGS](#section-7.2.4)
     TEXT[!MUST]: A SETTINGS frame MUST be sent as the first frame of
@@ -3064,8 +3068,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
     TEXT[!MUST]:    does not understand.
 
   SECTION: [Defined SETTINGS Parameters](#section-7.2.4.1)
-    TEXT[!SHOULD]: Endpoints SHOULD include at least one such setting in their
-    TEXT[!SHOULD]:    SETTINGS frame.
+    TEXT[!SHOULD,implementation]: Endpoints SHOULD include at least one such setting in their
+    TEXT[!SHOULD,implementation]:    SETTINGS frame.
     TEXT[!MUST]: Endpoints MUST NOT consider such settings to have
     TEXT[!MUST]:    any meaning upon receipt.
     TEXT[!MUST]: These reserved settings MUST NOT be sent, and
@@ -3106,10 +3110,10 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
     TEXT[!MUST]:    might be violated by the client with its 0-RTT data.
     TEXT[!MUST]: The server MUST
     TEXT[!MUST]:    include all settings that differ from their default values.
-    TEXT[!MUST]: If a
-    TEXT[!MUST]:    server accepts 0-RTT but then sends settings that are not compatible
-    TEXT[!MUST]:    with the previously specified settings, this MUST be treated as a
-    TEXT[!MUST]:    connection error of type H3_SETTINGS_ERROR.
+    TEXT[!MUST,implementation]: If a
+    TEXT[!MUST,implementation]:    server accepts 0-RTT but then sends settings that are not compatible
+    TEXT[!MUST,implementation]:    with the previously specified settings, this MUST be treated as a
+    TEXT[!MUST,implementation]:    connection error of type H3_SETTINGS_ERROR.
     TEXT[!MUST]: If a server accepts
     TEXT[!MUST]:    0-RTT but then sends a SETTINGS frame that omits a setting value that
     TEXT[!MUST]:    the client understands (apart from reserved setting identifiers) that
@@ -3119,19 +3123,19 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
   SECTION: [PUSH_PROMISE](#section-7.2.5)
     TEXT[!MUST]:    A server MUST NOT use a push ID that is larger than the client has
     TEXT[!MUST]:    provided in a MAX_PUSH_ID frame (Section 7.2.7).
-    TEXT[!MUST]: A client MUST treat
-    TEXT[!MUST]:    receipt of a PUSH_PROMISE frame that contains a larger push ID than
-    TEXT[!MUST]:    the client has advertised as a connection error of H3_ID_ERROR.
+    TEXT[!MUST,implementation]: A client MUST treat
+    TEXT[!MUST,implementation]:    receipt of a PUSH_PROMISE frame that contains a larger push ID than
+    TEXT[!MUST,implementation]:    the client has advertised as a connection error of H3_ID_ERROR.
     TEXT[!MAY]:    A server MAY use the same push ID in multiple PUSH_PROMISE frames.
     TEXT[!MUST]:    If so, the decompressed request header sets MUST contain the same
     TEXT[!MUST]:    fields in the same order, and both the name and the value in each
     TEXT[!MUST]:    field MUST be exact matches.
     TEXT[!SHOULD]: Clients SHOULD compare the request
     TEXT[!SHOULD]:    header sections for resources promised multiple times.
-    TEXT[!MUST]: If a client
-    TEXT[!MUST]:    receives a push ID that has already been promised and detects a
-    TEXT[!MUST]:    mismatch, it MUST respond with a connection error of type
-    TEXT[!MUST]:    H3_GENERAL_PROTOCOL_ERROR.
+    TEXT[!MUST,implementation]: If a client
+    TEXT[!MUST,implementation]:    receives a push ID that has already been promised and detects a
+    TEXT[!MUST,implementation]:    mismatch, it MUST respond with a connection error of type
+    TEXT[!MUST,implementation]:    H3_GENERAL_PROTOCOL_ERROR.
     TEXT[!SHOULD]: If the decompressed field sections match
     TEXT[!SHOULD]:    exactly, the client SHOULD associate the pushed content with each
     TEXT[!SHOULD]:    stream on which a PUSH_PROMISE frame was received.
@@ -3139,10 +3143,10 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
     TEXT[!SHOULD]:    avoid reusing a push ID over a long period.
     TEXT[!MUST]:    If a PUSH_PROMISE frame is received on the control stream, the client
     TEXT[!MUST]:    MUST respond with a connection error of type H3_FRAME_UNEXPECTED.
-    TEXT[!MUST]:    A client MUST NOT send a PUSH_PROMISE frame.
-    TEXT[!MUST]: A server MUST treat the
-    TEXT[!MUST]:    receipt of a PUSH_PROMISE frame as a connection error of type
-    TEXT[!MUST]:    H3_FRAME_UNEXPECTED.
+    TEXT[!MUST,implementation]:    A client MUST NOT send a PUSH_PROMISE frame.
+    TEXT[!MUST,implementation]: A server MUST treat the
+    TEXT[!MUST,implementation]:    receipt of a PUSH_PROMISE frame as a connection error of type
+    TEXT[!MUST,implementation]:    H3_FRAME_UNEXPECTED.
 
   SECTION: [GOAWAY](#section-7.2.6)
     TEXT[!MUST]:    A client MUST treat receipt of a GOAWAY frame containing a stream ID
@@ -3158,10 +3162,10 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
     TEXT[!MUST]: A client MUST treat the
     TEXT[!MUST]:    receipt of a MAX_PUSH_ID frame as a connection error of type
     TEXT[!MUST]:    H3_FRAME_UNEXPECTED.
-    TEXT[!MUST,test]: A MAX_PUSH_ID frame cannot reduce the maximum push
-    TEXT[!MUST,test]:    ID; receipt of a MAX_PUSH_ID frame that contains a smaller value than
-    TEXT[!MUST,test]:    previously received MUST be treated as a connection error of type
-    TEXT[!MUST,test]:    H3_ID_ERROR.
+    TEXT[!MUST,implementation,test]: A MAX_PUSH_ID frame cannot reduce the maximum push
+    TEXT[!MUST,implementation,test]:    ID; receipt of a MAX_PUSH_ID frame that contains a smaller value than
+    TEXT[!MUST,implementation,test]:    previously received MUST be treated as a connection error of type
+    TEXT[!MUST,implementation,test]:    H3_ID_ERROR.
 
   SECTION: [Reserved Frame Types](#section-7.2.8)
     TEXT[!MAY]: These frames have no semantics, and
@@ -3402,10 +3406,10 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9204
     TEXT[!MUST,implementation,test]:    stream.
     TEXT[!MUST,implementation,test]: Receipt of a second instance of either stream type MUST be
     TEXT[!MUST,implementation,test]:    treated as a connection error of type H3_STREAM_CREATION_ERROR.
-    TEXT[!MUST]:    The sender MUST NOT close either of these streams, and the receiver
-    TEXT[!MUST]:    MUST NOT request that the sender close either of these streams.
-    TEXT[!MUST]:    Closure of either unidirectional stream type MUST be treated as a
-    TEXT[!MUST]:    connection error of type H3_CLOSED_CRITICAL_STREAM.
+    TEXT[!MUST,implementation]:    The sender MUST NOT close either of these streams, and the receiver
+    TEXT[!MUST,implementation]:    MUST NOT request that the sender close either of these streams.
+    TEXT[!MUST,implementation]:    Closure of either unidirectional stream type MUST be treated as a
+    TEXT[!MUST,implementation]:    connection error of type H3_CLOSED_CRITICAL_STREAM.
     TEXT[!MAY]:    An endpoint MAY avoid creating an encoder stream if it will not be
     TEXT[!MAY]:    used (for example, if its encoder does not wish to use the dynamic
     TEXT[!MAY]:    table or if the maximum size of the dynamic table permitted by the

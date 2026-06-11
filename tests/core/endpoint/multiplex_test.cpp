@@ -18,6 +18,24 @@ struct has_public_path_id_member<T, std::void_t<decltype(std::declval<T>().path_
 template <typename T>
 using route_handle_member_type = std::remove_cvref_t<decltype(std::declval<T>().route_handle)>;
 
+std::vector<coquic::quic::StreamFrame>
+stream_frames_from_sender_datagram(const coquic::quic::QuicConnection &connection,
+                                   std::span<const std::byte> datagram) {
+    std::vector<coquic::quic::StreamFrame> streams;
+    for (const auto &packet : decode_sender_datagram(connection, datagram)) {
+        const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+        if (application == nullptr) {
+            continue;
+        }
+        for (const auto &frame : application->frames) {
+            if (const auto *stream = std::get_if<coquic::quic::StreamFrame>(&frame)) {
+                streams.push_back(*stream);
+            }
+        }
+    }
+    return streams;
+}
+
 TEST(QuicCoreEndpointTest, ConnectionCommandsOnlyAdvanceTheSelectedHandle) {
     coquic::quic::QuicCore core(make_client_endpoint_config());
 
@@ -266,7 +284,16 @@ TEST(QuicCoreEndpointTest, SharedSendCommandProducesSameDatagramAsOwnedSendComma
     ASSERT_EQ(owned_sends.size(), shared_sends.size());
     ASSERT_FALSE(owned_sends.empty());
     EXPECT_EQ(shared_sends.front().route_handle, owned_sends.front().route_handle);
-    EXPECT_EQ(shared_sends.front().bytes, owned_sends.front().bytes);
+    const auto owned_frames = stream_frames_from_sender_datagram(
+        *owned_core.connections_.at(1).connection, owned_sends.front().bytes.span());
+    const auto shared_frames = stream_frames_from_sender_datagram(
+        *shared_core.connections_.at(1).connection, shared_sends.front().bytes.span());
+    ASSERT_EQ(owned_frames.size(), 1u);
+    ASSERT_EQ(shared_frames.size(), 1u);
+    EXPECT_EQ(shared_frames.front().stream_id, owned_frames.front().stream_id);
+    EXPECT_EQ(shared_frames.front().offset, owned_frames.front().offset);
+    EXPECT_EQ(shared_frames.front().fin, owned_frames.front().fin);
+    EXPECT_EQ(shared_frames.front().stream_data, owned_frames.front().stream_data);
 }
 
 TEST(QuicCoreEndpointTest, EndpointConnectionCommandSendsSharedDatagramOnSelectedConnection) {

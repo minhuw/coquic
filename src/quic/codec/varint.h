@@ -28,6 +28,7 @@ enum class CodecErrorCode : std::uint8_t {
     header_protection_failed,
     packet_decryption_failed,
     invalid_packet_protection_state,
+    crypto_buffer_exceeded,
     http09_parse_error,
     http3_parse_error,
 };

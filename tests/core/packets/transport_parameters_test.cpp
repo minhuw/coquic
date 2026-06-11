@@ -502,6 +502,8 @@ TEST(QuicTransportParametersTest, RejectsInvalidAckTimingValues) {
     // # An endpoint MUST treat receipt of a transport parameter with an
     // # invalid value as a connection error of type
     // # TRANSPORT_PARAMETER_ERROR.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # Values of 2^14 or greater are invalid.
     ASSERT_FALSE(bad_max_ack_delay.has_value());
 }
 

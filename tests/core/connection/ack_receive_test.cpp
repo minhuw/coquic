@@ -87,6 +87,7 @@ TEST(QuicCoreTest, PacketInspectionQueuesDecodedOutboundOneRttPackets) {
 
 TEST(QuicCoreTest, LatencySpinBitIsDisabledUnlessConfigured) {
     auto connection = make_connected_client_connection();
+    connection.disabled_latency_spin_bit_value_ = false;
     auto &path = connection.ensure_path_state(0);
     path.spin.disabled = false;
     path.spin.value = true;
@@ -105,6 +106,20 @@ TEST(QuicCoreTest, LatencySpinBitIsDisabledUnlessConfigured) {
     connection.update_spin_bit_on_receive(0, /*peer_spin_bit=*/false, /*packet_number=*/1);
     EXPECT_TRUE(path.spin.value);
     EXPECT_FALSE(path.spin.largest_peer_packet_number.has_value());
+}
+
+TEST(QuicCoreTest, LatencySpinBitDisabledUsesPerConnectionRandomValue) {
+    auto connection = make_connected_client_connection();
+    connection.disabled_latency_spin_bit_value_ = true;
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
+    // # It is RECOMMENDED that endpoints set the spin bit to a random value
+    // # either chosen independently for each packet or chosen independently for
+    // # each connection ID.
+    EXPECT_TRUE(connection.outbound_spin_bit_for_path(0));
+
+    connection.disabled_latency_spin_bit_value_ = false;
+    EXPECT_FALSE(connection.outbound_spin_bit_for_path(0));
 }
 
 TEST(QuicCoreTest, LatencySpinBitRandomDisableSelectsOneInSixteen) {

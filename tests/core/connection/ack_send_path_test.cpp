@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "src/quic/codec/packet_number.h"
 #include "tests/support/core/connection_ack_test_support.h"
+#include "src/quic/connection/connection_internal.h"
 
 namespace {
 
@@ -609,8 +610,10 @@ TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossRepeatedCumulativeAcks
 
 TEST(QuicCoreTest, ApplicationSendUsesConfiguredOutboundDatagramSizeLimit) {
     auto connection = make_connected_client_connection();
-    connection.config_.transport.pmtud_enabled = false;
+    connection.config_.transport.pmtud_enabled = true;
     connection.config_.max_outbound_datagram_size = 4096;
+    connection.paths_.at(0).mtu.validated_datagram_size = 4096;
+    connection.paths_.at(0).mtu.probe_ceiling = 4096;
     auto &peer_transport_parameters =
         optional_ref_or_terminate(connection.peer_transport_parameters_);
     peer_transport_parameters.max_udp_payload_size = 4096;
@@ -1954,7 +1957,8 @@ TEST(QuicCoreTest, SendingAtPacketNumberLimitSilentlyClosesWithoutDatagram) {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-12.3
     // # If the packet number for sending reaches 2^62-1, the sender MUST
     // # close the connection without sending a CONNECTION_CLOSE frame or any
-    // # further packets;
+    // # further packets; an endpoint MAY send a Stateless Reset (Section 10.3)
+    // # in response to further packets that it receives.
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
 
     EXPECT_TRUE(datagram.empty());
@@ -3240,6 +3244,38 @@ TEST(QuicCoreTest, OneRttReceivedAckOnlyFastPathMatchesGenericApplicationAckProc
     EXPECT_TRUE(fast_connection.outbound_spin_bit_for_path(0));
 }
 
+TEST(QuicCoreTest, ExcessiveNonproductivePacketsCloseAfterPeerProgressBudget) {
+    auto connection = make_connected_client_connection();
+
+    for (std::size_t index = 0; index < coquic::quic::kMaxConsecutiveNonproductivePackets;
+         ++index) {
+        EXPECT_TRUE(connection.note_nonproductive_packet(coquic::quic::test::test_time(index)));
+        EXPECT_FALSE(connection.pending_transport_close_.has_value());
+    }
+    EXPECT_EQ(connection.consecutive_nonproductive_packets_,
+              coquic::quic::kMaxConsecutiveNonproductivePackets);
+
+    connection.note_peer_progress();
+    EXPECT_EQ(connection.consecutive_nonproductive_packets_, 0u);
+
+    for (std::size_t index = 0; index < coquic::quic::kMaxConsecutiveNonproductivePackets;
+         ++index) {
+        EXPECT_TRUE(
+            connection.note_nonproductive_packet(coquic::quic::test::test_time(1000 + index)));
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-21.9
+    // # While there are legitimate uses for all messages, implementations
+    // # SHOULD track cost of processing relative to progress and treat
+    // # excessive quantities of any non-productive packets as indicative of an
+    // # attack.
+    EXPECT_FALSE(connection.note_nonproductive_packet(coquic::quic::test::test_time(2000)));
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::closing);
+    ASSERT_TRUE(connection.pending_transport_close_.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(connection.pending_transport_close_).error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation));
+}
+
 TEST(QuicCoreTest, ReceivedAckFrameProcessingCoversTraceFormattingAndInvalidCursorPaths) {
     auto connection = make_connected_client_connection();
     connection.track_sent_packet(connection.application_space_,
@@ -3841,6 +3877,11 @@ TEST(QuicCoreTest, SelectPtoProbeFiltersControlFramesAgainstCurrentPendingState)
     ASSERT_EQ(probe_packet.max_stream_data_frames.size(), 1u);
     EXPECT_EQ(probe_packet.max_stream_data_frames.front().stream_id, 0u);
     ASSERT_EQ(probe_packet.stream_data_blocked_frames.size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # To keep the
+    // # connection from closing, a sender that is flow control limited SHOULD
+    // # periodically send a STREAM_DATA_BLOCKED or DATA_BLOCKED frame when it
+    // # has no ack-eliciting packets in flight.
     EXPECT_EQ(probe_packet.stream_data_blocked_frames.front().stream_id, 0u);
     EXPECT_FALSE(probe_packet.max_data_frame.has_value());
     EXPECT_FALSE(probe_packet.data_blocked_frame.has_value());
@@ -3877,6 +3918,11 @@ TEST(QuicCoreTest, SelectPtoProbeKeepsMatchingConnectionBlockedFrames) {
     EXPECT_EQ(max_data_frame.maximum_data, 99u);
     ASSERT_TRUE(probe_packet.data_blocked_frame.has_value());
     const auto &data_blocked_frame = optional_ref_or_terminate(probe_packet.data_blocked_frame);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+    // # To keep the
+    // # connection from closing, a sender that is flow control limited SHOULD
+    // # periodically send a STREAM_DATA_BLOCKED or DATA_BLOCKED frame when it
+    // # has no ack-eliciting packets in flight.
     EXPECT_EQ(data_blocked_frame.maximum_data, 77u);
 }
 

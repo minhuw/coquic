@@ -844,6 +844,88 @@ TEST(QuicCoreTest, ServerProcessesZeroRttStreamBeforeHandshakeCompletes) {
     EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
 }
 
+TEST(QuicCoreTest, ServerRejectsZeroRttStreamDataOverRememberedLimit) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+
+    const auto stream = connection.get_or_open_receive_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    stream.value()->flow_control.advertised_max_stream_data = 4;
+    stream.value()->receive_flow_control_limit = 4;
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedZeroRttPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id =
+                optional_value_or_terminate(connection.peer_source_connection_id_),
+            .packet_number_length = 1,
+            .packet_number = 9,
+            .frames =
+                {
+                    coquic::quic::StreamFrame{
+                        .has_offset = true,
+                        .has_length = true,
+                        .stream_id = 0,
+                        .offset = 0,
+                        .stream_data = coquic::quic::test::bytes_from_string("early"),
+                    },
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+    // # A server SHOULD treat a violation of remembered limits
+    // # (Section 7.4.1) as a connection error of an appropriate type (for
+    // # instance, a FLOW_CONTROL_ERROR for exceeding stream data limits).
+    ASSERT_FALSE(processed.has_value());
+    ASSERT_TRUE(processed.error().has_transport_error_code);
+    EXPECT_EQ(processed.error().transport_error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::flow_control_error));
+}
+
+TEST(QuicCoreTest, ServerRejectsZeroRttStreamOpenOverRememberedLimit) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+    connection.local_stream_limit_state_.advertised_max_streams_bidi = 1;
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedZeroRttPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id =
+                optional_value_or_terminate(connection.peer_source_connection_id_),
+            .packet_number_length = 1,
+            .packet_number = 10,
+            .frames =
+                {
+                    coquic::quic::StreamFrame{
+                        .has_offset = true,
+                        .has_length = true,
+                        .stream_id = 4,
+                        .offset = 0,
+                        .stream_data = coquic::quic::test::bytes_from_string("early"),
+                    },
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+    // # A server SHOULD treat a violation of remembered limits
+    // # (Section 7.4.1) as a connection error of an appropriate type (for
+    // # instance, a FLOW_CONTROL_ERROR for exceeding stream data limits).
+    ASSERT_FALSE(processed.has_value());
+    ASSERT_TRUE(processed.error().has_transport_error_code);
+    EXPECT_EQ(processed.error().transport_error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::stream_limit_error));
+}
+
 TEST(QuicCoreTest, ProcessInboundDatagramProcessesZeroRttStreamBeforeHandshakeCompletes) {
     auto connection = make_connected_server_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;

@@ -24,6 +24,7 @@
 #include <openssl/rand.h>
 
 #include "src/quic/codec/buffer.h"
+#include "src/quic/codec/protected_codec.h"
 #include "src/quic/connection/connection.h"
 #include "src/quic/crypto/packet_crypto.h"
 #include "src/quic/object_cache.h"
@@ -106,6 +107,12 @@ constexpr std::byte kServerConnectionIdPrefix{0x53};
 constexpr std::size_t kCoreEffectStorageCacheMaxBytes = std::size_t{64} * 1024;
 constexpr std::size_t kCoreEffectStorageCacheBucketBytes = std::size_t{4} * 1024;
 constexpr std::size_t kCoreEffectStorageCacheSlots = 128;
+
+enum class AddressValidationTokenKind : std::uint8_t {
+    unknown,
+    retry,
+    new_token,
+};
 
 static_assert(kStreamStateErrorMap.size() ==
               static_cast<std::size_t>(StreamStateErrorCode::final_size_conflict) + 1);
@@ -818,6 +825,10 @@ encode_address_validation_token_body(const SelfContainedAddressValidationToken &
     // # A token sent in a NEW_TOKEN frame or a Retry packet MUST be
     // # constructed in a way that allows the server to identify how it was
     // # provided to a client.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # Information that allows the server to distinguish between tokens from
+    // # Retry and NEW_TOKEN MAY be accessible to entities other than the
+    // # server.
     body.push_back(token_metadata.kind);
     append_u32_be(body, token_metadata.version);
     body.push_back(token_metadata.route_handle.has_value() ? std::byte{0x01} : std::byte{0x00});
@@ -916,6 +927,34 @@ open_address_validation_token(const QuicAddressValidationTokenSecret &secret,
         CRYPTO_memcmp(expected->data(), tag.data(), expected->size()) != 0) {
         return std::nullopt;
     }
+    return decode_address_validation_token_body(body);
+}
+
+std::optional<AddressValidationTokenKind>
+peek_self_contained_address_validation_token_kind(std::span<const std::byte> sealed_token) {
+    if (sealed_token.size() <= kAddressValidationTokenTagLength) {
+        return std::nullopt;
+    }
+    const auto body = sealed_token.first(sealed_token.size() - kAddressValidationTokenTagLength);
+    if (body.size() < 6 || body[0] != std::byte{'C'} || body[1] != std::byte{'Q'} ||
+        body[2] != std::byte{'A'} || body[3] != std::byte{'V'} || body[4] != std::byte{0x01}) {
+        return std::nullopt;
+    }
+    if (body[5] == kAddressValidationRetryTokenType) {
+        return AddressValidationTokenKind::retry;
+    }
+    if (body[5] == kAddressValidationNewTokenType) {
+        return AddressValidationTokenKind::new_token;
+    }
+    return std::nullopt;
+}
+
+std::optional<SelfContainedAddressValidationToken>
+peek_self_contained_address_validation_token(std::span<const std::byte> sealed_token) {
+    if (sealed_token.size() <= kAddressValidationTokenTagLength) {
+        return std::nullopt;
+    }
+    const auto body = sealed_token.first(sealed_token.size() - kAddressValidationTokenTagLength);
     return decode_address_validation_token_body(body);
 }
 
@@ -1021,6 +1060,19 @@ route_address_family_from_identity(std::span<const std::byte> identity) {
         return QuicRouteAddressFamily::ipv6;
     }
     return QuicRouteAddressFamily::unknown;
+}
+
+COQUIC_NO_PROFILE bool preferred_address_has_family(const PreferredAddress &preferred_address,
+                                                    QuicRouteAddressFamily family) {
+    switch (family) {
+    case QuicRouteAddressFamily::ipv4:
+        return preferred_address.ipv4_port != 0;
+    case QuicRouteAddressFamily::ipv6:
+        return preferred_address.ipv6_port != 0;
+    case QuicRouteAddressFamily::unknown:
+        return true;
+    }
+    return true;
 }
 
 COQUIC_NO_PROFILE std::size_t
@@ -1649,6 +1701,10 @@ COQUIC_NO_PROFILE std::vector<std::byte> QuicCore::make_endpoint_new_token(
                     .route_handle = route_handle,
                     .address_validation_identity = std::vector<std::byte>(
                         address_validation_identity.begin(), address_validation_identity.end()),
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+                    // # A token issued with NEW_TOKEN MUST NOT include
+                    // # information that would allow values to be linked by an
+                    // # observer to the connection on which it was issued.
                     .nonce = std::move(nonce),
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-21.3
                     // # Servers SHOULD provide mitigations for this attack by
@@ -1667,6 +1723,10 @@ COQUIC_NO_PROFILE std::vector<std::byte> QuicCore::make_endpoint_new_token(
 
     std::vector<std::byte> token(24, std::byte{0x00});
     //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A token issued with NEW_TOKEN MUST NOT include information that would
+    // # allow values to be linked by an observer to the connection on which it
+    // # was issued.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
     // # A server MUST ensure that every NEW_TOKEN frame it sends is unique
     // # across all clients, with the exception of those sent to repair losses
     // # of previously sent NEW_TOKEN frames.
@@ -1675,6 +1735,67 @@ COQUIC_NO_PROFILE std::vector<std::byte> QuicCore::make_endpoint_new_token(
     token.back() = static_cast<std::byte>(std::to_integer<std::uint8_t>(token.back()) ^
                                           static_cast<std::uint8_t>(sequence & 0xffu));
     return token;
+}
+
+COQUIC_NO_PROFILE std::vector<std::byte>
+QuicCore::make_initial_transport_close_packet_bytes(const QuicCore::ParsedEndpointDatagram &parsed,
+                                                    std::uint64_t error_code,
+                                                    ConnectionId source_connection_id) {
+    if (!parsed.source_connection_id.has_value()) {
+        return {};
+    }
+
+    auto client_initial_destination_connection_id = parsed.destination_connection_id;
+    if (const auto token_metadata = peek_self_contained_address_validation_token(parsed.token);
+        token_metadata.has_value() && token_metadata->kind == kAddressValidationRetryTokenType &&
+        !token_metadata->original_destination_connection_id.empty()) {
+        client_initial_destination_connection_id =
+            token_metadata->original_destination_connection_id;
+    }
+    const auto encoded = serialize_protected_datagram(
+        std::array<ProtectedPacket, 1>{
+            ProtectedInitialPacket{
+                .version = parsed.version,
+                .destination_connection_id = parsed.source_connection_id.value(),
+                .source_connection_id = std::move(source_connection_id),
+                .packet_number_length = 2,
+                .packet_number = 0,
+                .frames =
+                    {
+                        TransportConnectionCloseFrame{
+                            .error_code = error_code,
+                        },
+                    },
+            },
+        },
+        SerializeProtectionContext{
+            .local_role = EndpointRole::server,
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+            // # The Destination Connection ID field from the first Initial
+            // # packet sent by a client is used to determine packet protection
+            // # keys for Initial packets.
+            .client_initial_destination_connection_id = client_initial_destination_connection_id,
+        });
+    if (!encoded.has_value()) {
+        return {};
+    }
+    return encoded.value();
+}
+
+COQUIC_NO_PROFILE std::vector<std::byte>
+QuicCore::make_invalid_retry_token_close_packet_bytes(const ParsedEndpointDatagram &parsed) {
+    return make_initial_transport_close_packet_bytes(
+        parsed, static_cast<std::uint64_t>(QuicTransportErrorCode::invalid_token),
+        make_endpoint_connection_id(kServerConnectionIdPrefix,
+                                    next_server_connection_id_sequence_++, endpoint_random_));
+}
+
+COQUIC_NO_PROFILE std::vector<std::byte>
+QuicCore::make_connection_refused_close_packet_bytes(const ParsedEndpointDatagram &parsed) {
+    return make_initial_transport_close_packet_bytes(
+        parsed, static_cast<std::uint64_t>(QuicTransportErrorCode::connection_refused),
+        make_endpoint_connection_id(kServerConnectionIdPrefix,
+                                    next_server_connection_id_sequence_++, endpoint_random_));
 }
 
 COQUIC_NO_PROFILE std::optional<QuicCore::PendingRetryToken> QuicCore::take_retry_context(
@@ -1814,6 +1935,10 @@ COQUIC_NO_PROFILE std::optional<QuicCore::StoredEndpointNewToken> QuicCore::take
         //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
         // # Tokens that are provided in NEW_TOKEN frames (Section 19.7) need to
         // # be valid for longer but SHOULD NOT be accepted multiple times.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+        // # Servers are encouraged to allow tokens to be used only once, if
+        // # possible; tokens MAY include additional information about clients to
+        // # further narrow applicability or reuse.
         mark_address_validation_token_consumed(parsed.token, metadata->expires_at);
         return StoredEndpointNewToken{
             .token = parsed.token,
@@ -1842,8 +1967,37 @@ COQUIC_NO_PROFILE std::optional<QuicCore::StoredEndpointNewToken> QuicCore::take
 
     token.used = true;
     new_tokens_.erase(it);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+    // # Servers are encouraged to allow tokens to be used only once, if
+    // # possible; tokens MAY include additional information about clients to
+    // # further narrow applicability or reuse.
     mark_address_validation_token_consumed(parsed.token, token.expires_at);
     return token;
+}
+
+COQUIC_NO_PROFILE QuicCore::AddressValidationTokenClassification
+QuicCore::classify_address_validation_token(const ParsedEndpointDatagram &parsed) const {
+    if (parsed.token.empty()) {
+        return AddressValidationTokenClassification::missing;
+    }
+
+    const auto token_key = connection_id_key(parsed.token);
+    if (new_tokens_.contains(token_key)) {
+        return AddressValidationTokenClassification::new_token;
+    }
+    if (retry_tokens_.contains(token_key)) {
+        return AddressValidationTokenClassification::retry;
+    }
+    if (const auto kind = peek_self_contained_address_validation_token_kind(parsed.token)) {
+        if (*kind == AddressValidationTokenKind::new_token) {
+            return AddressValidationTokenClassification::new_token;
+        }
+        if (*kind == AddressValidationTokenKind::retry) {
+            return AddressValidationTokenClassification::retry;
+        }
+    }
+
+    return AddressValidationTokenClassification::unknown;
 }
 
 COQUIC_NO_PROFILE void QuicCore::maybe_queue_server_new_token(ConnectionEntry &entry,
@@ -1943,6 +2097,9 @@ COQUIC_NO_PROFILE void QuicCore::remember_client_new_tokens(ConnectionEntry &ent
             continue;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+        // # A server MAY provide clients with an address validation token
+        // # during one connection that can be used on a subsequent connection.
         client_new_tokens_.push_back(ClientStoredNewToken{
             .server_name = entry.connection->config_.server_name,
             .version = entry.connection->current_version_,
@@ -1969,6 +2126,9 @@ QuicCore::take_client_new_token_for_open(const QuicCoreClientConnectionConfig &c
             continue;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+        // # Clients MAY use tokens obtained on one connection for any
+        // # connection attempt using the same version.
         //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
         // # A client SHOULD NOT reuse a token from a NEW_TOKEN frame for
         // # different connection attempts.
@@ -2067,6 +2227,10 @@ std::optional<QuicConnectionHandle>
     // # However, endpoints MUST treat any packet ending in a valid stateless
     // # reset token as a Stateless Reset, as other QUIC versions might allow
     // # the use of a long header.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
+    // # If the last 16 bytes of the datagram are identical in value to a
+    // # stateless reset token, the endpoint MUST enter the draining period and
+    // # not send any further packets on this connection.
     if (bytes.size() < kMinimumStatelessResetDatagramSize) {
         return std::nullopt;
     }
@@ -2094,6 +2258,9 @@ QuicCore::make_stateless_reset_for_unknown_cid(const ParsedEndpointDatagram &par
                                                std::span<const std::byte> inbound_bytes,
                                                const std::optional<QuicRouteHandle> &route_handle,
                                                QuicCoreTimePoint now) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # An endpoint MAY send a Stateless Reset in response to receiving a
+    // # packet that it cannot associate with an active connection.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
     // # Endpoints MUST send Stateless Resets formatted as a packet with a
     // # short header.
@@ -2289,8 +2456,30 @@ bool QuicCore::address_validation_identity_allowed_for_new_route(
 
     const auto current_identity = entry != nullptr ? current_address_validation_identity(*entry)
                                                    : std::span<const std::byte>{};
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-21.5.6
+    // # Endpoints MAY prevent connection attempts or migration to a loopback
+    // # address.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-21.5.6
+    // # Endpoints MAY choose to avoid sending datagrams to these ports or not
+    // # send datagrams that match these patterns prior to validating the
+    // # destination address.
     return address_identity_allowed_by_request_forgery_policy(
         endpoint_config_.request_forgery_policy, current_identity, address_validation_identity);
+}
+
+bool QuicCore::preferred_address_migration_route_family_allowed(
+    const ConnectionEntry &entry, std::span<const std::byte> address_validation_identity) {
+    if (entry.connection == nullptr || !entry.connection->peer_transport_parameters_.has_value() ||
+        !entry.connection->peer_transport_parameters_->preferred_address.has_value()) {
+        return true;
+    }
+
+    const auto family = route_address_family_from_identity(address_validation_identity);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.3
+    // # A client that migrates to a new address SHOULD use a preferred
+    // # address from the same address family for the server.
+    return preferred_address_has_family(
+        *entry.connection->peer_transport_parameters_->preferred_address, family);
 }
 
 std::vector<std::byte> COQUIC_NO_PROFILE QuicCore::make_version_negotiation_packet_bytes(
@@ -2304,6 +2493,22 @@ std::vector<std::byte> COQUIC_NO_PROFILE QuicCore::make_version_negotiation_pack
                                                    supported_versions.end());
     if (grease_reserved_versions &&
         std::none_of(advertised_versions.begin(), advertised_versions.end(), is_reserved_version)) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-15
+        // # Reserved version numbers will never represent a real protocol; a
+        // # client MAY use one of these version numbers with the expectation that
+        // # the server will initiate version negotiation; a server MAY advertise
+        // # support for one of these versions and can expect that clients ignore
+        // # the value.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-15
+        // # A client or server MAY advertise support for any of these reserved
+        // # versions.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-15
+        // # a server MAY advertise support for one of these versions and can
+        // # expect that clients ignore the value.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-6.3
+        // # Endpoints MAY add reserved versions to any field where unknown or
+        // # unsupported versions are ignored to test that a peer correctly
+        // # ignores the value.
         advertised_versions.push_back(kGreasedReservedVersion);
     }
 
@@ -2372,6 +2577,54 @@ QuicCore::find_endpoint_connection_for_datagram(const ParsedEndpointDatagram &pa
     return initial_it->second;
 }
 
+std::optional<QuicConnectionHandle> QuicCore::find_endpoint_connection_for_connection_id(
+    std::span<const std::byte> connection_id) const {
+    const auto key = connection_id_key(connection_id);
+    if (const auto connection_it = connection_id_routes_.find(key);
+        connection_it != connection_id_routes_.end()) {
+        return connection_it->second;
+    }
+    if (const auto initial_it = initial_destination_routes_.find(key);
+        initial_it != initial_destination_routes_.end()) {
+        return initial_it->second;
+    }
+    return std::nullopt;
+}
+
+bool QuicCore::quoted_packet_matches_connection(const ParsedEndpointDatagram &quoted,
+                                                QuicConnectionHandle handle) const {
+    if (const auto destination_match =
+            find_endpoint_connection_for_connection_id(quoted.destination_connection_id);
+        destination_match.has_value() && *destination_match == handle) {
+        return true;
+    }
+    if (quoted.source_connection_id.has_value()) {
+        const auto source_match =
+            find_endpoint_connection_for_connection_id(*quoted.source_connection_id);
+        if (source_match.has_value() && *source_match == handle) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool QuicCore::path_mtu_update_matches_connection(const ConnectionEntry &entry,
+                                                  const QuicCorePathMtuUpdate &update) const {
+    if (update.quoted_packet.empty()) {
+        return true;
+    }
+
+    const auto quoted =
+        parse_endpoint_datagram(update.quoted_packet, endpoint_config_.transport.grease_quic_bit);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+    // # ICMP message validation MUST include matching IP addresses and UDP
+    // # ports [RFC8085] and, when possible, connection IDs to an active QUIC
+    // # session.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+    // # The endpoint SHOULD ignore all ICMP messages that fail validation.
+    return quoted.has_value() && quoted_packet_matches_connection(*quoted, entry.handle);
+}
+
 COQUIC_NO_PROFILE void QuicCore::erase_endpoint_connection_routes(const ConnectionEntry &entry) {
     for (const auto &connection_id_key_value : entry.active_connection_id_keys) {
         const auto it = connection_id_routes_.find(connection_id_key_value);
@@ -2427,6 +2680,13 @@ COQUIC_NO_PROFILE void QuicCore::retire_endpoint_connection_routes(const Connect
             continue;
         }
         if (reset_token_expiry.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+            // # The endpoint MAY send a Stateless Reset in
+            // # response to any further incoming packets belonging to this
+            // # connection.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.2
+            // # For instance, an endpoint MAY send a Stateless Reset in
+            // # response to any further incoming packets.
             it->second.expires_at = reset_token_expiry;
         } else {
             local_stateless_reset_tokens_by_cid_.erase(it);
@@ -2647,6 +2907,16 @@ std::optional<QuicPathId> COQUIC_NO_PROFILE QuicCore::path_id_for_inbound_route(
             remember_address_validation_identity(entry, existing->second,
                                                  address_validation_identity);
             return existing->second;
+        }
+        if (entry.connection != nullptr && entry.connection->config_.role == EndpointRole::client) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+            // # If a client receives packets from an unknown server address,
+            // # the client MUST discard these packets.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6
+            // # If a client receives packets from a new server address when
+            // # the client has not initiated a migration to that address, the
+            // # client SHOULD discard these packets.
+            return std::nullopt;
         }
         if (!endpoint_config_.allow_peer_address_change) {
             return std::nullopt;
@@ -2974,6 +3244,27 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             return result;
         }
 
+        if (open->connection.source_connection_id.empty() &&
+            std::any_of(connections_.begin(), connections_.end(), [](const auto &connection) {
+                const auto &entry = connection.second;
+                return entry.connection != nullptr &&
+                       entry.connection->config_.source_connection_id.empty();
+            })) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1
+            // # An endpoint MUST NOT use the same IP address and port for
+            // # multiple concurrent connections with zero-length connection
+            // # IDs, unless it is certain that those protocol features are not
+            // # in use.
+            QuicCoreResult result;
+            result.local_error = QuicCoreLocalError{
+                .connection = std::nullopt,
+                .code = QuicCoreLocalErrorCode::unsupported_operation,
+                .stream_id = std::nullopt,
+            };
+            result.next_wakeup = next_wakeup();
+            return result;
+        }
+
         auto retry_token = open->connection.retry_token;
         if (retry_token.empty()) {
             if (auto stored_token = take_client_new_token_for_open(open->connection)) {
@@ -3126,6 +3417,9 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             }
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
+        // # Receivers MAY route based on the information in the first packet
+        // # contained in a UDP datagram.
         auto parsed =
             parse_endpoint_datagram(inbound_payload, endpoint_config_.transport.grease_quic_bit);
         if (!parsed.has_value()) {
@@ -3172,6 +3466,10 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                         static_cast<void>(drain_stateless_reset_owner(*reset_owner));
                         return finalize_endpoint_result(std::move(result), now);
                     }
+                } else {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
+                    // # Endpoints MAY skip this check if any packet from a
+                    // # datagram is successfully processed.
                 }
 
                 const bool defer_send_drain =
@@ -3237,6 +3535,12 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
              !endpoint_supports_version);
         if (should_send_version_negotiation) {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.2
+            // # A server MAY limit the number of
+            // # packets to which it responds with a Version Negotiation packet.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-6.1
+            // # A server MAY limit the number of Version Negotiation packets it
+            // # sends.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.2
             // # If a server receives a packet that indicates an unsupported version
             // # and if the packet is large enough to initiate a new connection for
             // # any supported version, the server SHOULD send a Version Negotiation
@@ -3281,6 +3585,13 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             return finalize_endpoint_result(std::move(result), now);
         }
 
+        if (parsed->destination_connection_id.size() < 8) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+            // # This Destination Connection ID MUST be at least 8 bytes in
+            // # length.
+            return finalize_endpoint_result(std::move(result), now);
+        }
+
         if (inbound_payload.size() < kMinimumClientInitialDatagramBytes) {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
             // # A server MUST discard an Initial packet that is carried in a
@@ -3297,6 +3608,26 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             return finalize_endpoint_result(std::move(result), now);
         }
 
+        if (endpoint_config_.max_server_connections != 0 &&
+            connections_.size() >= endpoint_config_.max_server_connections) {
+            auto close_bytes = make_connection_refused_close_packet_bytes(*parsed);
+            if (!close_bytes.empty()) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.2
+                // # If a server refuses to accept a new connection, it SHOULD
+                // # send an Initial packet containing a CONNECTION_CLOSE frame
+                // # with error code CONNECTION_REFUSED.
+                emit_send_datagram(result,
+                                   QuicCoreSendDatagram{
+                                       .connection = 0,
+                                       .route_handle = inbound->route_handle,
+                                       .bytes = DatagramBuffer(std::move(close_bytes)),
+                                   },
+                                   send_sink);
+            }
+            return finalize_endpoint_result(std::move(result), now);
+        }
+
+        const auto token_classification = classify_address_validation_token(*parsed);
         std::optional<PendingRetryToken> retry_context;
         std::optional<StoredEndpointNewToken> new_token_context;
         if (!parsed->token.empty()) {
@@ -3311,10 +3642,21 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             retry_context = take_retry_context(*parsed, inbound->route_handle, now,
                                                inbound->address_validation_identity);
             if (!retry_context.has_value()) {
-                if (!parsed->token.empty() && !new_token_context.has_value()) {
-                    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
-                    // # Servers MAY discard any Initial packet that does not
-                    // # carry the expected token.
+                if (token_classification == AddressValidationTokenClassification::retry) {
+                    auto close_bytes = make_invalid_retry_token_close_packet_bytes(*parsed);
+                    if (!close_bytes.empty()) {
+                        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.2
+                        // # Instead, the server SHOULD immediately close
+                        // # (Section 10.2) the connection with an INVALID_TOKEN
+                        // # error.
+                        emit_send_datagram(result,
+                                           QuicCoreSendDatagram{
+                                               .connection = 0,
+                                               .route_handle = inbound->route_handle,
+                                               .bytes = DatagramBuffer(std::move(close_bytes)),
+                                           },
+                                           send_sink);
+                    }
                     return finalize_endpoint_result(std::move(result), now);
                 }
 
@@ -3336,6 +3678,13 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
 
                 auto bytes = make_retry_packet_bytes(*parsed, pending);
                 if (!bytes.empty()) {
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+                    // # If the token is invalid, then the server SHOULD proceed
+                    // # as if the client did not have a validated address,
+                    // # including potentially sending a Retry packet.
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.1
+                    // # A server MAY send Retry packets in response to Initial
+                    // # and 0-RTT packets.
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.1
                     // # A server MUST NOT send more than one Retry
                     // # packet in response to a single UDP datagram.
@@ -3450,6 +3799,18 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             if (!path_id.has_value()) {
                 continue;
             }
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+            // # QUIC endpoints using PMTUD SHOULD validate ICMP messages to
+            // # protect from packet injection as specified in [RFC8201] and
+            // # Section 5.2 of [RFC8085].
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+            // # This validation SHOULD use the quoted packet supplied in the
+            // # payload of an ICMP message to associate the message with a
+            // # corresponding transport connection (see Section 4.6.1 of
+            // # [DPLPMTUD]).
+            if (!path_mtu_update_matches_connection(entry, *mtu)) {
+                continue;
+            }
             entry.connection->apply_path_mtu_update(*path_id, mtu->max_udp_payload_size);
             auto drained = drain_connection_effects(
                 entry.handle, entry.default_route_handle, entry.route_handle_by_path_id,
@@ -3554,6 +3915,16 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                         entry, in.route_handle, in.address_validation_identity);
                     if (!address_validation_identity_allowed_for_new_route(&entry,
                                                                            effective_identity)) {
+                        result.local_error = QuicCoreLocalError{
+                            .connection = entry.handle,
+                            .code = QuicCoreLocalErrorCode::unsupported_operation,
+                            .stream_id = std::nullopt,
+                        };
+                        return;
+                    }
+                    if (in.reason == QuicMigrationRequestReason::preferred_address &&
+                        !preferred_address_migration_route_family_allowed(entry,
+                                                                          effective_identity)) {
                         result.local_error = QuicCoreLocalError{
                             .connection = entry.handle,
                             .code = QuicCoreLocalErrorCode::unsupported_operation,
@@ -3754,11 +4125,6 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                         if (can_process_retry && valid_integrity &&
                             valid_destination_connection_id && valid_version &&
                             valid_source_connection_id && valid_retry_token) {
-                            //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.3
-                            // # A client MUST NOT reset the packet number for any packet number
-                            // # space after processing a Retry packet.
-                            const auto next_initial_send_packet_number =
-                                connection->initial_space_.next_send_packet_number;
                             config.original_destination_connection_id =
                                 original_destination_connection_id;
                             config.retry_source_connection_id = retry->source_connection_id;
@@ -3774,26 +4140,17 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                             // # The client MUST include the token in all Initial packets it
                             // # sends, unless a Retry replaces the token with a newer one.
                             config.retry_token = retry->retry_token;
-                            //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.1
-                            // # The client MUST use the value from the Source
-                            // # Connection ID field of the Retry packet in the Destination
-                            // # Connection ID field of subsequent packets that it sends.
                             config.initial_destination_connection_id = retry->source_connection_id;
-                            entry.connection = std::make_unique<QuicConnection>(config);
-                            connection = entry.connection.get();
+                            connection->apply_client_retry(original_destination_connection_id,
+                                                           retry->source_connection_id,
+                                                           retry->retry_token);
                             if (const auto family = entry.address_family_by_path_id.find(*path_id);
                                 family != entry.address_family_by_path_id.end()) {
                                 remember_path_address_family(entry, *path_id, family->second);
                             }
-                            //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.3
-                            // # A client MUST NOT reset the packet number for any packet number
-                            // # space after processing a Retry packet.
-                            connection->initial_space_.next_send_packet_number =
-                                next_initial_send_packet_number;
                             connection->last_inbound_path_id_ = *path_id;
                             connection->current_send_path_id_ = path_id;
                             connection->ensure_path_state(*path_id).is_current_send_path = true;
-                            connection->start(now);
                         }
                         return;
                     }
@@ -3811,6 +4168,9 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                 }
                 const auto path_it = entry.path_id_by_route_handle.find(*in.route_handle);
                 if (path_it == entry.path_id_by_route_handle.end()) {
+                    return;
+                }
+                if (!path_mtu_update_matches_connection(entry, in)) {
                     return;
                 }
                 connection->apply_path_mtu_update(path_it->second, in.max_udp_payload_size);
@@ -3879,6 +4239,15 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                     entry, in.route_handle, in.address_validation_identity);
                 if (!address_validation_identity_allowed_for_new_route(&entry,
                                                                        effective_identity)) {
+                    result.local_error = QuicCoreLocalError{
+                        .connection = std::nullopt,
+                        .code = QuicCoreLocalErrorCode::unsupported_operation,
+                        .stream_id = std::nullopt,
+                    };
+                    return;
+                }
+                if (in.reason == QuicMigrationRequestReason::preferred_address &&
+                    !preferred_address_migration_route_family_allowed(entry, effective_identity)) {
                     result.local_error = QuicCoreLocalError{
                         .connection = std::nullopt,
                         .code = QuicCoreLocalErrorCode::unsupported_operation,

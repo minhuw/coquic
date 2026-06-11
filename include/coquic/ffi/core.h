@@ -207,6 +207,7 @@ typedef struct coquic_endpoint_config {
     uint8_t emit_shared_receive_stream_data;
     uint8_t enable_packet_inspection;
     uint8_t allow_peer_address_change;
+    size_t max_server_connections;
 } coquic_endpoint_config_t;
 
 typedef struct coquic_resumption_state {

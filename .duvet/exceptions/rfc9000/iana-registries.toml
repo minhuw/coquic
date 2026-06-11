@@ -1,6 +1,18 @@
 target = "https://www.rfc-editor.org/rfc/rfc9000"
 
 [[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.1"
+quote = '''
+Provisional registrations MAY omit the Specification and Notes
+fields, plus any additional fields that might be required for a
+permanent registration.
+'''
+reason = '''
+This requirement defines IANA registry metadata for provisional QUIC
+codepoint registrations, not behavior implemented by a QUIC endpoint.
+'''
+
+[[exception]]
 target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.2"
 quote = '''
 New requests for codepoints from QUIC registries SHOULD use a
@@ -35,6 +47,28 @@ requirements of the registration policy are met.
 reason = '''
 This requirement is directed at IANA registry administration, not at QUIC
 endpoint implementations.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.2"
+quote = '''
+Requests
+for multiple codepoints MAY use a contiguous range.
+'''
+reason = '''
+This is guidance for authors requesting QUIC registry codepoints, not a
+transport behavior implemented by CoQUIC.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.2"
+quote = '''
+Applications to register codepoints in QUIC registries MAY include a
+requested codepoint as part of the registration.
+'''
+reason = '''
+This is guidance for applications registering QUIC codepoints, not runtime
+behavior implemented by this endpoint.
 '''
 
 [[exception]]
@@ -84,6 +118,18 @@ not QUIC endpoint behavior.
 '''
 
 [[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.3"
+quote = '''
+If no use of the codepoint was identified and no request was made to
+update the registration, the codepoint MAY be removed from the
+registry.
+'''
+reason = '''
+This requirement concerns designated-expert maintenance of IANA registries,
+not QUIC endpoint behavior.
+'''
+
+[[exception]]
 target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.4"
 quote = '''
 All registrations made by Standards Track publications MUST be
@@ -92,6 +138,28 @@ permanent.
 reason = '''
 This requirement is directed at IANA registry policy, not at QUIC endpoint
 implementations.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.4"
+quote = '''
+The creation of a registry MAY identify a range of codepoints where
+registrations are governed by a different registration policy.
+'''
+reason = '''
+This requirement concerns how IANA registries define registration policy
+ranges, not behavior implemented by a QUIC endpoint.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.1.4"
+quote = '''
+The creation of a registry
+MAY specify additional constraints on permanent registrations.
+'''
+reason = '''
+This requirement concerns registry-definition policy, not behavior implemented
+by a QUIC endpoint.
 '''
 
 [[exception]]
@@ -164,4 +232,15 @@ registrations in this registry MUST include the following fields:
 reason = '''
 This requirement defines the format of IANA error-code registry entries,
 not QUIC endpoint behavior.
+'''
+
+[[exception]]
+target = "https://www.rfc-editor.org/rfc/rfc9000#section-22.5"
+quote = '''
+Description:  A brief description of the error code semantics, which
+MAY be a summary if a specification reference is provided.
+'''
+reason = '''
+This requirement defines IANA error-code registry metadata, not runtime
+behavior implemented by this endpoint.
 '''

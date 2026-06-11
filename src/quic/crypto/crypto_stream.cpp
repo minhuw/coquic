@@ -10,6 +10,7 @@
 
 namespace {
 
+using coquic::quic::CodecError;
 using coquic::quic::CodecErrorCode;
 using coquic::quic::CodecResult;
 using coquic::quic::ContiguousReceiveBytes;
@@ -21,6 +22,13 @@ constexpr std::uint64_t maximum_stream_offset = (std::uint64_t{1} << 62) - 1;
 
 template <typename T> CodecResult<T> crypto_stream_failure() {
     return CodecResult<T>::failure(CodecErrorCode::invalid_varint, 0);
+}
+
+template <typename T> CodecResult<T> crypto_buffer_exceeded_failure() {
+    return CodecResult<T>::failure(CodecError{
+        .code = CodecErrorCode::crypto_buffer_exceeded,
+        .offset = 0,
+    });
 }
 
 std::uint64_t range_end(std::uint64_t offset, std::size_t length) {
@@ -56,6 +64,22 @@ void append_contiguous_segment(ContiguousReceiveBytes &contiguous, SharedBytes b
 } // namespace
 
 namespace coquic::quic {
+
+ReliableReceiveBuffer::ReliableReceiveBuffer(std::size_t buffered_byte_limit)
+    : buffered_byte_limit_(buffered_byte_limit) {
+}
+
+void ReliableReceiveBuffer::set_buffered_byte_limit(std::size_t limit) {
+    buffered_byte_limit_ = limit;
+}
+
+void ReliableReceiveBuffer::clear_buffered_byte_limit() {
+    buffered_byte_limit_.reset();
+}
+
+std::size_t ReliableReceiveBuffer::buffered_byte_count() const {
+    return buffered_byte_count_;
+}
 
 void ReliableSendBuffer::note_segment_inserted(const Segment &segment) {
     ++segment_state_counts_[segment_state_index(segment.state)];
@@ -595,12 +619,23 @@ CodecResult<ContiguousReceiveBytes> ReliableReceiveBuffer::push_shared(std::uint
         });
     }
 
-    const auto start = std::max(offset, next_contiguous_offset_);
-    if (start < end) {
+    if (offset <= next_contiguous_offset_ && next_contiguous_offset_ < end) {
+        const auto begin_index = static_cast<std::size_t>(next_contiguous_offset_ - offset);
+        next_contiguous_offset_ = end;
+        return CodecResult<ContiguousReceiveBytes>::success(
+            take_contiguous_buffered_bytes(ContiguousReceiveBytes{
+                .shared = bytes.subspan(begin_index),
+            }));
+    }
+
+    if (offset > next_contiguous_offset_) {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
         // # Implementations MUST support buffering at least 4096 bytes of data
         // # received in out-of-order CRYPTO frames.
-        buffer_range(start, bytes.subspan(static_cast<std::size_t>(start - offset)));
+        if (!can_buffer_range(offset, bytes)) {
+            return crypto_buffer_exceeded_failure<ContiguousReceiveBytes>();
+        }
+        buffer_range(offset, bytes);
     }
 
     return CodecResult<ContiguousReceiveBytes>::success(take_contiguous_buffered_bytes({}));
@@ -644,6 +679,65 @@ CodecResult<std::vector<std::byte>> ReliableReceiveBuffer::push(std::uint64_t of
     return push(offset, std::move(owned));
 }
 
+std::size_t ReliableReceiveBuffer::unbuffered_byte_count(std::uint64_t offset,
+                                                         const SharedBytes &bytes) const {
+    std::size_t total = 0;
+    auto cursor = offset;
+    const auto end = range_end(offset, bytes.size());
+    auto next_buffered = buffered_bytes_.lower_bound(offset);
+    if (next_buffered != buffered_bytes_.begin()) {
+        auto previous = std::prev(next_buffered);
+        if (range_end(previous->first, previous->second.size()) > offset) {
+            next_buffered = previous;
+        }
+    }
+
+    while (true) {
+        while (next_buffered != buffered_bytes_.end() &&
+               range_end(next_buffered->first, next_buffered->second.size()) <= cursor) {
+            ++next_buffered;
+        }
+
+        auto next_gap_end = end;
+        if (next_buffered != buffered_bytes_.end() && next_buffered->first < next_gap_end) {
+            next_gap_end = next_buffered->first;
+        }
+
+        if (cursor < next_gap_end) {
+            const auto byte_count = static_cast<std::size_t>(next_gap_end - cursor);
+            if (total > std::numeric_limits<std::size_t>::max() - byte_count) {
+                return std::numeric_limits<std::size_t>::max();
+            }
+            total += byte_count;
+            cursor = next_gap_end;
+            continue;
+        }
+
+        if (next_buffered == buffered_bytes_.end()) {
+            break;
+        }
+
+        cursor = std::max(cursor, range_end(next_buffered->first, next_buffered->second.size()));
+        if (cursor >= end) {
+            break;
+        }
+        ++next_buffered;
+    }
+
+    return total;
+}
+
+bool ReliableReceiveBuffer::can_buffer_range(std::uint64_t offset, const SharedBytes &bytes) const {
+    if (!buffered_byte_limit_.has_value()) {
+        return true;
+    }
+    if (buffered_byte_count_ > *buffered_byte_limit_) {
+        return false;
+    }
+    const auto additional = unbuffered_byte_count(offset, bytes);
+    return additional <= *buffered_byte_limit_ - buffered_byte_count_;
+}
+
 void ReliableReceiveBuffer::buffer_range(std::uint64_t offset, const SharedBytes &bytes) {
     if (bytes.empty()) {
         return;
@@ -673,7 +767,11 @@ void ReliableReceiveBuffer::buffer_range(std::uint64_t offset, const SharedBytes
         if (cursor < next_gap_end) {
             const auto begin_index = static_cast<std::size_t>(cursor - offset);
             const auto byte_count = static_cast<std::size_t>(next_gap_end - cursor);
-            buffered_bytes_.emplace(cursor, bytes.subspan(begin_index, byte_count));
+            const auto [inserted, did_insert] =
+                buffered_bytes_.emplace(cursor, bytes.subspan(begin_index, byte_count));
+            if (did_insert) {
+                buffered_byte_count_ += inserted->second.size();
+            }
             cursor = next_gap_end;
             continue;
         }
@@ -707,6 +805,11 @@ ReliableReceiveBuffer::take_contiguous_buffered_bytes(ContiguousReceiveBytes con
             next_contiguous_offset_ = segment_end;
         }
 
+        if (buffered_byte_count_ >= next->second.size()) {
+            buffered_byte_count_ -= next->second.size();
+        } else {
+            buffered_byte_count_ = 0;
+        }
         buffered_bytes_.erase(next);
     }
 
@@ -715,6 +818,9 @@ ReliableReceiveBuffer::take_contiguous_buffered_bytes(ContiguousReceiveBytes con
 
 std::vector<std::byte> ReliableReceiveBuffer::take_contiguous_buffered_bytes() {
     return take_contiguous_buffered_bytes({}).to_vector();
+}
+
+CryptoReceiveBuffer::CryptoReceiveBuffer() : reliable_(kMinimumOutOfOrderCryptoBufferSize) {
 }
 
 CodecResult<std::vector<std::byte>> CryptoReceiveBuffer::push(std::uint64_t offset,

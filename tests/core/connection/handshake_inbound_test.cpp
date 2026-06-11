@@ -97,6 +97,38 @@ TEST(QuicCoreTest, ConnectionProcessInboundCryptoCoversErrorBranches) {
                          coquic::quic::CodecErrorCode::invalid_packet_protection_state);
 }
 
+TEST(QuicCoreTest, ProcessInboundCryptoClosesWithCryptoBufferExceededWhenLimitExceeded) {
+    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    const auto tail =
+        std::vector<std::byte>(coquic::quic::kMinimumOutOfOrderCryptoBufferSize, std::byte{0x5a});
+
+    auto buffered = connection.process_inbound_crypto(coquic::quic::EncryptionLevel::initial,
+                                                      std::array<coquic::quic::Frame, 1>{
+                                                          coquic::quic::CryptoFrame{
+                                                              .offset = 1,
+                                                              .crypto_data = tail,
+                                                          },
+                                                      },
+                                                      coquic::quic::test::test_time());
+    ASSERT_TRUE(buffered.has_value());
+
+    auto overflow = connection.process_inbound_crypto(
+        coquic::quic::EncryptionLevel::initial,
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::CryptoFrame{
+                .offset = 1 + static_cast<std::uint64_t>(tail.size()),
+                .crypto_data = {std::byte{0x5b}},
+            },
+        },
+        coquic::quic::test::test_time(1));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+    // # If an endpoint does not expand its buffer, it MUST close the
+    // # connection with a CRYPTO_BUFFER_EXCEEDED error code.
+    expect_transport_codec_failure(overflow, coquic::quic::CodecErrorCode::crypto_buffer_exceeded,
+                                   coquic::quic::QuicTransportErrorCode::crypto_buffer_exceeded);
+}
+
 TEST(QuicCoreTest, ConnectionProcessInboundCryptoAcceptsPingBeforeCryptoFrames) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
 
@@ -281,7 +313,8 @@ TEST(QuicCoreTest, ProcessInboundDatagramSeparatelyAcknowledgesCoalescedInitialA
             coquic::quic::ProtectedInitialPacket{
                 .version = coquic::quic::kQuicVersion1,
                 .destination_connection_id = connection.config_.source_connection_id,
-                .source_connection_id = bytes_from_hex("0011223344556677"),
+                .source_connection_id =
+                    optional_value_or_terminate(connection.peer_source_connection_id_),
                 .packet_number_length = 2,
                 .packet_number = 1,
                 .frames = {coquic::quic::PingFrame{}},
@@ -289,7 +322,8 @@ TEST(QuicCoreTest, ProcessInboundDatagramSeparatelyAcknowledgesCoalescedInitialA
             coquic::quic::ProtectedHandshakePacket{
                 .version = coquic::quic::kQuicVersion1,
                 .destination_connection_id = connection.config_.source_connection_id,
-                .source_connection_id = bytes_from_hex("0011223344556677"),
+                .source_connection_id =
+                    optional_value_or_terminate(connection.peer_source_connection_id_),
                 .packet_number_length = 2,
                 .packet_number = 2,
                 .frames = {coquic::quic::PingFrame{}},
@@ -327,7 +361,8 @@ TEST(QuicCoreTest, ProcessInboundDatagramSeparatelyAcknowledgesCoalescedInitialA
             coquic::quic::ProtectedInitialPacket{
                 .version = coquic::quic::kQuicVersion1,
                 .destination_connection_id = mismatched.config_.source_connection_id,
-                .source_connection_id = bytes_from_hex("0011223344556677"),
+                .source_connection_id =
+                    optional_value_or_terminate(mismatched.peer_source_connection_id_),
                 .packet_number_length = 2,
                 .packet_number = 1,
                 .frames = {coquic::quic::PingFrame{}},
@@ -335,7 +370,8 @@ TEST(QuicCoreTest, ProcessInboundDatagramSeparatelyAcknowledgesCoalescedInitialA
             coquic::quic::ProtectedHandshakePacket{
                 .version = coquic::quic::kQuicVersion1,
                 .destination_connection_id = bytes_from_ints({0x55, 0x66}),
-                .source_connection_id = bytes_from_hex("0011223344556677"),
+                .source_connection_id =
+                    optional_value_or_terminate(mismatched.peer_source_connection_id_),
                 .packet_number_length = 2,
                 .packet_number = 2,
                 .frames = {coquic::quic::PingFrame{}},
@@ -3182,7 +3218,7 @@ TEST(QuicCoreTest,
                          coquic::quic::CodecErrorCode::invalid_varint);
 }
 
-TEST(QuicCoreTest, ReceivedInitialPacketResetsClientHandshakePeerStateOnSourceConnectionIdChange) {
+TEST(QuicCoreTest, ReceivedInitialPacketDiscardsClientHandshakeSourceConnectionIdChange) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.started_ = true;
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
@@ -3219,18 +3255,24 @@ TEST(QuicCoreTest, ReceivedInitialPacketResetsClientHandshakePeerStateOnSourceCo
         },
         coquic::quic::test::test_time(1)));
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+    // # Once a client has received a valid Initial packet from the server, it
+    // # MUST discard any subsequent packet it receives on that connection with a
+    // # different Source Connection ID.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+    // # if subsequent Initial packets include a different Source Connection ID,
+    // # they MUST be discarded.
     EXPECT_EQ(optional_value_or_terminate(connection.peer_source_connection_id_),
-              replacement_source_connection_id);
-    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
-    EXPECT_FALSE(connection.peer_transport_parameters_.has_value());
-    EXPECT_FALSE(connection.peer_transport_parameters_validated_);
-    EXPECT_EQ(connection.active_peer_connection_id_sequence_, 0u);
+              bytes_from_ints({0x01}));
+    EXPECT_FALSE(connection.deferred_protected_packets_.empty());
+    ASSERT_TRUE(connection.peer_transport_parameters_.has_value());
+    EXPECT_TRUE(connection.peer_transport_parameters_validated_);
+    EXPECT_EQ(connection.active_peer_connection_id_sequence_, 7u);
     ASSERT_EQ(connection.peer_connection_ids_.size(), 1u);
-    EXPECT_EQ(connection.peer_connection_ids_.at(0).connection_id,
-              replacement_source_connection_id);
-    EXPECT_FALSE(connection.initial_space_.received_packets.has_ack_to_send());
-    EXPECT_FALSE(connection.handshake_space_.received_packets.has_ack_to_send());
-    EXPECT_FALSE(connection.zero_rtt_space_.received_packets.has_ack_to_send());
+    EXPECT_EQ(connection.peer_connection_ids_.at(7).connection_id, bytes_from_ints({0x07}));
+    EXPECT_TRUE(connection.initial_space_.received_packets.has_ack_to_send());
+    EXPECT_TRUE(connection.handshake_space_.received_packets.has_ack_to_send());
+    EXPECT_TRUE(connection.zero_rtt_space_.received_packets.has_ack_to_send());
 }
 
 TEST(QuicCoreTest, DuplicateReceivedInitialPacketDoesNotResetClientHandshakePeerState) {
@@ -3264,9 +3306,8 @@ TEST(QuicCoreTest, DuplicateReceivedInitialPacketDoesNotResetClientHandshakePeer
     EXPECT_TRUE(connection.initial_space_.received_packets.has_ack_to_send());
 }
 
-TEST(
-    QuicCoreTest,
-    ReceivedHandshakePacketAdoptsVersionAndResetsClientHandshakePeerStateOnSourceConnectionIdChange) {
+TEST(QuicCoreTest,
+     ReceivedHandshakePacketAdoptsVersionAndDiscardsClientHandshakeSourceConnectionIdChange) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.started_ = true;
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
@@ -3305,18 +3346,21 @@ TEST(
         coquic::quic::test::test_time(1)));
 
     EXPECT_EQ(connection.current_version_, coquic::quic::kQuicVersion2);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+    // # Once a client has received a valid Initial packet from the server, it
+    // # MUST discard any subsequent packet it receives on that connection with a
+    // # different Source Connection ID.
     EXPECT_EQ(optional_value_or_terminate(connection.peer_source_connection_id_),
-              replacement_source_connection_id);
-    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
-    EXPECT_FALSE(connection.peer_transport_parameters_.has_value());
-    EXPECT_FALSE(connection.peer_transport_parameters_validated_);
-    EXPECT_EQ(connection.active_peer_connection_id_sequence_, 0u);
+              bytes_from_ints({0x01}));
+    EXPECT_FALSE(connection.deferred_protected_packets_.empty());
+    ASSERT_TRUE(connection.peer_transport_parameters_.has_value());
+    EXPECT_TRUE(connection.peer_transport_parameters_validated_);
+    EXPECT_EQ(connection.active_peer_connection_id_sequence_, 9u);
     ASSERT_EQ(connection.peer_connection_ids_.size(), 1u);
-    EXPECT_EQ(connection.peer_connection_ids_.at(0).connection_id,
-              replacement_source_connection_id);
-    EXPECT_FALSE(connection.initial_space_.received_packets.has_ack_to_send());
-    EXPECT_FALSE(connection.handshake_space_.received_packets.has_ack_to_send());
-    EXPECT_FALSE(connection.zero_rtt_space_.received_packets.has_ack_to_send());
+    EXPECT_EQ(connection.peer_connection_ids_.at(9).connection_id, bytes_from_ints({0x09}));
+    EXPECT_TRUE(connection.initial_space_.received_packets.has_ack_to_send());
+    EXPECT_TRUE(connection.handshake_space_.received_packets.has_ack_to_send());
+    EXPECT_TRUE(connection.zero_rtt_space_.received_packets.has_ack_to_send());
 }
 
 TEST(QuicCoreTest, DuplicateReceivedHandshakePacketDoesNotResetClientHandshakePeerState) {
@@ -3934,6 +3978,7 @@ TEST(QuicCoreTest, ProcessInboundDatagramFailsWhenDeferredReplayPacketFailsProce
 
 TEST(QuicCoreTest, DrainOutboundDatagramReplaysDeferredProtectedPacketsBeforeFlush) {
     auto connection = make_connected_client_connection();
+    connection.local_transport_parameters_.ack_delay_exponent = 0;
     const auto deferred_packet = coquic::quic::serialize_protected_datagram(
         std::array<coquic::quic::ProtectedPacket, 1>{
             coquic::quic::ProtectedOneRttPacket{
@@ -3980,6 +4025,10 @@ TEST(QuicCoreTest, DrainOutboundDatagramReplaysDeferredProtectedPacketsBeforeFlu
         if (const auto *ack = std::get_if<coquic::quic::AckFrame>(&frame)) {
             saw_ack = true;
             EXPECT_EQ(ack->largest_acknowledged, 7u);
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.5
+            // # However, endpoints SHOULD include buffering delays caused by
+            // # unavailability of decryption keys, since these delays can be
+            // # large and are likely to be non-repeating.
             EXPECT_EQ(ack->ack_delay, 1000u);
         }
     }

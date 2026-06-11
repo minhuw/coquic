@@ -478,6 +478,10 @@ runtime_preferred_address_for_server(const Http09RuntimeConfig &config) {
         if (!resolved_any_address) {
             return std::nullopt;
         }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+        // # Servers MAY communicate a preferred address of each address family
+        // # (IPv4 and IPv6) to allow clients to pick the one most suited to
+        // # their network attachment.
         return preferred_address;
     }
 
@@ -492,6 +496,10 @@ runtime_preferred_address_for_server(const Http09RuntimeConfig &config) {
         return std::nullopt;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
+    // # Servers MAY choose to only send a preferred address of one address
+    // # family by sending an all-zero address and port (0.0.0.0:0 or [::]:0)
+    // # for the other family.
     auto preferred_address = preferred_address_from_resolved_udp_address(
         preferred_bind, make_runtime_connection_id(std::byte{0x5a}, 1));
     return preferred_address;
@@ -1415,6 +1423,9 @@ void maybe_queue_client_runtime_policy_inputs(const Http09RuntimeConfig &config,
     // # Once the handshake is confirmed, the client SHOULD select one of the
     // # two addresses provided by the server and initiate path validation
     // # (see Section 8.2).
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.5
+    // # Changing address can cause a peer to reset its congestion control state
+    // # (see Section 9.4), so addresses SHOULD only be changed infrequently.
     core_inputs.emplace_back(QuicCoreRequestConnectionMigration{
         .route_handle = *policy.preferred_address_route_handle,
         .reason = QuicMigrationRequestReason::preferred_address,
@@ -1893,6 +1904,7 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
                     QuicCorePathMtuUpdate{
                         .route_handle = event->path_mtu->route_handle,
                         .max_udp_payload_size = event->path_mtu->max_udp_payload_size,
+                        .quoted_packet = event->path_mtu->quoted_packet,
                     },
                     event->now))) {
                 return 1;
@@ -2933,6 +2945,7 @@ bool process_server_path_mtu_update_with_backend(
         QuicCorePathMtuUpdate{
             .route_handle = path_mtu_update.route_handle,
             .max_udp_payload_size = path_mtu_update.max_udp_payload_size,
+            .quoted_packet = path_mtu_update.quoted_packet,
         },
         input_time);
     bool observed_early_stream_data = false;

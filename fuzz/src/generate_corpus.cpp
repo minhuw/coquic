@@ -18,6 +18,7 @@
 #include "src/quic/codec/varint.h"
 #include "src/quic/transport/transport_parameters.h"
 #include "src/quic/version.h"
+#include "fuzz/src/stream_state_bytecode.h"
 
 namespace {
 
@@ -91,6 +92,15 @@ std::array<std::byte, 16> token(unsigned base) {
     };
 }
 
+std::vector<std::byte> counted_bytes(unsigned base, std::size_t count) {
+    std::vector<std::byte> output;
+    output.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        output.push_back(static_cast<std::byte>((base + index) & 0xffu));
+    }
+    return output;
+}
+
 void write_seed(const std::filesystem::path &root, const std::string &target,
                 const std::string &name, std::span<const std::byte> data) {
     const auto dir = root / target;
@@ -107,6 +117,81 @@ void write_seed(const std::filesystem::path &root, const std::string &target,
 void write_seed(const std::filesystem::path &root, const std::string &target,
                 const std::string &name, const std::vector<std::byte> &data) {
     write_seed(root, target, name, std::span<const std::byte>(data.data(), data.size()));
+}
+
+class FuzzInputBuilder {
+  public:
+    void write_u8(unsigned value) {
+        data_.push_back(static_cast<std::byte>(value & 0xffu));
+    }
+
+    void write_u64(std::uint64_t value) {
+        for (int shift = 56; shift >= 0; shift -= 8) {
+            write_u8(static_cast<unsigned>((value >> shift) & 0xffu));
+        }
+    }
+
+    void write_size(std::uint64_t value) {
+        write_u64(value);
+    }
+
+    void write_sized_bytes(std::span<const std::byte> data) {
+        write_size(data.size());
+        data_.insert(data_.end(), data.begin(), data.end());
+    }
+
+    std::vector<std::byte> finish() && {
+        return std::move(data_);
+    }
+
+  private:
+    std::vector<std::byte> data_;
+};
+
+enum class ProtectedSeedPacketSpace : std::uint8_t {
+    handshake,
+    zero_rtt,
+    one_rtt,
+};
+
+void write_common_protected_seed_prefix(FuzzInputBuilder &seed) {
+    seed.write_u8(0); // endpoint role
+    seed.write_u8(0); // cipher suite
+    seed.write_sized_bytes(bytes({0x83}));
+    seed.write_sized_bytes(bytes({0xde, 0xad, 0xbe, 0xef}));
+    seed.write_size(0); // generate one packet
+    seed.write_size(0); // one-byte packet number
+}
+
+std::vector<std::byte> protected_packet_seed(ProtectedSeedPacketSpace packet_space,
+                                             std::uint8_t frame_choice) {
+    FuzzInputBuilder seed;
+    write_common_protected_seed_prefix(seed);
+
+    switch (packet_space) {
+    case ProtectedSeedPacketSpace::handshake:
+        seed.write_u8(1); // ProtectedHandshakePacket
+        seed.write_sized_bytes(bytes({0x84}));
+        seed.write_sized_bytes(bytes({0xc2}));
+        seed.write_u64(0); // packet number
+        break;
+    case ProtectedSeedPacketSpace::zero_rtt:
+        seed.write_u8(2); // ProtectedZeroRttPacket
+        seed.write_sized_bytes(bytes({0x85}));
+        seed.write_sized_bytes(bytes({0xc3}));
+        seed.write_u64(0); // packet number
+        break;
+    case ProtectedSeedPacketSpace::one_rtt:
+        seed.write_u8(3);  // ProtectedOneRttPacket
+        seed.write_u8(0);  // spin bit
+        seed.write_u8(0);  // key phase
+        seed.write_u64(0); // packet number delta
+        break;
+    }
+
+    seed.write_size(0); // generate one frame
+    seed.write_u8(frame_choice);
+    return std::move(seed).finish();
 }
 
 void write_encoded_frame(const std::filesystem::path &root, const std::string &name,
@@ -414,6 +499,72 @@ void generate_packet_seeds(const std::filesystem::path &root) {
     write_encoded_packet(root, "fuzz_datagram", "generated_one_rtt_dcid_8", one_rtt_dcid_8);
 }
 
+void generate_protected_packet_seeds(const std::filesystem::path &root) {
+    static constexpr std::array<const char *, 5> handshake_frames = {
+        "padding", "ping", "ack", "crypto", "transport_close",
+    };
+    static constexpr std::array<const char *, 16> zero_rtt_frames = {
+        "padding",
+        "ping",
+        "reset_stream",
+        "stop_sending",
+        "stream",
+        "datagram",
+        "max_data",
+        "max_stream_data",
+        "max_streams",
+        "data_blocked",
+        "stream_data_blocked",
+        "streams_blocked",
+        "new_connection_id",
+        "path_challenge",
+        "transport_close",
+        "application_close",
+    };
+    static constexpr std::array<const char *, 22> one_rtt_frames = {
+        "padding",
+        "ping",
+        "ack",
+        "reset_stream",
+        "stop_sending",
+        "crypto",
+        "new_token",
+        "stream",
+        "datagram",
+        "max_data",
+        "max_stream_data",
+        "max_streams",
+        "data_blocked",
+        "stream_data_blocked",
+        "streams_blocked",
+        "new_connection_id",
+        "retire_connection_id",
+        "path_challenge",
+        "path_response",
+        "transport_close",
+        "application_close",
+        "handshake_done",
+    };
+
+    for (std::size_t i = 0; i < handshake_frames.size(); ++i) {
+        write_seed(root, "fuzz_protected_packet",
+                   "generated_handshake_" + std::string(handshake_frames[i]),
+                   protected_packet_seed(ProtectedSeedPacketSpace::handshake,
+                                         static_cast<std::uint8_t>(i)));
+    }
+    for (std::size_t i = 0; i < zero_rtt_frames.size(); ++i) {
+        write_seed(root, "fuzz_protected_packet",
+                   "generated_zero_rtt_" + std::string(zero_rtt_frames[i]),
+                   protected_packet_seed(ProtectedSeedPacketSpace::zero_rtt,
+                                         static_cast<std::uint8_t>(i)));
+    }
+    for (std::size_t i = 0; i < one_rtt_frames.size(); ++i) {
+        write_seed(
+            root, "fuzz_protected_packet", "generated_one_rtt_" + std::string(one_rtt_frames[i]),
+            protected_packet_seed(ProtectedSeedPacketSpace::one_rtt, static_cast<std::uint8_t>(i)));
+    }
+}
+
 void generate_transport_parameter_seeds(const std::filesystem::path &root) {
     write_encoded_transport_parameters(root, "generated_minimal",
                                        TransportParameters{
@@ -475,11 +626,494 @@ void generate_transport_parameter_seeds(const std::filesystem::path &root) {
                                        });
 }
 
+void write_stream_state_seed(const std::filesystem::path &root, const std::string &name,
+                             FuzzInputBuilder seed) {
+    write_seed(root, "fuzz_stream_state", name, std::move(seed).finish());
+}
+
+void write_stream_state_prefix(FuzzInputBuilder &seed, bool server, std::uint64_t stream_id,
+                               std::uint64_t initial_peer_limit,
+                               std::uint64_t initial_receive_limit) {
+    for (const auto byte : coquic::fuzz::stream_state::kMagic) {
+        seed.write_u8(byte);
+    }
+    seed.write_u8(server ? 1u : 0u);
+    seed.write_u64(stream_id);
+    seed.write_u64(initial_peer_limit);
+    seed.write_u64(initial_receive_limit);
+}
+
+void stream_state_append_payload(FuzzInputBuilder &seed, std::span<const std::byte> payload,
+                                 bool fin) {
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::local_send));
+    seed.write_sized_bytes(payload);
+    seed.write_u8(fin ? 1u : 0u);
+}
+
+void stream_state_peer_max_stream_data(FuzzInputBuilder &seed, std::uint64_t maximum) {
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::peer_max_stream_data));
+    seed.write_u64(maximum);
+}
+
+void stream_state_data_blocked(FuzzInputBuilder &seed, bool acknowledge) {
+    seed.write_u8(
+        static_cast<unsigned>(coquic::fuzz::stream_state::Op::stream_data_blocked_round_trip));
+    seed.write_u8(acknowledge ? 1u : 0u);
+}
+
+void stream_state_max_stream_data(FuzzInputBuilder &seed, std::uint64_t maximum, bool acknowledge) {
+    seed.write_u8(
+        static_cast<unsigned>(coquic::fuzz::stream_state::Op::max_stream_data_round_trip));
+    seed.write_u64(maximum);
+    seed.write_u8(acknowledge ? 1u : 0u);
+}
+
+void stream_state_take_fragments(FuzzInputBuilder &seed, std::size_t packet_bytes,
+                                 std::uint64_t new_bytes, bool prefer_fresh,
+                                 std::initializer_list<unsigned> fragment_actions) {
+    seed.write_u8(
+        static_cast<unsigned>(coquic::fuzz::stream_state::Op::take_send_fragments_with_actions));
+    seed.write_size(packet_bytes == 0 ? 0 : packet_bytes - 1u);
+    seed.write_u64(new_bytes);
+    seed.write_u8(prefer_fresh ? 1u : 0u);
+    for (const auto action : fragment_actions) {
+        seed.write_u8(action);
+    }
+}
+
+void stream_state_receive_range(FuzzInputBuilder &seed, std::uint64_t offset, std::size_t length,
+                                bool fin) {
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::receive_range));
+    seed.write_u64(offset);
+    seed.write_size(length);
+    seed.write_u8(fin ? 1u : 0u);
+}
+
+void stream_state_peer_reset(FuzzInputBuilder &seed, std::uint64_t application_error_code,
+                             std::uint64_t final_size) {
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::peer_reset));
+    seed.write_u64(application_error_code);
+    seed.write_u64(final_size);
+}
+
+void stream_state_peer_stop_sending(FuzzInputBuilder &seed, std::uint64_t error_code) {
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::peer_stop_sending));
+    seed.write_u64(error_code);
+}
+
+void stream_state_local_reset(FuzzInputBuilder &seed, std::uint64_t error_code, bool acknowledge) {
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::local_reset_round_trip));
+    seed.write_u64(error_code);
+    seed.write_u8(acknowledge ? 1u : 0u);
+}
+
+void stream_state_local_stop_sending(FuzzInputBuilder &seed, std::uint64_t error_code,
+                                     bool acknowledge) {
+    seed.write_u8(
+        static_cast<unsigned>(coquic::fuzz::stream_state::Op::local_stop_sending_round_trip));
+    seed.write_u64(error_code);
+    seed.write_u8(acknowledge ? 1u : 0u);
+}
+
+void stream_state_peer_final_size(FuzzInputBuilder &seed, std::uint64_t final_size) {
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::peer_final_size));
+    seed.write_u64(final_size);
+}
+
+void stream_state_classify(FuzzInputBuilder &seed, std::uint64_t stream_id) {
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::classify_stream));
+    seed.write_u64(stream_id);
+}
+
+void stream_state_open_limits(FuzzInputBuilder &seed, std::uint64_t bidi, std::uint64_t uni,
+                              std::uint64_t stream_id) {
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::local_open_limits));
+    seed.write_u64(bidi);
+    seed.write_u64(uni);
+    seed.write_u64(stream_id);
+}
+
+void stream_state_peer_open_limits(FuzzInputBuilder &seed, std::uint64_t stream_id,
+                                   std::uint64_t bidi, std::uint64_t uni) {
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::peer_open_limits));
+    seed.write_u64(stream_id);
+    seed.write_u64(bidi);
+    seed.write_u64(uni);
+}
+
+void stream_state_snapshot(FuzzInputBuilder &seed, bool prefer_fresh) {
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::snapshot));
+    seed.write_u8(prefer_fresh ? 1u : 0u);
+}
+
+void generate_stream_state_seeds(const std::filesystem::path &root) {
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, false, 0, 8, 128);
+        stream_state_append_payload(seed, counted_bytes(0x10, 48), false);
+        stream_state_take_fragments(seed, 64, 64, true, {0, 2, 3, 1});
+        stream_state_data_blocked(seed, false);
+        stream_state_peer_max_stream_data(seed, 128);
+        stream_state_take_fragments(seed, 80, 80, false, {0, 1});
+        stream_state_snapshot(seed, false);
+        write_stream_state_seed(root, "generated_stream_flow_blocked_recovery", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, false, 0, 4096, 4096);
+        stream_state_append_payload(seed, counted_bytes(0x40, 96), false);
+        stream_state_take_fragments(seed, 24, 24, true, {0});
+        stream_state_take_fragments(seed, 24, 24, false, {2});
+        stream_state_take_fragments(seed, 48, 48, true, {3});
+        stream_state_take_fragments(seed, 128, 128, false, {1});
+        stream_state_snapshot(seed, true);
+        write_stream_state_seed(root, "generated_stream_fragment_send_loss_restore",
+                                std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, false, 0, 1024, 128);
+        stream_state_receive_range(seed, 0, 32, false);
+        stream_state_receive_range(seed, 64, 32, false);
+        stream_state_receive_range(seed, 32, 32, false);
+        stream_state_receive_range(seed, 96, 0, true);
+        stream_state_peer_final_size(seed, 96);
+        stream_state_peer_reset(seed, 0x100, 96);
+        stream_state_peer_reset(seed, 0x101, 64);
+        write_stream_state_seed(root, "generated_stream_receive_gap_final_reset", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, true, 1, 2048, 2048);
+        stream_state_append_payload(seed, counted_bytes(0x80, 32), true);
+        stream_state_local_reset(seed, 0x10, false);
+        stream_state_local_reset(seed, 0x10, true);
+        stream_state_local_stop_sending(seed, 0x20, false);
+        stream_state_local_stop_sending(seed, 0x20, true);
+        stream_state_peer_stop_sending(seed, 0x30);
+        stream_state_snapshot(seed, false);
+        write_stream_state_seed(root, "generated_stream_local_reset_stop_loss_ack",
+                                std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, false, 0, 256, 32);
+        stream_state_max_stream_data(seed, 64, false);
+        stream_state_max_stream_data(seed, 128, true);
+        stream_state_max_stream_data(seed, 16, false);
+        stream_state_receive_range(seed, 0, 16, false);
+        stream_state_receive_range(seed, 16, 16, true);
+        write_stream_state_seed(root, "generated_stream_max_stream_data_retransmit",
+                                std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, true, 3, 512, 512);
+        stream_state_append_payload(seed, counted_bytes(0xa0, 40), true);
+        stream_state_take_fragments(seed, 32, 32, true, {0, 1});
+        stream_state_take_fragments(seed, 64, 64, false, {2, 3});
+        stream_state_classify(seed, 3);
+        stream_state_classify(seed, 7);
+        write_stream_state_seed(root, "generated_stream_server_uni_send", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, false, 3, 0, 256);
+        stream_state_receive_range(seed, 0, 24, false);
+        stream_state_receive_range(seed, 24, 24, true);
+        stream_state_local_stop_sending(seed, 0x77, false);
+        stream_state_local_stop_sending(seed, 0x77, true);
+        stream_state_peer_reset(seed, 0x88, 48);
+        write_stream_state_seed(root, "generated_stream_client_peer_uni_receive_stop",
+                                std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, false, 0, 1024, 1024);
+        for (std::uint64_t stream_id = 0; stream_id < 16; ++stream_id) {
+            stream_state_classify(seed, stream_id);
+        }
+        stream_state_open_limits(seed, 0, 0, 0);
+        stream_state_open_limits(seed, 1, 1, 4);
+        stream_state_open_limits(seed, 63, 63, 252);
+        stream_state_peer_open_limits(seed, 0, 0, 0);
+        stream_state_peer_open_limits(seed, 5, 1, 0);
+        stream_state_peer_open_limits(seed, 254, 63, 63);
+        write_stream_state_seed(root, "generated_stream_client_limits_matrix", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, true, 1, 1024, 1024);
+        for (std::uint64_t stream_id = 0; stream_id < 16; ++stream_id) {
+            stream_state_classify(seed, stream_id);
+        }
+        stream_state_open_limits(seed, 0, 0, 1);
+        stream_state_open_limits(seed, 2, 1, 9);
+        stream_state_open_limits(seed, 63, 63, 253);
+        stream_state_peer_open_limits(seed, 1, 0, 0);
+        stream_state_peer_open_limits(seed, 4, 1, 0);
+        stream_state_peer_open_limits(seed, 255, 63, 63);
+        write_stream_state_seed(root, "generated_stream_server_limits_matrix", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, false, 0, 64, 64);
+        stream_state_append_payload(seed, counted_bytes(0xc0, 16), false);
+        stream_state_peer_max_stream_data(seed, 16);
+        stream_state_take_fragments(seed, 8, 8, true, {0});
+        stream_state_peer_max_stream_data(seed, 32);
+        stream_state_append_payload(seed, counted_bytes(0xd0, 16), true);
+        stream_state_take_fragments(seed, 12, 12, false, {0, 2, 3, 1});
+        stream_state_peer_final_size(seed, 32);
+        write_stream_state_seed(root, "generated_stream_fin_after_flow_growth", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, true, 0, 128, 128);
+        stream_state_receive_range(seed, 0, 0, false);
+        stream_state_receive_range(seed, 0, 64, true);
+        stream_state_peer_final_size(seed, 63);
+        stream_state_peer_reset(seed, 0x55, 64);
+        stream_state_local_stop_sending(seed, 0x66, false);
+        stream_state_snapshot(seed, true);
+        write_stream_state_seed(root, "generated_stream_peer_bidi_receive_edges", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, false, 2, 256, 256);
+        stream_state_append_payload(seed, counted_bytes(0xe0, 56), true);
+        stream_state_take_fragments(seed, 16, 16, true, {0});
+        stream_state_local_reset(seed, 0xaa, false);
+        stream_state_peer_stop_sending(seed, 0xbb);
+        stream_state_take_fragments(seed, 96, 96, false, {2, 3, 1});
+        write_stream_state_seed(root, "generated_stream_client_uni_reset_after_send",
+                                std::move(seed));
+    }
+}
+
+void recovery_record_received(FuzzInputBuilder &seed, std::uint64_t packet_number,
+                              bool ack_eliciting, std::uint64_t received_at, unsigned ecn = 0,
+                              std::uint64_t packet_size_index = 0) {
+    seed.write_u8(0);
+    seed.write_u64(packet_number);
+    seed.write_u8(ack_eliciting ? 1u : 0u);
+    seed.write_u8(ecn);
+    seed.write_u64(received_at);
+    seed.write_size(packet_size_index);
+}
+
+void recovery_build_ack_header(FuzzInputBuilder &seed, std::uint64_t max_ack_ranges,
+                               std::uint64_t now, bool immediate, bool ack_sent) {
+    seed.write_u8(1);
+    seed.write_u64(max_ack_ranges);
+    seed.write_u64(now);
+    seed.write_u8(immediate ? 1u : 0u);
+    seed.write_u8(ack_sent ? 1u : 0u);
+}
+
+void recovery_build_ack_frame(FuzzInputBuilder &seed, std::uint64_t max_ack_ranges,
+                              std::uint64_t now, bool immediate) {
+    seed.write_u8(2);
+    seed.write_u64(max_ack_ranges);
+    seed.write_u64(now);
+    seed.write_u8(immediate ? 1u : 0u);
+}
+
+void recovery_retire_received_ranges(FuzzInputBuilder &seed, std::uint64_t packet_number) {
+    seed.write_u8(3);
+    seed.write_u64(packet_number);
+}
+
+void recovery_sent_packet(FuzzInputBuilder &seed, std::uint64_t packet_number,
+                          std::uint64_t sent_at, unsigned flags, std::uint64_t bytes_index) {
+    seed.write_u8(4);
+    seed.write_u64(packet_number);
+    seed.write_u64(sent_at);
+    seed.write_u8(flags);
+    seed.write_size(bytes_index);
+}
+
+void recovery_simple_stream_sent_packet(FuzzInputBuilder &seed, std::uint64_t packet_number,
+                                        std::uint64_t sent_at, std::uint64_t bytes_index) {
+    seed.write_u8(5);
+    seed.write_u64(packet_number);
+    seed.write_u64(sent_at);
+    seed.write_size(bytes_index);
+}
+
+void recovery_ack_ranges(FuzzInputBuilder &seed, std::uint64_t largest_acknowledged,
+                         std::initializer_list<std::pair<std::uint64_t, std::uint64_t>> ranges,
+                         std::uint64_t received_at) {
+    seed.write_u8(6);
+    seed.write_u64(largest_acknowledged);
+    seed.write_size(ranges.size() - 1u);
+    for (const auto &[high, width] : ranges) {
+        seed.write_u64(high);
+        seed.write_u64(width);
+    }
+    seed.write_u64(received_at);
+}
+
+void recovery_ack_frame(FuzzInputBuilder &seed, std::uint64_t largest_acknowledged,
+                        std::uint64_t ack_delay, std::uint64_t first_ack_range,
+                        std::initializer_list<std::pair<std::uint64_t, std::uint64_t>> ranges,
+                        bool include_ecn, std::uint64_t received_at) {
+    seed.write_u8(7);
+    seed.write_u64(largest_acknowledged);
+    seed.write_u64(ack_delay);
+    seed.write_u64(first_ack_range);
+    seed.write_size(ranges.size());
+    for (const auto &[gap, range_length] : ranges) {
+        seed.write_u64(gap);
+        seed.write_u64(range_length);
+    }
+    seed.write_u8(include_ecn ? 1u : 0u);
+    if (include_ecn) {
+        seed.write_u64(5);
+        seed.write_u64(2);
+        seed.write_u64(1);
+    }
+    seed.write_u64(received_at);
+}
+
+void recovery_declare_lost(FuzzInputBuilder &seed, std::uint64_t packet_number) {
+    seed.write_u8(8);
+    seed.write_u64(packet_number);
+}
+
+void recovery_retire_sent_packet(FuzzInputBuilder &seed, std::uint64_t packet_number) {
+    seed.write_u8(9);
+    seed.write_u64(packet_number);
+}
+
+void recovery_collect_losses(FuzzInputBuilder &seed, std::uint64_t now, std::uint64_t pmtu_now) {
+    seed.write_u8(10);
+    seed.write_u64(now);
+    seed.write_u64(pmtu_now);
+}
+
+void recovery_compute_pto(FuzzInputBuilder &seed, std::uint64_t latest_rtt, std::uint64_t min_rtt,
+                          std::uint64_t smoothed_rtt, std::uint64_t max_ack_delay,
+                          std::uint64_t now, unsigned pto_count) {
+    seed.write_u8(11);
+    seed.write_u64(latest_rtt);
+    seed.write_u64(min_rtt);
+    seed.write_u64(smoothed_rtt);
+    seed.write_u64(max_ack_delay);
+    seed.write_u64(now);
+    seed.write_u8(pto_count);
+}
+
+void write_recovery_ack_seed(const std::filesystem::path &root, const std::string &name,
+                             FuzzInputBuilder seed) {
+    write_seed(root, "fuzz_recovery_ack", name, std::move(seed).finish());
+}
+
+void generate_recovery_ack_seeds(const std::filesystem::path &root) {
+    {
+        FuzzInputBuilder seed;
+        for (std::uint64_t pn = 0; pn < 8; ++pn) {
+            recovery_record_received(seed, pn, true, 1'000 + pn * 100, pn % 4, pn);
+        }
+        recovery_build_ack_header(seed, 4, 2'000, true, true);
+        recovery_build_ack_frame(seed, 4, 2'100, false);
+        recovery_retire_received_ranges(seed, 4);
+        recovery_build_ack_frame(seed, 4, 2'200, true);
+        write_recovery_ack_seed(root, "generated_receive_contiguous_ack_retire", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        for (const auto pn : {0u, 1u, 4u, 5u, 9u, 12u, 13u}) {
+            recovery_record_received(seed, pn, (pn % 2u) == 0u, 3'000 + pn * 50, pn % 5u, pn);
+        }
+        recovery_build_ack_frame(seed, 8, 4'000, true);
+        recovery_build_ack_header(seed, 8, 4'200, false, true);
+        recovery_retire_received_ranges(seed, 6);
+        write_recovery_ack_seed(root, "generated_receive_sparse_ack_ranges", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        for (std::uint64_t pn = 1; pn <= 6; ++pn) {
+            recovery_sent_packet(seed, pn, pn * 1'000, 1u, 1200 + pn);
+        }
+        recovery_ack_ranges(seed, 6, {{6, 5}}, 12'000);
+        recovery_collect_losses(seed, 13'000, 13'500);
+        write_recovery_ack_seed(root, "generated_sent_cumulative_ack", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        for (std::uint64_t pn = 1; pn <= 12; ++pn) {
+            recovery_sent_packet(seed, pn, pn * 900, 1u, 900 + pn);
+        }
+        recovery_ack_frame(seed, 12, 20, 1, {{1, 2}, {0, 1}}, true, 20'000);
+        recovery_collect_losses(seed, 21'000, 21'500);
+        recovery_declare_lost(seed, 4);
+        recovery_retire_sent_packet(seed, 4);
+        write_recovery_ack_seed(root, "generated_sent_gapped_ack_loss", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        recovery_sent_packet(seed, 21, 1'000, 0x05u, 1400);
+        recovery_sent_packet(seed, 22, 1'100, 0x05u, 1450);
+        recovery_sent_packet(seed, 23, 1'200, 0x01u, 1280);
+        recovery_collect_losses(seed, 200'000, 210'000);
+        recovery_ack_ranges(seed, 23, {{23, 0}, {21, 0}}, 220'000);
+        write_recovery_ack_seed(root, "generated_pmtu_probe_timeout_ack", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        for (std::uint64_t pn = 30; pn < 36; ++pn) {
+            recovery_simple_stream_sent_packet(seed, pn, 10'000 + pn * 100, 512 + pn);
+        }
+        recovery_ack_ranges(seed, 35, {{35, 1}, {32, 0}, {30, 0}}, 20'000);
+        recovery_collect_losses(seed, 25'000, 26'000);
+        write_recovery_ack_seed(root, "generated_simple_stream_ack_loss", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        recovery_compute_pto(seed, 20'000, 18'000, 19'000, 1'000, 50'000, 0);
+        recovery_compute_pto(seed, 120'000, 80'000, 90'000, 25'000, 200'000, 3);
+        recovery_compute_pto(seed, 400'000, 1'000, 50'000, 0, 800'000, 7);
+        write_recovery_ack_seed(root, "generated_pto_rtt_matrix", std::move(seed));
+    }
+    {
+        FuzzInputBuilder seed;
+        recovery_sent_packet(seed, 100, 1'000, 1u, 1000);
+        recovery_sent_packet(seed, 101, 2'000, 1u, 1000);
+        recovery_ack_ranges(seed, 101, {{101, 0}}, 10'000);
+        recovery_declare_lost(seed, 100);
+        recovery_ack_ranges(seed, 100, {{100, 0}}, 12'000);
+        recovery_retire_sent_packet(seed, 101);
+        recovery_collect_losses(seed, 20'000, 21'000);
+        write_recovery_ack_seed(root, "generated_late_ack_after_loss", std::move(seed));
+    }
+}
+
+void generate_state_machine_seeds(const std::filesystem::path &root) {
+    generate_stream_state_seeds(root);
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, false, 0, 32, 32);
+        stream_state_append_payload(seed, bytes({0x68, 0x65, 0x6c, 0x6c, 0x6f}), true);
+        stream_state_take_fragments(seed, 64, 64, true, {0});
+        write_stream_state_seed(root, "generated_stream_send_fin", std::move(seed));
+    }
+    generate_recovery_ack_seeds(root);
+    write_seed(root, "fuzz_congestion", "generated_cubic_loss",
+               bytes({
+                   0x01, 0x04, 0xb0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+                   0x00, 0x01, 0x04, 0xb0, 0x02, 0x01, 0x00, 0x00, 0x00, 0x20, 0x01,
+                   0x04, 0xb0, 0x05, 0x01, 0x00, 0x00, 0x00, 0x30, 0x01, 0x04, 0xb0,
+               }));
+}
+
 void generate(const std::filesystem::path &root) {
     generate_varint_seeds(root);
     generate_frame_seeds(root);
     generate_packet_seeds(root);
+    generate_protected_packet_seeds(root);
     generate_transport_parameter_seeds(root);
+    generate_state_machine_seeds(root);
 }
 
 } // namespace

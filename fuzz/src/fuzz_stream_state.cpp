@@ -32,14 +32,37 @@ bool consume_magic(coquic::fuzz::InputReader &reader) {
 }
 
 coquic::quic::StreamFrameSendMetadata metadata_from(coquic::fuzz::InputReader &reader,
-                                                    std::uint64_t stream_id) {
+                                                    const coquic::quic::StreamState &stream) {
+    const auto raw_offset = reader.read_u64();
+    auto length = reader.read_size(ss::kMaxPayloadSize + 1u);
+    auto fin = reader.read_bool();
+    auto consumes_flow_control = reader.read_bool();
+
+    const auto committed = stream.send_flow_control_committed;
+    const auto offset = committed == 0 ? std::uint64_t{0} : raw_offset % (committed + 1u);
+    const auto available = committed - offset;
+    length = std::min<std::size_t>(length, static_cast<std::size_t>(available));
+
+    const auto end = offset + static_cast<std::uint64_t>(length);
+    fin = fin && stream.send_final_size.has_value() && end == *stream.send_final_size;
+    consumes_flow_control = consumes_flow_control && length != 0;
+
     return coquic::quic::StreamFrameSendMetadata{
-        .stream_id = stream_id,
-        .offset = reader.read_u64() % (ss::kMaxOffset + 1u),
-        .length = reader.read_size(ss::kMaxPayloadSize + 1u),
-        .fin = reader.read_bool(),
-        .consumes_flow_control = reader.read_bool(),
+        .stream_id = stream.stream_id,
+        .offset = offset,
+        .length = length,
+        .fin = fin,
+        .consumes_flow_control = consumes_flow_control,
     };
+}
+
+bool can_restore_send_metadata(const coquic::quic::StreamState &stream,
+                               const coquic::quic::StreamFrameSendMetadata &metadata) {
+    if (!metadata.consumes_flow_control) {
+        return true;
+    }
+
+    return static_cast<std::uint64_t>(metadata.length) <= stream.flow_control.highest_sent;
 }
 
 void exercise_fragment(coquic::quic::StreamState &stream,
@@ -214,19 +237,22 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
             break;
         }
         case ss::Op::mark_send_sent: {
-            stream.mark_send_metadata_sent(metadata_from(reader, stream.stream_id));
+            stream.mark_send_metadata_sent(metadata_from(reader, stream));
             break;
         }
         case ss::Op::ack_send: {
-            stream.acknowledge_send_metadata(metadata_from(reader, stream.stream_id));
+            stream.acknowledge_send_metadata(metadata_from(reader, stream));
             break;
         }
         case ss::Op::lose_send: {
-            stream.mark_send_metadata_lost(metadata_from(reader, stream.stream_id));
+            stream.mark_send_metadata_lost(metadata_from(reader, stream));
             break;
         }
         case ss::Op::restore_send: {
-            stream.restore_send_metadata(metadata_from(reader, stream.stream_id));
+            const auto metadata = metadata_from(reader, stream);
+            if (can_restore_send_metadata(stream, metadata)) {
+                stream.restore_send_metadata(metadata);
+            }
             break;
         }
         case ss::Op::receive_range: {

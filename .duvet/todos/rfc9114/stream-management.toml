@@ -1,0 +1,238 @@
+# RFC 9114 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.1"
+# report-id = 911
+quote = '''
+In order to
+permit these streams to open, an HTTP/3 server SHOULD configure non-
+zero minimum values for the number of permitted streams and the
+initial stream flow-control window.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.1"
+# report-id = 912
+quote = '''
+So as to not unnecessarily limit
+parallelism, at least 100 request streams SHOULD be permitted at a
+time.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2.1"
+# report-id = 919
+quote = '''
+Because the contents of the control stream are used to manage the
+behavior of other streams, endpoints SHOULD provide enough flow-
+control credit to keep the peer's control stream from becoming
+blocked.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2.2"
+# report-id = 921
+quote = '''
+A client SHOULD NOT abort reading on a push stream prior to reading
+the push stream header, as this could lead to disagreement between
+client and server on which push IDs have already been consumed.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2.3"
+# report-id = 924
+quote = '''
+They MAY also be
+sent on connections where no data is currently being transferred.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2.3"
+# report-id = 925
+quote = '''
+Endpoints MUST NOT consider these streams to have any meaning upon
+receipt.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2.3"
+# report-id = 926
+quote = '''
+When sending a reserved stream type,
+the implementation MAY either terminate the stream cleanly or reset
+it.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2.3"
+# report-id = 927
+quote = '''
+When resetting the stream, either the H3_NO_ERROR error code or
+a reserved error code (Section 8.1) SHOULD be used.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2"
+# report-id = 928
+quote = '''
+Therefore, the transport parameters sent by both clients
+and servers MUST allow the peer to create at least three
+unidirectional streams.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2"
+# report-id = 929
+quote = '''
+These transport parameters SHOULD also
+provide at least 1,024 bytes of flow-control credit to each
+unidirectional stream.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2"
+# report-id = 930
+quote = '''
+Endpoints SHOULD create the HTTP control stream as well as the
+unidirectional streams required by mandatory extensions (such as the
+QPACK encoder and decoder streams) first, and then create additional
+streams as allowed by their peer.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2"
+# report-id = 932
+quote = '''
+If reading is aborted, the recipient SHOULD use
+the H3_STREAM_CREATION_ERROR error code or a reserved error code
+(Section 8.1).
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2"
+# report-id = 934
+quote = '''
+As certain stream types can affect connection state, a recipient
+SHOULD NOT discard data from incoming unidirectional streams prior to
+reading the stream type.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2"
+# report-id = 935
+quote = '''
+Implementations MAY send stream types before knowing whether the peer
+supports them.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2"
+# report-id = 936
+quote = '''
+However, stream types that could modify the state or
+semantics of existing protocol components, including QPACK or other
+extensions, MUST NOT be sent until the peer is known to support them.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-6.2"
+# report-id = 937
+quote = '''
+A receiver MUST tolerate unidirectional streams being
+closed or reset prior to the reception of the unidirectional stream
+header.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-9"
+# report-id = 1001
+quote = '''
+Implementations MUST discard data or
+abort reading on unidirectional streams that have unknown or
+unsupported types.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/57"
+reason = '''
+HTTP/3 stream limits, flow credit, reserved streams, unknown stream handling, and stream negotiation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]

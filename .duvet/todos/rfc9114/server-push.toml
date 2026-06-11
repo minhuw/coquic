@@ -1,0 +1,358 @@
+# RFC 9114 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-10.4"
+# report-id = 768
+quote = '''
+Where multiple tenants share space on the same server, that server
+MUST ensure that tenants are not able to push representations of
+resources that they do not have authority over.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1"
+# report-id = 831
+quote = '''
+A server MAY send one or more PUSH_PROMISE frames before, after, or
+interleaved with the frames of a response message.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 880
+quote = '''
+A server SHOULD use push IDs sequentially, beginning from
+zero.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 882
+quote = '''
+When the
+same push ID is promised on multiple request streams, the
+decompressed request field sections MUST contain the same fields in
+the same order, and both the name and the value in each field MUST be
+identical.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 883
+quote = '''
+A server MAY push requests that have
+the following properties:
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 884
+quote = '''
+The server MUST include a value in the :authority pseudo-header field
+for which the server is authoritative.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 885
+quote = '''
+If the client has not yet
+validated the connection for the origin indicated by the pushed
+request, it MUST perform the same verification process it would do
+before sending a request for that origin on the connection; see
+Section 3.3.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 886
+quote = '''
+If this verification fails, the client MUST NOT
+consider the server authoritative for that origin.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 887
+quote = '''
+Clients SHOULD send a CANCEL_PUSH frame upon receipt of a
+PUSH_PROMISE frame carrying a request that is not cacheable, is not
+known to be safe, that indicates the presence of request content, or
+for which it does not consider the server authoritative.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 888
+quote = '''
+Any
+corresponding responses MUST NOT be used or cached.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 889
+quote = '''
+These
+associations do not affect the operation of the protocol, but they
+MAY be considered by user agents when deciding how to use pushed
+resources.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 890
+quote = '''
+The server SHOULD send PUSH_PROMISE frames
+prior to sending HEADERS or DATA frames that reference the promised
+responses.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 891
+quote = '''
+Clients SHOULD abort reading and discard data
+already read from push streams if no corresponding PUSH_PROMISE frame
+is processed in a reasonable amount of time.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 892
+quote = '''
+Pushed responses that are not cacheable MUST NOT be stored by any
+HTTP cache.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.6"
+# report-id = 893
+quote = '''
+They MAY be made available to the application
+separately.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.3"
+# report-id = 945
+quote = '''
+The server SHOULD
+abort sending the resource, but the mechanism to do so depends on the
+state of the corresponding push stream.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.3"
+# report-id = 946
+quote = '''
+If the push stream is
+open, the server SHOULD abruptly terminate that stream.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.3"
+# report-id = 947
+quote = '''
+If the push
+stream has already ended, the server MAY still abruptly terminate the
+stream or MAY take no action.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.3"
+# report-id = 948
+quote = '''
+Regardless of
+whether a push stream has been opened, a server SHOULD send a
+CANCEL_PUSH frame when it determines that promise will not be
+fulfilled.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.3"
+# report-id = 949
+quote = '''
+A client SHOULD NOT send a CANCEL_PUSH frame
+when it has already received a corresponding push stream.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.3"
+# report-id = 950
+quote = '''
+The
+client SHOULD abort reading the stream with an error code of
+H3_REQUEST_CANCELLED.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.5"
+# report-id = 979
+quote = '''
+A server MAY use the same push ID in multiple PUSH_PROMISE frames.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.5"
+# report-id = 980
+quote = '''
+If so, the decompressed request header sets MUST contain the same
+fields in the same order, and both the name and the value in each
+field MUST be exact matches.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.5"
+# report-id = 981
+quote = '''
+Clients SHOULD compare the request
+header sections for resources promised multiple times.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.5"
+# report-id = 983
+quote = '''
+If the decompressed field sections match
+exactly, the client SHOULD associate the pushed content with each
+stream on which a PUSH_PROMISE frame was received.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.5"
+# report-id = 984
+quote = '''
+A server SHOULD
+avoid reusing a push ID over a long period.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/55"
+reason = '''
+HTTP/3 server push authority, cacheability, cancellation, duplicate promise, and push ID reuse behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]

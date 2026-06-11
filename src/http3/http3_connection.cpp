@@ -530,6 +530,13 @@ Http3Result<bool> Http3Connection::submit_request_head(std::uint64_t stream_id,
     if (const auto validated = validate_http3_request_headers(fields); !validated.has_value()) {
         return Http3Result<bool>::failure(validated.error());
     }
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2
+    // # An HTTP implementation MUST NOT send frames or requests that would be
+    // # invalid based on its current understanding of the peer's settings.
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
+    // # An implementation that has received this parameter SHOULD NOT send an
+    // # HTTP message header that exceeds the indicated size, as the peer will
+    // # likely refuse to process it.
     if (peer_settings_.max_field_section_size.has_value() &&
         field_section_exceeds_limit(fields, *peer_settings_.max_field_section_size)) {
         return local_http3_failure<bool>(
@@ -556,6 +563,8 @@ Http3Result<bool> Http3Connection::submit_request_head(std::uint64_t stream_id,
                                       });
     request.head_request = head.method == "HEAD";
     request.connect_request = head.method == "CONNECT";
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+    // # A client MUST send only a single request on a given stream.
     request.final_request_headers_sent = true;
     request.expected_request_content_length = head.content_length;
     return Http3Result<bool>::success(true);
@@ -743,6 +752,8 @@ Http3Result<bool> Http3Connection::finish_request(std::uint64_t stream_id) {
                                          "request body does not match content-length", stream_id);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+    // # After sending a request, a client MUST close the stream for sending.
     request.request_finished = true;
     queue_send(stream_id, std::span<const std::byte>{}, true);
     return Http3Result<bool>::success(true);
@@ -827,6 +838,13 @@ Http3Result<bool> Http3Connection::submit_response_head(std::uint64_t stream_id,
     if (const auto validated = validate_http3_response_headers(fields); !validated.has_value()) {
         return Http3Result<bool>::failure(validated.error());
     }
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2
+    // # An HTTP implementation MUST NOT send frames or requests that would be
+    // # invalid based on its current understanding of the peer's settings.
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
+    // # An implementation that has received this parameter SHOULD NOT send an
+    // # HTTP message header that exceeds the indicated size, as the peer will
+    // # likely refuse to process it.
     if (peer_settings_.max_field_section_size.has_value() &&
         field_section_exceeds_limit(fields, *peer_settings_.max_field_section_size)) {
         return local_http3_failure<bool>(
@@ -1077,6 +1095,9 @@ Http3Result<bool> Http3Connection::finish_response(std::uint64_t stream_id,
                                          "response body does not match content-length", stream_id);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+    // # After sending a final response, the server MUST close the stream for
+    // # sending.
     response.finished = true;
     queue_send(stream_id, std::span<const std::byte>{}, true);
     return Http3Result<bool>::success(true);
@@ -1099,6 +1120,9 @@ Http3Result<bool> Http3Connection::submit_max_push_id(std::uint64_t push_id) {
         return local_http3_failure<bool>(Http3ErrorCode::id_error, "max push id cannot be reduced");
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-10.5
+    // # A client that accepts server push SHOULD limit the number of push IDs
+    // # it issues at a time.
     state_.local_max_push_id = push_id;
     queue_serialized_frame(*state_.local_control_stream_id,
                            Http3Frame{Http3MaxPushIdFrame{.push_id = push_id}});
@@ -1137,10 +1161,16 @@ Http3Result<std::uint64_t> Http3Connection::submit_push_promise(std::uint64_t re
     }
 
     const auto push_id = state_.next_local_push_id;
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.5
+    // # A server MUST NOT use a push ID that is larger than the client has
+    // # provided in a MAX_PUSH_ID frame (Section 7.2.7).
     if (push_id > *state_.peer_max_push_id) {
         return local_http3_failure<std::uint64_t>(
             Http3ErrorCode::id_error, "peer max push id is exhausted", request_stream_id);
     }
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-5.2
+    // # Endpoints MUST NOT initiate new requests or promise new pushes on the
+    // # connection after receipt of a GOAWAY frame from the peer.
     if (state_.goaway_id.has_value()) {
         return local_http3_failure<std::uint64_t>(Http3ErrorCode::request_rejected,
                                                   "peer goaway prevents issuing a new push",
@@ -1537,6 +1567,12 @@ Http3Result<bool> Http3Connection::submit_goaway(std::uint64_t id) {
                                          "invalid server goaway stream id");
     }
     if (state_.local_goaway_id.has_value() && id > *state_.local_goaway_id) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-5.2
+        // # An endpoint MAY send multiple GOAWAY frames indicating different
+        // # identifiers, but the identifier in each frame MUST NOT be greater
+        // # than the identifier in any previous frame, since clients might
+        // # already have retried unprocessed requests on another HTTP
+        // # connection.
         return local_http3_failure<bool>(Http3ErrorCode::id_error,
                                          "local goaway identifier cannot increase");
     }
@@ -1958,6 +1994,10 @@ void Http3Connection::handle_peer_stop_sending(const quic::QuicCorePeerStopSendi
 void Http3Connection::handle_peer_bidi_stream(std::uint64_t stream_id,
                                               std::span<const std::byte> bytes, bool fin) {
     if (config_.role == Http3ConnectionRole::client) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-6.1
+        // # Clients MUST treat receipt of a server-initiated bidirectional
+        // # stream as a connection error of type H3_STREAM_CREATION_ERROR
+        // # unless such an extension has been negotiated.
         queue_connection_close(Http3ErrorCode::stream_creation_error,
                                "server-initiated bidirectional stream is not permitted");
         return;
@@ -2071,6 +2111,10 @@ void Http3Connection::register_peer_uni_stream(std::uint64_t stream_id, std::uin
 
     if (stream_type == static_cast<std::uint64_t>(Http3UniStreamType::push)) {
         if (config_.role == Http3ConnectionRole::server) {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.2
+            // # Only servers can push; if a server receives a client-initiated
+            // # push stream, this MUST be treated as a connection error of
+            // # type H3_STREAM_CREATION_ERROR.
             queue_connection_close(Http3ErrorCode::stream_creation_error,
                                    "client-initiated push stream is not permitted");
             return;
@@ -2115,6 +2159,12 @@ void Http3Connection::register_peer_uni_stream(std::uint64_t stream_id, std::uin
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2
+    // # Recipients of unknown stream types MUST either abort reading of the
+    // # stream or discard incoming data without further processing.
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2
+    // # The recipient MUST NOT consider unknown stream types to be a
+    // # connection error of any kind.
     stream.kind = PeerUniStreamKind::ignored;
 }
 
@@ -2232,6 +2282,11 @@ void Http3Connection::process_push_stream(std::uint64_t stream_id, PeerUniStream
             queue_connection_close(Http3ErrorCode::id_error, "invalid push stream push id");
             return;
         }
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.6
+        // # A client MUST treat receipt of a push stream as a connection error
+        // # of type H3_ID_ERROR when no MAX_PUSH_ID frame has been sent or
+        // # when the stream references a push ID that is greater than the
+        // # maximum push ID.
         if (!state_.local_max_push_id.has_value() || *push_id > *state_.local_max_push_id) {
             queue_connection_close(Http3ErrorCode::id_error,
                                    "push stream references unavailable push id");
@@ -2239,6 +2294,12 @@ void Http3Connection::process_push_stream(std::uint64_t stream_id, PeerUniStream
         }
 
         auto &push = peer_pushes_[*push_id];
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.2
+        // # Each push ID MUST only be used once in a push stream header.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.2
+        // # If a client detects that a push stream header includes a push ID
+        // # that was used in another push stream header, the client MUST treat
+        // # this as a connection error of type H3_ID_ERROR.
         if (push.push_stream_id.has_value()) {
             queue_connection_close(Http3ErrorCode::id_error, "duplicate push stream id");
             return;
@@ -2268,6 +2329,10 @@ void Http3Connection::process_push_stream(std::uint64_t stream_id, PeerUniStream
         const auto parsed =
             parse_http3_frame(std::span<const std::byte>(stream.buffer.data(), *frame_size));
         if (!parsed.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-7.1
+            // # When a stream terminates cleanly, if the last frame on the
+            // # stream was truncated, this MUST be treated as a connection
+            // # error of type H3_FRAME_ERROR.
             queue_connection_close(Http3ErrorCode::frame_error, "invalid http3 frame");
             return;
         }
@@ -2311,6 +2376,10 @@ void Http3Connection::process_request_stream(std::uint64_t stream_id) {
         const auto parsed =
             parse_http3_frame(std::span<const std::byte>(stream.buffer.data(), *frame_size));
         if (!parsed.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-7.1
+            // # When a stream terminates cleanly, if the last frame on the
+            // # stream was truncated, this MUST be treated as a connection
+            // # error of type H3_FRAME_ERROR.
             queue_connection_close(Http3ErrorCode::frame_error, "invalid http3 frame");
             return;
         }
@@ -2395,6 +2464,8 @@ void Http3Connection::handle_request_frame(std::uint64_t stream_id, const Http3F
     }
 
     if (const auto *data = std::get_if<Http3DataFrame>(&frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.1
+        // # DATA frames MUST be associated with an HTTP request or response.
         handle_request_data_frame(stream_id, *data);
         return;
     }
@@ -2417,6 +2488,8 @@ void Http3Connection::handle_response_frame(std::uint64_t stream_id, const Http3
     }
 
     if (const auto *data = std::get_if<Http3DataFrame>(&frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.1
+        // # DATA frames MUST be associated with an HTTP request or response.
         handle_response_data_frame(stream_id, *data);
         return;
     }
@@ -2813,6 +2886,10 @@ void Http3Connection::apply_request_field_section(std::uint64_t stream_id,
     }
 
     if (kind == RequestFieldSectionKind::initial_headers) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
+        // # An HTTP/3 implementation MAY impose a limit on the maximum size
+        // # of the message header it will accept on an individual HTTP
+        // # message.
         if (config_.local_settings.max_field_section_size.has_value() &&
             field_section_exceeds_limit(headers, *config_.local_settings.max_field_section_size)) {
             queue_stream_error(stream_id, Http3ErrorCode::message_error);
@@ -2821,6 +2898,9 @@ void Http3Connection::apply_request_field_section(std::uint64_t stream_id,
 
         auto head = validate_http3_request_headers(headers);
         if (!head.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1.2
+            // # Malformed requests or responses that are detected MUST be
+            // # treated as a stream error of type H3_MESSAGE_ERROR.
             queue_stream_error(stream_id, head.error().code);
             return;
         }
@@ -2869,6 +2949,10 @@ void Http3Connection::apply_response_field_section(std::uint64_t stream_id,
     }
 
     if (kind == ResponseFieldSectionKind::informational_or_final_headers) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
+        // # An HTTP/3 implementation MAY impose a limit on the maximum size
+        // # of the message header it will accept on an individual HTTP
+        // # message.
         if (config_.local_settings.max_field_section_size.has_value() &&
             field_section_exceeds_limit(headers, *config_.local_settings.max_field_section_size)) {
             queue_stream_error(stream_id, Http3ErrorCode::message_error);
@@ -2877,10 +2961,19 @@ void Http3Connection::apply_response_field_section(std::uint64_t stream_id,
 
         auto head = validate_http3_response_headers(headers);
         if (!head.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1.2
+            // # Clients MUST NOT accept a malformed response.
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1.2
+            // # Malformed requests or responses that are detected MUST be
+            // # treated as a stream error of type H3_MESSAGE_ERROR.
             queue_stream_error(stream_id, head.error().code);
             return;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+        // # A response MAY consist of multiple messages when and only when one
+        // # or more interim responses (1xx; see Section 15.2 of [HTTP])
+        // # precede a final response to the same request.
         if (is_informational_response(head.value().status)) {
             pending_events_.push_back(Http3PeerInformationalResponseEvent{
                 .stream_id = stream_id,
@@ -2935,6 +3028,10 @@ void Http3Connection::apply_push_field_section(std::uint64_t stream_id, std::uin
     }
 
     if (kind == PushFieldSectionKind::promise_headers) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
+        // # An HTTP/3 implementation MAY impose a limit on the maximum size
+        // # of the message header it will accept on an individual HTTP
+        // # message.
         if (config_.local_settings.max_field_section_size.has_value() &&
             field_section_exceeds_limit(headers, *config_.local_settings.max_field_section_size)) {
             queue_stream_error(stream_id, Http3ErrorCode::message_error);
@@ -2975,6 +3072,10 @@ void Http3Connection::apply_push_field_section(std::uint64_t stream_id, std::uin
     }
 
     if (kind == PushFieldSectionKind::response_headers) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2.2
+        // # An HTTP/3 implementation MAY impose a limit on the maximum size
+        // # of the message header it will accept on an individual HTTP
+        // # message.
         if (config_.local_settings.max_field_section_size.has_value() &&
             field_section_exceeds_limit(headers, *config_.local_settings.max_field_section_size)) {
             queue_push_stream_error(stream_id, push_id, Http3ErrorCode::message_error);
@@ -3107,6 +3208,10 @@ void Http3Connection::finalize_request_stream(std::uint64_t stream_id) {
     }
 
     if (!request->second.initial_headers_received) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+        // # If a client-initiated stream terminates without enough of the HTTP
+        // # message to provide a complete response, the server SHOULD abort
+        // # its response stream with the error code H3_REQUEST_INCOMPLETE.
         queue_stream_error(stream_id, Http3ErrorCode::request_incomplete);
         return;
     }
@@ -3129,6 +3234,8 @@ void Http3Connection::finalize_response_stream(std::uint64_t stream_id) {
     }
 
     if (!request->second.final_response_received) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1.2
+        // # Clients MUST NOT accept a malformed response.
         queue_stream_error(stream_id, Http3ErrorCode::message_error);
         return;
     }
@@ -3189,6 +3296,10 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
             return;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4
+        // # A SETTINGS frame MUST be sent as the first frame of each control
+        // # stream (see Section 6.2.1) by each peer, and it MUST NOT be sent
+        // # subsequently.
         const auto valid = validate_http3_settings_frame(*settings);
         if (!valid.has_value()) {
             queue_connection_close(valid.error().code, valid.error().detail);
@@ -3228,6 +3339,25 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
     }
 
     if (!http3_frame_allowed_on_control_stream(config_.role, frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.1
+        // # If a DATA frame is received on a control stream, the recipient
+        // # MUST respond with a connection error of type H3_FRAME_UNEXPECTED.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.2
+        // # If a HEADERS frame is received on a control stream, the recipient
+        // # MUST respond with a connection error of type H3_FRAME_UNEXPECTED.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4
+        // # SETTINGS frames MUST NOT be sent on any stream other than the
+        // # control stream.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.5
+        // # If a PUSH_PROMISE frame is received on the control stream, the
+        // # client MUST respond with a connection error of type
+        // # H3_FRAME_UNEXPECTED.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.6
+        // # A client MUST treat a GOAWAY frame on a stream other than the
+        // # control stream as a connection error of type H3_FRAME_UNEXPECTED.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.7
+        // # Receipt of a MAX_PUSH_ID frame on any other stream MUST be treated
+        // # as a connection error of type H3_FRAME_UNEXPECTED.
         queue_connection_close(Http3ErrorCode::frame_unexpected,
                                "frame is not permitted on the control stream");
         return;
@@ -3354,6 +3484,16 @@ bool Http3Connection::validate_zero_rtt_settings_compatibility(
     if (settings.max_field_section_size.has_value()) {
         if (!saw_max_field_section_size || !updated.max_field_section_size.has_value() ||
             *updated.max_field_section_size < *settings.max_field_section_size) {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2
+            // # If 0-RTT data is accepted by the server, its SETTINGS frame
+            // # MUST NOT reduce any limits or alter any values that might be
+            // # violated by the client with its 0-RTT data.
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2
+            // # If a server accepts 0-RTT but then sends a SETTINGS frame that
+            // # omits a setting value that the client understands (apart from
+            // # reserved setting identifiers) that was previously specified to
+            // # have a non-default value, this MUST be treated as a connection
+            // # error of type H3_SETTINGS_ERROR.
             return false;
         }
     }

@@ -1,0 +1,195 @@
+# RFC 9114 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-10.5.1"
+# report-id = 769
+quote = '''
+This setting is only advisory, so
+endpoints MAY choose to send field sections that exceed this limit
+and risk having the request or response being treated as malformed.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-10.9"
+# report-id = 776
+quote = '''
+The anti-replay mitigations in [HTTP-REPLAY] MUST be applied when
+using HTTP/3 with 0-RTT.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.1"
+# report-id = 955
+quote = '''
+Endpoints MUST NOT consider such settings to have
+any meaning upon receipt.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2"
+# report-id = 958
+quote = '''
+Each endpoint SHOULD use
+these initial values to send messages before the peer's SETTINGS
+frame has arrived, as packets carrying the settings can be lost or
+delayed.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2"
+# report-id = 959
+quote = '''
+Endpoints MUST NOT require any data to be received from
+the peer prior to sending the SETTINGS frame; settings MUST be sent
+as soon as the transport is ready to send data.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2"
+# report-id = 960
+quote = '''
+Clients SHOULD
+NOT wait indefinitely for SETTINGS to arrive before sending requests,
+but they SHOULD process received datagrams in order to increase the
+likelihood of processing SETTINGS before sending the first request.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2"
+# report-id = 961
+quote = '''
+Clients
+SHOULD store the settings the server provided in the HTTP/3
+connection where resumption information was provided, but they MAY
+opt not to store settings in certain cases (e.g., if the session
+ticket is received before the SETTINGS frame).
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2"
+# report-id = 962
+quote = '''
+A client MUST comply
+with stored settings -- or default values if no values are stored --
+when attempting 0-RTT.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2"
+# report-id = 963
+quote = '''
+Once a server has provided new settings,
+clients MUST comply with those values.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2"
+# report-id = 964
+quote = '''
+If the
+server cannot determine that the settings remembered by a client are
+compatible with its current settings, it MUST NOT accept 0-RTT data.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2"
+# report-id = 965
+quote = '''
+A server MAY accept 0-RTT and subsequently provide different settings
+in its SETTINGS frame.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2"
+# report-id = 967
+quote = '''
+The server MUST
+include all settings that differ from their default values.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-9"
+# report-id = 1003
+quote = '''
+Extensions that could change the semantics of existing protocol
+components MUST be negotiated before being used.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-9"
+# report-id = 1004
+quote = '''
+If a setting is used for extension negotiation, the default
+value MUST be defined in such a fashion that the extension is
+disabled if the setting is omitted.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/58"
+reason = '''
+HTTP/3 SETTINGS, 0-RTT compatibility, anti-replay, remembered settings, and extension negotiation defaults need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]

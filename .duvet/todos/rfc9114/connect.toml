@@ -1,0 +1,114 @@
+# RFC 9114 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.4"
+# report-id = 872
+quote = '''
+Extension frames MAY be used if
+specifically permitted by the definition of the extension.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/54"
+reason = '''
+HTTP/3 CONNECT construction, extension-frame, half-close, TCP tunnel teardown, and proxy safety behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.4"
+# report-id = 873
+quote = '''
+Receipt
+of any other known frame type MUST be treated as a connection error
+of type H3_FRAME_UNEXPECTED.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/54"
+reason = '''
+HTTP/3 CONNECT construction, extension-frame, half-close, TCP tunnel teardown, and proxy safety behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.4"
+# report-id = 874
+quote = '''
+TCP connections that remain half closed in a single
+direction are not invalid, but are often handled poorly by servers,
+so clients SHOULD NOT close a stream for sending while they still
+expect to receive data from the target of the CONNECT.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/54"
+reason = '''
+HTTP/3 CONNECT construction, extension-frame, half-close, TCP tunnel teardown, and proxy safety behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.4"
+# report-id = 875
+quote = '''
+Correspondingly, if a proxy detects an error with the stream or the
+QUIC connection, it MUST close the TCP connection.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/54"
+reason = '''
+HTTP/3 CONNECT construction, extension-frame, half-close, TCP tunnel teardown, and proxy safety behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.4"
+# report-id = 876
+quote = '''
+If the proxy
+detects that the client has reset the stream or aborted reading from
+the stream, it MUST close the TCP connection.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/54"
+reason = '''
+HTTP/3 CONNECT construction, extension-frame, half-close, TCP tunnel teardown, and proxy safety behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.4"
+# report-id = 877
+quote = '''
+If the stream is reset
+or reading is aborted by the client, a proxy SHOULD perform the same
+operation on the other direction in order to ensure that both
+directions of the stream are cancelled.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/54"
+reason = '''
+HTTP/3 CONNECT construction, extension-frame, half-close, TCP tunnel teardown, and proxy safety behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.4"
+# report-id = 878
+quote = '''
+In all these cases, if the
+underlying TCP implementation permits it, the proxy SHOULD send a TCP
+segment with the RST bit set.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/54"
+reason = '''
+HTTP/3 CONNECT construction, extension-frame, half-close, TCP tunnel teardown, and proxy safety behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.4"
+# report-id = 879
+quote = '''
+Since CONNECT creates a tunnel to an arbitrary server, proxies that
+support CONNECT SHOULD restrict its use to a set of known ports or a
+list of safe request targets; see Section 9.3.6 of [HTTP] for more
+details.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/54"
+reason = '''
+HTTP/3 CONNECT construction, extension-frame, half-close, TCP tunnel teardown, and proxy safety behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]

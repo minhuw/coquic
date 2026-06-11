@@ -1,0 +1,99 @@
+# RFC 9114 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-10.5"
+# report-id = 771
+quote = '''
+Implementations SHOULD track the
+use of these features and set limits on their use.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/59"
+reason = '''
+HTTP/3 excessive-load, compression confidentiality, unknown error-code, and reserved error-code policy need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-10.5"
+# report-id = 772
+quote = '''
+An endpoint MAY
+treat activity that is suspicious as a connection error of type
+H3_EXCESSIVE_LOAD, but false positives will result in disrupting
+valid connections and requests.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/59"
+reason = '''
+HTTP/3 excessive-load, compression confidentiality, unknown error-code, and reserved error-code policy need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-10.6"
+# report-id = 773
+quote = '''
+Implementations communicating on a secure channel MUST NOT compress
+content that includes both confidential and attacker-controlled data
+unless separate compression contexts are used for each source of
+data.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/59"
+reason = '''
+HTTP/3 excessive-load, compression confidentiality, unknown error-code, and reserved error-code policy need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-10.6"
+# report-id = 774
+quote = '''
+Compression MUST NOT be used if the source of data cannot be
+reliably determined.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/59"
+reason = '''
+HTTP/3 excessive-load, compression confidentiality, unknown error-code, and reserved error-code policy need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-8.1"
+# report-id = 997
+quote = '''
+Implementations SHOULD select an error code from this space with some
+probability when they would have sent H3_NO_ERROR.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/59"
+reason = '''
+HTTP/3 excessive-load, compression confidentiality, unknown error-code, and reserved error-code policy need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-8"
+# report-id = 998
+quote = '''
+An endpoint MAY choose to treat a stream error as a connection error
+under certain circumstances, closing the entire connection in
+response to a condition on a single stream.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/59"
+reason = '''
+HTTP/3 excessive-load, compression confidentiality, unknown error-code, and reserved error-code policy need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-8"
+# report-id = 999
+quote = '''
+Because new error codes can be defined without negotiation (see
+Section 9), use of an error code in an unexpected context or receipt
+of an unknown error code MUST be treated as equivalent to
+H3_NO_ERROR.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/59"
+reason = '''
+HTTP/3 excessive-load, compression confidentiality, unknown error-code, and reserved error-code policy need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]

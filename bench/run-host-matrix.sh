@@ -217,6 +217,109 @@ generate_flamegraph() {
   fi
 }
 
+write_failed_result() {
+  local output_path="$1"
+  local failure_reason="$2"
+  local client_status_value="$3"
+  local elapsed_ms_value
+  if [ "${client_status_value}" = "124" ]; then
+    elapsed_ms_value=$((run_timeout_seconds * 1000))
+  else
+    elapsed_ms_value=0
+  fi
+  python3 - <<'PY' \
+    "${output_path}" \
+    "${failure_reason}" \
+    "${client_status_value}" \
+    "${mode}" \
+    "${direction}" \
+    "${backend}" \
+    "${congestion_control}" \
+    "${server_name}" \
+    "${port}" \
+    "${elapsed_ms_value}" \
+    "${warmup}" \
+    "${request_bytes}" \
+    "${response_bytes}" \
+    "${streams}" \
+    "${effective_connections}" \
+    "${effective_inflight}"
+import json
+import pathlib
+import re
+import sys
+
+(
+    output_path,
+    failure_reason,
+    client_status,
+    mode,
+    direction,
+    backend,
+    congestion_control,
+    remote_host,
+    remote_port,
+    elapsed_ms,
+    warmup,
+    request_bytes,
+    response_bytes,
+    streams,
+    connections,
+    requests_in_flight,
+) = sys.argv[1:]
+
+
+def parse_duration_ms(value: str) -> int:
+    match = re.fullmatch(r"([0-9]+)(ms|s)", value)
+    if not match:
+        return 0
+    amount = int(match.group(1))
+    return amount if match.group(2) == "ms" else amount * 1000
+
+
+record = {
+    "schema_version": 1,
+    "status": "failed",
+    "failure_reason": failure_reason,
+    "mode": mode,
+    "direction": "download" if direction == "stay" else direction,
+    "backend": backend,
+    "congestion_control": congestion_control,
+    "remote_host": remote_host,
+    "remote_port": int(remote_port),
+    "alpn": "coquic-perf/1",
+    "elapsed_ms": int(elapsed_ms),
+    "warmup_ms": parse_duration_ms(warmup),
+    "bytes_sent": 0,
+    "bytes_received": 0,
+    "server_counters": {
+        "bytes_sent": 0,
+        "bytes_received": 0,
+        "requests_completed": 0,
+    },
+    "requests_completed": 0,
+    "streams": int(streams),
+    "connections": int(connections),
+    "requests_in_flight": int(requests_in_flight),
+    "request_bytes": int(request_bytes),
+    "response_bytes": int(response_bytes),
+    "throughput_mib_per_s": 0.0,
+    "throughput_gbit_per_s": 0.0,
+    "requests_per_s": 0.0,
+    "latency": {
+        "min_us": 0,
+        "avg_us": 0,
+        "p50_us": 0,
+        "p90_us": 0,
+        "p99_us": 0,
+        "max_us": 0,
+    },
+    "client_status": client_status,
+}
+pathlib.Path(output_path).write_text(json.dumps(record, indent=2) + "\n")
+PY
+}
+
 finish_perf_record() {
   local recorder_pid="$1"
   local recorder_container="$2"
@@ -703,8 +806,11 @@ for congestion_control in "${congestion_control_list[@]}"; do
     docker rm -f "${client_name}" "${client_name}-client-perf-record" >/dev/null 2>&1 || true
 
     if [ ! -f "${results_root}/result.json" ]; then
-      echo "missing JSON result for ${run_name}: ${results_root}/result.json" >&2
-      exit "${client_status:-1}"
+      failure_reason="missing JSON result for ${run_name}: ${results_root}/result.json"
+      echo "${failure_reason}" >&2
+      write_failed_result "${json_path}" "${failure_reason}" "${client_status:-1}"
+      failed_runs=1
+      continue
     fi
     mv "${results_root}/result.json" "${json_path}"
 

@@ -39,6 +39,7 @@
 #define DRAIN_TIMEOUT_US 2000000ULL
 #define SERVER_SHUTDOWN_DELAY_US 500000ULL
 #define HANDSHAKE_TIMEOUT_US 10000000ULL
+#define CRR_WORKER_LIMIT 8ULL
 
 typedef struct optional_u64_t {
     uint64_t value;
@@ -1710,14 +1711,16 @@ static int run_crr(const config_t *cfg, counters_t *counters) {
         return -1;
     }
 
-    pthread_t *threads = (pthread_t *)calloc((size_t)cfg->connections, sizeof(*threads));
+    uint64_t worker_count =
+        cfg->connections < CRR_WORKER_LIMIT ? cfg->connections : CRR_WORKER_LIMIT;
+    pthread_t *threads = (pthread_t *)calloc((size_t)worker_count, sizeof(*threads));
     if (threads == NULL) {
         pthread_mutex_destroy(&state.mutex);
         return -1;
     }
 
     uint64_t created = 0;
-    for (; created < cfg->connections; ++created) {
+    for (; created < worker_count; ++created) {
         if (pthread_create(&threads[created], NULL, crr_worker_main, &state) != 0) {
             pthread_mutex_lock(&state.mutex);
             state.failed = 1;

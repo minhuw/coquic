@@ -1444,9 +1444,15 @@ void QuicConnection::discard_packet_space_state(PacketSpaceState &packet_space) 
     }
 
     if (!discarded_packets.empty()) {
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.4
+        // # The sender MUST discard all recovery state associated with those
+        // # packets and MUST remove them from the count of bytes in flight.
         congestion_controller_.on_packets_discarded(discarded_packets);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.4
+    // # The sender MUST discard all recovery state associated with those
+    // # packets and MUST remove them from the count of bytes in flight.
     reset_discarded_packet_space_state(packet_space);
 }
 
@@ -1461,6 +1467,11 @@ void QuicConnection::discard_initial_packet_space() {
     //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.1
     // # Endpoints MUST NOT send Initial packets after this point.
     discard_packet_space_state(initial_space_);
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2
+    // # When Initial or Handshake keys are discarded, the PTO and loss
+    // # detection timers MUST be reset, because discarding keys indicates
+    // # forward progress and the loss detection timer might have been set for
+    // # a now-discarded packet number space.
     pto_count_ = 0;
 }
 
@@ -1469,6 +1480,11 @@ void QuicConnection::discard_handshake_packet_space() {
     handshake_packet_space_discarded_ = true;
     discard_handshake_packet_space_after_ack_ = false;
     discard_packet_space_state(handshake_space_);
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2
+    // # When Initial or Handshake keys are discarded, the PTO and loss
+    // # detection timers MUST be reset, because discarding keys indicates
+    // # forward progress and the loss detection timer might have been set for
+    // # a now-discarded packet number space.
     pto_count_ = 0;
 }
 
@@ -1763,6 +1779,8 @@ bool QuicConnection::note_packet_productivity(std::uint64_t previous_progress_ge
 
 bool QuicConnection::non_paced_burst_allows_send(bool ack_eliciting, bool bypass_congestion_window,
                                                  std::optional<bool> pacing_controlled) const {
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.5
+    // # Probe packets MUST NOT be blocked by the congestion controller.
     if (!ack_eliciting || bypass_congestion_window) {
         return true;
     }

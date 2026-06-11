@@ -1236,6 +1236,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         }
         {
             COQUIC_SEND_PROFILE_TIMER(burst_note_timer, commit_burst_note_ns);
+            //= https://www.rfc-editor.org/rfc/rfc9002#section-7.5
+            // # A sender MUST however count these packets as being
+            // # additionally in flight, since these packets add network load
+            // # without establishing packet loss.
             note_burst_limited_ack_eliciting_send(options.unpaced_ack_eliciting_packets,
                                                   options.bypass_burst_limit,
                                                   options.pacing_controlled);
@@ -2392,6 +2396,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             application_space_.received_packets.on_ack_sent();
             application_space_.pending_ack_deadline = std::nullopt;
             application_space_.force_ack_send = false;
+            //= https://www.rfc-editor.org/rfc/rfc9002#section-7.7
+            // # To avoid delaying their delivery to the peer, packets
+            // # containing only ACK frames SHOULD therefore not be paced.
             return commit_serialized_datagram({}, std::move(ack_only_datagram.value()),
                                               CommitSerializedDatagramOptions{
                                                   .one_rtt_encrypted_packets = 1,
@@ -4430,6 +4437,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 const bool has_non_pmtu_application_probe =
                     application_space_.pending_probe_packet.has_value() &&
                     !application_space_.pending_probe_packet->is_pmtu_probe;
+                //= https://www.rfc-editor.org/rfc/rfc9002#section-7.5
+                // # Probe packets MUST NOT be blocked by the congestion
+                // # controller.
                 return has_non_pmtu_application_probe ||
                        (application_path_validation_frames.challenge.has_value() &&
                         stream_fragments.empty());
@@ -4823,11 +4833,16 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 return restore_and_fallback_blocked_application_candidate();
             }
             if (send_pacing_deadline.has_value() && now < *send_pacing_deadline) {
+                //= https://www.rfc-editor.org/rfc/rfc9002#section-7.7
+                // # A sender SHOULD pace sending of all in-flight packets
+                // # based on input from the congestion controller.
                 note_application_pacing_blocked(candidate_datagram_size);
                 return restore_and_fallback_blocked_application_candidate();
             }
             if (!non_paced_burst_allows_send(ack_eliciting, bypass_congestion_window,
                                              send_pacing_deadline.has_value())) {
+                //= https://www.rfc-editor.org/rfc/rfc9002#section-7.7
+                // # Senders MUST either use pacing or limit such bursts.
                 note_application_burst_blocked(candidate_datagram_size);
                 return restore_and_fallback_blocked_application_candidate();
             }

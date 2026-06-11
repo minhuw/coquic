@@ -1568,6 +1568,13 @@ void QuicConnection::maybe_update_rtt_before_ack_loss_detection(
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-5.3
+    // # To account for this, the endpoint SHOULD ignore max_ack_delay until
+    // # the handshake is confirmed, as defined in Section 4.1.2 of
+    // # [QUIC-TLS].
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-5.3
+    // # *  SHOULD ignore the peer's max_ack_delay until the handshake is
+    // #    confirmed;
     const bool ignore_max_ack_delay = (&packet_space != &initial_space_) && !handshake_confirmed_;
     update_rtt(packet_space.recovery.rtt_state(), now, *largest_packet,
                RttAckDelayAdjustment{

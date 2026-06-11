@@ -72,6 +72,10 @@ constexpr std::size_t kOneRttPacketProtectionTagLength = 16;
 constexpr std::size_t kShortHeaderProtectionSampleOffset = 4;
 constexpr std::uint64_t kMaxQuicVarInt = 4611686018427387903ull;
 constexpr std::uint64_t kCompatibilityStreamId = 0;
+//= https://www.rfc-editor.org/rfc/rfc9002#section-7.6.1
+// # The RECOMMENDED value for kPersistentCongestionThreshold is 3, which
+// # results in behavior that is approximately equivalent to a TCP sender
+// # declaring an RTO after two TLPs.
 constexpr std::uint32_t kPersistentCongestionThreshold = 3;
 constexpr std::size_t kPmtudMinimumProbeGrowth = 16;
 constexpr std::size_t kMaximumRememberedPmtudFailedProbeSizes = 16;
@@ -4171,6 +4175,9 @@ inline std::size_t application_ack_eliciting_frame_count(
 inline bool establishes_persistent_congestion(std::span<const SentPacketRecord> lost_packets,
                                               const RecoveryRttState &rtt,
                                               QuicCoreDuration max_ack_delay) {
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.6.2
+    // # The persistent congestion period SHOULD NOT start until there is at
+    // # least one RTT sample.
     if (!rtt.latest_rtt.has_value()) {
         return false;
     }
@@ -4184,6 +4191,10 @@ inline bool establishes_persistent_congestion(std::span<const SentPacketRecord> 
         return false;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.6.2
+    // # These two packets MUST be ack-eliciting, since a receiver is required
+    // # to acknowledge only ack-eliciting packets within its maximum
+    // # acknowledgment delay; see Section 13.2 of [QUIC-TRANSPORT].
     const auto persistent_congestion_duration =
         (rtt.smoothed_rtt + std::max(rtt.rttvar * 4, kGranularity) + max_ack_delay) *
         kPersistentCongestionThreshold;

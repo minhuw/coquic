@@ -1,0 +1,30 @@
+# RFC 9002 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-7.4"
+# report-id = 745
+quote = '''
+Endpoints MAY ignore the
+loss of Handshake, 0-RTT, and 1-RTT packets that might have arrived
+before the peer had packet protection keys to process those packets.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/48"
+reason = '''
+Loss-ignore policy around peer packet protection key availability and earliest-acknowledged packet boundaries is incomplete or not yet proven.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-7.4"
+# report-id = 746
+quote = '''
+Endpoints MUST NOT ignore the loss of packets that were sent after
+the earliest acknowledged packet in a given packet number space.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/48"
+reason = '''
+Loss-ignore policy around peer packet protection key availability and earliest-acknowledged packet boundaries is incomplete or not yet proven.
+'''
+tags = ["rfc9002"]

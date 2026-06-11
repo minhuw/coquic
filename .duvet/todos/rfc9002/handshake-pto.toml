@@ -1,0 +1,81 @@
+# RFC 9002 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1"
+# report-id = 712
+quote = '''
+A sender SHOULD restart its PTO timer every time an ack-eliciting
+packet is sent or acknowledged, or when Initial or Handshake keys are
+discarded (Section 4.9 of [QUIC-TLS]).
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/45"
+reason = '''
+Handshake PTO restart, no-in-flight client probe arming, optional path-validation RTT reuse, and optional early CRYPTO retransmission policy are incomplete or not yet proven.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2.1"
+# report-id = 716
+quote = '''
+That is,
+the client MUST set the PTO timer if the client has not received an
+acknowledgment for any of its Handshake packets and the handshake is
+not confirmed (see Section 4.1.2 of [QUIC-TLS]), even if there are no
+packets in flight.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/45"
+reason = '''
+Handshake PTO restart, no-in-flight client probe arming, optional path-validation RTT reuse, and optional early CRYPTO retransmission policy are incomplete or not yet proven.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2"
+# report-id = 718
+quote = '''
+Resumed connections over the same network MAY use the previous
+connection's final smoothed RTT value as the resumed connection's
+initial RTT.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/45"
+reason = '''
+Handshake PTO restart, no-in-flight client probe arming, optional path-validation RTT reuse, and optional early CRYPTO retransmission policy are incomplete or not yet proven.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2"
+# report-id = 720
+quote = '''
+A connection MAY use the delay between sending a PATH_CHALLENGE and
+receiving a PATH_RESPONSE to set the initial RTT (see kInitialRtt in
+Appendix A.2) for a new path, but the delay SHOULD NOT be considered
+an RTT sample.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/45"
+reason = '''
+Handshake PTO restart, no-in-flight client probe arming, optional path-validation RTT reuse, and optional early CRYPTO retransmission policy are incomplete or not yet proven.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-6.2.3"
+# report-id = 722
+quote = '''
+To speed up handshake completion under these conditions, an endpoint
+MAY, for a limited number of times per connection, send a packet
+containing unacknowledged CRYPTO data earlier than the PTO expiry,
+subject to the address validation limits in Section 8.1 of
+[QUIC-TRANSPORT].
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/45"
+reason = '''
+Handshake PTO restart, no-in-flight client probe arming, optional path-validation RTT reuse, and optional early CRYPTO retransmission policy are incomplete or not yet proven.
+'''
+tags = ["rfc9002"]

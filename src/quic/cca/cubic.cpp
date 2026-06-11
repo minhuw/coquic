@@ -342,6 +342,9 @@ void CubicCongestionController::on_loss_event(QuicCoreTimePoint loss_detection_t
     }
 
     hystart_.disable();
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.1
+    // # The sender MUST exit slow start and enter a recovery period when a
+    // # packet is lost or when the ECN-CE count reported by its peer increases.
     recovery_start_time_ = loss_detection_time;
     cwnd_prior_segments_ = current_window_segments;
     congestion_avoidance_credit_segments_ *= kCubicBeta;
@@ -404,6 +407,9 @@ bool CubicCongestionController::should_start_pacing(
 }
 
 std::size_t CubicCongestionController::pacing_budget_cap() const {
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.7
+    // # Senders SHOULD limit bursts to the initial congestion window; see
+    // # Section 7.2.
     return congestion_quinn_pacing_budget_cap(congestion_window_, max_datagram_size_,
                                               pacing_smoothed_rtt_);
 }

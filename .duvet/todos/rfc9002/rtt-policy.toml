@@ -1,0 +1,75 @@
+# RFC 9002 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-5.2"
+# report-id = 690
+quote = '''
+Endpoints SHOULD set the min_rtt to the newest RTT sample after
+persistent congestion is established.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/44"
+reason = '''
+RTT estimation edge policies around min_rtt refresh, pre-confirmation ACK delay, Initial ACK delay, and local delay compensation are incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-5.2"
+# report-id = 691
+quote = '''
+Endpoints MAY reestablish the min_rtt at other times in the
+connection, such as when traffic volume is low and an acknowledgment
+is received with a low acknowledgment delay.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/44"
+reason = '''
+RTT estimation edge policies around min_rtt refresh, pre-confirmation ACK delay, Initial ACK delay, and local delay compensation are incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-5.3"
+# report-id = 694
+quote = '''
+Therefore, prior to handshake confirmation, an endpoint
+MAY ignore RTT samples if adjusting the RTT sample for acknowledgment
+delay causes the sample to be less than the min_rtt.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/44"
+reason = '''
+RTT estimation edge policies around min_rtt refresh, pre-confirmation ACK delay, Initial ACK delay, and local delay compensation are incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-5.3"
+# report-id = 695
+quote = '''
+*  MAY ignore the acknowledgment delay for Initial packets, since
+these acknowledgments are not delayed by the peer (Section 13.2.1
+of [QUIC-TRANSPORT]);
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/44"
+reason = '''
+RTT estimation edge policies around min_rtt refresh, pre-confirmation ACK delay, Initial ACK delay, and local delay compensation are incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-5.3"
+# report-id = 699
+quote = '''
+In such
+cases, an endpoint SHOULD subtract such local delays from its RTT
+sample until the handshake is confirmed.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/44"
+reason = '''
+RTT estimation edge policies around min_rtt refresh, pre-confirmation ACK delay, Initial ACK delay, and local delay compensation are incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9002"]

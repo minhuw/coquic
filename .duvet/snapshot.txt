@@ -2241,50 +2241,49 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9002
     TEXT[!MUST,implementation,test]:    min_rtt MUST be set to the latest_rtt on the first RTT sample.
     TEXT[!MUST,implementation]:    min_rtt MUST be set to the lesser of min_rtt and latest_rtt
     TEXT[!MUST,implementation]:    (Section 5.1) on all other samples.
-    TEXT[!SHOULD]:    Endpoints SHOULD set the min_rtt to the newest RTT sample after
-    TEXT[!SHOULD]:    persistent congestion is established.
-    TEXT[!MAY]:    Endpoints MAY reestablish the min_rtt at other times in the
-    TEXT[!MAY]:    connection, such as when traffic volume is low and an acknowledgment
-    TEXT[!MAY]:    is received with a low acknowledgment delay.
-    TEXT[!SHOULD]: Implementations SHOULD
-    TEXT[!SHOULD]:    NOT refresh the min_rtt value too often since the actual minimum RTT
-    TEXT[!SHOULD]:    of the path is not frequently observable.
+    TEXT[!SHOULD,todo]:    Endpoints SHOULD set the min_rtt to the newest RTT sample after
+    TEXT[!SHOULD,todo]:    persistent congestion is established.
+    TEXT[!MAY,todo]:    Endpoints MAY reestablish the min_rtt at other times in the
+    TEXT[!MAY,todo]:    connection, such as when traffic volume is low and an acknowledgment
+    TEXT[!MAY,todo]:    is received with a low acknowledgment delay.
+    TEXT[!SHOULD,implementation]: Implementations SHOULD
+    TEXT[!SHOULD,implementation]:    NOT refresh the min_rtt value too often since the actual minimum RTT
+    TEXT[!SHOULD,implementation]:    of the path is not frequently observable.
 
   SECTION: [Estimating smoothed_rtt and rttvar](#section-5.3)
-    TEXT[!SHOULD]: To account for this, the endpoint SHOULD ignore
-    TEXT[!SHOULD]:    max_ack_delay until the handshake is confirmed, as defined in
-    TEXT[!SHOULD]:    Section 4.1.2 of [QUIC-TLS].
-    TEXT[!MAY]: Therefore, prior to handshake confirmation, an endpoint
-    TEXT[!MAY]:    MAY ignore RTT samples if adjusting the RTT sample for acknowledgment
-    TEXT[!MAY]:    delay causes the sample to be less than the min_rtt.
-    TEXT[!MAY]:    *  MAY ignore the acknowledgment delay for Initial packets, since
-    TEXT[!MAY]:       these acknowledgments are not delayed by the peer (Section 13.2.1
-    TEXT[!MAY]:       of [QUIC-TRANSPORT]);
-    TEXT[!SHOULD]:    *  SHOULD ignore the peer's max_ack_delay until the handshake is
-    TEXT[!SHOULD]:       confirmed;
+    TEXT[!SHOULD,implementation]: To account for this, the endpoint SHOULD ignore
+    TEXT[!SHOULD,implementation]:    max_ack_delay until the handshake is confirmed, as defined in
+    TEXT[!SHOULD,implementation]:    Section 4.1.2 of [QUIC-TLS].
+    TEXT[!MAY,todo]: Therefore, prior to handshake confirmation, an endpoint
+    TEXT[!MAY,todo]:    MAY ignore RTT samples if adjusting the RTT sample for acknowledgment
+    TEXT[!MAY,todo]:    delay causes the sample to be less than the min_rtt.
+    TEXT[!MAY,todo]:    *  MAY ignore the acknowledgment delay for Initial packets, since
+    TEXT[!MAY,todo]:       these acknowledgments are not delayed by the peer (Section 13.2.1
+    TEXT[!MAY,todo]:       of [QUIC-TRANSPORT]);
+    TEXT[!SHOULD,implementation]:    *  SHOULD ignore the peer's max_ack_delay until the handshake is
+    TEXT[!SHOULD,implementation]:       confirmed;
     TEXT[!MUST,implementation]:    *  MUST use the lesser of the acknowledgment delay and the peer's
     TEXT[!MUST,implementation]:       max_ack_delay after the handshake is confirmed; and
     TEXT[!MUST,implementation]:    *  MUST NOT subtract the acknowledgment delay from the RTT sample if
     TEXT[!MUST,implementation]:       the resulting value is smaller than the min_rtt.
-    TEXT[!SHOULD]: In such
-    TEXT[!SHOULD]:    cases, an endpoint SHOULD subtract such local delays from its RTT
-    TEXT[!SHOULD]:    sample until the handshake is confirmed.
+    TEXT[!SHOULD,todo]: In such
+    TEXT[!SHOULD,todo]:    cases, an endpoint SHOULD subtract such local delays from its RTT
+    TEXT[!SHOULD,todo]:    sample until the handshake is confirmed.
 
   SECTION: [Acknowledgment-Based Detection](#section-6.1)
     TEXT[implementation]:    A packet is declared lost if it meets all of the following
     TEXT[implementation]:    conditions:
-    TEXT[!MAY]: Implementations with adaptive time
-    TEXT[!MAY]:    thresholds MAY choose to start with smaller initial reordering
-    TEXT[!MAY]:    thresholds to minimize recovery latency.
+    TEXT[!MAY,implementation]: Implementations with adaptive time
+    TEXT[!MAY,implementation]:    thresholds MAY choose to start with smaller initial reordering
+    TEXT[!MAY,implementation]:    thresholds to minimize recovery latency.
 
   SECTION: [Packet Threshold](#section-6.1.1)
-    TEXT[!SHOULD]:    The RECOMMENDED initial value for the packet reordering threshold
-    TEXT[!SHOULD]:    (kPacketThreshold) is 3, based on best practices for TCP loss
-    TEXT[!SHOULD]:    detection [RFC5681] [RFC6675].
+    TEXT[!SHOULD,implementation]:    The RECOMMENDED initial value for the packet reordering threshold
+    TEXT[!SHOULD,implementation]:    (kPacketThreshold) is 3, based on best practices for TCP loss
+    TEXT[!SHOULD,implementation]:    detection [RFC5681] [RFC6675].
     TEXT[!SHOULD,implementation]: In order to remain similar to TCP,
-    TEXT[!SHOULD,implementation]:    implementations SHOULD NOT use a packet threshold less than 3;
-    TEXT[!SHOULD]:  see
-    TEXT[!SHOULD]:    [RFC5681].
+    TEXT[!SHOULD,implementation]:    implementations SHOULD NOT use a packet threshold less than 3; see
+    TEXT[!SHOULD,implementation]:    [RFC5681].
 
   SECTION: [Time Threshold](#section-6.1.2)
     TEXT[!SHOULD,implementation]:    Once a later packet within the same packet number space has been
@@ -2302,70 +2301,70 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9002
     TEXT[!SHOULD,implementation]:    multiplier, is 9/8.
     TEXT[!SHOULD,implementation]: The RECOMMENDED value of the timer granularity
     TEXT[!SHOULD,implementation]:    (kGranularity) is 1 millisecond.
-    TEXT[!MAY]:    Implementations MAY experiment with absolute thresholds, thresholds
-    TEXT[!MAY]:    from previous connections, adaptive thresholds, or the including of
-    TEXT[!MAY]:    RTT variation.
+    TEXT[!MAY,implementation]:    Implementations MAY experiment with absolute thresholds, thresholds
+    TEXT[!MAY,implementation]:    from previous connections, adaptive thresholds, or the including of
+    TEXT[!MAY,implementation]:    RTT variation.
 
   SECTION: [Probe Timeout](#section-6.2)
-    TEXT[!MUST]:    A PTO timer expiration event does not indicate packet loss and MUST
-    TEXT[!MUST]:    NOT cause prior unacknowledged packets to be marked as lost.
+    TEXT[!MUST,todo]:    A PTO timer expiration event does not indicate packet loss and MUST
+    TEXT[!MUST,todo]:    NOT cause prior unacknowledged packets to be marked as lost.
 
   SECTION: [Computing PTO](#section-6.2.1)
     TEXT[implementation]:    PTO = smoothed_rtt + max(4*rttvar, kGranularity) + max_ack_delay
     TEXT[implementation]:    When the PTO is armed for Initial or Handshake packet number spaces,
     TEXT[implementation]:    the max_ack_delay in the PTO period computation is set to 0
-    TEXT[!MUST]:    The PTO period MUST be at least kGranularity to avoid the timer
-    TEXT[!MUST]:    expiring immediately.
+    TEXT[!MUST,implementation]:    The PTO period MUST be at least kGranularity to avoid the timer
+    TEXT[!MUST,implementation]:    expiring immediately.
     TEXT[!MUST,implementation]:    When ack-eliciting packets in multiple packet number spaces are in
     TEXT[!MUST,implementation]:    flight, the timer MUST be set to the earlier value of the Initial and
     TEXT[!MUST,implementation]:    Handshake packet number spaces.
     TEXT[!MUST,implementation]:    An endpoint MUST NOT set its PTO timer for the Application Data
     TEXT[!MUST,implementation]:    packet number space until the handshake is confirmed.
-    TEXT[!SHOULD]:    A sender SHOULD restart its PTO timer every time an ack-eliciting
-    TEXT[!SHOULD]:    packet is sent or acknowledged, or when Initial or Handshake keys are
-    TEXT[!SHOULD]:    discarded (Section 4.9 of [QUIC-TLS]).
+    TEXT[!SHOULD,todo]:    A sender SHOULD restart its PTO timer every time an ack-eliciting
+    TEXT[!SHOULD,todo]:    packet is sent or acknowledged, or when Initial or Handshake keys are
+    TEXT[!SHOULD,todo]:    discarded (Section 4.9 of [QUIC-TLS]).
     TEXT[!MUST,implementation]:    When a PTO timer expires, the PTO backoff MUST be increased,
     TEXT[!MUST,implementation]:    resulting in the PTO period being set to twice its current value.
     TEXT[!MUST,implementation]:    The PTO timer MUST NOT be set if a timer is set for time threshold
     TEXT[!MUST,implementation]:    loss detection; see Section 6.1.2.
 
   SECTION: [Handshakes and New Paths](#section-6.2.2)
-    TEXT[!MAY]:    Resumed connections over the same network MAY use the previous
-    TEXT[!MAY]:    connection's final smoothed RTT value as the resumed connection's
-    TEXT[!MAY]:    initial RTT.
+    TEXT[!MAY,todo]:    Resumed connections over the same network MAY use the previous
+    TEXT[!MAY,todo]:    connection's final smoothed RTT value as the resumed connection's
+    TEXT[!MAY,todo]:    initial RTT.
     TEXT[!SHOULD,implementation,test]: When no previous RTT is available, the initial RTT
     TEXT[!SHOULD,implementation,test]:    SHOULD be set to 333 milliseconds.
-    TEXT[!SHOULD]:    A connection MAY use the delay between sending a PATH_CHALLENGE and
-    TEXT[!SHOULD]:    receiving a PATH_RESPONSE to set the initial RTT (see kInitialRtt in
-    TEXT[!SHOULD]:    Appendix A.2) for a new path, but the delay SHOULD NOT be considered
-    TEXT[!SHOULD]:    an RTT sample.
-    TEXT[!MUST]: When
-    TEXT[!MUST]:    Initial or Handshake keys are discarded, the PTO and loss detection
-    TEXT[!MUST]:    timers MUST be reset, because discarding keys indicates forward
-    TEXT[!MUST]:    progress and the loss detection timer might have been set for a now-
-    TEXT[!MUST]:    discarded packet number space.
+    TEXT[!SHOULD,todo]:    A connection MAY use the delay between sending a PATH_CHALLENGE and
+    TEXT[!SHOULD,todo]:    receiving a PATH_RESPONSE to set the initial RTT (see kInitialRtt in
+    TEXT[!SHOULD,todo]:    Appendix A.2) for a new path, but the delay SHOULD NOT be considered
+    TEXT[!SHOULD,todo]:    an RTT sample.
+    TEXT[!MUST,implementation]: When
+    TEXT[!MUST,implementation]:    Initial or Handshake keys are discarded, the PTO and loss detection
+    TEXT[!MUST,implementation]:    timers MUST be reset, because discarding keys indicates forward
+    TEXT[!MUST,implementation]:    progress and the loss detection timer might have been set for a now-
+    TEXT[!MUST,implementation]:    discarded packet number space.
 
   SECTION: [Before Address Validation](#section-6.2.2.1)
-    TEXT[!MUST]: If
-    TEXT[!MUST]:    no additional data can be sent, the server's PTO timer MUST NOT be
-    TEXT[!MUST]:    armed until datagrams have been received from the client because
-    TEXT[!MUST]:    packets sent on PTO count against the anti-amplification limit.
-    TEXT[!MUST]: That is,
-    TEXT[!MUST]:    the client MUST set the PTO timer if the client has not received an
-    TEXT[!MUST]:    acknowledgment for any of its Handshake packets and the handshake is
-    TEXT[!MUST]:    not confirmed (see Section 4.1.2 of [QUIC-TLS]), even if there are no
-    TEXT[!MUST]:    packets in flight.
-    TEXT[!MUST]: When the PTO fires, the client MUST send a
-    TEXT[!MUST]:    Handshake packet if it has Handshake keys, otherwise it MUST send an
-    TEXT[!MUST]:    Initial packet in a UDP datagram with a payload of at least 1200
-    TEXT[!MUST]:    bytes.
+    TEXT[!MUST,implementation]: If
+    TEXT[!MUST,implementation]:    no additional data can be sent, the server's PTO timer MUST NOT be
+    TEXT[!MUST,implementation]:    armed until datagrams have been received from the client because
+    TEXT[!MUST,implementation]:    packets sent on PTO count against the anti-amplification limit.
+    TEXT[!MUST,todo]: That is,
+    TEXT[!MUST,todo]:    the client MUST set the PTO timer if the client has not received an
+    TEXT[!MUST,todo]:    acknowledgment for any of its Handshake packets and the handshake is
+    TEXT[!MUST,todo]:    not confirmed (see Section 4.1.2 of [QUIC-TLS]), even if there are no
+    TEXT[!MUST,todo]:    packets in flight.
+    TEXT[!MUST,implementation]: When the PTO fires, the client MUST send a
+    TEXT[!MUST,implementation]:    Handshake packet if it has Handshake keys, otherwise it MUST send an
+    TEXT[!MUST,implementation]:    Initial packet in a UDP datagram with a payload of at least 1200
+    TEXT[!MUST,implementation]:    bytes.
 
   SECTION: [Speeding up Handshake Completion](#section-6.2.3)
-    TEXT[!MAY]:    To speed up handshake completion under these conditions, an endpoint
-    TEXT[!MAY]:    MAY, for a limited number of times per connection, send a packet
-    TEXT[!MAY]:    containing unacknowledged CRYPTO data earlier than the PTO expiry,
-    TEXT[!MAY]:    subject to the address validation limits in Section 8.1 of
-    TEXT[!MAY]:    [QUIC-TRANSPORT].
+    TEXT[!MAY,todo]:    To speed up handshake completion under these conditions, an endpoint
+    TEXT[!MAY,todo]:    MAY, for a limited number of times per connection, send a packet
+    TEXT[!MAY,todo]:    containing unacknowledged CRYPTO data earlier than the PTO expiry,
+    TEXT[!MAY,todo]:    subject to the address validation limits in Section 8.1 of
+    TEXT[!MAY,todo]:    [QUIC-TRANSPORT].
 
   SECTION: [Sending Probe Packets](#section-6.2.4)
     TEXT[!MUST,implementation]:    When a PTO timer expires, a sender MUST send at least one ack-
@@ -2375,62 +2374,62 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9002
     TEXT[!MAY,implementation]:    packets to avoid an expensive consecutive PTO expiration due to a
     TEXT[!MAY,implementation]:    single lost datagram or to transmit data from multiple packet number
     TEXT[!MAY,implementation]:    spaces.
-    TEXT[!MUST]: All probe packets sent on a PTO MUST be ack-eliciting.
-    TEXT[!SHOULD]:    In addition to sending data in the packet number space for which the
-    TEXT[!SHOULD]:    timer expired, the sender SHOULD send ack-eliciting packets from
-    TEXT[!SHOULD]:    other packet number spaces with in-flight data, coalescing packets if
-    TEXT[!SHOULD]:    possible.
-    TEXT[!SHOULD]:    An endpoint SHOULD include new data in packets that are sent on PTO
-    TEXT[!SHOULD]:    expiration.
+    TEXT[!MUST,todo]: All probe packets sent on a PTO MUST be ack-eliciting.
+    TEXT[!SHOULD,implementation]:    In addition to sending data in the packet number space for which the
+    TEXT[!SHOULD,implementation]:    timer expired, the sender SHOULD send ack-eliciting packets from
+    TEXT[!SHOULD,implementation]:    other packet number spaces with in-flight data, coalescing packets if
+    TEXT[!SHOULD,implementation]:    possible.
+    TEXT[!SHOULD,todo]:    An endpoint SHOULD include new data in packets that are sent on PTO
+    TEXT[!SHOULD,todo]:    expiration.
     TEXT[!MAY,implementation]: Previously sent data MAY be sent if no new data can be
     TEXT[!MAY,implementation]:    sent.
-    TEXT[!MAY]: Implementations MAY use alternative strategies for determining
-    TEXT[!MAY]:    the content of probe packets, including sending new or retransmitted
-    TEXT[!MAY]:    data based on the application's priorities.
+    TEXT[!MAY,todo]: Implementations MAY use alternative strategies for determining
+    TEXT[!MAY,todo]:    the content of probe packets, including sending new or retransmitted
+    TEXT[!MAY,todo]:    data based on the application's priorities.
     TEXT[!SHOULD,implementation,test]: When there is no data to send, the sender SHOULD send
     TEXT[!SHOULD,implementation,test]:    a PING or other ack-eliciting frame in a single packet, rearming the
     TEXT[!SHOULD,implementation,test]:    PTO timer.
-    TEXT[!MAY]:    Alternatively, instead of sending an ack-eliciting packet, the sender
-    TEXT[!MAY]:    MAY mark any packets still in flight as lost.
+    TEXT[!MAY,todo]:    Alternatively, instead of sending an ack-eliciting packet, the sender
+    TEXT[!MAY,todo]:    MAY mark any packets still in flight as lost.
 
   SECTION: [Handling Retry Packets](#section-6.3)
-    TEXT[!MAY]:    The client MAY compute an RTT estimate to the server as the time
-    TEXT[!MAY]:    period from when the first Initial packet was sent to when a Retry or
-    TEXT[!MAY]:    a Version Negotiation packet is received.
-    TEXT[!MAY]: The client MAY use this
-    TEXT[!MAY]:    value in place of its default for the initial RTT estimate.
+    TEXT[!MAY,todo]:    The client MAY compute an RTT estimate to the server as the time
+    TEXT[!MAY,todo]:    period from when the first Initial packet was sent to when a Retry or
+    TEXT[!MAY,todo]:    a Version Negotiation packet is received.
+    TEXT[!MAY,todo]: The client MAY use this
+    TEXT[!MAY,todo]:    value in place of its default for the initial RTT estimate.
 
   SECTION: [Discarding Keys and Packet State](#section-6.4)
-    TEXT[!MUST]: The sender MUST discard all recovery state
-    TEXT[!MUST]:    associated with those packets and MUST remove them from the count of
-    TEXT[!MUST]:    bytes in flight.
+    TEXT[!MUST,implementation]: The sender MUST discard all recovery state
+    TEXT[!MUST,implementation]:    associated with those packets and MUST remove them from the count of
+    TEXT[!MUST,implementation]:    bytes in flight.
 
   SECTION: [Congestion Control](#section-7)
-    TEXT[!MUST]:    If a sender uses a different controller than that specified in this
-    TEXT[!MUST]:    document, the chosen controller MUST conform to the congestion
-    TEXT[!MUST]:    control guidelines specified in Section 3.1 of [RFC8085].
+    TEXT[!MUST,todo]:    If a sender uses a different controller than that specified in this
+    TEXT[!MUST,todo]:    document, the chosen controller MUST conform to the congestion
+    TEXT[!MUST,todo]:    control guidelines specified in Section 3.1 of [RFC8085].
     TEXT[implementation]:    Similar to TCP, packets containing only ACK frames do not count
     TEXT[implementation]:    toward bytes in flight and are not congestion controlled.
-    TEXT[!MAY]: Unlike
-    TEXT[!MAY]:    TCP, QUIC can detect the loss of these packets and MAY use that
-    TEXT[!MAY]:    information to adjust the congestion controller or the rate of ACK-
-    TEXT[!MAY]:    only packets being sent, but this document does not describe a
-    TEXT[!MAY]:    mechanism for doing so.
+    TEXT[!MAY,todo]: Unlike
+    TEXT[!MAY,todo]:    TCP, QUIC can detect the loss of these packets and MAY use that
+    TEXT[!MAY,todo]:    information to adjust the congestion controller or the rate of ACK-
+    TEXT[!MAY,todo]:    only packets being sent, but this document does not describe a
+    TEXT[!MAY,todo]:    mechanism for doing so.
     TEXT[!MUST,implementation]:    An endpoint MUST NOT send a packet if it would cause bytes_in_flight
     TEXT[!MUST,implementation]:    (see Appendix B.2) to be larger than the congestion window, unless
     TEXT[!MUST,implementation]:    the packet is sent on a PTO timer expiration (see Section 6.2) or
     TEXT[!MUST,implementation]:    when entering recovery (see Section 7.3.2).
 
   SECTION: [Initial and Minimum Congestion Window](#section-7.2)
-    TEXT[!SHOULD]: Endpoints SHOULD use an initial congestion
-    TEXT[!SHOULD]:    window of ten times the maximum datagram size (max_datagram_size),
-    TEXT[!SHOULD]:    while limiting the window to the larger of 14,720 bytes or twice the
-    TEXT[!SHOULD]:    maximum datagram size.
-    TEXT[!SHOULD]:    If the maximum datagram size changes during the connection, the
-    TEXT[!SHOULD]:    initial congestion window SHOULD be recalculated with the new size.
-    TEXT[!SHOULD]:    If the maximum datagram size is decreased in order to complete the
-    TEXT[!SHOULD]:    handshake, the congestion window SHOULD be set to the new initial
-    TEXT[!SHOULD]:    congestion window.
+    TEXT[!SHOULD,implementation]: Endpoints SHOULD use an initial congestion
+    TEXT[!SHOULD,implementation]:    window of ten times the maximum datagram size (max_datagram_size),
+    TEXT[!SHOULD,implementation]:    while limiting the window to the larger of 14,720 bytes or twice the
+    TEXT[!SHOULD,implementation]:    maximum datagram size.
+    TEXT[!SHOULD,todo]:    If the maximum datagram size changes during the connection, the
+    TEXT[!SHOULD,todo]:    initial congestion window SHOULD be recalculated with the new size.
+    TEXT[!SHOULD,todo]:    If the maximum datagram size is decreased in order to complete the
+    TEXT[!SHOULD,todo]:    handshake, the congestion window SHOULD be set to the new initial
+    TEXT[!SHOULD,todo]:    congestion window.
     TEXT[!SHOULD,implementation]: The RECOMMENDED
     TEXT[!SHOULD,implementation]:    value is 2 * max_datagram_size.
 
@@ -2438,9 +2437,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9002
     TEXT[implementation]:    While a sender is in slow start, the congestion window increases by
     TEXT[implementation]:    the number of bytes acknowledged when each acknowledgment is
     TEXT[implementation]:    processed.
-    TEXT[!MUST]:    The sender MUST exit slow start and enter a recovery period when a
-    TEXT[!MUST]:    packet is lost or when the ECN-CE count reported by its peer
-    TEXT[!MUST]:    increases.
+    TEXT[!MUST,implementation]:    The sender MUST exit slow start and enter a recovery period when a
+    TEXT[!MUST,implementation]:    packet is lost or when the ECN-CE count reported by its peer
+    TEXT[!MUST,implementation]:    increases.
 
   SECTION: [Recovery](#section-7.3.2)
     TEXT[implementation]:    sender that is already in a recovery period stays in it and does not
@@ -2462,60 +2461,60 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9002
     TEXT[!MUST,implementation]:    each congestion window that is acknowledged.
 
   SECTION: [Ignoring Loss of Undecryptable Packets](#section-7.4)
-    TEXT[!MAY]: Endpoints MAY ignore the
-    TEXT[!MAY]:    loss of Handshake, 0-RTT, and 1-RTT packets that might have arrived
-    TEXT[!MAY]:    before the peer had packet protection keys to process those packets.
-    TEXT[!MUST]:    Endpoints MUST NOT ignore the loss of packets that were sent after
-    TEXT[!MUST]:    the earliest acknowledged packet in a given packet number space.
+    TEXT[!MAY,todo]: Endpoints MAY ignore the
+    TEXT[!MAY,todo]:    loss of Handshake, 0-RTT, and 1-RTT packets that might have arrived
+    TEXT[!MAY,todo]:    before the peer had packet protection keys to process those packets.
+    TEXT[!MUST,todo]:    Endpoints MUST NOT ignore the loss of packets that were sent after
+    TEXT[!MUST,todo]:    the earliest acknowledged packet in a given packet number space.
 
   SECTION: [Probe Timeout](#section-7.5)
-    TEXT[!MUST]:    Probe packets MUST NOT be blocked by the congestion controller.
-    TEXT[!MUST]:    sender MUST however count these packets as being additionally in
-    TEXT[!MUST]:    flight, since these packets add network load without establishing
-    TEXT[!MUST]:    packet loss.
+    TEXT[!MUST,implementation]:    Probe packets MUST NOT be blocked by the congestion controller.
+    TEXT[!MUST,implementation]:    sender MUST however count these packets as being additionally in
+    TEXT[!MUST,implementation]:    flight, since these packets add network load without establishing
+    TEXT[!MUST,implementation]:    packet loss.
 
   SECTION: [Duration](#section-7.6.1)
-    TEXT[!SHOULD]:    The RECOMMENDED value for kPersistentCongestionThreshold is 3, which
-    TEXT[!SHOULD]:    results in behavior that is approximately equivalent to a TCP sender
-    TEXT[!SHOULD]:    declaring an RTO after two TLPs.
+    TEXT[!SHOULD,implementation]:    The RECOMMENDED value for kPersistentCongestionThreshold is 3, which
+    TEXT[!SHOULD,implementation]:    results in behavior that is approximately equivalent to a TCP sender
+    TEXT[!SHOULD,implementation]:    declaring an RTO after two TLPs.
 
   SECTION: [Establishing Persistent Congestion](#section-7.6.2)
-    TEXT[!MUST]:    These two packets MUST be ack-eliciting, since a receiver is required
-    TEXT[!MUST]:    to acknowledge only ack-eliciting packets within its maximum
-    TEXT[!MUST]:    acknowledgment delay; see Section 13.2 of [QUIC-TRANSPORT].
-    TEXT[!SHOULD]:    The persistent congestion period SHOULD NOT start until there is at
-    TEXT[!SHOULD]:    least one RTT sample.
-    TEXT[!SHOULD]:    Since network congestion is not affected by packet number spaces,
-    TEXT[!SHOULD]:    persistent congestion SHOULD consider packets sent across packet
-    TEXT[!SHOULD]:    number spaces.
-    TEXT[!MAY]: A sender that does not have state for all packet
-    TEXT[!MAY]:    number spaces or an implementation that cannot compare send times
-    TEXT[!MAY]:    across packet number spaces MAY use state for just the packet number
-    TEXT[!MAY]:    space that was acknowledged.
+    TEXT[!MUST,implementation]:    These two packets MUST be ack-eliciting, since a receiver is required
+    TEXT[!MUST,implementation]:    to acknowledge only ack-eliciting packets within its maximum
+    TEXT[!MUST,implementation]:    acknowledgment delay; see Section 13.2 of [QUIC-TRANSPORT].
+    TEXT[!SHOULD,implementation]:    The persistent congestion period SHOULD NOT start until there is at
+    TEXT[!SHOULD,implementation]:    least one RTT sample.
+    TEXT[!SHOULD,todo]:    Since network congestion is not affected by packet number spaces,
+    TEXT[!SHOULD,todo]:    persistent congestion SHOULD consider packets sent across packet
+    TEXT[!SHOULD,todo]:    number spaces.
+    TEXT[!MAY,todo]: A sender that does not have state for all packet
+    TEXT[!MAY,todo]:    number spaces or an implementation that cannot compare send times
+    TEXT[!MAY,todo]:    across packet number spaces MAY use state for just the packet number
+    TEXT[!MAY,todo]:    space that was acknowledged.
     TEXT[!MUST,implementation]:    When persistent congestion is declared, the sender's congestion
     TEXT[!MUST,implementation]:    window MUST be reduced to the minimum congestion window
-    TEXT[!MUST]:    (kMinimumWindow), similar to a TCP sender's response on an RTO
-    TEXT[!MUST]:    [RFC5681].
+    TEXT[!MUST,implementation]:    (kMinimumWindow), similar to a TCP sender's response on an RTO
+    TEXT[!MUST,implementation]:    [RFC5681].
 
   SECTION: [Pacing](#section-7.7)
-    TEXT[!SHOULD]:    A sender SHOULD pace sending of all in-flight packets based on input
-    TEXT[!SHOULD]:    from the congestion controller.
-    TEXT[!MUST]: Senders MUST either use pacing or limit such bursts.
-    TEXT[!SHOULD]:    Senders SHOULD limit bursts to the initial congestion window; see
-    TEXT[!SHOULD]:    Section 7.2.
-    TEXT[!MAY]: A sender with knowledge that the network path to the
-    TEXT[!MAY]:    receiver can absorb larger bursts MAY use a higher limit.
-    TEXT[!SHOULD]: To avoid delaying their delivery to the peer, packets
-    TEXT[!SHOULD]:    containing only ACK frames SHOULD therefore not be paced.
+    TEXT[!SHOULD,implementation]:    A sender SHOULD pace sending of all in-flight packets based on input
+    TEXT[!SHOULD,implementation]:    from the congestion controller.
+    TEXT[!MUST,implementation]: Senders MUST either use pacing or limit such bursts.
+    TEXT[!SHOULD,implementation]:    Senders SHOULD limit bursts to the initial congestion window; see
+    TEXT[!SHOULD,implementation]:    Section 7.2.
+    TEXT[!MAY,todo]: A sender with knowledge that the network path to the
+    TEXT[!MAY,todo]:    receiver can absorb larger bursts MAY use a higher limit.
+    TEXT[!SHOULD,implementation]: To avoid delaying their delivery to the peer, packets
+    TEXT[!SHOULD,implementation]:    containing only ACK frames SHOULD therefore not be paced.
 
   SECTION: [Underutilizing the Congestion Window](#section-7.8)
-    TEXT[!SHOULD]: When this occurs, the congestion window
-    TEXT[!SHOULD]:    SHOULD NOT be increased in either slow start or congestion avoidance.
-    TEXT[!SHOULD]: A sender SHOULD NOT consider itself application limited if it
-    TEXT[!SHOULD]:    would have fully utilized the congestion window without pacing delay.
-    TEXT[!MAY]:    A sender MAY implement alternative mechanisms to update its
-    TEXT[!MAY]:    congestion window after periods of underutilization, such as those
-    TEXT[!MAY]:    proposed for TCP in [RFC7661].
+    TEXT[!SHOULD,todo]: When this occurs, the congestion window
+    TEXT[!SHOULD,todo]:    SHOULD NOT be increased in either slow start or congestion avoidance.
+    TEXT[!SHOULD,todo]: A sender SHOULD NOT consider itself application limited if it
+    TEXT[!SHOULD,todo]:    would have fully utilized the congestion window without pacing delay.
+    TEXT[!MAY,todo]:    A sender MAY implement alternative mechanisms to update its
+    TEXT[!MAY,todo]:    congestion window after periods of underutilization, such as those
+    TEXT[!MAY,todo]:    proposed for TCP in [RFC7661].
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
   SECTION: [Discovering an HTTP/3 Endpoint](#section-3.1)

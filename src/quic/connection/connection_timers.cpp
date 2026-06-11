@@ -110,6 +110,10 @@ std::optional<QuicCoreTimePoint> QuicConnection::loss_deadline() const {
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2.1
+    // # If no additional data can be sent, the server's PTO timer MUST NOT be
+    // # armed until datagrams have been received from the client because
+    // # packets sent on PTO count against the anti-amplification limit.
     if (anti_amplification_applies() && anti_amplification_remaining_send_budget() == 0) {
         return std::nullopt;
     }
@@ -555,6 +559,10 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
             return;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2.1
+        // # When the PTO fires, the client MUST send a Handshake packet if it
+        // # has Handshake keys, otherwise it MUST send an Initial packet in a
+        // # UDP datagram with a payload of at least 1200 bytes.
         if (&packet_space != &application_space_ && packet_space.send_crypto.has_pending_data()) {
             return;
         }
@@ -574,6 +582,11 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
             return;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.4
+        // # In addition to sending data in the packet number space for which
+        // # the timer expired, the sender SHOULD send ack-eliciting packets
+        // # from other packet number spaces with in-flight data, coalescing
+        // # packets if possible.
         arm_packet_space_probe(packet_space);
     };
 

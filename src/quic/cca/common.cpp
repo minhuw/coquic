@@ -225,6 +225,10 @@ void HyStartPlusPlus::start_new_round(std::uint64_t finished_round_end) {
 }
 
 std::size_t congestion_initial_window(std::size_t max_datagram_size) {
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.2
+    // # Endpoints SHOULD use an initial congestion window of ten times the
+    // # maximum datagram size (max_datagram_size), while limiting the window
+    // # to the larger of 14,720 bytes or twice the maximum datagram size.
     return std::min<std::size_t>(
         10 * max_datagram_size,
         std::max<std::size_t>(2 * max_datagram_size, kRecommendedInitialWindowUpperBound));

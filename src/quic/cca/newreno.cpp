@@ -403,6 +403,9 @@ void NewRenoCongestionController::on_loss_event(QuicCoreTimePoint loss_detection
     recovery_delivered_bytes_ = 0;
     recovery_sent_bytes_ = 0;
     hystart_.disable();
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.1
+    // # The sender MUST exit slow start and enter a recovery period when a
+    // # packet is lost or when the ECN-CE count reported by its peer increases.
     //= https://www.rfc-editor.org/rfc/rfc9002#section-7.3.2
     // # On entering a recovery period, a sender MUST set the slow start
     // # threshold to half the value of the congestion window when loss is
@@ -517,6 +520,9 @@ bool NewRenoCongestionController::should_start_pacing(
 }
 
 std::size_t NewRenoCongestionController::pacing_budget_cap() const {
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.7
+    // # Senders SHOULD limit bursts to the initial congestion window; see
+    // # Section 7.2.
     return congestion_quinn_pacing_budget_cap(congestion_window_, max_datagram_size_,
                                               pacing_smoothed_rtt_,
                                               kNewRenoPacingMinimumBurstPackets);

@@ -153,6 +153,8 @@ struct lsquic_conn_ctx {
     int persistent_stream_pending;
     int session_ready;
     int closing;
+    int closed;
+    uint64_t stream_refs;
     perf_session_start_t session_start;
     struct lsquic_conn_ctx *next;
 };
@@ -840,6 +842,45 @@ static void close_all_connections(client_state_t *state) {
 
 static void maybe_finish_client(client_state_t *state);
 
+static void maybe_free_client_conn_ctx(struct lsquic_conn_ctx *conn_ctx) {
+    if (conn_ctx && conn_ctx->closed && conn_ctx->stream_refs == 0) {
+        free(conn_ctx);
+    }
+}
+
+static void retain_client_conn_ctx(struct lsquic_conn_ctx *conn_ctx) {
+    if (conn_ctx) {
+        ++conn_ctx->stream_refs;
+    }
+}
+
+static void release_client_conn_ctx(struct lsquic_stream_ctx *stream_ctx) {
+    struct lsquic_conn_ctx *conn_ctx = stream_ctx->conn_ctx;
+    if (!conn_ctx) {
+        return;
+    }
+    stream_ctx->conn_ctx = NULL;
+    if (conn_ctx->stream_refs > 0) {
+        --conn_ctx->stream_refs;
+    }
+    maybe_free_client_conn_ctx(conn_ctx);
+}
+
+static void free_client_stream_ctx(struct lsquic_stream_ctx *stream_ctx) {
+    if (!stream_ctx) {
+        return;
+    }
+    if (stream_ctx->persistent_rr && stream_ctx->conn_ctx &&
+        stream_ctx->conn_ctx->persistent_stream == stream_ctx) {
+        stream_ctx->conn_ctx->persistent_stream = NULL;
+    }
+    free(stream_ctx->latency_starts);
+    free(stream_ctx->control_out);
+    free(stream_ctx->control_in);
+    release_client_conn_ctx(stream_ctx);
+    free(stream_ctx);
+}
+
 static void try_open_streams_on_conn(client_state_t *state, struct lsquic_conn_ctx *conn_ctx) {
     const uint64_t global_limit = inflight_limit(&state->cfg);
     const uint64_t conn_limit = per_conn_stream_limit(&state->cfg);
@@ -1075,8 +1116,10 @@ static void client_on_conn_closed(lsquic_conn_t *conn) {
         --state->active_conns;
     }
     release_client_sport(state, conn_ctx->sport);
+    conn_ctx->closed = 1;
+    conn_ctx->closing = 1;
     lsquic_conn_set_ctx(conn, NULL);
-    free(conn_ctx);
+    maybe_free_client_conn_ctx(conn_ctx);
     maybe_finish_client(state);
 }
 
@@ -1110,6 +1153,7 @@ static lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, lsquic_str
     }
     stream_ctx->state = state;
     stream_ctx->conn_ctx = conn_ctx;
+    retain_client_conn_ctx(conn_ctx);
     stream_ctx->stream = stream;
     if ((uint64_t)lsquic_stream_id(stream) == CONTROL_STREAM_ID) {
         stream_ctx->is_control = 1;
@@ -1123,8 +1167,8 @@ static lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, lsquic_str
             encode_session_start_message(&connection_cfg, &stream_ctx->control_len);
         if (stream_ctx->control_out == NULL) {
             set_failure(state, "could not encode lsquic session_start");
-            free(stream_ctx);
             lsquic_stream_close(stream);
+            free_client_stream_ctx(stream_ctx);
             maybe_finish_client(state);
             return NULL;
         }
@@ -1133,7 +1177,7 @@ static lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, lsquic_str
     }
     if (conn_ctx && !conn_ctx->session_ready) {
         lsquic_stream_close(stream);
-        free(stream_ctx);
+        free_client_stream_ctx(stream_ctx);
         maybe_finish_client(state);
         return NULL;
     }
@@ -1148,7 +1192,7 @@ static lsquic_stream_ctx_t *client_on_new_stream(void *stream_if_ctx, lsquic_str
                 set_failure(state, "could not start persistent-rr request");
             }
             lsquic_stream_close(stream);
-            free(stream_ctx);
+            free_client_stream_ctx(stream_ctx);
             maybe_finish_client(state);
             return NULL;
         }
@@ -1360,20 +1404,12 @@ static void client_on_close(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
               stream_ctx->response_read, stream_ctx->response_bytes);
     client_state_t *state = stream_ctx->state;
     if (stream_ctx->is_control) {
-        free(stream_ctx->control_out);
-        free(stream_ctx->control_in);
-        free(stream_ctx);
+        free_client_stream_ctx(stream_ctx);
         maybe_finish_client(state);
         return;
     }
     if (stream_ctx->persistent_rr) {
-        if (stream_ctx->conn_ctx && stream_ctx->conn_ctx->persistent_stream == stream_ctx) {
-            stream_ctx->conn_ctx->persistent_stream = NULL;
-        }
-        free(stream_ctx->latency_starts);
-        free(stream_ctx->control_out);
-        free(stream_ctx->control_in);
-        free(stream_ctx);
+        free_client_stream_ctx(stream_ctx);
         maybe_finish_client(state);
         return;
     }
@@ -1391,13 +1427,12 @@ static void client_on_close(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     if (stream_ctx->conn_ctx && stream_ctx->conn_ctx->active_streams > 0) {
         --stream_ctx->conn_ctx->active_streams;
     }
-    if (is_mode(&state->cfg, "crr") && stream_ctx->conn_ctx && !stream_ctx->conn_ctx->closing) {
-        stream_ctx->conn_ctx->closing = 1;
-        lsquic_conn_close(stream_ctx->conn_ctx->conn);
+    struct lsquic_conn_ctx *conn_ctx = stream_ctx->conn_ctx;
+    if (is_mode(&state->cfg, "crr") && conn_ctx && !conn_ctx->closing && !conn_ctx->closed) {
+        conn_ctx->closing = 1;
+        lsquic_conn_close(conn_ctx->conn);
     }
-    free(stream_ctx->control_out);
-    free(stream_ctx->control_in);
-    free(stream_ctx);
+    free_client_stream_ctx(stream_ctx);
     maybe_finish_client(state);
 }
 

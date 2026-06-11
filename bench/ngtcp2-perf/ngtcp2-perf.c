@@ -677,6 +677,10 @@ static void set_failure_liberr(perf_conn_t *pc, const char *context, int rv) {
     set_failure(pc, buf);
 }
 
+static int is_terminal_conn_error(int rv) {
+    return rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING || rv == NGTCP2_ERR_IDLE_CLOSE;
+}
+
 static int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
@@ -1650,6 +1654,10 @@ static int conn_read_client(perf_conn_t *pc) {
         memset(&pi, 0, sizeof(pi));
         int rv = ngtcp2_conn_read_pkt(pc->conn, &path, &pi, buf, (size_t)nread, ngtcp2_now());
         if (rv != 0) {
+            if (is_terminal_conn_error(rv)) {
+                pc->closed = 1;
+                return 0;
+            }
             set_failure_liberr(pc, "ngtcp2_conn_read_pkt", rv);
             return -1;
         }
@@ -1818,7 +1826,7 @@ static int wait_client_connections(perf_conn_t **conns, size_t count, uint64_t m
     uint64_t now = ngtcp2_now();
     for (size_t i = 0; i < count; ++i) {
         perf_conn_t *pc = conns[i];
-        if (!pc) {
+        if (!pc || pc->closed) {
             continue;
         }
         if (pc->fd >= FD_SETSIZE) {
@@ -1868,7 +1876,7 @@ static int drive_client_connections_once(perf_conn_t **conns, size_t count, uint
                                          char *failure_reason, size_t failure_reason_len) {
     for (size_t i = 0; i < count; ++i) {
         perf_conn_t *pc = conns[i];
-        if (!pc) {
+        if (!pc || pc->closed) {
             continue;
         }
         if (conn_write(pc) != 0) {
@@ -1879,6 +1887,10 @@ static int drive_client_connections_once(perf_conn_t **conns, size_t count, uint
         if (ngtcp2_conn_get_expiry(pc->conn) <= now) {
             int rv = ngtcp2_conn_handle_expiry(pc->conn, now);
             if (rv != 0) {
+                if (is_terminal_conn_error(rv)) {
+                    pc->closed = 1;
+                    continue;
+                }
                 set_failure_liberr(pc, "ngtcp2_conn_handle_expiry", rv);
                 snprintf(failure_reason, failure_reason_len, "%s", pc->failure_reason);
                 return -1;

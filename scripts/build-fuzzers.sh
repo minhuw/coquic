@@ -25,6 +25,7 @@ common_flags=(
   -g
   -O1
   -fno-omit-frame-pointer
+  -DCOQUIC_FUZZ_BUILD=1
   -DCOQUIC_PROFILE_HOOKS=0
   -I"$repo_root"
   -I"$repo_root/include"

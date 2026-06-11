@@ -1,6 +1,7 @@
 #include "src/quic/codec/plaintext_codec.h"
 
 #include "src/quic/codec/buffer.h"
+#include "src/quic/fuzz_corpus_capture.h"
 
 namespace coquic::quic {
 
@@ -13,10 +14,21 @@ CodecResult<std::vector<std::byte>> serialize_datagram(std::span<const Packet> p
             return CodecResult<std::vector<std::byte>>::failure(encoded.error().code,
                                                                 encoded.error().offset);
         }
-        writer.write_bytes(encoded.value());
+        const auto &packet_bytes = encoded.value();
+        capture_fuzz_corpus_sample("fuzz_plaintext_packet", packet_bytes);
+        if (!packet_bytes.empty()) {
+            if ((std::to_integer<std::uint8_t>(packet_bytes.front()) & 0x80u) != 0) {
+                capture_fuzz_corpus_sample("fuzz_long_header_packet", packet_bytes);
+            } else {
+                capture_fuzz_corpus_sample("fuzz_short_header_packet", packet_bytes);
+            }
+        }
+        writer.write_bytes(packet_bytes);
     }
 
-    return CodecResult<std::vector<std::byte>>::success(writer.bytes());
+    const auto bytes = writer.bytes();
+    capture_fuzz_corpus_sample("fuzz_datagram", bytes);
+    return CodecResult<std::vector<std::byte>>::success(bytes);
 }
 
 CodecResult<std::vector<Packet>> deserialize_datagram(std::span<const std::byte> bytes,

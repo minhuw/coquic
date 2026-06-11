@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "src/quic/codec/varint.h"
+#include "src/quic/fuzz_corpus_capture.h"
 
 namespace coquic::quic {
 
@@ -348,6 +349,7 @@ serialize_transport_parameters(const TransportParameters &parameters) {
         append_parameter_header(output, grease_quic_bit_parameter_id, 0);
     }
 
+    capture_fuzz_corpus_sample("fuzz_transport_parameters", output);
     return CodecResult<std::vector<std::byte>>::success(std::move(output));
 }
 

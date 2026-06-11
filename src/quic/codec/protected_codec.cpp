@@ -22,6 +22,7 @@
 #include "src/quic/crypto/packet_crypto_test_hooks.h"
 #include "src/quic/codec/packet_number.h"
 #include "src/quic/codec/protected_codec_test_hooks.h"
+#include "src/quic/fuzz_corpus_capture.h"
 #include "src/quic/transport/streams.h"
 #include "src/quic/version.h"
 
@@ -1329,6 +1330,43 @@ deserialize_plaintext_packet_image(std::span<const std::byte> plaintext_image,
     return deserialize_packet(plaintext_image, options);
 }
 
+void capture_plaintext_packet_image(std::span<const std::byte> bytes) {
+    capture_fuzz_corpus_sample("fuzz_plaintext_packet", bytes);
+    capture_fuzz_corpus_sample("fuzz_datagram", bytes);
+    if (bytes.empty()) {
+        return;
+    }
+    if ((std::to_integer<std::uint8_t>(bytes.front()) & 0x80u) != 0) {
+        capture_fuzz_corpus_sample("fuzz_long_header_packet", bytes);
+    } else {
+        capture_fuzz_corpus_sample("fuzz_short_header_packet", bytes);
+    }
+}
+
+void capture_protected_datagram_sample(std::span<const std::byte> bytes) {
+    capture_fuzz_corpus_sample("fuzz_protected_packet", bytes);
+}
+
+void capture_short_header_packet_with_chunk_payload(std::span<const std::byte> header,
+                                                    std::span<const PlaintextChunk> chunks) {
+    if (!fuzz_corpus_capture_enabled()) {
+        return;
+    }
+
+    std::size_t payload_size = 0;
+    for (const auto &chunk : chunks) {
+        payload_size += chunk.bytes.size();
+    }
+
+    std::vector<std::byte> packet;
+    packet.reserve(header.size() + payload_size);
+    packet.insert(packet.end(), header.begin(), header.end());
+    for (const auto &chunk : chunks) {
+        packet.insert(packet.end(), chunk.bytes.begin(), chunk.bytes.end());
+    }
+    capture_plaintext_packet_image(packet);
+}
+
 CodecResult<ReceivedStreamFrame>
 try_decode_single_received_stream_frame_value_fast(const SharedBytes &plaintext_payload,
                                                    std::size_t base_offset) {
@@ -1877,6 +1915,17 @@ CodecResult<std::size_t> append_protected_long_header_packet_to_datagram(
     for (const auto &frame : frames) {
         payload_offset +=
             write_frame_wire_bytes(payload_bytes.subspan(payload_offset), frame).value();
+    }
+    if (fuzz_corpus_capture_enabled()) {
+        std::vector<std::byte> plaintext_packet(
+            packet_bytes.begin(), packet_bytes.begin() + static_cast<std::ptrdiff_t>(
+                                                             header_end + plaintext_payload_size));
+        if (payload_offset < plaintext_payload_size) {
+            std::fill(plaintext_packet.begin() +
+                          static_cast<std::ptrdiff_t>(header_end + payload_offset),
+                      plaintext_packet.end(), std::byte{0x00});
+        }
+        capture_plaintext_packet_image(plaintext_packet);
     }
 
     std::array<std::byte, 32> nonce_storage;
@@ -2735,6 +2784,8 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
 
         auto plaintext_payload = std::span<const std::byte>(packet_bytes)
                                      .subspan(payload_offset, plaintext_payload_size);
+        capture_plaintext_packet_image(std::span<const std::byte>(packet_bytes)
+                                           .first(payload_offset + plaintext_payload_size));
 
         auto ciphertext =
             CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
@@ -2862,6 +2913,9 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
                         .bytes = fragment.bytes.span(),
                     },
                 };
+                capture_short_header_packet_with_chunk_payload(
+                    std::span<const std::byte>(packet_bytes).first(payload_offset),
+                    plaintext_chunks);
                 auto ciphertext = CodecResult<std::size_t>::failure(
                     CodecErrorCode::invalid_packet_protection_state, 0);
                 {
@@ -2999,6 +3053,8 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
                     .bytes = fragment.bytes.span(),
                 },
             };
+            capture_short_header_packet_with_chunk_payload(
+                std::span<const std::byte>(packet_bytes).first(payload_offset), plaintext_chunks);
             auto ciphertext = CodecResult<std::size_t>::failure(
                 CodecErrorCode::invalid_packet_protection_state, 0);
             {
@@ -3084,6 +3140,9 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
                     ++frame_index;
                 }
             }
+            capture_short_header_packet_with_chunk_payload(
+                std::span<const std::byte>(packet_bytes).first(payload_offset),
+                std::span<const PlaintextChunk>(plaintext_chunks.data(), chunk_count));
 
             auto ciphertext = CodecResult<std::size_t>::failure(
                 CodecErrorCode::invalid_packet_protection_state, 0);
@@ -3167,6 +3226,8 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
 
     auto plaintext_payload =
         std::span<const std::byte>(packet_bytes).subspan(payload_offset, plaintext_payload_size);
+    capture_plaintext_packet_image(
+        std::span<const std::byte>(packet_bytes).first(payload_offset + plaintext_payload_size));
 
     auto ciphertext =
         CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
@@ -3335,6 +3396,8 @@ append_protected_one_rtt_stream_fragment_packet_to_datagram(
                          .subspan(payload_size, plaintext_payload_size - payload_size),
         },
     };
+    capture_short_header_packet_with_chunk_payload(
+        std::span<const std::byte>(packet_bytes).first(payload_offset), plaintext_chunks);
 
     auto ciphertext =
         CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
@@ -3915,6 +3978,7 @@ serialize_protected_datagram_with_metadata(std::span<const ProtectedPacket> pack
         }
     }
 
+    capture_protected_datagram_sample(out.bytes.span());
     return CodecResult<SerializedProtectedDatagram>::success(std::move(out));
 }
 
@@ -3935,6 +3999,7 @@ serialize_protected_datagram_with_metadata(std::span<const ProtectedPacket> pack
                                                                  appended.error().offset);
     }
 
+    capture_protected_datagram_sample(encoded.value().bytes.span());
     return encoded;
 }
 

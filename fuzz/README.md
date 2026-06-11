@@ -39,6 +39,17 @@ under `.fuzz/corpus/` before replay or AFL++ campaigns. The build also creates
 serializer-derived raw seeds from `.fuzz/generated-corpus/`. Set
 `COQUIC_FUZZ_SKIP_GENERATED_CORPUS=1` to replay only checked-in hex seeds.
 
+Collect high-quality candidate seeds from normal CoQUIC execution by wrapping a
+perf, interop, or test command:
+
+```sh
+nix develop -c scripts/collect-fuzz-corpus.sh -- zig build test
+```
+
+The wrapper sets `COQUIC_FUZZ_CORPUS_CAPTURE_DIR` and stores raw candidates
+under `.fuzz/captured/<timestamp>/<target>/`. Runtime capture is disabled during
+fuzzer builds, and it only runs when the environment variable is set.
+
 Minimize corpus candidates after a campaign:
 
 ```sh
@@ -52,6 +63,14 @@ the checked-in seed corpus, pass `--promote`:
 
 ```sh
 nix develop -c scripts/minimize-fuzz-corpus.sh fuzz_frame --promote --replace-promoted
+```
+
+To minimize captured candidates, pass the target-specific capture directory:
+
+```sh
+nix develop -c scripts/minimize-fuzz-corpus.sh fuzz_transport_parameters \
+  --candidate .fuzz/captured/<run>/fuzz_transport_parameters \
+  --promote
 ```
 
 Promotion converts raw minimized inputs into `fuzz/corpus/<target>/afl_*.hex`.

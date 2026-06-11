@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub Work Item"
+  short_description: "Create structured project issues"
+  default_prompt: "Use $gh-work-item to draft or create a structured GitHub issue for a project work item."

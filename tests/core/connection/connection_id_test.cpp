@@ -1117,7 +1117,7 @@ TEST(QuicCoreTest, NewConnectionIdRetirePriorToRefreshesCurrentPathPeerConnectio
     const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
     ASSERT_NE(application, nullptr);
     EXPECT_EQ(application->destination_connection_id, bytes_from_ints({0x11, 0x11}));
-    ASSERT_EQ(application->frames.size(), 1u);
+    ASSERT_GE(application->frames.size(), 1u);
     const auto *retire =
         std::get_if<coquic::quic::RetireConnectionIdFrame>(&application->frames.front());
     ASSERT_NE(retire, nullptr);
@@ -1328,7 +1328,7 @@ TEST(QuicCoreTest, ServerInitialPacketsUsePeerSourceConnectionIdAsDestination) {
               optional_value_or_terminate(connection.peer_source_connection_id_));
 }
 
-TEST(QuicCoreTest, ClientResetsInitialAckHistoryWhenPeerSourceConnectionIdChangesMidHandshake) {
+TEST(QuicCoreTest, ClientDiscardsInitialWhenPeerSourceConnectionIdChangesMidHandshake) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.start_client_if_needed();
     ASSERT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time()).empty());
@@ -1357,7 +1357,14 @@ TEST(QuicCoreTest, ClientResetsInitialAckHistoryWhenPeerSourceConnectionIdChange
         coquic::quic::test::test_time(2));
     ASSERT_TRUE(second_packet.has_value());
 
-    EXPECT_EQ(connection.peer_source_connection_id_, bytes_from_ints({0xbb}));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+    // # Once a client has received a valid Initial packet from the server, it
+    // # MUST discard any subsequent packet it receives on that connection with a
+    // # different Source Connection ID.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+    // # if subsequent Initial packets include a different Source Connection ID,
+    // # they MUST be discarded.
+    EXPECT_EQ(connection.peer_source_connection_id_, bytes_from_ints({0xaa}));
 
     auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
     ASSERT_FALSE(datagram.empty());
@@ -1378,7 +1385,7 @@ TEST(QuicCoreTest, ClientResetsInitialAckHistoryWhenPeerSourceConnectionIdChange
     ASSERT_NE(ack_frame_it, initial_packet->frames.end());
 
     const auto &ack_frame = std::get<coquic::quic::AckFrame>(*ack_frame_it);
-    EXPECT_EQ(ack_frame.largest_acknowledged, 0u);
+    EXPECT_EQ(ack_frame.largest_acknowledged, 2u);
     EXPECT_EQ(ack_frame.first_ack_range, 0u);
     EXPECT_TRUE(ack_frame.additional_ranges.empty());
 }

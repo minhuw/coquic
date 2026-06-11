@@ -319,7 +319,7 @@ TEST(QuicCoreTest,
         auto &peer_transport_parameters =
             optional_ref_or_terminate(connection.peer_transport_parameters_);
         peer_transport_parameters.max_udp_payload_size = max_datagram_size;
-        connection.connection_flow_control_.local_receive_window = 16;
+        connection.connection_flow_control_.local_receive_window = 0x4000;
         connection.connection_flow_control_.advertised_max_data = 1;
         connection.connection_flow_control_.delivered_bytes = 1;
         connection.application_space_.pending_probe_packet = coquic::quic::SentPacketRecord{

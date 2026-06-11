@@ -243,7 +243,8 @@ struct PacketSpaceState {
     bool force_ack_send = false;
 
     PacketSpaceState()
-        : sent_packets(&recovery, PacketSpacePacketMapView::Filter::outstanding),
+        : receive_crypto(kMinimumOutOfOrderCryptoBufferSize),
+          sent_packets(&recovery, PacketSpacePacketMapView::Filter::outstanding),
           declared_lost_packets(&recovery, PacketSpacePacketMapView::Filter::declared_lost) {
     }
 
@@ -376,28 +377,32 @@ struct DeferredProtectedDatagram {
     QuicPathId path_id = 0;
     std::optional<std::uint32_t> datagram_id;
     QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
+    std::optional<QuicCoreTimePoint> received_time;
 
     DeferredProtectedDatagram() = default;
     explicit DeferredProtectedDatagram(
         DatagramBuffer datagram_bytes, QuicPathId id = 0,
         std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
-        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
+        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable,
+        std::optional<QuicCoreTimePoint> datagram_received_time = std::nullopt)
         : bytes(std::move(datagram_bytes)), path_id(id), datagram_id(qlog_datagram_id),
-          ecn(datagram_ecn) {
+          ecn(datagram_ecn), received_time(datagram_received_time) {
     }
     explicit DeferredProtectedDatagram(
         const std::vector<std::byte> &datagram_bytes, QuicPathId id = 0,
         std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
-        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
+        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable,
+        std::optional<QuicCoreTimePoint> datagram_received_time = std::nullopt)
         : DeferredProtectedDatagram(DatagramBuffer(datagram_bytes), id, qlog_datagram_id,
-                                    datagram_ecn) {
+                                    datagram_ecn, datagram_received_time) {
     }
     explicit DeferredProtectedDatagram(
         std::vector<std::byte> &&datagram_bytes, QuicPathId id = 0,
         std::optional<std::uint32_t> qlog_datagram_id = std::nullopt,
-        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable)
+        QuicEcnCodepoint datagram_ecn = QuicEcnCodepoint::unavailable,
+        std::optional<QuicCoreTimePoint> datagram_received_time = std::nullopt)
         : DeferredProtectedDatagram(DatagramBuffer(std::move(datagram_bytes)), id, qlog_datagram_id,
-                                    datagram_ecn) {
+                                    datagram_ecn, datagram_received_time) {
     }
 
     bool operator==(const DeferredProtectedDatagram &) const = default;
@@ -510,6 +515,9 @@ struct PathState {
     bool preferred_address_path = false;
     bool challenge_pending = false;
     bool validation_initiated_locally = false;
+    bool validation_probe_only = false;
+    bool path_mtu_validation_pending = false;
+    bool outstanding_challenge_sent_with_expanded_datagram = true;
     std::uint64_t anti_amplification_received_bytes = 0;
     std::uint64_t anti_amplification_sent_bytes = 0;
     std::optional<std::array<std::byte, 8>> outstanding_challenge;
@@ -624,6 +632,13 @@ class QuicConnection {
     void start_server_if_needed(const ConnectionId &client_initial_destination_connection_id,
                                 QuicCoreTimePoint now,
                                 std::uint32_t client_initial_version = kQuicVersion1);
+    // NOLINTBEGIN(bugprone-easily-swappable-parameters)
+    void apply_client_retry(const ConnectionId &original_destination_connection_id,
+                            const ConnectionId &retry_source_connection_id,
+                            std::vector<std::byte> retry_token);
+    // NOLINTEND(bugprone-easily-swappable-parameters)
+    void restore_zero_rtt_stream_data_after_retry();
+    void restore_zero_rtt_packet_stream_data_after_retry(const SentPacketRecord &packet);
     void maybe_open_qlog_session(QuicCoreTimePoint now, const ConnectionId &odcid);
     void emit_local_qlog_startup_events(QuicCoreTimePoint now);
     void maybe_emit_remote_qlog_parameters(QuicCoreTimePoint now);
@@ -807,9 +822,13 @@ class QuicConnection {
     PathState &ensure_path_state(QuicPathId path_id);
     void start_path_validation(QuicPathId path_id, bool initiated_locally,
                                QuicCoreTimePoint now = QuicCoreClock::now());
+    void start_path_validation_probe(QuicPathId path_id, bool initiated_locally,
+                                     QuicCoreTimePoint now = QuicCoreClock::now());
     void queue_path_response(QuicPathId path_id, const std::array<std::byte, 8> &data);
     void respond_to_path_challenge(QuicPathId path_id, const std::array<std::byte, 8> &data);
     bool path_validation_timed_out(QuicPathId path_id, QuicCoreTimePoint now) const;
+    void complete_path_validation(QuicPathId path_id, PathState &path, QuicCoreTimePoint now);
+    void abandon_original_address_validation_after_preferred_success(QuicPathId preferred_path_id);
     static bool
     should_skip_packet_number_for_optimistic_ack_detection(const PacketSpaceState &packet_space,
                                                            std::uint64_t packet_number);
@@ -829,6 +848,8 @@ class QuicConnection {
     void issue_spare_connection_ids();
     void issue_path_probe_replacement_connection_id();
     std::array<std::byte, 8> next_path_challenge_data(QuicPathId path_id);
+    // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+    void mark_path_challenge_sent(QuicPathId path_id, std::size_t datagram_size);
     std::optional<std::uint64_t>
     select_peer_connection_id_sequence_for_path(QuicPathId path_id) const;
     std::optional<std::uint64_t>
@@ -836,8 +857,8 @@ class QuicConnection {
     bool rotate_peer_connection_id_for_path(QuicPathId path_id);
     ConnectionId active_peer_destination_connection_id() const;
     std::optional<NewConnectionIdFrame> take_pending_new_connection_id_frame();
-    bool should_reset_client_handshake_peer_state(const ConnectionId &source_connection_id) const;
-    void reset_client_handshake_peer_state_for_new_source_connection_id();
+    bool should_discard_client_long_header_with_changed_source(
+        const ConnectionId &source_connection_id) const;
     bool packet_targets_discarded_long_header_space(std::span<const std::byte> packet_bytes) const;
     void discard_packet_space_state(PacketSpaceState &packet_space);
     void discard_initial_packet_space();
@@ -953,6 +974,9 @@ class QuicConnection {
     bool should_keep_current_send_path_for_inbound_non_probing(
         QuicPathId inbound_path_id,
         std::optional<std::uint64_t> packet_number = std::nullopt) const;
+    bool should_drop_inbound_packet_on_old_path_after_preferred_success(
+        QuicPathId inbound_path_id,
+        std::optional<std::uint64_t> packet_number = std::nullopt) const;
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     void note_inbound_application_packet_for_path(QuicPathId path_id, std::uint64_t packet_number);
     void maybe_switch_to_path(QuicPathId path_id, bool initiated_locally,
@@ -1007,6 +1031,11 @@ class QuicConnection {
     bool note_aead_encryption_attempt(std::size_t packet_count, QuicCoreTimePoint now);
     void maybe_request_proactive_key_update();
     bool note_packet_authentication_failure(const CodecError &error, QuicCoreTimePoint now);
+    void note_peer_progress();
+    std::uint64_t inbound_progress_generation() const;
+    bool note_nonproductive_packet(QuicCoreTimePoint now);
+    bool note_packet_productivity(std::uint64_t previous_progress_generation,
+                                  QuicCoreTimePoint now);
     bool non_paced_burst_allows_send(bool ack_eliciting, bool bypass_congestion_window,
                                      std::optional<bool> pacing_controlled = std::nullopt) const;
     void
@@ -1023,6 +1052,7 @@ class QuicConnection {
 
     QuicCoreConfig config_;
     bool latency_spin_bit_disabled_ = true;
+    bool disabled_latency_spin_bit_value_ = false;
     std::uint32_t original_version_;
     std::uint32_t current_version_;
     std::uint64_t grease_quic_bit_seed_ = 0;
@@ -1051,6 +1081,8 @@ class QuicConnection {
     std::uint64_t current_application_write_key_encrypted_packets_ = 0;
     std::uint64_t current_application_write_key_generation_ = 0;
     std::uint64_t failed_authentication_packets_ = 0;
+    std::uint64_t consecutive_nonproductive_packets_ = 0;
+    std::uint64_t inbound_progress_generation_ = 0;
     std::size_t unpaced_ack_eliciting_burst_packets_ = 0;
     bool peer_transport_parameters_validated_ = false;
     bool peer_address_validated_ = false;

@@ -59,6 +59,7 @@ struct QuicIoRxDatagram {
 struct QuicIoPathMtuUpdate {
     QuicRouteHandle route_handle = 0;
     std::size_t max_udp_payload_size = 0;
+    std::vector<std::byte> quoted_packet;
 };
 
 struct QuicIoTxDatagram {

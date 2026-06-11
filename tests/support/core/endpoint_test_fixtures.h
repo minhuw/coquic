@@ -42,7 +42,13 @@ inline QuicCoreClientConnectionConfig make_client_open_config(std::uint64_t inde
         .initial_destination_connection_id =
             ConnectionId{
                 std::byte{0x83},
-                std::byte{static_cast<std::uint8_t>(0x40u + index)},
+                std::byte{0x94},
+                std::byte{0xc8},
+                std::byte{0xf0},
+                std::byte{0x3e},
+                std::byte{0x51},
+                std::byte{0x57},
+                std::byte{static_cast<std::uint8_t>(0x08u + index)},
             },
         .server_name = "localhost",
     };

@@ -3,6 +3,12 @@
 
 namespace {
 
+bool has_transport_connection_close(std::span<const coquic::quic::Frame> frames) {
+    return std::ranges::any_of(frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::TransportConnectionCloseFrame>(frame);
+    });
+}
+
 TEST(QuicCoreTest, PublicConfigAcceptsOpaqueResumptionStateAndZeroRttConfig) {
     auto config = coquic::quic::test::make_client_core_config();
     config.resumption_state = coquic::quic::QuicResumptionState{
@@ -96,6 +102,8 @@ TEST(QuicCoreTest, TwoPeersEmitHandshakeReadyExactlyOnce) {
 
     EXPECT_TRUE(client.is_handshake_complete());
     EXPECT_TRUE(server.is_handshake_complete());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7
+    // # The cryptographic handshake MUST provide the following properties:
     EXPECT_EQ(coquic::quic::test::count_state_change(
                   client_events, coquic::quic::QuicCoreStateChange::handshake_ready),
               1u);
@@ -115,6 +123,8 @@ TEST(QuicCoreTest, ClientHandshakeReadyEmitsBeforeHandshakeConfirmation) {
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7
+    // # The cryptographic handshake MUST provide the following properties:
     ASSERT_TRUE(connection.tls_->handshake_complete());
     ASSERT_TRUE(connection.peer_transport_parameters_validated_);
     ASSERT_TRUE(connection.application_space_.read_secret.has_value());
@@ -1294,8 +1304,10 @@ TEST(QuicCoreTest, ClosingTransportErrorUsesHandshakeProtectionWithoutOneRttKeys
 
     ASSERT_FALSE(datagram.empty());
     auto packets = decode_sender_datagram(connection, datagram);
-    ASSERT_EQ(packets.size(), 1u);
-    const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.front());
+    ASSERT_EQ(packets.size(), 2u);
+    const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets.front());
+    ASSERT_NE(initial, nullptr);
+    const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets.back());
     ASSERT_NE(handshake, nullptr);
     ASSERT_EQ(handshake->frames.size(), 1u);
     const auto *close =
@@ -1312,14 +1324,59 @@ TEST(QuicCoreTest, ClosingTransportErrorUsesHandshakeProtectionWithoutOneRttKeys
     // # An endpoint that wishes to communicate a fatal connection error MUST
     // # use a CONNECTION_CLOSE frame if it is able.
     ASSERT_NE(close, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+    // # Under these circumstances, a server SHOULD send a CONNECTION_CLOSE
+    // # frame in both Handshake and Initial packets to ensure that at least
+    // # one of them is processable by the client.
+    EXPECT_TRUE(has_transport_connection_close(initial->frames));
     //= https://www.rfc-editor.org/rfc/rfc9000#section-11
     // # The most appropriate error code (Section 20) SHOULD be included in
     // # the frame that signals the error.
     EXPECT_EQ(close->error_code, static_cast<std::uint64_t>(
                                      coquic::quic::QuicTransportErrorCode::frame_encoding_error));
+    EXPECT_EQ(tracked_packet_count(connection.initial_space_), 1u);
     EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 1u);
     EXPECT_EQ(tracked_packet_count(connection.application_space_), 0u);
     EXPECT_FALSE(connection.has_sendable_datagram(coquic::quic::test::test_time(2)));
+}
+
+TEST(QuicCoreTest, ClosingBeforeHandshakeConfirmationSendsLowerLevelCloseWithOneRttClose) {
+    auto connection = make_connected_server_connection();
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.initial_packet_space_discarded_ = false;
+    connection.handshake_space_.write_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x46});
+    connection.queue_transport_close_for_error(
+        coquic::quic::test::test_time(1),
+        coquic::quic::CodecError{.code = coquic::quic::CodecErrorCode::invalid_varint,
+                                 .offset = 0});
+
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+
+    ASSERT_FALSE(datagram.empty());
+    auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 3u);
+    const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets[0]);
+    const auto *handshake = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets[1]);
+    const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets[2]);
+    ASSERT_NE(initial, nullptr);
+    ASSERT_NE(handshake, nullptr);
+    ASSERT_NE(one_rtt, nullptr);
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+    // # * Prior to confirming the handshake, a peer might be unable to process
+    // # 1-RTT packets, so an endpoint SHOULD send a CONNECTION_CLOSE frame in
+    // # both Handshake and 1-RTT packets.
+    EXPECT_TRUE(has_transport_connection_close(handshake->frames));
+    EXPECT_TRUE(has_transport_connection_close(one_rtt->frames));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+    // # A server SHOULD also send a CONNECTION_CLOSE frame in an Initial
+    // # packet.
+    EXPECT_TRUE(has_transport_connection_close(initial->frames));
+    EXPECT_EQ(tracked_packet_count(connection.initial_space_), 1u);
+    EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 1u);
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), 1u);
 }
 
 TEST(QuicCoreTest, ClosingTransportErrorUsesInitialProtectionWithoutHandshakeKeys) {

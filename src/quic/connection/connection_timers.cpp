@@ -537,7 +537,8 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
     bool armed_pto_probe = false;
     if (current_send_path_id_.has_value()) {
         auto &path = ensure_path_state(*current_send_path_id_);
-        if (!path.validated && path.outstanding_challenge.has_value()) {
+        if ((!path.validated || path.path_mtu_validation_pending) &&
+            path.outstanding_challenge.has_value()) {
             path.challenge_pending = true;
         }
     }
@@ -1224,6 +1225,8 @@ void QuicConnection::start_client_if_needed(QuicCoreTimePoint now) {
         }
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7
+    // # The cryptographic handshake MUST provide the following properties:
     tls_.emplace(TlsAdapterConfig{
         .role = config_.role,
         .verify_peer = config_.verify_peer,
@@ -1321,6 +1324,8 @@ void QuicConnection::start_server_if_needed(
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7
+    // # The cryptographic handshake MUST provide the following properties:
     tls_.emplace(TlsAdapterConfig{
         .role = config_.role,
         .verify_peer = config_.verify_peer,
@@ -1351,5 +1356,121 @@ void QuicConnection::start_server_if_needed(
         mark_peer_address_validated();
     }
 }
+
+void QuicConnection::restore_zero_rtt_packet_stream_data_after_retry(
+    const SentPacketRecord &packet) {
+    const auto note_restored_stream = [&](StreamState &stream,
+                                          std::uint64_t previous_fresh_sendable_bytes,
+                                          bool previous_has_lost_send_data) {
+        note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
+                                       stream);
+    };
+    const auto restore_metadata = [&](const StreamFrameSendMetadata &metadata) {
+        const auto stream = streams_.find(metadata.stream_id);
+        if (stream == streams_.end()) {
+            return;
+        }
+
+        const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
+        const auto previous_has_lost_send_data =
+            stream_has_lost_send_data_for_state_change(stream->second);
+        if (metadata.consumes_flow_control && metadata.length != 0) {
+            connection_flow_control_.highest_sent -= static_cast<std::uint64_t>(metadata.length);
+        }
+        stream->second.restore_send_metadata(metadata);
+        note_restored_stream(stream->second, previous_fresh_sendable_bytes,
+                             previous_has_lost_send_data);
+    };
+    const auto restore_fragment = [&](const StreamFrameSendFragment &fragment) {
+        const auto stream = streams_.find(fragment.stream_id);
+        if (stream == streams_.end()) {
+            return;
+        }
+
+        const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream->second);
+        const auto previous_has_lost_send_data =
+            stream_has_lost_send_data_for_state_change(stream->second);
+        if (fragment.consumes_flow_control && !fragment.bytes.empty()) {
+            connection_flow_control_.highest_sent -=
+                static_cast<std::uint64_t>(fragment.bytes.size());
+        }
+        stream->second.restore_send_fragment(fragment);
+        note_restored_stream(stream->second, previous_fresh_sendable_bytes,
+                             previous_has_lost_send_data);
+    };
+
+    for_each_stream_frame_metadata(packet, restore_metadata);
+    for (const auto &fragment : packet.stream_fragments) {
+        restore_fragment(fragment);
+    }
+}
+
+void QuicConnection::restore_zero_rtt_stream_data_after_retry() {
+    const auto handles = application_space_.recovery.tracked_packets();
+    std::vector<SentPacketRecord> discarded_packets;
+    discarded_packets.reserve(handles.size());
+    for (const auto handle : handles) {
+        const auto packet = application_space_.recovery.take_retired_packet_if_present(handle);
+        if (!packet.has_value()) {
+            continue;
+        }
+
+        if (packet->in_flight && packet->bytes_in_flight != 0) {
+            discarded_packets.push_back(*packet);
+        }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
+        // # A client SHOULD attempt to resend data in 0-RTT packets after it
+        // # sends a new Initial packet.
+        restore_zero_rtt_packet_stream_data_after_retry(*packet);
+    }
+    if (!discarded_packets.empty()) {
+        congestion_controller_.on_packets_discarded(discarded_packets);
+    }
+}
+
+// NOLINTBEGIN(bugprone-easily-swappable-parameters)
+void QuicConnection::apply_client_retry(const ConnectionId &original_destination_connection_id,
+                                        const ConnectionId &retry_source_connection_id,
+                                        std::vector<std::byte> retry_token) {
+    std::vector<SentPacketRecord> discarded_packets;
+    const auto handles = initial_space_.recovery.tracked_packets();
+    discarded_packets.reserve(handles.size());
+    for (const auto handle : handles) {
+        const auto *packet = initial_space_.recovery.packet_for_handle(handle);
+        if (packet == nullptr) {
+            continue;
+        }
+        for (const auto &range : packet->crypto_ranges) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.3
+            // # A client MUST use the same cryptographic handshake message it
+            // # included in this packet.
+            initial_space_.send_crypto.mark_unsent(range.offset, range.bytes.size());
+        }
+        if (packet->in_flight && packet->bytes_in_flight != 0) {
+            discarded_packets.push_back(*packet);
+        }
+    }
+    if (!discarded_packets.empty()) {
+        congestion_controller_.on_packets_discarded(discarded_packets);
+    }
+    for (const auto handle : handles) {
+        initial_space_.recovery.retire_packet(handle);
+    }
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.3
+    // # A client MAY attempt 0-RTT after receiving a Retry packet by sending
+    // # 0-RTT packets to the connection ID provided by the server.
+    restore_zero_rtt_stream_data_after_retry();
+
+    config_.original_destination_connection_id = original_destination_connection_id;
+    config_.retry_source_connection_id = retry_source_connection_id;
+    config_.retry_token = std::move(retry_token);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.1
+    // # The client MUST use the value from the Source
+    // # Connection ID field of the Retry packet in the Destination
+    // # Connection ID field of subsequent packets that it sends.
+    config_.initial_destination_connection_id = retry_source_connection_id;
+    client_initial_destination_connection_id_.reset();
+}
+// NOLINTEND(bugprone-easily-swappable-parameters)
 
 } // namespace coquic::quic

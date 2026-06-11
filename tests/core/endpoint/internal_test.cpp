@@ -22,9 +22,12 @@ std::vector<std::byte> make_client_initial_datagram() {
     client_config.application_protocol = "coquic";
 
     QuicCore client(std::move(client_config));
+    auto open = make_client_open_config();
+    open.initial_destination_connection_id =
+        bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});
     auto opened = client.advance_endpoint(
         QuicCoreOpenConnection{
-            .connection = make_client_open_config(),
+            .connection = std::move(open),
             .initial_route_handle = 17,
         },
         coquic::quic::test::test_time(0));
@@ -51,6 +54,28 @@ std::vector<std::byte> make_plaintext_initial_datagram_with_token(std::vector<st
     auto bytes = encoded.has_value() ? encoded.value() : std::vector<std::byte>{};
     if (bytes.size() < 1200) {
         bytes.resize(1200, std::byte{0x00});
+    }
+    return bytes;
+}
+
+std::vector<std::byte>
+make_plaintext_initial_datagram(std::uint32_t version,
+                                std::vector<std::byte> destination_connection_id,
+                                std::vector<std::byte> source_connection_id,
+                                std::vector<std::byte> token, std::size_t minimum_size = 1200) {
+    auto encoded = serialize_packet(InitialPacket{
+        .version = version,
+        .destination_connection_id = std::move(destination_connection_id),
+        .source_connection_id = std::move(source_connection_id),
+        .token = std::move(token),
+        .packet_number_length = 1,
+        .truncated_packet_number = 1,
+        .frames = {PaddingFrame{}},
+    });
+    EXPECT_TRUE(encoded.has_value());
+    auto bytes = encoded.has_value() ? encoded.value() : std::vector<std::byte>{};
+    if (bytes.size() < minimum_size) {
+        bytes.resize(minimum_size, std::byte{0x00});
     }
     return bytes;
 }
@@ -193,6 +218,20 @@ QuicCore::ConnectionEntry make_server_connection_entry(
     };
 }
 // NOLINTEND(clang-analyzer-cplusplus.NewDeleteLeaks)
+
+std::vector<ProtectedPacket> decode_endpoint_initial_datagram(std::span<const std::byte> datagram,
+                                                              const ConnectionId &client_dcid) {
+    auto decoded = deserialize_protected_datagram(
+        datagram, DeserializeProtectionContext{
+                      .peer_role = EndpointRole::server,
+                      .client_initial_destination_connection_id = client_dcid,
+                  });
+    EXPECT_TRUE(decoded.has_value());
+    if (!decoded.has_value()) {
+        return {};
+    }
+    return decoded.value();
+}
 
 TEST(QuicCoreEndpointInternalTest, LegacyViewAndLegacyEntryHelpersHandleNullAndMissingCases) {
     QuicCore::LegacyConnectionView detached;
@@ -1077,6 +1116,26 @@ TEST(QuicCoreEndpointInternalTest, EndpointPathMtuUpdateAppliesToMatchedRouteOnl
     auto &second = endpoint.connections_.at(2);
     *first.connection = make_connected_client_connection();
     *second.connection = make_connected_client_connection();
+    const auto first_source_connection_id = bytes_from_ints({0xc1, 0x01});
+    first.connection->config_.source_connection_id = first_source_connection_id;
+    first.connection->local_connection_ids_.clear();
+    first.connection->local_connection_ids_.emplace(0,
+                                                    LocalConnectionIdRecord{
+                                                        .sequence_number = 0,
+                                                        .connection_id = first_source_connection_id,
+                                                    });
+    const auto second_source_connection_id = bytes_from_ints({0xc2, 0x02});
+    second.connection->config_.source_connection_id = second_source_connection_id;
+    second.connection->local_connection_ids_.clear();
+    second.connection->local_connection_ids_.emplace(
+        0, LocalConnectionIdRecord{
+               .sequence_number = 0,
+               .connection_id = second_source_connection_id,
+           });
+    first.endpoint_route_generation = 0;
+    second.endpoint_route_generation = 0;
+    endpoint.refresh_server_connection_routes(first);
+    endpoint.refresh_server_connection_routes(second);
     first.connection->config_.max_outbound_datagram_size = 4096;
     second.connection->config_.max_outbound_datagram_size = 4096;
     first.path_id_by_route_handle.emplace(17, 0);
@@ -1097,17 +1156,42 @@ TEST(QuicCoreEndpointInternalTest, EndpointPathMtuUpdateAppliesToMatchedRouteOnl
         QuicCorePathMtuUpdate{
             .route_handle = 99,
             .max_udp_payload_size = 1300,
+            .quoted_packet = make_supported_long_header_datagram(
+                kQuicVersion1, first.connection->config_.source_connection_id,
+                first.connection->config_.initial_destination_connection_id),
         },
         coquic::quic::test::test_time(2));
     EXPECT_TRUE(ignored.effects.empty());
+    EXPECT_EQ(first.connection->paths_.at(0).mtu.validated_datagram_size, 1500u);
+
+    auto mismatched_quote = endpoint.advance_endpoint(
+        QuicCorePathMtuUpdate{
+            .route_handle = 17,
+            .max_udp_payload_size = 1300,
+            .quoted_packet = make_supported_long_header_datagram(
+                kQuicVersion1, second.connection->config_.source_connection_id,
+                second.connection->config_.initial_destination_connection_id),
+        },
+        coquic::quic::test::test_time(3));
+    EXPECT_TRUE(mismatched_quote.effects.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+    // # The endpoint SHOULD ignore all ICMP messages that fail validation.
     EXPECT_EQ(first.connection->paths_.at(0).mtu.validated_datagram_size, 1500u);
 
     auto updated = endpoint.advance_endpoint(
         QuicCorePathMtuUpdate{
             .route_handle = 17,
             .max_udp_payload_size = 1400,
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+            // # This validation SHOULD use the quoted packet supplied in the
+            // # payload of an ICMP message to associate the message with a
+            // # corresponding transport connection (see Section 4.6.1 of
+            // # [DPLPMTUD]).
+            .quoted_packet = make_supported_long_header_datagram(
+                kQuicVersion1, first.connection->config_.source_connection_id,
+                first.connection->config_.initial_destination_connection_id),
         },
-        coquic::quic::test::test_time(3));
+        coquic::quic::test::test_time(4));
 
     EXPECT_FALSE(updated.local_error.has_value());
     //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
@@ -1207,7 +1291,7 @@ TEST(QuicCoreEndpointInternalTest, SelfMoveAssignmentLeavesLegacyCoreUsable) {
     EXPECT_EQ(core.connection_.owner, &core);
 }
 
-TEST(QuicCoreEndpointInternalTest, InboundEndpointBranchesCoverAcceptDropAndUnknownRetryToken) {
+TEST(QuicCoreEndpointInternalTest, InboundEndpointBranchesCoverAcceptRetryAndUnknownToken) {
     auto server_config = make_server_endpoint_config();
     server_config.application_protocol = "coquic";
     QuicCore server(std::move(server_config));
@@ -1237,17 +1321,161 @@ TEST(QuicCoreEndpointInternalTest, InboundEndpointBranchesCoverAcceptDropAndUnkn
     auto retry_config = make_server_endpoint_config();
     retry_config.retry_enabled = true;
     QuicCore retry_server(std::move(retry_config));
-    auto dropped = retry_server.advance_endpoint(
+    auto retried_unknown_token = retry_server.advance_endpoint(
         QuicCoreInboundDatagram{
             .bytes = make_plaintext_initial_datagram_with_token(bytes_from_ints({0xaa})),
             .route_handle = 55,
         },
         coquic::quic::test::test_time(3));
-    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
-    // # Servers MAY discard any Initial packet that does not carry the
-    // # expected token.
-    EXPECT_TRUE(dropped.effects.empty());
+    auto unknown_token_sends = send_effects_from(retried_unknown_token);
+    ASSERT_EQ(unknown_token_sends.size(), 1u);
+    auto unknown_token_retry = deserialize_packet(unknown_token_sends.front().bytes.span(), {});
+    ASSERT_TRUE(unknown_token_retry.has_value());
+    EXPECT_NE(std::get_if<RetryPacket>(&unknown_token_retry.value().packet), nullptr);
     EXPECT_EQ(retry_server.connection_count(), 0u);
+}
+
+TEST(QuicCoreEndpointInternalTest, ServerClosesInvalidRetryTokenWithInvalidToken) {
+    auto config = make_server_endpoint_config();
+    config.retry_enabled = true;
+    config.address_validation_token_secret = make_address_validation_secret(0x8a);
+    QuicCore server(std::move(config));
+
+    auto client_dcid = bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});
+    auto client_scid = bytes_from_ints({0xc1, 0x01});
+    auto initial = make_supported_initial_datagram(kQuicVersion1, client_dcid, client_scid, {});
+
+    auto retry = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = initial,
+            .route_handle = 56,
+        },
+        coquic::quic::test::test_time(1));
+    auto retry_sends = send_effects_from(retry);
+    ASSERT_EQ(retry_sends.size(), 1u);
+    auto decoded_retry = deserialize_packet(retry_sends.front().bytes.span(), {});
+    ASSERT_TRUE(decoded_retry.has_value());
+    auto *retry_packet = std::get_if<RetryPacket>(&decoded_retry.value().packet);
+    ASSERT_NE(retry_packet, nullptr);
+
+    auto tampered_token = retry_packet->retry_token;
+    tampered_token.back() =
+        static_cast<std::byte>(std::to_integer<std::uint8_t>(tampered_token.back()) ^ 0x01u);
+    auto retried_initial = make_plaintext_initial_datagram(
+        kQuicVersion1, retry_packet->source_connection_id, client_scid, tampered_token);
+    auto rejected = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = retried_initial,
+            .route_handle = 56,
+        },
+        coquic::quic::test::test_time(2));
+
+    auto close_sends = send_effects_from(rejected);
+    ASSERT_EQ(close_sends.size(), 1u);
+    auto close_packets = decode_endpoint_initial_datagram(close_sends.front().bytes, client_dcid);
+    ASSERT_EQ(close_packets.size(), 1u);
+    auto *initial_close = std::get_if<ProtectedInitialPacket>(&close_packets.front());
+    ASSERT_NE(initial_close, nullptr);
+    ASSERT_EQ(initial_close->frames.size(), 1u);
+    auto *close_frame = std::get_if<TransportConnectionCloseFrame>(&initial_close->frames.front());
+    ASSERT_NE(close_frame, nullptr);
+    EXPECT_EQ(close_frame->error_code,
+              static_cast<std::uint64_t>(QuicTransportErrorCode::invalid_token));
+    EXPECT_EQ(server.connection_count(), 0u);
+}
+
+TEST(QuicCoreEndpointInternalTest, ServerRefusesNewConnectionAtAdmissionLimit) {
+    auto config = make_server_endpoint_config();
+    config.application_protocol = "coquic";
+    config.max_server_connections = 1;
+    QuicCore server(std::move(config));
+
+    auto accepted = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_client_initial_datagram(),
+            .route_handle = 56,
+        },
+        coquic::quic::test::test_time(1));
+    auto lifecycle = lifecycle_events_from(accepted);
+    ASSERT_EQ(lifecycle.size(), 1u);
+    EXPECT_EQ(lifecycle.front().event, QuicCoreConnectionLifecycle::accepted);
+    ASSERT_EQ(server.connection_count(), 1u);
+
+    auto refused_client_dcid = bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x09});
+    auto refused_client_scid = bytes_from_ints({0xc1, 0x02});
+    auto refused_initial = make_supported_initial_datagram(kQuicVersion1, refused_client_dcid,
+                                                           refused_client_scid, {});
+    auto refused = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = refused_initial,
+            .route_handle = 57,
+        },
+        coquic::quic::test::test_time(2));
+
+    auto close_sends = send_effects_from(refused);
+    ASSERT_EQ(close_sends.size(), 1u);
+    EXPECT_EQ(close_sends.front().route_handle, std::optional<QuicRouteHandle>{57u});
+    auto close_packets =
+        decode_endpoint_initial_datagram(close_sends.front().bytes, refused_client_dcid);
+    ASSERT_EQ(close_packets.size(), 1u);
+    auto *initial_close = std::get_if<ProtectedInitialPacket>(&close_packets.front());
+    ASSERT_NE(initial_close, nullptr);
+    ASSERT_EQ(initial_close->frames.size(), 1u);
+    auto *close_frame = std::get_if<TransportConnectionCloseFrame>(&initial_close->frames.front());
+    ASSERT_NE(close_frame, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.2
+    // # If a server refuses to accept a new connection, it SHOULD send an
+    // # Initial packet containing a CONNECTION_CLOSE frame with error code
+    // # CONNECTION_REFUSED.
+    EXPECT_EQ(close_frame->error_code,
+              static_cast<std::uint64_t>(QuicTransportErrorCode::connection_refused));
+    EXPECT_EQ(server.connection_count(), 1u);
+}
+
+TEST(QuicCoreEndpointInternalTest, ServerRetriesInvalidNewTokenAsUnvalidatedAddress) {
+    auto issuer_config = make_server_endpoint_config();
+    issuer_config.address_validation_token_secret = make_address_validation_secret(0x8b);
+    QuicCore issuer(std::move(issuer_config));
+    auto identity = make_ipv4_identity(198, 51, 100, 7, 4433);
+    auto token = issuer.make_endpoint_new_token(1, kQuicVersion1, 57, identity,
+                                                coquic::quic::test::test_time(1));
+    ASSERT_FALSE(token.empty());
+    token.back() = static_cast<std::byte>(std::to_integer<std::uint8_t>(token.back()) ^ 0x01u);
+
+    auto server_config = make_server_endpoint_config();
+    server_config.retry_enabled = true;
+    server_config.address_validation_token_secret = make_address_validation_secret(0x8b);
+    QuicCore server(std::move(server_config));
+
+    auto client_config = make_client_endpoint_config();
+    client_config.application_protocol = "coquic";
+    QuicCore client(std::move(client_config));
+    auto open = make_client_open_config(12);
+    open.initial_destination_connection_id =
+        bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});
+    open.retry_token = token;
+    auto opened = client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = std::move(open),
+            .initial_route_handle = 57,
+        },
+        coquic::quic::test::test_time(2));
+    auto initial_sends = send_effects_from(opened);
+    ASSERT_FALSE(initial_sends.empty());
+
+    auto response = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = initial_sends.front().bytes,
+            .route_handle = 57,
+            .address_validation_identity = identity,
+        },
+        coquic::quic::test::test_time(3));
+    auto response_sends = send_effects_from(response);
+    ASSERT_EQ(response_sends.size(), 1u);
+    auto decoded_retry = deserialize_packet(response_sends.front().bytes.span(), {});
+    ASSERT_TRUE(decoded_retry.has_value());
+    EXPECT_NE(std::get_if<RetryPacket>(&decoded_retry.value().packet), nullptr);
+    EXPECT_EQ(server.connection_count(), 0u);
 }
 
 TEST(QuicCoreEndpointInternalTest, EndpointAndLegacyCommandsCoverErrorAndCleanupBranches) {
@@ -1632,6 +1860,28 @@ TEST(QuicCoreEndpointInternalTest, ServerDiscardsSupportedInitialDatagramSmaller
     // # Therefore, an endpoint MUST NOT close a connection when it receives a
     // # datagram that does not meet size constraints; the endpoint MAY discard
     // # such datagrams.
+    EXPECT_FALSE(result.local_error.has_value());
+    EXPECT_EQ(server.connection_count(), 0u);
+    EXPECT_TRUE(server.retry_tokens_.empty());
+}
+
+TEST(QuicCoreEndpointInternalTest, ServerDiscardsInitialWithShortDestinationConnectionId) {
+    auto server_config = make_server_endpoint_config();
+    server_config.retry_enabled = true;
+    QuicCore server(std::move(server_config));
+    auto initial = make_supported_initial_datagram(kQuicVersion1, bytes_from_ints({0x83, 0x01}),
+                                                   bytes_from_ints({0xc1, 0x01}), {});
+
+    auto result = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = initial,
+            .route_handle = 41,
+        },
+        coquic::quic::test::test_time(1));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
+    // # This Destination Connection ID MUST be at least 8 bytes in length.
+    EXPECT_TRUE(result.effects.empty());
     EXPECT_FALSE(result.local_error.has_value());
     EXPECT_EQ(server.connection_count(), 0u);
     EXPECT_TRUE(server.retry_tokens_.empty());
@@ -2258,6 +2508,10 @@ TEST(QuicCoreEndpointInternalTest, NewTokensUseIndependentPerIssueBytes) {
     // # A server MUST ensure that every NEW_TOKEN frame it sends is unique
     // # across all clients, with the exception of those sent to repair losses
     // # of previously sent NEW_TOKEN frames.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A token issued with NEW_TOKEN MUST NOT include information that would
+    // # allow values to be linked by an observer to the connection on which it
+    // # was issued.
     EXPECT_NE(first_stateful, second_stateful);
 
     auto sealed_config = make_server_endpoint_config();
@@ -2274,6 +2528,10 @@ TEST(QuicCoreEndpointInternalTest, NewTokensUseIndependentPerIssueBytes) {
     // # A server MUST ensure that every NEW_TOKEN frame it sends is unique
     // # across all clients, with the exception of those sent to repair losses
     // # of previously sent NEW_TOKEN frames.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # A token issued with NEW_TOKEN MUST NOT include information that would
+    // # allow values to be linked by an observer to the connection on which it
+    // # was issued.
     EXPECT_NE(first_sealed, second_sealed);
 }
 
@@ -2315,6 +2573,32 @@ TEST(QuicCoreEndpointInternalTest, RouteIdentityHelpersReuseStoredIdentityAndRej
         client.path_id_for_inbound_route(entry, 29, make_ipv4_identity(192, 168, 0, 10, 4433));
     EXPECT_FALSE(rejected_private.has_value());
     EXPECT_FALSE(entry.path_id_by_route_handle.contains(29));
+}
+
+TEST(QuicCoreEndpointInternalTest, ClientRejectsUnknownInboundServerRoute) {
+    auto config = make_client_endpoint_config();
+    config.allow_peer_address_change = true;
+    QuicCore client(std::move(config));
+
+    QuicCore::ConnectionEntry entry{
+        .handle = 7,
+    };
+    entry.connection = std::make_unique<QuicConnection>(make_connected_client_connection());
+    entry.default_route_handle = 17;
+    entry.path_id_by_route_handle.emplace(17, 0);
+    entry.route_handle_by_path_id.emplace(0, 17);
+
+    const auto unknown_path =
+        client.path_id_for_inbound_route(entry, 18, make_ipv4_identity(198, 51, 100, 8, 4433));
+    EXPECT_FALSE(unknown_path.has_value());
+    EXPECT_FALSE(entry.path_id_by_route_handle.contains(18));
+
+    entry.path_id_by_route_handle.emplace(19, 1);
+    entry.route_handle_by_path_id.emplace(1, 19);
+    const auto client_initiated_path =
+        client.path_id_for_inbound_route(entry, 19, make_ipv4_identity(198, 51, 100, 9, 4433));
+    ASSERT_TRUE(client_initiated_path.has_value());
+    EXPECT_EQ(optional_value_or_terminate(client_initiated_path), 1u);
 }
 
 TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeInitialRoutes) {
@@ -2448,6 +2732,69 @@ TEST(QuicCoreEndpointInternalTest, RequestForgeryPolicyRejectsUnsafeNewRoutes) {
         coquic::quic::test::test_time(4));
     EXPECT_TRUE(link_local_inbound.effects.empty());
     EXPECT_FALSE(entry.path_id_by_route_handle.contains(31));
+}
+
+TEST(QuicCoreEndpointInternalTest,
+     PreferredAddressMigrationRejectsRouteFamilyWithoutAdvertisedPreferredAddress) {
+    auto config = make_client_endpoint_config();
+    config.allow_peer_address_change = true;
+    QuicCore client(std::move(config));
+
+    static_cast<void>(client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+            .address_validation_identity = make_ipv4_identity(198, 51, 100, 1, 4433),
+        },
+        coquic::quic::test::test_time(1)));
+    ASSERT_TRUE(client.connections_.contains(1));
+    auto &entry = client.connections_.at(1);
+    *entry.connection = make_connected_client_connection();
+    entry.connection->current_send_path_id_ = 0;
+    auto &peer_parameters = optional_ref_or_terminate(entry.connection->peer_transport_parameters_);
+    peer_parameters.active_connection_id_limit = 8;
+    peer_parameters.preferred_address = PreferredAddress{
+        .ipv4_address = {std::byte{198}, std::byte{51}, std::byte{100}, std::byte{2}},
+        .ipv4_port = 4433,
+        .connection_id = bytes_from_ints({0x41, 0x42}),
+    };
+
+    auto ipv6_migration = client.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                QuicCoreRequestConnectionMigration{
+                    .route_handle = 29,
+                    .reason = QuicMigrationRequestReason::preferred_address,
+                    .address_validation_identity =
+                        make_ipv6_identity({0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05},
+                                           4433),
+                },
+        },
+        coquic::quic::test::test_time(2));
+
+    auto ipv6_migration_error = optional_value_or_terminate(ipv6_migration.local_error);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.3
+    // # A client that migrates to a new address SHOULD use a preferred
+    // # address from the same address family for the server.
+    EXPECT_EQ(ipv6_migration_error.code, QuicCoreLocalErrorCode::unsupported_operation);
+    EXPECT_FALSE(entry.path_id_by_route_handle.contains(29));
+
+    auto ipv4_migration = client.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                QuicCoreRequestConnectionMigration{
+                    .route_handle = 30,
+                    .reason = QuicMigrationRequestReason::preferred_address,
+                    .address_validation_identity = make_ipv4_identity(198, 51, 100, 2, 4433),
+                },
+        },
+        coquic::quic::test::test_time(3));
+
+    EXPECT_FALSE(ipv4_migration.local_error.has_value());
+    EXPECT_TRUE(entry.path_id_by_route_handle.contains(30));
 }
 
 TEST(QuicCoreEndpointInternalTest, ExpiredRetryAndNewTokensAreRemoved) {

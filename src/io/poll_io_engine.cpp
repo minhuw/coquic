@@ -25,6 +25,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <random>
 #include <string_view>
 #include <vector>
 
@@ -352,6 +353,18 @@ COQUIC_NO_PROFILE std::uint32_t normalize_ipv6_flow_label_hash(std::uint32_t has
     return (hash & 0x000fffffu) == 0 ? 1u : (hash & 0x000fffffu);
 }
 
+std::uint64_t ipv6_flow_label_secret() {
+    static const std::uint64_t secret = [] {
+        std::random_device device;
+        std::uint64_t value = 0;
+        for (unsigned index = 0; index < sizeof(value); ++index) {
+            value = (value << 8u) ^ static_cast<std::uint64_t>(device());
+        }
+        return value == 0 ? 0x9e3779b97f4a7c15ull : value;
+    }();
+    return secret;
+}
+
 std::uint32_t hash_ipv6_flow_label_input(const sockaddr_in6 &peer,
                                          std::span<const std::byte> datagram) {
     std::uint32_t hash = 2166136261u;
@@ -359,6 +372,10 @@ std::uint32_t hash_ipv6_flow_label_input(const sockaddr_in6 &peer,
         hash ^= value;
         hash *= 16777619u;
     };
+    const auto secret = ipv6_flow_label_secret();
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+        mix(static_cast<std::uint8_t>((secret >> shift) & 0xffu));
+    }
     for (const auto byte : peer.sin6_addr.s6_addr) {
         mix(byte);
     }
@@ -384,6 +401,10 @@ sockaddr_storage peer_with_ipv6_flow_label(const sockaddr_storage &peer, socklen
     // # Endpoints that send data using IPv6 SHOULD apply an IPv6 flow label in
     // # compliance with [RFC6437], unless the local API does not allow setting
     // # IPv6 flow labels.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.7
+    // # The flow label generation MUST be designed to minimize the chances of
+    // # linkability with a previously used flow label, as a stable flow label
+    // # would enable correlating activity on multiple paths; see Section 9.5.
     ipv6_peer->sin6_flowinfo = htonl(hash_ipv6_flow_label_input(*ipv6_peer, datagram));
     return peer_with_flow_label;
 }
@@ -1362,11 +1383,25 @@ PathMtuUpdateResult receive_path_mtu_update(int socket_fd, std::string_view role
             // # An endpoint MUST ignore an ICMP message that claims the PMTU has
             // # decreased below QUIC's smallest allowed maximum datagram size.
             if (max_udp_payload_size >= 1200) {
+                std::vector<std::byte> quoted_packet;
+                if (bytes_read > 0) {
+                    quoted_packet.assign(
+                        inbound.begin(),
+                        inbound.begin() +
+                            static_cast<std::ptrdiff_t>(std::min<std::size_t>(
+                                static_cast<std::size_t>(bytes_read), inbound.size())));
+                }
                 return PathMtuUpdateResult{
                     .status = PathMtuUpdateStatus::ok,
                     .max_udp_payload_size = max_udp_payload_size,
                     .peer = peer,
                     .peer_len = static_cast<socklen_t>(inbound_message.msg_namelen),
+                    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2.1
+                    // # This validation SHOULD use the quoted packet supplied
+                    // # in the payload of an ICMP message to associate the
+                    // # message with a corresponding transport connection (see
+                    // # Section 4.6.1 of [DPLPMTUD]).
+                    .quoted_packet = std::move(quoted_packet),
                     .input_time = now(),
                 };
             }
@@ -1605,6 +1640,7 @@ PollIoEngine::wait(std::span<const int> socket_fds, int idle_timeout_ms,
                                 .peer = update.peer,
                                 .peer_len = update.peer_len,
                                 .max_udp_payload_size = update.max_udp_payload_size,
+                                .quoted_packet = std::move(update.quoted_packet),
                                 .now = update.input_time,
                             },
                     };

@@ -16,6 +16,7 @@ QuicConnection::QuicConnection(QuicCoreConfig config)
       // # defined below.
       latency_spin_bit_disabled_(config_.transport.enable_latency_spin_bit ? random_one_in_sixteen()
                                                                            : true),
+      disabled_latency_spin_bit_value_(random_bool_for_disabled_spin_bit()),
       original_version_(config_.original_version), current_version_(config_.initial_version),
       grease_quic_bit_seed_(make_grease_quic_bit_seed()),
       congestion_controller_(config_.transport.congestion_control,
@@ -241,9 +242,11 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
 
     const auto defer_packet =
         [&](std::span<const std::byte> packet_bytes, QuicPathId deferred_path_id,
-            std::optional<std::uint32_t> deferred_datagram_id, QuicEcnCodepoint deferred_ecn) {
+            std::optional<std::uint32_t> deferred_datagram_id, QuicEcnCodepoint deferred_ecn,
+            QuicCoreTimePoint packet_received_time) {
             queue_deferred_protected_datagram(deferred_protected_packets_, packet_bytes,
-                                              deferred_path_id, deferred_datagram_id, deferred_ecn);
+                                              deferred_path_id, deferred_datagram_id, deferred_ecn,
+                                              packet_received_time);
         };
     std::size_t offset = 0;
     bool processed_any_packet = false;
@@ -321,9 +324,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
     };
     const auto process_packet_bytes_with =
         [&](std::span<const std::byte> packet_bytes, bool allow_defer, QuicPathId packet_path_id,
-            QuicEcnCodepoint packet_ecn, std::optional<std::uint32_t> datagram_id,
-            bool packet_replay_trigger, auto deserialize_packets, auto process_packet,
-            auto emit_qlog_event, PacketProcessingLabels labels) -> bool {
+            QuicEcnCodepoint packet_ecn, QuicCoreTimePoint packet_received_time,
+            std::optional<std::uint32_t> datagram_id, bool packet_replay_trigger,
+            auto deserialize_packets, auto process_packet, auto emit_qlog_event,
+            PacketProcessingLabels labels) -> bool {
         if (send_profile_enabled()) {
             ++send_profile_counters().packet_bytes_calls;
         }
@@ -343,8 +347,8 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         }
         if (defer_short_header_packet_before_server_handshake_complete(
                 allow_defer, short_header_packet, config_.role, status_,
-                deferred_protected_packets_, packet_bytes, packet_path_id, datagram_id,
-                packet_ecn)) {
+                deferred_protected_packets_, packet_bytes, packet_path_id, datagram_id, packet_ecn,
+                packet_received_time)) {
             return true;
         }
 
@@ -438,12 +442,16 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 }
                 // Later packets in the same datagram can depend on keys unlocked by an earlier
                 // packet, so buffer them even after partial progress.
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.1
+                // # The client MAY drop these packets, or it MAY buffer them in
+                // # anticipation of later packets that allow it to compute the key.
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
                 // # For example, if decryption fails (because the keys are not available
                 // # or for any other reason), the receiver MAY either discard or buffer
                 // # the packet for later processing and MUST attempt to process the
                 // # remaining packets.
-                defer_packet(packet_bytes, packet_path_id, datagram_id, packet_ecn);
+                defer_packet(packet_bytes, packet_path_id, datagram_id, packet_ecn,
+                             packet_received_time);
                 return true;
             }
 
@@ -453,6 +461,14 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                     is_discardable_short_header_packet_error(packets.error().code);
             }
             if (!should_discard_packet) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+                // # For this reason, endpoints MAY discard packets rather
+                // # than immediately close if errors are detected in packets
+                // # that lack authentication.
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-11.1
+                // # As the AEAD for Initial packets does not provide strong
+                // # authentication, an endpoint MAY discard an invalid Initial
+                // # packet.
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
                 // # Invalid packets that lack strong integrity protection, such as
                 // # Initial, Retry, or Version Negotiation, MAY be discarded.
@@ -495,7 +511,8 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                     allow_defer, packet, config_.role, status_);
             }
             if (defer_protected_app_packet) {
-                defer_packet(packet_bytes, packet_path_id, datagram_id, packet_ecn);
+                defer_packet(packet_bytes, packet_path_id, datagram_id, packet_ecn,
+                             packet_received_time);
                 return true;
             }
 
@@ -510,8 +527,13 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
             {
                 COQUIC_SEND_PROFILE_TIMER(process_timer, process_packet_ns);
-                processed =
-                    process_packet(packet, now, packet_ecn, used_previous_application_read_secret);
+                const auto previous_progress_generation = inbound_progress_generation();
+                processed = process_packet(packet, packet_received_time, packet_ecn,
+                                           used_previous_application_read_secret);
+                if (processed.has_value() &&
+                    !note_packet_productivity(previous_progress_generation, packet_received_time)) {
+                    return false;
+                }
             }
             if (!processed.has_value()) {
                 const auto traced_packet_number = protected_one_rtt_packet_number_for_trace(packet);
@@ -566,10 +588,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
 
         return true;
     };
-    const auto process_packet_bytes = [&](std::span<const std::byte> packet_bytes, bool allow_defer,
-                                          QuicPathId packet_path_id, QuicEcnCodepoint packet_ecn,
-                                          std::optional<std::uint32_t> datagram_id,
-                                          bool packet_replay_trigger) -> bool {
+    const auto process_packet_bytes =
+        [&](std::span<const std::byte> packet_bytes, bool allow_defer, QuicPathId packet_path_id,
+            QuicEcnCodepoint packet_ecn, QuicCoreTimePoint packet_received_time,
+            std::optional<std::uint32_t> datagram_id, bool packet_replay_trigger) -> bool {
         if (qlog_session_ != nullptr) {
             const auto emit_qlog_event = [&](const ProtectedPacket &packet) {
                 if (!datagram_id.has_value()) {
@@ -588,8 +610,8 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                                 }))));
             };
             return process_packet_bytes_with(
-                packet_bytes, allow_defer, packet_path_id, packet_ecn, datagram_id,
-                packet_replay_trigger,
+                packet_bytes, allow_defer, packet_path_id, packet_ecn, packet_received_time,
+                datagram_id, packet_replay_trigger,
                 [](std::span<const std::byte> bytes, const DeserializeProtectionContext &context) {
                     return deserialize_protected_datagram(bytes, context);
                 },
@@ -635,8 +657,8 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
             };
         }();
         return process_packet_bytes_with(
-            packet_bytes, allow_defer, packet_path_id, packet_ecn, datagram_id,
-            packet_replay_trigger,
+            packet_bytes, allow_defer, packet_path_id, packet_ecn, packet_received_time,
+            datagram_id, packet_replay_trigger,
             [&](std::span<const std::byte> bytes, const DeserializeProtectionContext &context) {
                 if (packet_storage_range.has_value()) {
                     return deserialize_received_protected_packet_fast(
@@ -750,6 +772,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
             {
                 COQUIC_SEND_PROFILE_TIMER(process_timer, process_packet_ns);
+                const auto previous_progress_generation = inbound_progress_generation();
                 note_authenticated_packet_number(application_space_, ack_only->packet_number);
                 if (should_ignore_received_packet(application_space_, ack_only->packet_number)) {
                     note_ignored_application_received_packet(
@@ -761,6 +784,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                     processed = process_inbound_received_application_ack_only(
                         ack_only->packet_number, ack_only->spin_bit, ack_only->ack, now, ecn,
                         last_inbound_path_id_, /*used_previous_application_read_secret=*/false);
+                }
+                if (processed.has_value() &&
+                    !note_packet_productivity(previous_progress_generation, now)) {
+                    return false;
                 }
             }
             if (!processed.has_value()) {
@@ -787,7 +814,12 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         CodecResult<bool> processed = CodecResult<bool>::failure(CodecErrorCode::invalid_varint, 0);
         {
             COQUIC_SEND_PROFILE_TIMER(process_timer, process_packet_ns);
+            const auto previous_progress_generation = inbound_progress_generation();
             processed = process_inbound_received_packet(*received_packet, now, ecn);
+            if (processed.has_value() &&
+                !note_packet_productivity(previous_progress_generation, now)) {
+                return false;
+            }
         }
         if (!processed.has_value()) {
             log_codec_failure("process_inbound_received_packet", processed.error());
@@ -825,9 +857,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         auto deferred_packets = std::move(deferred_protected_packets_);
         deferred_protected_packets_.clear();
         for (const auto &deferred_packet : deferred_packets) {
+            const auto deferred_received_time = deferred_packet.received_time.value_or(now);
             if (!process_packet_bytes(deferred_packet.bytes, /*allow_defer=*/true,
                                       deferred_packet.path_id, deferred_packet.ecn,
-                                      deferred_packet.datagram_id,
+                                      deferred_received_time, deferred_packet.datagram_id,
                                       /*packet_replay_trigger=*/true)) {
                 return false;
             }
@@ -897,7 +930,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         // # The receiver of coalesced QUIC packets MUST individually process
         // # each QUIC packet and separately acknowledge them, as if they were
         // # received as the payload of different UDP datagrams.
-        if (!process_packet_bytes(packet_bytes, /*allow_defer=*/true, path_id, ecn,
+        if (!process_packet_bytes(packet_bytes, /*allow_defer=*/true, path_id, ecn, now,
                                   inbound_datagram_id, replay_trigger)) {
             return result;
         }
@@ -1085,6 +1118,9 @@ CodecResult<bool> QuicConnection::request_connection_migration(QuicPathId path_i
                                         ? &peer_transport_parameters_->preferred_address
                                         : nullptr;
     if (preferred_address != nullptr && preferred_address->has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+        // # A client MUST NOT use these for other connections, including
+        // # connections that are resumed from the current connection.
         const auto preferred_connection_id = ensure_peer_preferred_address_connection_id();
         if (!preferred_connection_id.has_value()) {
             return CodecResult<bool>::failure(preferred_connection_id.error());
@@ -1092,15 +1128,30 @@ CodecResult<bool> QuicConnection::request_connection_migration(QuicPathId path_i
         auto &path = ensure_path_state(path_id);
         set_path_peer_connection_id_sequence(path, kPreferredAddressConnectionIdSequence);
         path.destination_connection_id_override = preferred_address->value().connection_id;
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.3
+        // # This connection ID is provided to ensure that the client has a
+        // # connection ID available for migration, but the client MAY use this
+        // # connection ID on any path.
         path.preferred_address_path = true;
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
         // # A client that migrates to a preferred address MUST validate the
         // # address it chooses before migrating; see Section 21.5.3.
+        if (current_send_path_id_.has_value() && *current_send_path_id_ != path_id) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.3
+            // # In this case, the client SHOULD perform path validation to
+            // # both the original and preferred server address from the
+            // # client's new address concurrently.
+            start_path_validation_probe(*current_send_path_id_, /*initiated_locally=*/true, now);
+        }
     }
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
     // # Once the handshake is confirmed, the client SHOULD select one of the
     // # two addresses provided by the server and initiate path validation
     // # (see Section 8.2).
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.1
+    // # An endpoint MAY probe for peer reachability from a new local address
+    // # using path validation (Section 8.2) prior to migrating the connection
+    // # to the new local address.
     maybe_switch_to_path(path_id, /*initiated_locally=*/true, now);
     return CodecResult<bool>::success(true);
 }
@@ -1205,8 +1256,17 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
         current.is_current_send_path = false;
         current.challenge_pending = false;
         current.validation_initiated_locally = false;
+        current.validation_probe_only = false;
+        current.path_mtu_validation_pending = false;
+        current.outstanding_challenge_sent_with_expanded_datagram = true;
         current.validation_deadline.reset();
         if (!last_validated_path_id_.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9
+            // # When an endpoint has no validated path on which to send
+            // # packets, it MAY discard connection state.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10
+            // # An endpoint MAY discard connection state if it does not have a
+            // # validated path on which it can send packets; see Section 8.2.
             //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.2
             // # If an endpoint has no state about the last validated peer
             // # address, it MUST close the connection silently by discarding

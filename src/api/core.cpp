@@ -260,6 +260,7 @@ quic::QuicCoreEndpointConfig to_internal(const EndpointConfig &config) {
         .supported_versions = config.supported_versions,
         .verify_peer = config.verify_peer,
         .retry_enabled = config.retry_enabled,
+        .max_server_connections = config.max_server_connections,
         .application_protocol = config.application_protocol,
         .identity = to_internal(config.identity),
         .transport = to_internal(config.transport),

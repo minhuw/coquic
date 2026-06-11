@@ -1219,6 +1219,47 @@ TEST(QuicCoreTest, LocalApplicationCloseQueuesApplicationConnectionCloseFrame) {
         1u);
 }
 
+TEST(QuicCoreTest, LocalApplicationCloseDropsInvalidUtf8ReasonPhrase) {
+    coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
+    coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
+    coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
+
+    std::string invalid_reason;
+    invalid_reason.push_back(static_cast<char>(0xc0));
+    invalid_reason.push_back(static_cast<char>(0xaf));
+    auto closed = client.advance(
+        coquic::quic::QuicCoreCloseConnection{
+            .application_error_code = 7,
+            .reason_phrase = invalid_reason,
+        },
+        coquic::quic::test::test_time(1));
+
+    bool saw_application_close = false;
+    for (auto &datagram : coquic::quic::test::send_datagrams_from(closed)) {
+        for (auto &packet : decode_sender_datagram(*client.connection_, datagram)) {
+            auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packet);
+            if (one_rtt == nullptr) {
+                continue;
+            }
+            for (auto &frame : one_rtt->frames) {
+                auto *close_frame =
+                    std::get_if<coquic::quic::ApplicationConnectionCloseFrame>(&frame);
+                if (close_frame == nullptr) {
+                    continue;
+                }
+                saw_application_close = true;
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-19.19
+                // # This SHOULD be a UTF-8 encoded string [RFC3629], though the
+                // # frame does not carry information, such as language tags, that
+                // # would aid comprehension by any entity other than the one that
+                // # created the text.
+                EXPECT_TRUE(close_frame->reason.bytes.empty());
+            }
+        }
+    }
+    EXPECT_TRUE(saw_application_close);
+}
+
 TEST(QuicCoreTest, PeerStopSendingQueuesAutomaticReset) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
@@ -2282,7 +2323,9 @@ TEST(QuicCoreTest, LargeDatagramSchedulingLimitsFreshDataToLeadingBulkStreamsPer
     auto connection = make_connected_client_connection();
     constexpr std::size_t kLargeDatagramSize = std::size_t{16} * 1024u;
     constexpr std::uint64_t kLargeFlowCredit = std::uint64_t{128} * 1024u;
-    connection.config_.transport.pmtud_enabled = false;
+    connection.config_.transport.pmtud_enabled = true;
+    connection.paths_.at(0).mtu.validated_datagram_size = kLargeDatagramSize;
+    connection.paths_.at(0).mtu.probe_ceiling = kLargeDatagramSize;
     connection.config_.transport.pmtud_max_datagram_size = kLargeDatagramSize;
     connection.config_.max_outbound_datagram_size = kLargeDatagramSize;
     auto &peer_transport_parameters =
@@ -2310,7 +2353,9 @@ TEST(QuicCoreTest, BulkStreamDatagramsFillValidatedMtuExactly) {
     constexpr std::array kPathUdpPayloadSizes = {std::size_t{1452}, std::size_t{1472}};
     for (auto path_udp_payload_size : kPathUdpPayloadSizes) {
         auto connection = make_connected_client_connection();
-        connection.config_.transport.pmtud_enabled = false;
+        connection.config_.transport.pmtud_enabled = true;
+        connection.paths_.at(0).mtu.validated_datagram_size = path_udp_payload_size;
+        connection.paths_.at(0).mtu.probe_ceiling = path_udp_payload_size;
         connection.config_.transport.pmtud_max_datagram_size = path_udp_payload_size;
         connection.config_.max_outbound_datagram_size = path_udp_payload_size;
         auto &peer_transport_parameters =
@@ -2334,10 +2379,33 @@ TEST(QuicCoreTest, BulkStreamDatagramsFillValidatedMtuExactly) {
     }
 }
 
+TEST(QuicCoreTest, DisabledPmtudCapsApplicationDatagramsAtMinimumSize) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.pmtud_enabled = false;
+    connection.config_.max_outbound_datagram_size = 4096;
+    auto &peer_transport_parameters =
+        optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_transport_parameters.max_udp_payload_size = 4096;
+    peer_transport_parameters.initial_max_data = std::uint64_t{64} * 1024u;
+    peer_transport_parameters.initial_max_stream_data_bidi_remote = std::uint64_t{64} * 1024u;
+    connection.initialize_peer_flow_control_from_transport_parameters();
+    connection.congestion_controller_.congestion_window_ = std::size_t{64} * 1024u;
+
+    const auto payload = std::vector<std::byte>(std::size_t{32} * 1024u, std::byte{0x42});
+    ASSERT_TRUE(connection.queue_stream_send(0, payload, false).has_value());
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.2
+    // # In the absence of these mechanisms, QUIC endpoints SHOULD NOT send
+    // # datagrams larger than the smallest allowed maximum datagram size.
+    EXPECT_LE(datagram.size(), 1200u);
+}
+
 TEST(QuicCoreTest, LastPtoProbeFreshSchedulingTreatsSingleFinOnlyStreamAsActive) {
     auto connection = make_connected_client_connection();
     constexpr std::size_t kLargeDatagramSize = std::size_t{16} * 1024u;
-    connection.config_.transport.pmtud_enabled = false;
     connection.config_.max_outbound_datagram_size = kLargeDatagramSize;
     auto &peer_transport_parameters =
         optional_ref_or_terminate(connection.peer_transport_parameters_);

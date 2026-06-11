@@ -139,9 +139,11 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
             // #    numbered ack-eliciting packet that has been received and there are
             // #    missing packets between that packet and this packet.
             //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
-            // # the more out of order the packets are, the more important it is to send
-            // # an updated ACK frame quickly, to prevent the peer from declaring a packet
-            // # as lost and spuriously retransmitting the frames it contains.
+            // # ACK frames SHOULD always acknowledge the most recently received
+            // # packets, and the more out of order the packets are, the more
+            // # important it is to send an updated ACK frame quickly, to prevent
+            // # the peer from declaring a packet as lost and spuriously
+            // # retransmitting the frames it contains.
             immediate_ack_requested_ =
                 immediate_ack_requested_ || ack_eliciting_out_of_order ||
                 ack_eliciting_creates_gap ||
@@ -162,6 +164,9 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
         if (largest_range->second.largest_packet_number !=
                 std::numeric_limits<std::uint64_t>::max() &&
             packet_number == largest_range->second.largest_packet_number + 1) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.2
+            // # A receiver MAY process multiple available packets before determining
+            // # whether to send an ACK frame in response.
             largest_range->second.largest_packet_number = packet_number;
             note_new_packet_recorded(/*ack_eliciting_out_of_order=*/false,
                                      /*ack_eliciting_creates_gap=*/false);
@@ -216,6 +221,10 @@ void ReceivedPacketHistory::record_received(std::uint64_t packet_number, bool ac
 
 void ReceivedPacketHistory::trim_old_ack_ranges() {
     while (ranges_.size() > kMaxTrackedAckRanges) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
+        // # Receivers MAY also limit ACK
+        // # frame size further to preserve space for other frames or to limit the
+        // # capacity that acknowledgments consume.
         //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
         // # A receiver MUST retain an ACK Range unless it can ensure that it will
         // # not subsequently accept packets with numbers in that range.

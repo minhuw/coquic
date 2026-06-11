@@ -942,7 +942,12 @@ TEST(QuicProtectedCodecTest, DatagramBufferAppendZeroPadsPingOnlyOneRttPacketPla
 
     const auto *padding = std::get_if<coquic::quic::PaddingFrame>(&one_rtt->frames[1]);
     ASSERT_NE(padding, nullptr);
-    EXPECT_EQ(padding->length, 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # To achieve that end, the endpoint SHOULD ensure that all packets it
+    // # sends are at least 22 bytes longer than the minimum connection ID length
+    // # that it requests the peer to include in its packets, adding PADDING
+    // # frames as necessary.
+    EXPECT_EQ(padding->length, 2u);
 }
 
 TEST(QuicProtectedCodecTest, AppendsOneRttPacketFragmentViewIntoExistingDatagramBuffer) {
@@ -2938,9 +2943,10 @@ TEST_P(QuicProtectedCodecOneRttTest, RoundTripsOneRttPacketForCipherSuite) {
     EXPECT_EQ(one_rtt->destination_connection_id, expected_packet.destination_connection_id);
     EXPECT_EQ(one_rtt->packet_number_length, kOneRttPacketNumberLength);
     EXPECT_EQ(one_rtt->packet_number, kOneRttPacketNumber);
-    ASSERT_EQ(one_rtt->frames.size(), 2u);
+    ASSERT_EQ(one_rtt->frames.size(), 3u);
     EXPECT_TRUE(std::holds_alternative<coquic::quic::PingFrame>(one_rtt->frames[0]));
     EXPECT_TRUE(std::holds_alternative<coquic::quic::PingFrame>(one_rtt->frames[1]));
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::PaddingFrame>(one_rtt->frames[2]));
 }
 
 TEST(QuicProtectedCodecTest, RejectsOneRttPacketWhenKeyPhaseDoesNotMatchContext) {
@@ -2988,7 +2994,7 @@ TEST(QuicProtectedCodecTest,
         encoded.value(), make_one_rtt_deserialize_context(
                              coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, 32, false, 0));
     ASSERT_FALSE(decoded.has_value());
-    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::packet_decryption_failed);
+    EXPECT_EQ(decoded.error().code, coquic::quic::CodecErrorCode::invalid_packet_protection_state);
 }
 
 TEST(QuicProtectedCodecTest, RejectsOneRttPacketWithInvalidPacketNumberLength) {

@@ -23,6 +23,8 @@ namespace coquic::quic {
 #define COQUIC_NO_PROFILE
 #endif
 
+inline constexpr std::size_t kMinimumOutOfOrderCryptoBufferSize = 4096;
+
 struct ByteRange {
     std::uint64_t offset = 0;
     SharedBytes bytes;
@@ -262,6 +264,17 @@ class ReliableSendBuffer {
 
 class ReliableReceiveBuffer {
   public:
+    ReliableReceiveBuffer() = default;
+    explicit ReliableReceiveBuffer(std::size_t buffered_byte_limit);
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4
+    // # To avoid excessive buffering at multiple layers, QUIC
+    // # implementations SHOULD provide an interface for the cryptographic
+    // # protocol implementation to communicate its buffering limits.
+    void set_buffered_byte_limit(std::size_t limit);
+    void clear_buffered_byte_limit();
+    std::size_t buffered_byte_count() const;
+
     CodecResult<ContiguousReceiveBytes> push_shared(std::uint64_t offset, const SharedBytes &bytes);
     CodecResult<std::vector<std::byte>> push(std::uint64_t offset, std::vector<std::byte> &&bytes);
     CodecResult<std::vector<std::byte>> push(std::uint64_t offset,
@@ -269,12 +282,16 @@ class ReliableReceiveBuffer {
     CodecResult<bool> try_accept_contiguous(std::uint64_t offset, std::size_t length);
 
   private:
+    std::size_t unbuffered_byte_count(std::uint64_t offset, const SharedBytes &bytes) const;
+    bool can_buffer_range(std::uint64_t offset, const SharedBytes &bytes) const;
     void buffer_range(std::uint64_t offset, const SharedBytes &bytes);
     ContiguousReceiveBytes take_contiguous_buffered_bytes(ContiguousReceiveBytes contiguous);
     std::vector<std::byte> take_contiguous_buffered_bytes();
 
     std::uint64_t next_contiguous_offset_ = 0;
     std::map<std::uint64_t, SharedBytes> buffered_bytes_;
+    std::optional<std::size_t> buffered_byte_limit_;
+    std::size_t buffered_byte_count_ = 0;
 };
 
 class CryptoSendBuffer {
@@ -289,6 +306,8 @@ class CryptoSendBuffer {
 
 class CryptoReceiveBuffer {
   public:
+    CryptoReceiveBuffer();
+
     CodecResult<std::vector<std::byte>> push(std::uint64_t offset,
                                              std::span<const std::byte> bytes);
 

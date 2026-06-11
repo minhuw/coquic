@@ -1113,6 +1113,10 @@ TEST(QuicCoreTest, SelectPtoProbeSkipsPacketsThatCannotBeProbed) {
         ADD_FAILURE() << "PTO probe did not skip non-probeable packets";
     }
     if (!ping_probe.has_ping) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.7
+        // # To avoid a deadlock, a sender SHOULD ensure that other frames are sent
+        // # periodically in addition to PADDING frames to elicit acknowledgments
+        // # from the receiver.
         //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.4
         // # When there is no data to send, the sender SHOULD send
         // # a PING or other ack-eliciting frame in a single packet, rearming the

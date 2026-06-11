@@ -1106,9 +1106,11 @@ TEST(QuicRecoveryTest, AckElicitingGapRequestsImmediateAck) {
     // #    numbered ack-eliciting packet that has been received and there are
     // #    missing packets between that packet and this packet.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.3
-    // # the more out of order the packets are, the more important it is to send
-    // # an updated ACK frame quickly, to prevent the peer from declaring a packet
-    // # as lost and spuriously retransmitting the frames it contains.
+    // # ACK frames SHOULD always acknowledge the most recently received
+    // # packets, and the more out of order the packets are, the more important
+    // # it is to send an updated ACK frame quickly, to prevent the peer from
+    // # declaring a packet as lost and spuriously retransmitting the frames it
+    // # contains.
     EXPECT_TRUE(history.requests_immediate_ack());
 }
 

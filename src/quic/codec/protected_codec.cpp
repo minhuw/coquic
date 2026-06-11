@@ -491,6 +491,15 @@ std::size_t minimum_payload_bytes_for_header_sample(std::uint8_t packet_number_l
                : kHeaderProtectionSampleOffset - packet_number_length;
 }
 
+std::size_t minimum_short_header_payload_bytes(std::uint8_t packet_number_length) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
+    // # To achieve that end, the endpoint SHOULD ensure that all packets it
+    // # sends are at least 22 bytes longer than the minimum connection ID length
+    // # that it requests the peer to include in its packets, adding PADDING
+    // # frames as necessary.
+    return minimum_payload_bytes_for_header_sample(packet_number_length) + 1;
+}
+
 CodecResult<std::size_t> serialized_frame_payload_size(std::span<const Frame> frames) {
     if (frames.empty()) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::empty_packet_payload, 0);
@@ -559,6 +568,15 @@ bool frame_allowed_in_long_header_packet_type(const Frame &frame,
         return !forbidden_in_zero_rtt;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+    // # *  PADDING, PING, and CRYPTO frames MAY appear in any packet number
+    // # space.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+    // # *  CONNECTION_CLOSE frames signaling errors at the QUIC layer (type
+    // # 0x1c) MAY appear in any packet number space.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+    // # *  ACK frames MAY appear in any packet number space but can only
+    // # acknowledge packets that appeared in that packet number space.
     const auto allowed_in_non_zero_rtt =
         std::holds_alternative<PaddingFrame>(frame) | std::holds_alternative<PingFrame>(frame) |
         is_ack_like | std::holds_alternative<CryptoFrame>(frame) |
@@ -600,9 +618,22 @@ bool frame_allowed_in_protected_payload_packet_type(const ReceivedFrame &frame,
                                            std::holds_alternative<NewTokenFrame>(frame) |
                                            std::holds_alternative<PathResponseFrame>(frame) |
                                            std::holds_alternative<RetireConnectionIdFrame>(frame);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+        // # A server MAY treat receipt
+        // # of these frames in 0-RTT packets as a connection error of type
+        // # PROTOCOL_VIOLATION.
         return !forbidden_in_zero_rtt;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+    // # *  PADDING, PING, and CRYPTO frames MAY appear in any packet number
+    // # space.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+    // # *  CONNECTION_CLOSE frames signaling errors at the QUIC layer (type
+    // # 0x1c) MAY appear in any packet number space.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-12.5
+    // # *  ACK frames MAY appear in any packet number space but can only
+    // # acknowledge packets that appeared in that packet number space.
     return std::holds_alternative<PaddingFrame>(frame) | std::holds_alternative<PingFrame>(frame) |
            std::holds_alternative<ReceivedAckFrame>(frame) |
            std::holds_alternative<ReceivedCryptoFrame>(frame) |
@@ -2639,7 +2670,10 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
             }
             payload_size = measured_payload_size.value();
         }
-        auto maximum_packet_size = payload_offset + payload_size + kPacketProtectionTagLength;
+        const auto plaintext_payload_size =
+            std::max(payload_size, minimum_short_header_payload_bytes(packet.packet_number_length));
+        auto maximum_packet_size =
+            payload_offset + plaintext_payload_size + kPacketProtectionTagLength;
         std::span<std::byte> packet_bytes;
         {
             COQUIC_SERIALIZE_PROFILE_TIMER(reserve_timer, reserve_resize_ns);
@@ -2665,7 +2699,7 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
                     .has_value());
         }
 
-        auto payload_bytes = packet_bytes.subspan(payload_offset, payload_size);
+        auto payload_bytes = packet_bytes.subspan(payload_offset, plaintext_payload_size);
         {
             COQUIC_SERIALIZE_PROFILE_TIMER(payload_timer, payload_write_ns);
             auto written =
@@ -2688,17 +2722,16 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
                 return CodecResult<std::size_t>::failure(CodecErrorCode::packet_length_mismatch,
                                                          written.value());
             }
-            auto force_padding_fill = consume_protected_codec_fault(
+            const auto force_padding_fill = consume_protected_codec_fault(
                 test::ProtectedCodecFaultPoint::simple_ack_force_padding_fill);
-            if (force_padding_fill) {
-                const auto padding_offset = payload_size;
-                std::fill(payload_bytes.begin() + static_cast<std::ptrdiff_t>(padding_offset),
+            if (force_padding_fill || payload_size < plaintext_payload_size) {
+                std::fill(payload_bytes.begin() + static_cast<std::ptrdiff_t>(payload_size),
                           payload_bytes.end(), std::byte{0x00});
             }
         }
 
-        auto plaintext_payload =
-            std::span<const std::byte>(packet_bytes).subspan(payload_offset, payload_size);
+        auto plaintext_payload = std::span<const std::byte>(packet_bytes)
+                                     .subspan(payload_offset, plaintext_payload_size);
 
         auto ciphertext =
             CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
@@ -2736,7 +2769,7 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
         }
 
         COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_bytes, final_packet_size);
-        COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_payload_bytes, payload_size);
+        COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_payload_bytes, plaintext_payload_size);
         return CodecResult<std::size_t>::success(final_packet_size);
     }
 
@@ -2757,7 +2790,7 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
             const auto stream_header_bytes = fragment.stream_frame_header_bytes();
             const auto payload_size =
                 ack_payload_size + stream_header_bytes.size() + fragment.bytes.size();
-            if (payload_size == std::max(payload_size, minimum_payload_bytes_for_header_sample(
+            if (payload_size == std::max(payload_size, minimum_short_header_payload_bytes(
                                                            packet.packet_number_length))) {
                 COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(simple_ack_fast_calls, 1);
                 auto maximum_packet_size =
@@ -2903,8 +2936,8 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
         return CodecResult<std::size_t>::failure(CodecErrorCode::empty_packet_payload, 0);
     }
 
-    const auto plaintext_payload_size = std::max(
-        payload_size, minimum_payload_bytes_for_header_sample(packet.packet_number_length));
+    const auto plaintext_payload_size =
+        std::max(payload_size, minimum_short_header_payload_bytes(packet.packet_number_length));
     auto maximum_packet_size = payload_offset + plaintext_payload_size + kPacketProtectionTagLength;
     std::span<std::byte> packet_bytes;
     {
@@ -3247,12 +3280,14 @@ append_protected_one_rtt_stream_fragment_packet_to_datagram(
 
     const auto header_bytes = fragment.stream_frame_header_bytes();
     const auto payload_size = header_bytes.size() + fragment.bytes.size();
-    if (payload_size == 0 ||
-        payload_size < minimum_payload_bytes_for_header_sample(packet_number_length)) {
+    if (payload_size == 0) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::empty_packet_payload, 0);
     }
 
-    const auto maximum_packet_size = payload_offset + payload_size + kPacketProtectionTagLength;
+    const auto plaintext_payload_size =
+        std::max(payload_size, minimum_short_header_payload_bytes(packet_number_length));
+    const auto maximum_packet_size =
+        payload_offset + plaintext_payload_size + kPacketProtectionTagLength;
     std::span<std::byte> packet_bytes;
     {
         COQUIC_SERIALIZE_PROFILE_TIMER(reserve_timer, reserve_resize_ns);
@@ -3276,10 +3311,14 @@ append_protected_one_rtt_stream_fragment_packet_to_datagram(
         }
     }
 
-    auto payload_bytes = packet_bytes.subspan(payload_offset, payload_size);
+    auto payload_bytes = packet_bytes.subspan(payload_offset, plaintext_payload_size);
     {
         COQUIC_SERIALIZE_PROFILE_TIMER(payload_timer, payload_write_ns);
         std::memcpy(payload_bytes.data(), header_bytes.data(), header_bytes.size());
+        if (payload_size < plaintext_payload_size) {
+            std::fill(payload_bytes.begin() + static_cast<std::ptrdiff_t>(payload_size),
+                      payload_bytes.end(), std::byte{0x00});
+        }
     }
     const std::array plaintext_chunks{
         PlaintextChunk{
@@ -3287,6 +3326,10 @@ append_protected_one_rtt_stream_fragment_packet_to_datagram(
         },
         PlaintextChunk{
             .bytes = fragment.bytes.span(),
+        },
+        PlaintextChunk{
+            .bytes = std::span<const std::byte>(payload_bytes)
+                         .subspan(payload_size, plaintext_payload_size - payload_size),
         },
     };
 

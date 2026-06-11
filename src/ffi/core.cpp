@@ -33,6 +33,9 @@ using TimePoint = coquic::core::TimePoint;
 constexpr std::size_t kEndpointConfigSizeV1 =
     offsetof(coquic_endpoint_config_t, allow_peer_address_change) +
     sizeof(coquic_endpoint_config_t::allow_peer_address_change);
+constexpr std::size_t kEndpointConfigSizeV2 =
+    offsetof(coquic_endpoint_config_t, max_server_connections) +
+    sizeof(coquic_endpoint_config_t::max_server_connections);
 constexpr std::size_t kClientConnectionConfigSizeV1 =
     offsetof(coquic_client_connection_config_t, zero_rtt) +
     sizeof(coquic_client_connection_config_t::zero_rtt);
@@ -382,6 +385,8 @@ coquic::core::EndpointConfig to_cpp(const coquic_endpoint_config_t &config) {
         .supported_versions = std::move(supported_versions),
         .verify_peer = config.verify_peer != 0,
         .retry_enabled = config.retry_enabled != 0,
+        .max_server_connections =
+            config.size >= kEndpointConfigSizeV2 ? config.max_server_connections : 0,
         .application_protocol =
             to_string(config.application_protocol, config.application_protocol_length),
         .identity = to_cpp(config.identity),
@@ -808,6 +813,7 @@ void coquic_endpoint_config_init(coquic_endpoint_config_t *config) {
         .emit_shared_receive_stream_data = 0,
         .enable_packet_inspection = 0,
         .allow_peer_address_change = 1,
+        .max_server_connections = 0,
     };
 }
 

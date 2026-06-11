@@ -50,6 +50,46 @@ TEST(QuicCoreEndpointTest, ClientOpenCreatesStableHandleAndTagsInitialSendRoute)
     EXPECT_EQ(core.connection_count(), 1u);
 }
 
+TEST(QuicCoreEndpointTest, ClientOpenRejectsConcurrentZeroLengthConnectionIds) {
+    coquic::quic::QuicCore core(make_client_endpoint_config());
+
+    auto first_open = make_client_open_config(1);
+    first_open.source_connection_id = {};
+    const auto first = core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = std::move(first_open),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0));
+    EXPECT_FALSE(first.local_error.has_value());
+    EXPECT_EQ(core.connection_count(), 1u);
+
+    auto second_open = make_client_open_config(2);
+    second_open.source_connection_id = {};
+    const auto second = core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = std::move(second_open),
+            .initial_route_handle = 18,
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(second.local_error.has_value());
+    const auto &second_error = optional_ref_or_terminate(second.local_error);
+    EXPECT_EQ(second_error.connection, std::nullopt);
+    EXPECT_EQ(second_error.code, coquic::quic::QuicCoreLocalErrorCode::unsupported_operation);
+    EXPECT_TRUE(send_effects_from(second).empty());
+    EXPECT_EQ(core.connection_count(), 1u);
+
+    const auto non_zero = core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(3),
+            .initial_route_handle = 19,
+        },
+        coquic::quic::test::test_time(2));
+    EXPECT_FALSE(non_zero.local_error.has_value());
+    EXPECT_EQ(core.connection_count(), 2u);
+}
+
 TEST(QuicCoreEndpointTest, ClientOpenSendEffectDoesNotExposePublicPathId) {
     coquic::quic::QuicCore core(make_client_endpoint_config());
 

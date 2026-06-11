@@ -1138,6 +1138,7 @@ TEST(QuicCryptoStreamTest, ReceiveBufferReleasesReorderedApplicationBytesContigu
 
 TEST(QuicCryptoStreamTest, ReceiveBufferSupportsFourKilobytesOfOutOfOrderCrypto) {
     ReliableReceiveBuffer buffer;
+    buffer.set_buffered_byte_limit(coquic::quic::kMinimumOutOfOrderCryptoBufferSize);
     const auto tail = std::vector<std::byte>(4096, std::byte{0x5a});
 
     auto buffered = buffer.push(1, tail);
@@ -1152,6 +1153,29 @@ TEST(QuicCryptoStreamTest, ReceiveBufferSupportsFourKilobytesOfOutOfOrderCrypto)
     // # Implementations MUST support buffering at least 4096 bytes of data
     // # received in out-of-order CRYPTO frames.
     EXPECT_EQ(std::vector<std::byte>(released.value().begin() + 1, released.value().end()), tail);
+}
+
+TEST(QuicCryptoStreamTest, ReceiveBufferRejectsOutOfOrderCryptoBeyondConfiguredLimit) {
+    ReliableReceiveBuffer buffer;
+    buffer.set_buffered_byte_limit(coquic::quic::kMinimumOutOfOrderCryptoBufferSize);
+    const auto tail = std::vector<std::byte>(4096, std::byte{0x5a});
+
+    ASSERT_TRUE(buffer.push(1, tail).has_value());
+    EXPECT_EQ(buffer.buffered_byte_count(), tail.size());
+
+    auto duplicate = buffer.push(1, tail);
+    ASSERT_TRUE(duplicate.has_value());
+    EXPECT_TRUE(duplicate.value().empty());
+    EXPECT_EQ(buffer.buffered_byte_count(), tail.size());
+
+    auto overflow = buffer.push(4097, std::vector<std::byte>{std::byte{0x5b}});
+
+    ASSERT_FALSE(overflow.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-7.5
+    // # If an endpoint does not expand its buffer, it MUST close the
+    // # connection with a CRYPTO_BUFFER_EXCEEDED error code.
+    EXPECT_EQ(overflow.error().code, coquic::quic::CodecErrorCode::crypto_buffer_exceeded);
+    EXPECT_EQ(buffer.buffered_byte_count(), tail.size());
 }
 
 TEST(QuicCryptoStreamTest, ReceiveBufferReturnsOnlyUndeliveredTailOfOverlappingWrite) {

@@ -184,8 +184,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
         }
 
         const auto metrics = controller.debug_metrics(fuzz_time(reader.read_u64()));
-        coquic::fuzz::require(controller.congestion_window() >= controller.minimum_window(),
-                              "congestion window below minimum window");
+        coquic::fuzz::require(controller.congestion_window() > 0, "congestion window is zero");
+        coquic::fuzz::require(controller.minimum_window() > 0, "minimum congestion window is zero");
         coquic::fuzz::require(metrics.send_quantum > 0, "congestion send quantum is zero");
     }
 

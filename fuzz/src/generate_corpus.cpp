@@ -18,6 +18,7 @@
 #include "src/quic/codec/varint.h"
 #include "src/quic/transport/transport_parameters.h"
 #include "src/quic/version.h"
+#include "fuzz/src/stream_state_bytecode.h"
 
 namespace {
 
@@ -633,6 +634,9 @@ void write_stream_state_seed(const std::filesystem::path &root, const std::strin
 void write_stream_state_prefix(FuzzInputBuilder &seed, bool server, std::uint64_t stream_id,
                                std::uint64_t initial_peer_limit,
                                std::uint64_t initial_receive_limit) {
+    for (const auto byte : coquic::fuzz::stream_state::kMagic) {
+        seed.write_u8(byte);
+    }
     seed.write_u8(server ? 1u : 0u);
     seed.write_u64(stream_id);
     seed.write_u64(initial_peer_limit);
@@ -641,23 +645,25 @@ void write_stream_state_prefix(FuzzInputBuilder &seed, bool server, std::uint64_
 
 void stream_state_append_payload(FuzzInputBuilder &seed, std::span<const std::byte> payload,
                                  bool fin) {
-    seed.write_u8(0);
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::local_send));
     seed.write_sized_bytes(payload);
     seed.write_u8(fin ? 1u : 0u);
 }
 
 void stream_state_peer_max_stream_data(FuzzInputBuilder &seed, std::uint64_t maximum) {
-    seed.write_u8(1);
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::peer_max_stream_data));
     seed.write_u64(maximum);
 }
 
 void stream_state_data_blocked(FuzzInputBuilder &seed, bool acknowledge) {
-    seed.write_u8(2);
+    seed.write_u8(
+        static_cast<unsigned>(coquic::fuzz::stream_state::Op::stream_data_blocked_round_trip));
     seed.write_u8(acknowledge ? 1u : 0u);
 }
 
 void stream_state_max_stream_data(FuzzInputBuilder &seed, std::uint64_t maximum, bool acknowledge) {
-    seed.write_u8(3);
+    seed.write_u8(
+        static_cast<unsigned>(coquic::fuzz::stream_state::Op::max_stream_data_round_trip));
     seed.write_u64(maximum);
     seed.write_u8(acknowledge ? 1u : 0u);
 }
@@ -665,7 +671,8 @@ void stream_state_max_stream_data(FuzzInputBuilder &seed, std::uint64_t maximum,
 void stream_state_take_fragments(FuzzInputBuilder &seed, std::size_t packet_bytes,
                                  std::uint64_t new_bytes, bool prefer_fresh,
                                  std::initializer_list<unsigned> fragment_actions) {
-    seed.write_u8(4);
+    seed.write_u8(
+        static_cast<unsigned>(coquic::fuzz::stream_state::Op::take_send_fragments_with_actions));
     seed.write_size(packet_bytes == 0 ? 0 : packet_bytes - 1u);
     seed.write_u64(new_bytes);
     seed.write_u8(prefer_fresh ? 1u : 0u);
@@ -676,7 +683,7 @@ void stream_state_take_fragments(FuzzInputBuilder &seed, std::size_t packet_byte
 
 void stream_state_receive_range(FuzzInputBuilder &seed, std::uint64_t offset, std::size_t length,
                                 bool fin) {
-    seed.write_u8(5);
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::receive_range));
     seed.write_u64(offset);
     seed.write_size(length);
     seed.write_u8(fin ? 1u : 0u);
@@ -684,42 +691,43 @@ void stream_state_receive_range(FuzzInputBuilder &seed, std::uint64_t offset, st
 
 void stream_state_peer_reset(FuzzInputBuilder &seed, std::uint64_t application_error_code,
                              std::uint64_t final_size) {
-    seed.write_u8(6);
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::peer_reset));
     seed.write_u64(application_error_code);
     seed.write_u64(final_size);
 }
 
 void stream_state_peer_stop_sending(FuzzInputBuilder &seed, std::uint64_t error_code) {
-    seed.write_u8(7);
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::peer_stop_sending));
     seed.write_u64(error_code);
 }
 
 void stream_state_local_reset(FuzzInputBuilder &seed, std::uint64_t error_code, bool acknowledge) {
-    seed.write_u8(8);
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::local_reset_round_trip));
     seed.write_u64(error_code);
     seed.write_u8(acknowledge ? 1u : 0u);
 }
 
 void stream_state_local_stop_sending(FuzzInputBuilder &seed, std::uint64_t error_code,
                                      bool acknowledge) {
-    seed.write_u8(9);
+    seed.write_u8(
+        static_cast<unsigned>(coquic::fuzz::stream_state::Op::local_stop_sending_round_trip));
     seed.write_u64(error_code);
     seed.write_u8(acknowledge ? 1u : 0u);
 }
 
 void stream_state_peer_final_size(FuzzInputBuilder &seed, std::uint64_t final_size) {
-    seed.write_u8(10);
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::peer_final_size));
     seed.write_u64(final_size);
 }
 
 void stream_state_classify(FuzzInputBuilder &seed, std::uint64_t stream_id) {
-    seed.write_u8(11);
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::classify_stream));
     seed.write_u64(stream_id);
 }
 
 void stream_state_open_limits(FuzzInputBuilder &seed, std::uint64_t bidi, std::uint64_t uni,
                               std::uint64_t stream_id) {
-    seed.write_u8(12);
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::local_open_limits));
     seed.write_u64(bidi);
     seed.write_u64(uni);
     seed.write_u64(stream_id);
@@ -727,14 +735,14 @@ void stream_state_open_limits(FuzzInputBuilder &seed, std::uint64_t bidi, std::u
 
 void stream_state_peer_open_limits(FuzzInputBuilder &seed, std::uint64_t stream_id,
                                    std::uint64_t bidi, std::uint64_t uni) {
-    seed.write_u8(13);
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::peer_open_limits));
     seed.write_u64(stream_id);
     seed.write_u64(bidi);
     seed.write_u64(uni);
 }
 
 void stream_state_snapshot(FuzzInputBuilder &seed, bool prefer_fresh) {
-    seed.write_u8(14);
+    seed.write_u8(static_cast<unsigned>(coquic::fuzz::stream_state::Op::snapshot));
     seed.write_u8(prefer_fresh ? 1u : 0u);
 }
 
@@ -885,12 +893,13 @@ void generate_stream_state_seeds(const std::filesystem::path &root) {
 
 void generate_state_machine_seeds(const std::filesystem::path &root) {
     generate_stream_state_seeds(root);
-    write_seed(root, "fuzz_stream_state", "generated_stream_send_fin",
-               bytes({
-                   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                   0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x05, 0x68,
-                   0x65, 0x6c, 0x6c, 0x6f, 0x04, 0x00, 0x00, 0x00, 0x40,
-               }));
+    {
+        FuzzInputBuilder seed;
+        write_stream_state_prefix(seed, false, 0, 32, 32);
+        stream_state_append_payload(seed, bytes({0x68, 0x65, 0x6c, 0x6c, 0x6f}), true);
+        stream_state_take_fragments(seed, 64, 64, true, {0});
+        write_stream_state_seed(root, "generated_stream_send_fin", std::move(seed));
+    }
     write_seed(root, "fuzz_recovery_ack", "generated_ack_loss",
                bytes({
                    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x04, 0xb0,

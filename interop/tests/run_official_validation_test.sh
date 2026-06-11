@@ -21,6 +21,11 @@ eval "$(
     sed '$d'
 )"
 eval "$(
+  sed -n '/^failed_retryable_official_testcases()/,/^logged_official_testcases()/p' \
+    interop/run-official.sh |
+    sed '$d'
+)"
+eval "$(
   sed -n '/^apply_official_result_compatibility_adjustments()/,/^mark_official_testcases_recovered()/p' \
     interop/run-official.sh |
     sed '$d'
@@ -159,6 +164,33 @@ if validate_official_results \
   "${missing_results}" coquic quic-go handshake,transfer
 then
   echo "expected missing requested testcase to fail validation" >&2
+  exit 1
+fi
+
+retryable_results="${tmpdir}/retryable-results.json"
+cat >"${retryable_results}" <<'JSON'
+{
+  "servers": ["xquic"],
+  "clients": ["coquic"],
+  "results": [[
+    {"name": "http3", "result": "failed"},
+    {"name": "retry", "result": "peer_broken"},
+    {"name": "handshake", "result": "failed"}
+  ]],
+  "measurements": [[
+    {"name": "crosstraffic", "result": "failed"}
+  ]]
+}
+JSON
+
+mapfile -t retryable_tests < <(
+  failed_retryable_official_testcases \
+    "${retryable_results}" \
+    http3,retry,handshake,crosstraffic \
+    amplificationlimit,handshakeloss,handshakecorruption,rebind-addr,connectionmigration,http3
+)
+if [ "${#retryable_tests[@]}" -ne 1 ] || [ "${retryable_tests[0]}" != "http3" ]; then
+  echo "expected only failed retryable http3 testcase to be selected" >&2
   exit 1
 fi
 

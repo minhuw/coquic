@@ -40,6 +40,8 @@ readonly interop_runner_output_tail_lines="${INTEROP_RUNNER_OUTPUT_TAIL_LINES:-2
 readonly interop_save_files="${INTEROP_SAVE_FILES:-0}"
 readonly interop_retry_failed_testcases="${INTEROP_RETRY_FAILED_TESTCASES:-0}"
 readonly interop_retry_testcases="${INTEROP_RETRY_TESTCASES:-amplificationlimit,handshakeloss,handshakecorruption,rebind-addr,connectionmigration}"
+readonly interop_nix_build_attempts="${INTEROP_NIX_BUILD_ATTEMPTS:-3}"
+readonly interop_nix_build_retry_delay_seconds="${INTEROP_NIX_BUILD_RETRY_DELAY_SECONDS:-10}"
 log_root_input="${INTEROP_LOG_ROOT:-${repo_root}/.interop-logs/official}"
 if [[ "${log_root_input}" != /* ]]; then
   log_root_input="${repo_root}/${log_root_input}"
@@ -72,6 +74,36 @@ show_runner_output_tail() {
   echo "Official runner output saved to ${runner_output_log}"
   echo "Showing last ${interop_runner_output_tail_lines} lines from ${runner_output_log}"
   tail -n "${interop_runner_output_tail_lines}" "${runner_output_log}" || true
+}
+
+build_coquic_image_tar() {
+  if [[ ! "${interop_nix_build_attempts}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "INTEROP_NIX_BUILD_ATTEMPTS must be a positive integer" >&2
+    return 2
+  fi
+  if [[ ! "${interop_nix_build_retry_delay_seconds}" =~ ^[0-9]+$ ]]; then
+    echo "INTEROP_NIX_BUILD_RETRY_DELAY_SECONDS must be a non-negative integer" >&2
+    return 2
+  fi
+
+  local attempt=1
+
+  while [ "${attempt}" -le "${interop_nix_build_attempts}" ]; do
+    if nix --option eval-cache false build --print-out-paths ".#${coquic_package}"; then
+      return 0
+    fi
+
+    if [ "${attempt}" -eq "${interop_nix_build_attempts}" ]; then
+      echo "Failed to build .#${coquic_package} after ${attempt} attempt(s)" >&2
+      return 1
+    fi
+
+    echo \
+      "nix build .#${coquic_package} failed on attempt ${attempt}/${interop_nix_build_attempts}; retrying in ${interop_nix_build_retry_delay_seconds}s" \
+      >&2
+    sleep "${interop_nix_build_retry_delay_seconds}"
+    attempt=$((attempt + 1))
+  done
 }
 
 validate_official_results() {
@@ -508,7 +540,7 @@ source "${runner_dir}/.venv/bin/activate"
 python3 -m pip install --quiet --upgrade pip
 python3 -m pip install --quiet -r "${runner_dir}/requirements.txt"
 
-coquic_image_tar="$(nix --option eval-cache false build --print-out-paths ".#${coquic_package}")"
+coquic_image_tar="$(build_coquic_image_tar)"
 docker load -i "${coquic_image_tar}" >/dev/null
 
 ensure_docker_image() {

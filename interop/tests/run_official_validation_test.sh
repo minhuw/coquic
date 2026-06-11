@@ -11,6 +11,11 @@ cleanup() {
 trap cleanup EXIT
 
 eval "$(
+  sed -n '/^build_coquic_image_tar()/,/^validate_official_results()/p' \
+    interop/run-official.sh |
+    sed '$d'
+)"
+eval "$(
   sed -n '/^validate_official_results()/,/^failed_retryable_official_testcases()/p' \
     interop/run-official.sh |
     sed '$d'
@@ -37,6 +42,64 @@ cat >"${complete_results}" <<'JSON'
   ]]
 }
 JSON
+
+test_build_coquic_image_tar_retries() {
+  local fake_bin="${tmpdir}/fake-bin"
+  mkdir -p "${fake_bin}"
+
+  cat >"${fake_bin}/nix" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+count_file="${FAKE_NIX_COUNT_FILE:?}"
+count=0
+if [ -f "${count_file}" ]; then
+  count="$(cat "${count_file}")"
+fi
+count=$((count + 1))
+printf '%s\n' "${count}" >"${count_file}"
+
+if [ "${count}" -lt 3 ]; then
+  echo "fake nix failure ${count}" >&2
+  exit 1
+fi
+
+echo "/nix/store/fake-coquic-interop.tar.gz"
+SH
+  chmod +x "${fake_bin}/nix"
+
+  cat >"${fake_bin}/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "${fake_bin}/sleep"
+
+  local stdout_log="${tmpdir}/build-stdout.txt"
+  local stderr_log="${tmpdir}/build-stderr.txt"
+  local count_file="${tmpdir}/fake-nix-count.txt"
+
+  PATH="${fake_bin}:${PATH}" \
+    FAKE_NIX_COUNT_FILE="${count_file}" \
+    interop_nix_build_attempts=3 \
+    interop_nix_build_retry_delay_seconds=0 \
+    coquic_package=interop-image-test \
+    build_coquic_image_tar >"${stdout_log}" 2>"${stderr_log}"
+
+  if [ "$(cat "${stdout_log}")" != "/nix/store/fake-coquic-interop.tar.gz" ]; then
+    echo "expected build helper stdout to contain only the image tar path" >&2
+    exit 1
+  fi
+  if [ "$(cat "${count_file}")" != "3" ]; then
+    echo "expected build helper to retry until the third attempt" >&2
+    exit 1
+  fi
+  if [ "$(rg -c 'retrying in 0s' "${stderr_log}")" != "2" ]; then
+    echo "expected build helper to log two retry messages on stderr" >&2
+    exit 1
+  fi
+}
+
+test_build_coquic_image_tar_retries
 
 validate_official_results \
   "${complete_results}" coquic quic-go handshake,transfer,retry,ipv6,goodput

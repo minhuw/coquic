@@ -291,6 +291,61 @@ TEST(QuicCoreTest, AckOnlyRebindResponseIncludesPathChallengeOnFirstNewPathPacke
     EXPECT_TRUE(saw_path_challenge);
 }
 
+TEST(QuicCoreTest, ReceivedAckOnlyRebindStartsPathValidationOnNewPath) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.note_inbound_application_packet_for_path(3, 60);
+    connection.congestion_controller_.congestion_window_ = std::size_t{1024} * 1024u;
+
+    ASSERT_TRUE(connection
+                    .queue_stream_send(
+                        0, coquic::quic::test::bytes_from_string(std::string(4096, 'm')), false)
+                    .has_value());
+
+    const auto path3_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(path3_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 3u);
+    ASSERT_NE(tracked_packet_count(connection.application_space_), 0u);
+    const auto largest_sent_packet =
+        last_tracked_packet(connection.application_space_).packet_number;
+
+    ASSERT_TRUE(connection
+                    .process_inbound_received_application_ack_only(
+                        /*packet_number=*/61, /*spin_bit=*/false,
+                        coquic::quic::ReceivedAckFrame{
+                            .largest_acknowledged = largest_sent_packet,
+                            .first_ack_range = 0,
+                        },
+                        coquic::quic::test::test_time(2), coquic::quic::QuicEcnCodepoint::not_ect,
+                        /*path_id=*/7)
+                    .has_value());
+    connection.ensure_path_state(7).anti_amplification_received_bytes = 4000;
+
+    ASSERT_EQ(connection.current_send_path_id_, 7u);
+    ASSERT_TRUE(connection.paths_.contains(7));
+    EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+    EXPECT_TRUE(connection.paths_.at(7).challenge_pending);
+
+    auto migrated_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+    ASSERT_FALSE(migrated_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 7u);
+
+    auto packets = decode_sender_datagram(connection, migrated_datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(packet, nullptr);
+
+    const bool saw_path_challenge = std::ranges::any_of(packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+    });
+
+    EXPECT_TRUE(saw_path_challenge);
+}
+
 TEST(QuicCoreTest, AckOnlyRebindCarriesQueuedStreamDataUnderAmplificationLimit) {
     auto connection = make_connected_server_connection();
     connection.last_validated_path_id_ = 3;

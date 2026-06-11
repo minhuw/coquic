@@ -306,6 +306,9 @@ std::vector<Http3Setting> settings_from_snapshot(const Http3SettingsSnapshot &se
             .value = 1,
         });
     }
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.1
+    // # Endpoints SHOULD include at least one such setting in their
+    // # SETTINGS frame.
     values.push_back(Http3Setting{
         .id = kHttp3SettingsReservedGrease,
         .value = 0,
@@ -443,6 +446,11 @@ Http3EndpointUpdate Http3Connection::on_core_result(const quic::QuicCoreResult &
             if (zero_rtt->status == quic::QuicZeroRttStatus::accepted) {
                 state_.zero_rtt_accepted = true;
                 if (remote_settings_frame_.has_value() && remembered_peer_settings_.has_value() &&
+                    //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2
+                    // # If a
+                    // # server accepts 0-RTT but then sends settings that are not compatible
+                    // # with the previously specified settings, this MUST be treated as a
+                    // # connection error of type H3_SETTINGS_ERROR.
                     !validate_zero_rtt_settings_compatibility(*remote_settings_frame_,
                                                               *remembered_peer_settings_)) {
                     queue_connection_close(Http3ErrorCode::settings_error,
@@ -1682,6 +1690,10 @@ void Http3Connection::queue_startup_streams() {
     // # After the QUIC connection is established, a SETTINGS frame MUST be
     // # sent by each endpoint as the initial frame of their respective HTTP
     // # control stream.
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.1
+    // # Each side MUST initiate a single control stream at the beginning of
+    // # the connection and send its SETTINGS frame as the first frame on this
+    // # stream.
     const auto control_stream =
         serialize_http3_control_stream(settings_from_snapshot(config_.local_settings));
     if (!control_stream.has_value()) {
@@ -1845,6 +1857,13 @@ void Http3Connection::handle_receive_datagram_data(
 }
 
 void Http3Connection::handle_peer_reset_stream(const quic::QuicCorePeerResetStream &reset) {
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.1
+    // # If either control
+    // # stream is closed at any point, this MUST be treated as a connection
+    // # error of type H3_CLOSED_CRITICAL_STREAM.
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+    // # Closure of either unidirectional stream type MUST be treated as a
+    // # connection error of type H3_CLOSED_CRITICAL_STREAM.
     if (is_remote_critical_stream(reset.stream_id)) {
         queue_connection_close(Http3ErrorCode::closed_critical_stream,
                                "peer reset critical stream");
@@ -1901,6 +1920,13 @@ void Http3Connection::handle_peer_reset_stream(const quic::QuicCorePeerResetStre
 }
 
 void Http3Connection::handle_peer_stop_sending(const quic::QuicCorePeerStopSending &stop) {
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.1
+    // # The
+    // # sender MUST NOT close the control stream, and the receiver MUST NOT
+    // # request that the sender close the control stream.
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+    // # The sender MUST NOT close either of these streams, and the receiver
+    // # MUST NOT request that the sender close either of these streams.
     if (is_local_critical_stream(stop.stream_id)) {
         queue_connection_close(Http3ErrorCode::closed_critical_stream,
                                "peer requested stop sending on critical stream");
@@ -2014,6 +2040,13 @@ void Http3Connection::handle_peer_uni_stream_data(std::uint64_t stream_id,
         return;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.1
+    // # If either control
+    // # stream is closed at any point, this MUST be treated as a connection
+    // # error of type H3_CLOSED_CRITICAL_STREAM.
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+    // # Closure of either unidirectional stream type MUST be treated as a
+    // # connection error of type H3_CLOSED_CRITICAL_STREAM.
     queue_connection_close(Http3ErrorCode::closed_critical_stream, "peer closed critical stream");
 }
 
@@ -2022,6 +2055,10 @@ void Http3Connection::register_peer_uni_stream(std::uint64_t stream_id, std::uin
     auto &stream = peer_uni_streams_.at(stream_id);
 
     if (stream_type == static_cast<std::uint64_t>(Http3UniStreamType::control)) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.1
+        // # Only one control stream per peer is permitted;
+        // # receipt of a second stream claiming to be a control stream MUST be
+        // # treated as a connection error of type H3_STREAM_CREATION_ERROR.
         if (state_.remote_control_stream_id.has_value()) {
             queue_connection_close(Http3ErrorCode::stream_creation_error,
                                    "duplicate peer control stream");
@@ -2363,6 +2400,12 @@ void Http3Connection::handle_request_frame(std::uint64_t stream_id, const Http3F
     }
 
     if (std::holds_alternative<Http3PushPromiseFrame>(frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.5
+        // # A client MUST NOT send a PUSH_PROMISE frame.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.5
+        // # A server MUST treat the
+        // # receipt of a PUSH_PROMISE frame as a connection error of type
+        // # H3_FRAME_UNEXPECTED.
         queue_connection_close(Http3ErrorCode::frame_unexpected, "client sent push promise frame");
     }
 }
@@ -2379,6 +2422,10 @@ void Http3Connection::handle_response_frame(std::uint64_t stream_id, const Http3
     }
 
     if (const auto *promise = std::get_if<Http3PushPromiseFrame>(&frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.5
+        // # A client MUST treat
+        // # receipt of a PUSH_PROMISE frame that contains a larger push ID than
+        // # the client has advertised as a connection error of H3_ID_ERROR.
         if (!state_.local_max_push_id.has_value() || promise->push_id > *state_.local_max_push_id) {
             queue_connection_close(Http3ErrorCode::id_error,
                                    "push promise references unavailable push id");
@@ -2439,6 +2486,10 @@ void Http3Connection::handle_push_stream_frame(std::uint64_t stream_id, std::uin
     }
 
     if (std::holds_alternative<Http3PushPromiseFrame>(frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+        // # PUSH_PROMISE frames are not permitted on push streams;
+        // # a pushed response that includes PUSH_PROMISE frames MUST be treated
+        // # as a connection error of type H3_FRAME_UNEXPECTED.
         queue_connection_close(Http3ErrorCode::frame_unexpected,
                                "push promise is not permitted on push stream");
     }
@@ -2498,6 +2549,9 @@ void Http3Connection::handle_request_data_frame(std::uint64_t stream_id,
     }
 
     if (!request->second.initial_headers_received) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+        // # Receipt of an invalid sequence of frames MUST be treated as a
+        // # connection error of type H3_FRAME_UNEXPECTED.
         queue_connection_close(Http3ErrorCode::frame_unexpected,
                                "data frame before request headers is not permitted");
         return;
@@ -2512,6 +2566,9 @@ void Http3Connection::handle_request_data_frame(std::uint64_t stream_id,
         return;
     }
     if (request->second.trailing_headers_received) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+        // # Receipt of an invalid sequence of frames MUST be treated as a
+        // # connection error of type H3_FRAME_UNEXPECTED.
         queue_connection_close(Http3ErrorCode::frame_unexpected,
                                "data frame after trailing headers is not permitted");
         return;
@@ -2639,6 +2696,9 @@ void Http3Connection::handle_response_data_frame(std::uint64_t stream_id,
     }
 
     if (!request->second.final_response_received) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+        // # Receipt of an invalid sequence of frames MUST be treated as a
+        // # connection error of type H3_FRAME_UNEXPECTED.
         queue_connection_close(Http3ErrorCode::frame_unexpected,
                                "data frame before response headers is not permitted");
         return;
@@ -2663,6 +2723,9 @@ void Http3Connection::handle_response_data_frame(std::uint64_t stream_id,
         return;
     }
     if (request->second.response_trailers_received) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+        // # Receipt of an invalid sequence of frames MUST be treated as a
+        // # connection error of type H3_FRAME_UNEXPECTED.
         queue_connection_close(Http3ErrorCode::frame_unexpected,
                                "data frame after response trailers is not permitted");
         return;
@@ -2888,6 +2951,11 @@ void Http3Connection::apply_push_field_section(std::uint64_t stream_id, std::uin
             const auto existing_fields =
                 request_fields_from_head(push->second.promised_head.value());
             const auto new_fields = request_fields_from_head(head.value());
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.5
+            // # If a client
+            // # receives a push ID that has already been promised and detects a
+            // # mismatch, it MUST respond with a connection error of type
+            // # H3_GENERAL_PROTOCOL_ERROR.
             if (!headers_equal(existing_fields, new_fields)) {
                 queue_connection_close(Http3ErrorCode::general_protocol_error,
                                        "duplicate push promise headers differ");
@@ -3111,6 +3179,10 @@ void Http3Connection::finalize_push_stream(std::uint64_t stream_id, std::uint64_
 void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3Frame &frame) {
     if (!state_.remote_settings_received) {
         const auto *settings = std::get_if<Http3SettingsFrame>(&frame);
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-6.2.1
+        // # If the first frame of the control stream is any other frame
+        // # type, this MUST be treated as a connection error of type
+        // # H3_MISSING_SETTINGS.
         if (settings == nullptr) {
             queue_connection_close(Http3ErrorCode::missing_settings,
                                    "peer control stream did not start with settings");
@@ -3124,6 +3196,11 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
         }
 
         if (state_.zero_rtt_accepted && remembered_peer_settings_.has_value() &&
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.2
+            // # If a
+            // # server accepts 0-RTT but then sends settings that are not compatible
+            // # with the previously specified settings, this MUST be treated as a
+            // # connection error of type H3_SETTINGS_ERROR.
             !validate_zero_rtt_settings_compatibility(*settings, *remembered_peer_settings_)) {
             queue_connection_close(Http3ErrorCode::settings_error,
                                    "zero-rtt settings are incompatible");
@@ -3141,6 +3218,10 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
     // # stream, the endpoint MUST respond with a connection error of type
     // # H3_FRAME_UNEXPECTED.
     if (std::holds_alternative<Http3SettingsFrame>(frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4
+        // # If an endpoint receives a second SETTINGS
+        // # frame on the control stream, the endpoint MUST respond with a
+        // # connection error of type H3_FRAME_UNEXPECTED.
         queue_connection_close(Http3ErrorCode::frame_unexpected,
                                "duplicate settings frame on control stream");
         return;
@@ -3159,6 +3240,9 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
             return;
         }
         if (state_.goaway_id.has_value() && goaway->id > *state_.goaway_id) {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-5.2
+            // # Receiving a GOAWAY containing a larger identifier than previously
+            // # received MUST be treated as a connection error of type H3_ID_ERROR.
             queue_connection_close(Http3ErrorCode::id_error, "peer goaway identifier increased");
             return;
         }
@@ -3168,6 +3252,11 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
     if (const auto *max_push_id = std::get_if<Http3MaxPushIdFrame>(&frame)) {
         if (state_.peer_max_push_id.has_value() &&
             max_push_id->push_id < *state_.peer_max_push_id) {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.7
+            // # A MAX_PUSH_ID frame cannot reduce the maximum push
+            // # ID; receipt of a MAX_PUSH_ID frame that contains a smaller value than
+            // # previously received MUST be treated as a connection error of type
+            // # H3_ID_ERROR.
             queue_connection_close(Http3ErrorCode::id_error, "peer max push id decreased");
             return;
         }
@@ -3176,6 +3265,11 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
 
     if (const auto *cancel = std::get_if<Http3CancelPushFrame>(&frame)) {
         if (config_.role == Http3ConnectionRole::client) {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.3
+            // # If a CANCEL_PUSH frame is received that
+            // # references a push ID greater than currently allowed on the
+            // # connection, this MUST be treated as a connection error of type
+            // # H3_ID_ERROR.
             if (!state_.local_max_push_id.has_value() ||
                 cancel->push_id > *state_.local_max_push_id) {
                 queue_connection_close(Http3ErrorCode::id_error,
@@ -3189,12 +3283,21 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
             return;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.3
+        // # If a CANCEL_PUSH frame is received that
+        // # references a push ID greater than currently allowed on the
+        // # connection, this MUST be treated as a connection error of type
+        // # H3_ID_ERROR.
         if (!state_.peer_max_push_id.has_value() || cancel->push_id > *state_.peer_max_push_id) {
             queue_connection_close(Http3ErrorCode::id_error,
                                    "cancel push references unavailable push id");
             return;
         }
         auto push_it = local_pushes_.find(cancel->push_id);
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.3
+        // # If a server receives a CANCEL_PUSH frame for a push
+        // # ID that has not yet been mentioned by a PUSH_PROMISE frame, this MUST
+        // # be treated as a connection error of type H3_ID_ERROR.
         if (push_it == local_pushes_.end()) {
             queue_connection_close(Http3ErrorCode::id_error,
                                    "cancel push references unpromised push id");

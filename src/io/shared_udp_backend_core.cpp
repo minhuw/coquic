@@ -13,6 +13,7 @@
 #include <bit>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -67,6 +68,11 @@ translate_non_receive_wait_event(const QuicIoEngineEvent &event) {
         return std::nullopt;
     }
     return std::nullopt;
+}
+
+COQUIC_NO_PROFILE bool io_runtime_trace_enabled() {
+    const char *value = std::getenv("COQUIC_RUNTIME_TRACE");
+    return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
 }
 
 } // namespace
@@ -596,6 +602,14 @@ SharedUdpBackendCore::wait(std::optional<QuicCoreTimePoint> next_wakeup) {
     auto completion = std::move(*event->rx);
     const auto handle = internal::remember_route_handle(impl_->route_state, completion.peer,
                                                         completion.peer_len, completion.socket_fd);
+    if (io_runtime_trace_enabled()) {
+        std::cerr << "io-" << impl_->config.role_name
+                  << " trace: recv-dgram route_handle=" << handle << " fd=" << completion.socket_fd
+                  << " bytes="
+                  << (completion.shared_bytes != nullptr ? completion.end - completion.begin
+                                                         : completion.bytes.size())
+                  << '\n';
+    }
     return QuicIoEvent{
         .kind = QuicIoEvent::Kind::rx_datagram,
         .now = completion.now,

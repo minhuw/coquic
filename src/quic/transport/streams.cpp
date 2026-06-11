@@ -208,9 +208,13 @@ bool StreamOpenLimits::can_open_local_stream(std::uint64_t stream_id,
     // # An endpoint MUST NOT open more streams than permitted by the current
     // # stream limit set by its peer.
     if (id_info.direction == StreamDirection::bidirectional) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+        // # Endpoints MUST NOT exceed the limit set by their peer.
         return stream_index < peer_max_bidirectional;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # Endpoints MUST NOT exceed the limit set by their peer.
     return stream_index < peer_max_unidirectional;
 }
 
@@ -421,6 +425,8 @@ StreamStateResult<bool> StreamState::note_peer_final_size(std::uint64_t final_si
     //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
     // # Once a final size for a stream is known, it cannot change.
     if (peer_final_size.has_value() && *peer_final_size != final_size) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+        // # Once a final size for a stream is known, it cannot change.
         return StreamStateResult<bool>::failure(StreamStateErrorCode::final_size_conflict,
                                                 stream_id);
     }
@@ -430,6 +436,10 @@ StreamStateResult<bool> StreamState::note_peer_final_size(std::uint64_t final_si
     // # size as an error of type FINAL_SIZE_ERROR, even after a stream
     // # is closed.
     if (highest_received_offset > final_size) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.5
+        // # A receiver SHOULD treat receipt of data at or beyond the
+        // # final size as an error of type FINAL_SIZE_ERROR, even after a stream
+        // # is closed.
         return StreamStateResult<bool>::failure(StreamStateErrorCode::final_size_conflict,
                                                 stream_id);
     }
@@ -580,6 +590,9 @@ void StreamState::note_peer_max_stream_data(std::uint64_t maximum_stream_data) {
     // # A sender MUST ignore any MAX_STREAM_DATA or MAX_DATA frames that do
     // # not increase flow control limits.
     if (maximum_stream_data <= flow_control.peer_max_stream_data) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
+        // # A sender MUST ignore any MAX_STREAM_DATA or MAX_DATA frames that do
+        // # not increase flow control limits.
         return;
     }
 

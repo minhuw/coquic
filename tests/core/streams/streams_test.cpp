@@ -613,6 +613,9 @@ TEST(QuicStreamsTest, ResetAndStopSendingRemainIdempotentAfterAcknowledgement) {
     EXPECT_FALSE(reset_state.has_pending_send());
     EXPECT_FALSE(reset_state.has_outstanding_send());
     ASSERT_TRUE(reset_state.validate_local_reset(/*application_error_code=*/6).has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.3
+    // # The content of a RESET_STREAM frame MUST NOT change when it is sent
+    // # again.
     EXPECT_FALSE(reset_state.take_reset_frame().has_value());
     EXPECT_TRUE(reset_state.note_peer_stop_sending(/*application_error_code=*/7).has_value());
 

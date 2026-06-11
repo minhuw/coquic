@@ -146,10 +146,19 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
                 const auto cursor = coquic::quic::make_ack_range_cursor(*ack);
                 if (cursor.has_value()) {
                     auto cursor_value = cursor.value();
-                    std::uint64_t previous_smallest = cursor_value.previous_smallest;
+                    bool first_range = true;
+                    std::uint64_t previous_smallest = 0;
                     while (const auto range = coquic::quic::next_ack_range(cursor_value)) {
-                        coquic::fuzz::require(range->largest < previous_smallest,
-                                              "ACK cursor ranges are not descending");
+                        coquic::fuzz::require(range->smallest <= range->largest,
+                                              "ACK cursor range is inverted");
+                        if (first_range) {
+                            coquic::fuzz::require(range->largest == ack->largest_acknowledged,
+                                                  "ACK cursor first range misses largest acked");
+                            first_range = false;
+                        } else {
+                            coquic::fuzz::require(range->largest < previous_smallest,
+                                                  "ACK cursor ranges are not descending");
+                        }
                         previous_smallest = range->smallest;
                     }
                 }

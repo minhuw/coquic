@@ -254,10 +254,12 @@ const (
 type CongestionControl uint8
 
 const (
-	CongestionControlNewReno CongestionControl = C.COQUIC_CONGESTION_CONTROL_NEWRENO
-	CongestionControlCubic   CongestionControl = C.COQUIC_CONGESTION_CONTROL_CUBIC
-	CongestionControlBBR     CongestionControl = C.COQUIC_CONGESTION_CONTROL_BBR
-	CongestionControlCopa    CongestionControl = C.COQUIC_CONGESTION_CONTROL_COPA
+	CongestionControlNewReno   CongestionControl = C.COQUIC_CONGESTION_CONTROL_NEWRENO
+	CongestionControlCubic     CongestionControl = C.COQUIC_CONGESTION_CONTROL_CUBIC
+	CongestionControlBBR       CongestionControl = C.COQUIC_CONGESTION_CONTROL_BBR
+	CongestionControlCopa      CongestionControl = C.COQUIC_CONGESTION_CONTROL_COPA
+	CongestionControlPCC       CongestionControl = C.COQUIC_CONGESTION_CONTROL_PCC
+	CongestionControlPCCVivace CongestionControl = C.COQUIC_CONGESTION_CONTROL_PCC_VIVACE
 )
 
 type EcnCodepoint uint8

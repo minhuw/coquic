@@ -32,6 +32,8 @@ enum class CongestionControl : std::uint8_t {
     cubic,
     bbr,
     copa,
+    pcc,
+    pcc_vivace,
 };
 
 enum class EcnCodepoint : std::uint8_t {

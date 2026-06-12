@@ -163,6 +163,26 @@ TEST(QuicPerfConfigTest, ParsesAndPropagatesCongestionControlSelection) {
     });
     EXPECT_EQ(server.transport.congestion_control,
               coquic::quic::QuicCongestionControlAlgorithm::bbr);
+
+    const char *vivace_argv[] = {
+        "coquic-perf",
+        "client",
+        "--host",
+        "127.0.0.1",
+        "--mode",
+        "bulk",
+        "--direction",
+        "download",
+        "--total-bytes",
+        "65536",
+        "--congestion-control",
+        "pcc-vivace",
+    };
+    const auto vivace_config = parse_perf_runtime_args(static_cast<int>(std::size(vivace_argv)),
+                                                       const_cast<char **>(vivace_argv));
+    EXPECT_EQ(require_perf_config_value(vivace_config, "pcc-vivace client invocation should parse")
+                  .congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::pcc_vivace);
 }
 
 TEST(QuicPerfConfigTest, EndpointConfigUsesPerfOutboundDatagramSize) {

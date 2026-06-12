@@ -6,8 +6,8 @@ namespace {
 
 TEST(QuicCoreTest, SimpleStreamFastPathEligibilityIncludesImplementedControllers) {
     using Algorithm = coquic::quic::QuicCongestionControlAlgorithm;
-    for (const auto algorithm :
-         {Algorithm::newreno, Algorithm::cubic, Algorithm::bbr, Algorithm::copa}) {
+    for (const auto algorithm : {Algorithm::newreno, Algorithm::cubic, Algorithm::bbr,
+                                 Algorithm::copa, Algorithm::pcc, Algorithm::pcc_vivace}) {
         EXPECT_TRUE(coquic::quic::simple_stream_congestion_batch_algorithm_is_supported(algorithm));
         EXPECT_TRUE(coquic::quic::simple_stream_ack_sample_collection_is_eligible(
             /*has_late_acked_packets=*/false, /*has_lost_packets=*/false,
@@ -27,6 +27,10 @@ TEST(QuicCoreTest, SimpleStreamFastPathEligibilityIncludesImplementedControllers
         coquic::quic::simple_stream_congestion_ack_aggregation_is_supported(Algorithm::bbr));
     EXPECT_FALSE(
         coquic::quic::simple_stream_congestion_ack_aggregation_is_supported(Algorithm::copa));
+    EXPECT_FALSE(
+        coquic::quic::simple_stream_congestion_ack_aggregation_is_supported(Algorithm::pcc));
+    EXPECT_FALSE(
+        coquic::quic::simple_stream_congestion_ack_aggregation_is_supported(Algorithm::pcc_vivace));
 }
 
 TEST(QuicCoreTest, TimeoutRunsLossDetectionAndArmsPtoProbe) {

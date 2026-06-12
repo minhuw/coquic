@@ -40,6 +40,10 @@ quic::QuicCongestionControlAlgorithm to_internal(CongestionControl algorithm) {
         return quic::QuicCongestionControlAlgorithm::bbr;
     case CongestionControl::copa:
         return quic::QuicCongestionControlAlgorithm::copa;
+    case CongestionControl::pcc:
+        return quic::QuicCongestionControlAlgorithm::pcc;
+    case CongestionControl::pcc_vivace:
+        return quic::QuicCongestionControlAlgorithm::pcc_vivace;
     }
     return quic::QuicCongestionControlAlgorithm::newreno;
 }
@@ -54,6 +58,10 @@ CongestionControl from_internal(quic::QuicCongestionControlAlgorithm algorithm) 
         return CongestionControl::bbr;
     case quic::QuicCongestionControlAlgorithm::copa:
         return CongestionControl::copa;
+    case quic::QuicCongestionControlAlgorithm::pcc:
+        return CongestionControl::pcc;
+    case quic::QuicCongestionControlAlgorithm::pcc_vivace:
+        return CongestionControl::pcc_vivace;
     }
     return CongestionControl::newreno;
 }

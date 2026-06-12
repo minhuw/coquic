@@ -48,6 +48,8 @@ typedef uint8_t coquic_congestion_control_t;
 #define COQUIC_CONGESTION_CONTROL_CUBIC 1u
 #define COQUIC_CONGESTION_CONTROL_BBR 2u
 #define COQUIC_CONGESTION_CONTROL_COPA 3u
+#define COQUIC_CONGESTION_CONTROL_PCC 4u
+#define COQUIC_CONGESTION_CONTROL_PCC_VIVACE 5u
 
 typedef uint8_t coquic_ecn_codepoint_t;
 #define COQUIC_ECN_UNAVAILABLE 0u

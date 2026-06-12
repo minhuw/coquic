@@ -380,6 +380,15 @@ TEST(QuicHttp09RuntimeTest, RuntimePropagatesCongestionControlSelection) {
     const auto server_core = coquic::http09::make_http09_server_core_config(server_runtime);
     EXPECT_EQ(server_core.transport.congestion_control,
               coquic::quic::QuicCongestionControlAlgorithm::bbr);
+
+    const auto vivace_runtime = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
+        .requests_env = "https://localhost/a.txt",
+        .congestion_control = coquic::quic::QuicCongestionControlAlgorithm::pcc_vivace,
+    };
+    const auto vivace_core = coquic::http09::make_http09_client_core_config(vivace_runtime);
+    EXPECT_EQ(vivace_core.transport.congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::pcc_vivace);
 }
 
 TEST(QuicHttp09RuntimeTest, TransferRuntimeKeepsNewRenoAsDefaultCongestionControl) {

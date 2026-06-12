@@ -11,6 +11,7 @@
 #include "src/quic/cca/copa.h"
 #include "src/quic/cca/cubic.h"
 #include "src/quic/cca/newreno.h"
+#include "src/quic/cca/pcc.h"
 #include "src/quic/core.h"
 
 namespace coquic::quic {
@@ -126,7 +127,7 @@ class QuicCongestionController {
     std::size_t test_metric(bool congestion_window) const;
 
     std::variant<NewRenoCongestionController, CubicCongestionController, BbrCongestionController,
-                 CopaCongestionController>
+                 CopaCongestionController, PccCongestionController>
         storage_;
     bool enable_hystart_plus_plus_ = true;
     TestMetricHandle congestion_window_{this, true};

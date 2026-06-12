@@ -172,6 +172,10 @@ coquic::core::CongestionControl congestion_control_to_cpp(coquic_congestion_cont
         return coquic::core::CongestionControl::bbr;
     case COQUIC_CONGESTION_CONTROL_COPA:
         return coquic::core::CongestionControl::copa;
+    case COQUIC_CONGESTION_CONTROL_PCC:
+        return coquic::core::CongestionControl::pcc;
+    case COQUIC_CONGESTION_CONTROL_PCC_VIVACE:
+        return coquic::core::CongestionControl::pcc_vivace;
     default:
         return coquic::core::CongestionControl::newreno;
     }
@@ -187,6 +191,10 @@ coquic_congestion_control_t from_cpp(coquic::core::CongestionControl algorithm) 
         return COQUIC_CONGESTION_CONTROL_BBR;
     case coquic::core::CongestionControl::copa:
         return COQUIC_CONGESTION_CONTROL_COPA;
+    case coquic::core::CongestionControl::pcc:
+        return COQUIC_CONGESTION_CONTROL_PCC;
+    case coquic::core::CongestionControl::pcc_vivace:
+        return COQUIC_CONGESTION_CONTROL_PCC_VIVACE;
     }
     return COQUIC_CONGESTION_CONTROL_NEWRENO;
 }

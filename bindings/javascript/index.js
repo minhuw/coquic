@@ -25,6 +25,8 @@ export const CongestionControl = Object.freeze({
   CUBIC: 1,
   BBR: 2,
   COPA: 3,
+  PCC: 4,
+  PCC_VIVACE: 5,
 });
 
 export const EcnCodepoint = Object.freeze({

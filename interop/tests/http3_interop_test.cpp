@@ -303,11 +303,11 @@ TEST(QuicHttp3InteropTest, ParsesAndRejectsCongestionControlFromEnvironment) {
     }
 
     {
-        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "copa");
+        ScopedEnvVar congestion_control("COQUIC_CONGESTION_CONTROL", "pcc-vivace");
         const auto parsed = coquic::http3::parse_http3_interop_args(2, const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
-                  coquic::quic::QuicCongestionControlAlgorithm::copa);
+                  coquic::quic::QuicCongestionControlAlgorithm::pcc_vivace);
     }
 
     {

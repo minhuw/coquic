@@ -152,6 +152,8 @@ export function congestionControlName(value) {
     [CongestionControl.CUBIC]: "cubic",
     [CongestionControl.BBR]: "bbr",
     [CongestionControl.COPA]: "copa",
+    [CongestionControl.PCC]: "pcc",
+    [CongestionControl.PCC_VIVACE]: "pcc-vivace",
   };
   return names[value];
 }
@@ -250,6 +252,9 @@ function parseCongestionControl(value) {
     cubic: CongestionControl.CUBIC,
     bbr: CongestionControl.BBR,
     copa: CongestionControl.COPA,
+    pcc: CongestionControl.PCC,
+    "pcc-vivace": CongestionControl.PCC_VIVACE,
+    pcc_vivace: CongestionControl.PCC_VIVACE,
   };
   if (value in mapping) {
     return mapping[value];
@@ -304,7 +309,7 @@ function readFile(path) {
 export function usage() {
   return (
     "usage: coquic-js-perf [server|client] [--host HOST] [--port PORT] " +
-    "[--io-backend socket] [--congestion-control newreno|cubic|bbr|copa] " +
+    "[--io-backend socket] [--congestion-control newreno|cubic|bbr|copa|pcc|pcc-vivace] " +
     "[--mode bulk|rr|crr|persistent-rr] [--direction upload|download] [--request-bytes N] " +
     "[--response-bytes N] [--streams N] [--connections N] " +
     "[--requests-in-flight N] [--requests N] [--total-bytes N] " +

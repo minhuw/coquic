@@ -353,12 +353,12 @@ TEST(QuicHttp09InteropTest, ParsesAndRejectsCongestionControlSelection) {
 
     {
         const char *argv[] = {"coquic", "interop-client", "--congestion-control",
-                              "copa",   "--requests",     "https://localhost/a.txt"};
+                              "pcc",    "--requests",     "https://localhost/a.txt"};
         const auto parsed = coquic::interop::parse_http09_interop_args(
             static_cast<int>(std::size(argv)), const_cast<char **>(argv));
         ASSERT_TRUE(parsed.has_value());
         EXPECT_EQ(optional_ref_or_terminate(parsed).congestion_control,
-                  coquic::quic::QuicCongestionControlAlgorithm::copa);
+                  coquic::quic::QuicCongestionControlAlgorithm::pcc);
     }
 
     {

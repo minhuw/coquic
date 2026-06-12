@@ -82,10 +82,20 @@ h3_pid=""
 next_ready=0
 qa_ready=0
 
+is_managed_pid() {
+  local pid="${1:-}"
+  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] && [[ "${pid}" != "1" ]]
+}
+
+pid_is_alive() {
+  local pid="$1"
+  is_managed_pid "${pid}" && kill -0 -- "${pid}" >/dev/null 2>&1
+}
+
 stop_pid() {
   local pid="$1"
-  if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
-    kill "${pid}" >/dev/null 2>&1 || true
+  if pid_is_alive "${pid}"; then
+    kill -- "${pid}" >/dev/null 2>&1 || true
     wait "${pid}" >/dev/null 2>&1 || true
   fi
 }
@@ -118,7 +128,7 @@ if [[ "${qa_should_start}" == "1" ]]; then
   qa_pid="$!"
 
   for _ in $(seq 1 120); do
-    if ! kill -0 "${qa_pid}" >/dev/null 2>&1; then
+    if ! pid_is_alive "${qa_pid}"; then
       wait "${qa_pid}" || true
       echo "RAG QA API exited before Next.js startup" >&2
       exit 1
@@ -146,7 +156,7 @@ fi
 next_pid="$!"
 
 for _ in $(seq 1 50); do
-  if ! kill -0 "${next_pid}" >/dev/null 2>&1; then
+  if ! pid_is_alive "${next_pid}"; then
     wait "${next_pid}" || true
     echo "Next.js server exited before h3-server startup" >&2
     exit 1

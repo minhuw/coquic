@@ -611,6 +611,9 @@ void expect_header_value(const coquic::http3::Http3ResponseHead &response_head,
 
 bool wait_for_http3_server_ready(pid_t pid,
                                  const coquic::http3::Http3RuntimeConfig &runtime_config) {
+    if (pid <= 0) {
+        return false;
+    }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
     while (std::chrono::steady_clock::now() < deadline) {
         int status = 0;
@@ -644,6 +647,10 @@ class ScopedHttp3Process {
         pid_ = ::fork();
         if (pid_ == 0) {
             _exit(coquic::http3::run_http3_runtime(runtime_config));
+        }
+        if (pid_ < 0) {
+            ADD_FAILURE() << "failed to fork HTTP/3 runtime";
+            return;
         }
         if (!wait_for_http3_server_ready(pid_, runtime_config)) {
             ADD_FAILURE() << "timed out waiting for HTTP/3 runtime to bind loopback listeners";

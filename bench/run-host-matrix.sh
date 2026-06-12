@@ -35,6 +35,28 @@ server_name=''
 client_name=''
 failed_runs=0
 
+is_managed_pid() {
+  local pid="${1:-}"
+  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] && [[ "${pid}" != "1" ]]
+}
+
+pid_is_alive() {
+  local pid="$1"
+  is_managed_pid "${pid}" && kill -0 -- "${pid}" >/dev/null 2>&1
+}
+
+signal_pid() {
+  local signal_name="$1"
+  local pid="$2"
+  is_managed_pid "${pid}" && kill "-${signal_name}" -- "${pid}" >/dev/null 2>&1
+}
+
+signal_process_group() {
+  local signal_name="$1"
+  local pid="$2"
+  is_managed_pid "${pid}" && kill "-${signal_name}" -- "-${pid}" >/dev/null 2>&1
+}
+
 usage() {
   cat <<'USAGE'
 usage: bash bench/run-host-matrix.sh [--preset smoke|ci]
@@ -165,7 +187,7 @@ start_perf_record() {
   fi
 
   host_pid="$(container_host_pid "${container_name}")"
-  if ! [[ "${host_pid}" =~ ^[0-9]+$ ]] || [ "${host_pid}" -le 0 ]; then
+  if ! is_managed_pid "${host_pid}"; then
     write_profile_status "${status_path}" "unavailable" "unable to resolve ${role} container host pid"
     return
   fi
@@ -330,11 +352,14 @@ finish_perf_record() {
   local status_path="$7"
   local current_status=''
 
-  if [ -n "${recorder_pid}" ]; then
-    if [ -n "${recorder_container}" ]; then
-      docker kill --signal INT "${recorder_container}" >/dev/null 2>&1 || true
-    elif kill -0 "${recorder_pid}" >/dev/null 2>&1; then
-      kill -INT "-${recorder_pid}" >/dev/null 2>&1 || kill -INT "${recorder_pid}" >/dev/null 2>&1 || true
+  if [ -n "${recorder_container}" ]; then
+    docker kill --signal INT "${recorder_container}" >/dev/null 2>&1 || true
+    if is_managed_pid "${recorder_pid}"; then
+      wait "${recorder_pid}" >/dev/null 2>&1 || true
+    fi
+  elif is_managed_pid "${recorder_pid}"; then
+    if pid_is_alive "${recorder_pid}"; then
+      signal_process_group INT "${recorder_pid}" || signal_pid INT "${recorder_pid}" || true
     fi
     wait "${recorder_pid}" >/dev/null 2>&1 || true
   elif [ -f "${status_path}" ]; then
@@ -787,8 +812,8 @@ for congestion_control in "${congestion_control_list[@]}"; do
         client_status=124
         docker kill "${client_name}" >/dev/null 2>&1 || true
       fi
-      if [ -n "${stats_pid}" ]; then
-        kill "${stats_pid}" >/dev/null 2>&1 || true
+      if is_managed_pid "${stats_pid}"; then
+        kill -- "${stats_pid}" >/dev/null 2>&1 || true
         wait "${stats_pid}" >/dev/null 2>&1 || true
       fi
       finish_perf_record "${client_perf_pid}" "${client_perf_container}" "${client_perf_data_path}" "${client_flamegraph_path}" "${run_name} client" "${client_profile_log_path}" "${client_profile_status_path}"

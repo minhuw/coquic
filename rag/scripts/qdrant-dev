@@ -16,6 +16,10 @@ STARTUP_POLL_INTERVAL_SECONDS = 0.05
 STOP_WAIT_SECONDS = 10.0
 
 
+def is_signalable_pid(pid: int) -> bool:
+    return pid > 0
+
+
 def discover_repo_root(start: Path) -> Path:
     for candidate in (start, *start.parents):
         if (candidate / "build.zig").is_file():
@@ -24,6 +28,8 @@ def discover_repo_root(start: Path) -> Path:
 
 
 def pid_is_alive(pid: int) -> bool:
+    if not is_signalable_pid(pid):
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -37,9 +43,10 @@ def read_pid(pid_path: Path) -> int | None:
     if not pid_path.is_file():
         return None
     try:
-        return int(pid_path.read_text(encoding="utf-8").strip())
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
     except ValueError:
         return None
+    return pid if is_signalable_pid(pid) else None
 
 
 def yaml_quote(value: Path) -> str:
@@ -77,6 +84,8 @@ def is_expected_qdrant_process(pid: int, config_path: Path) -> bool:
 
 
 def send_signal(pid: int, sig: signal.Signals) -> bool:
+    if not is_signalable_pid(pid):
+        return False
     try:
         os.kill(pid, sig)
     except ProcessLookupError:

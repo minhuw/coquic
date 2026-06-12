@@ -69,6 +69,9 @@ class ScopedPerfProcess {
         if (pid_ == 0) {
             _exit(run_perf_runtime(config));
         }
+        if (pid_ < 0) {
+            return;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds{50});
     }
 

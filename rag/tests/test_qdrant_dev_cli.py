@@ -131,6 +131,27 @@ def test_stop_refuses_to_signal_unrelated_pid(tmp_path: Path) -> None:
     assert pid_path.is_file()
 
 
+def test_stop_ignores_non_positive_pid_file_values(tmp_path: Path, monkeypatch) -> None:
+    repo_root = _make_repo_root(tmp_path)
+    pid_path = repo_root / ".rag" / "dev" / "qdrant.pid"
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    module = _load_qdrant_dev_module()
+    signals_sent: list[tuple[int, signal.Signals]] = []
+
+    monkeypatch.setattr(
+        module,
+        "send_signal",
+        lambda pid, sig: signals_sent.append((pid, sig)) or True,
+    )
+
+    for pid_text in ("-1\n", "0\n"):
+        pid_path.write_text(pid_text, encoding="utf-8")
+        result = module.stop(repo_root)
+
+        assert result == 0
+        assert signals_sent == []
+
+
 def test_status_handles_unreadable_proc_cmdline(tmp_path: Path, monkeypatch) -> None:
     repo_root = _make_repo_root(tmp_path)
     module = _load_qdrant_dev_module()

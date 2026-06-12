@@ -211,6 +211,12 @@ using QuicPathId = std::uint64_t;
 using QuicConnectionHandle = std::uint64_t;
 using QuicRouteHandle = std::uint64_t;
 
+struct QuicOrphanZeroRttBufferConfig {
+    std::size_t max_packets = 0;
+    std::size_t max_bytes = 0;
+    QuicCoreDuration max_age{0};
+};
+
 struct QuicCorePacketSpaceDiagnostics {
     std::uint64_t next_send_packet_number = 0;
     std::optional<std::uint64_t> largest_authenticated_packet_number;
@@ -340,6 +346,7 @@ struct QuicCoreEndpointConfig {
     bool verify_peer = true;
     bool retry_enabled = false;
     std::size_t max_server_connections = 0;
+    QuicOrphanZeroRttBufferConfig orphan_zero_rtt_buffer;
     std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
     QuicTransportConfig transport;
@@ -716,6 +723,7 @@ class QuicCore {
         enum class Kind : std::uint8_t {
             short_header,
             supported_initial,
+            supported_zero_rtt,
             supported_long_header,
             unsupported_version_long_header,
         };
@@ -768,6 +776,17 @@ class QuicCore {
 
     struct PeerStatelessResetTokenRoute {
         QuicConnectionHandle owner = 0;
+    };
+
+    struct BufferedOrphanZeroRttDatagram {
+        ConnectionId destination_connection_id;
+        std::optional<ConnectionId> source_connection_id;
+        std::uint32_t version = kQuicVersion1;
+        std::optional<QuicRouteHandle> route_handle;
+        std::vector<std::byte> address_validation_identity;
+        std::vector<std::byte> bytes;
+        QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable;
+        QuicCoreTimePoint received_at{};
     };
 
     struct WakeupHeapEntry {
@@ -877,6 +896,32 @@ class QuicCore {
                                           bool grease_reserved_versions = false);
     static std::vector<std::byte> make_retry_packet_bytes(const ParsedEndpointDatagram &parsed,
                                                           const PendingRetryToken &pending);
+    bool orphan_zero_rtt_buffer_enabled() const;
+    void purge_expired_orphan_zero_rtt(QuicCoreTimePoint now);
+    void drop_matching_orphan_zero_rtt(const ParsedEndpointDatagram &parsed,
+                                       const std::optional<QuicRouteHandle> &route_handle,
+                                       std::span<const std::byte> address_validation_identity,
+                                       QuicCoreTimePoint now);
+    bool maybe_buffer_orphan_zero_rtt(const ParsedEndpointDatagram &parsed,
+                                      const QuicCoreInboundDatagram &inbound,
+                                      QuicCoreTimePoint now);
+    std::vector<BufferedOrphanZeroRttDatagram>
+    take_matching_orphan_zero_rtt(const ParsedEndpointDatagram &parsed,
+                                  const QuicCoreInboundDatagram &inbound, QuicCoreTimePoint now);
+    std::optional<QuicCoreTimePoint> next_orphan_zero_rtt_expiry() const;
+    static bool
+    orphan_zero_rtt_route_matches(const BufferedOrphanZeroRttDatagram &buffered,
+                                  const std::optional<QuicRouteHandle> &route_handle,
+                                  std::span<const std::byte> address_validation_identity);
+    static bool orphan_zero_rtt_connection_tuple_matches(
+        const BufferedOrphanZeroRttDatagram &buffered, const ParsedEndpointDatagram &parsed,
+        const std::optional<QuicRouteHandle> &route_handle,
+        std::span<const std::byte> address_validation_identity);
+    static bool
+    orphan_zero_rtt_tuple_matches(const BufferedOrphanZeroRttDatagram &buffered,
+                                  const ParsedEndpointDatagram &parsed,
+                                  const std::optional<QuicRouteHandle> &route_handle,
+                                  std::span<const std::byte> address_validation_identity);
     std::optional<QuicConnectionHandle>
     find_endpoint_connection_for_datagram(const ParsedEndpointDatagram &parsed) const;
     std::optional<QuicConnectionHandle>
@@ -928,6 +973,8 @@ class QuicCore {
     std::unordered_map<std::string, LocalStatelessResetTokenRoute>
         local_stateless_reset_tokens_by_cid_;
     std::unordered_map<std::string, PeerStatelessResetTokenRoute> peer_stateless_reset_tokens_;
+    std::vector<BufferedOrphanZeroRttDatagram> orphan_zero_rtt_buffer_;
+    std::size_t orphan_zero_rtt_buffer_bytes_ = 0;
     std::optional<QuicConnectionHandle> legacy_connection_handle_;
     QuicConnectionHandle next_connection_handle_ = 1;
     std::uint64_t next_server_connection_id_sequence_ = 1;

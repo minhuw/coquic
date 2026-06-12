@@ -358,6 +358,9 @@ TEST(CoquicCoreFfiTest, InitializersAndNullQueriesAreStable) {
     EXPECT_EQ(static_cast<unsigned>(endpoint_config.transport.congestion_control),
               static_cast<unsigned>(COQUIC_CONGESTION_CONTROL_NEWRENO));
     EXPECT_EQ(endpoint_config.enable_out_of_order_receive, 0);
+    EXPECT_EQ(endpoint_config.orphan_zero_rtt_buffer.max_packets, 0u);
+    EXPECT_EQ(endpoint_config.orphan_zero_rtt_buffer.max_bytes, 0u);
+    EXPECT_EQ(endpoint_config.orphan_zero_rtt_buffer.max_age_us, 0u);
 
     coquic_client_connection_config_t connection_config{};
     coquic_client_connection_config_init(&connection_config);
@@ -401,6 +404,22 @@ TEST(CoquicCoreFfiTest, EndpointConfigSizeGatesOutOfOrderReceiveOption) {
     coquic_endpoint_destroy(endpoint);
 }
 
+TEST(CoquicCoreFfiTest, EndpointConfigSizeGatesOrphanZeroRttBufferOption) {
+    coquic_endpoint_config_t endpoint_config{};
+    coquic_endpoint_config_init(&endpoint_config);
+    endpoint_config.orphan_zero_rtt_buffer = coquic_orphan_zero_rtt_buffer_config_t{
+        .max_packets = 2,
+        .max_bytes = 4096,
+        .max_age_us = 1000,
+    };
+    endpoint_config.size = offsetof(coquic_endpoint_config_t, orphan_zero_rtt_buffer);
+
+    coquic_endpoint_t *endpoint = nullptr;
+    ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);
+    ASSERT_NE(endpoint, nullptr);
+    coquic_endpoint_destroy(endpoint);
+}
+
 TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
     coquic_endpoint_config_t endpoint_config{};
     coquic_endpoint_config_init(&endpoint_config);
@@ -435,6 +454,11 @@ TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
     endpoint_config.enable_packet_inspection = 1;
     endpoint_config.allow_peer_address_change = 0;
     endpoint_config.max_server_connections = 8;
+    endpoint_config.orphan_zero_rtt_buffer = coquic_orphan_zero_rtt_buffer_config_t{
+        .max_packets = 2,
+        .max_bytes = 8192,
+        .max_age_us = 250000,
+    };
 
     coquic_endpoint_t *endpoint = nullptr;
     ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);

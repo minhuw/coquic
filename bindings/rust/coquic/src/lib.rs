@@ -320,6 +320,31 @@ impl Default for ZeroRttConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OrphanZeroRttBufferConfig {
+    pub max_packets: usize,
+    pub max_bytes: usize,
+    pub max_age_us: TimeUs,
+}
+
+impl OrphanZeroRttBufferConfig {
+    fn from_raw(raw: ffi::coquic_orphan_zero_rtt_buffer_config_t) -> Self {
+        Self {
+            max_packets: raw.max_packets,
+            max_bytes: raw.max_bytes,
+            max_age_us: raw.max_age_us,
+        }
+    }
+
+    fn to_raw(self) -> ffi::coquic_orphan_zero_rtt_buffer_config_t {
+        ffi::coquic_orphan_zero_rtt_buffer_config_t {
+            max_packets: self.max_packets,
+            max_bytes: self.max_bytes,
+            max_age_us: self.max_age_us,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransportConfig {
     pub max_idle_timeout: u64,
@@ -429,6 +454,7 @@ pub struct EndpointConfig {
     pub transport: TransportConfig,
     pub max_outbound_datagram_size: usize,
     pub zero_rtt: ZeroRttConfig,
+    pub orphan_zero_rtt_buffer: OrphanZeroRttBufferConfig,
     pub emit_shared_receive_stream_data: bool,
     pub enable_out_of_order_receive: bool,
     pub enable_packet_inspection: bool,
@@ -474,6 +500,7 @@ impl EndpointConfig {
                 transport: self.transport.to_raw(),
                 max_outbound_datagram_size: self.max_outbound_datagram_size,
                 zero_rtt: self.zero_rtt.to_raw(),
+                orphan_zero_rtt_buffer: self.orphan_zero_rtt_buffer.to_raw(),
                 emit_shared_receive_stream_data: self.emit_shared_receive_stream_data as u8,
                 enable_out_of_order_receive: self.enable_out_of_order_receive as u8,
                 enable_packet_inspection: self.enable_packet_inspection as u8,
@@ -504,6 +531,9 @@ impl Default for EndpointConfig {
                 transport: TransportConfig::from_raw(raw.transport),
                 max_outbound_datagram_size: raw.max_outbound_datagram_size,
                 zero_rtt: ZeroRttConfig::default(),
+                orphan_zero_rtt_buffer: OrphanZeroRttBufferConfig::from_raw(
+                    raw.orphan_zero_rtt_buffer,
+                ),
                 emit_shared_receive_stream_data: raw.emit_shared_receive_stream_data != 0,
                 enable_out_of_order_receive: raw.enable_out_of_order_receive != 0,
                 enable_packet_inspection: raw.enable_packet_inspection != 0,

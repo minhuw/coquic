@@ -1282,6 +1282,14 @@ bool is_initial_long_header_type(std::uint32_t version, std::uint8_t type) {
     return type == 0x00u;
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+bool is_zero_rtt_long_header_type(std::uint32_t version, std::uint8_t type) {
+    if (version == kQuicVersion2) {
+        return type == 0x02u;
+    }
+    return type == 0x01u;
+}
+
 std::optional<VersionNegotiationPacket>
 parse_version_negotiation_packet(std::span<const std::byte> bytes) {
     if (bytes.size() < 5) {
@@ -1629,10 +1637,15 @@ QuicCore::parse_endpoint_datagram(std::span<const std::byte> bytes, bool accept_
         token.assign(token_bytes.begin(), token_bytes.end());
     }
 
+    auto kind = ParsedEndpointDatagram::Kind::supported_long_header;
+    if (is_initial_long_header_type(version, type)) {
+        kind = ParsedEndpointDatagram::Kind::supported_initial;
+    } else if (is_zero_rtt_long_header_type(version, type)) {
+        kind = ParsedEndpointDatagram::Kind::supported_zero_rtt;
+    }
+
     return ParsedEndpointDatagram{
-        .kind = is_initial_long_header_type(version, type)
-                    ? ParsedEndpointDatagram::Kind::supported_initial
-                    : ParsedEndpointDatagram::Kind::supported_long_header,
+        .kind = kind,
         .destination_connection_id = std::move(destination_connection_id),
         .source_connection_id = std::move(source_connection_id),
         .version = version,
@@ -2625,6 +2638,167 @@ std::vector<std::byte> QuicCore::make_retry_packet_bytes(const ParsedEndpointDat
     return DatagramBuffer(serialize_packet(packet).value());
 }
 
+bool QuicCore::orphan_zero_rtt_buffer_enabled() const {
+    return endpoint_config_.role == EndpointRole::server &&
+           endpoint_config_.orphan_zero_rtt_buffer.max_packets != 0 &&
+           endpoint_config_.orphan_zero_rtt_buffer.max_bytes != 0 &&
+           endpoint_config_.orphan_zero_rtt_buffer.max_age > QuicCoreDuration{0};
+}
+
+void QuicCore::purge_expired_orphan_zero_rtt(QuicCoreTimePoint now) {
+    if (orphan_zero_rtt_buffer_.empty()) {
+        return;
+    }
+    if (!orphan_zero_rtt_buffer_enabled()) {
+        orphan_zero_rtt_buffer_.clear();
+        orphan_zero_rtt_buffer_bytes_ = 0;
+        return;
+    }
+
+    const auto max_age = endpoint_config_.orphan_zero_rtt_buffer.max_age;
+    auto retained_bytes = std::size_t{0};
+    auto out = std::vector<BufferedOrphanZeroRttDatagram>{};
+    out.reserve(orphan_zero_rtt_buffer_.size());
+    for (auto &buffered : orphan_zero_rtt_buffer_) {
+        if (buffered.received_at + max_age <= now) {
+            continue;
+        }
+        retained_bytes += buffered.bytes.size();
+        out.push_back(std::move(buffered));
+    }
+    orphan_zero_rtt_buffer_ = std::move(out);
+    orphan_zero_rtt_buffer_bytes_ = retained_bytes;
+}
+
+bool QuicCore::orphan_zero_rtt_route_matches(
+    const BufferedOrphanZeroRttDatagram &buffered,
+    const std::optional<QuicRouteHandle> &route_handle,
+    std::span<const std::byte> address_validation_identity) {
+    return buffered.route_handle == route_handle &&
+           std::ranges::equal(buffered.address_validation_identity, address_validation_identity);
+}
+
+bool QuicCore::orphan_zero_rtt_connection_tuple_matches(
+    const BufferedOrphanZeroRttDatagram &buffered, const ParsedEndpointDatagram &parsed,
+    const std::optional<QuicRouteHandle> &route_handle,
+    std::span<const std::byte> address_validation_identity) {
+    return buffered.destination_connection_id == parsed.destination_connection_id &&
+           buffered.source_connection_id == parsed.source_connection_id &&
+           orphan_zero_rtt_route_matches(buffered, route_handle, address_validation_identity);
+}
+
+bool QuicCore::orphan_zero_rtt_tuple_matches(
+    const BufferedOrphanZeroRttDatagram &buffered, const ParsedEndpointDatagram &parsed,
+    const std::optional<QuicRouteHandle> &route_handle,
+    std::span<const std::byte> address_validation_identity) {
+    return buffered.version == parsed.version &&
+           orphan_zero_rtt_connection_tuple_matches(buffered, parsed, route_handle,
+                                                    address_validation_identity);
+}
+
+void QuicCore::drop_matching_orphan_zero_rtt(const ParsedEndpointDatagram &parsed,
+                                             const std::optional<QuicRouteHandle> &route_handle,
+                                             std::span<const std::byte> address_validation_identity,
+                                             QuicCoreTimePoint now) {
+    purge_expired_orphan_zero_rtt(now);
+    if (orphan_zero_rtt_buffer_.empty()) {
+        return;
+    }
+
+    auto retained_bytes = std::size_t{0};
+    auto out = std::vector<BufferedOrphanZeroRttDatagram>{};
+    out.reserve(orphan_zero_rtt_buffer_.size());
+    for (auto &buffered : orphan_zero_rtt_buffer_) {
+        if (orphan_zero_rtt_connection_tuple_matches(buffered, parsed, route_handle,
+                                                     address_validation_identity)) {
+            continue;
+        }
+        retained_bytes += buffered.bytes.size();
+        out.push_back(std::move(buffered));
+    }
+    orphan_zero_rtt_buffer_ = std::move(out);
+    orphan_zero_rtt_buffer_bytes_ = retained_bytes;
+}
+
+bool QuicCore::maybe_buffer_orphan_zero_rtt(const ParsedEndpointDatagram &parsed,
+                                            const QuicCoreInboundDatagram &inbound,
+                                            QuicCoreTimePoint now) {
+    purge_expired_orphan_zero_rtt(now);
+    if (!orphan_zero_rtt_buffer_enabled() ||
+        parsed.kind != ParsedEndpointDatagram::Kind::supported_zero_rtt) {
+        return false;
+    }
+
+    auto bytes = inbound.materialize();
+    const auto &limits = endpoint_config_.orphan_zero_rtt_buffer;
+    if (bytes.empty() || bytes.size() > limits.max_bytes ||
+        orphan_zero_rtt_buffer_.size() >= limits.max_packets ||
+        orphan_zero_rtt_buffer_bytes_ > limits.max_bytes - bytes.size()) {
+        return false;
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.2
+    // # If the packet is a 0-RTT packet, the server MAY buffer a limited
+    // # number of these packets in anticipation of a late-arriving Initial packet.
+    orphan_zero_rtt_buffer_bytes_ += bytes.size();
+    orphan_zero_rtt_buffer_.push_back(BufferedOrphanZeroRttDatagram{
+        .destination_connection_id = parsed.destination_connection_id,
+        .source_connection_id = parsed.source_connection_id,
+        .version = parsed.version,
+        .route_handle = inbound.route_handle,
+        .address_validation_identity = inbound.address_validation_identity,
+        .bytes = std::move(bytes),
+        .ecn = inbound.ecn,
+        .received_at = now,
+    });
+    return true;
+}
+
+std::vector<QuicCore::BufferedOrphanZeroRttDatagram>
+QuicCore::take_matching_orphan_zero_rtt(const ParsedEndpointDatagram &parsed,
+                                        const QuicCoreInboundDatagram &inbound,
+                                        QuicCoreTimePoint now) {
+    purge_expired_orphan_zero_rtt(now);
+    auto matched = std::vector<BufferedOrphanZeroRttDatagram>{};
+    if (orphan_zero_rtt_buffer_.empty()) {
+        return matched;
+    }
+
+    auto retained_bytes = std::size_t{0};
+    auto out = std::vector<BufferedOrphanZeroRttDatagram>{};
+    out.reserve(orphan_zero_rtt_buffer_.size());
+    for (auto &buffered : orphan_zero_rtt_buffer_) {
+        if (orphan_zero_rtt_connection_tuple_matches(buffered, parsed, inbound.route_handle,
+                                                     inbound.address_validation_identity)) {
+            if (buffered.version == parsed.version) {
+                matched.push_back(std::move(buffered));
+            }
+            continue;
+        }
+        retained_bytes += buffered.bytes.size();
+        out.push_back(std::move(buffered));
+    }
+    orphan_zero_rtt_buffer_ = std::move(out);
+    orphan_zero_rtt_buffer_bytes_ = retained_bytes;
+    return matched;
+}
+
+std::optional<QuicCoreTimePoint> QuicCore::next_orphan_zero_rtt_expiry() const {
+    if (!orphan_zero_rtt_buffer_enabled() || orphan_zero_rtt_buffer_.empty()) {
+        return std::nullopt;
+    }
+
+    const auto max_age = endpoint_config_.orphan_zero_rtt_buffer.max_age;
+    std::optional<QuicCoreTimePoint> earliest;
+    for (const auto &buffered : orphan_zero_rtt_buffer_) {
+        const auto expiry = buffered.received_at + max_age;
+        if (!earliest.has_value() || expiry < *earliest) {
+            earliest = expiry;
+        }
+    }
+    return earliest;
+}
+
 std::optional<QuicConnectionHandle>
 QuicCore::find_endpoint_connection_for_datagram(const ParsedEndpointDatagram &parsed) const {
     const auto destination_connection_id_key = connection_id_key(parsed.destination_connection_id);
@@ -2634,6 +2808,7 @@ QuicCore::find_endpoint_connection_for_datagram(const ParsedEndpointDatagram &pa
     }
 
     if (parsed.kind != ParsedEndpointDatagram::Kind::supported_initial &&
+        parsed.kind != ParsedEndpointDatagram::Kind::supported_zero_rtt &&
         parsed.kind != ParsedEndpointDatagram::Kind::supported_long_header) {
         return std::nullopt;
     }
@@ -3101,6 +3276,8 @@ QuicCore::QuicCore(QuicCore &&other) noexcept
       client_new_tokens_(std::move(other.client_new_tokens_)),
       local_stateless_reset_tokens_by_cid_(std::move(other.local_stateless_reset_tokens_by_cid_)),
       peer_stateless_reset_tokens_(std::move(other.peer_stateless_reset_tokens_)),
+      orphan_zero_rtt_buffer_(std::move(other.orphan_zero_rtt_buffer_)),
+      orphan_zero_rtt_buffer_bytes_(other.orphan_zero_rtt_buffer_bytes_),
       legacy_connection_handle_(other.legacy_connection_handle_),
       next_connection_handle_(other.next_connection_handle_),
       next_server_connection_id_sequence_(other.next_server_connection_id_sequence_),
@@ -3108,6 +3285,7 @@ QuicCore::QuicCore(QuicCore &&other) noexcept
       wakeup_heap_(std::move(other.wakeup_heap_)),
       wakeup_cache_initialized_(other.wakeup_cache_initialized_) {
     other.connection_.owner = &other;
+    other.orphan_zero_rtt_buffer_bytes_ = 0;
     other.wakeup_cache_initialized_ = false;
     other.wakeup_heap_ = {};
 }
@@ -3127,12 +3305,15 @@ QuicCore &QuicCore::operator=(QuicCore &&other) noexcept {
     client_new_tokens_ = std::move(other.client_new_tokens_);
     local_stateless_reset_tokens_by_cid_ = std::move(other.local_stateless_reset_tokens_by_cid_);
     peer_stateless_reset_tokens_ = std::move(other.peer_stateless_reset_tokens_);
+    orphan_zero_rtt_buffer_ = std::move(other.orphan_zero_rtt_buffer_);
+    orphan_zero_rtt_buffer_bytes_ = other.orphan_zero_rtt_buffer_bytes_;
     legacy_connection_handle_ = other.legacy_connection_handle_;
     next_connection_handle_ = other.next_connection_handle_;
     next_server_connection_id_sequence_ = other.next_server_connection_id_sequence_;
     endpoint_random_ = other.endpoint_random_;
     connection_.owner = this;
     other.connection_.owner = &other;
+    other.orphan_zero_rtt_buffer_bytes_ = 0;
     wakeup_heap_ = std::move(other.wakeup_heap_);
     wakeup_cache_initialized_ = other.wakeup_cache_initialized_;
     other.wakeup_cache_initialized_ = false;
@@ -3186,6 +3367,7 @@ void QuicCore::ensure_wakeup_cache() const {
 
 std::optional<QuicCoreTimePoint> QuicCore::next_wakeup() const {
     ensure_wakeup_cache();
+    const auto orphan_zero_rtt_expiry = next_orphan_zero_rtt_expiry();
     while (!wakeup_heap_.empty()) {
         const auto top = wakeup_heap_.top();
         const auto entry_it = connections_.find(top.connection);
@@ -3196,9 +3378,12 @@ std::optional<QuicCoreTimePoint> QuicCore::next_wakeup() const {
             wakeup_heap_.pop();
             continue;
         }
+        if (orphan_zero_rtt_expiry.has_value() && *orphan_zero_rtt_expiry < top.wakeup) {
+            return orphan_zero_rtt_expiry;
+        }
         return top.wakeup;
     }
-    return std::nullopt;
+    return orphan_zero_rtt_expiry;
 }
 
 std::vector<QuicConnectionHandle> QuicCore::due_connection_handles(QuicCoreTimePoint now) const {
@@ -3432,6 +3617,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
 
     if (auto *inbound = std::get_if<QuicCoreInboundDatagram>(&input); inbound != nullptr) {
         QuicCoreResult result;
+        purge_expired_orphan_zero_rtt(now);
         const auto inbound_payload = inbound->payload();
         const auto drain_stateless_reset_owner = [&](QuicConnectionHandle owner) -> bool {
             const auto entry_it = connections_.find(owner);
@@ -3601,6 +3787,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
         bool should_send_version_negotiation =
             parsed->kind == ParsedEndpointDatagram::Kind::unsupported_version_long_header ||
             ((parsed->kind == ParsedEndpointDatagram::Kind::supported_initial ||
+              parsed->kind == ParsedEndpointDatagram::Kind::supported_zero_rtt ||
               parsed->kind == ParsedEndpointDatagram::Kind::supported_long_header) &&
              !endpoint_supports_version);
         if (should_send_version_negotiation) {
@@ -3642,6 +3829,9 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
         }
 
         if (parsed->kind != ParsedEndpointDatagram::Kind::supported_initial) {
+            if (maybe_buffer_orphan_zero_rtt(*parsed, *inbound, now)) {
+                return finalize_endpoint_result(std::move(result), now);
+            }
             //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.2
             // # Clients are not able to send Handshake packets prior to
             // # receiving a server response, so servers SHOULD ignore any such
@@ -3659,6 +3849,8 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
             // # This Destination Connection ID MUST be at least 8 bytes in
             // # length.
+            drop_matching_orphan_zero_rtt(*parsed, inbound->route_handle,
+                                          inbound->address_validation_identity, now);
             return finalize_endpoint_result(std::move(result), now);
         }
 
@@ -3671,10 +3863,14 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             // # Therefore, an endpoint MUST NOT close a connection when it
             // # receives a datagram that does not meet size constraints; the
             // # endpoint MAY discard such datagrams.
+            drop_matching_orphan_zero_rtt(*parsed, inbound->route_handle,
+                                          inbound->address_validation_identity, now);
             return finalize_endpoint_result(std::move(result), now);
         }
         if (!address_validation_identity_allowed_for_new_route(
                 nullptr, inbound->address_validation_identity)) {
+            drop_matching_orphan_zero_rtt(*parsed, inbound->route_handle,
+                                          inbound->address_validation_identity, now);
             return finalize_endpoint_result(std::move(result), now);
         }
 
@@ -3694,6 +3890,8 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                                    },
                                    send_sink);
             }
+            drop_matching_orphan_zero_rtt(*parsed, inbound->route_handle,
+                                          inbound->address_validation_identity, now);
             return finalize_endpoint_result(std::move(result), now);
         }
 
@@ -3727,6 +3925,8 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                                            },
                                            send_sink);
                     }
+                    drop_matching_orphan_zero_rtt(*parsed, inbound->route_handle,
+                                                  inbound->address_validation_identity, now);
                     return finalize_endpoint_result(std::move(result), now);
                 }
 
@@ -3766,6 +3966,8 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                                        },
                                        send_sink);
                 }
+                drop_matching_orphan_zero_rtt(*parsed, inbound->route_handle,
+                                              inbound->address_validation_identity, now);
                 return finalize_endpoint_result(std::move(result), now);
             }
         }
@@ -3830,6 +4032,11 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
         } else {
             entry.connection->process_inbound_datagram_owned(std::move(inbound->bytes), now,
                                                              path_id, inbound->ecn);
+        }
+        auto buffered_zero_rtt = take_matching_orphan_zero_rtt(*parsed, *inbound, now);
+        for (auto &buffered : buffered_zero_rtt) {
+            entry.connection->process_inbound_datagram_owned(std::move(buffered.bytes), now,
+                                                             path_id, buffered.ecn);
         }
         if (new_token_context.has_value()) {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
@@ -4038,6 +4245,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
         return finalize_endpoint_result(std::move(result), now);
     }
 
+    purge_expired_orphan_zero_rtt(now);
     QuicCoreResult result;
     for (const auto handle : due_connection_handles(now)) {
         auto entry_it = connections_.find(handle);

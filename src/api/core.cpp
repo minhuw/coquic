@@ -245,6 +245,14 @@ quic::QuicZeroRttConfig to_internal(const ZeroRttConfig &config) {
     };
 }
 
+quic::QuicOrphanZeroRttBufferConfig to_internal(const OrphanZeroRttBufferConfig &config) {
+    return quic::QuicOrphanZeroRttBufferConfig{
+        .max_packets = config.max_packets,
+        .max_bytes = config.max_bytes,
+        .max_age = config.max_age,
+    };
+}
+
 std::optional<quic::QuicResumptionState> to_internal(const std::optional<ResumptionState> &state) {
     if (!state.has_value()) {
         return std::nullopt;
@@ -261,6 +269,7 @@ quic::QuicCoreEndpointConfig to_internal(const EndpointConfig &config) {
         .verify_peer = config.verify_peer,
         .retry_enabled = config.retry_enabled,
         .max_server_connections = config.max_server_connections,
+        .orphan_zero_rtt_buffer = to_internal(config.orphan_zero_rtt_buffer),
         .application_protocol = config.application_protocol,
         .identity = to_internal(config.identity),
         .transport = to_internal(config.transport),

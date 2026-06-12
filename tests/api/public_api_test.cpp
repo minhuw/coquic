@@ -33,6 +33,12 @@ TEST(CoquicPublicApiTest, CoreEndpointOpensConnectionAndReportsDatagrams) {
     coquic::core::Endpoint endpoint(coquic::core::EndpointConfig{
         .role = coquic::core::Role::client,
         .verify_peer = false,
+        .orphan_zero_rtt_buffer =
+            {
+                .max_packets = 2,
+                .max_bytes = 4096,
+                .max_age = std::chrono::milliseconds(10),
+            },
         .application_protocol = "coquic",
     });
 

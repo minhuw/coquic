@@ -126,6 +126,13 @@ class ZeroRttConfig:
 
 
 @dataclass(slots=True)
+class OrphanZeroRttBufferConfig:
+    max_packets: int = 0
+    max_bytes: int = 0
+    max_age_us: int = 0
+
+
+@dataclass(slots=True)
 class TransportConfig:
     max_idle_timeout: int
     max_udp_payload_size: int
@@ -227,6 +234,9 @@ class EndpointConfig:
     transport: TransportConfig = field(default_factory=TransportConfig.default)
     max_outbound_datagram_size: int = 0
     zero_rtt: ZeroRttConfig = field(default_factory=ZeroRttConfig)
+    orphan_zero_rtt_buffer: OrphanZeroRttBufferConfig = field(
+        default_factory=OrphanZeroRttBufferConfig
+    )
     emit_shared_receive_stream_data: bool = False
     enable_out_of_order_receive: bool = False
     enable_packet_inspection: bool = False
@@ -248,6 +258,11 @@ class EndpointConfig:
             transport=TransportConfig.from_raw(raw.transport),
             max_outbound_datagram_size=raw.max_outbound_datagram_size,
             zero_rtt=ZeroRttConfig(),
+            orphan_zero_rtt_buffer=OrphanZeroRttBufferConfig(
+                max_packets=raw.orphan_zero_rtt_buffer.max_packets,
+                max_bytes=raw.orphan_zero_rtt_buffer.max_bytes,
+                max_age_us=raw.orphan_zero_rtt_buffer.max_age_us,
+            ),
             emit_shared_receive_stream_data=bool(raw.emit_shared_receive_stream_data),
             enable_out_of_order_receive=bool(raw.enable_out_of_order_receive),
             enable_packet_inspection=bool(raw.enable_packet_inspection),
@@ -992,6 +1007,11 @@ class _EndpointConfigMaterialization:
                 application_context=self._arena.bytes(
                     config.zero_rtt.application_context
                 ),
+            ),
+            orphan_zero_rtt_buffer=ffi.coquic_orphan_zero_rtt_buffer_config_t(
+                max_packets=config.orphan_zero_rtt_buffer.max_packets,
+                max_bytes=config.orphan_zero_rtt_buffer.max_bytes,
+                max_age_us=config.orphan_zero_rtt_buffer.max_age_us,
             ),
             emit_shared_receive_stream_data=int(config.emit_shared_receive_stream_data),
             enable_out_of_order_receive=int(config.enable_out_of_order_receive),

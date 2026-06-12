@@ -5,7 +5,7 @@ import ctypes.util
 import os
 from pathlib import Path
 
-FFI_ABI_VERSION = 2
+FFI_ABI_VERSION = 4
 
 COQUIC_STATUS_OK = 0
 COQUIC_STATUS_INVALID_ARGUMENT = 1
@@ -148,6 +148,14 @@ class coquic_zero_rtt_config_t(C.Structure):
     ]
 
 
+class coquic_orphan_zero_rtt_buffer_config_t(C.Structure):
+    _fields_ = [
+        ("max_packets", C.c_size_t),
+        ("max_bytes", C.c_size_t),
+        ("max_age_us", C.c_uint64),
+    ]
+
+
 class coquic_transport_config_t(C.Structure):
     _fields_ = [
         ("max_idle_timeout", C.c_uint64),
@@ -196,6 +204,7 @@ class coquic_endpoint_config_t(C.Structure):
         ("allow_peer_address_change", C.c_uint8),
         ("max_server_connections", C.c_size_t),
         ("enable_out_of_order_receive", C.c_uint8),
+        ("orphan_zero_rtt_buffer", coquic_orphan_zero_rtt_buffer_config_t),
     ]
 
 

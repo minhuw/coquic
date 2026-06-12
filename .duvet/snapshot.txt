@@ -241,9 +241,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    If a server refuses to accept a new connection, it SHOULD send an
     TEXT[!SHOULD,implementation,test]:    Initial packet containing a CONNECTION_CLOSE frame with error code
     TEXT[!SHOULD,implementation,test]:    CONNECTION_REFUSED.
-    TEXT[!MAY]:    If the packet is a 0-RTT packet, the server MAY buffer a limited
-    TEXT[!MAY]:    number of these packets in anticipation of a late-arriving Initial
-    TEXT[!MAY]:    packet.
+    TEXT[!MAY,implementation,test]:    If the packet is a 0-RTT packet, the server MAY buffer a limited
+    TEXT[!MAY,implementation,test]:    number of these packets in anticipation of a late-arriving Initial
+    TEXT[!MAY,implementation,test]:    packet.
     TEXT[!SHOULD,implementation,test]: Clients are not able to send Handshake packets prior to
     TEXT[!SHOULD,implementation,test]:    receiving a server response, so servers SHOULD ignore any such
     TEXT[!SHOULD,implementation,test]:    packets.

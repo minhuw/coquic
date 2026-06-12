@@ -145,6 +145,12 @@ struct ZeroRttConfig {
     std::vector<std::byte> application_context;
 };
 
+struct OrphanZeroRttBufferConfig {
+    std::size_t max_packets = 0;
+    std::size_t max_bytes = 0;
+    Duration max_age{0};
+};
+
 struct ResumptionState {
     std::vector<std::byte> serialized;
 };
@@ -155,6 +161,7 @@ struct EndpointConfig {
     bool verify_peer = true;
     bool retry_enabled = false;
     std::size_t max_server_connections = 0;
+    OrphanZeroRttBufferConfig orphan_zero_rtt_buffer;
     std::string application_protocol = "coquic";
     std::optional<TlsIdentity> identity;
     TransportConfig transport;

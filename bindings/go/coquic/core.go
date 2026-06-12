@@ -33,6 +33,9 @@ static inline coquic_status_t coquic_go_endpoint_create(
     uint8_t zero_rtt_allow,
     const uint8_t *zero_rtt_context,
     size_t zero_rtt_context_length,
+    size_t orphan_zero_rtt_max_packets,
+    size_t orphan_zero_rtt_max_bytes,
+    coquic_time_us_t orphan_zero_rtt_max_age_us,
     uint8_t emit_shared_receive_stream_data,
     uint8_t enable_out_of_order_receive,
     uint8_t enable_packet_inspection,
@@ -63,6 +66,9 @@ static inline coquic_status_t coquic_go_endpoint_create(
     config.zero_rtt.attempt = zero_rtt_attempt;
     config.zero_rtt.allow = zero_rtt_allow;
     config.zero_rtt.application_context = coquic_go_bytes(zero_rtt_context, zero_rtt_context_length);
+    config.orphan_zero_rtt_buffer.max_packets = orphan_zero_rtt_max_packets;
+    config.orphan_zero_rtt_buffer.max_bytes = orphan_zero_rtt_max_bytes;
+    config.orphan_zero_rtt_buffer.max_age_us = orphan_zero_rtt_max_age_us;
     config.emit_shared_receive_stream_data = emit_shared_receive_stream_data;
     config.enable_out_of_order_receive = enable_out_of_order_receive;
     config.enable_packet_inspection = enable_packet_inspection;
@@ -413,22 +419,34 @@ type EndpointConfig struct {
 	Transport                   TransportConfig
 	MaxOutboundDatagramSize     int
 	ZeroRtt                     ZeroRttConfig
+	OrphanZeroRttBuffer         OrphanZeroRttBufferConfig
 	EmitSharedReceiveStreamData bool
 	EnableOutOfOrderReceive     bool
 	EnablePacketInspection      bool
 	AllowPeerAddressChange      bool
 }
 
+type OrphanZeroRttBufferConfig struct {
+	MaxPackets int
+	MaxBytes   int
+	MaxAgeUs   TimeUs
+}
+
 func DefaultEndpointConfig() EndpointConfig {
 	var raw C.coquic_endpoint_config_t
 	C.coquic_endpoint_config_init(&raw)
 	return EndpointConfig{
-		Role:                        Role(raw.role),
-		VerifyPeer:                  raw.verify_peer != 0,
-		RetryEnabled:                raw.retry_enabled != 0,
-		ApplicationProtocol:         copyChar(raw.application_protocol, raw.application_protocol_length),
-		Transport:                   transportConfigFromRaw(raw.transport),
-		MaxOutboundDatagramSize:     int(raw.max_outbound_datagram_size),
+		Role:                    Role(raw.role),
+		VerifyPeer:              raw.verify_peer != 0,
+		RetryEnabled:            raw.retry_enabled != 0,
+		ApplicationProtocol:     copyChar(raw.application_protocol, raw.application_protocol_length),
+		Transport:               transportConfigFromRaw(raw.transport),
+		MaxOutboundDatagramSize: int(raw.max_outbound_datagram_size),
+		OrphanZeroRttBuffer: OrphanZeroRttBufferConfig{
+			MaxPackets: int(raw.orphan_zero_rtt_buffer.max_packets),
+			MaxBytes:   int(raw.orphan_zero_rtt_buffer.max_bytes),
+			MaxAgeUs:   TimeUs(raw.orphan_zero_rtt_buffer.max_age_us),
+		},
 		EmitSharedReceiveStreamData: raw.emit_shared_receive_stream_data != 0,
 		EnableOutOfOrderReceive:     raw.enable_out_of_order_receive != 0,
 		EnablePacketInspection:      raw.enable_packet_inspection != 0,
@@ -504,6 +522,9 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		cBool(config.ZeroRtt.Allow),
 		bytePtr(config.ZeroRtt.ApplicationContext),
 		C.size_t(len(config.ZeroRtt.ApplicationContext)),
+		C.size_t(config.OrphanZeroRttBuffer.MaxPackets),
+		C.size_t(config.OrphanZeroRttBuffer.MaxBytes),
+		C.coquic_time_us_t(config.OrphanZeroRttBuffer.MaxAgeUs),
 		cBool(config.EmitSharedReceiveStreamData),
 		cBool(config.EnableOutOfOrderReceive),
 		cBool(config.EnablePacketInspection),

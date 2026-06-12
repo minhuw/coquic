@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const native = loadNative();
 
-export const FFI_ABI_VERSION = 2;
+export const FFI_ABI_VERSION = 4;
 
 export const Status = Object.freeze({
   OK: 0,
@@ -101,6 +101,16 @@ export function ZeroRttConfig({
   this.applicationContext = toBuffer(applicationContext);
 }
 
+export function OrphanZeroRttBufferConfig({
+  maxPackets = 0,
+  maxBytes = 0,
+  maxAgeUs = 0n,
+} = {}) {
+  this.maxPackets = Number(maxPackets);
+  this.maxBytes = Number(maxBytes);
+  this.maxAgeUs = BigInt(maxAgeUs);
+}
+
 export function TransportConfig(values = {}) {
   Object.assign(this, native.defaultTransportConfig(), values);
 }
@@ -113,6 +123,9 @@ export function EndpointConfig(values = {}) {
   this.identity = values.identity == null ? null : new TlsIdentity(values.identity);
   this.transport = new TransportConfig(values.transport ?? defaults.transport);
   this.zeroRtt = new ZeroRttConfig(values.zeroRtt ?? defaults.zeroRtt);
+  this.orphanZeroRttBuffer = new OrphanZeroRttBufferConfig(
+    values.orphanZeroRttBuffer ?? defaults.orphanZeroRttBuffer,
+  );
 }
 
 export function ResumptionState({ serialized = Buffer.alloc(0) } = {}) {
@@ -309,6 +322,7 @@ export function ffiAbiVersion() {
 export const quic = Object.freeze({
   Endpoint,
   EndpointConfig,
+  OrphanZeroRttBufferConfig,
   ClientConfig,
   ClientConnectionConfig,
   Connection,

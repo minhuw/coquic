@@ -23,7 +23,7 @@ extern "C" {
 #endif
 #endif
 
-#define COQUIC_FFI_ABI_VERSION 2u
+#define COQUIC_FFI_ABI_VERSION 4u
 
 typedef struct coquic_endpoint coquic_endpoint_t;
 typedef struct coquic_result coquic_result_t;
@@ -169,6 +169,12 @@ typedef struct coquic_zero_rtt_config {
     coquic_bytes_t application_context;
 } coquic_zero_rtt_config_t;
 
+typedef struct coquic_orphan_zero_rtt_buffer_config {
+    size_t max_packets;
+    size_t max_bytes;
+    coquic_time_us_t max_age_us;
+} coquic_orphan_zero_rtt_buffer_config_t;
+
 typedef struct coquic_transport_config {
     uint64_t max_idle_timeout;
     uint64_t max_udp_payload_size;
@@ -214,6 +220,7 @@ typedef struct coquic_endpoint_config {
     uint8_t allow_peer_address_change;
     size_t max_server_connections;
     uint8_t enable_out_of_order_receive;
+    coquic_orphan_zero_rtt_buffer_config_t orphan_zero_rtt_buffer;
 } coquic_endpoint_config_t;
 
 typedef struct coquic_resumption_state {

@@ -16,7 +16,7 @@
 
 namespace {
 
-constexpr std::uint32_t kExpectedFfiAbiVersion = 1;
+constexpr std::uint32_t kExpectedFfiAbiVersion = COQUIC_FFI_ABI_VERSION;
 
 struct Bytes {
     std::vector<std::uint8_t> storage;
@@ -446,6 +446,18 @@ coquic_zero_rtt_config_t zero_rtt_from_object(napi_env env, napi_value value, By
     };
 }
 
+coquic_orphan_zero_rtt_buffer_config_t
+orphan_zero_rtt_buffer_from_object(napi_env env, napi_value value,
+                                   coquic_orphan_zero_rtt_buffer_config_t fallback) {
+    if (is_nullish(env, value)) {
+        return fallback;
+    }
+    fallback.max_packets = get_size(env, value, "maxPackets", fallback.max_packets);
+    fallback.max_bytes = get_size(env, value, "maxBytes", fallback.max_bytes);
+    fallback.max_age_us = get_u64(env, value, "maxAgeUs", fallback.max_age_us);
+    return fallback;
+}
+
 coquic_transport_config_t transport_from_object(napi_env env, napi_value value,
                                                 coquic_transport_config_t fallback) {
     if (is_nullish(env, value)) {
@@ -536,6 +548,15 @@ napi_value zero_rtt_to_js(napi_env env, const coquic_zero_rtt_config_t &raw) {
     return out;
 }
 
+napi_value orphan_zero_rtt_buffer_to_js(napi_env env,
+                                        const coquic_orphan_zero_rtt_buffer_config_t &raw) {
+    napi_value out = make_object(env);
+    set_u64(env, out, "maxPackets", raw.max_packets);
+    set_u64(env, out, "maxBytes", raw.max_bytes);
+    set_u64(env, out, "maxAgeUs", raw.max_age_us);
+    return out;
+}
+
 EndpointConfigMaterialization endpoint_config_from_js(napi_env env, napi_value value) {
     EndpointConfigMaterialization out;
     coquic_endpoint_config_init(&out.config);
@@ -578,6 +599,10 @@ EndpointConfigMaterialization endpoint_config_from_js(napi_env env, napi_value v
     get_named(env, value, "zeroRtt", &zero_rtt_value);
     out.config.zero_rtt =
         zero_rtt_from_object(env, zero_rtt_value, out.zero_rtt_context, out.config.zero_rtt);
+    napi_value orphan_zero_rtt_buffer_value = nullptr;
+    get_named(env, value, "orphanZeroRttBuffer", &orphan_zero_rtt_buffer_value);
+    out.config.orphan_zero_rtt_buffer = orphan_zero_rtt_buffer_from_object(
+        env, orphan_zero_rtt_buffer_value, out.config.orphan_zero_rtt_buffer);
     out.config.emit_shared_receive_stream_data = static_cast<std::uint8_t>(get_bool(
         env, value, "emitSharedReceiveStreamData", out.config.emit_shared_receive_stream_data));
     out.config.enable_out_of_order_receive = static_cast<std::uint8_t>(
@@ -900,6 +925,8 @@ napi_value DefaultEndpointConfig(napi_env env, napi_callback_info) {
     set_named(env, out, "transport", transport_to_js(env, config.transport));
     set_u64(env, out, "maxOutboundDatagramSize", config.max_outbound_datagram_size);
     set_named(env, out, "zeroRtt", zero_rtt_to_js(env, config.zero_rtt));
+    set_named(env, out, "orphanZeroRttBuffer",
+              orphan_zero_rtt_buffer_to_js(env, config.orphan_zero_rtt_buffer));
     set_bool(env, out, "emitSharedReceiveStreamData", config.emit_shared_receive_stream_data != 0);
     set_bool(env, out, "enableOutOfOrderReceive", config.enable_out_of_order_receive != 0);
     set_bool(env, out, "enablePacketInspection", config.enable_packet_inspection != 0);

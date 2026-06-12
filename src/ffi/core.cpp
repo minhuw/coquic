@@ -39,6 +39,9 @@ constexpr std::size_t kEndpointConfigSizeV2 =
 constexpr std::size_t kEndpointConfigSizeV3 =
     offsetof(coquic_endpoint_config_t, enable_out_of_order_receive) +
     sizeof(coquic_endpoint_config_t::enable_out_of_order_receive);
+constexpr std::size_t kEndpointConfigSizeV4 =
+    offsetof(coquic_endpoint_config_t, orphan_zero_rtt_buffer) +
+    sizeof(coquic_endpoint_config_t::orphan_zero_rtt_buffer);
 constexpr std::size_t kClientConnectionConfigSizeV1 =
     offsetof(coquic_client_connection_config_t, zero_rtt) +
     sizeof(coquic_client_connection_config_t::zero_rtt);
@@ -342,6 +345,14 @@ coquic::core::ZeroRttConfig to_cpp(coquic_zero_rtt_config_t config) {
     };
 }
 
+coquic::core::OrphanZeroRttBufferConfig to_cpp(coquic_orphan_zero_rtt_buffer_config_t config) {
+    return coquic::core::OrphanZeroRttBufferConfig{
+        .max_packets = config.max_packets,
+        .max_bytes = config.max_bytes,
+        .max_age = std::chrono::microseconds{static_cast<std::int64_t>(config.max_age_us)},
+    };
+}
+
 coquic::core::TransportConfig to_cpp(const coquic_transport_config_t &config) {
     return coquic::core::TransportConfig{
         .max_idle_timeout = config.max_idle_timeout,
@@ -397,6 +408,9 @@ coquic::core::EndpointConfig to_cpp(const coquic_endpoint_config_t &config) {
         .retry_enabled = config.retry_enabled != 0,
         .max_server_connections =
             config.size >= kEndpointConfigSizeV2 ? config.max_server_connections : 0,
+        .orphan_zero_rtt_buffer = config.size >= kEndpointConfigSizeV4
+                                      ? to_cpp(config.orphan_zero_rtt_buffer)
+                                      : coquic::core::OrphanZeroRttBufferConfig{},
         .application_protocol =
             to_string(config.application_protocol, config.application_protocol_length),
         .identity = to_cpp(config.identity),
@@ -829,6 +843,7 @@ void coquic_endpoint_config_init(coquic_endpoint_config_t *config) {
         .allow_peer_address_change = 1,
         .max_server_connections = 0,
         .enable_out_of_order_receive = 0,
+        .orphan_zero_rtt_buffer = {},
     };
 }
 

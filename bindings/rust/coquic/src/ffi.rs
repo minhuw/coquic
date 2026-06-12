@@ -4,7 +4,7 @@
 
 use std::ffi::c_char;
 
-pub const COQUIC_FFI_ABI_VERSION: u32 = 2;
+pub const COQUIC_FFI_ABI_VERSION: u32 = 4;
 
 pub enum coquic_endpoint_t {}
 pub enum coquic_result_t {}
@@ -194,6 +194,14 @@ pub struct coquic_zero_rtt_config_t {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct coquic_orphan_zero_rtt_buffer_config_t {
+    pub max_packets: usize,
+    pub max_bytes: usize,
+    pub max_age_us: coquic_time_us_t,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct coquic_transport_config_t {
     pub max_idle_timeout: u64,
     pub max_udp_payload_size: u64,
@@ -241,6 +249,7 @@ pub struct coquic_endpoint_config_t {
     pub allow_peer_address_change: u8,
     pub max_server_connections: usize,
     pub enable_out_of_order_receive: u8,
+    pub orphan_zero_rtt_buffer: coquic_orphan_zero_rtt_buffer_config_t,
 }
 
 #[repr(C)]

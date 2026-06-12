@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub Issue Implementation"
+  short_description: "Implement CoQUIC GitHub issues end to end"
+  default_prompt: "Use $gh-issue-implementation to implement and close this CoQUIC GitHub issue."

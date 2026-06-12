@@ -3011,8 +3011,10 @@ QuicConnection::minimum_pending_application_stream_datagram_bytes() const {
     }
     const auto destination_connection_id_size = outbound_destination_connection_id().size();
     const auto max_datagram_size = outbound_datagram_size_limit();
-    const auto stream_budget =
-        application_stream_frame_budget(max_datagram_size, destination_connection_id_size);
+    const auto stream_budget = application_stream_frame_budget(
+        max_datagram_size, destination_connection_id_size,
+        packet_number_length_for_send(application_space_,
+                                      application_space_.next_send_packet_number));
     if (*minimum_wire_bytes > stream_budget) {
         return std::nullopt;
     }
@@ -3039,8 +3041,10 @@ QuicConnection::minimum_pending_application_datagram_datagram_bytes() const {
     }
     const auto destination_connection_id_size = outbound_destination_connection_id().size();
     const auto max_datagram_size = outbound_datagram_size_limit();
-    const auto stream_budget =
-        application_stream_frame_budget(max_datagram_size, destination_connection_id_size);
+    const auto stream_budget = application_stream_frame_budget(
+        max_datagram_size, destination_connection_id_size,
+        packet_number_length_for_send(application_space_,
+                                      application_space_.next_send_packet_number));
     if (*minimum_wire_bytes > stream_budget) {
         return std::nullopt;
     }
@@ -3086,8 +3090,10 @@ std::optional<std::size_t> QuicConnection::application_stream_pacing_deadline_by
     }
 
     const auto destination_connection_id_size = outbound_destination_connection_id().size();
-    auto stream_budget =
-        application_stream_frame_budget(max_datagram_size, destination_connection_id_size);
+    auto stream_budget = application_stream_frame_budget(
+        max_datagram_size, destination_connection_id_size,
+        packet_number_length_for_send(application_space_,
+                                      application_space_.next_send_packet_number));
     if (stream_budget == 0) {
         return max_datagram_size;
     }

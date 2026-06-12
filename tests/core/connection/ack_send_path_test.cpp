@@ -518,7 +518,7 @@ TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossRepeatedCumulativeAcks
                               .largest_authenticated_handshake_packet_number =
                                   connection.handshake_space_.largest_authenticated_packet_number,
                               .largest_authenticated_application_packet_number =
-                                  connection.application_space_.largest_authenticated_packet_number,
+                                  sender_application_packet_number_reference_for_tests(connection),
                               .one_rtt_destination_connection_id_length =
                                   connection.config_.source_connection_id.size(),
                           });
@@ -1313,7 +1313,7 @@ TEST(QuicCoreTest, ApplicationSendDrainsLargePayloadAcrossDroppedCumulativeAckRo
                               .largest_authenticated_handshake_packet_number =
                                   connection.handshake_space_.largest_authenticated_packet_number,
                               .largest_authenticated_application_packet_number =
-                                  connection.application_space_.largest_authenticated_packet_number,
+                                  sender_application_packet_number_reference_for_tests(connection),
                               .one_rtt_destination_connection_id_length =
                                   connection.config_.source_connection_id.size(),
                           });

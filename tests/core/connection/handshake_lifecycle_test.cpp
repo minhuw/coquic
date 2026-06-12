@@ -684,7 +684,9 @@ TEST(QuicCoreTest, ApplicationLevelHandshakeDoneFrameConfirmsHandshakeInCryptoPa
 }
 
 TEST(QuicCoreTest, ClientHandshakePacketUpdatesCurrentVersionWhenPeerNegotiatesSupportedVersion) {
-    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    auto config = coquic::quic::test::make_client_core_config();
+    config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+    coquic::quic::QuicConnection connection(std::move(config));
     connection.started_ = true;
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     connection.current_version_ = coquic::quic::kQuicVersion1;

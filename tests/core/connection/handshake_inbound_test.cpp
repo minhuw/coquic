@@ -922,7 +922,8 @@ TEST(QuicCoreTest, ClientSendsStandaloneHandshakeAckBeforeHandshakeFlight) {
 
     expect_codec_success(connection.process_inbound_packet(
         coquic::quic::ProtectedHandshakePacket{
-            .source_connection_id = bytes_from_hex("0011223344556677"),
+            .source_connection_id =
+                optional_value_or_terminate(connection.peer_source_connection_id_),
             .packet_number = 1,
             .frames = {coquic::quic::PingFrame{}},
         },
@@ -1406,7 +1407,7 @@ TEST(QuicCoreTest, InitialAckUpdatesSharedCongestionController) {
     EXPECT_LT(connection.congestion_controller_.bytes_in_flight(), bytes_in_flight_before_ack);
 }
 
-TEST(QuicCoreTest, ClientFirstHandshakeSendDiscardsInitialBeforeCongestionCheck) {
+TEST(QuicCoreTest, ClientFirstHandshakeSendDiscardsInitialAfterCommittedCoalescedHandshake) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.started_ = true;
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
@@ -1441,7 +1442,10 @@ TEST(QuicCoreTest, ClientFirstHandshakeSendDiscardsInitialBeforeCongestionCheck)
     EXPECT_TRUE(connection.initial_packet_space_discarded_);
     EXPECT_FALSE(connection.initial_space_.pending_probe_packet.has_value());
     EXPECT_EQ(tracked_packet_count(connection.initial_space_), 0u);
-    expect_single_packet_kind(datagram, ProtectedPacketKind::handshake);
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 2u);
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packets.front()));
+    EXPECT_TRUE(std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(packets.back()));
     EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 1u);
 }
 
@@ -2237,11 +2241,11 @@ TEST(QuicCoreTest, InitialCongestionBlockRestoresInitialCryptoRanges) {
     EXPECT_EQ(connection.initial_space_.next_send_packet_number, 0u);
 }
 
-TEST(QuicCoreTest, HandshakeCongestionBlockFinalizesQueuedInitialPacket) {
-    bool finalized_initial_before_handshake = false;
+TEST(QuicCoreTest, HandshakeCoalescingTrimsCryptoAndFinalizesQueuedInitialPacket) {
+    bool coalesced_trimmed_handshake_with_initial = false;
 
     for (std::size_t handshake_crypto_size = 64;
-         handshake_crypto_size <= 2048 && !finalized_initial_before_handshake;
+         handshake_crypto_size <= 2048 && !coalesced_trimmed_handshake_with_initial;
          handshake_crypto_size += 64) {
         auto config = coquic::quic::test::make_client_core_config();
         config.max_outbound_datagram_size = 4096;
@@ -2260,22 +2264,27 @@ TEST(QuicCoreTest, HandshakeCongestionBlockFinalizesQueuedInitialPacket) {
             continue;
         }
         if (!connection.handshake_space_.send_crypto.has_pending_data() ||
-            connection.handshake_space_.next_send_packet_number != 0u) {
+            connection.handshake_space_.next_send_packet_number != 1u) {
             continue;
         }
 
         const auto packets = decode_sender_datagram(connection, datagram);
-        if (packets.size() != 1u) {
+        if (packets.size() != 2u) {
             continue;
         }
         if (!std::holds_alternative<coquic::quic::ProtectedInitialPacket>(packets.front())) {
             continue;
         }
+        if (!std::holds_alternative<coquic::quic::ProtectedHandshakePacket>(packets.back())) {
+            continue;
+        }
 
-        finalized_initial_before_handshake = true;
+        EXPECT_EQ(datagram.size(), 1200u);
+        EXPECT_EQ(connection.initial_space_.next_send_packet_number, 1u);
+        coalesced_trimmed_handshake_with_initial = true;
     }
 
-    EXPECT_TRUE(finalized_initial_before_handshake);
+    EXPECT_TRUE(coalesced_trimmed_handshake_with_initial);
 }
 
 TEST(QuicCoreTest, HasPendingCongestionControlledSendIncludesRetireCidAndApplicationCrypto) {
@@ -3308,7 +3317,9 @@ TEST(QuicCoreTest, DuplicateReceivedInitialPacketDoesNotResetClientHandshakePeer
 
 TEST(QuicCoreTest,
      ReceivedHandshakePacketAdoptsVersionAndDiscardsClientHandshakeSourceConnectionIdChange) {
-    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    auto config = coquic::quic::test::make_client_core_config();
+    config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+    coquic::quic::QuicConnection connection(std::move(config));
     connection.started_ = true;
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     connection.handshake_confirmed_ = false;
@@ -3364,7 +3375,9 @@ TEST(QuicCoreTest,
 }
 
 TEST(QuicCoreTest, DuplicateReceivedHandshakePacketDoesNotResetClientHandshakePeerState) {
-    coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
+    auto config = coquic::quic::test::make_client_core_config();
+    config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+    coquic::quic::QuicConnection connection(std::move(config));
     connection.started_ = true;
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     connection.handshake_confirmed_ = false;
@@ -4029,7 +4042,7 @@ TEST(QuicCoreTest, DrainOutboundDatagramReplaysDeferredProtectedPacketsBeforeFlu
             // # However, endpoints SHOULD include buffering delays caused by
             // # unavailability of decryption keys, since these delays can be
             // # large and are likely to be non-repeating.
-            EXPECT_EQ(ack->ack_delay, 1000u);
+            EXPECT_EQ(ack->ack_delay, 8000u);
         }
     }
     EXPECT_TRUE(saw_ack);

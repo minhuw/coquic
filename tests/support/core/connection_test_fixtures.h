@@ -196,6 +196,14 @@ inline std::vector<SentPacketRecord> tracked_packet_snapshot(const PacketSpaceSt
     return packets;
 }
 
+inline std::optional<std::uint64_t>
+sender_application_packet_number_reference_for_tests(const QuicConnection &connection) {
+    if (connection.application_space_.next_send_packet_number == 0) {
+        return std::nullopt;
+    }
+    return connection.application_space_.next_send_packet_number - 1;
+}
+
 class ScopedEnvVar {
   public:
     ScopedEnvVar(std::string name, std::optional<std::string> value) : name_(std::move(name)) {
@@ -458,7 +466,7 @@ inline std::vector<ProtectedPacket> decode_sender_datagram(const QuicConnection 
                       .largest_authenticated_handshake_packet_number =
                           connection.handshake_space_.largest_authenticated_packet_number,
                       .largest_authenticated_application_packet_number =
-                          connection.application_space_.largest_authenticated_packet_number,
+                          sender_application_packet_number_reference_for_tests(connection),
                       .one_rtt_destination_connection_id_length =
                           connection.config_.source_connection_id.size(),
                   });

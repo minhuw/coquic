@@ -1347,6 +1347,38 @@ TEST(QuicCoreEndpointInternalTest, LegacyPathMtuUpdateHonorsRouteMapping) {
     EXPECT_EQ(path.mtu.probe_ceiling, 1300u);
     EXPECT_EQ(path.mtu.validated_datagram_size, 1300u);
 }
+
+TEST(QuicCoreEndpointInternalTest, LegacyClientBindsFirstInboundRouteAsDefaultPath) {
+    QuicCore legacy_core(coquic::quic::test::make_client_core_config());
+    auto *entry = legacy_core.ensure_legacy_entry();
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->connection, nullptr);
+    ASSERT_EQ(legacy_core.connection_count(), 1u);
+    ASSERT_FALSE(entry->default_route_handle.has_value());
+    ASSERT_TRUE(entry->path_id_by_route_handle.empty());
+    ASSERT_TRUE(entry->route_handle_by_path_id.empty());
+
+    const auto identity = make_ipv4_identity(198, 51, 100, 7, 4433);
+    auto route_probe = legacy_core.advance(
+        QuicCoreInboundDatagram{
+            .bytes = bytes_from_ints({0x40}),
+            .route_handle = 17,
+            .address_validation_identity = identity,
+        },
+        coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(route_probe.local_error.has_value());
+    entry = legacy_core.ensure_legacy_entry();
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->default_route_handle, std::optional<QuicRouteHandle>{17u});
+    ASSERT_TRUE(entry->path_id_by_route_handle.contains(17));
+    EXPECT_EQ(entry->path_id_by_route_handle.at(17), 0u);
+    ASSERT_TRUE(entry->route_handle_by_path_id.contains(0));
+    EXPECT_EQ(entry->route_handle_by_path_id.at(0), 17u);
+    ASSERT_TRUE(entry->address_validation_identity_by_path_id.contains(0));
+    EXPECT_EQ(entry->address_validation_identity_by_path_id.at(0), identity);
+}
+
 TEST(QuicCoreEndpointInternalTest,
      ExistingInboundDatagramUsesDefaultRouteAndErasesClosedConnection) {
     auto server_config = make_server_endpoint_config();

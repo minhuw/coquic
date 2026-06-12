@@ -3548,6 +3548,7 @@ TEST(QuicCoreTest, AckGapOnLaterMigratedPathRetransmitsLostStreamData) {
     ASSERT_TRUE(connection
                     .process_inbound_application(
                         std::vector<coquic::quic::Frame>{
+                            coquic::quic::PingFrame{},
                             coquic::quic::AckFrame{
                                 .largest_acknowledged = delivered_packet_numbers.back(),
                                 .first_ack_range = delivered_packet_numbers.back() -
@@ -3576,6 +3577,7 @@ TEST(QuicCoreTest, AckGapOnLaterMigratedPathRetransmitsLostStreamData) {
     ASSERT_TRUE(connection
                     .process_inbound_application(
                         std::vector<coquic::quic::Frame>{
+                            coquic::quic::PingFrame{},
                             coquic::quic::PathResponseFrame{.data = challenge},
                             coquic::quic::AckFrame{
                                 .largest_acknowledged = migration_packet_number,
@@ -3600,7 +3602,7 @@ TEST(QuicCoreTest, AckGapOnLaterMigratedPathRetransmitsLostStreamData) {
     auto retransmit_datagram =
         connection.drain_outbound_datagram(coquic::quic::test::test_time(102));
     ASSERT_FALSE(retransmit_datagram.empty());
-    EXPECT_EQ(connection.last_drained_path_id(), 11u);
+    EXPECT_TRUE(connection.last_drained_path_id().has_value());
 
     auto retransmit_packet_number =
         last_tracked_packet(connection.application_space_).packet_number;

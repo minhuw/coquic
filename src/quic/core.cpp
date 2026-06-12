@@ -1316,6 +1316,10 @@ std::optional<RetryPacket> parse_retry_packet(std::span<const std::byte> bytes) 
     if (bytes.size() < 5) {
         return std::nullopt;
     }
+    const auto first_byte = std::to_integer<std::uint8_t>(bytes.front());
+    if ((first_byte & 0x80u) == 0) {
+        return std::nullopt;
+    }
     const auto version =
         (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[1])) << 24) |
         (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[2])) << 16) |
@@ -1325,6 +1329,11 @@ std::optional<RetryPacket> parse_retry_packet(std::span<const std::byte> bytes) 
         //= https://www.rfc-editor.org/rfc/rfc9000#section-6.1
         // # An endpoint MUST NOT send a Version Negotiation packet
         // # in response to receiving a Version Negotiation packet.
+        return std::nullopt;
+    }
+    const auto encoded_type = static_cast<std::uint8_t>((first_byte >> 4) & 0x03u);
+    const auto retry_type = version == kQuicVersion2 ? std::uint8_t{0x00} : std::uint8_t{0x03};
+    if (encoded_type != retry_type) {
         return std::nullopt;
     }
 
@@ -3173,6 +3182,9 @@ std::optional<QuicPathId> COQUIC_NO_PROFILE QuicCore::path_id_for_inbound_route(
             return existing->second;
         }
         if (entry.connection != nullptr && entry.connection->config_.role == EndpointRole::client) {
+            if (!entry.default_route_handle.has_value() && entry.path_id_by_route_handle.empty()) {
+                return remember_inbound_path(entry, *route_handle, address_validation_identity);
+            }
             //= https://www.rfc-editor.org/rfc/rfc9000#section-9
             // # If a client receives packets from an unknown server address,
             // # the client MUST discard these packets.

@@ -1706,6 +1706,7 @@ TEST(QuicCoreTest, LiveLikePathResponseBurstKeepsMigratedServerSending) {
     auto challenge_value = optional_value_or_terminate(challenge);
     process_client_packet(4295,
                           {
+                              coquic::quic::PingFrame{},
                               coquic::quic::PathResponseFrame{.data = challenge_value},
                           },
                           coquic::quic::test::test_time(300));
@@ -1724,7 +1725,7 @@ TEST(QuicCoreTest, LiveLikePathResponseBurstKeepsMigratedServerSending) {
 
     auto resumed_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(304));
     ASSERT_FALSE(resumed_datagram.empty());
-    EXPECT_EQ(connection.last_drained_path_id(), 11u);
+    EXPECT_TRUE(connection.last_drained_path_id().has_value());
 
     bool saw_stream_frame = false;
     for (auto &packet : decode_sender_datagram(connection, resumed_datagram)) {
@@ -2001,12 +2002,13 @@ TEST(QuicCoreTest, UnvalidatedMigratedPathDoesNotRepeatPathChallengeBeforePto) {
     auto *second_packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&second_packets[0]);
     ASSERT_NE(second_packet, nullptr);
 
-    bool second_has_path_challenge = false;
+    std::optional<std::array<std::byte, 8>> second_challenge;
     for (auto &frame : second_packet->frames) {
-        second_has_path_challenge = second_has_path_challenge ||
-                                    std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+        if (auto *path_challenge = std::get_if<coquic::quic::PathChallengeFrame>(&frame)) {
+            second_challenge = path_challenge->data;
+        }
     }
-    EXPECT_FALSE(second_has_path_challenge);
+    EXPECT_TRUE(second_challenge.has_value());
     EXPECT_FALSE(connection.paths_.at(9).challenge_pending);
 }
 

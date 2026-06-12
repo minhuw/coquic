@@ -67,6 +67,16 @@ function timedPersistentRrClient() {
   return { client, state };
 }
 
+function timedBulkClient() {
+  const config = new PerfConfig();
+  config.mode = Mode.BULK;
+  config.direction = Direction.DOWNLOAD;
+  config.totalBytes = null;
+  config.duration = 5;
+
+  return new Client(config, new FakeEndpoint(), fakeIo, 1, Buffer.alloc(0));
+}
+
 test("timed persistent rr drain is bounded by a benchmark wakeup", async () => {
   const { client, state } = timedPersistentRrClient();
 
@@ -97,4 +107,19 @@ test("timed persistent rr hard drain closes without waiting for FIN", async () =
   assert.equal(state.persistentFinSent, true);
   assert.equal(state.closeRequested, true);
   assert.equal(client.runComplete(), true);
+});
+
+test("timed bulk can wait through idle only after benchmark start", () => {
+  const client = timedBulkClient();
+
+  assert.equal(client.canWaitThroughIdle(), false);
+
+  client.benchmarkStartedAt = 100_000;
+  assert.equal(client.canWaitThroughIdle(), true);
+});
+
+test("timed request response idle remains fatal", () => {
+  const { client } = timedPersistentRrClient();
+
+  assert.equal(client.canWaitThroughIdle(), false);
 });

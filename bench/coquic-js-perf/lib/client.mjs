@@ -192,6 +192,8 @@ export class Client {
         const eventNow = this.io.nowUs();
         await this.advanceBenchmarkPhase(eventNow);
         await this.handleDueTimer();
+      } else if (this.canWaitThroughIdle()) {
+        await this.advanceBenchmarkPhase(this.io.nowUs());
       } else {
         throw new PerfError("client timed out waiting for progress");
       }
@@ -906,6 +908,10 @@ export class Client {
 
   benchmarkAcceptsNewWork() {
     return this.phase !== BenchmarkPhase.DRAIN;
+  }
+
+  canWaitThroughIdle() {
+    return this.timedBulkMode() && this.benchmarkStartedAt != null;
   }
 
   benchmarkNextWakeup() {

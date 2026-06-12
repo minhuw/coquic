@@ -36,6 +36,7 @@ static inline coquic_status_t coquic_go_endpoint_create(
     size_t orphan_zero_rtt_max_packets,
     size_t orphan_zero_rtt_max_bytes,
     coquic_time_us_t orphan_zero_rtt_max_age_us,
+    uint8_t enable_reserved_version_probe,
     uint8_t emit_shared_receive_stream_data,
     uint8_t enable_out_of_order_receive,
     uint8_t enable_packet_inspection,
@@ -69,6 +70,7 @@ static inline coquic_status_t coquic_go_endpoint_create(
     config.orphan_zero_rtt_buffer.max_packets = orphan_zero_rtt_max_packets;
     config.orphan_zero_rtt_buffer.max_bytes = orphan_zero_rtt_max_bytes;
     config.orphan_zero_rtt_buffer.max_age_us = orphan_zero_rtt_max_age_us;
+    config.enable_reserved_version_probe = enable_reserved_version_probe;
     config.emit_shared_receive_stream_data = emit_shared_receive_stream_data;
     config.enable_out_of_order_receive = enable_out_of_order_receive;
     config.enable_packet_inspection = enable_packet_inspection;
@@ -423,6 +425,7 @@ type EndpointConfig struct {
 	EmitSharedReceiveStreamData bool
 	EnableOutOfOrderReceive     bool
 	EnablePacketInspection      bool
+	EnableReservedVersionProbe  bool
 	AllowPeerAddressChange      bool
 }
 
@@ -450,6 +453,7 @@ func DefaultEndpointConfig() EndpointConfig {
 		EmitSharedReceiveStreamData: raw.emit_shared_receive_stream_data != 0,
 		EnableOutOfOrderReceive:     raw.enable_out_of_order_receive != 0,
 		EnablePacketInspection:      raw.enable_packet_inspection != 0,
+		EnableReservedVersionProbe:  raw.enable_reserved_version_probe != 0,
 		AllowPeerAddressChange:      raw.allow_peer_address_change != 0,
 	}
 }
@@ -525,6 +529,7 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		C.size_t(config.OrphanZeroRttBuffer.MaxPackets),
 		C.size_t(config.OrphanZeroRttBuffer.MaxBytes),
 		C.coquic_time_us_t(config.OrphanZeroRttBuffer.MaxAgeUs),
+		cBool(config.EnableReservedVersionProbe),
 		cBool(config.EmitSharedReceiveStreamData),
 		cBool(config.EnableOutOfOrderReceive),
 		cBool(config.EnablePacketInspection),

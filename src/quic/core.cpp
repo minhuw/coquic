@@ -2606,6 +2606,27 @@ std::vector<std::byte> COQUIC_NO_PROFILE QuicCore::make_version_negotiation_pack
     return encoded.has_value() ? DatagramBuffer(encoded.value()) : DatagramBuffer{};
 }
 
+std::vector<std::byte> QuicCore::make_reserved_version_probe_packet_bytes(
+    const QuicCoreClientConnectionConfig &connection) {
+    if (connection.initial_destination_connection_id.size() > 255 ||
+        connection.source_connection_id.size() > 255) {
+        return {};
+    }
+
+    std::vector<std::byte> bytes;
+    bytes.reserve(7 + connection.initial_destination_connection_id.size() +
+                  connection.source_connection_id.size());
+    bytes.push_back(std::byte{0xc0});
+    append_u32_be(bytes, kGreasedReservedVersion);
+    bytes.push_back(static_cast<std::byte>(connection.initial_destination_connection_id.size()));
+    bytes.insert(bytes.end(), connection.initial_destination_connection_id.begin(),
+                 connection.initial_destination_connection_id.end());
+    bytes.push_back(static_cast<std::byte>(connection.source_connection_id.size()));
+    bytes.insert(bytes.end(), connection.source_connection_id.begin(),
+                 connection.source_connection_id.end());
+    return bytes;
+}
+
 std::vector<std::byte> QuicCore::make_retry_packet_bytes(const ParsedEndpointDatagram &parsed,
                                                          const PendingRetryToken &pending) {
     if (!parsed.source_connection_id.has_value()) {
@@ -3256,6 +3277,7 @@ QuicCore::QuicCore(QuicCoreConfig config)
           .emit_shared_receive_stream_data = config.emit_shared_receive_stream_data,
           .enable_out_of_order_receive = config.enable_out_of_order_receive,
           .enable_packet_inspection = config.enable_packet_inspection,
+          .enable_reserved_version_probe = config.enable_reserved_version_probe,
           .defer_inbound_application_send_drain = config.defer_inbound_application_send_drain,
       }),
       legacy_config_(std::move(config)), endpoint_random_(std::random_device{}()),
@@ -3570,6 +3592,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             .emit_shared_receive_stream_data = endpoint_config_.emit_shared_receive_stream_data,
             .enable_out_of_order_receive = endpoint_config_.enable_out_of_order_receive,
             .enable_packet_inspection = endpoint_config_.enable_packet_inspection,
+            .enable_reserved_version_probe = endpoint_config_.enable_reserved_version_probe,
         };
 
         auto handle = next_connection_handle_++;
@@ -3607,6 +3630,21 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             drain_connection_effects(handle, entry.default_route_handle,
                                      entry.route_handle_by_path_id, *entry.connection, now,
                                      /*continue_paced_burst=*/false, send_sink);
+        if (endpoint_config_.enable_reserved_version_probe) {
+            auto probe_bytes = make_reserved_version_probe_packet_bytes(open->connection);
+            if (!probe_bytes.empty()) {
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-6.3
+                // # Endpoints MAY send packets with a reserved version to test that a
+                // # peer correctly discards the packet.
+                emit_send_datagram(result,
+                                   QuicCoreSendDatagram{
+                                       .connection = 0,
+                                       .route_handle = open->initial_route_handle,
+                                       .bytes = DatagramBuffer(std::move(probe_bytes)),
+                                   },
+                                   send_sink);
+            }
+        }
         result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
             .connection = handle,
             .event = QuicCoreConnectionLifecycle::created,

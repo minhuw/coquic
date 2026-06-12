@@ -6,8 +6,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
   SECTION: [Sending and Receiving Data](#section-2.2)
     TEXT[!MUST,implementation,test]:    Endpoints MUST be able to deliver stream data to an application as an
     TEXT[!MUST,implementation,test]:    ordered byte stream.
-    TEXT[!MAY]: However, implementations MAY choose to offer the ability to
-    TEXT[!MAY]:    deliver data out of order to a receiving application.
+    TEXT[!MAY]: However,
+    TEXT[!MAY,implementation,test]: implementations MAY choose to offer the ability to
+    TEXT[!MAY,implementation,test]:    deliver data out of order to a receiving application.
     TEXT[!MUST,implementation,test]: The data at a given offset MUST NOT change if it is sent
     TEXT[!MUST,implementation,test]:    multiple times
     TEXT[!MUST,exception]: ; an endpoint MAY treat receipt of different data at
@@ -149,6 +150,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation]:    certain that those protocol features are not in use.
 
   SECTION: [Issuing Connection IDs](#section-5.1.1)
+    TEXT[test]: If the preferred_address transport
+    TEXT[test]:    parameter is sent, the sequence number of the supplied connection ID
+    TEXT[test]:    is 1.
     TEXT[!MUST,implementation,test]: The sequence number on
     TEXT[!MUST,implementation,test]:    each newly issued connection ID MUST increase by 1.
     TEXT[!MUST,implementation,test]:    When an endpoint issues a connection ID, it MUST accept packets that
@@ -159,10 +163,10 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    available and unused connection IDs.
     TEXT[!MUST,implementation,test]: An endpoint MUST NOT
     TEXT[!MUST,implementation,test]:    provide more connection IDs than the peer's limit.
-    TEXT[!MAY]: An endpoint MAY
-    TEXT[!MAY]:    send connection IDs that temporarily exceed a peer's limit if the
-    TEXT[!MAY]:    NEW_CONNECTION_ID frame also requires the retirement of any excess,
-    TEXT[!MAY]:    by including a sufficiently large value in the Retire Prior To field.
+    TEXT[!MAY,implementation,test]: An endpoint MAY
+    TEXT[!MAY,implementation,test]:    send connection IDs that temporarily exceed a peer's limit if the
+    TEXT[!MAY,implementation,test]:    NEW_CONNECTION_ID frame also requires the retirement of any excess,
+    TEXT[!MAY,implementation,test]:    by including a sufficiently large value in the Retire Prior To field.
     TEXT[!MUST,implementation,test]: After processing a NEW_CONNECTION_ID frame and
     TEXT[!MUST,implementation,test]:    adding and retiring active connection IDs, if the number of active
     TEXT[!MUST,implementation,test]:    connection IDs exceeds the value advertised in its
@@ -170,9 +174,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    close the connection with an error of type CONNECTION_ID_LIMIT_ERROR.
     TEXT[!SHOULD,implementation,test]:    An endpoint SHOULD supply a new connection ID when the peer retires a
     TEXT[!SHOULD,implementation,test]:    connection ID.
-    TEXT[!MAY]: If an endpoint provided fewer connection IDs than the
-    TEXT[!MAY]:    peer's active_connection_id_limit, it MAY supply a new connection ID
-    TEXT[!MAY]:    when it receives a packet with a previously unused connection ID.
+    TEXT[!MAY,implementation,test]: If an endpoint provided fewer connection IDs than the
+    TEXT[!MAY,implementation,test]:    peer's active_connection_id_limit, it MAY supply a new connection ID
+    TEXT[!MAY,implementation,test]:    when it receives a packet with a previously unused connection ID.
     TEXT[!MAY,implementation]: An
     TEXT[!MAY,implementation]:    endpoint MAY limit the total number of connection IDs issued for each
     TEXT[!MAY,implementation]:    connection to avoid the risk of running out of connection IDs; see
@@ -186,11 +190,17 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    available to its peer allows the peer to use a new connection ID on
     TEXT[!SHOULD,implementation,test]:    migration, as the peer will be unable to respond if the pool is
     TEXT[!SHOULD,implementation,test]:    exhausted.
+    TEXT[test]:    An endpoint that selects a zero-length connection ID during the
+    TEXT[test]:    handshake cannot issue a new connection ID.
 
   SECTION: [Consuming and Retiring Connection IDs](#section-5.1.2)
     TEXT[!SHOULD,implementation,test]: Endpoints SHOULD retire connection IDs when
     TEXT[!SHOULD,implementation,test]:    they are no longer actively using either the local or destination
     TEXT[!SHOULD,implementation,test]:    address for which the connection ID was used.
+    TEXT[implementation]:    An endpoint might need to stop accepting previously issued connection
+    TEXT[implementation]:    IDs in certain circumstances.  Such an endpoint can cause its peer to
+    TEXT[implementation]:    retire connection IDs by sending a NEW_CONNECTION_ID frame with an
+    TEXT[implementation]:    increased Retire Prior To field.
     TEXT[!SHOULD,implementation,test]: The endpoint SHOULD continue to
     TEXT[!SHOULD,implementation,test]:    accept the previously issued connection IDs until they are retired by
     TEXT[!SHOULD,implementation,test]:    the peer.
@@ -285,8 +295,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MAY,implementation]:    Endpoints MAY add reserved versions to any field where unknown or
     TEXT[!MAY,implementation]:    unsupported versions are ignored to test that a peer correctly
     TEXT[!MAY,implementation]:    ignores the value.
-    TEXT[!MAY]:    Endpoints MAY send packets with a reserved version to test that a
-    TEXT[!MAY]:    peer correctly discards the packet.
+    TEXT[!MAY,implementation,test]:    Endpoints MAY send packets with a reserved version to test that a
+    TEXT[!MAY,implementation,test]:    peer correctly discards the packet.
 
   SECTION: [Cryptographic and Transport Handshake](#section-7)
     TEXT[!MUST,implementation,test]: The cryptographic handshake MUST

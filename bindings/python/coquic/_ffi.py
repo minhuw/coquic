@@ -5,7 +5,7 @@ import ctypes.util
 import os
 from pathlib import Path
 
-FFI_ABI_VERSION = 4
+FFI_ABI_VERSION = 5
 
 COQUIC_STATUS_OK = 0
 COQUIC_STATUS_INVALID_ARGUMENT = 1
@@ -205,6 +205,7 @@ class coquic_endpoint_config_t(C.Structure):
         ("max_server_connections", C.c_size_t),
         ("enable_out_of_order_receive", C.c_uint8),
         ("orphan_zero_rtt_buffer", coquic_orphan_zero_rtt_buffer_config_t),
+        ("enable_reserved_version_probe", C.c_uint8),
     ]
 
 

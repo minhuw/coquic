@@ -123,6 +123,7 @@ TEST(CoquicPublicApiTest, CoreEndpointCoversServerAndTransportOptions) {
             .emit_shared_receive_stream_data = true,
             .enable_out_of_order_receive = true,
             .enable_packet_inspection = true,
+            .enable_reserved_version_probe = true,
             .allow_peer_address_change = false,
         });
 
@@ -132,6 +133,37 @@ TEST(CoquicPublicApiTest, CoreEndpointCoversServerAndTransportOptions) {
         EXPECT_FALSE(endpoint.has_pending_stream_send());
         EXPECT_TRUE(endpoint.connection_diagnostics().empty());
     }
+}
+
+TEST(CoquicPublicApiTest, CoreEndpointCanOptIntoReservedVersionProbe) {
+    coquic::core::Endpoint endpoint(coquic::core::EndpointConfig{
+        .role = coquic::core::Role::client,
+        .verify_peer = false,
+        .application_protocol = "coquic",
+        .enable_reserved_version_probe = true,
+    });
+
+    auto result = endpoint.open_connection(
+        coquic::core::OpenConnection{
+            .connection = client_connection_config(),
+            .initial_route_handle = 7,
+        },
+        coquic::core::TimePoint{});
+
+    const auto datagrams = coquic::core::send_datagrams(result);
+    ASSERT_EQ(datagrams.size(), 2u);
+    EXPECT_EQ(datagrams.front().connection, 1u);
+    EXPECT_EQ(datagrams.back().connection, 0u);
+    EXPECT_EQ(datagrams.back().route_handle, std::optional<coquic::core::RouteHandle>{7});
+    ASSERT_GE(datagrams.back().bytes.size(), 5u);
+    const auto &probe = datagrams.back().bytes;
+    const auto version =
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(probe[1])) << 24) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(probe[2])) << 16) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(probe[3])) << 8) |
+        static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(probe[4]));
+    EXPECT_EQ(version, 0x0a0a0a0au);
+    EXPECT_FALSE(coquic::quic::is_supported_quic_version(version));
 }
 
 TEST(CoquicPublicApiTest, CoreEndpointForwardsEndpointInputs) {

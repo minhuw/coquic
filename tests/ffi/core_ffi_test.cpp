@@ -361,6 +361,7 @@ TEST(CoquicCoreFfiTest, InitializersAndNullQueriesAreStable) {
     EXPECT_EQ(endpoint_config.orphan_zero_rtt_buffer.max_packets, 0u);
     EXPECT_EQ(endpoint_config.orphan_zero_rtt_buffer.max_bytes, 0u);
     EXPECT_EQ(endpoint_config.orphan_zero_rtt_buffer.max_age_us, 0u);
+    EXPECT_EQ(endpoint_config.enable_reserved_version_probe, 0);
 
     coquic_client_connection_config_t connection_config{};
     coquic_client_connection_config_init(&connection_config);
@@ -420,6 +421,18 @@ TEST(CoquicCoreFfiTest, EndpointConfigSizeGatesOrphanZeroRttBufferOption) {
     coquic_endpoint_destroy(endpoint);
 }
 
+TEST(CoquicCoreFfiTest, EndpointConfigSizeGatesReservedVersionProbeOption) {
+    coquic_endpoint_config_t endpoint_config{};
+    coquic_endpoint_config_init(&endpoint_config);
+    endpoint_config.enable_reserved_version_probe = 1;
+    endpoint_config.size = offsetof(coquic_endpoint_config_t, enable_reserved_version_probe);
+
+    coquic_endpoint_t *endpoint = nullptr;
+    ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);
+    ASSERT_NE(endpoint, nullptr);
+    coquic_endpoint_destroy(endpoint);
+}
+
 TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
     coquic_endpoint_config_t endpoint_config{};
     coquic_endpoint_config_init(&endpoint_config);
@@ -459,6 +472,7 @@ TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
         .max_bytes = 8192,
         .max_age_us = 250000,
     };
+    endpoint_config.enable_reserved_version_probe = 1;
 
     coquic_endpoint_t *endpoint = nullptr;
     ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);

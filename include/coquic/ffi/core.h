@@ -23,7 +23,7 @@ extern "C" {
 #endif
 #endif
 
-#define COQUIC_FFI_ABI_VERSION 4u
+#define COQUIC_FFI_ABI_VERSION 5u
 
 typedef struct coquic_endpoint coquic_endpoint_t;
 typedef struct coquic_result coquic_result_t;
@@ -221,6 +221,7 @@ typedef struct coquic_endpoint_config {
     size_t max_server_connections;
     uint8_t enable_out_of_order_receive;
     coquic_orphan_zero_rtt_buffer_config_t orphan_zero_rtt_buffer;
+    uint8_t enable_reserved_version_probe;
 } coquic_endpoint_config_t;
 
 typedef struct coquic_resumption_state {

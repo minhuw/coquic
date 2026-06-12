@@ -603,6 +603,8 @@ EndpointConfigMaterialization endpoint_config_from_js(napi_env env, napi_value v
     get_named(env, value, "orphanZeroRttBuffer", &orphan_zero_rtt_buffer_value);
     out.config.orphan_zero_rtt_buffer = orphan_zero_rtt_buffer_from_object(
         env, orphan_zero_rtt_buffer_value, out.config.orphan_zero_rtt_buffer);
+    out.config.enable_reserved_version_probe = static_cast<std::uint8_t>(get_bool(
+        env, value, "enableReservedVersionProbe", out.config.enable_reserved_version_probe));
     out.config.emit_shared_receive_stream_data = static_cast<std::uint8_t>(get_bool(
         env, value, "emitSharedReceiveStreamData", out.config.emit_shared_receive_stream_data));
     out.config.enable_out_of_order_receive = static_cast<std::uint8_t>(
@@ -927,6 +929,7 @@ napi_value DefaultEndpointConfig(napi_env env, napi_callback_info) {
     set_named(env, out, "zeroRtt", zero_rtt_to_js(env, config.zero_rtt));
     set_named(env, out, "orphanZeroRttBuffer",
               orphan_zero_rtt_buffer_to_js(env, config.orphan_zero_rtt_buffer));
+    set_bool(env, out, "enableReservedVersionProbe", config.enable_reserved_version_probe != 0);
     set_bool(env, out, "emitSharedReceiveStreamData", config.emit_shared_receive_stream_data != 0);
     set_bool(env, out, "enableOutOfOrderReceive", config.enable_out_of_order_receive != 0);
     set_bool(env, out, "enablePacketInspection", config.enable_packet_inspection != 0);

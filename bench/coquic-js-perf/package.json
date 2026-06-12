@@ -7,7 +7,7 @@
     "coquic-js-perf": "./bin/coquic-js-perf.mjs"
   },
   "dependencies": {
-    "@coquic/coquic": "file:../../../bindings/javascript"
+    "@coquic/coquic": "file:../../bindings/javascript"
   },
   "engines": {
     "node": ">=20"

@@ -172,7 +172,8 @@ export class UdpRuntime {
       }
       timerTimeout = (nextWakeup - now) / 1_000_000.0;
     }
-    const timeout = timerTimeout == null ? idleTimeout : timerTimeout;
+    const timerIsEarlier = timerTimeout != null && timerTimeout <= idleTimeout;
+    const timeout = timerIsEarlier ? timerTimeout : idleTimeout;
 
     return await new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -180,7 +181,7 @@ export class UdpRuntime {
         if (index >= 0) {
           this.waiters.splice(index, 1);
         }
-        if (timerTimeout != null) {
+        if (timerIsEarlier) {
           resolve(new WaitEvent("timer"));
         } else {
           resolve(new WaitEvent("idle"));

@@ -236,9 +236,16 @@ TEST(QuicHttp09RuntimeTest, ConfiguredCompatibleVersionsStartInQuicV1AndNegotiat
     }
 
     EXPECT_TRUE(client.is_handshake_complete());
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4
+    // # Endpoints that support both
+    // # versions SHOULD support compatible version negotiation to avoid a
+    // # round trip.
     EXPECT_TRUE(std::ranges::any_of(server_datagrams, [](const auto &datagram) {
         return has_long_header(datagram) && read_u32_be_at(datagram, 1) == kQuicVersion2;
     }));
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+    // # Once the client has learned the negotiated version, it SHOULD send
+    // # subsequent Initial packets using that version.
     EXPECT_TRUE(std::ranges::any_of(client_followup_datagrams, [](const auto &datagram) {
         return has_long_header(datagram) && read_u32_be_at(datagram, 1) == kQuicVersion2;
     }));

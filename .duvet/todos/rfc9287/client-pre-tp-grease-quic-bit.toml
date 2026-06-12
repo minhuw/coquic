@@ -1,0 +1,17 @@
+# RFC 9287 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9287#section-3.1"
+# report-id = 1072
+quote = '''
+A client MAY also set the QUIC Bit to 0 in Initial, Handshake, or
+0-RTT packets that are sent prior to receiving transport parameters
+from the server.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/69"
+reason = '''
+Clients currently only grease the QUIC Bit after peer transport parameters are
+validated; the optional pre-transport-parameter client path based on a recent
+qualifying NEW_TOKEN is not implemented.
+'''
+tags = ["rfc9287"]

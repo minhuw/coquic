@@ -38,6 +38,12 @@ struct Http09RuntimeConfig {
     int client_receive_timeout_ms = 30000;
     std::uint32_t original_version = quic::kQuicVersion1;
     std::uint32_t initial_version = quic::kQuicVersion1;
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4
+    // # As
+    // # this mechanism does not currently distinguish between QUIC versions,
+    // # HTTP servers SHOULD support multiple versions to reduce the
+    // # probability of incompatibility and the cost associated with QUIC
+    // # version negotiation or TCP fallback.
     std::vector<std::uint32_t> supported_versions = {quic::kQuicVersion1};
     quic::QuicTransportConfig client_transport;
     quic::QuicTransportConfig server_transport;

@@ -1,0 +1,18 @@
+# RFC 9369 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9369#section-4.1"
+# report-id = 1135
+quote = '''
+The server MUST NOT
+discard its original version Initial receive keys until it
+successfully processes a Handshake packet with the negotiated
+version.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/79"
+reason = '''
+Server Handshake processing currently discards the Initial packet space after
+successfully processing any server-side Handshake packet; it needs an explicit
+negotiated-version condition for compatible version negotiation.
+'''
+tags = ["rfc9369"]

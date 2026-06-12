@@ -1630,6 +1630,62 @@ TEST(QuicCoreTest, AcceptedZeroRttRejectsReducedServerTransportLimits) {
     expect_reduction_rejected([](auto &parameters) { parameters.initial_max_streams_uni = 3; });
 }
 
+TEST(QuicCoreTest, AcceptedZeroRttRejectsReducedRememberedMaxDatagramFrameSize) {
+    const auto original_destination_connection_id =
+        bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});
+    const auto remembered = coquic::quic::TransportParameters{
+        .original_destination_connection_id = original_destination_connection_id,
+        .max_udp_payload_size = 1200,
+        .active_connection_id_limit = 8,
+        .initial_max_data = 4096,
+        .initial_max_stream_data_bidi_local = 2048,
+        .initial_max_stream_data_bidi_remote = 2048,
+        .initial_max_stream_data_uni = 1024,
+        .initial_max_streams_bidi = 4,
+        .initial_max_streams_uni = 4,
+        .initial_source_connection_id = bytes_from_ints({0x53, 0x01}),
+        .max_datagram_frame_size = 65535,
+    };
+    auto reduced = remembered;
+    reduced.max_datagram_frame_size = 1200;
+
+    auto connection = coquic::quic::QuicConnection(coquic::quic::test::make_client_core_config());
+    connection.start_client_if_needed();
+    ASSERT_TRUE(connection.tls_.has_value());
+    connection.peer_source_connection_id_ = bytes_from_ints({0x53, 0x01});
+    connection.decoded_resumption_state_ = coquic::quic::StoredClientResumptionState{
+        .tls_state = {},
+        .quic_version = coquic::quic::kQuicVersion1,
+        .application_protocol = connection.config_.application_protocol,
+        .peer_transport_parameters = remembered,
+        .application_context = connection.config_.zero_rtt.application_context,
+    };
+    connection.client_initial_destination_connection_id_ =
+        connection.config_.initial_destination_connection_id;
+
+    const auto serialized_reduced = coquic::quic::serialize_transport_parameters(reduced);
+    ASSERT_TRUE(serialized_reduced.has_value());
+    coquic::quic::test::TlsAdapterTestPeer::set_peer_transport_parameters(
+        *connection.tls_, serialized_reduced.value());
+    coquic::quic::test::TlsAdapterTestPeer::set_early_data_attempted(*connection.tls_, true);
+    coquic::quic::test::TlsAdapterTestPeer::apply_early_data_status(*connection.tls_,
+                                                                    SSL_EARLY_DATA_ACCEPTED, true);
+
+    auto validated = connection.validate_peer_transport_parameters_if_ready();
+
+    ASSERT_FALSE(validated.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+    // # If a client stores the value of the
+    // # max_datagram_frame_size transport parameter with their 0-RTT state,
+    // # they MUST validate that the new value of the max_datagram_frame_size
+    // # transport parameter sent by the server in the handshake is greater
+    // # than or equal to the stored value; if not, the client MUST terminate
+    // # the connection with error PROTOCOL_VIOLATION.
+    EXPECT_TRUE(validated.error().has_transport_error_code);
+    EXPECT_EQ(validated.error().transport_error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation));
+}
+
 TEST(QuicCoreTest, AcceptedZeroRttAllowsNonRememberedAndOptionalParameterReduction) {
     const auto original_destination_connection_id =
         bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});

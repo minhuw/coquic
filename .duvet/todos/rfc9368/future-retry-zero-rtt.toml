@@ -1,0 +1,33 @@
+# RFC 9368 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-7.1"
+# report-id = 1122
+quote = '''
+If a future document wishes to define compatibility between two
+versions that support Retry, that document MUST specify how version
+negotiation (both compatible and incompatible) interacts with Retry
+during a handshake that requires both.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/76"
+reason = '''
+Future compatible-version design guidance does not yet document the required
+Retry interaction rules.
+'''
+tags = ["rfc9368"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-7.3"
+# report-id = 1124
+quote = '''
+If a future document
+wishes to define compatibility between two versions that support
+0-RTT, that document MUST address the scenario where there are 0-RTT
+packets in the client's first flight.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/76"
+reason = '''
+Future compatible-version design guidance does not yet document required
+0-RTT first-flight behavior.
+'''
+tags = ["rfc9368"]

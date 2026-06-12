@@ -213,6 +213,10 @@ TEST(QuicHttp3QpackDynamicTest, BlocksUntilRequiredInsertCountIsAvailable) {
     EXPECT_EQ(unblocked.value()[0].headers, appendix_b2_headers());
     EXPECT_EQ(decoder.blocked_streams, 0u);
 
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.2.1
+    // # After the decoder finishes decoding a field section encoded using
+    // # representations containing dynamic table references, it MUST emit a
+    // # Section Acknowledgment instruction (Section 4.4.1).
     const auto decoder_feedback = coquic::http3::take_http3_qpack_decoder_instructions(decoder);
     ASSERT_TRUE(decoder_feedback.has_value());
     EXPECT_EQ(decoder_feedback.value(), bytes_from_ints({0x84}));
@@ -238,6 +242,12 @@ TEST(QuicHttp3QpackDynamicTest, RejectsFieldSectionWithInvalidBase) {
     const auto result = coquic::http3::decode_http3_field_section(
         decoder, 4, bytes_from_ints({0x03, 0x82}), bytes_from_ints({0x10}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.2
+    // # The value of Base MUST NOT be negative.
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.2
+    // # An endpoint MUST treat a field block with a Sign bit of 1 as invalid
+    // # if the value of Required Insert Count is less than or equal to the
+    // # value of Delta Base.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
     EXPECT_EQ(result.error().detail, "invalid field section base");
 }
@@ -248,6 +258,10 @@ TEST(QuicHttp3QpackDynamicTest, RejectsNonZeroRequiredInsertCountWhenDynamicTabl
     const auto result = coquic::http3::decode_http3_field_section(
         decoder, 4, bytes_from_ints({0x01, 0x00}), bytes_from_ints({}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.1
+    // # If the decoder encounters a value of EncodedInsertCount that could
+    // # not have been produced by a conformant encoder, it MUST treat this as
+    // # a connection error of type QPACK_DECOMPRESSION_FAILED.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
     EXPECT_EQ(result.error().detail, "invalid required insert count");
 }
@@ -258,6 +272,10 @@ TEST(QuicHttp3QpackDynamicTest, RejectsRequiredInsertCountEncodingPastFullRange)
     const auto result = coquic::http3::decode_http3_field_section(
         decoder, 4, bytes_from_ints({0x05, 0x00}), bytes_from_ints({}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.1
+    // # If the decoder encounters a value of EncodedInsertCount that could
+    // # not have been produced by a conformant encoder, it MUST treat this as
+    // # a connection error of type QPACK_DECOMPRESSION_FAILED.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
     EXPECT_EQ(result.error().detail, "invalid required insert count");
 }
@@ -268,6 +286,10 @@ TEST(QuicHttp3QpackDynamicTest, RejectsRequiredInsertCountThatWrapsToZero) {
     const auto result = coquic::http3::decode_http3_field_section(
         decoder, 4, bytes_from_ints({0x01, 0x00}), bytes_from_ints({}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.1
+    // # If the decoder encounters a value of EncodedInsertCount that could
+    // # not have been produced by a conformant encoder, it MUST treat this as
+    // # a connection error of type QPACK_DECOMPRESSION_FAILED.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
     EXPECT_EQ(result.error().detail, "invalid required insert count");
 }
@@ -278,6 +300,10 @@ TEST(QuicHttp3QpackDynamicTest, RejectsRequiredInsertCountEncodingInInvalidWrapp
     const auto result = coquic::http3::decode_http3_field_section(
         decoder, 4, bytes_from_ints({0x04, 0x00}), bytes_from_ints({}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.1
+    // # If the decoder encounters a value of EncodedInsertCount that could
+    // # not have been produced by a conformant encoder, it MUST treat this as
+    // # a connection error of type QPACK_DECOMPRESSION_FAILED.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
     EXPECT_EQ(result.error().detail, "invalid required insert count");
 }
@@ -317,6 +343,10 @@ TEST(QuicHttp3QpackDynamicTest, RejectsBlockedFieldSectionWhenBlockedStreamLimit
     const auto second = coquic::http3::decode_http3_field_section(
         decoder, 8, bytes_from_ints({0x03, 0x81}), bytes_from_ints({0x10, 0x11}));
     ASSERT_FALSE(second.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-2.1.2
+    // # If a decoder encounters more blocked streams than it promised to
+    // # support, it MUST treat this as a connection error of type
+    // # QPACK_DECOMPRESSION_FAILED.
     EXPECT_EQ(second.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
     EXPECT_EQ(second.error().detail, "too many blocked streams");
 }
@@ -339,6 +369,9 @@ TEST(QuicHttp3QpackDynamicTest, RejectsCapacityUpdateThatWouldEvictBlockedRefere
     const auto result = coquic::http3::process_http3_qpack_encoder_instructions(
         decoder, bytes_from_ints({0x3f, 0x01}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.3.1
+    // # This MUST NOT cause the eviction of entries that are not evictable;
+    // # see Section 2.1.1.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_encoder_stream_error);
 }
 
@@ -362,6 +395,9 @@ TEST(QuicHttp3QpackDynamicTest, RejectsInsertThatWouldEvictBlockedReferences) {
     const auto result =
         coquic::http3::process_http3_qpack_encoder_instructions(decoder, second_insert);
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2.2
+    // # The encoder MUST NOT cause a dynamic table entry to be evicted unless
+    // # that entry is evictable; see Section 2.1.1.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_encoder_stream_error);
 }
 
@@ -391,6 +427,9 @@ TEST(QuicHttp3QpackDynamicTest, DecodesDynamicFieldRepresentationsAgainstDynamic
         bytes_from_ints({0x80, 0x10, 0x40, 0x01, 0x78, 0x00, 0x01, 0x79, 0x21, 0x6e, 0x01, 0x76}));
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(decoded.value().status, coquic::http3::Http3QpackDecodeStatus::complete);
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2
+    // # The decoder MUST emit field lines in the order their representations
+    // # appear in the encoded field section.
     EXPECT_EQ(decoded.value().headers, (coquic::http3::Http3Headers{
                                            {":authority", "www.example.com"},
                                            {":path", "/sample/path"},
@@ -546,6 +585,11 @@ TEST(QuicHttp3QpackDynamicTest, RejectsUnknownSectionAcknowledgment) {
     const auto result =
         coquic::http3::process_http3_qpack_decoder_instructions(encoder, bytes_from_ints({0x84}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.4.1
+    // # If an encoder receives a Section Acknowledgment instruction referring
+    // # to a stream on which every encoded field section with a non-zero
+    // # Required Insert Count has already been acknowledged, this MUST be
+    // # treated as a connection error of type QPACK_DECODER_STREAM_ERROR.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_decoder_stream_error);
     EXPECT_EQ(result.error().detail, "unknown section acknowledgment");
 }
@@ -671,6 +715,9 @@ TEST(QuicHttp3QpackDynamicTest, ProcessesDynamicNameReferenceAndDuplicateInstruc
     const auto duplicated =
         coquic::http3::process_http3_qpack_encoder_instructions(decoder, bytes_from_ints({0x00}));
     ASSERT_TRUE(duplicated.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2
+    // # Therefore, duplicate entries MUST NOT be treated as an error by the
+    // # decoder.
     EXPECT_TRUE(duplicated.value().empty());
     EXPECT_EQ(decoder.insert_count, 3u);
 }
@@ -711,6 +758,10 @@ TEST(QuicHttp3QpackDynamicTest, RejectsDynamicEntryLargerThanCapacity) {
     const auto result = coquic::http3::process_http3_qpack_encoder_instructions(
         decoder, bytes_from_ints({0x3f, 0x01, 0xc0, 0x01, 0x61}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2.2
+    // # It is an error if the encoder attempts to add an entry that is larger
+    // # than the dynamic table capacity; the decoder MUST treat this as a
+    // # connection error of type QPACK_ENCODER_STREAM_ERROR.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_encoder_stream_error);
     EXPECT_EQ(result.error().detail, "dynamic table entry exceeds capacity");
 }
@@ -721,6 +772,9 @@ TEST(QuicHttp3QpackDynamicTest, RejectsInvalidStaticNameReferenceInstruction) {
     const auto result = coquic::http3::process_http3_qpack_encoder_instructions(
         decoder, bytes_from_ints({0xff, 0x25}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-3.1
+    // # If this index is received on the encoder stream, this MUST be treated
+    // # as a connection error of type QPACK_ENCODER_STREAM_ERROR.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_encoder_stream_error);
     EXPECT_EQ(result.error().detail, "invalid static table name reference");
 }
@@ -853,6 +907,13 @@ TEST(QuicHttp3QpackDynamicTest, RejectsCapacityUpdateAbovePeerSetting) {
     const auto result = coquic::http3::process_http3_qpack_encoder_instructions(
         decoder, bytes_from_ints({0x3f, 0x21}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.3.1
+    // # The new capacity MUST be lower than or equal to the limit described
+    // # in Section 3.2.3.
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.3.1
+    // # The decoder MUST treat a new dynamic table capacity value that
+    // # exceeds this limit as a connection error of type
+    // # QPACK_ENCODER_STREAM_ERROR.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_encoder_stream_error);
 }
 
@@ -1038,6 +1099,10 @@ TEST(QuicHttp3QpackDynamicTest,
     const auto result = coquic::http3::decode_http3_field_section(
         decoder, 4, bytes_from_ints({0x02, 0x01}), bytes_from_ints({0x80}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.1
+    // # If it encounters a Required Insert Count smaller than expected, it
+    // # MUST treat this as a connection error of type
+    // # QPACK_DECOMPRESSION_FAILED; see Section 2.2.3.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
     EXPECT_EQ(result.error().detail, "dynamic table reference exceeds required insert count");
 }
@@ -1253,6 +1318,10 @@ TEST(QuicHttp3QpackDynamicTest,
     const auto result = coquic::http3::decode_http3_field_section(
         decoder, 4, bytes_from_ints({0x02, 0x00}), bytes_from_ints({0x10}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.1
+    // # If it encounters a Required Insert Count smaller than expected, it
+    // # MUST treat this as a connection error of type
+    // # QPACK_DECOMPRESSION_FAILED; see Section 2.2.3.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
     EXPECT_EQ(result.error().detail, "dynamic table reference exceeds required insert count");
 }
@@ -1425,6 +1494,10 @@ TEST(QuicHttp3QpackDynamicTest,
     const auto result = coquic::http3::decode_http3_field_section(
         decoder, 4, bytes_from_ints({0x02, 0x01}), bytes_from_ints({0x40, 0x00}));
     ASSERT_FALSE(result.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.1
+    // # If it encounters a Required Insert Count smaller than expected, it
+    // # MUST treat this as a connection error of type
+    // # QPACK_DECOMPRESSION_FAILED; see Section 2.2.3.
     EXPECT_EQ(result.error().code, coquic::http3::Http3ErrorCode::qpack_decompression_failed);
     EXPECT_EQ(result.error().detail, "dynamic table reference exceeds required insert count");
 }

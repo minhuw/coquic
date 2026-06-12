@@ -150,6 +150,9 @@ CodecResult<TransportParametersValidationOk> version_negotiation_validation_fail
     return CodecResult<TransportParametersValidationOk>::failure(CodecError{
         .code = CodecErrorCode::invalid_packet_protection_state,
         .offset = 0,
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+        // # Every QUIC version that supports version negotiation MUST define a
+        // # method for closing the connection with a version negotiation error.
         .transport_error_code = 0x11u,
         .has_transport_error_code = true,
     });
@@ -531,6 +534,9 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
             break;
         }
         case version_information_parameter_id: {
+            //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+            // # Both endpoints MUST parse their peer's Version Information during the
+            // # handshake.
             //= https://www.rfc-editor.org/rfc/rfc9368#section-3
             // # Version Information {
             // #   Chosen Version (32),
@@ -538,6 +544,12 @@ deserialize_transport_parameters(std::span<const std::byte> bytes) {
             // # }
             if (value.size() < sizeof(std::uint32_t) ||
                 (value.size() % sizeof(std::uint32_t)) != 0) {
+                //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+                // # If that leads to a parsing failure (for example, if it is
+                // # too short or if its length is not divisible by four), then the
+                // # endpoint MUST close the connection; if the connection was using QUIC
+                // # version 1, that connection closure MUST use a transport error of type
+                // # TRANSPORT_PARAMETER_ERROR.
                 return CodecResult<TransportParameters>::failure(CodecErrorCode::invalid_varint,
                                                                  offset);
             }
@@ -728,6 +740,9 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
         if (parameters.version_information.has_value() &&
             has_zero_version_information_value(parameters.version_information.value())) {
             //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+            // # Both endpoints MUST parse their peer's Version Information during the
+            // # handshake.
+            //= https://www.rfc-editor.org/rfc/rfc9368#section-4
             // # If an endpoint receives a Chosen Version
             // # equal to zero, or any Available Version equal to zero, it MUST treat
             // # it as a parsing failure.
@@ -748,10 +763,24 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
                 // # If a server receives Version Information
                 // # where the Chosen Version is not included in Available Versions, it
                 // # MUST treat it as a parsing failure.
+                //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+                // # Subsequently,
+                // # if the server receives the client's Version Information over QUIC
+                // # version 1 (as indicated by the Version field of the Long Header
+                // # packets that carried the transport parameters) and the client's
+                // # Chosen Version is not set to 0x00000001, the server MUST close the
+                // # connection with a version negotiation error.
+                //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+                // # If the two
+                // # differ, the server MUST close the connection with a version
+                // # negotiation error.
                 return version_negotiation_validation_failure();
             }
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+        // # Servers MAY complete the handshake even if the Version Information is
+        // # missing.
         return CodecResult<TransportParametersValidationOk>::success({});
     }
 
@@ -833,6 +862,10 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
             !contains_version(context.expected_version_information->available_versions,
                               parameters.version_information->chosen_version)) {
             //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+            // # Clients MUST NOT complete the handshake if they are
+            // # reacting to a Version Negotiation packet and the Version Information
+            // # is missing, but MAY do so otherwise.
+            //= https://www.rfc-editor.org/rfc/rfc9368#section-4
             // # If a client receives Version Information where the server's Chosen
             // # Version was not sent by the client as part of its Available Versions,
             // # the client MUST close the connection with a version negotiation
@@ -841,6 +874,9 @@ validate_peer_transport_parameters(EndpointRole peer_role, const TransportParame
         }
 
         if (context.reacted_to_version_negotiation) {
+            //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+            // # If the client received and acted on a Version Negotiation packet, the
+            // # client MUST validate the server's Available Versions field.
             if (parameters.version_information->available_versions.empty()) {
                 //= https://www.rfc-editor.org/rfc/rfc9368#section-4
                 // # In particular, if the client reacted to a Version

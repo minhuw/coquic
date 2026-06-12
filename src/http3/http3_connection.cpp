@@ -451,6 +451,9 @@ Http3EndpointUpdate Http3Connection::on_core_result(const quic::QuicCoreResult &
                     // # server accepts 0-RTT but then sends settings that are not compatible
                     // # with the previously specified settings, this MUST be treated as a
                     // # connection error of type H3_SETTINGS_ERROR.
+                    //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2.3
+                    // # If the remembered value is non-zero, the server MUST
+                    // # send the same non-zero value in its SETTINGS frame.
                     !validate_zero_rtt_settings_compatibility(*remote_settings_frame_,
                                                               *remembered_peer_settings_)) {
                     queue_connection_close(Http3ErrorCode::settings_error,
@@ -1743,6 +1746,10 @@ void Http3Connection::queue_startup_streams() {
     const auto decoder_prefix =
         serialize_http3_uni_stream_prefix(Http3UniStreamType::qpack_decoder).value();
 
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+    // # Each endpoint
+    // # MUST initiate, at most, one encoder stream and, at most, one decoder
+    // # stream.
     state_.local_control_stream_id = control_stream_id;
     state_.local_qpack_encoder_stream_id = encoder_stream_id;
     state_.local_qpack_decoder_stream_id = decoder_stream_id;
@@ -2125,6 +2132,9 @@ void Http3Connection::register_peer_uni_stream(std::uint64_t stream_id, std::uin
 
     if (stream_type == static_cast<std::uint64_t>(Http3UniStreamType::qpack_encoder)) {
         //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+        // # An endpoint MUST allow its peer to create an encoder stream and a
+        // # decoder stream even if the connection's settings prevent their use.
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
         // # Each endpoint
         // # MUST initiate, at most, one encoder stream and, at most, one decoder
         // # stream.
@@ -2142,6 +2152,9 @@ void Http3Connection::register_peer_uni_stream(std::uint64_t stream_id, std::uin
     }
 
     if (stream_type == static_cast<std::uint64_t>(Http3UniStreamType::qpack_decoder)) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
+        // # An endpoint MUST allow its peer to create an encoder stream and a
+        // # decoder stream even if the connection's settings prevent their use.
         //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2
         // # Each endpoint
         // # MUST initiate, at most, one encoder stream and, at most, one decoder
@@ -2217,6 +2230,12 @@ void Http3Connection::process_qpack_encoder_stream(std::uint64_t stream_id,
         const auto decoded = process_http3_qpack_encoder_instructions(
             decoder_, std::span<const std::byte>(stream.buffer.data(), instruction.bytes_consumed));
         if (!decoded.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9204#section-7.4
+            // # If an implementation encounters a value larger than it is able
+            // # to decode, this MUST be treated as a stream error of type
+            // # QPACK_DECOMPRESSION_FAILED if on a request stream or a
+            // # connection error of the appropriate type if on the encoder or
+            // # decoder stream.
             queue_connection_close(decoded.error().code, decoded.error().detail);
             return;
         }
@@ -2257,6 +2276,12 @@ void Http3Connection::process_qpack_decoder_stream(std::uint64_t stream_id,
         const auto processed = process_http3_qpack_decoder_instructions(
             encoder_, std::span<const std::byte>(stream.buffer.data(), instruction.bytes_consumed));
         if (!processed.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9204#section-7.4
+            // # If an implementation encounters a value larger than it is able
+            // # to decode, this MUST be treated as a stream error of type
+            // # QPACK_DECOMPRESSION_FAILED if on a request stream or a
+            // # connection error of the appropriate type if on the encoder or
+            // # decoder stream.
             queue_connection_close(processed.error().code, processed.error().detail);
             return;
         }
@@ -3312,6 +3337,9 @@ void Http3Connection::handle_control_frame(std::uint64_t stream_id, const Http3F
             // # server accepts 0-RTT but then sends settings that are not compatible
             // # with the previously specified settings, this MUST be treated as a
             // # connection error of type H3_SETTINGS_ERROR.
+            //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2.3
+            // # If the remembered value is non-zero, the server MUST send the
+            // # same non-zero value in its SETTINGS frame.
             !validate_zero_rtt_settings_compatibility(*settings, *remembered_peer_settings_)) {
             queue_connection_close(Http3ErrorCode::settings_error,
                                    "zero-rtt settings are incompatible");
@@ -3477,8 +3505,14 @@ bool Http3Connection::validate_zero_rtt_settings_compatibility(
         }
     }
 
-    if (updated.qpack_max_table_capacity < settings.qpack_max_table_capacity ||
-        updated.qpack_blocked_streams < settings.qpack_blocked_streams) {
+    if (settings.qpack_max_table_capacity != 0 &&
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2.3
+        // # If the remembered value is non-zero, the server MUST send the
+        // # same non-zero value in its SETTINGS frame.
+        updated.qpack_max_table_capacity != settings.qpack_max_table_capacity) {
+        return false;
+    }
+    if (updated.qpack_blocked_streams < settings.qpack_blocked_streams) {
         return false;
     }
     if (settings.max_field_section_size.has_value()) {

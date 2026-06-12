@@ -1,0 +1,70 @@
+# RFC 9204 Duvet tracking TODOs generated from the compliance report.
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9204#section-2.1"
+# report-id = 1009
+quote = '''
+An encoder MAY insert any entry in the dynamic table it chooses; it
+is not limited to field lines it is compressing.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/64"
+reason = '''
+These RFC 9204 optional QPACK behaviors need an implementation decision, tests for selected behavior, or durable documentation that coquic intentionally does not implement the option.
+'''
+tags = ["rfc9204"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9204#section-2.2.1"
+# report-id = 1013
+quote = '''
+If it
+encounters a Required Insert Count larger than expected, it MAY treat
+this as a connection error of type QPACK_DECOMPRESSION_FAILED.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/64"
+reason = '''
+These RFC 9204 optional QPACK behaviors need an implementation decision, tests for selected behavior, or durable documentation that coquic intentionally does not implement the option.
+'''
+tags = ["rfc9204"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9204#section-2.2.2.2"
+# report-id = 1015
+quote = '''
+A decoder with a maximum dynamic table
+capacity (Section 3.2.3) equal to zero MAY omit sending Stream
+Cancellations, because the encoder cannot have any dynamic table
+references.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/64"
+reason = '''
+These RFC 9204 optional QPACK behaviors need an implementation decision, tests for selected behavior, or durable documentation that coquic intentionally does not implement the option.
+'''
+tags = ["rfc9204"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9204#section-4.2"
+# report-id = 1033
+quote = '''
+An endpoint MAY avoid creating an encoder stream if it will not be
+used (for example, if its encoder does not wish to use the dynamic
+table or if the maximum size of the dynamic table permitted by the
+peer is zero).
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/64"
+reason = '''
+These RFC 9204 optional QPACK behaviors need an implementation decision, tests for selected behavior, or durable documentation that coquic intentionally does not implement the option.
+'''
+tags = ["rfc9204"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9204#section-4.2"
+# report-id = 1034
+quote = '''
+An endpoint MAY avoid creating a decoder stream if its decoder sets
+the maximum capacity of the dynamic table to zero.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/64"
+reason = '''
+These RFC 9204 optional QPACK behaviors need an implementation decision, tests for selected behavior, or durable documentation that coquic intentionally does not implement the option.
+'''
+tags = ["rfc9204"]

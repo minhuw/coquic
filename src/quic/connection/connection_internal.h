@@ -1214,6 +1214,11 @@ make_local_version_information(std::span<const std::uint32_t> supported_versions
     // # [QUIC-VN] to prevent version downgrade attacks.
     return VersionInformation{
         .chosen_version = chosen_version,
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-3
+        // # Note that the
+        // # version in the Chosen Version field MUST be included in this list
+        // # to allow the client to communicate the Chosen Version's
+        // # preference.
         .available_versions =
             std::vector<std::uint32_t>(supported_versions.begin(), supported_versions.end()),
     };
@@ -1237,6 +1242,9 @@ inline std::uint32_t select_server_version(std::span<const std::uint32_t> suppor
         return client_initial_version;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-2.2
+    // # Implementations MUST NOT assume compatibility
+    // # between versions unless explicitly specified.
     return client_initial_version;
 }
 
@@ -1869,6 +1877,11 @@ inline void schedule_application_ack_deadline(PacketSpaceState &packet_space, Qu
         // # ack-eliciting packets MUST be acknowledged at least once within the
         // # maximum delay an endpoint communicated using the max_ack_delay
         // # transport parameter; see Section 18.2.
+        //= https://www.rfc-editor.org/rfc/rfc9221#section-5.2
+        // # Receivers SHOULD support delaying ACK frames (within the limits
+        // # specified by max_ack_delay) in response to receiving packets that
+        // # only contain DATAGRAM frames, since the sender takes no action if
+        // # these packets are temporarily unacknowledged.
         packet_space.pending_ack_deadline =
             now + transport_parameter_milliseconds(max_ack_delay_ms);
     }
@@ -2151,6 +2164,22 @@ inline bool is_discardable_packet_length_error(CodecErrorCode code) {
 inline bool peer_validated_grease_quic_bit_support(
     bool local_grease_quic_bit_enabled, bool peer_transport_parameters_validated,
     const std::optional<TransportParameters> &peer_transport_parameters) {
+    //= https://www.rfc-editor.org/rfc/rfc9287#section-3.1
+    // # However, a client MUST NOT set the QUIC Bit to 0
+    // # unless the Initial packets it sends include a token provided by the
+    // # server in a NEW_TOKEN frame (Section 19.7 of [QUIC]), received less
+    // # than 604800 seconds (7 days) prior on a connection where the server
+    // # also included the grease_quic_bit transport parameter.
+    //= https://www.rfc-editor.org/rfc/rfc9287#section-3.1
+    // # A server MUST set the QUIC Bit to 0 only after processing transport
+    // # parameters from a client.
+    //= https://www.rfc-editor.org/rfc/rfc9287#section-3.1
+    // # A server MUST NOT remember that a client
+    // # negotiated the extension in a previous connection and set the QUIC
+    // # Bit to 0 based on that information.
+    //= https://www.rfc-editor.org/rfc/rfc9287#section-3.1
+    // # An endpoint MUST NOT set the QUIC Bit to 0 without knowing whether
+    // # the peer supports the extension.
     return local_grease_quic_bit_enabled && peer_transport_parameters_validated &&
            peer_transport_parameters.has_value() && peer_transport_parameters->grease_quic_bit;
 }
@@ -2314,6 +2343,9 @@ inline bool should_drop_wrong_version_client_long_header(
     //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.1
     // # If a client receives a packet that uses a different version than it
     // # initially selected, it MUST discard that packet.
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+    // # An endpoint MUST drop packets using any other
+    // # version.
     return true;
 }
 

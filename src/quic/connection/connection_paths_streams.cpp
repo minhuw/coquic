@@ -119,6 +119,10 @@ select_compatible_server_version(std::span<const std::uint32_t> supported_versio
         // # When the server then processes the client's Version
         // # Information, the server MUST validate that the client's Chosen
         // # Version matches the version in use for the connection.
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+        // # If the two
+        // # differ, the server MUST close the connection with a version
+        // # negotiation error.
         return std::nullopt;
     }
     for (const auto supported_version : supported_versions) {
@@ -127,6 +131,13 @@ select_compatible_server_version(std::span<const std::uint32_t> supported_versio
             // # In order to perform compatible version negotiation, the server MUST
             // # select one of these versions that it (1) supports and (2) knows the
             // # client's Chosen Version is compatible with.
+            //= https://www.rfc-editor.org/rfc/rfc9368#section-2
+            // # If the server can parse the first flight, it can establish the
+            // # connection using the client's Chosen Version, or it MAY select any
+            // # other compatible version, as described in Section 2.3.
+            //= https://www.rfc-editor.org/rfc/rfc9368#section-3
+            // # Note that this preference is only advisory; servers
+            // # MAY choose to use their own preference instead.
             return supported_version;
         }
     }
@@ -143,6 +154,9 @@ void QuicConnection::install_available_secrets() {
     bool installed_client_application_keys = false;
     bool installed_application_read_secret = false;
     for (auto &available_secret : tls_->take_available_secrets()) {
+        //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+        // # Both endpoints MUST send Handshake and 1-RTT packets using the
+        // # negotiated version.
         available_secret.secret.quic_version = current_version_;
         if (should_skip_available_secret(available_secret.level, initial_packet_space_discarded_,
                                          handshake_packet_space_discarded_)) {
@@ -236,9 +250,18 @@ CodecResult<bool> QuicConnection::maybe_negotiate_server_version_from_client_hel
 
     const auto &peer_version_information = peer_parameters.version_information;
     if (peer_version_information.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9369#section-4
+        // # Endpoints that support both
+        // # versions SHOULD support compatible version negotiation to avoid a
+        // # round trip.
         const auto selected_version = select_compatible_server_version(
             config_.supported_versions, peer_version_information.value(), original_version_);
         if (!selected_version.has_value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9368#section-2.3
+            // # If the first flight is correctly
+            // # formatted, then this conversion process cannot fail by definition of
+            // # the first flight being compatible; if the server is unable to convert
+            // # the first flight, it MUST abort the handshake.
             return CodecResult<bool>::failure(version_negotiation_error());
         }
         current_version_ = *selected_version;
@@ -335,6 +358,11 @@ CodecResult<bool> QuicConnection::sync_tls_state() {
 
     if (const auto ticket = tls_adapter->take_resumption_state(); ticket.has_value()) {
         auto encoded = encode_resumption_state(
+            //= https://www.rfc-editor.org/rfc/rfc9369#section-5
+            // # When a connection
+            // # includes compatible version negotiation, any issued server tokens are
+            // # considered to originate from the negotiated version, not the original
+            // # one.
             *ticket, current_version_, config_.application_protocol, *peer_transport_parameters_,
             config_.zero_rtt.application_context);
         pending_resumption_state_effect_ = QuicCoreResumptionStateAvailable{
@@ -432,6 +460,18 @@ CodecResult<bool> QuicConnection::validate_peer_transport_parameters_if_ready() 
     }
     const bool accepted_zero_rtt = tls_.has_value() && tls_->early_data_accepted().value_or(false);
     if (config_.role == EndpointRole::client && accepted_zero_rtt) {
+        if (decoded_resumption_state_.has_value() &&
+            peer_transport_parameters.max_datagram_frame_size <
+                decoded_resumption_state_->peer_transport_parameters.max_datagram_frame_size) {
+            //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+            // # If a client stores the value of the
+            // # max_datagram_frame_size transport parameter with their 0-RTT state,
+            // # they MUST validate that the new value of the max_datagram_frame_size
+            // # transport parameter sent by the server in the handshake is greater
+            // # than or equal to the stored value; if not, the client MUST terminate
+            // # the connection with error PROTOCOL_VIOLATION.
+            return CodecResult<bool>::failure(protocol_violation_error(/*frame_type=*/0));
+        }
         if (decoded_resumption_state_.has_value() &&
             !zero_rtt_transport_limits_not_reduced(
                 decoded_resumption_state_->peer_transport_parameters, peer_transport_parameters)) {
@@ -1870,6 +1910,16 @@ QuicConnection::peer_transport_parameters_validation_context() const {
         const auto expected_version_information = version_information_for_handshake(
             config_.supported_versions, current_version_, config_.retry_source_connection_id,
             original_version_, current_version_);
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+        // # If the client received and acted on a Version Negotiation packet, the
+        // # client MUST validate the server's Available Versions field.
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+        // # In particular, since the client can be made aware of the
+        // # Negotiated Version by the QUIC long header version during compatible
+        // # version negotiation (see Section 2.3), clients MUST validate that the
+        // # server's Chosen Version is equal to the Negotiated Version; if they
+        // # do not match, the client MUST close the connection with a version
+        // # negotiation error.
         return TransportParametersValidationContext{
             .expected_initial_source_connection_id = peer_source_connection_id_.value(),
             .expected_original_destination_connection_id =

@@ -1570,6 +1570,10 @@ QuicCore::parse_endpoint_datagram(std::span<const std::byte> bytes, bool accept_
         (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[3])) << 8) |
         static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[4]));
     if (version == kVersionNegotiationVersion) {
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-2.1
+        // # Clients
+        // # MUST NOT send Version Negotiation packets and servers MUST ignore all
+        // # received Version Negotiation packets.
         return std::nullopt;
     }
 
@@ -1650,6 +1654,11 @@ COQUIC_NO_PROFILE std::vector<std::byte> QuicCore::make_endpoint_retry_token(
                 *endpoint_config_.address_validation_token_secret,
                 SelfContainedAddressValidationToken{
                     .kind = kAddressValidationRetryTokenType,
+                    //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+                    // # The server MAY encode the QUIC
+                    // # version in its Retry token to validate that the client did not switch
+                    // # versions, and drop the packet if it switched, to enforce client
+                    // # compliance.
                     .version = parsed->version,
                     .route_handle = route_handle,
                     .address_validation_identity = std::vector<std::byte>(
@@ -1836,6 +1845,11 @@ COQUIC_NO_PROFILE std::optional<QuicCore::PendingRetryToken> QuicCore::take_retr
             !token_identity_matches(metadata->address_validation_identity,
                                     address_validation_identity) ||
             parsed.destination_connection_id != metadata->retry_source_connection_id ||
+            //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+            // # The server MAY encode the QUIC
+            // # version in its Retry token to validate that the client did not switch
+            // # versions, and drop the packet if it switched, to enforce client
+            // # compliance.
             parsed.version != metadata->version) {
             return std::nullopt;
         }
@@ -1867,6 +1881,11 @@ COQUIC_NO_PROFILE std::optional<QuicCore::PendingRetryToken> QuicCore::take_retr
     if (pending.route_handle != route_handle ||
         !token_identity_matches(pending.address_validation_identity, address_validation_identity) ||
         parsed.destination_connection_id != pending.retry_source_connection_id ||
+        //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+        // # The server MAY encode the QUIC
+        // # version in its Retry token to validate that the client did not switch
+        // # versions, and drop the packet if it switched, to enforce client
+        // # compliance.
         parsed.version != pending.original_version) {
         return std::nullopt;
     }
@@ -2040,6 +2059,11 @@ COQUIC_NO_PROFILE void QuicCore::maybe_queue_server_new_token(ConnectionEntry &e
                                      .address_validation_identity =
                                          std::vector<std::byte>(address_validation_identity.begin(),
                                                                 address_validation_identity.end()),
+                                     //= https://www.rfc-editor.org/rfc/rfc9369#section-5
+                                     // # When a connection
+                                     // # includes compatible version negotiation, any issued server
+                                     // # tokens are considered to originate from the
+                                     // # negotiated version, not the original one.
                                      .version = entry.connection->current_version_,
                                      .expires_at = now + kNewTokenLifetime,
                                      .used = false,
@@ -2090,6 +2114,10 @@ COQUIC_NO_PROFILE void QuicCore::remember_client_new_tokens(ConnectionEntry &ent
         const bool already_stored =
             std::ranges::any_of(client_new_tokens_, [&](const ClientStoredNewToken &stored) {
                 return stored.server_name == entry.connection->config_.server_name &&
+                       //= https://www.rfc-editor.org/rfc/rfc9369#section-5
+                       // # Clients MUST NOT use a
+                       // # session ticket or token from a QUIC version 1 connection to initiate
+                       // # a QUIC version 2 connection, and vice versa.
                        stored.version == entry.connection->current_version_ &&
                        stored.token == new_token->token;
             });
@@ -2102,6 +2130,11 @@ COQUIC_NO_PROFILE void QuicCore::remember_client_new_tokens(ConnectionEntry &ent
         // # during one connection that can be used on a subsequent connection.
         client_new_tokens_.push_back(ClientStoredNewToken{
             .server_name = entry.connection->config_.server_name,
+            //= https://www.rfc-editor.org/rfc/rfc9369#section-5
+            // # When a connection
+            // # includes compatible version negotiation, any issued server tokens are
+            // # considered to originate from the negotiated version, not the original
+            // # one.
             .version = entry.connection->current_version_,
             .token = new_token->token,
             .used = false,
@@ -2122,6 +2155,10 @@ QuicCore::take_client_new_token_for_open(const QuicCoreClientConnectionConfig &c
         // # knowledge that the server that issued the token and the server the
         // # client is connecting to are jointly managing the tokens.
         if (it->used || it->server_name != connection.server_name ||
+            //= https://www.rfc-editor.org/rfc/rfc9369#section-5
+            // # Clients MUST NOT use a
+            // # session ticket or token from a QUIC version 1 connection to initiate
+            // # a QUIC version 2 connection, and vice versa.
             it->version != connection.initial_version || it->token.empty()) {
             continue;
         }
@@ -2149,6 +2186,11 @@ std::optional<QuicCoreResult>
         // # A client MUST discard any Version Negotiation packet if it has
         // # received and successfully processed any other packet, including an
         // # earlier Version Negotiation packet.
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+        // # A client that makes a connection
+        // # attempt based on information received from a Version Negotiation
+        // # packet MUST ignore any Version Negotiation packets it receives in
+        // # response to that connection attempt.
         entry.connection->has_processed_peer_packet() ||
         entry.connection->config_.reacted_to_version_negotiation) {
         return std::nullopt;
@@ -2174,17 +2216,32 @@ std::optional<QuicCoreResult>
     //= https://www.rfc-editor.org/rfc/rfc9000#section-6.2
     // # A client MUST discard a Version Negotiation packet that
     // # lists the QUIC version selected by the client.
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+    // # Clients MUST ignore any received Version Negotiation packets that
+    // # contain the Original Version.
     if (echoes_original_version) {
         return QuicCoreResult{};
     }
 
     for (const auto supported_version : config.supported_versions) {
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-2.1
+        // # Upon receiving the Version Negotiation packet, the client SHALL
+        // # search for a version it supports in the list provided by the server.
         if (std::find(version_negotiation->supported_versions.begin(),
                       version_negotiation->supported_versions.end(),
                       supported_version) == version_negotiation->supported_versions.end()) {
             continue;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-2.1
+        // # Otherwise, it SHALL select a mutually supported version and send a
+        // # new first flight with that version -- this version is now the
+        // # Negotiated Version.
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-6
+        // # When incompatible version negotiation is in use, the second
+        // # connection that is created in response to the received Version
+        // # Negotiation packet MUST restart its application-layer protocol
+        // # negotiation process without taking into account the Original Version.
         config.initial_version = supported_version;
         config.reacted_to_version_negotiation = true;
         erase_endpoint_connection_routes(entry);
@@ -2218,6 +2275,8 @@ std::optional<QuicCoreResult>
         return result;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-2.1
+    // # If it doesn't find one, it SHALL abort the connection attempt.
     return QuicCoreResult{};
 }
 
@@ -2509,6 +2568,9 @@ std::vector<std::byte> COQUIC_NO_PROFILE QuicCore::make_version_negotiation_pack
         // # Endpoints MAY add reserved versions to any field where unknown or
         // # unsupported versions are ignored to test that a peer correctly
         // # ignores the value.
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-2.1
+        // # The server MAY add reserved versions (as
+        // # defined in Section 6.3 of [QUIC]) in Supported Version fields.
         advertised_versions.push_back(kGreasedReservedVersion);
     }
 
@@ -2522,6 +2584,10 @@ std::vector<std::byte> COQUIC_NO_PROFILE QuicCore::make_version_negotiation_pack
     const auto encoded = serialize_packet(VersionNegotiationPacket{
         .destination_connection_id = *parsed.source_connection_id,
         .source_connection_id = parsed.destination_connection_id,
+        //= https://www.rfc-editor.org/rfc/rfc9368#section-2.1
+        // # This packet SHALL include each entry
+        // # from the server's set of Offered Versions (see Section 5) in a
+        // # Supported Version field.
         .supported_versions = std::move(advertised_versions),
     });
     return encoded.has_value() ? DatagramBuffer(encoded.value()) : DatagramBuffer{};
@@ -2540,6 +2606,8 @@ std::vector<std::byte> QuicCore::make_retry_packet_bytes(const ParsedEndpointDat
     }
 
     RetryPacket packet{
+        //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+        // # If the server sends a Retry packet, it MUST use the original version.
         .version = parsed.version,
         .retry_unused_bits = 0,
         .destination_connection_id = *parsed.source_connection_id,
@@ -4064,6 +4132,17 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                                     // # abandon the current connection attempt if it receives a
                                     // # Version Negotiation packet, with the following two
                                     // # exceptions.
+                                    //= https://www.rfc-editor.org/rfc/rfc9368#section-2.1
+                                    // # Otherwise, it SHALL select a mutually supported version and
+                                    // # send a new first flight with that version -- this version
+                                    // # is now the Negotiated Version.
+                                    //= https://www.rfc-editor.org/rfc/rfc9368#section-6
+                                    // # When incompatible version negotiation is in use, the second
+                                    // # connection that is created in response to the
+                                    // # received Version Negotiation packet MUST restart
+                                    // # its application-layer protocol negotiation
+                                    // # process without taking into account the
+                                    // # Original Version.
                                     config.initial_version = supported_version;
                                     config.reacted_to_version_negotiation = true;
                                     entry.connection = std::make_unique<QuicConnection>(config);
@@ -4082,6 +4161,8 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                                     return;
                                 }
                             }
+                            //= https://www.rfc-editor.org/rfc/rfc9368#section-2.1
+                            // # If it doesn't find one, it SHALL abort the connection attempt.
                             return;
                         }
                     }
@@ -4111,6 +4192,10 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                             retry_integrity_valid.has_value() && retry_integrity_valid.value();
                         const bool valid_destination_connection_id =
                             retry->destination_connection_id == config.source_connection_id;
+                        //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+                        // # The client
+                        // # MUST NOT use a different version in the subsequent Initial packet
+                        // # that contains the Retry token.
                         const bool valid_version = retry->version == config.original_version;
                         //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.1
                         // # A client MUST discard a Retry packet that contains a Source

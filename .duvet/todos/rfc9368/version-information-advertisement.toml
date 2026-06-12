@@ -1,0 +1,29 @@
+# RFC 9368 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-3"
+# report-id = 1099
+quote = '''
+For the same reason, the
+Available Versions field MAY be empty.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/74"
+reason = '''
+CoQUIC does not yet expose or document an intentional policy for sending empty
+Available Versions in Version Information.
+'''
+tags = ["rfc9368"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-3"
+# report-id = 1100
+quote = '''
+Clients and servers MAY both include versions following the pattern
+0x?a?a?a?a in their Available Versions list.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/74"
+reason = '''
+Reserved-version greasing is implemented for Version Negotiation packets, but
+not yet for the Version Information Available Versions list.
+'''
+tags = ["rfc9368"]

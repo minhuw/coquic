@@ -976,6 +976,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     bool defer_server_compatible_negotiation_crypto = (config_.role == EndpointRole::server) &&
                                                       (original_version_ != current_version_) &&
                                                       !peer_transport_parameters_validated_;
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+    // # Before the server is able to process transport parameters from the
+    // # client, it might need to respond to Initial packets from the client.
+    // # For these packets, the server uses the original version.
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+    // # Once the client has learned the negotiated version, it SHOULD send
+    // # subsequent Initial packets using that version.
     auto initial_packet_version =
         defer_server_compatible_negotiation_crypto ? original_version_ : current_version_;
     static const std::vector<std::byte> kEmptyInitialToken;
@@ -1696,6 +1703,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     // # number space as the packet being acknowledged; see Section 12.1.
     auto initial_crypto_ranges = std::vector<ByteRange>{};
     if (!initial_packet_space_discarded_ && !defer_server_compatible_negotiation_crypto) {
+        //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+        // # The server cannot send CRYPTO frames until it has processed the
+        // # client's transport parameters.
         initial_crypto_ranges =
             initial_space_.send_crypto.take_ranges(std::numeric_limits<std::size_t>::max());
     }
@@ -2022,6 +2032,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             -> CodecResult<SerializedProtectedDatagram> {
             auto candidate_packets = packets;
             candidate_packets.emplace_back(ProtectedHandshakePacket{
+                //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+                // # The server MUST send all CRYPTO
+                // # frames using the negotiated version.
+                //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+                // # Both endpoints MUST send Handshake and 1-RTT packets using the
+                // # negotiated version.
                 .version = current_version_,
                 .destination_connection_id = send_destination_connection_id,
                 .source_connection_id = config_.source_connection_id,
@@ -2037,6 +2053,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             -> CodecResult<SerializedProtectedDatagram> {
             auto candidate_packets = packets;
             candidate_packets.emplace_back(ProtectedHandshakePacket{
+                //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+                // # The server MUST send all CRYPTO
+                // # frames using the negotiated version.
+                //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+                // # Both endpoints MUST send Handshake and 1-RTT packets using the
+                // # negotiated version.
                 .version = current_version_,
                 .destination_connection_id = send_destination_connection_id,
                 .source_connection_id = config_.source_connection_id,
@@ -2103,6 +2125,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         }
 
         packets.emplace_back(ProtectedHandshakePacket{
+            //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+            // # The server MUST send all CRYPTO
+            // # frames using the negotiated version.
+            //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+            // # Both endpoints MUST send Handshake and 1-RTT packets using the
+            // # negotiated version.
             .version = current_version_,
             .destination_connection_id = send_destination_connection_id,
             .source_connection_id = config_.source_connection_id,
@@ -4168,6 +4196,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                         datagram_wire_size <= peer_transport_parameters_->max_datagram_frame_size;
                     if (pending_application_stream_priority.has_value() &&
                         pending_datagram.priority < *pending_application_stream_priority) {
+                        //= https://www.rfc-editor.org/rfc/rfc9221#section-5.1
+                        // # QUIC implementations SHOULD present an API to applications to assign
+                        // # relative priorities to DATAGRAM frames with respect to each other and
+                        // # to QUIC streams.
                         continue;
                     }
                     if (!peer_limit_allows_datagram ||
@@ -4829,6 +4861,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 // # (see Appendix B.2) to be larger than the congestion window, unless
                 // # the packet is sent on a PTO timer expiration (see Section 6.2) or
                 // # when entering recovery (see Section 7.3.2).
+                //= https://www.rfc-editor.org/rfc/rfc9221#section-5.4
+                // # The sender MUST either delay sending the frame until the
+                // # controller allows it or drop the frame without sending it (at
+                // # which point it MAY notify the application).
                 note_application_congestion_blocked(candidate_datagram_size);
                 return restore_and_fallback_blocked_application_candidate();
             }

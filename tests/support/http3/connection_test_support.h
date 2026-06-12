@@ -59,6 +59,16 @@ coquic::quic::QuicCoreResult handshake_confirmed_result() {
     return result;
 }
 
+coquic::quic::QuicCoreResult zero_rtt_status_result(coquic::quic::QuicZeroRttStatus status) {
+    coquic::quic::QuicCoreResult result;
+    result.effects.push_back(coquic::quic::QuicCoreEffect{
+        coquic::quic::QuicCoreZeroRttStatusEvent{
+            .status = status,
+        },
+    });
+    return result;
+}
+
 coquic::quic::QuicCoreResult receive_result(std::uint64_t stream_id,
                                             std::span<const std::byte> bytes, bool fin = false) {
     coquic::quic::QuicCoreResult result;

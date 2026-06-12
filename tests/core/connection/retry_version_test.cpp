@@ -1185,6 +1185,12 @@ TEST(QuicCoreTest, CompatibleNegotiationUpgradesV1HandshakeToV2) {
     ASSERT_NE(server.connection_, nullptr);
     EXPECT_EQ(server.connection_->original_version_, coquic::quic::kQuicVersion1);
     EXPECT_EQ(server.connection_->current_version_, coquic::quic::kQuicVersion2);
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+    // # The server MUST send all CRYPTO
+    // # frames using the negotiated version.
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+    // # Both endpoints MUST send Handshake and 1-RTT packets using the
+    // # negotiated version.
     assert_long_header_version(*server.connection_, server_first_flight_datagrams,
                                coquic::quic::kQuicVersion2);
 
@@ -1195,6 +1201,12 @@ TEST(QuicCoreTest, CompatibleNegotiationUpgradesV1HandshakeToV2) {
     const auto client_handshake_datagrams =
         coquic::quic::test::send_datagrams_from(client_handshake);
     ASSERT_FALSE(client_handshake_datagrams.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+    // # Once the client has learned the negotiated version, it SHOULD send
+    // # subsequent Initial packets using that version.
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+    // # Both endpoints MUST send Handshake and 1-RTT packets using the
+    // # negotiated version.
     assert_long_header_version(*client.connection_, client_handshake_datagrams,
                                coquic::quic::kQuicVersion2);
 

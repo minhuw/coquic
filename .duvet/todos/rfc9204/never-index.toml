@@ -1,0 +1,71 @@
+# RFC 9204 Duvet tracking TODOs generated from the compliance report.
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9204#section-4.5.4"
+# report-id = 1044
+quote = '''
+When
+the 'N' bit is set, the encoded field line MUST always be encoded
+with a literal representation.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/62"
+reason = '''
+The current HTTP/3 field model stores name/value pairs without preserving QPACK literal never-index metadata, so N-bit forwarding and intermediary re-encoding requirements need implementation or explicit unsupported-status documentation.
+'''
+tags = ["rfc9204"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9204#section-4.5.4"
+# report-id = 1045
+quote = '''
+In particular, when a peer sends a
+field line that it received represented as a literal field line with
+the 'N' bit set, it MUST use a literal representation to forward this
+field line.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/62"
+reason = '''
+The current HTTP/3 field model stores name/value pairs without preserving QPACK literal never-index metadata, so N-bit forwarding and intermediary re-encoding requirements need implementation or explicit unsupported-status documentation.
+'''
+tags = ["rfc9204"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9204#section-7.1.3"
+# report-id = 1046
+quote = '''
+An intermediary MUST NOT re-encode a value that uses a literal
+representation with the 'N' bit set with another representation that
+would index it.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/62"
+reason = '''
+The current HTTP/3 field model stores name/value pairs without preserving QPACK literal never-index metadata, so N-bit forwarding and intermediary re-encoding requirements need implementation or explicit unsupported-status documentation.
+'''
+tags = ["rfc9204"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9204#section-7.1.3"
+# report-id = 1047
+quote = '''
+If QPACK is used for re-encoding, a literal
+representation with the 'N' bit set MUST be used.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/62"
+reason = '''
+The current HTTP/3 field model stores name/value pairs without preserving QPACK literal never-index metadata, so N-bit forwarding and intermediary re-encoding requirements need implementation or explicit unsupported-status documentation.
+'''
+tags = ["rfc9204"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9204#section-7.1.3"
+# report-id = 1048
+quote = '''
+If HPACK is used
+for re-encoding, the never-indexed literal representation (see
+Section 6.2.3 of [RFC7541]) MUST be used.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/62"
+reason = '''
+The current HTTP/3 field model stores name/value pairs without preserving QPACK literal never-index metadata, so N-bit forwarding and intermediary re-encoding requirements need implementation or explicit unsupported-status documentation.
+'''
+tags = ["rfc9204"]
+

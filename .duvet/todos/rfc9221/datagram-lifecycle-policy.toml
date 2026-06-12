@@ -1,0 +1,46 @@
+# RFC 9221 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9221#section-5.2"
+# report-id = 1063
+quote = '''
+If a sender detects that a packet containing a specific DATAGRAM
+frame might have been lost, the implementation MAY notify the
+application that it believes the datagram was lost.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/68"
+reason = '''
+The current DATAGRAM API does not expose stable per-DATAGRAM suspected-loss
+notifications to applications.
+'''
+tags = ["rfc9221"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9221#section-5.2"
+# report-id = 1064
+quote = '''
+Similarly, if a packet containing a DATAGRAM frame is acknowledged,
+the implementation MAY notify the sender application that the
+datagram was successfully transmitted and received.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/68"
+reason = '''
+The current DATAGRAM API does not expose stable per-DATAGRAM acknowledgement
+notifications to applications.
+'''
+tags = ["rfc9221"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9221#section-5.3"
+# report-id = 1065
+quote = '''
+However, since DATAGRAM
+frames are inherently unreliable, they MAY be dropped by the receiver
+if the receiver cannot process them.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/68"
+reason = '''
+Receiver behavior for DATAGRAM frames that cannot be processed is not yet an
+explicit application-facing policy with targeted tests.
+'''
+tags = ["rfc9221"]

@@ -463,6 +463,9 @@ void append_prefixed_integer(std::vector<std::byte> &out, std::uint8_t leading_b
 
 std::optional<std::uint64_t> decode_prefixed_integer(quic::BufferReader &reader, std::uint8_t first,
                                                      std::uint8_t prefix_bits) {
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.1.1
+    // # QPACK implementations MUST be able to decode integers up to and
+    // # including 62 bits long.
     const auto max_in_prefix = (static_cast<std::uint64_t>(1) << prefix_bits) - 1;
     std::uint64_t value = first & static_cast<std::uint8_t>(max_in_prefix);
     if (value < max_in_prefix) {
@@ -728,6 +731,9 @@ bool append_unique_reference(std::vector<std::uint64_t> &references, std::uint64
 bool can_reference_dynamic_state(const Http3QpackEncoderContext &encoder,
                                  std::uint64_t candidate_required_insert_count,
                                  bool stream_already_blocked, std::size_t blocked_stream_count) {
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-2.1.2
+    // # An encoder MUST limit the number of streams that could become blocked
+    // # to the value of SETTINGS_QPACK_BLOCKED_STREAMS at all times.
     if (candidate_required_insert_count <= encoder.known_received_count) {
         return true;
     }
@@ -760,6 +766,14 @@ bool insert_encoder_entry(Http3QpackEncoderContext &encoder, const Http3Field &f
 
     while (encoder.dynamic_table_size + size > encoder.dynamic_table_capacity) {
         const auto &oldest = encoder.dynamic_table.back();
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-2.1.1
+        // # If the dynamic table does not contain enough room for a new entry
+        // # without evicting other entries, and the entries that would be
+        // # evicted are not evictable, the encoder MUST NOT insert that entry
+        // # into the dynamic table (including duplicates of existing entries).
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2.2
+        // # The encoder MUST NOT cause a dynamic table entry to be evicted
+        // # unless that entry is evictable; see Section 2.1.1.
         if (oldest.outstanding_references != 0 ||
             oldest.absolute_index >= encoder.known_received_count) {
             return false;
@@ -787,6 +801,10 @@ Http3Result<bool> insert_decoder_entry(Http3QpackDecoderContext &decoder, Http3F
 
     const auto size = qpack_entry_size(field);
     if (size > decoder.dynamic_table_capacity) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2.2
+        // # It is an error if the encoder attempts to add an entry that is
+        // # larger than the dynamic table capacity; the decoder MUST treat
+        // # this as a connection error of type QPACK_ENCODER_STREAM_ERROR.
         return qpack_failure<bool>(Http3ErrorCode::qpack_encoder_stream_error,
                                    "dynamic table entry exceeds capacity");
     }
@@ -794,6 +812,9 @@ Http3Result<bool> insert_decoder_entry(Http3QpackDecoderContext &decoder, Http3F
     while (decoder.dynamic_table_size + size > decoder.dynamic_table_capacity) {
         if (pending_field_sections_reference(decoder,
                                              decoder.dynamic_table.back().absolute_index)) {
+            //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2.2
+            // # The encoder MUST NOT cause a dynamic table entry to be evicted
+            // # unless that entry is evictable; see Section 2.1.1.
             return qpack_failure<bool>(
                 Http3ErrorCode::qpack_encoder_stream_error,
                 "dynamic table eviction would invalidate blocked field section");
@@ -868,6 +889,11 @@ Http3Result<std::uint64_t> decode_required_insert_count(const Http3QpackDecoderC
     const auto max_entries = max_entries_for_capacity(decoder.local_settings.max_table_capacity);
     if (max_entries == 0) {
         if (encoded_insert_count != 0) {
+            //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.1
+            // # If the decoder encounters a value of EncodedInsertCount that
+            // # could not have been produced by a conformant encoder, it MUST
+            // # treat this as a connection error of type
+            // # QPACK_DECOMPRESSION_FAILED.
             return qpack_failure<std::uint64_t>(Http3ErrorCode::qpack_decompression_failed,
                                                 "invalid required insert count", stream_id);
         }
@@ -879,6 +905,10 @@ Http3Result<std::uint64_t> decode_required_insert_count(const Http3QpackDecoderC
         return Http3Result<std::uint64_t>::success(0);
     }
     if (encoded_insert_count > full_range) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.1
+        // # If the decoder encounters a value of EncodedInsertCount that
+        // # could not have been produced by a conformant encoder, it MUST
+        // # treat this as a connection error of type QPACK_DECOMPRESSION_FAILED.
         return qpack_failure<std::uint64_t>(Http3ErrorCode::qpack_decompression_failed,
                                             "invalid required insert count", stream_id);
     }
@@ -888,12 +918,21 @@ Http3Result<std::uint64_t> decode_required_insert_count(const Http3QpackDecoderC
     std::uint64_t required_insert_count = max_wrapped + encoded_insert_count - 1;
     if (required_insert_count > max_value) {
         if (required_insert_count <= full_range) {
+            //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.1
+            // # If the decoder encounters a value of EncodedInsertCount that
+            // # could not have been produced by a conformant encoder, it MUST
+            // # treat this as a connection error of type
+            // # QPACK_DECOMPRESSION_FAILED.
             return qpack_failure<std::uint64_t>(Http3ErrorCode::qpack_decompression_failed,
                                                 "invalid required insert count", stream_id);
         }
         required_insert_count -= full_range;
     }
     if (required_insert_count == 0) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.1
+        // # If the decoder encounters a value of EncodedInsertCount that
+        // # could not have been produced by a conformant encoder, it MUST
+        // # treat this as a connection error of type QPACK_DECOMPRESSION_FAILED.
         return qpack_failure<std::uint64_t>(Http3ErrorCode::qpack_decompression_failed,
                                             "invalid required insert count", stream_id);
     }
@@ -941,6 +980,8 @@ decode_field_section_prefix(const Http3QpackDecoderContext &decoder,
 
     std::uint64_t base = 0;
     if ((second_value & 0x80u) == 0u) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.2
+        // # The value of Base MUST NOT be negative.
         if (required_insert_count.value() >
             std::numeric_limits<std::uint64_t>::max() - delta_base.value()) {
             return qpack_failure<ParsedFieldSectionPrefix>(
@@ -950,6 +991,12 @@ decode_field_section_prefix(const Http3QpackDecoderContext &decoder,
         base = required_insert_count.value() + delta_base.value();
     } else {
         if (required_insert_count.value() <= delta_base.value()) {
+            //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.2
+            // # The value of Base MUST NOT be negative.
+            //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.2
+            // # An endpoint MUST treat a field block with a Sign bit of 1 as
+            // # invalid if the value of Required Insert Count is less than or
+            // # equal to the value of Delta Base.
             return qpack_failure<ParsedFieldSectionPrefix>(
                 Http3ErrorCode::qpack_decompression_failed, "invalid field section base",
                 stream_id);
@@ -968,11 +1015,27 @@ Http3Result<std::uint64_t> resolve_relative_absolute_index(std::uint64_t base, s
                                                            std::uint64_t required_insert_count,
                                                            std::optional<std::uint64_t> stream_id) {
     if (base == 0 || index >= base) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.3
+        // # If the decoder encounters a reference in a field line
+        // # representation to a dynamic table entry that has already been
+        // # evicted or that has an absolute index greater than or equal to the
+        // # declared Required Insert Count (Section 4.5.1), it MUST treat this
+        // # as a connection error of type QPACK_DECOMPRESSION_FAILED.
         return qpack_failure<std::uint64_t>(Http3ErrorCode::qpack_decompression_failed,
                                             "invalid dynamic table index", stream_id);
     }
     const auto absolute_index = base - index - 1;
     if (absolute_index + 1 > required_insert_count) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.1
+        // # If it encounters a Required Insert Count smaller than expected, it
+        // # MUST treat this as a connection error of type
+        // # QPACK_DECOMPRESSION_FAILED; see Section 2.2.3.
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.3
+        // # If the decoder encounters a reference in a field line
+        // # representation to a dynamic table entry that has already been
+        // # evicted or that has an absolute index greater than or equal to the
+        // # declared Required Insert Count (Section 4.5.1), it MUST treat this
+        // # as a connection error of type QPACK_DECOMPRESSION_FAILED.
         return qpack_failure<std::uint64_t>(Http3ErrorCode::qpack_decompression_failed,
                                             "dynamic table reference exceeds required insert count",
                                             stream_id);
@@ -990,6 +1053,16 @@ resolve_post_base_absolute_index(std::uint64_t base, std::uint64_t index,
     }
     const auto absolute_index = base + index;
     if (absolute_index + 1 > required_insert_count) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.1
+        // # If it encounters a Required Insert Count smaller than expected, it
+        // # MUST treat this as a connection error of type
+        // # QPACK_DECOMPRESSION_FAILED; see Section 2.2.3.
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.3
+        // # If the decoder encounters a reference in a field line
+        // # representation to a dynamic table entry that has already been
+        // # evicted or that has an absolute index greater than or equal to the
+        // # declared Required Insert Count (Section 4.5.1), it MUST treat this
+        // # as a connection error of type QPACK_DECOMPRESSION_FAILED.
         return qpack_failure<std::uint64_t>(Http3ErrorCode::qpack_decompression_failed,
                                             "dynamic table reference exceeds required insert count",
                                             stream_id);
@@ -1149,6 +1222,9 @@ Http3Result<Http3Headers> decode_field_section_payload(const Http3QpackDecoderCo
     Http3Headers headers;
 
     while (reader.remaining() > 0) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2
+        // # The decoder MUST emit field lines in the order their
+        // # representations appear in the encoded field section.
         const auto first_value = std::to_integer<std::uint8_t>(reader.read_byte().value());
         if ((first_value & 0x80u) == 0x80u) {
             const auto index = decode_prefixed_integer(reader, first_value, 6);
@@ -1180,6 +1256,13 @@ Http3Result<Http3Headers> decode_field_section_payload(const Http3QpackDecoderCo
             const auto *entry =
                 find_dynamic_entry_by_absolute_index(decoder.dynamic_table, absolute_index.value());
             if (entry == nullptr) {
+                //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.3
+                // # If the decoder encounters a reference in a field line
+                // # representation to a dynamic table entry that has already
+                // # been evicted or that has an absolute index greater than or
+                // # equal to the declared Required Insert Count (Section
+                // # 4.5.1), it MUST treat this as a connection error of type
+                // # QPACK_DECOMPRESSION_FAILED.
                 return qpack_failure<Http3Headers>(Http3ErrorCode::qpack_decompression_failed,
                                                    "invalid dynamic table index", stream_id);
             }
@@ -1205,6 +1288,13 @@ Http3Result<Http3Headers> decode_field_section_payload(const Http3QpackDecoderCo
             const auto *entry =
                 find_dynamic_entry_by_absolute_index(decoder.dynamic_table, absolute_index.value());
             if (entry == nullptr) {
+                //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.3
+                // # If the decoder encounters a reference in a field line
+                // # representation to a dynamic table entry that has already
+                // # been evicted or that has an absolute index greater than or
+                // # equal to the declared Required Insert Count (Section
+                // # 4.5.1), it MUST treat this as a connection error of type
+                // # QPACK_DECOMPRESSION_FAILED.
                 return qpack_failure<Http3Headers>(Http3ErrorCode::qpack_decompression_failed,
                                                    "invalid post-base index", stream_id);
             }
@@ -1239,6 +1329,13 @@ Http3Result<Http3Headers> decode_field_section_payload(const Http3QpackDecoderCo
                 const auto *entry = find_dynamic_entry_by_absolute_index(decoder.dynamic_table,
                                                                          absolute_index.value());
                 if (entry == nullptr) {
+                    //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.3
+                    // # If the decoder encounters a reference in a field line
+                    // # representation to a dynamic table entry that has
+                    // # already been evicted or that has an absolute index
+                    // # greater than or equal to the declared Required Insert
+                    // # Count (Section 4.5.1), it MUST treat this as a
+                    // # connection error of type QPACK_DECOMPRESSION_FAILED.
                     return qpack_failure<Http3Headers>(Http3ErrorCode::qpack_decompression_failed,
                                                        "invalid dynamic table name reference",
                                                        stream_id);
@@ -1284,6 +1381,13 @@ Http3Result<Http3Headers> decode_field_section_payload(const Http3QpackDecoderCo
             const auto *entry =
                 find_dynamic_entry_by_absolute_index(decoder.dynamic_table, absolute_index.value());
             if (entry == nullptr) {
+                //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.3
+                // # If the decoder encounters a reference in a field line
+                // # representation to a dynamic table entry that has already
+                // # been evicted or that has an absolute index greater than or
+                // # equal to the declared Required Insert Count (Section
+                // # 4.5.1), it MUST treat this as a connection error of type
+                // # QPACK_DECOMPRESSION_FAILED.
                 return qpack_failure<Http3Headers>(Http3ErrorCode::qpack_decompression_failed,
                                                    "invalid post-base name reference", stream_id);
             }
@@ -1358,6 +1462,10 @@ decode_unblocked_field_sections(Http3QpackDecoderContext &decoder) {
                 headers.error().code, headers.error().detail, headers.error().stream_id);
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.2.1
+        // # After the decoder finishes decoding a field section encoded using
+        // # representations containing dynamic table references, it MUST emit
+        // # a Section Acknowledgment instruction (Section 4.4.1).
         decoder.pending_section_acknowledgments.push_back(Http3QpackSectionAcknowledgment{
             .stream_id = pending.stream_id,
             .required_insert_count = pending.required_insert_count,
@@ -1405,11 +1513,21 @@ Http3Result<bool> decode_insert_with_name_reference(quic::BufferReader &reader,
         auto dynamic_index = unchecked_size(name_index.value());
         if constexpr (kNeedUint64SizeCheck) {
             if (name_index.value() > std::numeric_limits<std::size_t>::max()) {
+                //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.3
+                // # If the decoder encounters a reference in an encoder
+                // # instruction to a dynamic table entry that has already been
+                // # evicted, it MUST treat this as a connection error of type
+                // # QPACK_ENCODER_STREAM_ERROR.
                 return qpack_failure<bool>(Http3ErrorCode::qpack_encoder_stream_error,
                                            "invalid dynamic table name reference");
             }
         }
         if (dynamic_index >= decoder.dynamic_table.size()) {
+            //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.3
+            // # If the decoder encounters a reference in an encoder
+            // # instruction to a dynamic table entry that has already been
+            // # evicted, it MUST treat this as a connection error of type
+            // # QPACK_ENCODER_STREAM_ERROR.
             return qpack_failure<bool>(Http3ErrorCode::qpack_encoder_stream_error,
                                        "invalid dynamic table name reference");
         }
@@ -1472,15 +1590,27 @@ Http3Result<bool> decode_duplicate_instruction(quic::BufferReader &reader,
     auto dynamic_index = unchecked_size(index.value());
     if constexpr (kNeedUint64SizeCheck) {
         if (index.value() > std::numeric_limits<std::size_t>::max()) {
+            //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.3
+            // # If the decoder encounters a reference in an encoder
+            // # instruction to a dynamic table entry that has already been
+            // # evicted, it MUST treat this as a connection error of type
+            // # QPACK_ENCODER_STREAM_ERROR.
             return qpack_failure<bool>(Http3ErrorCode::qpack_encoder_stream_error,
                                        "invalid duplicate instruction index");
         }
     }
     if (dynamic_index >= decoder.dynamic_table.size()) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.3
+        // # If the decoder encounters a reference in an encoder instruction to
+        // # a dynamic table entry that has already been evicted, it MUST treat
+        // # this as a connection error of type QPACK_ENCODER_STREAM_ERROR.
         return qpack_failure<bool>(Http3ErrorCode::qpack_encoder_stream_error,
                                    "invalid duplicate instruction index");
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2
+    // # Therefore, duplicate entries MUST NOT be treated as an error by the
+    // # decoder.
     return insert_decoder_entry(decoder, decoder.dynamic_table[dynamic_index].field);
 }
 
@@ -1506,6 +1636,9 @@ encode_http3_field_section(Http3QpackEncoderContext &encoder, std::uint64_t stre
     auto stream_already_blocked = stream_is_already_blocked(encoder, stream_id);
 
     for (const auto &field : fields) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-2.1
+        // # An encoder MUST emit field representations in the order they
+        // # appear in the input field section.
         if (const auto static_index = lookup_static_field(field); static_index.has_value()) {
             append_static_indexed_field_line(encoded.payload, static_index.value());
             continue;
@@ -1532,6 +1665,10 @@ encode_http3_field_section(Http3QpackEncoderContext &encoder, std::uint64_t stre
 
             if (encoder.dynamic_table_capacity == 0) {
                 encoder.dynamic_table_capacity = peer_capacity;
+                //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2.3
+                // # The encoder MUST NOT set a dynamic table capacity that
+                // # exceeds this maximum, but it can choose to use a lower
+                // # dynamic table capacity; see Section 4.3.1.
                 append_set_dynamic_table_capacity(encoded.encoder_instructions,
                                                   encoder.dynamic_table_capacity);
             }
@@ -1586,6 +1723,10 @@ encode_http3_field_section(Http3QpackEncoderContext &encoder, std::uint64_t stre
     } else {
         const auto max_entries = max_entries_for_capacity(encoder.peer_settings.max_table_capacity);
         if (max_entries == 0) {
+            //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2.3
+            // # When the maximum table capacity is zero, the encoder MUST NOT
+            // # insert entries into the dynamic table and MUST NOT send any
+            // # encoder instructions on the encoder stream.
             return qpack_encode_failure<Http3EncodedFieldSection>();
         }
         const auto encoded_insert_count = (required_insert_count % (2 * max_entries)) + 1;
@@ -1641,6 +1782,10 @@ decode_http3_field_section(Http3QpackDecoderContext &decoder, std::uint64_t stre
         }
         blocked_streams.insert(stream_id);
         if (blocked_streams.size() > decoder.local_settings.blocked_streams) {
+            //= https://www.rfc-editor.org/rfc/rfc9204#section-2.1.2
+            // # If a decoder encounters more blocked streams than it promised
+            // # to support, it MUST treat this as a connection error of type
+            // # QPACK_DECOMPRESSION_FAILED.
             return qpack_failure<Http3DecodedFieldSection>(
                 Http3ErrorCode::qpack_decompression_failed, "too many blocked streams", stream_id);
         }
@@ -1678,6 +1823,10 @@ decode_http3_field_section(Http3QpackDecoderContext &decoder, std::uint64_t stre
     }
 
     if (parsed_prefix.value().required_insert_count != 0) {
+        //= https://www.rfc-editor.org/rfc/rfc9204#section-2.2.2.1
+        // # After the decoder finishes decoding a field section encoded using
+        // # representations containing dynamic table references, it MUST emit
+        // # a Section Acknowledgment instruction (Section 4.4.1).
         decoder.pending_section_acknowledgments.push_back(Http3QpackSectionAcknowledgment{
             .stream_id = stream_id,
             .required_insert_count = parsed_prefix.value().required_insert_count,
@@ -1707,6 +1856,13 @@ process_http3_qpack_encoder_instructions(Http3QpackDecoderContext &decoder,
                     Http3ErrorCode::qpack_encoder_stream_error, "malformed capacity update");
             }
             if (capacity.value() > decoder.local_settings.max_table_capacity) {
+                //= https://www.rfc-editor.org/rfc/rfc9204#section-4.3.1
+                // # The new capacity MUST be lower than or equal to the limit
+                // # described in Section 3.2.3.
+                //= https://www.rfc-editor.org/rfc/rfc9204#section-4.3.1
+                // # The decoder MUST treat a new dynamic table capacity value
+                // # that exceeds this limit as a connection error of type
+                // # QPACK_ENCODER_STREAM_ERROR.
                 return qpack_failure<std::vector<Http3DecodedFieldSection>>(
                     Http3ErrorCode::qpack_encoder_stream_error,
                     "encoder capacity exceeds peer setting");
@@ -1724,6 +1880,9 @@ process_http3_qpack_encoder_instructions(Http3QpackDecoderContext &decoder,
             while (decoder.dynamic_table_size > decoder.dynamic_table_capacity) {
                 if (pending_field_sections_reference(decoder,
                                                      decoder.dynamic_table.back().absolute_index)) {
+                    //= https://www.rfc-editor.org/rfc/rfc9204#section-4.3.1
+                    // # This MUST NOT cause the eviction of entries that are
+                    // # not evictable; see Section 2.1.1.
                     return qpack_failure<std::vector<Http3DecodedFieldSection>>(
                         Http3ErrorCode::qpack_encoder_stream_error,
                         "dynamic table eviction would invalidate blocked field section");
@@ -1807,6 +1966,12 @@ Http3Result<bool> process_http3_qpack_decoder_instructions(Http3QpackEncoderCont
                                  return section.stream_id == stream_id.value();
                              });
             if (section_it == encoder.outstanding_field_sections.end()) {
+                //= https://www.rfc-editor.org/rfc/rfc9204#section-4.4.1
+                // # If an encoder receives a Section Acknowledgment
+                // # instruction referring to a stream on which every encoded
+                // # field section with a non-zero Required Insert Count has
+                // # already been acknowledged, this MUST be treated as a
+                // # connection error of type QPACK_DECODER_STREAM_ERROR.
                 return qpack_failure<bool>(Http3ErrorCode::qpack_decoder_stream_error,
                                            "unknown section acknowledgment");
             }

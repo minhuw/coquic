@@ -1,0 +1,30 @@
+# RFC 9368 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-2.5"
+# report-id = 1093
+quote = '''
+When the client picks its Original Version, it SHOULD try to avoid
+incompatible version negotiation to save a round trip.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/73"
+reason = '''
+Client Original Version selection is configuration-driven and does not yet
+implement an explicit policy to avoid incompatible version negotiation.
+'''
+tags = ["rfc9368"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-2.5"
+# report-id = 1094
+quote = '''
+Therefore,
+the client SHOULD pick an Original Version to maximize the combined
+probability that both:
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/73"
+reason = '''
+Client Original Version selection does not yet score parse probability and
+compatibility with the preferred version.
+'''
+tags = ["rfc9368"]

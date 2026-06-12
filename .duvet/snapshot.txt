@@ -3303,102 +3303,102 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9204
   SECTION: [Encoder](#section-2.1)
-    TEXT[!MAY]:    An encoder MAY insert any entry in the dynamic table it chooses; it
-    TEXT[!MAY]:    is not limited to field lines it is compressing.
-    TEXT[!MUST]: An encoder MUST emit field representations in the order
-    TEXT[!MUST]:    they appear in the input field section.
+    TEXT[!MAY,todo]:    An encoder MAY insert any entry in the dynamic table it chooses; it
+    TEXT[!MAY,todo]:    is not limited to field lines it is compressing.
+    TEXT[!MUST,implementation]: An encoder MUST emit field representations in the order
+    TEXT[!MUST,implementation]:    they appear in the input field section.
 
   SECTION: [Limits on Dynamic Table Insertions](#section-2.1.1)
-    TEXT[!MUST]:    If the dynamic table does not contain enough room for a new entry
-    TEXT[!MUST]:    without evicting other entries, and the entries that would be evicted
-    TEXT[!MUST]:    are not evictable, the encoder MUST NOT insert that entry into the
-    TEXT[!MUST]:    dynamic table (including duplicates of existing entries).
+    TEXT[!MUST,implementation]:    If the dynamic table does not contain enough room for a new entry
+    TEXT[!MUST,implementation]:    without evicting other entries, and the entries that would be evicted
+    TEXT[!MUST,implementation]:    are not evictable, the encoder MUST NOT insert that entry into the
+    TEXT[!MUST,implementation]:    dynamic table (including duplicates of existing entries).
 
   SECTION: [Blocked Streams](#section-2.1.2)
-    TEXT[!MUST]: An encoder MUST limit the number of streams that could
-    TEXT[!MUST]:    become blocked to the value of SETTINGS_QPACK_BLOCKED_STREAMS at all
-    TEXT[!MUST]:    times.
-    TEXT[!MUST]: If a decoder encounters more blocked streams than it promised
-    TEXT[!MUST]:    to support, it MUST treat this as a connection error of type
-    TEXT[!MUST]:    QPACK_DECOMPRESSION_FAILED.
+    TEXT[!MUST,implementation]: An encoder MUST limit the number of streams that could
+    TEXT[!MUST,implementation]:    become blocked to the value of SETTINGS_QPACK_BLOCKED_STREAMS at all
+    TEXT[!MUST,implementation]:    times.
+    TEXT[!MUST,implementation,test]: If a decoder encounters more blocked streams than it promised
+    TEXT[!MUST,implementation,test]:    to support, it MUST treat this as a connection error of type
+    TEXT[!MUST,implementation,test]:    QPACK_DECOMPRESSION_FAILED.
 
   SECTION: [Avoiding Flow-Control Deadlocks](#section-2.1.3)
-    TEXT[!SHOULD]:    To avoid these deadlocks, an encoder SHOULD NOT write an instruction
-    TEXT[!SHOULD]:    unless sufficient stream and connection flow-control credit is
-    TEXT[!SHOULD]:    available for the entire instruction.
+    TEXT[!SHOULD,todo]:    To avoid these deadlocks, an encoder SHOULD NOT write an instruction
+    TEXT[!SHOULD,todo]:    unless sufficient stream and connection flow-control credit is
+    TEXT[!SHOULD,todo]:    available for the entire instruction.
 
   SECTION: [Decoder](#section-2.2)
-    TEXT[!MUST]:    The decoder MUST emit field lines in the order their representations
-    TEXT[!MUST]:    appear in the encoded field section.
+    TEXT[!MUST,implementation,test]:    The decoder MUST emit field lines in the order their representations
+    TEXT[!MUST,implementation,test]:    appear in the encoded field section.
 
   SECTION: [Blocked Decoding](#section-2.2.1)
-    TEXT[!SHOULD]:    While blocked, encoded field section data SHOULD remain in the
-    TEXT[!SHOULD]:    blocked stream's flow-control window.
-    TEXT[!MUST]: If it encounters a Required Insert
-    TEXT[!MUST]:    Count smaller than expected, it MUST treat this as a connection error
-    TEXT[!MUST]:    of type QPACK_DECOMPRESSION_FAILED; see Section 2.2.3.
-    TEXT[!MAY]: If it
-    TEXT[!MAY]:    encounters a Required Insert Count larger than expected, it MAY treat
-    TEXT[!MAY]:    this as a connection error of type QPACK_DECOMPRESSION_FAILED.
+    TEXT[!SHOULD,todo]:    While blocked, encoded field section data SHOULD remain in the
+    TEXT[!SHOULD,todo]:    blocked stream's flow-control window.
+    TEXT[!MUST,implementation,test]: If it encounters a Required Insert
+    TEXT[!MUST,implementation,test]:    Count smaller than expected, it MUST treat this as a connection error
+    TEXT[!MUST,implementation,test]:    of type QPACK_DECOMPRESSION_FAILED; see Section 2.2.3.
+    TEXT[!MAY,todo]: If it
+    TEXT[!MAY,todo]:    encounters a Required Insert Count larger than expected, it MAY treat
+    TEXT[!MAY,todo]:    this as a connection error of type QPACK_DECOMPRESSION_FAILED.
 
   SECTION: [Completed Processing of a Field Section](#section-2.2.2.1)
-    TEXT[!MUST]:    After the decoder finishes decoding a field section encoded using
-    TEXT[!MUST]:    representations containing dynamic table references, it MUST emit a
-    TEXT[!MUST]:    Section Acknowledgment instruction (Section 4.4.1).
+    TEXT[!MUST,implementation,test]:    After the decoder finishes decoding a field section encoded using
+    TEXT[!MUST,implementation,test]:    representations containing dynamic table references, it MUST emit a
+    TEXT[!MUST,implementation,test]:    Section Acknowledgment instruction (Section 4.4.1).
 
   SECTION: [Abandonment of a Stream](#section-2.2.2.2)
-    TEXT[!MAY]: A decoder with a maximum dynamic table
-    TEXT[!MAY]:    capacity (Section 3.2.3) equal to zero MAY omit sending Stream
-    TEXT[!MAY]:    Cancellations, because the encoder cannot have any dynamic table
-    TEXT[!MAY]:    references.
+    TEXT[!MAY,todo]: A decoder with a maximum dynamic table
+    TEXT[!MAY,todo]:    capacity (Section 3.2.3) equal to zero MAY omit sending Stream
+    TEXT[!MAY,todo]:    Cancellations, because the encoder cannot have any dynamic table
+    TEXT[!MAY,todo]:    references.
 
   SECTION: [Invalid References](#section-2.2.3)
-    TEXT[!MUST]:    If the decoder encounters a reference in a field line representation
-    TEXT[!MUST]:    to a dynamic table entry that has already been evicted or that has an
-    TEXT[!MUST]:    absolute index greater than or equal to the declared Required Insert
-    TEXT[!MUST]:    Count (Section 4.5.1), it MUST treat this as a connection error of
-    TEXT[!MUST]:    type QPACK_DECOMPRESSION_FAILED.
-    TEXT[!MUST]:    If the decoder encounters a reference in an encoder instruction to a
-    TEXT[!MUST]:    dynamic table entry that has already been evicted, it MUST treat this
-    TEXT[!MUST]:    as a connection error of type QPACK_ENCODER_STREAM_ERROR.
+    TEXT[!MUST,implementation]:    If the decoder encounters a reference in a field line representation
+    TEXT[!MUST,implementation]:    to a dynamic table entry that has already been evicted or that has an
+    TEXT[!MUST,implementation]:    absolute index greater than or equal to the declared Required Insert
+    TEXT[!MUST,implementation]:    Count (Section 4.5.1), it MUST treat this as a connection error of
+    TEXT[!MUST,implementation]:    type QPACK_DECOMPRESSION_FAILED.
+    TEXT[!MUST,implementation]:    If the decoder encounters a reference in an encoder instruction to a
+    TEXT[!MUST,implementation]:    dynamic table entry that has already been evicted, it MUST treat this
+    TEXT[!MUST,implementation]:    as a connection error of type QPACK_ENCODER_STREAM_ERROR.
 
   SECTION: [Static Table](#section-3.1)
     TEXT[!MUST,test]:    When the decoder encounters an invalid static table index in a field
     TEXT[!MUST,test]:    line representation, it MUST treat this as a connection error of type
     TEXT[!MUST,test]:    QPACK_DECOMPRESSION_FAILED.
-    TEXT[!MUST]: If this index is received on the encoder
-    TEXT[!MUST]:    stream, this MUST be treated as a connection error of type
-    TEXT[!MUST]:    QPACK_ENCODER_STREAM_ERROR.
+    TEXT[!MUST,test]: If this index is received on the encoder
+    TEXT[!MUST,test]:    stream, this MUST be treated as a connection error of type
+    TEXT[!MUST,test]:    QPACK_ENCODER_STREAM_ERROR.
 
   SECTION: [Dynamic Table](#section-3.2)
-    TEXT[!MUST]: Therefore, duplicate entries MUST NOT
-    TEXT[!MUST]:    be treated as an error by the decoder.
+    TEXT[!MUST,implementation,test]: Therefore, duplicate entries MUST NOT
+    TEXT[!MUST,implementation,test]:    be treated as an error by the decoder.
 
   SECTION: [Dynamic Table Capacity and Eviction](#section-3.2.2)
-    TEXT[!MUST]: The
-    TEXT[!MUST]:    encoder MUST NOT cause a dynamic table entry to be evicted unless
-    TEXT[!MUST]:    that entry is evictable; see Section 2.1.1.
-    TEXT[!MUST]: It is an error if the encoder attempts to add an
-    TEXT[!MUST]:    entry that is larger than the dynamic table capacity; the decoder
-    TEXT[!MUST]:    MUST treat this as a connection error of type
-    TEXT[!MUST]:    QPACK_ENCODER_STREAM_ERROR.
+    TEXT[!MUST,implementation,test]: The
+    TEXT[!MUST,implementation,test]:    encoder MUST NOT cause a dynamic table entry to be evicted unless
+    TEXT[!MUST,implementation,test]:    that entry is evictable; see Section 2.1.1.
+    TEXT[!MUST,implementation,test]: It is an error if the encoder attempts to add an
+    TEXT[!MUST,implementation,test]:    entry that is larger than the dynamic table capacity; the decoder
+    TEXT[!MUST,implementation,test]:    MUST treat this as a connection error of type
+    TEXT[!MUST,implementation,test]:    QPACK_ENCODER_STREAM_ERROR.
 
   SECTION: [Maximum Dynamic Table Capacity](#section-3.2.3)
-    TEXT[!MUST]:    The encoder MUST NOT set a dynamic table capacity that exceeds this
-    TEXT[!MUST]:    maximum, but it can choose to use a lower dynamic table capacity; see
-    TEXT[!MUST]:    Section 4.3.1.
-    TEXT[!MAY]: When the client's 0-RTT value of the
-    TEXT[!MAY]:    SETTING is zero, the server MAY set it to a non-zero value in its
-    TEXT[!MAY]:    SETTINGS frame.
-    TEXT[!MUST]: If the remembered value is non-zero, the server MUST
-    TEXT[!MUST]:    send the same non-zero value in its SETTINGS frame.
-    TEXT[!MUST]:    When the maximum table capacity is zero, the encoder MUST NOT insert
-    TEXT[!MUST]:    entries into the dynamic table and MUST NOT send any encoder
-    TEXT[!MUST]:    instructions on the encoder stream.
+    TEXT[!MUST,implementation]:    The encoder MUST NOT set a dynamic table capacity that exceeds this
+    TEXT[!MUST,implementation]:    maximum, but it can choose to use a lower dynamic table capacity; see
+    TEXT[!MUST,implementation]:    Section 4.3.1.
+    TEXT[!MAY,test]: When the client's 0-RTT value of the
+    TEXT[!MAY,test]:    SETTING is zero, the server MAY set it to a non-zero value in its
+    TEXT[!MAY,test]:    SETTINGS frame.
+    TEXT[!MUST,implementation]: If the remembered value is non-zero, the server MUST
+    TEXT[!MUST,implementation]:    send the same non-zero value in its SETTINGS frame.
+    TEXT[!MUST,implementation]:    When the maximum table capacity is zero, the encoder MUST NOT insert
+    TEXT[!MUST,implementation]:    entries into the dynamic table and MUST NOT send any encoder
+    TEXT[!MUST,implementation]:    instructions on the encoder stream.
 
   SECTION: [Prefixed Integers](#section-4.1.1)
-    TEXT[!MUST]:    QPACK implementations MUST be able to decode integers up to and
-    TEXT[!MUST]:    including 62 bits long.
+    TEXT[!MUST,implementation]:    QPACK implementations MUST be able to decode integers up to and
+    TEXT[!MUST,implementation]:    including 62 bits long.
 
   SECTION: [Encoder and Decoder Streams](#section-4.2)
     TEXT[!MUST,implementation,test]: Each endpoint
@@ -3410,29 +3410,29 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9204
     TEXT[!MUST,implementation]:    MUST NOT request that the sender close either of these streams.
     TEXT[!MUST,implementation]:    Closure of either unidirectional stream type MUST be treated as a
     TEXT[!MUST,implementation]:    connection error of type H3_CLOSED_CRITICAL_STREAM.
-    TEXT[!MAY]:    An endpoint MAY avoid creating an encoder stream if it will not be
-    TEXT[!MAY]:    used (for example, if its encoder does not wish to use the dynamic
-    TEXT[!MAY]:    table or if the maximum size of the dynamic table permitted by the
-    TEXT[!MAY]:    peer is zero).
-    TEXT[!MAY]:    An endpoint MAY avoid creating a decoder stream if its decoder sets
-    TEXT[!MAY]:    the maximum capacity of the dynamic table to zero.
-    TEXT[!MUST]:    An endpoint MUST allow its peer to create an encoder stream and a
-    TEXT[!MUST]:    decoder stream even if the connection's settings prevent their use.
+    TEXT[!MAY,todo]:    An endpoint MAY avoid creating an encoder stream if it will not be
+    TEXT[!MAY,todo]:    used (for example, if its encoder does not wish to use the dynamic
+    TEXT[!MAY,todo]:    table or if the maximum size of the dynamic table permitted by the
+    TEXT[!MAY,todo]:    peer is zero).
+    TEXT[!MAY,todo]:    An endpoint MAY avoid creating a decoder stream if its decoder sets
+    TEXT[!MAY,todo]:    the maximum capacity of the dynamic table to zero.
+    TEXT[!MUST,implementation]:    An endpoint MUST allow its peer to create an encoder stream and a
+    TEXT[!MUST,implementation]:    decoder stream even if the connection's settings prevent their use.
 
   SECTION: [Set Dynamic Table Capacity](#section-4.3.1)
-    TEXT[!MUST]:    The new capacity MUST be lower than or equal to the limit described
-    TEXT[!MUST]:    in Section 3.2.3.
-    TEXT[!MUST]: The decoder MUST treat a new dynamic table capacity
-    TEXT[!MUST]:    value that exceeds this limit as a connection error of type
-    TEXT[!MUST]:    QPACK_ENCODER_STREAM_ERROR.
-    TEXT[!MUST]: This MUST NOT cause the eviction of entries that
-    TEXT[!MUST]:    are not evictable; see Section 2.1.1.
+    TEXT[!MUST,implementation,test]:    The new capacity MUST be lower than or equal to the limit described
+    TEXT[!MUST,implementation,test]:    in Section 3.2.3.
+    TEXT[!MUST,implementation,test]: The decoder MUST treat a new dynamic table capacity
+    TEXT[!MUST,implementation,test]:    value that exceeds this limit as a connection error of type
+    TEXT[!MUST,implementation,test]:    QPACK_ENCODER_STREAM_ERROR.
+    TEXT[!MUST,implementation,test]: This MUST NOT cause the eviction of entries that
+    TEXT[!MUST,implementation,test]:    are not evictable; see Section 2.1.1.
 
   SECTION: [Section Acknowledgment](#section-4.4.1)
-    TEXT[!MUST]:    If an encoder receives a Section Acknowledgment instruction referring
-    TEXT[!MUST]:    to a stream on which every encoded field section with a non-zero
-    TEXT[!MUST]:    Required Insert Count has already been acknowledged, this MUST be
-    TEXT[!MUST]:    treated as a connection error of type QPACK_DECODER_STREAM_ERROR.
+    TEXT[!MUST,implementation,test]:    If an encoder receives a Section Acknowledgment instruction referring
+    TEXT[!MUST,implementation,test]:    to a stream on which every encoded field section with a non-zero
+    TEXT[!MUST,implementation,test]:    Required Insert Count has already been acknowledged, this MUST be
+    TEXT[!MUST,implementation,test]:    treated as a connection error of type QPACK_DECODER_STREAM_ERROR.
 
   SECTION: [Insert Count Increment](#section-4.4.3)
     TEXT[!MUST,test]:    An encoder that receives an Increment field equal to zero, or one
@@ -3441,44 +3441,44 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9204
     TEXT[!MUST,test]:    QPACK_DECODER_STREAM_ERROR.
 
   SECTION: [Required Insert Count](#section-4.5.1.1)
-    TEXT[!MUST]: If the decoder encounters a value
-    TEXT[!MUST]:    of EncodedInsertCount that could not have been produced by a
-    TEXT[!MUST]:    conformant encoder, it MUST treat this as a connection error of type
-    TEXT[!MUST]:    QPACK_DECOMPRESSION_FAILED.
+    TEXT[!MUST,implementation,test]: If the decoder encounters a value
+    TEXT[!MUST,implementation,test]:    of EncodedInsertCount that could not have been produced by a
+    TEXT[!MUST,implementation,test]:    conformant encoder, it MUST treat this as a connection error of type
+    TEXT[!MUST,implementation,test]:    QPACK_DECOMPRESSION_FAILED.
 
   SECTION: [Base](#section-4.5.1.2)
-    TEXT[!MUST]:    The value of Base MUST NOT be negative.
-    TEXT[!MUST]: An endpoint MUST treat a field block
-    TEXT[!MUST]:    with a Sign bit of 1 as invalid if the value of Required Insert Count
-    TEXT[!MUST]:    is less than or equal to the value of Delta Base.
+    TEXT[!MUST,implementation,test]:    The value of Base MUST NOT be negative.
+    TEXT[!MUST,implementation,test]: An endpoint MUST treat a field block
+    TEXT[!MUST,implementation,test]:    with a Sign bit of 1 as invalid if the value of Required Insert Count
+    TEXT[!MUST,implementation,test]:    is less than or equal to the value of Delta Base.
 
   SECTION: [Literal Field Line with Name Reference](#section-4.5.4)
-    TEXT[!MUST]: When
-    TEXT[!MUST]:    the 'N' bit is set, the encoded field line MUST always be encoded
-    TEXT[!MUST]:    with a literal representation.
-    TEXT[!MUST]: In particular, when a peer sends a
-    TEXT[!MUST]:    field line that it received represented as a literal field line with
-    TEXT[!MUST]:    the 'N' bit set, it MUST use a literal representation to forward this
-    TEXT[!MUST]:    field line.
+    TEXT[!MUST,todo]: When
+    TEXT[!MUST,todo]:    the 'N' bit is set, the encoded field line MUST always be encoded
+    TEXT[!MUST,todo]:    with a literal representation.
+    TEXT[!MUST,todo]: In particular, when a peer sends a
+    TEXT[!MUST,todo]:    field line that it received represented as a literal field line with
+    TEXT[!MUST,todo]:    the 'N' bit set, it MUST use a literal representation to forward this
+    TEXT[!MUST,todo]:    field line.
 
   SECTION: [Never-Indexed Literals](#section-7.1.3)
-    TEXT[!MUST]:    An intermediary MUST NOT re-encode a value that uses a literal
-    TEXT[!MUST]:    representation with the 'N' bit set with another representation that
-    TEXT[!MUST]:    would index it.
-    TEXT[!MUST]: If QPACK is used for re-encoding, a literal
-    TEXT[!MUST]:    representation with the 'N' bit set MUST be used.
-    TEXT[!MUST]: If HPACK is used
-    TEXT[!MUST]:    for re-encoding, the never-indexed literal representation (see
-    TEXT[!MUST]:    Section 6.2.3 of [RFC7541]) MUST be used.
+    TEXT[!MUST,todo]:    An intermediary MUST NOT re-encode a value that uses a literal
+    TEXT[!MUST,todo]:    representation with the 'N' bit set with another representation that
+    TEXT[!MUST,todo]:    would index it.
+    TEXT[!MUST,todo]: If QPACK is used for re-encoding, a literal
+    TEXT[!MUST,todo]:    representation with the 'N' bit set MUST be used.
+    TEXT[!MUST,todo]: If HPACK is used
+    TEXT[!MUST,todo]:    for re-encoding, the never-indexed literal representation (see
+    TEXT[!MUST,todo]:    Section 6.2.3 of [RFC7541]) MUST be used.
 
   SECTION: [Implementation Limits](#section-7.4)
-    TEXT[!SHOULD]: These limits SHOULD be large
-    TEXT[!SHOULD]:    enough to process the largest individual field the HTTP
-    TEXT[!SHOULD]:    implementation can be configured to accept.
-    TEXT[!MUST]:    If an implementation encounters a value larger than it is able to
-    TEXT[!MUST]:    decode, this MUST be treated as a stream error of type
-    TEXT[!MUST]:    QPACK_DECOMPRESSION_FAILED if on a request stream or a connection
-    TEXT[!MUST]:    error of the appropriate type if on the encoder or decoder stream.
+    TEXT[!SHOULD,todo]: These limits SHOULD be large
+    TEXT[!SHOULD,todo]:    enough to process the largest individual field the HTTP
+    TEXT[!SHOULD,todo]:    implementation can be configured to accept.
+    TEXT[!MUST,implementation]:    If an implementation encounters a value larger than it is able to
+    TEXT[!MUST,implementation]:    decode, this MUST be treated as a stream error of type
+    TEXT[!MUST,implementation]:    QPACK_DECOMPRESSION_FAILED if on a request stream or a connection
+    TEXT[!MUST,implementation]:    error of the appropriate type if on the encoder or decoder stream.
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9221
   SECTION: [Transport Parameter](#section-3)
@@ -3500,33 +3500,33 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9221
     TEXT[!MUST,implementation]:    that receives a DATAGRAM frame that is larger than the value it sent
     TEXT[!MUST,implementation]:    in its max_datagram_frame_size transport parameter MUST terminate the
     TEXT[!MUST,implementation]:    connection with an error of type PROTOCOL_VIOLATION.
-    TEXT[!SHOULD]:    For most uses of DATAGRAM frames, it is RECOMMENDED to send a value
-    TEXT[!SHOULD]:    of 65535 in the max_datagram_frame_size transport parameter to
-    TEXT[!SHOULD]:    indicate that this endpoint will accept any DATAGRAM frame that fits
-    TEXT[!SHOULD]:    inside a QUIC packet.
-    TEXT[!MAY]: Application
-    TEXT[!MAY]:    protocols that use DATAGRAM frames MAY choose to only negotiate and
-    TEXT[!MAY]:    use them in a single direction.
-    TEXT[!MAY]:    When clients use 0-RTT, they MAY store the value of the server's
-    TEXT[!MAY]:    max_datagram_frame_size transport parameter.
-    TEXT[!MUST]: When servers decide
-    TEXT[!MUST]:    to accept 0-RTT data, they MUST send a max_datagram_frame_size
-    TEXT[!MUST]:    transport parameter greater than or equal to the value they sent to
-    TEXT[!MUST]:    the client in the connection where they sent them the
-    TEXT[!MUST]:    NewSessionTicket message.
-    TEXT[!MUST]: If a client stores the value of the
-    TEXT[!MUST]:    max_datagram_frame_size transport parameter with their 0-RTT state,
-    TEXT[!MUST]:    they MUST validate that the new value of the max_datagram_frame_size
-    TEXT[!MUST]:    transport parameter sent by the server in the handshake is greater
-    TEXT[!MUST]:    than or equal to the stored value; if not, the client MUST terminate
-    TEXT[!MUST]:    the connection with error PROTOCOL_VIOLATION.
-    TEXT[!MUST]:    Application protocols that use datagrams MUST define how they react
-    TEXT[!MUST]:    to the absence of the max_datagram_frame_size transport parameter.
+    TEXT[!SHOULD,implementation]:    For most uses of DATAGRAM frames, it is RECOMMENDED to send a value
+    TEXT[!SHOULD,implementation]:    of 65535 in the max_datagram_frame_size transport parameter to
+    TEXT[!SHOULD,implementation]:    indicate that this endpoint will accept any DATAGRAM frame that fits
+    TEXT[!SHOULD,implementation]:    inside a QUIC packet.
+    TEXT[!MAY,test]: Application
+    TEXT[!MAY,test]:    protocols that use DATAGRAM frames MAY choose to only negotiate and
+    TEXT[!MAY,test]:    use them in a single direction.
+    TEXT[!MAY,implementation]:    When clients use 0-RTT, they MAY store the value of the server's
+    TEXT[!MAY,implementation]:    max_datagram_frame_size transport parameter.
+    TEXT[!MUST,todo]: When servers decide
+    TEXT[!MUST,todo]:    to accept 0-RTT data, they MUST send a max_datagram_frame_size
+    TEXT[!MUST,todo]:    transport parameter greater than or equal to the value they sent to
+    TEXT[!MUST,todo]:    the client in the connection where they sent them the
+    TEXT[!MUST,todo]:    NewSessionTicket message.
+    TEXT[!MUST,implementation,test]: If a client stores the value of the
+    TEXT[!MUST,implementation,test]:    max_datagram_frame_size transport parameter with their 0-RTT state,
+    TEXT[!MUST,implementation,test]:    they MUST validate that the new value of the max_datagram_frame_size
+    TEXT[!MUST,implementation,test]:    transport parameter sent by the server in the handshake is greater
+    TEXT[!MUST,implementation,test]:    than or equal to the stored value; if not, the client MUST terminate
+    TEXT[!MUST,implementation,test]:    the connection with error PROTOCOL_VIOLATION.
+    TEXT[!MUST,todo]:    Application protocols that use datagrams MUST define how they react
+    TEXT[!MUST,todo]:    to the absence of the max_datagram_frame_size transport parameter.
 
   SECTION: [Behavior and Usage](#section-5)
-    TEXT[!SHOULD]: This frame SHOULD be sent as soon as possible (as determined
-    TEXT[!SHOULD]:    by factors like congestion control, described below) and MAY be
-    TEXT[!SHOULD]:    coalesced with other frames.
+    TEXT[!SHOULD,test]: This frame SHOULD be sent as soon as possible (as determined
+    TEXT[!SHOULD,test]:    by factors like congestion control, described below) and MAY be
+    TEXT[!SHOULD,test]:    coalesced with other frames.
     TEXT[!SHOULD,implementation]:    When a QUIC endpoint receives a valid DATAGRAM frame, it SHOULD
     TEXT[!SHOULD,implementation]:    deliver the data to the application immediately, as long as it is
     TEXT[!SHOULD,implementation]:    able to process the frame and can store the contents in memory.
@@ -3534,32 +3534,32 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9221
     TEXT[!MUST,implementation]:    be protected with either 0-RTT or 1-RTT keys.
 
   SECTION: [Multiplexing Datagrams](#section-5.1)
-    TEXT[!SHOULD]:    QUIC implementations SHOULD present an API to applications to assign
-    TEXT[!SHOULD]:    relative priorities to DATAGRAM frames with respect to each other and
-    TEXT[!SHOULD]:    to QUIC streams.
+    TEXT[!SHOULD,implementation,test]:    QUIC implementations SHOULD present an API to applications to assign
+    TEXT[!SHOULD,implementation,test]:    relative priorities to DATAGRAM frames with respect to each other and
+    TEXT[!SHOULD,implementation,test]:    to QUIC streams.
 
   SECTION: [Acknowledgement Handling](#section-5.2)
-    TEXT[!SHOULD]: Receivers SHOULD support
-    TEXT[!SHOULD]:    delaying ACK frames (within the limits specified by max_ack_delay) in
-    TEXT[!SHOULD]:    response to receiving packets that only contain DATAGRAM frames,
-    TEXT[!SHOULD]:    since the sender takes no action if these packets are temporarily
-    TEXT[!SHOULD]:    unacknowledged.
-    TEXT[!MAY]:    If a sender detects that a packet containing a specific DATAGRAM
-    TEXT[!MAY]:    frame might have been lost, the implementation MAY notify the
-    TEXT[!MAY]:    application that it believes the datagram was lost.
-    TEXT[!MAY]:    Similarly, if a packet containing a DATAGRAM frame is acknowledged,
-    TEXT[!MAY]:    the implementation MAY notify the sender application that the
-    TEXT[!MAY]:    datagram was successfully transmitted and received.
+    TEXT[!SHOULD,implementation]: Receivers SHOULD support
+    TEXT[!SHOULD,implementation]:    delaying ACK frames (within the limits specified by max_ack_delay) in
+    TEXT[!SHOULD,implementation]:    response to receiving packets that only contain DATAGRAM frames,
+    TEXT[!SHOULD,implementation]:    since the sender takes no action if these packets are temporarily
+    TEXT[!SHOULD,implementation]:    unacknowledged.
+    TEXT[!MAY,todo]:    If a sender detects that a packet containing a specific DATAGRAM
+    TEXT[!MAY,todo]:    frame might have been lost, the implementation MAY notify the
+    TEXT[!MAY,todo]:    application that it believes the datagram was lost.
+    TEXT[!MAY,todo]:    Similarly, if a packet containing a DATAGRAM frame is acknowledged,
+    TEXT[!MAY,todo]:    the implementation MAY notify the sender application that the
+    TEXT[!MAY,todo]:    datagram was successfully transmitted and received.
 
   SECTION: [Flow Control](#section-5.3)
-    TEXT[!MAY]: However, since DATAGRAM
-    TEXT[!MAY]:    frames are inherently unreliable, they MAY be dropped by the receiver
-    TEXT[!MAY]:    if the receiver cannot process them.
+    TEXT[!MAY,todo]: However, since DATAGRAM
+    TEXT[!MAY,todo]:    frames are inherently unreliable, they MAY be dropped by the receiver
+    TEXT[!MAY,todo]:    if the receiver cannot process them.
 
   SECTION: [Congestion Control](#section-5.4)
-    TEXT[!MUST]: The sender MUST either delay sending the frame until
-    TEXT[!MUST]:    the controller allows it or drop the frame without sending it (at
-    TEXT[!MUST]:    which point it MAY notify the application).
+    TEXT[!MUST,implementation]: The sender MUST either delay sending the frame until
+    TEXT[!MUST,implementation]:    the controller allows it or drop the frame without sending it (at
+    TEXT[!MUST,implementation]:    which point it MAY notify the application).
 
   SECTION: [Security Considerations](#section-6)
     TEXT[!MUST,implementation]: All application data
@@ -3576,82 +3576,82 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9287
     TEXT[!MUST,implementation,test]:    MUST accept packets with the QUIC Bit set to a value of 0.
 
   SECTION: [Clearing the QUIC Bit](#section-3.1)
-    TEXT[!SHOULD]:    Endpoints that receive the grease_quic_bit transport parameter from a
-    TEXT[!SHOULD]:    peer SHOULD set the QUIC Bit to an unpredictable value unless another
-    TEXT[!SHOULD]:    extension assigns specific meaning to the value of the bit.
-    TEXT[!MAY]:    A client MAY also set the QUIC Bit to 0 in Initial, Handshake, or
-    TEXT[!MAY]:    0-RTT packets that are sent prior to receiving transport parameters
-    TEXT[!MAY]:    from the server.
-    TEXT[!MUST]: However, a client MUST NOT set the QUIC Bit to 0
-    TEXT[!MUST]:    unless the Initial packets it sends include a token provided by the
-    TEXT[!MUST]:    server in a NEW_TOKEN frame (Section 19.7 of [QUIC]), received less
-    TEXT[!MUST]:    than 604800 seconds (7 days) prior on a connection where the server
-    TEXT[!MUST]:    also included the grease_quic_bit transport parameter.
-    TEXT[!MUST]:    A server MUST set the QUIC Bit to 0 only after processing transport
-    TEXT[!MUST]:    parameters from a client.
-    TEXT[!MUST]: A server MUST NOT remember that a client
-    TEXT[!MUST]:    negotiated the extension in a previous connection and set the QUIC
-    TEXT[!MUST]:    Bit to 0 based on that information.
-    TEXT[!MUST]:    An endpoint MUST NOT set the QUIC Bit to 0 without knowing whether
-    TEXT[!MUST]:    the peer supports the extension.
+    TEXT[!SHOULD,implementation]:    Endpoints that receive the grease_quic_bit transport parameter from a
+    TEXT[!SHOULD,implementation]:    peer SHOULD set the QUIC Bit to an unpredictable value unless another
+    TEXT[!SHOULD,implementation]:    extension assigns specific meaning to the value of the bit.
+    TEXT[!MAY,todo]:    A client MAY also set the QUIC Bit to 0 in Initial, Handshake, or
+    TEXT[!MAY,todo]:    0-RTT packets that are sent prior to receiving transport parameters
+    TEXT[!MAY,todo]:    from the server.
+    TEXT[!MUST,implementation]: However, a client MUST NOT set the QUIC Bit to 0
+    TEXT[!MUST,implementation]:    unless the Initial packets it sends include a token provided by the
+    TEXT[!MUST,implementation]:    server in a NEW_TOKEN frame (Section 19.7 of [QUIC]), received less
+    TEXT[!MUST,implementation]:    than 604800 seconds (7 days) prior on a connection where the server
+    TEXT[!MUST,implementation]:    also included the grease_quic_bit transport parameter.
+    TEXT[!MUST,implementation]:    A server MUST set the QUIC Bit to 0 only after processing transport
+    TEXT[!MUST,implementation]:    parameters from a client.
+    TEXT[!MUST,implementation]: A server MUST NOT remember that a client
+    TEXT[!MUST,implementation]:    negotiated the extension in a previous connection and set the QUIC
+    TEXT[!MUST,implementation]:    Bit to 0 based on that information.
+    TEXT[!MUST,implementation]:    An endpoint MUST NOT set the QUIC Bit to 0 without knowing whether
+    TEXT[!MUST,implementation]:    the peer supports the extension.
 
   SECTION: [Using the QUIC Bit](#section-3.2)
-    TEXT[!MUST]: Extensions that use the QUIC Bit MUST negotiate their use
-    TEXT[!MUST]:    prior to acting on any semantic.
+    TEXT[!MUST,todo]: Extensions that use the QUIC Bit MUST negotiate their use
+    TEXT[!MUST,todo]:    prior to acting on any semantic.
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9368
   SECTION: [Definitions](#section-1.2)
-    TEXT[!SHOULD]: Implementations can make this
-    TEXT[!SHOULD]:       configurable, and a RECOMMENDED value is one minute.
+    TEXT[!SHOULD,todo]: Implementations can make this
+    TEXT[!SHOULD,todo]:       configurable, and a RECOMMENDED value is one minute.
 
   SECTION: [Version Negotiation Mechanism](#section-2)
-    TEXT[!MAY]:    If the server can parse the first flight, it can establish the
-    TEXT[!MAY]:    connection using the client's Chosen Version, or it MAY select any
-    TEXT[!MAY]:    other compatible version, as described in Section 2.3.
+    TEXT[!MAY,implementation]:    If the server can parse the first flight, it can establish the
+    TEXT[!MAY,implementation]:    connection using the client's Chosen Version, or it MAY select any
+    TEXT[!MAY,implementation]:    other compatible version, as described in Section 2.3.
 
   SECTION: [Incompatible Version Negotiation](#section-2.1)
-    TEXT[!MUST]: This packet SHALL include each entry
-    TEXT[!MUST]:    from the server's set of Offered Versions (see Section 5) in a
-    TEXT[!MUST]:    Supported Version field.
-    TEXT[!MAY]: The server MAY add reserved versions (as
-    TEXT[!MAY]:    defined in Section 6.3 of [QUIC]) in Supported Version fields.
-    TEXT[!MUST]:    Upon receiving the Version Negotiation packet, the client SHALL
-    TEXT[!MUST]:    search for a version it supports in the list provided by the server.
-    TEXT[!MUST]:    If it doesn't find one, it SHALL abort the connection attempt.
-    TEXT[!MUST]:    Otherwise, it SHALL select a mutually supported version and send a
-    TEXT[!MUST]:    new first flight with that version -- this version is now the
-    TEXT[!MUST]:    Negotiated Version.
-    TEXT[!MUST]: Clients
-    TEXT[!MUST]:    MUST NOT send Version Negotiation packets and servers MUST ignore all
-    TEXT[!MUST]:    received Version Negotiation packets.
+    TEXT[!MUST,implementation]: This packet SHALL include each entry
+    TEXT[!MUST,implementation]:    from the server's set of Offered Versions (see Section 5) in a
+    TEXT[!MUST,implementation]:    Supported Version field.
+    TEXT[!MAY,implementation]: The server MAY add reserved versions (as
+    TEXT[!MAY,implementation]:    defined in Section 6.3 of [QUIC]) in Supported Version fields.
+    TEXT[!MUST,implementation]:    Upon receiving the Version Negotiation packet, the client SHALL
+    TEXT[!MUST,implementation]:    search for a version it supports in the list provided by the server.
+    TEXT[!MUST,implementation]:    If it doesn't find one, it SHALL abort the connection attempt.
+    TEXT[!MUST,implementation,test]:    Otherwise, it SHALL select a mutually supported version and send a
+    TEXT[!MUST,implementation,test]:    new first flight with that version -- this version is now the
+    TEXT[!MUST,implementation,test]:    Negotiated Version.
+    TEXT[!MUST,implementation]: Clients
+    TEXT[!MUST,implementation]:    MUST NOT send Version Negotiation packets and servers MUST ignore all
+    TEXT[!MUST,implementation]:    received Version Negotiation packets.
 
   SECTION: [Compatible Versions](#section-2.2)
-    TEXT[!MUST]: Implementations MUST NOT assume compatibility
-    TEXT[!MUST]:    between versions unless explicitly specified.
+    TEXT[!MUST,implementation]: Implementations MUST NOT assume compatibility
+    TEXT[!MUST,implementation]:    between versions unless explicitly specified.
 
   SECTION: [Compatible Version Negotiation](#section-2.3)
     TEXT[!MUST,implementation]:    In order to perform compatible version negotiation, the server MUST
     TEXT[!MUST,implementation]:    select one of these versions that it (1) supports and (2) knows the
     TEXT[!MUST,implementation]:    client's Chosen Version is compatible with.
-    TEXT[!MUST]: If the first flight is correctly
-    TEXT[!MUST]:    formatted, then this conversion process cannot fail by definition of
-    TEXT[!MUST]:    the first flight being compatible; if the server is unable to convert
-    TEXT[!MUST]:    the first flight, it MUST abort the handshake.
-    TEXT[!MUST]:    If a document specifies that a QUIC version is compatible with
-    TEXT[!MUST]:    another, that document MUST specify the mechanism by which clients
-    TEXT[!MUST]:    are made aware of the Negotiated Version.
-    TEXT[!SHOULD]:    Mutually compatible versions SHOULD use the same mechanism.
-    TEXT[!MUST]: In particular, if the Negotiated Version
-    TEXT[!MUST]:    mandates that endpoints perform validations on Handshake packets,
-    TEXT[!MUST]:    endpoints MUST also perform such validations on the converted first
-    TEXT[!MUST]:    flight.
+    TEXT[!MUST,implementation]: If the first flight is correctly
+    TEXT[!MUST,implementation]:    formatted, then this conversion process cannot fail by definition of
+    TEXT[!MUST,implementation]:    the first flight being compatible; if the server is unable to convert
+    TEXT[!MUST,implementation]:    the first flight, it MUST abort the handshake.
+    TEXT[!MUST,todo]:    If a document specifies that a QUIC version is compatible with
+    TEXT[!MUST,todo]:    another, that document MUST specify the mechanism by which clients
+    TEXT[!MUST,todo]:    are made aware of the Negotiated Version.
+    TEXT[!SHOULD,todo]:    Mutually compatible versions SHOULD use the same mechanism.
+    TEXT[!MUST,todo]: In particular, if the Negotiated Version
+    TEXT[!MUST,todo]:    mandates that endpoints perform validations on Handshake packets,
+    TEXT[!MUST,todo]:    endpoints MUST also perform such validations on the converted first
+    TEXT[!MUST,todo]:    flight.
 
   SECTION: [Client Choice of Original Version](#section-2.5)
-    TEXT[!SHOULD]:    When the client picks its Original Version, it SHOULD try to avoid
-    TEXT[!SHOULD]:    incompatible version negotiation to save a round trip.
-    TEXT[!SHOULD]: Therefore,
-    TEXT[!SHOULD]:    the client SHOULD pick an Original Version to maximize the combined
-    TEXT[!SHOULD]:    probability that both:
+    TEXT[!SHOULD,todo]:    When the client picks its Original Version, it SHOULD try to avoid
+    TEXT[!SHOULD,todo]:    incompatible version negotiation to save a round trip.
+    TEXT[!SHOULD,todo]: Therefore,
+    TEXT[!SHOULD,todo]:    the client SHOULD pick an Original Version to maximize the combined
+    TEXT[!SHOULD,todo]:    probability that both:
 
   SECTION: [Version Information](#section-3)
     TEXT[!MUST,implementation]:    Any version of QUIC that supports this mechanism MUST provide a
@@ -3660,56 +3660,56 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9368
     TEXT[implementation]:    Version Information {
     TEXT[implementation]:      Chosen Version (32),
     TEXT[implementation]:      Available Versions (32) ...,
-    TEXT[!MUST]: Note that the
-    TEXT[!MUST]:       version in the Chosen Version field MUST be included in this list
-    TEXT[!MUST]:       to allow the client to communicate the Chosen Version's
-    TEXT[!MUST]:       preference.
-    TEXT[!MAY]: Note that this preference is only advisory; servers
-    TEXT[!MAY]:       MAY choose to use their own preference instead.
-    TEXT[!MAY]: For the same reason, the
-    TEXT[!MAY]:       Available Versions field MAY be empty.
-    TEXT[!MAY]:    Clients and servers MAY both include versions following the pattern
-    TEXT[!MAY]:    0x?a?a?a?a in their Available Versions list.
+    TEXT[!MUST,implementation]: Note that the
+    TEXT[!MUST,implementation]:       version in the Chosen Version field MUST be included in this list
+    TEXT[!MUST,implementation]:       to allow the client to communicate the Chosen Version's
+    TEXT[!MUST,implementation]:       preference.
+    TEXT[!MAY,implementation]: Note that this preference is only advisory; servers
+    TEXT[!MAY,implementation]:       MAY choose to use their own preference instead.
+    TEXT[!MAY,todo]: For the same reason, the
+    TEXT[!MAY,todo]:       Available Versions field MAY be empty.
+    TEXT[!MAY,todo]:    Clients and servers MAY both include versions following the pattern
+    TEXT[!MAY,todo]:    0x?a?a?a?a in their Available Versions list.
 
   SECTION: [Version Downgrade Prevention](#section-4)
-    TEXT[!MUST]:    Clients MUST ignore any received Version Negotiation packets that
-    TEXT[!MUST]:    contain the Original Version.
-    TEXT[!MUST]: A client that makes a connection
-    TEXT[!MUST]:    attempt based on information received from a Version Negotiation
-    TEXT[!MUST]:    packet MUST ignore any Version Negotiation packets it receives in
-    TEXT[!MUST]:    response to that connection attempt.
-    TEXT[!MUST]:    Both endpoints MUST parse their peer's Version Information during the
-    TEXT[!MUST]:    handshake.
-    TEXT[!MUST]: If that leads to a parsing failure (for example, if it is
-    TEXT[!MUST]:    too short or if its length is not divisible by four), then the
-    TEXT[!MUST]:    endpoint MUST close the connection; if the connection was using QUIC
-    TEXT[!MUST]:    version 1, that connection closure MUST use a transport error of type
-    TEXT[!MUST]:    TRANSPORT_PARAMETER_ERROR.
+    TEXT[!MUST,implementation,test]:    Clients MUST ignore any received Version Negotiation packets that
+    TEXT[!MUST,implementation,test]:    contain the Original Version.
+    TEXT[!MUST,implementation,test]: A client that makes a connection
+    TEXT[!MUST,implementation,test]:    attempt based on information received from a Version Negotiation
+    TEXT[!MUST,implementation,test]:    packet MUST ignore any Version Negotiation packets it receives in
+    TEXT[!MUST,implementation,test]:    response to that connection attempt.
+    TEXT[!MUST,implementation]:    Both endpoints MUST parse their peer's Version Information during the
+    TEXT[!MUST,implementation]:    handshake.
+    TEXT[!MUST,implementation]: If that leads to a parsing failure (for example, if it is
+    TEXT[!MUST,implementation]:    too short or if its length is not divisible by four), then the
+    TEXT[!MUST,implementation]:    endpoint MUST close the connection; if the connection was using QUIC
+    TEXT[!MUST,implementation]:    version 1, that connection closure MUST use a transport error of type
+    TEXT[!MUST,implementation]:    TRANSPORT_PARAMETER_ERROR.
     TEXT[!MUST,implementation,test]: If an endpoint receives a Chosen Version
     TEXT[!MUST,implementation,test]:    equal to zero, or any Available Version equal to zero, it MUST treat
     TEXT[!MUST,implementation,test]:    it as a parsing failure.
     TEXT[!MUST,implementation]: If a server receives Version Information
     TEXT[!MUST,implementation]:    where the Chosen Version is not included in Available Versions, it
     TEXT[!MUST,implementation]:    MUST treat it as a parsing failure.
-    TEXT[!MUST]:    Every QUIC version that supports version negotiation MUST define a
-    TEXT[!MUST]:    method for closing the connection with a version negotiation error.
+    TEXT[!MUST,implementation]:    Every QUIC version that supports version negotiation MUST define a
+    TEXT[!MUST,implementation]:    method for closing the connection with a version negotiation error.
     TEXT[!MUST,implementation]: When the server then processes the client's Version
     TEXT[!MUST,implementation]:    Information, the server MUST validate that the client's Chosen
     TEXT[!MUST,implementation]:    Version matches the version in use for the connection.
-    TEXT[!MUST]: If the two
-    TEXT[!MUST]:    differ, the server MUST close the connection with a version
-    TEXT[!MUST]:    negotiation error.
-    TEXT[!MUST]: Subsequently,
-    TEXT[!MUST]:    if the server receives the client's Version Information over QUIC
-    TEXT[!MUST]:    version 1 (as indicated by the Version field of the Long Header
-    TEXT[!MUST]:    packets that carried the transport parameters) and the client's
-    TEXT[!MUST]:    Chosen Version is not set to 0x00000001, the server MUST close the
-    TEXT[!MUST]:    connection with a version negotiation error.
-    TEXT[!MAY]:    Servers MAY complete the handshake even if the Version Information is
-    TEXT[!MAY]:    missing.
-    TEXT[!MUST]: Clients MUST NOT complete the handshake if they are
-    TEXT[!MUST]:    reacting to a Version Negotiation packet and the Version Information
-    TEXT[!MUST]:    is missing, but MAY do so otherwise.
+    TEXT[!MUST,implementation]: If the two
+    TEXT[!MUST,implementation]:    differ, the server MUST close the connection with a version
+    TEXT[!MUST,implementation]:    negotiation error.
+    TEXT[!MUST,implementation]: Subsequently,
+    TEXT[!MUST,implementation]:    if the server receives the client's Version Information over QUIC
+    TEXT[!MUST,implementation]:    version 1 (as indicated by the Version field of the Long Header
+    TEXT[!MUST,implementation]:    packets that carried the transport parameters) and the client's
+    TEXT[!MUST,implementation]:    Chosen Version is not set to 0x00000001, the server MUST close the
+    TEXT[!MUST,implementation]:    connection with a version negotiation error.
+    TEXT[!MAY,implementation]:    Servers MAY complete the handshake even if the Version Information is
+    TEXT[!MAY,implementation]:    missing.
+    TEXT[!MUST,implementation]: Clients MUST NOT complete the handshake if they are
+    TEXT[!MUST,implementation]:    reacting to a Version Negotiation packet and the Version Information
+    TEXT[!MUST,implementation]:    is missing, but MAY do so otherwise.
     TEXT[!MUST,implementation,test]:    If a client receives Version Information where the server's Chosen
     TEXT[!MUST,implementation,test]:    Version was not sent by the client as part of its Available Versions,
     TEXT[!MUST,implementation,test]:    the client MUST close the connection with a version negotiation
@@ -3717,8 +3717,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9368
     TEXT[!MUST,test]: If a client has reacted to a Version Negotiation packet and
     TEXT[!MUST,test]:    the server's Version Information was missing, the client MUST close
     TEXT[!MUST,test]:    the connection with a version negotiation error.
-    TEXT[!MUST]:    If the client received and acted on a Version Negotiation packet, the
-    TEXT[!MUST]:    client MUST validate the server's Available Versions field.
+    TEXT[!MUST,implementation]:    If the client received and acted on a Version Negotiation packet, the
+    TEXT[!MUST,implementation]:    client MUST validate the server's Available Versions field.
     TEXT[!MUST,implementation,test]: If the client would have selected a different
     TEXT[!MUST,implementation,test]:    version, the client MUST close the connection with a version
     TEXT[!MUST,implementation,test]:    negotiation error.
@@ -3726,66 +3726,66 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9368
     TEXT[!MUST,implementation]:    Negotiation packet and the server's Available Versions field is
     TEXT[!MUST,implementation]:    empty, the client MUST close the connection with a version
     TEXT[!MUST,implementation]:    negotiation error.
-    TEXT[!MUST]: In particular, since the client can be made aware of the
-    TEXT[!MUST]:    Negotiated Version by the QUIC long header version during compatible
-    TEXT[!MUST]:    version negotiation (see Section 2.3), clients MUST validate that the
-    TEXT[!MUST]:    server's Chosen Version is equal to the Negotiated Version; if they
-    TEXT[!MUST]:    do not match, the client MUST close the connection with a version
-    TEXT[!MUST]:    negotiation error.
+    TEXT[!MUST,implementation]: In particular, since the client can be made aware of the
+    TEXT[!MUST,implementation]:    Negotiated Version by the QUIC long header version during compatible
+    TEXT[!MUST,implementation]:    version negotiation (see Section 2.3), clients MUST validate that the
+    TEXT[!MUST,implementation]:    server's Chosen Version is equal to the Negotiated Version; if they
+    TEXT[!MUST,implementation]:    do not match, the client MUST close the connection with a version
+    TEXT[!MUST,implementation]:    negotiation error.
 
   SECTION: [Server Deployments of QUIC](#section-5)
-    TEXT[!SHOULD]: To avoid that,
-    TEXT[!SHOULD]:    server operators SHOULD perform a three-step process when they wish
-    TEXT[!SHOULD]:    to add or remove support for a version, as described below.
+    TEXT[!SHOULD,todo]: To avoid that,
+    TEXT[!SHOULD,todo]:    server operators SHOULD perform a three-step process when they wish
+    TEXT[!SHOULD,todo]:    to add or remove support for a version, as described below.
 
   SECTION: [Application-Layer Protocol Considerations](#section-6)
-    TEXT[!MUST]:    A given ALPN token MUST NOT be used with a new QUIC version that is
-    TEXT[!MUST]:    different from the version for which the ALPN token was originally
-    TEXT[!MUST]:    defined, unless all the following requirements are met:
-    TEXT[!MUST]:    When incompatible version negotiation is in use, the second
-    TEXT[!MUST]:    connection that is created in response to the received Version
-    TEXT[!MUST]:    Negotiation packet MUST restart its application-layer protocol
-    TEXT[!MUST]:    negotiation process without taking into account the Original Version.
+    TEXT[!MUST,todo]:    A given ALPN token MUST NOT be used with a new QUIC version that is
+    TEXT[!MUST,todo]:    different from the version for which the ALPN token was originally
+    TEXT[!MUST,todo]:    defined, unless all the following requirements are met:
+    TEXT[!MUST,implementation]:    When incompatible version negotiation is in use, the second
+    TEXT[!MUST,implementation]:    connection that is created in response to the received Version
+    TEXT[!MUST,implementation]:    Negotiation packet MUST restart its application-layer protocol
+    TEXT[!MUST,implementation]:    negotiation process without taking into account the Original Version.
 
   SECTION: [Considerations for Future Versions](#section-7)
-    TEXT[!SHOULD]:    In order to facilitate the deployment of future versions of QUIC,
-    TEXT[!SHOULD]:    designers of future versions SHOULD attempt to design their new
-    TEXT[!SHOULD]:    version such that commonly deployed versions are compatible with it.
+    TEXT[!SHOULD,todo]:    In order to facilitate the deployment of future versions of QUIC,
+    TEXT[!SHOULD,todo]:    designers of future versions SHOULD attempt to design their new
+    TEXT[!SHOULD,todo]:    version such that commonly deployed versions are compatible with it.
 
   SECTION: [Interaction with Retry](#section-7.1)
-    TEXT[!MUST]:    If a future document wishes to define compatibility between two
-    TEXT[!MUST]:    versions that support Retry, that document MUST specify how version
-    TEXT[!MUST]:    negotiation (both compatible and incompatible) interacts with Retry
-    TEXT[!MUST]:    during a handshake that requires both.
+    TEXT[!MUST,todo]:    If a future document wishes to define compatibility between two
+    TEXT[!MUST,todo]:    versions that support Retry, that document MUST specify how version
+    TEXT[!MUST,todo]:    negotiation (both compatible and incompatible) interacts with Retry
+    TEXT[!MUST,todo]:    during a handshake that requires both.
 
   SECTION: [Interaction with TLS Resumption](#section-7.2)
-    TEXT[!SHOULD]: New versions that also use
-    TEXT[!SHOULD]:    TLS 1.3 SHOULD mandate that their session tickets are tightly scoped
-    TEXT[!SHOULD]:    to one version of QUIC, i.e., require that clients not use them
-    TEXT[!SHOULD]:    across multiple version and that servers validate this client
-    TEXT[!SHOULD]:    requirement.
+    TEXT[!SHOULD,todo]: New versions that also use
+    TEXT[!SHOULD,todo]:    TLS 1.3 SHOULD mandate that their session tickets are tightly scoped
+    TEXT[!SHOULD,todo]:    to one version of QUIC, i.e., require that clients not use them
+    TEXT[!SHOULD,todo]:    across multiple version and that servers validate this client
+    TEXT[!SHOULD,todo]:    requirement.
 
   SECTION: [Interaction with 0-RTT](#section-7.3)
-    TEXT[!MUST]: If a future document
-    TEXT[!MUST]:    wishes to define compatibility between two versions that support
-    TEXT[!MUST]:    0-RTT, that document MUST address the scenario where there are 0-RTT
-    TEXT[!MUST]:    packets in the client's first flight.
+    TEXT[!MUST,todo]: If a future document
+    TEXT[!MUST,todo]:    wishes to define compatibility between two versions that support
+    TEXT[!MUST,todo]:    0-RTT, that document MUST address the scenario where there are 0-RTT
+    TEXT[!MUST,todo]:    packets in the client's first flight.
 
   SECTION: [Special Handling for QUIC Version 1](#section-8)
-    TEXT[!MUST]:    Because QUIC version 1 was the only QUIC version that was published
-    TEXT[!MUST]:    on the IETF Standards Track before this document, it is handled
-    TEXT[!MUST]:    specially as follows: if a client is starting a QUIC version 1
-    TEXT[!MUST]:    connection in response to a received Version Negotiation packet and
-    TEXT[!MUST]:    the version_information transport parameter is missing from the
-    TEXT[!MUST]:    server's transport parameters, then the client SHALL proceed as if
-    TEXT[!MUST]:    the server's transport parameters contained a version_information
-    TEXT[!MUST]:    transport parameter with a Chosen Version set to 0x00000001 and an
-    TEXT[!MUST]:    Available Version list containing exactly one version set to
-    TEXT[!MUST]:    0x00000001.
-    TEXT[!MUST]: Note that implementations that
-    TEXT[!MUST]:    wish to use version negotiation to negotiate versions other than QUIC
-    TEXT[!MUST]:    version 1 MUST implement the version negotiation mechanism defined in
-    TEXT[!MUST]:    this document.
+    TEXT[!MUST,todo]:    Because QUIC version 1 was the only QUIC version that was published
+    TEXT[!MUST,todo]:    on the IETF Standards Track before this document, it is handled
+    TEXT[!MUST,todo]:    specially as follows: if a client is starting a QUIC version 1
+    TEXT[!MUST,todo]:    connection in response to a received Version Negotiation packet and
+    TEXT[!MUST,todo]:    the version_information transport parameter is missing from the
+    TEXT[!MUST,todo]:    server's transport parameters, then the client SHALL proceed as if
+    TEXT[!MUST,todo]:    the server's transport parameters contained a version_information
+    TEXT[!MUST,todo]:    transport parameter with a Chosen Version set to 0x00000001 and an
+    TEXT[!MUST,todo]:    Available Version list containing exactly one version set to
+    TEXT[!MUST,todo]:    0x00000001.
+    TEXT[!MUST,todo]: Note that implementations that
+    TEXT[!MUST,todo]:    wish to use version negotiation to negotiate versions other than QUIC
+    TEXT[!MUST,todo]:    version 1 MUST implement the version negotiation mechanism defined in
+    TEXT[!MUST,todo]:    this document.
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9369
   SECTION: [Differences with QUIC Version 1](#section-3)
@@ -3794,50 +3794,59 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9369
     TEXT[!MUST,implementation,test]:    and [QUIC-RECOVERY].
 
   SECTION: [Version Negotiation Considerations](#section-4)
-    TEXT[!SHOULD]: As
-    TEXT[!SHOULD]:    this mechanism does not currently distinguish between QUIC versions,
-    TEXT[!SHOULD]:    HTTP servers SHOULD support multiple versions to reduce the
-    TEXT[!SHOULD]:    probability of incompatibility and the cost associated with QUIC
-    TEXT[!SHOULD]:    version negotiation or TCP fallback.
+    TEXT[!SHOULD,implementation,test]: As
+    TEXT[!SHOULD,implementation,test]:    this mechanism does not currently distinguish between QUIC versions,
+    TEXT[!SHOULD,implementation,test]:    HTTP servers SHOULD support multiple versions to reduce the
+    TEXT[!SHOULD,implementation,test]:    probability of incompatibility and the cost associated with QUIC
+    TEXT[!SHOULD,implementation,test]:    version negotiation or TCP fallback.
     TEXT[!MUST,implementation]:    Any QUIC endpoint that supports QUIC version 2 MUST send, process,
     TEXT[!MUST,implementation]:    and validate the version_information transport parameter specified in
     TEXT[!MUST,implementation]:    [QUIC-VN] to prevent version downgrade attacks.
-    TEXT[!SHOULD]: Endpoints that support both
-    TEXT[!SHOULD]:    versions SHOULD support compatible version negotiation to avoid a
-    TEXT[!SHOULD]:    round trip.
+    TEXT[!SHOULD,implementation,test]: Endpoints that support both
+    TEXT[!SHOULD,implementation,test]:    versions SHOULD support compatible version negotiation to avoid a
+    TEXT[!SHOULD,implementation,test]:    round trip.
 
   SECTION: [Compatible Negotiation Requirements](#section-4.1)
-    TEXT[!MUST]:    If the server sends a Retry packet, it MUST use the original version.
-    TEXT[!MUST]: The client
-    TEXT[!MUST]:    MUST NOT use a different version in the subsequent Initial packet
-    TEXT[!MUST]:    that contains the Retry token.
-    TEXT[!MAY]: The server MAY encode the QUIC
-    TEXT[!MAY]:    version in its Retry token to validate that the client did not switch
-    TEXT[!MAY]:    versions, and drop the packet if it switched, to enforce client
-    TEXT[!MAY]:    compliance.
-    TEXT[!MUST]: After switching to a negotiated version
-    TEXT[!MUST]:    after a Retry, the server MUST include the relevant transport
-    TEXT[!MUST]:    parameters to validate that the server sent the Retry and the
-    TEXT[!MUST]:    connection IDs used in the exchange, as described in Section 7.3 of
-    TEXT[!MUST]:    [QUIC].
-    TEXT[!MUST]: The server MUST send all CRYPTO
-    TEXT[!MUST]:    frames using the negotiated version.
-    TEXT[!SHOULD]:    Once the client has learned the negotiated version, it SHOULD send
-    TEXT[!SHOULD]:    subsequent Initial packets using that version.
-    TEXT[!MUST]: The server MUST NOT
-    TEXT[!MUST]:    discard its original version Initial receive keys until it
-    TEXT[!MUST]:    successfully processes a Handshake packet with the negotiated
-    TEXT[!MUST]:    version.
-    TEXT[!MUST]:    Both endpoints MUST send Handshake and 1-RTT packets using the
-    TEXT[!MUST]:    negotiated version.
-    TEXT[!MUST]: An endpoint MUST drop packets using any other
-    TEXT[!MUST]:    version.
-    TEXT[!MUST]:    The client MUST NOT send 0-RTT packets using the negotiated version,
-    TEXT[!MUST]:    even after processing a packet of that version from the server.
+    TEXT[!MUST,implementation]:    If the server sends a Retry packet, it MUST use the original version.
+    TEXT[!MUST,implementation]: The client
+    TEXT[!MUST,implementation]:    MUST NOT use a different version in the subsequent Initial packet
+    TEXT[!MUST,implementation]:    that contains the Retry token.
+    TEXT[!MAY,implementation]: The server MAY encode the QUIC
+    TEXT[!MAY,implementation]:    version in its Retry token to validate that the client did not switch
+    TEXT[!MAY,implementation]:    versions, and drop the packet if it switched, to enforce client
+    TEXT[!MAY,implementation]:    compliance.
+    TEXT[!MUST,implementation]: After switching to a negotiated version
+    TEXT[!MUST,implementation]:    after a Retry, the server MUST include the relevant transport
+    TEXT[!MUST,implementation]:    parameters to validate that the server sent the Retry and the
+    TEXT[!MUST,implementation]:    connection IDs used in the exchange, as described in Section 7.3 of
+    TEXT[!MUST,implementation]:    [QUIC].
+    TEXT[implementation]:    The server cannot send CRYPTO frames until it has processed the
+    TEXT[implementation]:    client's transport parameters.
+    TEXT[!MUST,implementation,test]: The server MUST send all CRYPTO
+    TEXT[!MUST,implementation,test]:    frames using the negotiated version.
+    TEXT[implementation]:    Before the server is able to process transport parameters from the
+    TEXT[implementation]:    client, it might need to respond to Initial packets from the client.
+    TEXT[implementation]:    For these packets, the server uses the original version.
+    TEXT[!SHOULD,implementation,test]:    Once the client has learned the negotiated version, it SHOULD send
+    TEXT[!SHOULD,implementation,test]:    subsequent Initial packets using that version.
+    TEXT[!MUST,todo]: The server MUST NOT
+    TEXT[!MUST,todo]:    discard its original version Initial receive keys until it
+    TEXT[!MUST,todo]:    successfully processes a Handshake packet with the negotiated
+    TEXT[!MUST,todo]:    version.
+    TEXT[!MUST,implementation,test]:    Both endpoints MUST send Handshake and 1-RTT packets using the
+    TEXT[!MUST,implementation,test]:    negotiated version.
+    TEXT[!MUST,implementation]: An endpoint MUST drop packets using any other
+    TEXT[!MUST,implementation]:    version.
+    TEXT[!MUST,todo]:    The client MUST NOT send 0-RTT packets using the negotiated version,
+    TEXT[!MUST,todo]:    even after processing a packet of that version from the server.
 
   SECTION: [TLS Resumption and NEW_TOKEN Tokens](#section-5)
-    TEXT[!MUST]: Clients MUST NOT use a
-    TEXT[!MUST]:    session ticket or token from a QUIC version 1 connection to initiate
-    TEXT[!MUST]:    a QUIC version 2 connection, and vice versa.
-    TEXT[!MUST]:    Servers MUST validate the originating version of any session ticket
-    TEXT[!MUST]:    or token and not accept one issued from a different version.
+    TEXT[!MUST,implementation]: Clients MUST NOT use a
+    TEXT[!MUST,implementation]:    session ticket or token from a QUIC version 1 connection to initiate
+    TEXT[!MUST,implementation]:    a QUIC version 2 connection, and vice versa.
+    TEXT[implementation]: When a connection
+    TEXT[implementation]:    includes compatible version negotiation, any issued server tokens are
+    TEXT[implementation]:    considered to originate from the negotiated version, not the original
+    TEXT[implementation]:    one.
+    TEXT[!MUST,todo]:    Servers MUST validate the originating version of any session ticket
+    TEXT[!MUST,todo]:    or token and not accept one issued from a different version.

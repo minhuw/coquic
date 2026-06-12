@@ -1251,31 +1251,82 @@ QuicConnection::process_retire_connection_id_frame(const RetireConnectionIdFrame
     return CodecResult<bool>::success(true);
 }
 
-void QuicConnection::issue_spare_connection_ids() {
+bool QuicConnection::can_issue_local_connection_id() const {
     if (!handshake_confirmed_ || !peer_transport_parameters_.has_value() ||
         //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
         // # An endpoint MUST NOT send this frame if it currently requires that
         // # its peer send packets with a zero-length Destination Connection ID.
         config_.source_connection_id.empty()) {
-        return;
+        return false;
     }
     if (config_.role == EndpointRole::client &&
         local_transport_parameters_.disable_active_migration) {
-        return;
+        return false;
     }
     if (current_send_path_id_.has_value()) {
         if (const auto path = paths_.find(*current_send_path_id_); path != paths_.end()) {
             if (!path->second.mtu.viable) {
-                return;
+                return false;
             }
         }
     }
 
-    const auto peer_limit =
-        static_cast<std::size_t>(peer_transport_parameters_->active_connection_id_limit);
-    if (peer_limit == 0) {
+    return peer_transport_parameters_->active_connection_id_limit != 0;
+}
+
+NewConnectionIdFrame QuicConnection::issue_local_connection_id(std::uint64_t retire_prior_to) {
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # The sequence number on each newly issued connection ID MUST increase
+    // # by 1.
+    const auto sequence_number = next_local_connection_id_sequence_++;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1
+    // # As a trivial example, this means the same connection ID
+    // # MUST NOT be issued more than once on the same connection.
+    const auto connection_id =
+        make_issued_connection_id(config_.source_connection_id, sequence_number);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+    // # The same stateless reset token MUST NOT be used for multiple
+    // # connection IDs.
+    const auto stateless_reset_token =
+        make_stateless_reset_token(connection_id, sequence_number, config_.stateless_reset_secret);
+    local_connection_ids_[sequence_number] = LocalConnectionIdRecord{
+        .sequence_number = sequence_number,
+        .connection_id = connection_id,
+        .stateless_reset_token = stateless_reset_token,
+    };
+    for (auto &[issued_sequence_number, record] : local_connection_ids_) {
+        if (issued_sequence_number >= retire_prior_to || record.retired) {
+            continue;
+        }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+        // # An endpoint might need to stop accepting previously issued
+        // # connection IDs in certain circumstances. Such an endpoint can cause
+        // # its peer to retire connection IDs by sending a NEW_CONNECTION_ID
+        // # frame with an increased Retire Prior To field.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+        // # The endpoint SHOULD continue to accept the previously issued
+        // # connection IDs until they are retired by the peer.
+        record.retirement_requested = true;
+    }
+    note_endpoint_route_state_changed();
+
+    auto frame = NewConnectionIdFrame{
+        .sequence_number = sequence_number,
+        .retire_prior_to = retire_prior_to,
+        .connection_id = connection_id,
+        .stateless_reset_token = stateless_reset_token,
+    };
+    pending_new_connection_id_frames_.push_back(frame);
+    return frame;
+}
+
+void QuicConnection::issue_spare_connection_ids() {
+    if (!can_issue_local_connection_id()) {
         return;
     }
+
+    const auto peer_limit =
+        static_cast<std::size_t>(peer_transport_parameters_->active_connection_id_limit);
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
     // # An endpoint SHOULD ensure that its peer has a sufficient number of
@@ -1288,46 +1339,84 @@ void QuicConnection::issue_spare_connection_ids() {
     // # An endpoint MUST NOT provide more connection IDs than the peer's limit.
     while (count_active_connection_ids(local_connection_ids_) < peer_limit) {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
-        // # An
-        // # endpoint MAY limit the total number of connection IDs issued for each
-        // # connection to avoid the risk of running out of connection IDs; see
-        // # Section 10.3.2.
+        // # An endpoint MAY limit the total number of connection IDs issued for
+        // # each connection to avoid the risk of running out of connection IDs;
+        // # see Section 10.3.2.
         //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
-        // # An endpoint MAY also limit the issuance of
-        // # connection IDs to reduce the amount of per-path state it maintains,
-        // # such as path validation status, as its peer might interact with it
-        // # over as many paths as there are issued connection IDs.
-        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
-        // # The sequence number on each newly issued connection ID MUST increase
-        // # by 1.
-        const auto sequence_number = next_local_connection_id_sequence_++;
-        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1
-        // # As a trivial example, this means the same connection ID
-        // # MUST NOT be issued more than once on the same connection.
-        const auto connection_id =
-            make_issued_connection_id(config_.source_connection_id, sequence_number);
-        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
-        // # The same stateless reset token MUST NOT be used for multiple
-        // # connection IDs.
-        const auto stateless_reset_token = make_stateless_reset_token(
-            connection_id, sequence_number, config_.stateless_reset_secret);
-        local_connection_ids_[sequence_number] = LocalConnectionIdRecord{
-            .sequence_number = sequence_number,
-            .connection_id = connection_id,
-            .stateless_reset_token = stateless_reset_token,
-        };
-        note_endpoint_route_state_changed();
-        pending_new_connection_id_frames_.push_back(NewConnectionIdFrame{
-            .sequence_number = sequence_number,
-            //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
-            // # Endpoints SHOULD NOT issue updates of the Retire Prior To field
-            // # before receiving RETIRE_CONNECTION_ID frames that retire all
-            // # connection IDs indicated by the previous Retire Prior To value.
-            .retire_prior_to = 0,
-            .connection_id = connection_id,
-            .stateless_reset_token = stateless_reset_token,
-        });
+        // # An endpoint MAY also limit the issuance of connection IDs to reduce
+        // # the amount of per-path state it maintains, such as path validation
+        // # status, as its peer might interact with it over as many paths as
+        // # there are issued connection IDs.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+        // # Endpoints SHOULD NOT issue updates of the Retire Prior To field
+        // # before receiving RETIRE_CONNECTION_ID frames that retire all
+        // # connection IDs indicated by the previous Retire Prior To value.
+        static_cast<void>(issue_local_connection_id(/*retire_prior_to=*/0));
     }
+}
+
+bool QuicConnection::request_local_connection_id_rotation() {
+    if (!can_issue_local_connection_id()) {
+        return false;
+    }
+
+    const auto has_pending_requested_retirement =
+        std::ranges::any_of(local_connection_ids_, [](const auto &entry) {
+            return !entry.second.retired && entry.second.retirement_requested;
+        });
+    if (has_pending_requested_retirement) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+        // # Endpoints SHOULD NOT issue updates of the Retire Prior To field
+        // # before receiving RETIRE_CONNECTION_ID frames that retire all
+        // # connection IDs indicated by the previous Retire Prior To value.
+        return false;
+    }
+
+    const auto peer_limit =
+        static_cast<std::size_t>(peer_transport_parameters_->active_connection_id_limit);
+    const auto active_after_retire_prior_to = [&](std::uint64_t retire_prior_to) {
+        const auto retained = std::count_if(
+            local_connection_ids_.begin(), local_connection_ids_.end(), [&](const auto &entry) {
+                return !entry.second.retired && entry.first >= retire_prior_to;
+            });
+        return static_cast<std::size_t>(retained) + 1u;
+    };
+
+    if (largest_local_retire_prior_to_ >= next_local_connection_id_sequence_) {
+        return false;
+    }
+
+    const auto first_candidate = largest_local_retire_prior_to_ + 1u;
+    for (auto retire_prior_to = first_candidate;
+         retire_prior_to <= next_local_connection_id_sequence_; ++retire_prior_to) {
+        const bool retires_existing_connection_id =
+            std::ranges::any_of(local_connection_ids_, [&](const auto &entry) {
+                return !entry.second.retired && entry.first < retire_prior_to;
+            });
+        if (!retires_existing_connection_id) {
+            continue;
+        }
+        if (active_after_retire_prior_to(retire_prior_to) > peer_limit) {
+            continue;
+        }
+
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+        // # An endpoint MAY send connection IDs that temporarily exceed a
+        // # peer's limit if the NEW_CONNECTION_ID frame also requires the
+        // # retirement of any excess, by including a sufficiently large value in
+        // # the Retire Prior To field.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+        // # After processing a NEW_CONNECTION_ID frame and adding and retiring
+        // # active connection IDs, if the number of active connection IDs
+        // # exceeds the value advertised in its active_connection_id_limit
+        // # transport parameter, an endpoint MUST close the connection with an
+        // # error of type CONNECTION_ID_LIMIT_ERROR.
+        static_cast<void>(issue_local_connection_id(retire_prior_to));
+        largest_local_retire_prior_to_ = retire_prior_to;
+        return true;
+    }
+
+    return false;
 }
 
 void QuicConnection::issue_path_probe_replacement_connection_id() {

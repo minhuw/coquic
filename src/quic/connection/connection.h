@@ -851,7 +851,10 @@ class QuicConnection {
     CodecResult<bool> ensure_peer_preferred_address_connection_id();
     void queue_peer_connection_id_retirement(std::uint64_t sequence_number);
     void refresh_peer_connection_id_sequences_after_retirement();
+    bool can_issue_local_connection_id() const;
+    NewConnectionIdFrame issue_local_connection_id(std::uint64_t retire_prior_to);
     void issue_spare_connection_ids();
+    bool request_local_connection_id_rotation();
     void issue_path_probe_replacement_connection_id();
     std::array<std::byte, 8> next_path_challenge_data(QuicPathId path_id);
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
@@ -1080,6 +1083,7 @@ class QuicConnection {
     std::map<QuicPathId, PathState> paths_;
     std::uint64_t active_peer_connection_id_sequence_ = 0;
     std::uint64_t largest_peer_retire_prior_to_ = 0;
+    std::uint64_t largest_local_retire_prior_to_ = 0;
     std::uint64_t active_local_connection_id_sequence_ = 0;
     std::uint64_t next_local_connection_id_sequence_ = 1;
     std::uint64_t endpoint_route_generation_ = 1;

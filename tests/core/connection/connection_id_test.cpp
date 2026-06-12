@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 
 #include <gtest/gtest.h>
@@ -34,6 +35,7 @@ using coquic::quic::test_support::expect_local_error;
 using coquic::quic::test_support::find_application_probe_payload_size_that_drops_ack;
 using coquic::quic::test_support::find_application_send_payload_size_that_drops_ack;
 using coquic::quic::test_support::invalid_cipher_suite;
+using coquic::quic::test_support::last_tracked_packet;
 using coquic::quic::test_support::make_connected_client_connection;
 using coquic::quic::test_support::make_connected_server_connection;
 using coquic::quic::test_support::make_connected_server_connection_with_preferred_address;
@@ -47,6 +49,27 @@ using coquic::quic::test_support::protected_next_packet_length;
 using coquic::quic::test_support::ProtectedPacketKind;
 using coquic::quic::test_support::read_u32_be_at;
 using coquic::quic::test_support::ScopedEnvVar;
+using coquic::quic::test_support::tracked_packet_count;
+
+std::size_t active_local_connection_id_count(const coquic::quic::QuicConnection &connection) {
+    return static_cast<std::size_t>(std::ranges::count_if(
+        connection.local_connection_ids_, [](const auto &entry) { return !entry.second.retired; }));
+}
+
+std::size_t peer_visible_local_connection_id_count_after_retire_prior_to(
+    const coquic::quic::QuicConnection &connection, std::uint64_t retire_prior_to) {
+    return static_cast<std::size_t>(
+        std::ranges::count_if(connection.local_connection_ids_, [&](const auto &entry) {
+            return !entry.second.retired && entry.first >= retire_prior_to;
+        }));
+}
+
+bool has_pending_requested_local_connection_id_retirement(
+    const coquic::quic::QuicConnection &connection) {
+    return std::ranges::any_of(connection.local_connection_ids_, [](const auto &entry) {
+        return !entry.second.retired && entry.second.retirement_requested;
+    });
+}
 
 TEST(QuicCoreTest,
      ServerProcessesOneRttRetireConnectionIdBeforeHandshakeCompletesWhenApplicationKeysExist) {
@@ -951,6 +974,224 @@ TEST(QuicCoreTest, RetiringRequestedLocalConnectionIdQueuesReplacement) {
     // # receiving RETIRE_CONNECTION_ID frames that retire all connection IDs
     // # indicated by the previous Retire Prior To value.
     EXPECT_EQ(connection.pending_new_connection_id_frames_.front().retire_prior_to, 0u);
+}
+
+TEST(QuicCoreTest, SpareConnectionIdIssuanceKeepsZeroRetirePriorToUntilRotationRequested) {
+    auto connection = make_connected_server_connection();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 4;
+
+    connection.issue_spare_connection_ids();
+
+    ASSERT_FALSE(connection.pending_new_connection_id_frames_.empty());
+    for (const auto &frame : connection.pending_new_connection_id_frames_) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+        // # Endpoints SHOULD NOT issue updates of the Retire Prior To field
+        // # before receiving RETIRE_CONNECTION_ID frames that retire all
+        // # connection IDs indicated by the previous Retire Prior To value.
+        EXPECT_EQ(frame.retire_prior_to, 0u);
+    }
+    EXPECT_FALSE(has_pending_requested_local_connection_id_retirement(connection));
+    EXPECT_EQ(connection.largest_local_retire_prior_to_, 0u);
+}
+
+TEST(QuicCoreTest, ProactiveLocalConnectionIdRotationTemporarilyExceedsPeerLimitWithRetirePriorTo) {
+    auto connection = make_connected_server_connection();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 2;
+    connection.issue_spare_connection_ids();
+    connection.pending_new_connection_id_frames_.clear();
+
+    ASSERT_EQ(active_local_connection_id_count(connection), 2u);
+    ASSERT_TRUE(connection.request_local_connection_id_rotation());
+
+    ASSERT_EQ(connection.pending_new_connection_id_frames_.size(), 1u);
+    const auto &frame = connection.pending_new_connection_id_frames_.front();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # The sequence number on each newly issued connection ID MUST increase
+    // # by 1.
+    EXPECT_EQ(frame.sequence_number, 2u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # An endpoint MAY send connection IDs that temporarily exceed a peer's
+    // # limit if the NEW_CONNECTION_ID frame also requires the retirement of
+    // # any excess, by including a sufficiently large value in the Retire Prior
+    // # To field.
+    EXPECT_EQ(frame.retire_prior_to, 1u);
+    EXPECT_EQ(active_local_connection_id_count(connection), 3u);
+    EXPECT_EQ(peer_visible_local_connection_id_count_after_retire_prior_to(connection,
+                                                                           frame.retire_prior_to),
+              2u);
+    const auto active_connection_ids = connection.active_local_connection_ids();
+    EXPECT_EQ(active_connection_ids.size(), 3u);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+    // # The endpoint SHOULD continue to accept the previously issued
+    // # connection IDs until they are retired by the peer.
+    EXPECT_NE(std::ranges::find(active_connection_ids, connection.config_.source_connection_id),
+              active_connection_ids.end());
+    EXPECT_TRUE(connection.local_connection_ids_.at(0).retirement_requested);
+    EXPECT_FALSE(connection.local_connection_ids_.at(1).retirement_requested);
+    EXPECT_FALSE(connection.local_connection_ids_.at(2).retirement_requested);
+    EXPECT_EQ(connection.next_local_connection_id_sequence_, 3u);
+
+    std::set<std::array<std::byte, 16>> stateless_reset_tokens;
+    for (const auto &[sequence_number, record] : connection.local_connection_ids_) {
+        static_cast<void>(sequence_number);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+        // # The same stateless reset token MUST NOT be used for multiple
+        // # connection IDs.
+        EXPECT_TRUE(stateless_reset_tokens.insert(record.stateless_reset_token).second);
+    }
+}
+
+TEST(QuicCoreTest, ProactiveLocalConnectionIdRotationWaitsForPeerRetirementBeforeNextRange) {
+    auto connection = make_connected_server_connection();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 2;
+    connection.issue_spare_connection_ids();
+    connection.pending_new_connection_id_frames_.clear();
+    ASSERT_TRUE(connection.request_local_connection_id_rotation());
+    connection.pending_new_connection_id_frames_.clear();
+
+    EXPECT_FALSE(connection.request_local_connection_id_rotation());
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
+
+    auto retired =
+        connection.process_retire_connection_id_frame(coquic::quic::RetireConnectionIdFrame{
+            .sequence_number = 0,
+        });
+    ASSERT_TRUE(retired.has_value());
+    EXPECT_TRUE(connection.local_connection_ids_.at(0).retired);
+    EXPECT_FALSE(has_pending_requested_local_connection_id_retirement(connection));
+
+    ASSERT_TRUE(connection.request_local_connection_id_rotation());
+    ASSERT_EQ(connection.pending_new_connection_id_frames_.size(), 1u);
+    const auto &frame = connection.pending_new_connection_id_frames_.front();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.2
+    // # Endpoints SHOULD NOT issue updates of the Retire Prior To field
+    // # before receiving RETIRE_CONNECTION_ID frames that retire all
+    // # connection IDs indicated by the previous Retire Prior To value.
+    EXPECT_EQ(frame.retire_prior_to, 2u);
+    EXPECT_EQ(frame.sequence_number, 3u);
+    EXPECT_TRUE(connection.local_connection_ids_.at(1).retirement_requested);
+    EXPECT_FALSE(connection.local_connection_ids_.at(2).retirement_requested);
+    EXPECT_FALSE(connection.local_connection_ids_.at(3).retirement_requested);
+}
+
+TEST(QuicCoreTest, AckedProactiveRotationFrameStillWaitsForPeerRetirement) {
+    auto connection = make_connected_server_connection();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 2;
+    connection.issue_spare_connection_ids();
+    connection.pending_new_connection_id_frames_.clear();
+    ASSERT_TRUE(connection.request_local_connection_id_rotation());
+
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+    ASSERT_TRUE(connection.pending_new_connection_id_frames_.empty());
+    ASSERT_NE(tracked_packet_count(connection.application_space_), 0u);
+    const auto packet_number = last_tracked_packet(connection.application_space_).packet_number;
+
+    auto acked = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = packet_number,
+            .first_ack_range = 0,
+        },
+        coquic::quic::test::test_time(2), connection.local_transport_parameters_.ack_delay_exponent,
+        connection.local_transport_parameters_.max_ack_delay, /*suppress_pto_reset=*/false);
+    ASSERT_TRUE(acked.has_value());
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
+    EXPECT_TRUE(connection.local_connection_ids_.at(0).retirement_requested);
+    EXPECT_FALSE(connection.request_local_connection_id_rotation());
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
+}
+
+TEST(QuicCoreTest, LostProactiveRotationFrameRequeuesSameConnectionIdFrame) {
+    auto connection = make_connected_server_connection();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 2;
+    connection.issue_spare_connection_ids();
+    connection.pending_new_connection_id_frames_.clear();
+    ASSERT_TRUE(connection.request_local_connection_id_rotation());
+    ASSERT_EQ(connection.pending_new_connection_id_frames_.size(), 1u);
+    const auto expected = connection.pending_new_connection_id_frames_.front();
+
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+    ASSERT_TRUE(connection.pending_new_connection_id_frames_.empty());
+    ASSERT_NE(tracked_packet_count(connection.application_space_), 0u);
+    const auto sent_packet = last_tracked_packet(connection.application_space_);
+    ASSERT_EQ(sent_packet.new_connection_id_frames.size(), 1u);
+    EXPECT_EQ(sent_packet.new_connection_id_frames.front().sequence_number,
+              expected.sequence_number);
+    EXPECT_EQ(sent_packet.new_connection_id_frames.front().retire_prior_to,
+              expected.retire_prior_to);
+    EXPECT_EQ(sent_packet.new_connection_id_frames.front().connection_id, expected.connection_id);
+    EXPECT_EQ(sent_packet.new_connection_id_frames.front().stateless_reset_token,
+              expected.stateless_reset_token);
+
+    auto lost = connection.mark_lost_packet(
+        connection.application_space_,
+        optional_value_or_terminate(connection.application_space_.recovery.handle_for_packet_number(
+            sent_packet.packet_number)));
+    ASSERT_TRUE(lost.has_value());
+    ASSERT_EQ(connection.pending_new_connection_id_frames_.size(), 1u);
+    const auto &requeued = connection.pending_new_connection_id_frames_.front();
+    EXPECT_EQ(requeued.sequence_number, expected.sequence_number);
+    EXPECT_EQ(requeued.retire_prior_to, expected.retire_prior_to);
+    EXPECT_EQ(requeued.connection_id, expected.connection_id);
+    EXPECT_EQ(requeued.stateless_reset_token, expected.stateless_reset_token);
+    EXPECT_EQ(connection.next_local_connection_id_sequence_, 3u);
+    EXPECT_FALSE(connection.request_local_connection_id_rotation());
+}
+
+TEST(QuicCoreTest, ProactiveRotationHonorsPreferredAddressSequenceOne) {
+    auto connection = make_connected_server_connection_with_preferred_address();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 2;
+    connection.pending_new_connection_id_frames_.clear();
+
+    ASSERT_TRUE(connection.request_local_connection_id_rotation());
+
+    ASSERT_EQ(connection.pending_new_connection_id_frames_.size(), 1u);
+    const auto &frame = connection.pending_new_connection_id_frames_.front();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # If the preferred_address transport parameter is sent, the sequence
+    // # number of the supplied connection ID is 1.
+    EXPECT_EQ(frame.sequence_number, 2u);
+    EXPECT_EQ(frame.retire_prior_to, 1u);
+    EXPECT_TRUE(connection.local_connection_ids_.at(0).retirement_requested);
+    EXPECT_FALSE(connection.local_connection_ids_.at(1).retirement_requested);
+    EXPECT_EQ(connection.local_connection_ids_.at(1).connection_id,
+              connection.config_.transport.preferred_address->connection_id);
+    EXPECT_EQ(peer_visible_local_connection_id_count_after_retire_prior_to(connection,
+                                                                           frame.retire_prior_to),
+              2u);
+}
+
+TEST(QuicCoreTest, ProactiveRotationSkipsClientWhenActiveMigrationIsDisabled) {
+    auto connection = make_connected_client_connection();
+    connection.local_transport_parameters_.disable_active_migration = true;
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 8;
+    connection.pending_new_connection_id_frames_.clear();
+    const auto next_sequence_number = connection.next_local_connection_id_sequence_;
+
+    EXPECT_FALSE(connection.request_local_connection_id_rotation());
+
+    EXPECT_EQ(connection.next_local_connection_id_sequence_, next_sequence_number);
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
+}
+
+TEST(QuicCoreTest, ProactiveRotationSkipsZeroLengthSourceConnectionId) {
+    auto connection = make_connected_server_connection();
+    connection.config_.source_connection_id.clear();
+    connection.local_transport_parameters_.initial_source_connection_id =
+        coquic::quic::ConnectionId{};
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 8;
+    connection.pending_new_connection_id_frames_.clear();
+    const auto next_sequence_number = connection.next_local_connection_id_sequence_;
+
+    EXPECT_FALSE(connection.request_local_connection_id_rotation());
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # An endpoint that selects a zero-length connection ID during the
+    // # handshake cannot issue a new connection ID.
+    EXPECT_EQ(connection.next_local_connection_id_sequence_, next_sequence_number);
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
 }
 
 TEST(QuicCoreTest, PreferredAddressReservesSequenceOneInLocalConnectionIdInventory) {

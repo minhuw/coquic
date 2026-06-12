@@ -312,9 +312,53 @@ TEST(QuicPerfBulkTest, TimedDownloadForceClosesAtDrainDeadline) {
     EXPECT_FALSE(client.run_complete());
 
     connection.active_bulk_streams.emplace(kQuicPerfFirstDataStreamId + 4u, true);
-    client.force_close_timed_bulk_drain(drain_deadline);
+    client.force_close_timed_drain(drain_deadline);
     EXPECT_TRUE(connection.active_bulk_streams.empty());
     EXPECT_TRUE(connection.close_requested);
+}
+
+TEST(QuicPerfBulkTest, TimedPersistentRrForceClosesAtDrainDeadline) {
+    const QuicPerfConfig config{
+        .role = QuicPerfRole::client,
+        .mode = QuicPerfMode::persistent_rr,
+        .host = "127.0.0.1",
+        .port = 9443,
+        .request_bytes = 32,
+        .response_bytes = 32,
+        .connections = 1,
+        .requests_in_flight = 4,
+        .warmup = std::chrono::milliseconds{100},
+        .duration = std::chrono::seconds{5},
+    };
+    QuicPerfClient client(config);
+    client.benchmark_started_at_ = coquic::quic::test::test_time(100);
+    client.phase_ = QuicPerfClient::BenchmarkPhase::measure;
+    client.measure_started_at_ = coquic::quic::test::test_time(200);
+    client.measure_deadline_ = client.measure_started_at_ + config.duration;
+
+    auto &connection = client.connections_[1];
+    connection.handle = 1;
+    connection.session_ready = true;
+    connection.persistent_rr_stream_id = kQuicPerfFirstDataStreamId;
+    connection.persistent_rr_fin_sent = true;
+    connection.outstanding_requests.push_back(QuicPerfClient::OutstandingRequest{
+        .stream_id = kQuicPerfFirstDataStreamId,
+        .started_at = client.measure_deadline_ - std::chrono::milliseconds{1},
+        .counts_toward_measurement = true,
+    });
+
+    client.enter_drain_phase(client.measure_deadline_);
+    const auto expected_drain_deadline = client.measure_deadline_ + std::chrono::seconds{2};
+    EXPECT_EQ(client.drain_deadline_, std::optional{expected_drain_deadline});
+    EXPECT_EQ(client.next_wait_wakeup(std::nullopt), std::optional{expected_drain_deadline});
+    EXPECT_FALSE(client.run_complete());
+
+    client.force_close_timed_drain(expected_drain_deadline - std::chrono::milliseconds{1});
+    EXPECT_FALSE(connection.close_requested);
+
+    client.force_close_timed_drain(expected_drain_deadline);
+    EXPECT_TRUE(connection.close_requested);
+    EXPECT_TRUE(client.run_complete());
 }
 
 TEST(QuicPerfBulkTest, TimedDownloadDoesNotReportZeroByteMeasurementAsSuccess) {

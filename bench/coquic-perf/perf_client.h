@@ -82,7 +82,7 @@ class QuicPerfClient {
     void maybe_start_timed_benchmark(quic::QuicCoreTimePoint now);
     void enter_measure_phase(quic::QuicCoreTimePoint now);
     void enter_drain_phase(quic::QuicCoreTimePoint now);
-    void force_close_timed_bulk_drain(quic::QuicCoreTimePoint now);
+    void force_close_timed_drain(quic::QuicCoreTimePoint now);
     std::optional<quic::QuicCoreTimePoint> benchmark_next_wakeup() const;
     std::optional<quic::QuicCoreTimePoint>
     next_wait_wakeup(std::optional<quic::QuicCoreTimePoint> core_next_wakeup) const;

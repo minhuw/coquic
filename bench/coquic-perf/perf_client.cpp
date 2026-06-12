@@ -9,6 +9,7 @@
 namespace coquic::perf {
 namespace {
 constexpr std::size_t kMaxPendingBackendEventsBeforeFlush = 64;
+constexpr quic::QuicCoreDuration kMaxTimedDrainDuration{2000000};
 
 std::vector<std::byte> make_payload(std::size_t bytes) {
     std::vector<std::byte> out(bytes, std::byte{0x5a});
@@ -216,10 +217,7 @@ std::optional<quic::QuicCoreTimePoint> QuicPerfClient::benchmark_next_wakeup() c
     case BenchmarkPhase::measure:
         return measure_deadline_;
     case BenchmarkPhase::drain:
-        if (timed_bulk_mode()) {
-            return drain_deadline_;
-        }
-        return std::nullopt;
+        return drain_deadline_;
     }
     return std::nullopt;
 }
@@ -298,8 +296,8 @@ void QuicPerfClient::enter_measure_phase(quic::QuicCoreTimePoint now) {
 void QuicPerfClient::enter_drain_phase(quic::QuicCoreTimePoint now) {
     phase_ = BenchmarkPhase::drain;
     summary_.elapsed = result_elapsed(now);
-    if (timed_bulk_mode()) {
-        drain_deadline_ = now + std::min(config_.duration, quic::QuicCoreDuration{2000000});
+    if (timed_mode()) {
+        drain_deadline_ = now + std::min(config_.duration, kMaxTimedDrainDuration);
     }
     if (config_.mode == QuicPerfMode::rr) {
         std::vector<quic::QuicConnectionHandle> handles;
@@ -344,17 +342,40 @@ void QuicPerfClient::enter_drain_phase(quic::QuicCoreTimePoint now) {
     }
 }
 
-void QuicPerfClient::force_close_timed_bulk_drain(quic::QuicCoreTimePoint now) {
-    if (!timed_bulk_mode() || phase_ != BenchmarkPhase::drain) {
+void QuicPerfClient::force_close_timed_drain(quic::QuicCoreTimePoint now) {
+    if (!timed_mode() || phase_ != BenchmarkPhase::drain) {
         return;
     }
     if (!drain_deadline_.has_value() || now < *drain_deadline_) {
         return;
     }
 
-    for (auto &[_, connection] : connections_) {
-        connection.active_bulk_streams.clear();
-        (void)maybe_close_bulk_connection(connection, now);
+    std::vector<quic::QuicConnectionHandle> handles;
+    handles.reserve(connections_.size());
+    for (const auto &[handle, _] : connections_) {
+        handles.push_back(handle);
+    }
+    for (const auto handle : handles) {
+        auto it = connections_.find(handle);
+        if (it == connections_.end()) {
+            continue;
+        }
+        auto &connection = it->second;
+        switch (config_.mode) {
+        case QuicPerfMode::bulk:
+            connection.active_bulk_streams.clear();
+            (void)maybe_close_bulk_connection(connection, now);
+            break;
+        case QuicPerfMode::rr:
+            (void)maybe_close_rr_connection(connection, now);
+            break;
+        case QuicPerfMode::persistent_rr:
+            (void)maybe_close_persistent_rr_connection(connection, now);
+            break;
+        case QuicPerfMode::crr:
+            (void)maybe_close_crr_connection(connection, now);
+            break;
+        }
     }
 }
 
@@ -368,7 +389,7 @@ void QuicPerfClient::advance_benchmark_phase(quic::QuicCoreTimePoint now) {
     if (phase_ == BenchmarkPhase::measure && now >= measure_deadline_) {
         enter_drain_phase(now);
     }
-    force_close_timed_bulk_drain(now);
+    force_close_timed_drain(now);
 }
 
 int QuicPerfClient::run() {

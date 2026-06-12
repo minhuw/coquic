@@ -1,6 +1,6 @@
 # AGENTS
 
-Last updated: 2026-06-04
+Last updated: 2026-06-12
 
 These repository instructions apply unless a newer user or developer instruction
 conflicts, or the required tool is unavailable in the current environment. When a
@@ -46,6 +46,8 @@ constraints clearly.
 - For QUIC protocol questions, query with `rag/scripts/query-rag`.
 - Do not commit generated RAG state such as `.rag/`.
 - Do not commit downloaded remote CI state such as `.remote-ci/`.
+- Keep `main` as the only remote branch; merge all local branch work back into
+  `main` before syncing or pushing to the remote.
 - Use Conventional Commits for git commit messages.
 
 ## Standard

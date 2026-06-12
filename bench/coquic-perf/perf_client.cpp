@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <utility>
 
 namespace coquic::perf {
@@ -593,8 +594,7 @@ bool QuicPerfClient::handle_result(quic::QuicCoreResult result, quic::QuicCoreTi
                 if (closing_connections_.contains(state->connection)) {
                     continue;
                 }
-                summary_.failure_reason =
-                    "client core state failed connection=" + std::to_string(state->connection);
+                summary_.failure_reason = describe_failed_connection(state->connection, now);
                 return false;
             }
             if (state->change == quic::QuicCoreStateChange::handshake_ready) {
@@ -642,6 +642,89 @@ bool QuicPerfClient::handle_result(quic::QuicCoreResult result, quic::QuicCoreTi
     }
 
     return true;
+}
+
+std::string QuicPerfClient::benchmark_phase_name() const {
+    switch (phase_) {
+    case BenchmarkPhase::warmup:
+        return "warmup";
+    case BenchmarkPhase::measure:
+        return "measure";
+    case BenchmarkPhase::drain:
+        return "drain";
+    }
+    return "unknown";
+}
+
+std::string QuicPerfClient::describe_failed_connection(quic::QuicConnectionHandle connection,
+                                                       quic::QuicCoreTimePoint now) const {
+    std::ostringstream out;
+    out << "client core state failed connection=" << connection
+        << " phase=" << benchmark_phase_name() << " elapsed_ms="
+        << std::chrono::duration_cast<std::chrono::milliseconds>(result_elapsed(now)).count()
+        << " requests_started=" << requests_started_
+        << " requests_completed=" << summary_.requests_completed;
+
+    const auto connection_it = connections_.find(connection);
+    if (connection_it != connections_.end()) {
+        const auto &state = connection_it->second;
+        out << " conn_requests_started=" << state.requests_started
+            << " conn_outstanding=" << state.outstanding_requests.size()
+            << " conn_bytes_sent=" << state.bytes_sent
+            << " conn_bytes_received=" << state.bytes_received
+            << " conn_control_complete=" << static_cast<int>(state.control_complete)
+            << " conn_close_requested=" << static_cast<int>(state.close_requested)
+            << " conn_persistent_rr_fin_sent=" << static_cast<int>(state.persistent_rr_fin_sent)
+            << " conn_persistent_rr_response_pending_bytes="
+            << state.persistent_rr_response_pending_bytes;
+    } else {
+        out << " conn_state=missing";
+    }
+
+    const auto diagnostics = core_.connection_diagnostics();
+    const auto diagnostics_it =
+        std::find_if(diagnostics.begin(), diagnostics.end(),
+                     [&](const auto &entry) { return entry.handle == connection; });
+    if (diagnostics_it != diagnostics.end()) {
+        const auto &diagnostics = *diagnostics_it;
+        out << " core_handshake_status=" << static_cast<int>(diagnostics.handshake_status)
+            << " core_failed_emitted=" << static_cast<int>(diagnostics.failed_emitted)
+            << " core_active_streams=" << diagnostics.active_streams
+            << " core_retired_streams=" << diagnostics.retired_streams
+            << " core_streams=" << diagnostics.streams.size()
+            << " core_app_outstanding_packets=" << diagnostics.application_space.outstanding_packets
+            << " core_app_declared_lost_packets="
+            << diagnostics.application_space.declared_lost_packets << " core_app_pending_probe="
+            << static_cast<int>(diagnostics.application_space.pending_probe)
+            << " core_cwnd=" << diagnostics.recovery.congestion_window
+            << " core_bytes_in_flight=" << diagnostics.recovery.bytes_in_flight
+            << " core_pto_count=" << diagnostics.recovery.pto_count
+            << " core_smoothed_rtt_ms=" << diagnostics.recovery.smoothed_rtt_ms
+            << " core_peer_max_data=" << diagnostics.flow_control.peer_max_data
+            << " core_highest_sent=" << diagnostics.flow_control.highest_sent
+            << " core_advertised_max_data=" << diagnostics.flow_control.advertised_max_data
+            << " core_delivered_bytes=" << diagnostics.flow_control.delivered_bytes
+            << " core_received_committed=" << diagnostics.flow_control.received_committed;
+        if (!diagnostics.streams.empty()) {
+            const auto &stream = diagnostics.streams.front();
+            out << " core_first_stream_id=" << stream.stream_id
+                << " core_first_stream_pending_send=" << static_cast<int>(stream.pending_send)
+                << " core_first_stream_outstanding_send="
+                << static_cast<int>(stream.outstanding_send)
+                << " core_first_stream_sendable_bytes=" << stream.sendable_bytes
+                << " core_first_stream_send_closed=" << static_cast<int>(stream.send_closed)
+                << " core_first_stream_receive_closed=" << static_cast<int>(stream.receive_closed)
+                << " core_first_stream_send_fin_state=" << static_cast<int>(stream.send_fin_state)
+                << " core_first_stream_send_flow_limit=" << stream.send_flow_control_limit
+                << " core_first_stream_receive_flow_limit=" << stream.receive_flow_control_limit
+                << " core_first_stream_highest_received=" << stream.highest_received_offset
+                << " core_first_stream_receive_consumed=" << stream.receive_flow_control_consumed;
+        }
+    } else {
+        out << " core_state=missing";
+    }
+
+    return out.str();
 }
 
 quic::QuicCoreResult QuicPerfClient::advance_endpoint(quic::QuicCoreEndpointInput input,
@@ -793,7 +876,6 @@ bool QuicPerfClient::handle_stream_data(ConnectionState &connection,
             return true;
         }
 
-        connection.bytes_received += received.byte_count();
         std::size_t response_bytes = static_cast<std::size_t>(config_.response_bytes);
         if (response_bytes == 0) {
             response_bytes = 1;

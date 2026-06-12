@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -97,6 +98,9 @@ class QuicPerfClient {
     bool maybe_close_bulk_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool benchmark_accepts_new_work() const;
     bool handle_result(quic::QuicCoreResult result, quic::QuicCoreTimePoint now);
+    std::string describe_failed_connection(quic::QuicConnectionHandle connection,
+                                           quic::QuicCoreTimePoint now) const;
+    std::string benchmark_phase_name() const;
     bool handle_stream_data(ConnectionState &connection,
                             const quic::QuicCoreReceiveStreamData &received,
                             quic::QuicCoreTimePoint now);

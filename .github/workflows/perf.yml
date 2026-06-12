@@ -275,7 +275,7 @@ jobs:
           PERF_IMAGE_TAG: ${{ matrix.image_tag }}
           PERF_UTILIZATION_ENABLED: "1"
           PERF_PROFILE_FLAMEGRAPHS: "1"
-          PERF_PROFILE_FREQUENCY: "99"
+          PERF_PROFILE_FREQUENCY: "49"
           PERF_PROFILE_USE_SUDO: "1"
           PERF_RUN_TIMEOUT_SECONDS: "180"
         run: bash bench/run-host-matrix.sh --preset ci

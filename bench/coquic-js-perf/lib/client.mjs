@@ -23,7 +23,7 @@ import {
   takeControlMessage,
 } from "./protocol.mjs";
 
-const IDLE_TIMEOUT = 1.0;
+const IDLE_TIMEOUT = 5.0;
 const DRAIN_TIMEOUT = 2.0;
 
 const BenchmarkPhase = Object.freeze({
@@ -57,6 +57,13 @@ class ConnectionState {
     this.serverCompleteCounted = false;
   }
 }
+
+export const testHooks = Object.freeze({
+  BenchmarkPhase,
+  ConnectionState,
+  OutstandingRequest,
+  durationUs,
+});
 
 class OpenConnectionCommand {}
 
@@ -100,7 +107,7 @@ export async function runClient(config) {
   }
 }
 
-class Client {
+export class Client {
   constructor(config, endpoint, io, primaryRoute, primaryIdentity) {
     this.config = config;
     this.endpoint = endpoint;
@@ -761,7 +768,7 @@ class Client {
     if (this.phase === BenchmarkPhase.MEASURE && now >= this.measureDeadline) {
       await this.enterDrainPhase(now);
     }
-    await this.forceCloseTimedBulkDrain(now);
+    await this.forceCloseTimedDrain(now);
   }
 
   advanceBenchmarkPhaseSync(now) {
@@ -776,9 +783,9 @@ class Client {
     }
   }
 
-  async forceCloseTimedBulkDrain(now) {
+  async forceCloseTimedDrain(now) {
     if (
-      !this.timedBulkMode() ||
+      !this.timedMode() ||
       this.phase !== BenchmarkPhase.DRAIN ||
       this.drainDeadline == null ||
       now < this.drainDeadline
@@ -787,9 +794,22 @@ class Client {
     }
 
     for (const handle of Array.from(this.connections.keys())) {
+      let commands = [];
       const state = this.connections.get(handle);
-      state?.activeBulkStreams.clear();
-      for (const command of this.maybeCloseBulkConnection(handle)) {
+      if (this.config.mode === Mode.BULK) {
+        state?.activeBulkStreams.clear();
+        commands = this.maybeCloseBulkConnection(handle);
+      } else if (this.config.mode === Mode.RR) {
+        commands = this.maybeCloseRrConnection(handle);
+      } else if (this.config.mode === Mode.PERSISTENT_RR) {
+        if (state != null) {
+          state.persistentFinSent = true;
+        }
+        commands = this.maybeClosePersistentRrConnection(handle);
+      } else if (this.config.mode === Mode.CRR) {
+        commands = this.maybeCloseCrrConnection(handle);
+      }
+      for (const command of commands) {
         const result = this.executeCommand(command, now);
         if (result != null) {
           await this.handleResult(result, now);
@@ -835,7 +855,7 @@ class Client {
     }
     this.phase = BenchmarkPhase.DRAIN;
     this.summary.elapsed_ms = durationMillis(this.resultElapsedSeconds(now));
-    if (this.timedBulkMode()) {
+    if (this.timedMode()) {
       this.drainDeadline = now + durationUs(Math.min(this.config.duration, DRAIN_TIMEOUT));
     }
 
@@ -898,7 +918,7 @@ class Client {
     if (this.phase === BenchmarkPhase.MEASURE) {
       return this.measureDeadline;
     }
-    if (this.timedBulkMode()) {
+    if (this.phase === BenchmarkPhase.DRAIN) {
       return this.drainDeadline;
     }
     return null;

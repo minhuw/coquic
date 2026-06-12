@@ -3244,12 +3244,12 @@ TEST(QuicCoreTest, OneRttReceivedAckOnlyFastPathMatchesGenericApplicationAckProc
     EXPECT_TRUE(fast_connection.outbound_spin_bit_for_path(0));
 }
 
-TEST(QuicCoreTest, ExcessiveNonproductivePacketsCloseAfterPeerProgressBudget) {
+TEST(QuicCoreTest, ExcessiveNonproductivePacketsDoNotCloseAfterPeerProgressBudget) {
     auto connection = make_connected_client_connection();
 
     for (std::size_t index = 0; index < coquic::quic::kMaxConsecutiveNonproductivePackets;
          ++index) {
-        EXPECT_TRUE(connection.note_nonproductive_packet(coquic::quic::test::test_time(index)));
+        EXPECT_TRUE(connection.note_nonproductive_packet());
         EXPECT_FALSE(connection.pending_transport_close_.has_value());
     }
     EXPECT_EQ(connection.consecutive_nonproductive_packets_,
@@ -3260,8 +3260,7 @@ TEST(QuicCoreTest, ExcessiveNonproductivePacketsCloseAfterPeerProgressBudget) {
 
     for (std::size_t index = 0; index < coquic::quic::kMaxConsecutiveNonproductivePackets;
          ++index) {
-        EXPECT_TRUE(
-            connection.note_nonproductive_packet(coquic::quic::test::test_time(1000 + index)));
+        EXPECT_TRUE(connection.note_nonproductive_packet());
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-21.9
@@ -3269,11 +3268,14 @@ TEST(QuicCoreTest, ExcessiveNonproductivePacketsCloseAfterPeerProgressBudget) {
     // # SHOULD track cost of processing relative to progress and treat
     // # excessive quantities of any non-productive packets as indicative of an
     // # attack.
-    EXPECT_FALSE(connection.note_nonproductive_packet(coquic::quic::test::test_time(2000)));
-    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::closing);
-    ASSERT_TRUE(connection.pending_transport_close_.has_value());
-    EXPECT_EQ(optional_ref_or_terminate(connection.pending_transport_close_).error_code,
-              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation));
+    // # Endpoints MAY respond to this condition with a connection
+    // # error or by dropping packets.
+    EXPECT_TRUE(connection.note_nonproductive_packet());
+    EXPECT_EQ(connection.consecutive_nonproductive_packets_,
+              coquic::quic::kMaxConsecutiveNonproductivePackets + 1u);
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::none);
+    EXPECT_FALSE(connection.pending_transport_close_.has_value());
 }
 
 TEST(QuicCoreTest, ReceivedAckFrameProcessingCoversTraceFormattingAndInvalidCursorPaths) {

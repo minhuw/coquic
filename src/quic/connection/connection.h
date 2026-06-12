@@ -1044,7 +1044,7 @@ class QuicConnection {
     bool note_packet_authentication_failure(const CodecError &error, QuicCoreTimePoint now);
     void note_peer_progress();
     std::uint64_t inbound_progress_generation() const;
-    bool note_nonproductive_packet(QuicCoreTimePoint now);
+    bool note_nonproductive_packet();
     bool note_packet_productivity(std::uint64_t previous_progress_generation,
                                   QuicCoreTimePoint now);
     bool non_paced_burst_allows_send(bool ack_eliciting, bool bypass_congestion_window,

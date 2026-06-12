@@ -1908,7 +1908,7 @@ std::uint64_t QuicConnection::inbound_progress_generation() const {
     return inbound_progress_generation_;
 }
 
-bool QuicConnection::note_nonproductive_packet(QuicCoreTimePoint now) {
+bool QuicConnection::note_nonproductive_packet() {
     if (consecutive_nonproductive_packets_ < std::numeric_limits<std::uint64_t>::max()) {
         ++consecutive_nonproductive_packets_;
     }
@@ -1924,8 +1924,7 @@ bool QuicConnection::note_nonproductive_packet(QuicCoreTimePoint now) {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-21.9
     // # Endpoints MAY respond to this condition with a connection
     // # error or by dropping packets.
-    queue_transport_close_for_error(now, protocol_violation_error(/*frame_type=*/0));
-    return false;
+    return true;
 }
 
 bool QuicConnection::note_packet_productivity(std::uint64_t previous_progress_generation,
@@ -1934,7 +1933,8 @@ bool QuicConnection::note_packet_productivity(std::uint64_t previous_progress_ge
         consecutive_nonproductive_packets_ = 0;
         return true;
     }
-    return note_nonproductive_packet(now);
+    (void)now;
+    return note_nonproductive_packet();
 }
 
 bool QuicConnection::non_paced_burst_allows_send(bool ack_eliciting, bool bypass_congestion_window,

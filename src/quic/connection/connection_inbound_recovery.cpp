@@ -338,6 +338,8 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                     process_inbound_crypto(EncryptionLevel::initial, protected_packet.frames, now);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
+                    note_local_connection_id_used_by_peer(
+                        protected_packet.destination_connection_id);
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
                     // # A packet MUST NOT be acknowledged until packet protection has been
@@ -419,6 +421,8 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                                                         protected_packet.frames, now);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
+                    note_local_connection_id_used_by_peer(
+                        protected_packet.destination_connection_id);
                     if (config_.role == EndpointRole::server) {
                         mark_peer_address_validated();
                     }
@@ -473,6 +477,8 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                     protected_packet.packet_number);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
+                    note_local_connection_id_used_by_peer(
+                        protected_packet.destination_connection_id);
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
                     // # A packet MUST NOT be acknowledged until packet protection has been
@@ -518,6 +524,8 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                     used_previous_application_read_secret, protected_packet.packet_number);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
+                    note_local_connection_id_used_by_peer(
+                        protected_packet.destination_connection_id);
                     if (config_.role == EndpointRole::server &&
                         status_ != HandshakeStatus::connected) {
                         mark_peer_address_validated();
@@ -631,6 +639,8 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                     EncryptionLevel::initial, protected_packet.frames, now);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
+                    note_local_connection_id_used_by_peer(
+                        protected_packet.destination_connection_id);
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
                     initial_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now, ecn,
@@ -700,6 +710,8 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                                                                  protected_packet.frames, now);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
+                    note_local_connection_id_used_by_peer(
+                        protected_packet.destination_connection_id);
                     if (config_.role == EndpointRole::server) {
                         mark_peer_address_validated();
                     }
@@ -742,6 +754,8 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                     protected_packet.packet_number);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
+                    note_local_connection_id_used_by_peer(
+                        protected_packet.destination_connection_id);
                     const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2.6
                     // # Packets that a client sends with 0-RTT packet protection
@@ -781,9 +795,14 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                         local_transport_parameters_.max_ack_delay);
                     return CodecResult<bool>::success(true);
                 }
-                return process_inbound_received_application_ack_only(
+                auto processed = process_inbound_received_application_ack_only(
                     protected_packet.packet_number, protected_packet.spin_bit, protected_packet.ack,
                     now, ecn, last_inbound_path_id_, used_previous_application_read_secret);
+                if (processed.has_value()) {
+                    note_local_connection_id_used_by_peer(
+                        protected_packet.destination_connection_id);
+                }
+                return processed;
             } else if constexpr (std::is_same_v<PacketType, ReceivedProtectedOneRttStreamPacket>) {
                 note_authenticated_packet_number(application_space_,
                                                  protected_packet.packet_number);
@@ -795,9 +814,14 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                         local_transport_parameters_.max_ack_delay);
                     return CodecResult<bool>::success(true);
                 }
-                return process_inbound_received_application_stream_packet(
+                auto processed = process_inbound_received_application_stream_packet(
                     protected_packet.packet_number, protected_packet.spin_bit,
                     protected_packet.stream, now, ecn);
+                if (processed.has_value()) {
+                    note_local_connection_id_used_by_peer(
+                        protected_packet.destination_connection_id);
+                }
+                return processed;
             } else {
                 note_authenticated_packet_number(application_space_,
                                                  protected_packet.packet_number);
@@ -814,17 +838,27 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                         single_received_ack_frame_or_null(protected_packet.frames);
                     ack_frame != nullptr &&
                     !packet_trace_matches_connection(config_.source_connection_id)) {
-                    return process_inbound_received_application_ack_only(
+                    auto processed = process_inbound_received_application_ack_only(
                         protected_packet.packet_number, protected_packet.spin_bit, *ack_frame, now,
                         ecn, last_inbound_path_id_, used_previous_application_read_secret);
+                    if (processed.has_value()) {
+                        note_local_connection_id_used_by_peer(
+                            protected_packet.destination_connection_id);
+                    }
+                    return processed;
                 }
                 if (const auto *stream_frame =
                         single_received_stream_frame_or_null(protected_packet.frames);
                     stream_frame != nullptr &&
                     !packet_trace_matches_connection(config_.source_connection_id)) {
-                    return process_inbound_received_application_stream_packet(
+                    auto processed = process_inbound_received_application_stream_packet(
                         protected_packet.packet_number, protected_packet.spin_bit, *stream_frame,
                         now, ecn);
+                    if (processed.has_value()) {
+                        note_local_connection_id_used_by_peer(
+                            protected_packet.destination_connection_id);
+                    }
+                    return processed;
                 }
                 const bool has_crypto_frame =
                     std::ranges::any_of(protected_packet.frames, [](const ReceivedFrame &frame) {
@@ -835,6 +869,8 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                     used_previous_application_read_secret, protected_packet.packet_number);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
+                    note_local_connection_id_used_by_peer(
+                        protected_packet.destination_connection_id);
                     if (config_.role == EndpointRole::server &&
                         status_ != HandshakeStatus::connected) {
                         mark_peer_address_validated();

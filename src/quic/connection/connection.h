@@ -464,6 +464,7 @@ struct LocalConnectionIdRecord {
     std::array<std::byte, 16> stateless_reset_token{};
     bool retired = false;
     bool retirement_requested = false;
+    bool used_by_peer = false;
 };
 
 enum class QuicPathEcnState : std::uint8_t {
@@ -855,6 +856,7 @@ class QuicConnection {
     NewConnectionIdFrame issue_local_connection_id(std::uint64_t retire_prior_to);
     void issue_spare_connection_ids();
     bool request_local_connection_id_rotation();
+    void note_local_connection_id_used_by_peer(const ConnectionId &destination_connection_id);
     void issue_path_probe_replacement_connection_id();
     std::array<std::byte, 8> next_path_challenge_data(QuicPathId path_id);
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)

@@ -149,6 +149,7 @@ struct ReceivedProtectedOneRttAckOnlyPacket {
 
 struct ReceivedProtectedOneRttAckOnlyFastPacket {
     bool spin_bit = false;
+    ConnectionId destination_connection_id;
     std::uint64_t packet_number = 0;
     ReceivedAckFrame ack;
 };

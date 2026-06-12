@@ -51,6 +51,7 @@ QuicConnection::QuicConnection(QuicCoreConfig config)
                                          .stateless_reset_token = make_stateless_reset_token(
                                              config_.source_connection_id, /*sequence_number=*/0,
                                              config_.stateless_reset_secret),
+                                         .used_by_peer = true,
                                      });
     if (config_.transport.preferred_address.has_value()) {
         // RFC 9000 reserves sequence number 1 for the preferred-address CID.
@@ -825,6 +826,9 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                     processed = process_inbound_received_application_ack_only(
                         ack_only->packet_number, ack_only->spin_bit, ack_only->ack, now, ecn,
                         last_inbound_path_id_, /*used_previous_application_read_secret=*/false);
+                    if (processed.has_value()) {
+                        note_local_connection_id_used_by_peer(ack_only->destination_connection_id);
+                    }
                 }
                 if (processed.has_value() &&
                     !note_packet_productivity(previous_progress_generation, now)) {

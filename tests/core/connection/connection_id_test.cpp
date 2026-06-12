@@ -71,6 +71,20 @@ bool has_pending_requested_local_connection_id_retirement(
     });
 }
 
+coquic::quic::CodecResult<bool> process_one_rtt_ping_with_destination_connection_id(
+    coquic::quic::QuicConnection &connection,
+    const coquic::quic::ConnectionId &destination_connection_id, std::uint64_t packet_number) {
+    return connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .key_phase = false,
+            .destination_connection_id = destination_connection_id,
+            .packet_number_length = 1,
+            .packet_number = packet_number,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+}
+
 TEST(QuicCoreTest,
      ServerProcessesOneRttRetireConnectionIdBeforeHandshakeCompletesWhenApplicationKeysExist) {
     auto connection = make_connected_server_connection();
@@ -989,9 +1003,161 @@ TEST(QuicCoreTest, SpareConnectionIdIssuanceKeepsZeroRetirePriorToUntilRotationR
         // # before receiving RETIRE_CONNECTION_ID frames that retire all
         // # connection IDs indicated by the previous Retire Prior To value.
         EXPECT_EQ(frame.retire_prior_to, 0u);
+        EXPECT_FALSE(connection.local_connection_ids_.at(frame.sequence_number).used_by_peer);
     }
     EXPECT_FALSE(has_pending_requested_local_connection_id_retirement(connection));
     EXPECT_EQ(connection.largest_local_retire_prior_to_, 0u);
+}
+
+TEST(QuicCoreTest, FirstUseOfUnusedLocalConnectionIdQueuesSingleReplacementBelowPeerLimit) {
+    auto connection = make_connected_server_connection();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 2;
+    connection.issue_spare_connection_ids();
+    ASSERT_TRUE(connection.local_connection_ids_.contains(1));
+    const auto peer_used_connection_id = connection.local_connection_ids_.at(1).connection_id;
+    EXPECT_FALSE(connection.local_connection_ids_.at(1).used_by_peer);
+
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 4;
+    connection.pending_new_connection_id_frames_.clear();
+
+    auto processed =
+        process_one_rtt_ping_with_destination_connection_id(connection, peer_used_connection_id, 7);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_TRUE(connection.local_connection_ids_.at(1).used_by_peer);
+    ASSERT_EQ(connection.pending_new_connection_id_frames_.size(), 1u);
+    const auto &frame = connection.pending_new_connection_id_frames_.front();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # If an endpoint provided fewer connection IDs than the peer's
+    // # active_connection_id_limit, it MAY supply a new connection ID when it
+    // # receives a packet with a previously unused connection ID.
+    EXPECT_EQ(frame.sequence_number, 2u);
+    EXPECT_EQ(frame.retire_prior_to, 0u);
+    EXPECT_EQ(active_local_connection_id_count(connection), 3u);
+}
+
+TEST(QuicCoreTest, RepeatedUseOfSameLocalConnectionIdDoesNotQueueDuplicateReplacement) {
+    auto connection = make_connected_server_connection();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 2;
+    connection.issue_spare_connection_ids();
+    ASSERT_TRUE(connection.local_connection_ids_.contains(1));
+    const auto peer_used_connection_id = connection.local_connection_ids_.at(1).connection_id;
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 4;
+    connection.pending_new_connection_id_frames_.clear();
+
+    auto first =
+        process_one_rtt_ping_with_destination_connection_id(connection, peer_used_connection_id, 7);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_EQ(connection.pending_new_connection_id_frames_.size(), 1u);
+    connection.pending_new_connection_id_frames_.clear();
+
+    auto duplicate =
+        process_one_rtt_ping_with_destination_connection_id(connection, peer_used_connection_id, 7);
+    auto repeated =
+        process_one_rtt_ping_with_destination_connection_id(connection, peer_used_connection_id, 8);
+
+    ASSERT_TRUE(duplicate.has_value());
+    ASSERT_TRUE(repeated.has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # If an endpoint provided fewer connection IDs than the peer's
+    // # active_connection_id_limit, it MAY supply a new connection ID when it
+    // # receives a packet with a previously unused connection ID.
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
+    EXPECT_EQ(connection.next_local_connection_id_sequence_, 3u);
+}
+
+TEST(QuicCoreTest, UsedLocalConnectionIdDoesNotReplenishWhenPeerLimitAlreadySatisfied) {
+    auto connection = make_connected_server_connection();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 2;
+    connection.issue_spare_connection_ids();
+    ASSERT_TRUE(connection.local_connection_ids_.contains(1));
+    const auto peer_used_connection_id = connection.local_connection_ids_.at(1).connection_id;
+    connection.pending_new_connection_id_frames_.clear();
+    const auto next_sequence_number = connection.next_local_connection_id_sequence_;
+
+    auto processed =
+        process_one_rtt_ping_with_destination_connection_id(connection, peer_used_connection_id, 7);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_TRUE(connection.local_connection_ids_.at(1).used_by_peer);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # An endpoint MUST NOT provide more connection IDs than the peer's
+    // # limit.
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
+    EXPECT_EQ(connection.next_local_connection_id_sequence_, next_sequence_number);
+}
+
+TEST(QuicCoreTest, FirstUseReplenishmentSkipsZeroLengthSourceConnectionId) {
+    auto connection = make_connected_server_connection();
+    connection.config_.source_connection_id.clear();
+    connection.local_transport_parameters_.initial_source_connection_id =
+        coquic::quic::ConnectionId{};
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 4;
+    connection.local_connection_ids_[1] = coquic::quic::LocalConnectionIdRecord{
+        .sequence_number = 1,
+        .connection_id = bytes_from_ints({0x21}),
+    };
+    connection.pending_new_connection_id_frames_.clear();
+    const auto next_sequence_number = connection.next_local_connection_id_sequence_;
+
+    connection.note_local_connection_id_used_by_peer(bytes_from_ints({0x21}));
+
+    EXPECT_TRUE(connection.local_connection_ids_.at(1).used_by_peer);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # An endpoint that selects a zero-length connection ID during the
+    // # handshake cannot issue a new connection ID.
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
+    EXPECT_EQ(connection.next_local_connection_id_sequence_, next_sequence_number);
+}
+
+TEST(QuicCoreTest, FirstUseReplenishmentSkipsClientWhenActiveMigrationIsDisabled) {
+    auto connection = make_connected_client_connection();
+    connection.local_transport_parameters_.disable_active_migration = true;
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 4;
+    connection.local_connection_ids_[1] = coquic::quic::LocalConnectionIdRecord{
+        .sequence_number = 1,
+        .connection_id = bytes_from_ints({0x31}),
+    };
+    connection.pending_new_connection_id_frames_.clear();
+    const auto next_sequence_number = connection.next_local_connection_id_sequence_;
+
+    connection.note_local_connection_id_used_by_peer(bytes_from_ints({0x31}));
+
+    EXPECT_TRUE(connection.local_connection_ids_.at(1).used_by_peer);
+    EXPECT_TRUE(connection.pending_new_connection_id_frames_.empty());
+    EXPECT_EQ(connection.next_local_connection_id_sequence_, next_sequence_number);
+}
+
+TEST(QuicCoreTest, PreferredAddressFirstUseReplenishesSequenceTwoWithUniqueResetToken) {
+    auto connection = make_connected_server_connection_with_preferred_address();
+    optional_ref_or_terminate(connection.peer_transport_parameters_).active_connection_id_limit = 3;
+    ASSERT_TRUE(connection.local_connection_ids_.contains(1));
+    const auto preferred_connection_id = connection.local_connection_ids_.at(1).connection_id;
+    connection.pending_new_connection_id_frames_.clear();
+
+    auto processed =
+        process_one_rtt_ping_with_destination_connection_id(connection, preferred_connection_id, 7);
+
+    ASSERT_TRUE(processed.has_value());
+    ASSERT_EQ(connection.pending_new_connection_id_frames_.size(), 1u);
+    const auto &frame = connection.pending_new_connection_id_frames_.front();
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # If the preferred_address transport parameter is sent, the sequence
+    // # number of the supplied connection ID is 1.
+    EXPECT_EQ(frame.sequence_number, 2u);
+    EXPECT_EQ(frame.retire_prior_to, 0u);
+    EXPECT_TRUE(connection.local_connection_ids_.at(1).used_by_peer);
+    EXPECT_EQ(connection.local_connection_ids_.at(1).connection_id,
+              connection.config_.transport.preferred_address->connection_id);
+
+    std::set<std::array<std::byte, 16>> stateless_reset_tokens;
+    for (const auto &[sequence_number, record] : connection.local_connection_ids_) {
+        static_cast<void>(sequence_number);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
+        // # The same stateless reset token MUST NOT be used for multiple
+        // # connection IDs.
+        EXPECT_TRUE(stateless_reset_tokens.insert(record.stateless_reset_token).second);
+    }
 }
 
 TEST(QuicCoreTest, ProactiveLocalConnectionIdRotationTemporarilyExceedsPeerLimitWithRetirePriorTo) {

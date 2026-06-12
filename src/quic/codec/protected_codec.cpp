@@ -3673,6 +3673,8 @@ COQUIC_NO_PROFILE CodecResult<ResultPacket> decode_received_one_rtt_packet_from_
                 return CodecResult<ResultPacket>::success(ResultPacket{
                     ReceivedProtectedOneRttAckOnlyFastPacket{
                         .spin_bit = decoded_ack_only_fields.value().spin_bit,
+                        .destination_connection_id =
+                            std::move(decoded_ack_only_fields.value().destination_connection_id),
                         .packet_number = packet_number,
                         .ack = std::move(decoded_ack_only_fields.value().ack),
                     },

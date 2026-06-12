@@ -1419,6 +1419,37 @@ bool QuicConnection::request_local_connection_id_rotation() {
     return false;
 }
 
+void QuicConnection::note_local_connection_id_used_by_peer(
+    const ConnectionId &destination_connection_id) {
+    auto record = std::find_if(
+        local_connection_ids_.begin(), local_connection_ids_.end(), [&](const auto &entry) {
+            return !entry.second.retired && entry.second.connection_id == destination_connection_id;
+        });
+    if (record == local_connection_ids_.end() || record->second.used_by_peer) {
+        return;
+    }
+
+    record->second.used_by_peer = true;
+    if (!can_issue_local_connection_id()) {
+        return;
+    }
+
+    const auto peer_limit =
+        static_cast<std::size_t>(peer_transport_parameters_->active_connection_id_limit);
+    if (count_active_connection_ids(local_connection_ids_) >= peer_limit) {
+        return;
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # If an endpoint provided fewer connection IDs than the peer's
+    // # active_connection_id_limit, it MAY supply a new connection ID when it
+    // # receives a packet with a previously unused connection ID.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
+    // # An endpoint MUST NOT provide more connection IDs than the peer's
+    // # limit.
+    static_cast<void>(issue_local_connection_id(/*retire_prior_to=*/0));
+}
+
 void QuicConnection::issue_path_probe_replacement_connection_id() {
     if (!handshake_confirmed_ || !peer_transport_parameters_.has_value() ||
         config_.source_connection_id.empty()) {

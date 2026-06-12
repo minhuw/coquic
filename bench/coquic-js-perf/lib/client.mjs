@@ -76,6 +76,18 @@ class CloseCommand {
   }
 }
 
+class ResultWork {
+  constructor(result) {
+    this.result = result;
+  }
+}
+
+class CommandWork {
+  constructor(command) {
+    this.command = command;
+  }
+}
+
 export async function runClient(config) {
   const endpoint = new Endpoint(clientEndpointConfig(config));
   const { io, primaryRoute, primaryIdentity } = await UdpRuntime.client(config.host, config.port);
@@ -97,6 +109,7 @@ class Client {
     this.primaryIdentity = primaryIdentity;
     this.connections = new Map();
     this.closingConnections = new Set();
+    this.closedConnections = new Set();
     this.requestsStarted = 0;
     this.crrRequestsOpened = 0;
     this.nextConnectionIndex = 0;
@@ -120,7 +133,9 @@ class Client {
 
     for (let index = 0; index < this.initialConnectionTarget(); index += 1) {
       const result = this.executeCommand(new OpenConnectionCommand(), start);
-      await this.handleResult(result, start);
+      if (result != null) {
+        await this.handleResult(result, start);
+      }
     }
 
     while (true) {
@@ -192,12 +207,19 @@ class Client {
   }
 
   async handleResult(result, now) {
-    const pending = [result];
+    const pending = [new ResultWork(result)];
     while (pending.length > 0) {
-      const current = pending.pop();
-      const commands = this.collectResultCommands(current, now);
-      for (const command of commands) {
-        pending.push(this.executeCommand(command, now));
+      const work = pending.pop();
+      if (work instanceof ResultWork) {
+        const commands = this.collectResultCommands(work.result, now);
+        for (let index = commands.length - 1; index >= 0; index -= 1) {
+          pending.push(new CommandWork(commands[index]));
+        }
+      } else if (work instanceof CommandWork) {
+        const nextResult = this.executeCommand(work.command, now);
+        if (nextResult != null) {
+          pending.push(new ResultWork(nextResult));
+        }
       }
     }
     await this.io.flushSends();
@@ -223,6 +245,7 @@ class Client {
           }
         } else if (effect.event === Lifecycle.CLOSED) {
           const connection = Number(effect.connection);
+          this.closedConnections.add(connection);
           if (this.config.mode === Mode.CRR) {
             this.connections.delete(connection);
           } else if (this.connections.has(connection)) {
@@ -432,10 +455,16 @@ class Client {
       return this.endpoint.connect(config, now).result;
     }
     if (command instanceof SendStreamCommand) {
+      if (this.closedConnections.has(command.connection)) {
+        return null;
+      }
       return this.endpoint
         .connection(command.connection)
         .stream(command.streamId)
         .send(command.bytes, command.fin, now);
+    }
+    if (this.closedConnections.has(command.connection)) {
+      return null;
     }
     this.closingConnections.add(command.connection);
     return this.endpoint.connection(command.connection).close(0, command.reason, now);
@@ -634,7 +663,9 @@ class Client {
       const now = this.io.nowUs();
       const result = this.executeCommand(new OpenConnectionCommand(), now);
       this.crrRequestsOpened += 1;
-      await this.handleResult(result, now);
+      if (result != null) {
+        await this.handleResult(result, now);
+      }
     }
   }
 
@@ -760,7 +791,9 @@ class Client {
       state?.activeBulkStreams.clear();
       for (const command of this.maybeCloseBulkConnection(handle)) {
         const result = this.executeCommand(command, now);
-        await this.handleResult(result, now);
+        if (result != null) {
+          await this.handleResult(result, now);
+        }
       }
     }
   }
@@ -819,7 +852,9 @@ class Client {
       }
       for (const command of commands) {
         const result = this.executeCommand(command, now);
-        await this.handleResult(result, now);
+        if (result != null) {
+          await this.handleResult(result, now);
+        }
       }
     }
   }

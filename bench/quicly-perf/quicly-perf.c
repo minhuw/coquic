@@ -53,6 +53,7 @@
 #define TRANSFER_CONNECTION_WINDOW (32U * 1024U * 1024U)
 #define TRANSFER_STREAM_WINDOW (16U * 1024U * 1024U)
 #define DRAIN_TIMEOUT_US 2000000ULL
+#define SESSION_READY_TIMEOUT_US 30000000ULL
 #define WRITE_CHUNK_SIZE 32768U
 
 typedef struct {
@@ -1878,8 +1879,9 @@ static int init_client_session(const config_t *cfg, client_conn_t *client,
     }
     if (open_control_stream(client->conn, cfg, client->batch, request_bytes, response_bytes) != 0 ||
         send_pending(client->fd, client->conn) != 0 ||
-        wait_for_session_ready(client->fd, client->conn, client->batch, now_us() + 10000000ULL,
-                               failure_reason, failure_reason_len) != 0) {
+        wait_for_session_ready(client->fd, client->conn, client->batch,
+                               now_us() + SESSION_READY_TIMEOUT_US, failure_reason,
+                               failure_reason_len) != 0) {
         if (failure_reason[0] == '\0') {
             snprintf(failure_reason, failure_reason_len, "%s", client->batch->failure_reason);
         }

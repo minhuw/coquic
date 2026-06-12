@@ -382,7 +382,9 @@ impl Server<'_> {
             }
         }
         if fin {
-            session.persistent_rr_pending_request_bytes.remove(&stream_id);
+            session
+                .persistent_rr_pending_request_bytes
+                .remove(&stream_id);
         }
         if send_complete {
             if let Some(command) = self.make_complete_command(connection) {
@@ -498,8 +500,7 @@ pub fn validate_session_start(start: &SessionStart) -> Option<String> {
     if start.requests_in_flight == 0 {
         return Some("requests_in_flight must be greater than zero".to_owned());
     }
-    if start.mode == Mode::PersistentRr && (start.request_bytes == 0 || start.response_bytes == 0)
-    {
+    if start.mode == Mode::PersistentRr && (start.request_bytes == 0 || start.response_bytes == 0) {
         return Some("persistent-rr requires nonzero request and response bytes".to_owned());
     }
     None

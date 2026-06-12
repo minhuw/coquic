@@ -84,6 +84,11 @@ enum ClientCommand {
     },
 }
 
+enum ClientWork {
+    Result(QueryResult),
+    Command(ClientCommand),
+}
+
 pub async fn run_client(config: PerfConfig) -> Result<RunSummary> {
     let endpoint_config = client_endpoint_config(&config);
     let mut endpoint = Endpoint::new(&endpoint_config)?;
@@ -97,6 +102,7 @@ pub async fn run_client(config: PerfConfig) -> Result<RunSummary> {
         primary_identity,
         connections: HashMap::new(),
         closing_connections: HashSet::new(),
+        closed_connections: HashSet::new(),
         requests_started: 0,
         crr_requests_opened: 0,
         next_connection_index: 0,
@@ -120,6 +126,7 @@ struct Client<'a> {
     primary_identity: Vec<u8>,
     connections: HashMap<ConnectionHandle, ConnectionState>,
     closing_connections: HashSet<ConnectionHandle>,
+    closed_connections: HashSet<ConnectionHandle>,
     requests_started: usize,
     crr_requests_opened: usize,
     next_connection_index: u64,
@@ -143,8 +150,9 @@ impl Client<'_> {
         }
 
         for _ in 0..self.initial_connection_target() {
-            let result = self.execute_command(ClientCommand::OpenConnection, start)?;
-            self.handle_result(result, start).await?;
+            if let Some(result) = self.execute_command(ClientCommand::OpenConnection, start)? {
+                self.handle_result(result, start).await?;
+            }
         }
 
         loop {
@@ -162,9 +170,7 @@ impl Client<'_> {
                 }
                 self.summary.status = "ok".to_owned();
                 self.summary.elapsed_ms = duration_millis(self.result_elapsed(now));
-                if self.timed_rr_mode()
-                    || self.timed_persistent_rr_mode()
-                    || self.timed_crr_mode()
+                if self.timed_rr_mode() || self.timed_persistent_rr_mode() || self.timed_crr_mode()
                 {
                     self.summary.server_counters = ServerCounters {
                         bytes_sent: self.summary.bytes_received,
@@ -222,11 +228,18 @@ impl Client<'_> {
     }
 
     async fn handle_result(&mut self, result: QueryResult, now: u64) -> Result<()> {
-        let mut pending_results = vec![result];
-        while let Some(result) = pending_results.pop() {
-            let commands = self.collect_result_commands(result, now)?;
-            for command in commands {
-                pending_results.push(self.execute_command(command, now)?);
+        let mut pending_work = vec![ClientWork::Result(result)];
+        while let Some(work) = pending_work.pop() {
+            match work {
+                ClientWork::Result(result) => {
+                    let commands = self.collect_result_commands(result, now)?;
+                    pending_work.extend(commands.into_iter().rev().map(ClientWork::Command));
+                }
+                ClientWork::Command(command) => {
+                    if let Some(result) = self.execute_command(command, now)? {
+                        pending_work.push(ClientWork::Result(result));
+                    }
+                }
             }
         }
         self.io.flush_sends().await?;
@@ -262,6 +275,7 @@ impl Client<'_> {
                             .or_insert_with(|| ConnectionState::new(connection, request_limit));
                     }
                     Lifecycle::Closed => {
+                        self.closed_connections.insert(connection);
                         if self.config.mode == Mode::Crr {
                             self.connections.remove(&connection);
                         } else if let Some(state) = self.connections.get_mut(&connection) {
@@ -495,7 +509,7 @@ impl Client<'_> {
         Ok(commands)
     }
 
-    fn execute_command(&mut self, command: ClientCommand, now: u64) -> Result<QueryResult> {
+    fn execute_command(&mut self, command: ClientCommand, now: u64) -> Result<Option<QueryResult>> {
         match command {
             ClientCommand::OpenConnection => {
                 let mut config = self.make_client_config(self.next_connection_index);
@@ -503,25 +517,31 @@ impl Client<'_> {
                 config.initial_route_handle = self.primary_route;
                 config.address_validation_identity = self.primary_identity.clone();
                 let connected = self.endpoint.connect(config, now)?;
-                Ok(connected.result)
+                Ok(Some(connected.result))
             }
             ClientCommand::SendStream {
                 connection,
                 stream_id,
                 bytes,
                 fin,
-            } => self
-                .endpoint
-                .connection(connection)
-                .stream(stream_id)
-                .send(&bytes, fin, now)
-                .map_err(Into::into),
-            ClientCommand::Close { connection, reason } => {
-                self.closing_connections.insert(connection);
-                self.endpoint
+            } => {
+                if self.closed_connections.contains(&connection) {
+                    return Ok(None);
+                }
+                let result = self
+                    .endpoint
                     .connection(connection)
-                    .close(0, reason, now)
-                    .map_err(Into::into)
+                    .stream(stream_id)
+                    .send(&bytes, fin, now)?;
+                Ok(Some(result))
+            }
+            ClientCommand::Close { connection, reason } => {
+                if self.closed_connections.contains(&connection) {
+                    return Ok(None);
+                }
+                self.closing_connections.insert(connection);
+                let result = self.endpoint.connection(connection).close(0, reason, now)?;
+                Ok(Some(result))
             }
         }
     }
@@ -863,9 +883,10 @@ impl Client<'_> {
                 .unwrap_or(true)
         {
             let now = self.io.now_us();
-            let result = self.execute_command(ClientCommand::OpenConnection, now)?;
             self.crr_requests_opened += 1;
-            self.handle_result(result, now).await?;
+            if let Some(result) = self.execute_command(ClientCommand::OpenConnection, now)? {
+                self.handle_result(result, now).await?;
+            }
         }
         Ok(())
     }
@@ -1031,8 +1052,9 @@ impl Client<'_> {
                 state.active_bulk_streams.clear();
             }
             for command in self.maybe_close_bulk_connection(handle)? {
-                let result = self.execute_command(command, now)?;
-                self.handle_result(result, now).await?;
+                if let Some(result) = self.execute_command(command, now)? {
+                    self.handle_result(result, now).await?;
+                }
             }
         }
         Ok(())
@@ -1094,8 +1116,9 @@ impl Client<'_> {
                 Vec::new()
             };
             for command in commands {
-                let result = self.execute_command(command, now)?;
-                self.handle_result(result, now).await?;
+                if let Some(result) = self.execute_command(command, now)? {
+                    self.handle_result(result, now).await?;
+                }
             }
         }
         Ok(())

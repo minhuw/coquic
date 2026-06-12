@@ -38,6 +38,7 @@
 #define TRANSFER_CONNECTION_WINDOW (32U * 1024U * 1024U)
 #define TRANSFER_STREAM_WINDOW (16U * 1024U * 1024U)
 #define TRANSFER_MAX_STREAMS 10000000U
+#define DRAIN_TIMEOUT_US 2000000ULL
 #define WRITE_CHUNK_SIZE 32768U
 
 static int debug_enabled(void) {
@@ -201,6 +202,7 @@ struct client_state {
     struct prog prog;
     struct sport_head sports;
     struct event *deadline_timer;
+    struct event *drain_timer;
     struct service_port **client_sports;
     int *client_sport_busy;
     uint64_t client_sport_count;
@@ -1671,6 +1673,13 @@ const struct lsquic_stream_if server_stream_if = {
     .on_close = server_on_close,
 };
 
+static void client_drain_cb(evutil_socket_t fd, short what, void *arg) {
+    (void)fd;
+    (void)what;
+    client_state_t *state = arg;
+    prog_stop(&state->prog);
+}
+
 static void client_deadline_cb(evutil_socket_t fd, short what, void *arg) {
     (void)fd;
     (void)what;
@@ -1680,6 +1689,15 @@ static void client_deadline_cb(evutil_socket_t fd, short what, void *arg) {
     if (state->active_conns == 0) {
         prog_stop(&state->prog);
     } else {
+        if (state->drain_timer) {
+            struct timeval timeout;
+            timeout.tv_sec = (time_t)(DRAIN_TIMEOUT_US / 1000000ULL);
+            timeout.tv_usec = (suseconds_t)(DRAIN_TIMEOUT_US % 1000000ULL);
+            evtimer_add(state->drain_timer, &timeout);
+        } else {
+            prog_stop(&state->prog);
+            return;
+        }
         prog_process_conns(&state->prog);
     }
 }
@@ -1891,6 +1909,7 @@ static run_summary_t run_client(const config_t *cfg) {
     state.deadline_us = state.measure_start_us + cfg->duration_us;
     if (!state.bounded) {
         state.deadline_timer = evtimer_new(prog_eb(&state.prog), client_deadline_cb, &state);
+        state.drain_timer = evtimer_new(prog_eb(&state.prog), client_drain_cb, &state);
         if (state.deadline_timer) {
             struct timeval timeout;
             timeout.tv_sec = (time_t)(cfg->duration_us / 1000000ULL);
@@ -1920,6 +1939,10 @@ static run_summary_t run_client(const config_t *cfg) {
     if (state.deadline_timer) {
         event_del(state.deadline_timer);
         event_free(state.deadline_timer);
+    }
+    if (state.drain_timer) {
+        event_del(state.drain_timer);
+        event_free(state.drain_timer);
     }
     prog_cleanup(&state.prog);
     cleanup_client_sports(&state);

@@ -136,6 +136,7 @@ impl UdpRuntime {
                     stream_id,
                     bytes,
                     fin,
+                    ..
                 } => out.push(OwnedEffect::ReceiveStreamData {
                     connection,
                     stream_id,

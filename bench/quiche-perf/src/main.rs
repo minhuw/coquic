@@ -1079,7 +1079,27 @@ fn run_persistent_rr(
     }
     for client in &mut clients {
         client.close_persistent_rr_stream()?;
-        client.drain(DRAIN_TIMEOUT)?;
+    }
+    drain_clients(&mut clients, DRAIN_TIMEOUT)?;
+    Ok(())
+}
+
+fn drain_clients(clients: &mut [QuicheClient], duration: Duration) -> Result<(), AnyError> {
+    let deadline = Instant::now() + duration;
+    while clients.iter().any(|client| !client.streams.is_empty()) && Instant::now() < deadline {
+        let mut made_progress = false;
+        for client in clients
+            .iter_mut()
+            .filter(|client| !client.streams.is_empty())
+        {
+            made_progress |= !client.drive(Some(deadline))?.is_empty();
+            if Instant::now() >= deadline {
+                break;
+            }
+        }
+        if !made_progress {
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
     Ok(())
 }

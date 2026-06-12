@@ -303,9 +303,13 @@ jobs:
         with:
           name: perf-artifacts-${{ matrix.label }}
           path: |
+            .bench-results/${{ matrix.label }}/*.json
+            .bench-results/${{ matrix.label }}/*.txt
+            .bench-results/${{ matrix.label }}/*.log
             .bench-results/${{ matrix.label }}/*.flamegraph.svg
             .bench-results/${{ matrix.label }}/*.perf.log
             .bench-results/${{ matrix.label }}/*.stats.jsonl
+            .bench-results/${{ matrix.label }}/*.profile.status
           include-hidden-files: true
           if-no-files-found: warn
 

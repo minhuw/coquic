@@ -696,6 +696,11 @@ class QuicConnection {
         bool allow_preconnected_frames = false, QuicPathId path_id = 0,
         bool used_previous_application_read_secret = false,
         std::optional<std::uint64_t> packet_number = std::nullopt);
+    CodecResult<bool> process_inbound_application_stream_data(std::uint64_t stream_id,
+                                                              std::uint64_t stream_offset,
+                                                              const SharedBytes &stream_data,
+                                                              bool fin, std::uint64_t frame_type,
+                                                              bool require_connected);
     CodecResult<bool>
     process_inbound_received_application_stream(const ReceivedStreamFrame &stream_frame,
                                                 bool require_connected);

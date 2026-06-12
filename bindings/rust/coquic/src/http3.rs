@@ -1,6 +1,6 @@
 use crate::ffi;
 use crate::{
-    bytes, bytes_view, optional_stream_from_raw, optional_u64, optional_u64_from_raw,
+    bytes, bytes_view, optional_http3_u64_from_raw, optional_stream_from_raw, optional_u64,
     ConnectionInput, QueryResult, Status, StreamId, TimeUs,
 };
 use std::error::Error;
@@ -73,7 +73,7 @@ impl Settings {
         Self {
             qpack_max_table_capacity: raw.qpack_max_table_capacity,
             qpack_blocked_streams: raw.qpack_blocked_streams,
-            max_field_section_size: optional_u64_from_raw(raw.max_field_section_size),
+            max_field_section_size: optional_http3_u64_from_raw(raw.max_field_section_size),
         }
     }
 
@@ -265,7 +265,7 @@ impl<'a> RequestHeadView<'a> {
     }
 
     pub fn content_length(&self) -> Option<u64> {
-        optional_u64_from_raw(self.raw.content_length)
+        optional_http3_u64_from_raw(self.raw.content_length)
     }
 
     pub fn header_count(&self) -> usize {
@@ -437,7 +437,7 @@ impl<'a> ResponseHeadView<'a> {
     }
 
     pub fn content_length(&self) -> Option<u64> {
-        optional_u64_from_raw(self.raw.content_length)
+        optional_http3_u64_from_raw(self.raw.content_length)
     }
 
     pub fn header_count(&self) -> usize {

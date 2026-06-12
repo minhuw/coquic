@@ -5,7 +5,7 @@ import ctypes.util
 import os
 from pathlib import Path
 
-FFI_ABI_VERSION = 1
+FFI_ABI_VERSION = 2
 
 COQUIC_STATUS_OK = 0
 COQUIC_STATUS_INVALID_ARGUMENT = 1
@@ -124,6 +124,13 @@ class coquic_optional_time_us_t(C.Structure):
     ]
 
 
+class coquic_optional_u64_t(C.Structure):
+    _fields_ = [
+        ("has_value", C.c_uint8),
+        ("value", C.c_uint64),
+    ]
+
+
 class coquic_tls_identity_t(C.Structure):
     _fields_ = [
         ("certificate_pem", C.POINTER(C.c_char)),
@@ -187,6 +194,8 @@ class coquic_endpoint_config_t(C.Structure):
         ("emit_shared_receive_stream_data", C.c_uint8),
         ("enable_packet_inspection", C.c_uint8),
         ("allow_peer_address_change", C.c_uint8),
+        ("max_server_connections", C.c_size_t),
+        ("enable_out_of_order_receive", C.c_uint8),
     ]
 
 
@@ -333,8 +342,10 @@ class coquic_receive_stream_data_effect_t(C.Structure):
     _fields_ = [
         ("connection", C.c_uint64),
         ("stream_id", C.c_uint64),
+        ("offset", C.c_uint64),
         ("bytes", coquic_bytes_view_t),
         ("fin", C.c_uint8),
+        ("final_size", coquic_optional_u64_t),
     ]
 
 

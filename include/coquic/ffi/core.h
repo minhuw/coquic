@@ -23,7 +23,7 @@ extern "C" {
 #endif
 #endif
 
-#define COQUIC_FFI_ABI_VERSION 1u
+#define COQUIC_FFI_ABI_VERSION 2u
 
 typedef struct coquic_endpoint coquic_endpoint_t;
 typedef struct coquic_result coquic_result_t;
@@ -151,6 +151,11 @@ typedef struct coquic_optional_time_us {
     coquic_time_us_t value;
 } coquic_optional_time_us_t;
 
+typedef struct coquic_optional_u64 {
+    uint8_t has_value;
+    uint64_t value;
+} coquic_optional_u64_t;
+
 typedef struct coquic_tls_identity {
     const char *certificate_pem;
     size_t certificate_pem_length;
@@ -208,6 +213,7 @@ typedef struct coquic_endpoint_config {
     uint8_t enable_packet_inspection;
     uint8_t allow_peer_address_change;
     size_t max_server_connections;
+    uint8_t enable_out_of_order_receive;
 } coquic_endpoint_config_t;
 
 typedef struct coquic_resumption_state {
@@ -322,8 +328,10 @@ typedef struct coquic_send_datagram_effect {
 typedef struct coquic_receive_stream_data_effect {
     coquic_connection_handle_t connection;
     coquic_stream_id_t stream_id;
+    uint64_t offset;
     coquic_bytes_view_t bytes;
     uint8_t fin;
+    coquic_optional_u64_t final_size;
 } coquic_receive_stream_data_effect_t;
 
 typedef struct coquic_receive_datagram_data_effect {

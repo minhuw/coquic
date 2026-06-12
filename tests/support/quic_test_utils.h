@@ -137,7 +137,8 @@ inline std::vector<std::byte> received_application_data_from(const QuicCoreResul
     std::vector<std::byte> out;
     for (const auto &effect : result.effects) {
         if (const auto *received = std::get_if<QuicCoreReceiveStreamData>(&effect)) {
-            out.insert(out.end(), received->bytes.begin(), received->bytes.end());
+            const auto payload = received->payload();
+            out.insert(out.end(), payload.begin(), payload.end());
         }
     }
 
@@ -179,9 +180,10 @@ struct StreamPayload {
 inline std::vector<StreamPayload> stream_payloads_from(const QuicCoreResult &result) {
     std::vector<StreamPayload> payloads;
     for (const auto &received : received_stream_data_from(result)) {
+        const auto payload = received.payload();
         std::string text;
-        text.reserve(received.bytes.size());
-        for (const auto byte : received.bytes) {
+        text.reserve(payload.size());
+        for (const auto byte : payload) {
             text.push_back(static_cast<char>(std::to_integer<unsigned char>(byte)));
         }
         payloads.push_back(StreamPayload{

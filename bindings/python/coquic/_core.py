@@ -228,6 +228,7 @@ class EndpointConfig:
     max_outbound_datagram_size: int = 0
     zero_rtt: ZeroRttConfig = field(default_factory=ZeroRttConfig)
     emit_shared_receive_stream_data: bool = False
+    enable_out_of_order_receive: bool = False
     enable_packet_inspection: bool = False
     allow_peer_address_change: bool = False
 
@@ -248,6 +249,7 @@ class EndpointConfig:
             max_outbound_datagram_size=raw.max_outbound_datagram_size,
             zero_rtt=ZeroRttConfig(),
             emit_shared_receive_stream_data=bool(raw.emit_shared_receive_stream_data),
+            enable_out_of_order_receive=bool(raw.enable_out_of_order_receive),
             enable_packet_inspection=bool(raw.enable_packet_inspection),
             allow_peer_address_change=bool(raw.allow_peer_address_change),
         )
@@ -525,12 +527,14 @@ class Effect:
     connection: ConnectionHandle | None = None
     route_handle: RouteHandle | None = None
     stream_id: StreamId | None = None
+    offset: int = 0
     bytes: bytes = b""
     fin: bool = False
     ecn: EcnCodepoint = EcnCodepoint.UNAVAILABLE
     is_pmtu_probe: bool = False
     application_error_code: int = 0
     final_size: int = 0
+    has_final_size: bool = False
     change: StateChange | None = None
     event: Lifecycle | None = None
     preferred_address: PreferredAddress | None = None
@@ -990,6 +994,7 @@ class _EndpointConfigMaterialization:
                 ),
             ),
             emit_shared_receive_stream_data=int(config.emit_shared_receive_stream_data),
+            enable_out_of_order_receive=int(config.enable_out_of_order_receive),
             enable_packet_inspection=int(config.enable_packet_inspection),
             allow_peer_address_change=int(config.allow_peer_address_change),
         )
@@ -1097,8 +1102,11 @@ def _effect_from_raw(raw: ffi.coquic_effect_t) -> Effect:
             kind="receive_stream_data",
             connection=value.connection,
             stream_id=value.stream_id,
+            offset=value.offset,
             bytes=_bytes_view(value.bytes.data, value.bytes.length),
             fin=bool(value.fin),
+            final_size=value.final_size.value if value.final_size.has_value else 0,
+            has_final_size=bool(value.final_size.has_value),
         )
     if raw.kind == ffi.COQUIC_EFFECT_RECEIVE_DATAGRAM_DATA:
         value = raw.as_.receive_datagram_data

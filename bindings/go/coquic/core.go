@@ -34,6 +34,7 @@ static inline coquic_status_t coquic_go_endpoint_create(
     const uint8_t *zero_rtt_context,
     size_t zero_rtt_context_length,
     uint8_t emit_shared_receive_stream_data,
+    uint8_t enable_out_of_order_receive,
     uint8_t enable_packet_inspection,
     uint8_t allow_peer_address_change,
     coquic_endpoint_t **out_endpoint
@@ -63,6 +64,7 @@ static inline coquic_status_t coquic_go_endpoint_create(
     config.zero_rtt.allow = zero_rtt_allow;
     config.zero_rtt.application_context = coquic_go_bytes(zero_rtt_context, zero_rtt_context_length);
     config.emit_shared_receive_stream_data = emit_shared_receive_stream_data;
+    config.enable_out_of_order_receive = enable_out_of_order_receive;
     config.enable_packet_inspection = enable_packet_inspection;
     config.allow_peer_address_change = allow_peer_address_change;
     return coquic_endpoint_create(&config, out_endpoint);
@@ -412,6 +414,7 @@ type EndpointConfig struct {
 	MaxOutboundDatagramSize     int
 	ZeroRtt                     ZeroRttConfig
 	EmitSharedReceiveStreamData bool
+	EnableOutOfOrderReceive     bool
 	EnablePacketInspection      bool
 	AllowPeerAddressChange      bool
 }
@@ -427,6 +430,7 @@ func DefaultEndpointConfig() EndpointConfig {
 		Transport:                   transportConfigFromRaw(raw.transport),
 		MaxOutboundDatagramSize:     int(raw.max_outbound_datagram_size),
 		EmitSharedReceiveStreamData: raw.emit_shared_receive_stream_data != 0,
+		EnableOutOfOrderReceive:     raw.enable_out_of_order_receive != 0,
 		EnablePacketInspection:      raw.enable_packet_inspection != 0,
 		AllowPeerAddressChange:      raw.allow_peer_address_change != 0,
 	}
@@ -501,6 +505,7 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		bytePtr(config.ZeroRtt.ApplicationContext),
 		C.size_t(len(config.ZeroRtt.ApplicationContext)),
 		cBool(config.EmitSharedReceiveStreamData),
+		cBool(config.EnableOutOfOrderReceive),
 		cBool(config.EnablePacketInspection),
 		cBool(config.AllowPeerAddressChange),
 		&out,
@@ -753,6 +758,7 @@ type Effect struct {
 	RouteHandle          RouteHandle
 	HasRouteHandle       bool
 	StreamID             StreamID
+	Offset               uint64
 	Bytes                []byte
 	Ecn                  EcnCodepoint
 	IsPMTUProbe          bool
@@ -761,6 +767,7 @@ type Effect struct {
 	Lifecycle            Lifecycle
 	ApplicationErrorCode uint64
 	FinalSize            uint64
+	HasFinalSize         bool
 }
 
 func (r *QueryResult) Effects() ([]Effect, error) {
@@ -811,8 +818,11 @@ func effectFromRaw(raw C.coquic_effect_t) Effect {
 		value := C.coquic_go_effect_receive_stream_data(raw)
 		effect.Connection = ConnectionHandle(value.connection)
 		effect.StreamID = StreamID(value.stream_id)
+		effect.Offset = uint64(value.offset)
 		effect.Bytes = copyBytes(value.bytes)
 		effect.Fin = value.fin != 0
+		effect.FinalSize = uint64(value.final_size.value)
+		effect.HasFinalSize = value.final_size.has_value != 0
 	case EffectReceiveDatagramData:
 		value := C.coquic_go_effect_receive_datagram_data(raw)
 		effect.Connection = ConnectionHandle(value.connection)

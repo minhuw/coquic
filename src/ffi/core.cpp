@@ -36,6 +36,9 @@ constexpr std::size_t kEndpointConfigSizeV1 =
 constexpr std::size_t kEndpointConfigSizeV2 =
     offsetof(coquic_endpoint_config_t, max_server_connections) +
     sizeof(coquic_endpoint_config_t::max_server_connections);
+constexpr std::size_t kEndpointConfigSizeV3 =
+    offsetof(coquic_endpoint_config_t, enable_out_of_order_receive) +
+    sizeof(coquic_endpoint_config_t::enable_out_of_order_receive);
 constexpr std::size_t kClientConnectionConfigSizeV1 =
     offsetof(coquic_client_connection_config_t, zero_rtt) +
     sizeof(coquic_client_connection_config_t::zero_rtt);
@@ -149,6 +152,13 @@ coquic_optional_time_us_t from_optional(std::optional<TimePoint> value) {
         return {.has_value = 0, .value = 0};
     }
     return {.has_value = 1, .value = from_time_point(*value)};
+}
+
+coquic_optional_u64_t from_optional_u64(std::optional<std::uint64_t> value) {
+    if (!value.has_value()) {
+        return {.has_value = 0, .value = 0};
+    }
+    return {.has_value = 1, .value = *value};
 }
 
 coquic::core::Role role_to_cpp(coquic_role_t role) {
@@ -396,6 +406,8 @@ coquic::core::EndpointConfig to_cpp(const coquic_endpoint_config_t &config) {
         .qlog = std::nullopt,
         .tls_keylog_path = std::nullopt,
         .emit_shared_receive_stream_data = config.emit_shared_receive_stream_data != 0,
+        .enable_out_of_order_receive =
+            config.size >= kEndpointConfigSizeV3 ? config.enable_out_of_order_receive != 0 : false,
         .enable_packet_inspection = config.enable_packet_inspection != 0,
         .allow_peer_address_change = config.allow_peer_address_change != 0,
     };
@@ -487,8 +499,10 @@ coquic_effect_t from_cpp(const coquic::core::Effect &effect) {
                                 {
                                     .connection = value.connection,
                                     .stream_id = value.stream_id,
+                                    .offset = value.offset,
                                     .bytes = bytes_view(value.bytes),
                                     .fin = static_cast<std::uint8_t>(value.fin ? 1 : 0),
+                                    .final_size = from_optional_u64(value.final_size),
                                 },
                         },
                 };
@@ -814,6 +828,7 @@ void coquic_endpoint_config_init(coquic_endpoint_config_t *config) {
         .enable_packet_inspection = 0,
         .allow_peer_address_change = 1,
         .max_server_connections = 0,
+        .enable_out_of_order_receive = 0,
     };
 }
 

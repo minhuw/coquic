@@ -163,6 +163,10 @@ struct EndpointConfig {
     std::optional<QlogConfig> qlog;
     std::optional<std::filesystem::path> tls_keylog_path;
     bool emit_shared_receive_stream_data = false;
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+    // # implementations MAY choose to offer the ability to deliver data out
+    // # of order to a receiving application.
+    bool enable_out_of_order_receive = false;
     bool enable_packet_inspection = false;
     bool allow_peer_address_change = true;
 };
@@ -258,8 +262,10 @@ struct SendDatagram {
 struct ReceiveStreamData {
     ConnectionHandle connection = 0;
     StreamId stream_id = 0;
+    std::uint64_t offset = 0;
     std::vector<std::byte> bytes;
     bool fin = false;
+    std::optional<std::uint64_t> final_size;
 };
 
 struct ReceiveDatagramData {

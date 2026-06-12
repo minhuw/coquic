@@ -3079,6 +3079,7 @@ QuicCore::QuicCore(QuicCoreConfig config)
           .address_validation_replay_store_path = config.address_validation_replay_store_path,
           .request_forgery_policy = config.request_forgery_policy,
           .emit_shared_receive_stream_data = config.emit_shared_receive_stream_data,
+          .enable_out_of_order_receive = config.enable_out_of_order_receive,
           .enable_packet_inspection = config.enable_packet_inspection,
           .defer_inbound_application_send_drain = config.defer_inbound_application_send_drain,
       }),
@@ -3382,6 +3383,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                 endpoint_config_.address_validation_replay_store_path,
             .request_forgery_policy = endpoint_config_.request_forgery_policy,
             .emit_shared_receive_stream_data = endpoint_config_.emit_shared_receive_stream_data,
+            .enable_out_of_order_receive = endpoint_config_.enable_out_of_order_receive,
             .enable_packet_inspection = endpoint_config_.enable_packet_inspection,
         };
 
@@ -3796,6 +3798,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                 endpoint_config_.address_validation_replay_store_path,
             .request_forgery_policy = endpoint_config_.request_forgery_policy,
             .emit_shared_receive_stream_data = endpoint_config_.emit_shared_receive_stream_data,
+            .enable_out_of_order_receive = endpoint_config_.enable_out_of_order_receive,
             .enable_packet_inspection = endpoint_config_.enable_packet_inspection,
         };
         if (retry_context.has_value()) {

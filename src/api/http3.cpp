@@ -247,8 +247,10 @@ connection_inputs_from(std::vector<::coquic::quic::QuicCoreInput> inputs) {
                 return ::coquic::quic::QuicCoreReceiveStreamData{
                     .connection = value.connection,
                     .stream_id = value.stream_id,
+                    .offset = value.offset,
                     .bytes = value.bytes,
                     .fin = value.fin,
+                    .final_size = value.final_size,
                 };
             } else if constexpr (std::is_same_v<T, core::ReceiveDatagramData>) {
                 return ::coquic::quic::QuicCoreReceiveDatagramData{

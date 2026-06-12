@@ -580,6 +580,8 @@ EndpointConfigMaterialization endpoint_config_from_js(napi_env env, napi_value v
         zero_rtt_from_object(env, zero_rtt_value, out.zero_rtt_context, out.config.zero_rtt);
     out.config.emit_shared_receive_stream_data = static_cast<std::uint8_t>(get_bool(
         env, value, "emitSharedReceiveStreamData", out.config.emit_shared_receive_stream_data));
+    out.config.enable_out_of_order_receive = static_cast<std::uint8_t>(
+        get_bool(env, value, "enableOutOfOrderReceive", out.config.enable_out_of_order_receive));
     out.config.enable_packet_inspection = static_cast<std::uint8_t>(
         get_bool(env, value, "enablePacketInspection", out.config.enable_packet_inspection));
     out.config.allow_peer_address_change = static_cast<std::uint8_t>(
@@ -744,8 +746,11 @@ napi_value effect_to_js(napi_env env, const coquic_effect_t &raw) {
         set_string(env, out, "kind", "receive_stream_data");
         set_u64(env, out, "connection", value.connection);
         set_u64(env, out, "streamId", value.stream_id);
+        set_u64(env, out, "offset", value.offset);
         set_buffer(env, out, "bytes", value.bytes);
         set_bool(env, out, "fin", value.fin != 0);
+        set_optional_u64(env, out, "finalSize", value.final_size.has_value != 0,
+                         value.final_size.value);
         break;
     }
     case COQUIC_EFFECT_RECEIVE_DATAGRAM_DATA: {
@@ -896,6 +901,7 @@ napi_value DefaultEndpointConfig(napi_env env, napi_callback_info) {
     set_u64(env, out, "maxOutboundDatagramSize", config.max_outbound_datagram_size);
     set_named(env, out, "zeroRtt", zero_rtt_to_js(env, config.zero_rtt));
     set_bool(env, out, "emitSharedReceiveStreamData", config.emit_shared_receive_stream_data != 0);
+    set_bool(env, out, "enableOutOfOrderReceive", config.enable_out_of_order_receive != 0);
     set_bool(env, out, "enablePacketInspection", config.enable_packet_inspection != 0);
     set_bool(env, out, "allowPeerAddressChange", config.allow_peer_address_change != 0);
     return out;

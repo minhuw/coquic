@@ -1189,6 +1189,45 @@ TEST(QuicCryptoStreamTest, ReceiveBufferReturnsOnlyUndeliveredTailOfOverlappingW
     EXPECT_EQ(second.value(), bytes_from_string("ef"));
 }
 
+TEST(QuicCryptoStreamTest, ReceiveBufferOutOfOrderPushReturnsSparseRangesImmediately) {
+    ReliableReceiveBuffer buffer;
+    auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcdef"));
+
+    auto late = buffer.push_out_of_order_shared(3, SharedBytes(storage, 3, 6));
+    ASSERT_TRUE(late.has_value());
+    ASSERT_EQ(late.value().size(), 1u);
+    EXPECT_EQ(late.value()[0].offset, 3u);
+    EXPECT_EQ(late.value()[0].bytes, bytes_from_string("def"));
+    EXPECT_EQ(late.value()[0].bytes.storage().get(), storage.get());
+
+    auto early = buffer.push_out_of_order_shared(0, SharedBytes(storage, 0, 3));
+    ASSERT_TRUE(early.has_value());
+    ASSERT_EQ(early.value().size(), 1u);
+    EXPECT_EQ(early.value()[0].offset, 0u);
+    EXPECT_EQ(early.value()[0].bytes, bytes_from_string("abc"));
+    EXPECT_TRUE(buffer.buffered_bytes_.empty());
+}
+
+TEST(QuicCryptoStreamTest, ReceiveBufferOutOfOrderPushSuppressesDuplicateAndOverlap) {
+    ReliableReceiveBuffer buffer;
+
+    auto first = buffer.push_out_of_order_shared(4, SharedBytes(bytes_from_string("efgh")));
+    ASSERT_TRUE(first.has_value());
+    ASSERT_EQ(first.value().size(), 1u);
+
+    auto duplicate = buffer.push_out_of_order_shared(4, SharedBytes(bytes_from_string("efgh")));
+    ASSERT_TRUE(duplicate.has_value());
+    EXPECT_TRUE(duplicate.value().empty());
+
+    auto overlap = buffer.push_out_of_order_shared(2, SharedBytes(bytes_from_string("cdefghij")));
+    ASSERT_TRUE(overlap.has_value());
+    ASSERT_EQ(overlap.value().size(), 2u);
+    EXPECT_EQ(overlap.value()[0].offset, 2u);
+    EXPECT_EQ(overlap.value()[0].bytes, bytes_from_string("cd"));
+    EXPECT_EQ(overlap.value()[1].offset, 8u);
+    EXPECT_EQ(overlap.value()[1].bytes, bytes_from_string("ij"));
+}
+
 TEST(QuicCryptoStreamTest, ReceiveBufferSharedPushReturnsAliasedInOrderStorage) {
     ReliableReceiveBuffer buffer;
     auto storage = std::make_shared<std::vector<std::byte>>(bytes_from_string("abcd"));

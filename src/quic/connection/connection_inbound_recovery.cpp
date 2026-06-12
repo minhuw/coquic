@@ -1,6 +1,8 @@
 #include "src/quic/connection/connection.h"
 #include "src/quic/connection/connection_internal.h"
 
+#include <limits>
+
 namespace coquic::quic {
 
 namespace {
@@ -44,6 +46,24 @@ CodecError crypto_receive_error(const CodecError &error) {
     // # connection with a CRYPTO_BUFFER_EXCEEDED error code.
     return transport_codec_error(error.code, QuicTransportErrorCode::crypto_buffer_exceeded,
                                  kFrameTypeCrypto, error.offset);
+}
+
+void assign_receive_payload(QuicCoreReceiveStreamData &receive, SharedBytes bytes,
+                            bool prefer_shared) {
+    if (prefer_shared) {
+        receive.shared_bytes = std::move(bytes);
+        return;
+    }
+
+    receive.bytes = bytes.to_vector();
+}
+
+std::uint64_t receive_range_end(std::uint64_t offset, std::size_t length) {
+    const auto max = std::numeric_limits<std::uint64_t>::max();
+    if (static_cast<std::uint64_t>(length) > max - offset) {
+        return max;
+    }
+    return offset + static_cast<std::uint64_t>(length);
 }
 
 } // namespace
@@ -2956,107 +2976,11 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 return CodecResult<bool>::failure(frame_encoding_error(kFrameTypeStreamBase));
             }
             const auto stream_offset = stream_frame->offset.value_or(0);
-            const auto retired_stream = validate_retired_peer_stream_frame(
-                stream_frame->stream_id, stream_offset, stream_frame->stream_data.size(),
-                stream_frame->fin, stream_frame_type_for(*stream_frame));
-            if (!retired_stream.has_value()) {
-                return retired_stream;
-            }
-            if (retired_stream.value()) {
-                continue;
-            }
-
-            const auto stream_count_before = streams_.size();
-            auto stream = get_or_open_receive_stream(stream_frame->stream_id);
-            if (!stream.has_value()) {
-                return CodecResult<bool>::failure(
-                    stream_state_codec_error(stream.error(), stream_frame_type_for(*stream_frame)));
-            }
-            auto *stream_state = stream.value();
-            if (stream_state->peer_reset_received) {
-                continue;
-            }
-
-            const auto previous_highest_offset = stream_state->highest_received_offset;
-            auto validated = stream_state->validate_receive_range(
-                stream_offset, stream_frame->stream_data.size(), stream_frame->fin);
-            if (!validated.has_value()) {
-                return CodecResult<bool>::failure(stream_state_codec_error(
-                    validated.error(), stream_frame_type_for(*stream_frame)));
-            }
-            const auto received_delta =
-                stream_state->highest_received_offset - previous_highest_offset;
-            //= https://www.rfc-editor.org/rfc/rfc9000#section-19.9
-            // # An endpoint MUST terminate a connection with an error of type
-            // # FLOW_CONTROL_ERROR if it receives more data than the maximum data
-            // # value that it has sent.
-            //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.3
-            // # A server SHOULD treat a violation of remembered limits
-            // # (Section 7.4.1) as a connection error of an appropriate type
-            // # (for instance, a FLOW_CONTROL_ERROR for exceeding stream data
-            // # limits).
-            if (connection_flow_control_.received_committed >
-                    connection_flow_control_.advertised_max_data ||
-                received_delta > connection_flow_control_.advertised_max_data -
-                                     connection_flow_control_.received_committed) {
-                return CodecResult<bool>::failure(
-                    flow_control_error(stream_frame_type_for(*stream_frame)));
-            }
-            connection_flow_control_.received_committed += received_delta;
-            if (streams_.size() != stream_count_before || received_delta != 0) {
-                note_peer_progress();
-            }
-
-            auto owned_contiguous_bytes =
-                stream_state->receive_buffer.push(stream_offset, stream_frame->stream_data);
-            if (!owned_contiguous_bytes.has_value()) {
-                return CodecResult<bool>::failure(owned_contiguous_bytes.error().code,
-                                                  owned_contiguous_bytes.error().offset);
-            }
-            if (stream_frame->stream_id == 0 &&
-                packet_trace_matches_connection(config_.source_connection_id)) {
-                std::cerr << "quic-packet-trace stream scid="
-                          << format_connection_id_hex(config_.source_connection_id)
-                          << " offset=" << stream_offset
-                          << " len=" << stream_frame->stream_data.size()
-                          << " fin=" << stream_frame->fin
-                          << " contiguous=" << owned_contiguous_bytes.value().size()
-                          << " highest=" << stream_state->highest_received_offset << '\n';
-            }
-
-            const auto contiguous_size = owned_contiguous_bytes.value().size();
-            stream_state->receive_flow_control_consumed +=
-                static_cast<std::uint64_t>(contiguous_size);
-            auto fin_ready =
-                stream_state->peer_final_size.has_value() &&
-                stream_state->receive_flow_control_consumed == *stream_state->peer_final_size &&
-                !stream_state->peer_fin_delivered;
-            if (contiguous_size != 0 || fin_ready) {
-                note_peer_progress();
-                //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
-                // # Endpoints MUST be able to deliver stream data to an
-                // # application as an ordered byte stream.
-                pending_stream_receive_effects_.push_back(QuicCoreReceiveStreamData{
-                    .stream_id = stream_frame->stream_id,
-                    .bytes = owned_contiguous_bytes.value(),
-                    .fin = fin_ready,
-                });
-                stream_state->flow_control.delivered_bytes +=
-                    static_cast<std::uint64_t>(owned_contiguous_bytes.value().size());
-                connection_flow_control_.delivered_bytes +=
-                    static_cast<std::uint64_t>(owned_contiguous_bytes.value().size());
-                if (fin_ready) {
-                    stream_state->peer_fin_delivered = true;
-                }
-                //= https://www.rfc-editor.org/rfc/rfc9000#section-4.2
-                // # Therefore, a receiver MUST NOT wait for a
-                // # STREAM_DATA_BLOCKED or DATA_BLOCKED frame before sending a
-                // # MAX_STREAM_DATA or MAX_DATA frame; doing so could result in
-                // # the sender being blocked for the rest of the connection.
-                maybe_refresh_stream_receive_credit(*stream_state, /*force=*/false);
-                maybe_refresh_connection_receive_credit(/*force=*/false);
-                maybe_refresh_peer_stream_limit(*stream_state);
-                maybe_retire_stream(stream_frame->stream_id);
+            const auto processed = process_inbound_application_stream_data(
+                stream_frame->stream_id, stream_offset, SharedBytes(stream_frame->stream_data),
+                stream_frame->fin, stream_frame_type_for(*stream_frame), require_connected);
+            if (!processed.has_value()) {
+                return processed;
             }
             continue;
         }
@@ -3906,23 +3830,17 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
     return CodecResult<bool>::success(true);
 }
 
-CodecResult<bool>
-QuicConnection::process_inbound_received_application_stream(const ReceivedStreamFrame &stream_frame,
-                                                            bool require_connected) {
+CodecResult<bool> QuicConnection::process_inbound_application_stream_data(
+    std::uint64_t stream_id, std::uint64_t stream_offset, const SharedBytes &stream_data, bool fin,
+    std::uint64_t frame_type, bool require_connected) {
     const bool allow_preconnected_stream_frame =
         application_space_.read_secret.has_value() && status_ == HandshakeStatus::in_progress;
     if (application_frame_requires_connected_state(
             require_connected && !allow_preconnected_stream_frame, status_)) {
-        return CodecResult<bool>::failure(
-            protocol_violation_error(stream_frame_type_for(stream_frame)));
+        return CodecResult<bool>::failure(protocol_violation_error(frame_type));
     }
-    if (stream_frame.has_offset && !stream_frame.offset.has_value()) {
-        return CodecResult<bool>::failure(frame_encoding_error(kFrameTypeStreamBase));
-    }
-    const auto stream_offset = stream_frame.offset.value_or(0);
     const auto retired_stream = validate_retired_peer_stream_frame(
-        stream_frame.stream_id, stream_offset, stream_frame.stream_data.size(), stream_frame.fin,
-        stream_frame_type_for(stream_frame));
+        stream_id, stream_offset, stream_data.size(), fin, frame_type);
     if (!retired_stream.has_value()) {
         return retired_stream;
     }
@@ -3931,10 +3849,9 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
     }
 
     const auto stream_count_before = streams_.size();
-    auto stream = get_or_open_receive_stream(stream_frame.stream_id);
+    auto stream = get_or_open_receive_stream(stream_id);
     if (!stream.has_value()) {
-        return CodecResult<bool>::failure(
-            stream_state_codec_error(stream.error(), stream_frame_type_for(stream_frame)));
+        return CodecResult<bool>::failure(stream_state_codec_error(stream.error(), frame_type));
     }
     auto *stream_state = stream.value();
     if (stream_state->peer_reset_received) {
@@ -3942,11 +3859,9 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
     }
 
     const auto previous_highest_offset = stream_state->highest_received_offset;
-    auto validated = stream_state->validate_receive_range(
-        stream_offset, stream_frame.stream_data.size(), stream_frame.fin);
+    auto validated = stream_state->validate_receive_range(stream_offset, stream_data.size(), fin);
     if (!validated.has_value()) {
-        return CodecResult<bool>::failure(
-            stream_state_codec_error(validated.error(), stream_frame_type_for(stream_frame)));
+        return CodecResult<bool>::failure(stream_state_codec_error(validated.error(), frame_type));
     }
     const auto received_delta = stream_state->highest_received_offset - previous_highest_offset;
     //= https://www.rfc-editor.org/rfc/rfc9000#section-19.9
@@ -3961,42 +3876,120 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
             connection_flow_control_.advertised_max_data ||
         received_delta > connection_flow_control_.advertised_max_data -
                              connection_flow_control_.received_committed) {
-        return CodecResult<bool>::failure(flow_control_error(stream_frame_type_for(stream_frame)));
+        return CodecResult<bool>::failure(flow_control_error(frame_type));
     }
     connection_flow_control_.received_committed += received_delta;
     if (streams_.size() != stream_count_before || received_delta != 0) {
         note_peer_progress();
     }
 
-    const auto fast_contiguous_receive = config_.emit_shared_receive_stream_data
-                                             ? stream_state->receive_buffer.try_accept_contiguous(
-                                                   stream_offset, stream_frame.stream_data.size())
-                                             : CodecResult<bool>::success(false);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+    // # implementations MAY choose to offer the ability to deliver data out
+    // # of order to a receiving application.
+    if (config_.enable_out_of_order_receive) {
+        auto delivered_ranges =
+            stream_state->receive_buffer.push_out_of_order_shared(stream_offset, stream_data);
+        if (!delivered_ranges.has_value()) {
+            return CodecResult<bool>::failure(delivered_ranges.error().code,
+                                              delivered_ranges.error().offset);
+        }
+        if (stream_id == 0 && packet_trace_matches_connection(config_.source_connection_id)) {
+            std::cerr << "quic-packet-trace stream scid="
+                      << format_connection_id_hex(config_.source_connection_id)
+                      << " offset=" << stream_offset << " len=" << stream_data.size()
+                      << " fin=" << fin << " delivered_ranges=" << delivered_ranges.value().size()
+                      << " highest=" << stream_state->highest_received_offset << '\n';
+        }
+
+        std::uint64_t delivered_delta = 0;
+        for (auto &range : delivered_ranges.value()) {
+            const auto range_end_value = receive_range_end(range.offset, range.bytes.size());
+            const bool range_reports_fin = stream_state->peer_final_size.has_value() &&
+                                           range_end_value == *stream_state->peer_final_size &&
+                                           !stream_state->peer_fin_reported;
+            QuicCoreReceiveStreamData receive{
+                .stream_id = stream_id,
+                .offset = range.offset,
+                .fin = range_reports_fin,
+                .final_size = range_reports_fin ? stream_state->peer_final_size : std::nullopt,
+            };
+            assign_receive_payload(receive, std::move(range.bytes),
+                                   config_.emit_shared_receive_stream_data);
+            pending_stream_receive_effects_.push_back(std::move(receive));
+            delivered_delta +=
+                static_cast<std::uint64_t>(pending_stream_receive_effects_.back().byte_count());
+            if (range_reports_fin) {
+                stream_state->peer_fin_reported = true;
+            }
+        }
+
+        const bool should_report_empty_fin =
+            stream_state->peer_final_size.has_value() && !stream_state->peer_fin_reported &&
+            receive_range_end(stream_offset, stream_data.size()) == *stream_state->peer_final_size;
+        if (should_report_empty_fin) {
+            pending_stream_receive_effects_.push_back(QuicCoreReceiveStreamData{
+                .stream_id = stream_id,
+                .offset = *stream_state->peer_final_size,
+                .fin = true,
+                .final_size = stream_state->peer_final_size,
+            });
+            stream_state->peer_fin_reported = true;
+        }
+
+        if (delivered_delta != 0 || should_report_empty_fin) {
+            note_peer_progress();
+        }
+        stream_state->receive_flow_control_consumed += delivered_delta;
+        stream_state->flow_control.delivered_bytes += delivered_delta;
+        connection_flow_control_.delivered_bytes += delivered_delta;
+        if (stream_state->peer_final_size.has_value() &&
+            stream_state->receive_buffer.next_contiguous_offset() ==
+                *stream_state->peer_final_size) {
+            stream_state->peer_fin_delivered = true;
+        }
+        if (delivered_delta != 0 || should_report_empty_fin) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-4.2
+            // # Therefore, a receiver MUST NOT wait for a STREAM_DATA_BLOCKED
+            // # or DATA_BLOCKED frame before sending a MAX_STREAM_DATA or
+            // # MAX_DATA frame; doing so could result in the sender being
+            // # blocked for the rest of the connection.
+            maybe_refresh_stream_receive_credit(*stream_state, /*force=*/false);
+            maybe_refresh_connection_receive_credit(/*force=*/false);
+            maybe_refresh_peer_stream_limit(*stream_state);
+            maybe_retire_stream(stream_id);
+        }
+
+        return CodecResult<bool>::success(true);
+    }
+
+    const auto fast_contiguous_receive =
+        config_.emit_shared_receive_stream_data
+            ? stream_state->receive_buffer.try_accept_contiguous(stream_offset, stream_data.size())
+            : CodecResult<bool>::success(false);
     if (!fast_contiguous_receive.has_value()) {
         return CodecResult<bool>::failure(fast_contiguous_receive.error().code,
                                           fast_contiguous_receive.error().offset);
     }
     ContiguousReceiveBytes shared_contiguous_bytes;
     if (!fast_contiguous_receive.value()) {
-        auto pushed =
-            stream_state->receive_buffer.push_shared(stream_offset, stream_frame.stream_data);
+        auto pushed = stream_state->receive_buffer.push_shared(stream_offset, stream_data);
         if (!pushed.has_value()) {
             return CodecResult<bool>::failure(pushed.error().code, pushed.error().offset);
         }
         shared_contiguous_bytes = std::move(pushed).value();
     }
     const auto contiguous_size = fast_contiguous_receive.value()
-                                     ? stream_frame.stream_data.size()
+                                     ? stream_data.size()
                                      : shared_contiguous_bytes.span().size();
-    if (stream_frame.stream_id == 0 &&
-        packet_trace_matches_connection(config_.source_connection_id)) {
+    if (stream_id == 0 && packet_trace_matches_connection(config_.source_connection_id)) {
         std::cerr << "quic-packet-trace stream scid="
                   << format_connection_id_hex(config_.source_connection_id)
-                  << " offset=" << stream_offset << " len=" << stream_frame.stream_data.size()
-                  << " fin=" << stream_frame.fin << " contiguous=" << contiguous_size
+                  << " offset=" << stream_offset << " len=" << stream_data.size() << " fin=" << fin
+                  << " contiguous=" << contiguous_size
                   << " highest=" << stream_state->highest_received_offset << '\n';
     }
 
+    const auto receive_offset = stream_state->receive_flow_control_consumed;
     stream_state->receive_flow_control_consumed += static_cast<std::uint64_t>(contiguous_size);
     auto fin_ready =
         stream_state->peer_final_size.has_value() &&
@@ -4008,11 +4001,13 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
         // # Endpoints MUST be able to deliver stream data to an application
         // # as an ordered byte stream.
         QuicCoreReceiveStreamData receive{
-            .stream_id = stream_frame.stream_id,
+            .stream_id = stream_id,
+            .offset = receive_offset,
             .fin = fin_ready,
+            .final_size = fin_ready ? stream_state->peer_final_size : std::nullopt,
         };
         if (fast_contiguous_receive.value()) {
-            receive.shared_bytes = stream_frame.stream_data;
+            receive.shared_bytes = stream_data;
         } else if (config_.emit_shared_receive_stream_data &&
                    shared_contiguous_bytes.owned.empty()) {
             receive.shared_bytes = std::move(shared_contiguous_bytes.shared);
@@ -4023,15 +4018,27 @@ QuicConnection::process_inbound_received_application_stream(const ReceivedStream
         stream_state->flow_control.delivered_bytes += static_cast<std::uint64_t>(contiguous_size);
         connection_flow_control_.delivered_bytes += static_cast<std::uint64_t>(contiguous_size);
         if (fin_ready) {
+            stream_state->peer_fin_reported = true;
             stream_state->peer_fin_delivered = true;
         }
         maybe_refresh_stream_receive_credit(*stream_state, /*force=*/false);
         maybe_refresh_connection_receive_credit(/*force=*/false);
         maybe_refresh_peer_stream_limit(*stream_state);
-        maybe_retire_stream(stream_frame.stream_id);
+        maybe_retire_stream(stream_id);
     }
 
     return CodecResult<bool>::success(true);
+}
+
+CodecResult<bool>
+QuicConnection::process_inbound_received_application_stream(const ReceivedStreamFrame &stream_frame,
+                                                            bool require_connected) {
+    if (stream_frame.has_offset && !stream_frame.offset.has_value()) {
+        return CodecResult<bool>::failure(frame_encoding_error(kFrameTypeStreamBase));
+    }
+    return process_inbound_application_stream_data(
+        stream_frame.stream_id, stream_frame.offset.value_or(0), stream_frame.stream_data,
+        stream_frame.fin, stream_frame_type_for(stream_frame), require_connected);
 }
 
 CodecResult<bool> QuicConnection::process_inbound_received_application_stream_packet(

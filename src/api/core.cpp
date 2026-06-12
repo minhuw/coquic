@@ -275,6 +275,7 @@ quic::QuicCoreEndpointConfig to_internal(const EndpointConfig &config) {
         .address_validation_replay_store_path = std::nullopt,
         .request_forgery_policy = {},
         .emit_shared_receive_stream_data = config.emit_shared_receive_stream_data,
+        .enable_out_of_order_receive = config.enable_out_of_order_receive,
         .enable_packet_inspection = config.enable_packet_inspection,
         .allow_peer_address_change = config.allow_peer_address_change,
     };
@@ -413,8 +414,10 @@ Effect from_internal(quic::QuicCoreEffect effect) {
                 return ReceiveStreamData{
                     .connection = value.connection,
                     .stream_id = value.stream_id,
+                    .offset = value.offset,
                     .bytes = payload_vector(value),
                     .fin = value.fin,
+                    .final_size = value.final_size,
                 };
             } else if constexpr (std::is_same_v<T, quic::QuicCoreReceiveDatagramData>) {
                 return ReceiveDatagramData{

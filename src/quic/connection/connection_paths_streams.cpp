@@ -2181,6 +2181,7 @@ QuicConnection::make_retired_peer_stream_state(std::uint64_t stream_id,
     auto stream = make_implicit_stream_state(stream_id, config_.role);
     stream.send_closed = true;
     stream.receive_closed = true;
+    stream.peer_fin_reported = true;
     stream.peer_fin_delivered = true;
     stream.peer_send_closed = true;
     stream.peer_final_size = range.receive_final_size;

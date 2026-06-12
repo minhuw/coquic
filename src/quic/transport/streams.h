@@ -184,6 +184,7 @@ struct StreamState {
     bool send_closed = false;
     bool receive_closed = false;
     bool peer_send_closed = false;
+    bool peer_fin_reported = false;
     bool peer_fin_delivered = false;
     std::optional<std::uint64_t> peer_final_size;
     std::optional<std::uint64_t> send_final_size;

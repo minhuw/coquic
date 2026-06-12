@@ -30,7 +30,7 @@ the same `coquic_*` C symbols.
 `COQUIC_FFI_ABI_VERSION` is the compile-time ABI version. Call
 `coquic_ffi_abi_version()` at runtime when a binding needs to verify that the
 loaded library matches the headers it was built against. The current ABI version
-is `1`.
+is `2`.
 
 All API input structs with a `size` member must be initialized before use. Keep
 `size` at `sizeof(the_struct)` after initialization so future ABI versions can

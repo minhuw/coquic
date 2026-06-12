@@ -357,6 +357,7 @@ TEST(CoquicCoreFfiTest, InitializersAndNullQueriesAreStable) {
     EXPECT_EQ(endpoint_config.application_protocol_length, 6u);
     EXPECT_EQ(static_cast<unsigned>(endpoint_config.transport.congestion_control),
               static_cast<unsigned>(COQUIC_CONGESTION_CONTROL_NEWRENO));
+    EXPECT_EQ(endpoint_config.enable_out_of_order_receive, 0);
 
     coquic_client_connection_config_t connection_config{};
     coquic_client_connection_config_init(&connection_config);
@@ -386,6 +387,18 @@ TEST(CoquicCoreFfiTest, InitializersAndNullQueriesAreStable) {
     EXPECT_EQ(coquic_result_effect_at(nullptr, 0, &effect), COQUIC_STATUS_INVALID_ARGUMENT);
     coquic_local_error_t error{};
     EXPECT_EQ(coquic_result_local_error(nullptr, &error), COQUIC_STATUS_INVALID_ARGUMENT);
+}
+
+TEST(CoquicCoreFfiTest, EndpointConfigSizeGatesOutOfOrderReceiveOption) {
+    coquic_endpoint_config_t endpoint_config{};
+    coquic_endpoint_config_init(&endpoint_config);
+    endpoint_config.enable_out_of_order_receive = 1;
+    endpoint_config.size = offsetof(coquic_endpoint_config_t, enable_out_of_order_receive);
+
+    coquic_endpoint_t *endpoint = nullptr;
+    ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);
+    ASSERT_NE(endpoint, nullptr);
+    coquic_endpoint_destroy(endpoint);
 }
 
 TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
@@ -418,6 +431,7 @@ TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
         .application_context = bytes_view(context),
     };
     endpoint_config.emit_shared_receive_stream_data = 1;
+    endpoint_config.enable_out_of_order_receive = 1;
     endpoint_config.enable_packet_inspection = 1;
     endpoint_config.allow_peer_address_change = 0;
     endpoint_config.max_server_connections = 8;
@@ -843,8 +857,10 @@ TEST(CoquicCoreFfiTest, ResultAccessorsExposeAllEffectVariants) {
         coquic::core::ReceiveStreamData{
             .connection = 2,
             .stream_id = 8,
+            .offset = 13,
             .bytes = core_bytes({0x03, 0x04, 0x05}),
             .fin = true,
+            .final_size = 16,
         },
         coquic::core::ReceiveDatagramData{
             .connection = 3,
@@ -937,8 +953,11 @@ TEST(CoquicCoreFfiTest, ResultAccessorsExposeAllEffectVariants) {
     EXPECT_EQ(effect.kind, COQUIC_EFFECT_RECEIVE_STREAM_DATA);
     EXPECT_EQ(effect.as.receive_stream_data.connection, 2u);
     EXPECT_EQ(effect.as.receive_stream_data.stream_id, 8u);
+    EXPECT_EQ(effect.as.receive_stream_data.offset, 13u);
     expect_bytes(effect.as.receive_stream_data.bytes, {0x03, 0x04, 0x05});
     EXPECT_EQ(effect.as.receive_stream_data.fin, 1);
+    ASSERT_EQ(effect.as.receive_stream_data.final_size.has_value, 1);
+    EXPECT_EQ(effect.as.receive_stream_data.final_size.value, 16u);
 
     ASSERT_EQ(coquic_result_effect_at(&result, 2, &effect), COQUIC_STATUS_OK);
     EXPECT_EQ(effect.kind, COQUIC_EFFECT_RECEIVE_DATAGRAM_DATA);

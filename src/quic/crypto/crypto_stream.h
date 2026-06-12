@@ -30,6 +30,11 @@ struct ByteRange {
     SharedBytes bytes;
 };
 
+struct ReceivedByteRange {
+    std::uint64_t offset = 0;
+    SharedBytes bytes;
+};
+
 struct ContiguousReceiveBytes {
     SharedBytes shared;
     std::vector<std::byte> owned;
@@ -274,8 +279,11 @@ class ReliableReceiveBuffer {
     void set_buffered_byte_limit(std::size_t limit);
     void clear_buffered_byte_limit();
     std::size_t buffered_byte_count() const;
+    std::uint64_t next_contiguous_offset() const;
 
     CodecResult<ContiguousReceiveBytes> push_shared(std::uint64_t offset, const SharedBytes &bytes);
+    CodecResult<std::vector<ReceivedByteRange>> push_out_of_order_shared(std::uint64_t offset,
+                                                                         const SharedBytes &bytes);
     CodecResult<std::vector<std::byte>> push(std::uint64_t offset, std::vector<std::byte> &&bytes);
     CodecResult<std::vector<std::byte>> push(std::uint64_t offset,
                                              std::span<const std::byte> bytes);
@@ -285,6 +293,8 @@ class ReliableReceiveBuffer {
     std::size_t unbuffered_byte_count(std::uint64_t offset, const SharedBytes &bytes) const;
     bool can_buffer_range(std::uint64_t offset, const SharedBytes &bytes) const;
     void buffer_range(std::uint64_t offset, const SharedBytes &bytes);
+    std::vector<ReceivedByteRange> new_ranges_for(std::uint64_t offset,
+                                                  const SharedBytes &bytes) const;
     ContiguousReceiveBytes take_contiguous_buffered_bytes(ContiguousReceiveBytes contiguous);
     std::vector<std::byte> take_contiguous_buffered_bytes();
 

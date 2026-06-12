@@ -4,6 +4,9 @@ import "testing"
 
 func TestConnectProducesInitialDatagram(t *testing.T) {
 	config := DefaultEndpointConfig()
+	if config.EnableOutOfOrderReceive {
+		t.Fatal("out-of-order receive default is enabled")
+	}
 	config.Role = RoleClient
 	config.ApplicationProtocol = []byte("coquic-perf/1")
 	config.MaxOutboundDatagramSize = 60 * 1024

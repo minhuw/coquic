@@ -15,6 +15,7 @@ using coquic::quic::CodecErrorCode;
 using coquic::quic::CodecResult;
 using coquic::quic::ContiguousReceiveBytes;
 using coquic::quic::CryptoFrame;
+using coquic::quic::ReceivedByteRange;
 using coquic::quic::ReliableSendBuffer;
 using coquic::quic::SharedBytes;
 
@@ -79,6 +80,10 @@ void ReliableReceiveBuffer::clear_buffered_byte_limit() {
 
 std::size_t ReliableReceiveBuffer::buffered_byte_count() const {
     return buffered_byte_count_;
+}
+
+std::uint64_t ReliableReceiveBuffer::next_contiguous_offset() const {
+    return next_contiguous_offset_;
 }
 
 void ReliableSendBuffer::note_segment_inserted(const Segment &segment) {
@@ -655,6 +660,33 @@ CodecResult<ContiguousReceiveBytes> ReliableReceiveBuffer::push_shared(std::uint
     return CodecResult<ContiguousReceiveBytes>::success(take_contiguous_buffered_bytes({}));
 }
 
+CodecResult<std::vector<ReceivedByteRange>>
+ReliableReceiveBuffer::push_out_of_order_shared(std::uint64_t offset, const SharedBytes &bytes) {
+    if (bytes.empty()) {
+        return CodecResult<std::vector<ReceivedByteRange>>::success({});
+    }
+    if (offset > maximum_stream_offset || bytes.size() - 1 > maximum_stream_offset - offset) {
+        return crypto_stream_failure<std::vector<ReceivedByteRange>>();
+    }
+
+    auto new_ranges = new_ranges_for(offset, bytes);
+    if (new_ranges.empty()) {
+        return CodecResult<std::vector<ReceivedByteRange>>::success({});
+    }
+
+    if (!can_buffer_range(offset, bytes)) {
+        return crypto_buffer_exceeded_failure<std::vector<ReceivedByteRange>>();
+    }
+    buffer_range(offset, bytes);
+    if (offset <= next_contiguous_offset_) {
+        next_contiguous_offset_ =
+            std::max(next_contiguous_offset_, range_end(offset, bytes.size()));
+        static_cast<void>(take_contiguous_buffered_bytes({}));
+    }
+
+    return CodecResult<std::vector<ReceivedByteRange>>::success(std::move(new_ranges));
+}
+
 CodecResult<bool> ReliableReceiveBuffer::try_accept_contiguous(std::uint64_t offset,
                                                                std::size_t length) {
     if (length == 0) {
@@ -800,6 +832,59 @@ void ReliableReceiveBuffer::buffer_range(std::uint64_t offset, const SharedBytes
         }
         ++next_buffered;
     }
+}
+
+std::vector<ReceivedByteRange>
+ReliableReceiveBuffer::new_ranges_for(std::uint64_t offset, const SharedBytes &bytes) const {
+    std::vector<ReceivedByteRange> ranges;
+    if (bytes.empty()) {
+        return ranges;
+    }
+
+    auto cursor = offset;
+    const auto end = range_end(offset, bytes.size());
+    if (cursor < next_contiguous_offset_) {
+        cursor = std::min(end, next_contiguous_offset_);
+    }
+
+    auto next_buffered = buffered_bytes_.lower_bound(cursor);
+    if (next_buffered != buffered_bytes_.begin()) {
+        auto previous = std::prev(next_buffered);
+        if (range_end(previous->first, previous->second.size()) > cursor) {
+            next_buffered = previous;
+        }
+    }
+
+    while (cursor < end) {
+        while (next_buffered != buffered_bytes_.end() &&
+               range_end(next_buffered->first, next_buffered->second.size()) <= cursor) {
+            ++next_buffered;
+        }
+
+        auto next_gap_end = end;
+        if (next_buffered != buffered_bytes_.end() && next_buffered->first < next_gap_end) {
+            next_gap_end = next_buffered->first;
+        }
+
+        if (cursor < next_gap_end) {
+            const auto begin_index = static_cast<std::size_t>(cursor - offset);
+            const auto byte_count = static_cast<std::size_t>(next_gap_end - cursor);
+            ranges.push_back(ReceivedByteRange{
+                .offset = cursor,
+                .bytes = bytes.subspan(begin_index, byte_count),
+            });
+            cursor = next_gap_end;
+            continue;
+        }
+
+        if (next_buffered == buffered_bytes_.end()) {
+            break;
+        }
+
+        cursor = std::max(cursor, range_end(next_buffered->first, next_buffered->second.size()));
+    }
+
+    return ranges;
 }
 
 ContiguousReceiveBytes

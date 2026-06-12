@@ -4,7 +4,7 @@
 
 use std::ffi::c_char;
 
-pub const COQUIC_FFI_ABI_VERSION: u32 = 1;
+pub const COQUIC_FFI_ABI_VERSION: u32 = 2;
 
 pub enum coquic_endpoint_t {}
 pub enum coquic_result_t {}
@@ -170,6 +170,13 @@ pub struct coquic_optional_time_us_t {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct coquic_optional_u64_t {
+    pub has_value: u8,
+    pub value: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct coquic_tls_identity_t {
     pub certificate_pem: *const c_char,
     pub certificate_pem_length: usize,
@@ -232,6 +239,8 @@ pub struct coquic_endpoint_config_t {
     pub emit_shared_receive_stream_data: u8,
     pub enable_packet_inspection: u8,
     pub allow_peer_address_change: u8,
+    pub max_server_connections: usize,
+    pub enable_out_of_order_receive: u8,
 }
 
 #[repr(C)]
@@ -380,8 +389,10 @@ pub struct coquic_send_datagram_effect_t {
 pub struct coquic_receive_stream_data_effect_t {
     pub connection: coquic_connection_handle_t,
     pub stream_id: coquic_stream_id_t,
+    pub offset: u64,
     pub bytes: coquic_bytes_view_t,
     pub fin: u8,
+    pub final_size: coquic_optional_u64_t,
 }
 
 #[repr(C)]

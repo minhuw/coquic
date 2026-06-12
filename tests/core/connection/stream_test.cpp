@@ -424,12 +424,283 @@ TEST(QuicCoreTest, ProcessInboundDatagramBuffersOutOfOrderOneRttStreamDataUntilG
     //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
     // # Endpoints MUST be able to deliver stream data to an application as an
     // # ordered byte stream.
+    EXPECT_EQ(received_stream.offset, 0u);
     if (coquic::quic::test::string_from_bytes(received_stream.bytes) != "hello") {
         ADD_FAILURE() << "unexpected coalesced stream bytes";
     }
     if (!received_stream.fin) {
         ADD_FAILURE() << "coalesced stream fin was not set";
     }
+    ASSERT_TRUE(received_stream.final_size.has_value());
+    EXPECT_EQ(*received_stream.final_size, 5u);
+    EXPECT_TRUE(connection.streams_.at(0).receive_buffer.buffered_bytes_.empty());
+}
+
+TEST(QuicCoreTest, OutOfOrderReceiveModeEmitsSparseStreamRangesBeforeGapCloses) {
+    auto connection = make_connected_server_connection();
+    connection.config_.enable_out_of_order_receive = true;
+
+    std::array late_frames = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+            .fin = false,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 3,
+            .stream_data = coquic::quic::SharedBytes(coquic::quic::test::bytes_from_string("lo")),
+        }},
+    };
+    ASSERT_TRUE(
+        connection
+            .process_inbound_received_application(late_frames, coquic::quic::test::test_time(1))
+            .has_value());
+
+    auto late = optional_value_or_terminate(connection.take_received_stream_data());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-2.2
+    // # implementations MAY choose to offer the ability to deliver data out
+    // # of order to a receiving application.
+    EXPECT_EQ(late.stream_id, 0u);
+    EXPECT_EQ(late.offset, 3u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(late.payload()), "lo");
+    EXPECT_FALSE(late.fin);
+    EXPECT_FALSE(late.final_size.has_value());
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
+
+    std::array early_frames = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+            .fin = false,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 0,
+            .stream_data = coquic::quic::SharedBytes(coquic::quic::test::bytes_from_string("hel")),
+        }},
+    };
+    ASSERT_TRUE(
+        connection
+            .process_inbound_received_application(early_frames, coquic::quic::test::test_time(2))
+            .has_value());
+
+    auto early = optional_value_or_terminate(connection.take_received_stream_data());
+    EXPECT_EQ(early.offset, 0u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(early.payload()), "hel");
+    EXPECT_FALSE(early.fin);
+    EXPECT_TRUE(connection.streams_.at(0).receive_buffer.buffered_bytes_.empty());
+    EXPECT_EQ(connection.streams_.at(0).receive_flow_control_consumed, 5u);
+    EXPECT_EQ(connection.streams_.at(0).flow_control.delivered_bytes, 5u);
+    EXPECT_EQ(connection.connection_flow_control_.delivered_bytes, 5u);
+}
+
+TEST(QuicCoreTest, OutOfOrderReceiveModeSuppressesDuplicateAndOverlappingRanges) {
+    auto connection = make_connected_server_connection();
+    connection.config_.enable_out_of_order_receive = true;
+
+    auto inject = [&](std::uint64_t offset, std::string_view text) {
+        std::array frames = {
+            coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+                .fin = false,
+                .has_offset = true,
+                .has_length = true,
+                .stream_id = 0,
+                .offset = offset,
+                .stream_data =
+                    coquic::quic::SharedBytes(coquic::quic::test::bytes_from_string(text)),
+            }},
+        };
+        return connection.process_inbound_received_application(
+            frames, coquic::quic::test::test_time(static_cast<std::int64_t>(offset + text.size())));
+    };
+
+    ASSERT_TRUE(inject(4, "efgh").has_value());
+    auto first = optional_value_or_terminate(connection.take_received_stream_data());
+    EXPECT_EQ(first.offset, 4u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(first.payload()), "efgh");
+
+    ASSERT_TRUE(inject(4, "efgh").has_value());
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
+
+    ASSERT_TRUE(inject(2, "cdefghij").has_value());
+    auto prefix = optional_value_or_terminate(connection.take_received_stream_data());
+    auto suffix = optional_value_or_terminate(connection.take_received_stream_data());
+    EXPECT_EQ(prefix.offset, 2u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(prefix.payload()), "cd");
+    EXPECT_EQ(suffix.offset, 8u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(suffix.payload()), "ij");
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
+    EXPECT_EQ(connection.streams_.at(0).receive_flow_control_consumed, 8u);
+    EXPECT_EQ(connection.connection_flow_control_.delivered_bytes, 8u);
+}
+
+TEST(QuicCoreTest, OutOfOrderReceiveModeReportsFinAndFinalSizeOnce) {
+    auto connection = make_connected_server_connection();
+    connection.config_.enable_out_of_order_receive = true;
+
+    std::array fin_frames = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+            .fin = true,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 3,
+            .stream_data = coquic::quic::SharedBytes(coquic::quic::test::bytes_from_string("lo")),
+        }},
+    };
+    ASSERT_TRUE(
+        connection
+            .process_inbound_received_application(fin_frames, coquic::quic::test::test_time(1))
+            .has_value());
+
+    auto late = optional_value_or_terminate(connection.take_received_stream_data());
+    EXPECT_EQ(late.offset, 3u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(late.payload()), "lo");
+    EXPECT_TRUE(late.fin);
+    ASSERT_TRUE(late.final_size.has_value());
+    EXPECT_EQ(*late.final_size, 5u);
+    EXPECT_EQ(connection.streams_.at(0).receive_flow_control_consumed, 2u);
+    EXPECT_FALSE(connection.streams_.at(0).peer_fin_delivered);
+
+    ASSERT_TRUE(
+        connection
+            .process_inbound_received_application(fin_frames, coquic::quic::test::test_time(2))
+            .has_value());
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
+
+    std::array early_frames = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+            .fin = false,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 0,
+            .stream_data = coquic::quic::SharedBytes(coquic::quic::test::bytes_from_string("hel")),
+        }},
+    };
+    ASSERT_TRUE(
+        connection
+            .process_inbound_received_application(early_frames, coquic::quic::test::test_time(3))
+            .has_value());
+
+    auto early = optional_value_or_terminate(connection.take_received_stream_data());
+    EXPECT_EQ(early.offset, 0u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(early.payload()), "hel");
+    EXPECT_FALSE(early.fin);
+    EXPECT_EQ(connection.streams_.at(0).receive_flow_control_consumed, 5u);
+    EXPECT_TRUE(connection.streams_.at(0).peer_fin_delivered);
+}
+
+TEST(QuicCoreTest, OutOfOrderReceiveModeReportsEmptyFinFinalSize) {
+    auto connection = make_connected_server_connection();
+    connection.config_.enable_out_of_order_receive = true;
+
+    std::array data_frames = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+            .fin = false,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 0,
+            .stream_data = coquic::quic::SharedBytes(coquic::quic::test::bytes_from_string("done")),
+        }},
+    };
+    ASSERT_TRUE(
+        connection
+            .process_inbound_received_application(data_frames, coquic::quic::test::test_time(1))
+            .has_value());
+    ASSERT_TRUE(connection.take_received_stream_data().has_value());
+
+    std::array fin_frames = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+            .fin = true,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 4,
+            .stream_data = coquic::quic::SharedBytes{},
+        }},
+    };
+    ASSERT_TRUE(
+        connection
+            .process_inbound_received_application(fin_frames, coquic::quic::test::test_time(2))
+            .has_value());
+
+    auto fin = optional_value_or_terminate(connection.take_received_stream_data());
+    EXPECT_EQ(fin.offset, 4u);
+    EXPECT_TRUE(fin.payload().empty());
+    EXPECT_TRUE(fin.fin);
+    ASSERT_TRUE(fin.final_size.has_value());
+    EXPECT_EQ(*fin.final_size, 4u);
+    EXPECT_TRUE(connection.streams_.at(0).peer_fin_delivered);
+}
+
+TEST(QuicCoreTest, OutOfOrderReceiveModeRejectsFinalSizeConflicts) {
+    auto connection = make_connected_server_connection();
+    connection.config_.enable_out_of_order_receive = true;
+
+    std::array first_fin = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+            .fin = true,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 2,
+            .stream_data = coquic::quic::SharedBytes(coquic::quic::test::bytes_from_string("x")),
+        }},
+    };
+    ASSERT_TRUE(
+        connection.process_inbound_received_application(first_fin, coquic::quic::test::test_time(1))
+            .has_value());
+    ASSERT_TRUE(connection.take_received_stream_data().has_value());
+
+    std::array conflicting_fin = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+            .fin = true,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 4,
+            .stream_data = coquic::quic::SharedBytes{},
+        }},
+    };
+    auto conflict = connection.process_inbound_received_application(
+        conflicting_fin, coquic::quic::test::test_time(2));
+
+    EXPECT_FALSE(conflict.has_value());
+    EXPECT_FALSE(connection.take_received_stream_data().has_value());
+}
+
+TEST(QuicCoreTest, OutOfOrderReceiveModeReportsResetAndClearsBufferedReceiveState) {
+    auto connection = make_connected_server_connection();
+    connection.config_.enable_out_of_order_receive = true;
+
+    std::array frames = {
+        coquic::quic::ReceivedFrame{coquic::quic::ReceivedStreamFrame{
+            .fin = false,
+            .has_offset = true,
+            .has_length = true,
+            .stream_id = 0,
+            .offset = 4,
+            .stream_data = coquic::quic::SharedBytes(coquic::quic::test::bytes_from_string("data")),
+        }},
+        coquic::quic::ReceivedFrame{coquic::quic::ResetStreamFrame{
+            .stream_id = 0,
+            .application_protocol_error_code = 77,
+            .final_size = 8,
+        }},
+    };
+
+    ASSERT_TRUE(
+        connection.process_inbound_received_application(frames, coquic::quic::test::test_time(1))
+            .has_value());
+
+    auto received = optional_value_or_terminate(connection.take_received_stream_data());
+    EXPECT_EQ(received.offset, 4u);
+    EXPECT_EQ(coquic::quic::test::string_from_bytes(received.payload()), "data");
+    auto reset = optional_value_or_terminate(connection.take_peer_reset_stream());
+    EXPECT_EQ(reset.stream_id, 0u);
+    EXPECT_EQ(reset.application_error_code, 77u);
+    EXPECT_EQ(reset.final_size, 8u);
+    ASSERT_TRUE(connection.streams_.contains(0));
+    EXPECT_TRUE(connection.streams_.at(0).peer_reset_received);
     EXPECT_TRUE(connection.streams_.at(0).receive_buffer.buffered_bytes_.empty());
 }
 

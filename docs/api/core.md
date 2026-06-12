@@ -31,6 +31,8 @@ route handles, timers, packets, and application effects.
 - `qlog`: optional qlog output directory.
 - `tls_keylog_path`: optional TLS key log output.
 - `emit_shared_receive_stream_data`: receive-data ownership mode.
+- `enable_out_of_order_receive`: opt-in sparse stream receive delivery with
+  offsets.
 - `enable_packet_inspection`: packet inspection effect emission.
 - `allow_peer_address_change`: peer address migration policy.
 
@@ -72,7 +74,8 @@ Every endpoint method returns `core::Result`. A result contains:
 `core::Effect` is a variant of:
 
 - `SendDatagram`: bytes the runtime must send on a UDP route.
-- `ReceiveStreamData`: stream bytes delivered to the application.
+- `ReceiveStreamData`: stream bytes delivered to the application, including
+  stream offset and optional final-size metadata.
 - `ReceiveDatagramData`: DATAGRAM frame payload delivered to the application.
 - `PeerResetStream` and `PeerStopSending`: peer stream-control signals.
 - `StateEvent`: handshake-ready, handshake-confirmed, or failed state changes.

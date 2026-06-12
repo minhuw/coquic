@@ -115,6 +115,7 @@ TEST(CoquicPublicApiTest, CoreEndpointCoversServerAndTransportOptions) {
             .qlog = coquic::core::QlogConfig{.directory = "."},
             .tls_keylog_path = ".coquic-test-keylog",
             .emit_shared_receive_stream_data = true,
+            .enable_out_of_order_receive = true,
             .enable_packet_inspection = true,
             .allow_peer_address_change = false,
         });

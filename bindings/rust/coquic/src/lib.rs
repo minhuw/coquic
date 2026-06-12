@@ -430,6 +430,7 @@ pub struct EndpointConfig {
     pub max_outbound_datagram_size: usize,
     pub zero_rtt: ZeroRttConfig,
     pub emit_shared_receive_stream_data: bool,
+    pub enable_out_of_order_receive: bool,
     pub enable_packet_inspection: bool,
     pub allow_peer_address_change: bool,
 }
@@ -474,8 +475,10 @@ impl EndpointConfig {
                 max_outbound_datagram_size: self.max_outbound_datagram_size,
                 zero_rtt: self.zero_rtt.to_raw(),
                 emit_shared_receive_stream_data: self.emit_shared_receive_stream_data as u8,
+                enable_out_of_order_receive: self.enable_out_of_order_receive as u8,
                 enable_packet_inspection: self.enable_packet_inspection as u8,
                 allow_peer_address_change: self.allow_peer_address_change as u8,
+                max_server_connections: 0,
             },
             _marker: PhantomData,
         }
@@ -502,6 +505,7 @@ impl Default for EndpointConfig {
                 max_outbound_datagram_size: raw.max_outbound_datagram_size,
                 zero_rtt: ZeroRttConfig::default(),
                 emit_shared_receive_stream_data: raw.emit_shared_receive_stream_data != 0,
+                enable_out_of_order_receive: raw.enable_out_of_order_receive != 0,
                 enable_packet_inspection: raw.enable_packet_inspection != 0,
                 allow_peer_address_change: raw.allow_peer_address_change != 0,
             }
@@ -963,8 +967,10 @@ pub enum Effect<'a> {
     ReceiveStreamData {
         connection: ConnectionHandle,
         stream_id: StreamId,
+        offset: u64,
         bytes: &'a [u8],
         fin: bool,
+        final_size: Option<u64>,
     },
     ReceiveDatagramData {
         connection: ConnectionHandle,
@@ -1027,8 +1033,10 @@ impl<'a> Effect<'a> {
                 Self::ReceiveStreamData {
                     connection: value.connection,
                     stream_id: value.stream_id,
+                    offset: value.offset,
                     bytes: unsafe { bytes_view(value.bytes) },
                     fin: value.fin != 0,
+                    final_size: optional_core_u64_from_raw(value.final_size),
                 }
             }
             ffi::COQUIC_EFFECT_RECEIVE_DATAGRAM_DATA => {
@@ -1652,7 +1660,11 @@ pub(crate) fn optional_u64(value: Option<u64>) -> ffi::coquic_http3_optional_u64
     }
 }
 
-pub(crate) fn optional_u64_from_raw(raw: ffi::coquic_http3_optional_u64_t) -> Option<u64> {
+fn optional_core_u64_from_raw(raw: ffi::coquic_optional_u64_t) -> Option<u64> {
+    (raw.has_value != 0).then_some(raw.value)
+}
+
+pub(crate) fn optional_http3_u64_from_raw(raw: ffi::coquic_http3_optional_u64_t) -> Option<u64> {
     (raw.has_value != 0).then_some(raw.value)
 }
 
@@ -1711,7 +1723,10 @@ mod tests {
 
     #[test]
     fn endpoint_create_destroy_smoke() {
-        let endpoint = Endpoint::new(&EndpointConfig::default()).unwrap();
+        let mut config = EndpointConfig::default();
+        assert!(!config.enable_out_of_order_receive);
+        config.enable_out_of_order_receive = true;
+        let endpoint = Endpoint::new(&config).unwrap();
         assert_eq!(endpoint.connection_count(), 0);
     }
 

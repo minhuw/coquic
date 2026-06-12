@@ -449,6 +449,99 @@ TEST(QuicCoreEndpointInternalTest, VersionNegotiationCanGreaseReservedVersion) {
               (std::vector<std::uint32_t>{kQuicVersion1, 0x1a2a3a4a}));
 }
 
+TEST(QuicCoreEndpointInternalTest, ReservedVersionProbePacketUsesReservedVersionPattern) {
+    auto open = make_client_open_config();
+
+    auto bytes = QuicCore::make_reserved_version_probe_packet_bytes(open);
+
+    ASSERT_EQ(bytes.size(), 7u + open.initial_destination_connection_id.size() +
+                                open.source_connection_id.size());
+    EXPECT_EQ(bytes[0], std::byte{0xc0});
+    EXPECT_EQ(bytes[1], std::byte{0x0a});
+    EXPECT_EQ(bytes[2], std::byte{0x0a});
+    EXPECT_EQ(bytes[3], std::byte{0x0a});
+    EXPECT_EQ(bytes[4], std::byte{0x0a});
+    EXPECT_EQ(bytes[5], static_cast<std::byte>(open.initial_destination_connection_id.size()));
+    EXPECT_TRUE(std::equal(open.initial_destination_connection_id.begin(),
+                           open.initial_destination_connection_id.end(), bytes.begin() + 6));
+    const auto source_length_offset = 6 + open.initial_destination_connection_id.size();
+    EXPECT_EQ(bytes[source_length_offset],
+              static_cast<std::byte>(open.source_connection_id.size()));
+    EXPECT_TRUE(std::equal(open.source_connection_id.begin(), open.source_connection_id.end(),
+                           bytes.begin() + static_cast<std::ptrdiff_t>(source_length_offset + 1)));
+    EXPECT_LT(bytes.size(), 1200u);
+}
+
+TEST(QuicCoreEndpointInternalTest, ReservedVersionProbeIsDisabledByDefaultOnClientOpen) {
+    QuicCore client(make_client_endpoint_config());
+
+    auto opened = client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0));
+
+    const auto sends = send_effects_from(opened);
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends.front().connection, 1u);
+    auto diagnostics = client.connection_diagnostics();
+    ASSERT_EQ(diagnostics.size(), 1u);
+    EXPECT_EQ(diagnostics.front().initial_space.next_send_packet_number, 1u);
+    EXPECT_GT(diagnostics.front().initial_space.outstanding_packets, 0u);
+    EXPECT_GT(diagnostics.front().recovery.bytes_in_flight, 0u);
+}
+
+TEST(QuicCoreEndpointInternalTest, ReservedVersionProbeOptInSendsUntrackedStartupDatagram) {
+    auto config = make_client_endpoint_config();
+    config.enable_reserved_version_probe = true;
+    QuicCore client(std::move(config));
+    auto open = make_client_open_config();
+    auto expected_probe = QuicCore::make_reserved_version_probe_packet_bytes(open);
+
+    auto opened = client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = open,
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0));
+
+    const auto sends = send_effects_from(opened);
+    ASSERT_EQ(sends.size(), 2u);
+    EXPECT_EQ(sends.front().connection, 1u);
+    EXPECT_EQ(sends.back().connection, 0u);
+    EXPECT_EQ(sends.back().route_handle, std::optional<QuicRouteHandle>{17});
+    EXPECT_EQ(sends.back().ecn, QuicEcnCodepoint::not_ect);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-6.3
+    // # Endpoints MAY send packets with a reserved version to test that a
+    // # peer correctly discards the packet.
+    EXPECT_EQ(sends.back().bytes.to_vector(), expected_probe);
+
+    auto diagnostics = client.connection_diagnostics();
+    ASSERT_EQ(diagnostics.size(), 1u);
+    EXPECT_EQ(diagnostics.front().initial_space.next_send_packet_number, 1u);
+    EXPECT_GT(diagnostics.front().initial_space.outstanding_packets, 0u);
+    EXPECT_GT(diagnostics.front().recovery.bytes_in_flight, 0u);
+}
+
+TEST(QuicCoreEndpointInternalTest, ServerDropsSmallReservedVersionProbeWithoutNegotiation) {
+    QuicCore server(make_server_endpoint_config());
+    auto probe = QuicCore::make_reserved_version_probe_packet_bytes(make_client_open_config());
+
+    auto result = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = std::move(probe),
+            .route_handle = 55,
+        },
+        coquic::quic::test::test_time(1));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2.2
+    // # Servers MUST drop smaller packets that specify unsupported versions.
+    EXPECT_TRUE(result.effects.empty());
+    EXPECT_FALSE(result.local_error.has_value());
+    EXPECT_EQ(server.connection_count(), 0u);
+}
+
 TEST(QuicCoreEndpointInternalTest, ClientEndpointRestartsHandshakeAfterValidVersionNegotiation) {
     auto endpoint_config = make_client_endpoint_config();
     endpoint_config.supported_versions = {kQuicVersion2, kQuicVersion1};
@@ -1254,6 +1347,38 @@ TEST(QuicCoreEndpointInternalTest, LegacyPathMtuUpdateHonorsRouteMapping) {
     EXPECT_EQ(path.mtu.probe_ceiling, 1300u);
     EXPECT_EQ(path.mtu.validated_datagram_size, 1300u);
 }
+
+TEST(QuicCoreEndpointInternalTest, LegacyClientBindsFirstInboundRouteAsDefaultPath) {
+    QuicCore legacy_core(coquic::quic::test::make_client_core_config());
+    auto *entry = legacy_core.ensure_legacy_entry();
+    ASSERT_NE(entry, nullptr);
+    ASSERT_NE(entry->connection, nullptr);
+    ASSERT_EQ(legacy_core.connection_count(), 1u);
+    ASSERT_FALSE(entry->default_route_handle.has_value());
+    ASSERT_TRUE(entry->path_id_by_route_handle.empty());
+    ASSERT_TRUE(entry->route_handle_by_path_id.empty());
+
+    const auto identity = make_ipv4_identity(198, 51, 100, 7, 4433);
+    auto route_probe = legacy_core.advance(
+        QuicCoreInboundDatagram{
+            .bytes = bytes_from_ints({0x40}),
+            .route_handle = 17,
+            .address_validation_identity = identity,
+        },
+        coquic::quic::test::test_time(1));
+
+    EXPECT_FALSE(route_probe.local_error.has_value());
+    entry = legacy_core.ensure_legacy_entry();
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->default_route_handle, std::optional<QuicRouteHandle>{17u});
+    ASSERT_TRUE(entry->path_id_by_route_handle.contains(17));
+    EXPECT_EQ(entry->path_id_by_route_handle.at(17), 0u);
+    ASSERT_TRUE(entry->route_handle_by_path_id.contains(0));
+    EXPECT_EQ(entry->route_handle_by_path_id.at(0), 17u);
+    ASSERT_TRUE(entry->address_validation_identity_by_path_id.contains(0));
+    EXPECT_EQ(entry->address_validation_identity_by_path_id.at(0), identity);
+}
+
 TEST(QuicCoreEndpointInternalTest,
      ExistingInboundDatagramUsesDefaultRouteAndErasesClosedConnection) {
     auto server_config = make_server_endpoint_config();

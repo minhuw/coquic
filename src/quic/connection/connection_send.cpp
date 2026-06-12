@@ -390,7 +390,9 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
     const auto destination_connection_id =
         outbound_destination_connection_id(current_send_path_id_);
     const auto stream_wire_budget = application_stream_frame_budget(
-        max_outbound_datagram_size, destination_connection_id.size());
+        max_outbound_datagram_size, destination_connection_id.size(),
+        packet_number_length_for_send(application_space_,
+                                      application_space_.next_send_packet_number));
     if (stream_wire_budget == 0) {
         return 0;
     }
@@ -509,8 +511,10 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
             break;
         }
         const auto datagram_limit = std::min(max_outbound_datagram_size, available_window);
-        const auto packet_stream_wire_budget =
-            application_stream_frame_budget(datagram_limit, destination_connection_id.size());
+        const auto packet_stream_wire_budget = application_stream_frame_budget(
+            datagram_limit, destination_connection_id.size(),
+            packet_number_length_for_send(application_space_,
+                                          application_space_.next_send_packet_number));
         if (packet_stream_wire_budget == 0) {
             break;
         }
@@ -786,23 +790,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         discard_packet_space_state(zero_rtt_space_);
     }
     queue_client_handshake_recovery_probe();
-    bool client_will_send_handshake_packet =
-        (config_.role == EndpointRole::client) & !initial_packet_space_discarded_ &
-        initial_space_.pending_probe_packet.has_value() &
-        !initial_space_.send_crypto.has_pending_data() &
-        !initial_space_.received_packets.has_ack_to_send() & !handshake_packet_space_discarded_ &
-        handshake_space_.write_secret.has_value() &
-        (handshake_space_.send_crypto.has_pending_data() ||
-         handshake_space_.pending_probe_packet.has_value());
-    if (client_will_send_handshake_packet) {
-        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.1
-        // # Thus, a client MUST discard Initial keys when it first sends a
-        // # Handshake packet and a server MUST discard Initial keys when it
-        // # first successfully processes a Handshake packet.
-        //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.1
-        // # Endpoints MUST NOT send Initial packets after this point.
-        discard_initial_packet_space();
-    }
 
     auto packets = std::vector<ProtectedPacket>{};
     auto selected_send_path_id = current_send_path_id_;
@@ -2084,6 +2071,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                       },
                       sent_handshake_crypto_ranges);
         if (!handshake_candidate_datagram.has_value()) {
+            for (const auto &range : sent_handshake_crypto_ranges) {
+                handshake_space_.send_crypto.mark_unsent(range.offset, range.bytes.size());
+            }
+            if (is_empty_packet_payload_error(handshake_candidate_datagram) && !packets.empty()) {
+                return finalize_datagram(packets);
+            }
             return fail_datagram_send(has_pending_tracked_packet());
         }
         auto sent_handshake_frames =
@@ -2096,6 +2089,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 return std::holds_alternative<PingFrame>(frame);
             });
         if (handshake_candidate_datagram.value().bytes.size() > max_outbound_datagram_size) {
+            for (const auto &range : sent_handshake_crypto_ranges) {
+                handshake_space_.send_crypto.mark_unsent(range.offset, range.bytes.size());
+            }
             if (!packets.empty()) {
                 return finalize_datagram(packets);
             }
@@ -4162,7 +4158,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 return std::min(max_outbound_datagram_size, cwnd - bytes_in_flight);
             }();
             auto base_application_stream_budget = application_stream_frame_budget(
-                congestion_limited_datagram_size, application_destination_connection_id().size());
+                congestion_limited_datagram_size, application_destination_connection_id().size(),
+                packet_number_length_for_send(application_space_,
+                                              application_space_.next_send_packet_number));
             const auto pending_application_stream_priority = [&]() -> std::optional<std::int32_t> {
                 std::optional<std::int32_t> highest;
                 for (const auto &[stream_id, stream] : streams_) {

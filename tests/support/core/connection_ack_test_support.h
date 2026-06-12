@@ -89,6 +89,7 @@ using coquic::quic::test_support::protected_next_packet_length;
 using coquic::quic::test_support::ProtectedPacketKind;
 using coquic::quic::test_support::read_u32_be_at;
 using coquic::quic::test_support::ScopedEnvVar;
+using coquic::quic::test_support::sender_application_packet_number_reference_for_tests;
 using coquic::quic::test_support::sent_packet_has_stream_frames_for_tests;
 using coquic::quic::test_support::tracked_packet_count;
 using coquic::quic::test_support::tracked_packet_or_null;

@@ -175,6 +175,10 @@ struct EndpointConfig {
     // # of order to a receiving application.
     bool enable_out_of_order_receive = false;
     bool enable_packet_inspection = false;
+    // Diagnostic anti-ossification mode. When enabled on a client endpoint,
+    // opening a connection also sends a standalone reserved-version probe that
+    // peers are expected to discard.
+    bool enable_reserved_version_probe = false;
     bool allow_peer_address_change = true;
 };
 

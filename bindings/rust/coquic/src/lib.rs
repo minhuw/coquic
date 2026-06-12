@@ -458,6 +458,7 @@ pub struct EndpointConfig {
     pub emit_shared_receive_stream_data: bool,
     pub enable_out_of_order_receive: bool,
     pub enable_packet_inspection: bool,
+    pub enable_reserved_version_probe: bool,
     pub allow_peer_address_change: bool,
 }
 
@@ -504,6 +505,7 @@ impl EndpointConfig {
                 emit_shared_receive_stream_data: self.emit_shared_receive_stream_data as u8,
                 enable_out_of_order_receive: self.enable_out_of_order_receive as u8,
                 enable_packet_inspection: self.enable_packet_inspection as u8,
+                enable_reserved_version_probe: self.enable_reserved_version_probe as u8,
                 allow_peer_address_change: self.allow_peer_address_change as u8,
                 max_server_connections: 0,
             },
@@ -537,6 +539,7 @@ impl Default for EndpointConfig {
                 emit_shared_receive_stream_data: raw.emit_shared_receive_stream_data != 0,
                 enable_out_of_order_receive: raw.enable_out_of_order_receive != 0,
                 enable_packet_inspection: raw.enable_packet_inspection != 0,
+                enable_reserved_version_probe: raw.enable_reserved_version_probe != 0,
                 allow_peer_address_change: raw.allow_peer_address_change != 0,
             }
         }

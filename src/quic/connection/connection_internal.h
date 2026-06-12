@@ -2663,10 +2663,9 @@ make_stream_frame_views(std::span<const StreamFrameSendFragment> fragments) {
 
 inline std::size_t application_stream_frame_budget(
     std::size_t max_datagram_size, // NOLINT(bugprone-easily-swappable-parameters)
-    std::size_t destination_connection_id_size) {
+    std::size_t destination_connection_id_size, std::uint8_t packet_number_length) {
     const auto packet_overhead = std::size_t{1} + destination_connection_id_size +
-                                 kDefaultInitialPacketNumberLength +
-                                 kOneRttPacketProtectionTagLength;
+                                 packet_number_length + kOneRttPacketProtectionTagLength;
     if (max_datagram_size <= packet_overhead) {
         return 0;
     }

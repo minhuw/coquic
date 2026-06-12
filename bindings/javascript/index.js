@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const native = loadNative();
 
-export const FFI_ABI_VERSION = 4;
+export const FFI_ABI_VERSION = 5;
 
 export const Status = Object.freeze({
   OK: 0,

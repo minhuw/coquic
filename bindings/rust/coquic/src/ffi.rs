@@ -4,7 +4,7 @@
 
 use std::ffi::c_char;
 
-pub const COQUIC_FFI_ABI_VERSION: u32 = 4;
+pub const COQUIC_FFI_ABI_VERSION: u32 = 5;
 
 pub enum coquic_endpoint_t {}
 pub enum coquic_result_t {}
@@ -250,6 +250,7 @@ pub struct coquic_endpoint_config_t {
     pub max_server_connections: usize,
     pub enable_out_of_order_receive: u8,
     pub orphan_zero_rtt_buffer: coquic_orphan_zero_rtt_buffer_config_t,
+    pub enable_reserved_version_probe: u8,
 }
 
 #[repr(C)]

@@ -201,6 +201,7 @@ struct QuicCoreConfig {
     // # of order to a receiving application.
     bool enable_out_of_order_receive = false;
     bool enable_packet_inspection = false;
+    bool enable_reserved_version_probe = false;
     bool defer_inbound_application_send_drain = false;
 };
 
@@ -366,6 +367,7 @@ struct QuicCoreEndpointConfig {
     // # of order to a receiving application.
     bool enable_out_of_order_receive = false;
     bool enable_packet_inspection = false;
+    bool enable_reserved_version_probe = false;
     bool defer_inbound_application_send_drain = false;
     bool allow_peer_address_change = true;
     bool retain_stateless_reset_tokens_after_connection_close = true;
@@ -894,6 +896,8 @@ class QuicCore {
     make_version_negotiation_packet_bytes(const ParsedEndpointDatagram &parsed,
                                           std::span<const std::uint32_t> supported_versions,
                                           bool grease_reserved_versions = false);
+    static std::vector<std::byte>
+    make_reserved_version_probe_packet_bytes(const QuicCoreClientConnectionConfig &connection);
     static std::vector<std::byte> make_retry_packet_bytes(const ParsedEndpointDatagram &parsed,
                                                           const PendingRetryToken &pending);
     bool orphan_zero_rtt_buffer_enabled() const;

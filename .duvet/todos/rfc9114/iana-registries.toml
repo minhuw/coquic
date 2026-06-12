@@ -1,0 +1,223 @@
+# RFC 9114 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.1"
+# report-id = 777
+quote = '''
+If an entry is present in
+only one registry, every effort SHOULD be made to avoid assigning the
+corresponding value to an unrelated operation.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.1"
+# report-id = 778
+quote = '''
+Expert reviewers MAY
+reject unrelated registrations that would conflict with the same
+value in the corresponding registry.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.1"
+# report-id = 779
+quote = '''
+In addition to common fields as described in Section 11.2, permanent
+registrations in this registry MUST include the following field:
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.1"
+# report-id = 780
+quote = '''
+Specifications of frame types MUST include a description of the frame
+layout and its semantics, including any parts of the frame that are
+conditionally present.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.1"
+# report-id = 781
+quote = '''
+Each code of the format 0x1f * N + 0x21 for non-negative integer
+values of N (that is, 0x21, 0x40, ..., through 0x3ffffffffffffffe)
+MUST NOT be assigned by IANA and MUST NOT appear in the listing of
+assigned values.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.2"
+# report-id = 782
+quote = '''
+If an entry is present in only one registry, every
+effort SHOULD be made to avoid assigning the corresponding value to
+an unrelated operation.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.2"
+# report-id = 783
+quote = '''
+Expert reviewers MAY reject unrelated
+registrations that would conflict with the same value in the
+corresponding registry.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.2"
+# report-id = 784
+quote = '''
+In addition to common fields as described in Section 11.2, permanent
+registrations in this registry MUST include the following fields:
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.2"
+# report-id = 785
+quote = '''
+A
+default SHOULD be the most restrictive possible value.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.2"
+# report-id = 786
+quote = '''
+Each code of the format 0x1f * N + 0x21 for non-negative integer
+values of N (that is, 0x21, 0x40, ..., through 0x3ffffffffffffffe)
+MUST NOT be assigned by IANA and MUST NOT appear in the listing of
+assigned values.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.3"
+# report-id = 787
+quote = '''
+Use of values that are registered in the "HTTP/2 Error Code" registry
+is discouraged, and expert reviewers MAY reject such registrations.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.3"
+# report-id = 788
+quote = '''
+Permanent registrations in
+this registry MUST include the following field:
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.3"
+# report-id = 789
+quote = '''
+Each code of the format 0x1f * N + 0x21 for non-negative integer
+values of N (that is, 0x21, 0x40, ..., through 0x3ffffffffffffffe)
+MUST NOT be assigned by IANA and MUST NOT appear in the listing of
+assigned values.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.4"
+# report-id = 790
+quote = '''
+In addition to common fields as described in Section 11.2, permanent
+registrations in this registry MUST include the following fields:
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.4"
+# report-id = 791
+quote = '''
+Specifications for permanent registrations MUST include a description
+of the stream type, including the layout and semantics of the stream
+contents.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-11.2.4"
+# report-id = 792
+quote = '''
+Each code of the format 0x1f * N + 0x21 for non-negative integer
+values of N (that is, 0x21, 0x40, ..., through 0x3ffffffffffffffe)
+MUST NOT be assigned by IANA and MUST NOT appear in the listing of
+assigned values.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/61"
+reason = '''
+HTTP/3 IANA registry, extension registration, and reserved codepoint policy need durable contributor documentation and validation.
+'''
+tags = ["rfc9114"]

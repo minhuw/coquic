@@ -481,6 +481,10 @@ TEST(QuicCoreEndpointInternalTest, ClientEndpointRestartsHandshakeAfterValidVers
 
     const auto restart_sends = send_effects_from(after_version_negotiation);
     ASSERT_FALSE(restart_sends.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-2.1
+    // # Otherwise, it SHALL select a mutually supported version and send a
+    // # new first flight with that version -- this version is now the
+    // # Negotiated Version.
     EXPECT_EQ(read_u32_be_at(restart_sends.front().bytes, 1), kQuicVersion2);
     ASSERT_EQ(client.connections_.size(), 1u);
     const auto &entry = client.connections_.begin()->second;
@@ -519,6 +523,9 @@ TEST(QuicCoreEndpointInternalTest, ClientEndpointIgnoresInvalidOrRepeatedVersion
             .route_handle = 17,
         },
         coquic::quic::test::test_time(1));
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+    // # Clients MUST ignore any received Version Negotiation packets that
+    // # contain the Original Version.
     EXPECT_TRUE(send_effects_from(ignored).empty());
 
     const auto valid = serialize_packet(VersionNegotiationPacket{
@@ -547,6 +554,11 @@ TEST(QuicCoreEndpointInternalTest, ClientEndpointIgnoresInvalidOrRepeatedVersion
             .route_handle = 17,
         },
         coquic::quic::test::test_time(3));
+    //= https://www.rfc-editor.org/rfc/rfc9368#section-4
+    // # A client that makes a connection
+    // # attempt based on information received from a Version Negotiation
+    // # packet MUST ignore any Version Negotiation packets it receives in
+    // # response to that connection attempt.
     EXPECT_TRUE(send_effects_from(second).empty());
 
     ASSERT_EQ(client.connections_.size(), 1u);

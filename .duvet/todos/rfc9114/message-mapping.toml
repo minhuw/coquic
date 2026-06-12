@@ -1,0 +1,158 @@
+# RFC 9114 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.2"
+# report-id = 824
+quote = '''
+Intermediaries that process HTTP requests or responses (i.e., any
+intermediary not acting as a tunnel) MUST NOT forward a malformed
+request or response.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/53"
+reason = '''
+HTTP/3 message mapping, malformed-message forwarding, Cookie handling, lowercase field generation, and HTTP/1.x translation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.2"
+# report-id = 826
+quote = '''
+For malformed requests, a server MAY send an HTTP response indicating
+the error prior to closing or resetting the stream.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/53"
+reason = '''
+HTTP/3 message mapping, malformed-message forwarding, Cookie handling, lowercase field generation, and HTTP/1.x translation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1"
+# report-id = 834
+quote = '''
+Transfer codings (see Section 7 of [HTTP/1.1]) are not defined for
+HTTP/3; the Transfer-Encoding header field MUST NOT be used.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/53"
+reason = '''
+HTTP/3 message mapping, malformed-message forwarding, Cookie handling, lowercase field generation, and HTTP/1.x translation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.2.1"
+# report-id = 845
+quote = '''
+To allow for better compression efficiency, the Cookie header field
+([COOKIES]) MAY be split into separate field lines, each with one or
+more cookie-pairs, before compression.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/53"
+reason = '''
+HTTP/3 message mapping, malformed-message forwarding, Cookie handling, lowercase field generation, and HTTP/1.x translation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.2.1"
+# report-id = 846
+quote = '''
+If a decompressed field
+section contains multiple cookie field lines, these MUST be
+concatenated into a single byte string using the two-byte delimiter
+of "; " (ASCII 0x3b, 0x20) before being passed into a context other
+than HTTP/2 or HTTP/3, such as an HTTP/1.1 connection, or a generic
+HTTP server application.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/53"
+reason = '''
+HTTP/3 message mapping, malformed-message forwarding, Cookie handling, lowercase field generation, and HTTP/1.x translation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.2"
+# report-id = 849
+quote = '''
+Characters in field names MUST be
+converted to lowercase prior to their encoding.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/53"
+reason = '''
+HTTP/3 message mapping, malformed-message forwarding, Cookie handling, lowercase field generation, and HTTP/1.x translation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.2"
+# report-id = 853
+quote = '''
+An intermediary transforming an HTTP/1.x message to HTTP/3 MUST
+remove connection-specific header fields as discussed in
+Section 7.6.1 of [HTTP], or their messages will be treated by other
+HTTP/3 endpoints as malformed.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/53"
+reason = '''
+HTTP/3 message mapping, malformed-message forwarding, Cookie handling, lowercase field generation, and HTTP/1.x translation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1"
+# report-id = 855
+quote = '''
+To ensure that the HTTP/1.1 request line can be reproduced
+accurately, this pseudo-header field MUST be omitted when
+translating from an HTTP/1.1 request that has a request target in
+a method-specific form; see Section 7.1 of [HTTP].
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/53"
+reason = '''
+HTTP/3 message mapping, malformed-message forwarding, Cookie handling, lowercase field generation, and HTTP/1.x translation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1"
+# report-id = 856
+quote = '''
+Clients that
+generate HTTP/3 requests directly SHOULD use the :authority
+pseudo-header field instead of the Host header field.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/53"
+reason = '''
+HTTP/3 message mapping, malformed-message forwarding, Cookie handling, lowercase field generation, and HTTP/1.x translation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1"
+# report-id = 857
+quote = '''
+An
+intermediary that converts an HTTP/3 request to HTTP/1.1 MUST
+create a Host field if one is not present in a request by copying
+the value of the :authority pseudo-header field.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/53"
+reason = '''
+HTTP/3 message mapping, malformed-message forwarding, Cookie handling, lowercase field generation, and HTTP/1.x translation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1"
+# report-id = 863
+quote = '''
+If the scheme does not have a mandatory authority component and none
+is provided in the request target, the request MUST NOT contain the
+:authority pseudo-header or Host header fields.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/53"
+reason = '''
+HTTP/3 message mapping, malformed-message forwarding, Cookie handling, lowercase field generation, and HTTP/1.x translation behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]

@@ -1931,6 +1931,66 @@ TEST(QuicHttp3ConnectionTest, HandshakeReadyOmitsUnsetMaxFieldSectionSizeSetting
     EXPECT_EQ(sends[0].bytes, control_stream_bytes(settings));
 }
 
+TEST(QuicHttp3ConnectionTest, ZeroRttAllowsNonZeroPeerQpackCapacityWhenRememberedCapacityWasZero) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+        .remembered_peer_settings =
+            coquic::http3::Http3SettingsSnapshot{
+                .qpack_max_table_capacity = 0,
+                .qpack_blocked_streams = 0,
+                .max_field_section_size = 4096,
+            },
+    });
+
+    auto zero_rtt_update =
+        connection.on_core_result(zero_rtt_status_result(coquic::quic::QuicZeroRttStatus::accepted),
+                                  coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(zero_rtt_update).has_value());
+
+    auto settings_update = connection.on_core_result(
+        receive_result(3, settings_stream_bytes(coquic::http3::Http3SettingsSnapshot{
+                              .qpack_max_table_capacity = 128,
+                              .qpack_blocked_streams = 0,
+                              .max_field_section_size = 4096,
+                          })),
+        coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(settings_update).has_value());
+    //= https://www.rfc-editor.org/rfc/rfc9204#section-3.2.3
+    // # When the client's 0-RTT value of the SETTING is zero, the server MAY set
+    // # it to a non-zero value in its SETTINGS frame.
+    EXPECT_EQ(connection.peer_settings().qpack_max_table_capacity, 128u);
+}
+
+TEST(QuicHttp3ConnectionTest, ZeroRttRejectsChangedNonZeroPeerQpackCapacityFromRememberedSettings) {
+    coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
+        .role = coquic::http3::Http3ConnectionRole::client,
+        .remembered_peer_settings =
+            coquic::http3::Http3SettingsSnapshot{
+                .qpack_max_table_capacity = 64,
+                .qpack_blocked_streams = 0,
+                .max_field_section_size = 4096,
+            },
+    });
+
+    auto zero_rtt_update =
+        connection.on_core_result(zero_rtt_status_result(coquic::quic::QuicZeroRttStatus::accepted),
+                                  coquic::quic::QuicCoreTimePoint{});
+    EXPECT_FALSE(close_input_from(zero_rtt_update).has_value());
+
+    auto settings_update = connection.on_core_result(
+        receive_result(3, settings_stream_bytes(coquic::http3::Http3SettingsSnapshot{
+                              .qpack_max_table_capacity = 128,
+                              .qpack_blocked_streams = 0,
+                              .max_field_section_size = 4096,
+                          })),
+        coquic::quic::QuicCoreTimePoint{});
+    auto close = close_input_from(settings_update);
+
+    ASSERT_TRUE(close.has_value());
+    EXPECT_EQ(close_application_error_code(close),
+              static_cast<std::uint64_t>(coquic::http3::Http3ErrorCode::settings_error));
+}
+
 TEST(QuicHttp3ConnectionTest, ClosedInternalGuardsSkipStartupAndPeerUniFinProcessing) {
     coquic::http3::Http3Connection connection(coquic::http3::Http3ConnectionConfig{
         .role = coquic::http3::Http3ConnectionRole::client,

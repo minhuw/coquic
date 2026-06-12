@@ -124,6 +124,11 @@ struct QuicTransportConfig {
     std::uint64_t initial_max_stream_data_uni = 256 << 10;
     std::uint64_t initial_max_streams_bidi = 16;
     std::uint64_t initial_max_streams_uni = 16;
+    //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+    // # For most uses of DATAGRAM frames, it is RECOMMENDED to send a value
+    // # of 65535 in the max_datagram_frame_size transport parameter to
+    // # indicate that this endpoint will accept any DATAGRAM frame that fits
+    // # inside a QUIC packet.
     std::uint64_t max_datagram_frame_size = 65535;
     QuicCongestionControlAlgorithm congestion_control = QuicCongestionControlAlgorithm::newreno;
     bool enable_hystart_plus_plus = true;
@@ -452,11 +457,19 @@ struct QuicCoreSendSharedStreamData {
 
 struct QuicCoreSendDatagramData {
     std::vector<std::byte> bytes;
+    //= https://www.rfc-editor.org/rfc/rfc9221#section-5.1
+    // # QUIC implementations SHOULD present an API to applications to assign
+    // # relative priorities to DATAGRAM frames with respect to each other and
+    // # to QUIC streams.
     std::int32_t priority = 0;
 };
 
 struct QuicCoreSendSharedDatagramData {
     SharedBytes bytes;
+    //= https://www.rfc-editor.org/rfc/rfc9221#section-5.1
+    // # QUIC implementations SHOULD present an API to applications to assign
+    // # relative priorities to DATAGRAM frames with respect to each other and
+    // # to QUIC streams.
     std::int32_t priority = 0;
 };
 

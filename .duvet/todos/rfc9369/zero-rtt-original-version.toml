@@ -1,0 +1,16 @@
+# RFC 9369 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9369#section-4.1"
+# report-id = 1138
+quote = '''
+The client MUST NOT send 0-RTT packets using the negotiated version,
+even after processing a packet of that version from the server.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/81"
+reason = '''
+Client 0-RTT packet construction currently passes current_version_ through the
+application packet send paths; after compatible negotiation this can become the
+negotiated version instead of the original version.
+'''
+tags = ["rfc9369"]

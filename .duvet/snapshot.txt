@@ -1451,7 +1451,7 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
   SECTION: [Transport Parameter Definitions](#section-18.2)
     TEXT[!MUST,implementation,test]: This transport parameter MUST NOT be sent
     TEXT[!MUST,implementation,test]:       by a client but MAY be sent by a server.
-    TEXT[!MUST,implementation,test]: Values below 1200 are invalid.
+    TEXT[implementation,test]: Values below 1200 are invalid.
     TEXT[!SHOULD,implementation]: This value
     TEXT[!SHOULD,implementation]:       SHOULD include the receiver's expected delays in alarms firing.
     TEXT[implementation,test]: Values of 2^14 or greater are invalid.
@@ -2241,50 +2241,49 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9002
     TEXT[!MUST,implementation,test]:    min_rtt MUST be set to the latest_rtt on the first RTT sample.
     TEXT[!MUST,implementation]:    min_rtt MUST be set to the lesser of min_rtt and latest_rtt
     TEXT[!MUST,implementation]:    (Section 5.1) on all other samples.
-    TEXT[!SHOULD]:    Endpoints SHOULD set the min_rtt to the newest RTT sample after
-    TEXT[!SHOULD]:    persistent congestion is established.
-    TEXT[!MAY]:    Endpoints MAY reestablish the min_rtt at other times in the
-    TEXT[!MAY]:    connection, such as when traffic volume is low and an acknowledgment
-    TEXT[!MAY]:    is received with a low acknowledgment delay.
-    TEXT[!SHOULD]: Implementations SHOULD
-    TEXT[!SHOULD]:    NOT refresh the min_rtt value too often since the actual minimum RTT
-    TEXT[!SHOULD]:    of the path is not frequently observable.
+    TEXT[!SHOULD,todo]:    Endpoints SHOULD set the min_rtt to the newest RTT sample after
+    TEXT[!SHOULD,todo]:    persistent congestion is established.
+    TEXT[!MAY,todo]:    Endpoints MAY reestablish the min_rtt at other times in the
+    TEXT[!MAY,todo]:    connection, such as when traffic volume is low and an acknowledgment
+    TEXT[!MAY,todo]:    is received with a low acknowledgment delay.
+    TEXT[!SHOULD,implementation]: Implementations SHOULD
+    TEXT[!SHOULD,implementation]:    NOT refresh the min_rtt value too often since the actual minimum RTT
+    TEXT[!SHOULD,implementation]:    of the path is not frequently observable.
 
   SECTION: [Estimating smoothed_rtt and rttvar](#section-5.3)
-    TEXT[!SHOULD]: To account for this, the endpoint SHOULD ignore
-    TEXT[!SHOULD]:    max_ack_delay until the handshake is confirmed, as defined in
-    TEXT[!SHOULD]:    Section 4.1.2 of [QUIC-TLS].
-    TEXT[!MAY]: Therefore, prior to handshake confirmation, an endpoint
-    TEXT[!MAY]:    MAY ignore RTT samples if adjusting the RTT sample for acknowledgment
-    TEXT[!MAY]:    delay causes the sample to be less than the min_rtt.
-    TEXT[!MAY]:    *  MAY ignore the acknowledgment delay for Initial packets, since
-    TEXT[!MAY]:       these acknowledgments are not delayed by the peer (Section 13.2.1
-    TEXT[!MAY]:       of [QUIC-TRANSPORT]);
-    TEXT[!SHOULD]:    *  SHOULD ignore the peer's max_ack_delay until the handshake is
-    TEXT[!SHOULD]:       confirmed;
+    TEXT[!SHOULD,implementation]: To account for this, the endpoint SHOULD ignore
+    TEXT[!SHOULD,implementation]:    max_ack_delay until the handshake is confirmed, as defined in
+    TEXT[!SHOULD,implementation]:    Section 4.1.2 of [QUIC-TLS].
+    TEXT[!MAY,todo]: Therefore, prior to handshake confirmation, an endpoint
+    TEXT[!MAY,todo]:    MAY ignore RTT samples if adjusting the RTT sample for acknowledgment
+    TEXT[!MAY,todo]:    delay causes the sample to be less than the min_rtt.
+    TEXT[!MAY,todo]:    *  MAY ignore the acknowledgment delay for Initial packets, since
+    TEXT[!MAY,todo]:       these acknowledgments are not delayed by the peer (Section 13.2.1
+    TEXT[!MAY,todo]:       of [QUIC-TRANSPORT]);
+    TEXT[!SHOULD,implementation]:    *  SHOULD ignore the peer's max_ack_delay until the handshake is
+    TEXT[!SHOULD,implementation]:       confirmed;
     TEXT[!MUST,implementation]:    *  MUST use the lesser of the acknowledgment delay and the peer's
     TEXT[!MUST,implementation]:       max_ack_delay after the handshake is confirmed; and
     TEXT[!MUST,implementation]:    *  MUST NOT subtract the acknowledgment delay from the RTT sample if
     TEXT[!MUST,implementation]:       the resulting value is smaller than the min_rtt.
-    TEXT[!SHOULD]: In such
-    TEXT[!SHOULD]:    cases, an endpoint SHOULD subtract such local delays from its RTT
-    TEXT[!SHOULD]:    sample until the handshake is confirmed.
+    TEXT[!SHOULD,todo]: In such
+    TEXT[!SHOULD,todo]:    cases, an endpoint SHOULD subtract such local delays from its RTT
+    TEXT[!SHOULD,todo]:    sample until the handshake is confirmed.
 
   SECTION: [Acknowledgment-Based Detection](#section-6.1)
     TEXT[implementation]:    A packet is declared lost if it meets all of the following
     TEXT[implementation]:    conditions:
-    TEXT[!MAY]: Implementations with adaptive time
-    TEXT[!MAY]:    thresholds MAY choose to start with smaller initial reordering
-    TEXT[!MAY]:    thresholds to minimize recovery latency.
+    TEXT[!MAY,implementation]: Implementations with adaptive time
+    TEXT[!MAY,implementation]:    thresholds MAY choose to start with smaller initial reordering
+    TEXT[!MAY,implementation]:    thresholds to minimize recovery latency.
 
   SECTION: [Packet Threshold](#section-6.1.1)
-    TEXT[!SHOULD]:    The RECOMMENDED initial value for the packet reordering threshold
-    TEXT[!SHOULD]:    (kPacketThreshold) is 3, based on best practices for TCP loss
-    TEXT[!SHOULD]:    detection [RFC5681] [RFC6675].
+    TEXT[!SHOULD,implementation]:    The RECOMMENDED initial value for the packet reordering threshold
+    TEXT[!SHOULD,implementation]:    (kPacketThreshold) is 3, based on best practices for TCP loss
+    TEXT[!SHOULD,implementation]:    detection [RFC5681] [RFC6675].
     TEXT[!SHOULD,implementation]: In order to remain similar to TCP,
-    TEXT[!SHOULD,implementation]:    implementations SHOULD NOT use a packet threshold less than 3;
-    TEXT[!SHOULD]:  see
-    TEXT[!SHOULD]:    [RFC5681].
+    TEXT[!SHOULD,implementation]:    implementations SHOULD NOT use a packet threshold less than 3; see
+    TEXT[!SHOULD,implementation]:    [RFC5681].
 
   SECTION: [Time Threshold](#section-6.1.2)
     TEXT[!SHOULD,implementation]:    Once a later packet within the same packet number space has been
@@ -2302,70 +2301,70 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9002
     TEXT[!SHOULD,implementation]:    multiplier, is 9/8.
     TEXT[!SHOULD,implementation]: The RECOMMENDED value of the timer granularity
     TEXT[!SHOULD,implementation]:    (kGranularity) is 1 millisecond.
-    TEXT[!MAY]:    Implementations MAY experiment with absolute thresholds, thresholds
-    TEXT[!MAY]:    from previous connections, adaptive thresholds, or the including of
-    TEXT[!MAY]:    RTT variation.
+    TEXT[!MAY,implementation]:    Implementations MAY experiment with absolute thresholds, thresholds
+    TEXT[!MAY,implementation]:    from previous connections, adaptive thresholds, or the including of
+    TEXT[!MAY,implementation]:    RTT variation.
 
   SECTION: [Probe Timeout](#section-6.2)
-    TEXT[!MUST]:    A PTO timer expiration event does not indicate packet loss and MUST
-    TEXT[!MUST]:    NOT cause prior unacknowledged packets to be marked as lost.
+    TEXT[!MUST,todo]:    A PTO timer expiration event does not indicate packet loss and MUST
+    TEXT[!MUST,todo]:    NOT cause prior unacknowledged packets to be marked as lost.
 
   SECTION: [Computing PTO](#section-6.2.1)
     TEXT[implementation]:    PTO = smoothed_rtt + max(4*rttvar, kGranularity) + max_ack_delay
     TEXT[implementation]:    When the PTO is armed for Initial or Handshake packet number spaces,
     TEXT[implementation]:    the max_ack_delay in the PTO period computation is set to 0
-    TEXT[!MUST]:    The PTO period MUST be at least kGranularity to avoid the timer
-    TEXT[!MUST]:    expiring immediately.
+    TEXT[!MUST,implementation]:    The PTO period MUST be at least kGranularity to avoid the timer
+    TEXT[!MUST,implementation]:    expiring immediately.
     TEXT[!MUST,implementation]:    When ack-eliciting packets in multiple packet number spaces are in
     TEXT[!MUST,implementation]:    flight, the timer MUST be set to the earlier value of the Initial and
     TEXT[!MUST,implementation]:    Handshake packet number spaces.
     TEXT[!MUST,implementation]:    An endpoint MUST NOT set its PTO timer for the Application Data
     TEXT[!MUST,implementation]:    packet number space until the handshake is confirmed.
-    TEXT[!SHOULD]:    A sender SHOULD restart its PTO timer every time an ack-eliciting
-    TEXT[!SHOULD]:    packet is sent or acknowledged, or when Initial or Handshake keys are
-    TEXT[!SHOULD]:    discarded (Section 4.9 of [QUIC-TLS]).
+    TEXT[!SHOULD,todo]:    A sender SHOULD restart its PTO timer every time an ack-eliciting
+    TEXT[!SHOULD,todo]:    packet is sent or acknowledged, or when Initial or Handshake keys are
+    TEXT[!SHOULD,todo]:    discarded (Section 4.9 of [QUIC-TLS]).
     TEXT[!MUST,implementation]:    When a PTO timer expires, the PTO backoff MUST be increased,
     TEXT[!MUST,implementation]:    resulting in the PTO period being set to twice its current value.
     TEXT[!MUST,implementation]:    The PTO timer MUST NOT be set if a timer is set for time threshold
     TEXT[!MUST,implementation]:    loss detection; see Section 6.1.2.
 
   SECTION: [Handshakes and New Paths](#section-6.2.2)
-    TEXT[!MAY]:    Resumed connections over the same network MAY use the previous
-    TEXT[!MAY]:    connection's final smoothed RTT value as the resumed connection's
-    TEXT[!MAY]:    initial RTT.
+    TEXT[!MAY,todo]:    Resumed connections over the same network MAY use the previous
+    TEXT[!MAY,todo]:    connection's final smoothed RTT value as the resumed connection's
+    TEXT[!MAY,todo]:    initial RTT.
     TEXT[!SHOULD,implementation,test]: When no previous RTT is available, the initial RTT
     TEXT[!SHOULD,implementation,test]:    SHOULD be set to 333 milliseconds.
-    TEXT[!SHOULD]:    A connection MAY use the delay between sending a PATH_CHALLENGE and
-    TEXT[!SHOULD]:    receiving a PATH_RESPONSE to set the initial RTT (see kInitialRtt in
-    TEXT[!SHOULD]:    Appendix A.2) for a new path, but the delay SHOULD NOT be considered
-    TEXT[!SHOULD]:    an RTT sample.
-    TEXT[!MUST]: When
-    TEXT[!MUST]:    Initial or Handshake keys are discarded, the PTO and loss detection
-    TEXT[!MUST]:    timers MUST be reset, because discarding keys indicates forward
-    TEXT[!MUST]:    progress and the loss detection timer might have been set for a now-
-    TEXT[!MUST]:    discarded packet number space.
+    TEXT[!SHOULD,todo]:    A connection MAY use the delay between sending a PATH_CHALLENGE and
+    TEXT[!SHOULD,todo]:    receiving a PATH_RESPONSE to set the initial RTT (see kInitialRtt in
+    TEXT[!SHOULD,todo]:    Appendix A.2) for a new path, but the delay SHOULD NOT be considered
+    TEXT[!SHOULD,todo]:    an RTT sample.
+    TEXT[!MUST,implementation]: When
+    TEXT[!MUST,implementation]:    Initial or Handshake keys are discarded, the PTO and loss detection
+    TEXT[!MUST,implementation]:    timers MUST be reset, because discarding keys indicates forward
+    TEXT[!MUST,implementation]:    progress and the loss detection timer might have been set for a now-
+    TEXT[!MUST,implementation]:    discarded packet number space.
 
   SECTION: [Before Address Validation](#section-6.2.2.1)
-    TEXT[!MUST]: If
-    TEXT[!MUST]:    no additional data can be sent, the server's PTO timer MUST NOT be
-    TEXT[!MUST]:    armed until datagrams have been received from the client because
-    TEXT[!MUST]:    packets sent on PTO count against the anti-amplification limit.
-    TEXT[!MUST]: That is,
-    TEXT[!MUST]:    the client MUST set the PTO timer if the client has not received an
-    TEXT[!MUST]:    acknowledgment for any of its Handshake packets and the handshake is
-    TEXT[!MUST]:    not confirmed (see Section 4.1.2 of [QUIC-TLS]), even if there are no
-    TEXT[!MUST]:    packets in flight.
-    TEXT[!MUST]: When the PTO fires, the client MUST send a
-    TEXT[!MUST]:    Handshake packet if it has Handshake keys, otherwise it MUST send an
-    TEXT[!MUST]:    Initial packet in a UDP datagram with a payload of at least 1200
-    TEXT[!MUST]:    bytes.
+    TEXT[!MUST,implementation]: If
+    TEXT[!MUST,implementation]:    no additional data can be sent, the server's PTO timer MUST NOT be
+    TEXT[!MUST,implementation]:    armed until datagrams have been received from the client because
+    TEXT[!MUST,implementation]:    packets sent on PTO count against the anti-amplification limit.
+    TEXT[!MUST,todo]: That is,
+    TEXT[!MUST,todo]:    the client MUST set the PTO timer if the client has not received an
+    TEXT[!MUST,todo]:    acknowledgment for any of its Handshake packets and the handshake is
+    TEXT[!MUST,todo]:    not confirmed (see Section 4.1.2 of [QUIC-TLS]), even if there are no
+    TEXT[!MUST,todo]:    packets in flight.
+    TEXT[!MUST,implementation]: When the PTO fires, the client MUST send a
+    TEXT[!MUST,implementation]:    Handshake packet if it has Handshake keys, otherwise it MUST send an
+    TEXT[!MUST,implementation]:    Initial packet in a UDP datagram with a payload of at least 1200
+    TEXT[!MUST,implementation]:    bytes.
 
   SECTION: [Speeding up Handshake Completion](#section-6.2.3)
-    TEXT[!MAY]:    To speed up handshake completion under these conditions, an endpoint
-    TEXT[!MAY]:    MAY, for a limited number of times per connection, send a packet
-    TEXT[!MAY]:    containing unacknowledged CRYPTO data earlier than the PTO expiry,
-    TEXT[!MAY]:    subject to the address validation limits in Section 8.1 of
-    TEXT[!MAY]:    [QUIC-TRANSPORT].
+    TEXT[!MAY,todo]:    To speed up handshake completion under these conditions, an endpoint
+    TEXT[!MAY,todo]:    MAY, for a limited number of times per connection, send a packet
+    TEXT[!MAY,todo]:    containing unacknowledged CRYPTO data earlier than the PTO expiry,
+    TEXT[!MAY,todo]:    subject to the address validation limits in Section 8.1 of
+    TEXT[!MAY,todo]:    [QUIC-TRANSPORT].
 
   SECTION: [Sending Probe Packets](#section-6.2.4)
     TEXT[!MUST,implementation]:    When a PTO timer expires, a sender MUST send at least one ack-
@@ -2375,62 +2374,62 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9002
     TEXT[!MAY,implementation]:    packets to avoid an expensive consecutive PTO expiration due to a
     TEXT[!MAY,implementation]:    single lost datagram or to transmit data from multiple packet number
     TEXT[!MAY,implementation]:    spaces.
-    TEXT[!MUST]: All probe packets sent on a PTO MUST be ack-eliciting.
-    TEXT[!SHOULD]:    In addition to sending data in the packet number space for which the
-    TEXT[!SHOULD]:    timer expired, the sender SHOULD send ack-eliciting packets from
-    TEXT[!SHOULD]:    other packet number spaces with in-flight data, coalescing packets if
-    TEXT[!SHOULD]:    possible.
-    TEXT[!SHOULD]:    An endpoint SHOULD include new data in packets that are sent on PTO
-    TEXT[!SHOULD]:    expiration.
+    TEXT[!MUST,todo]: All probe packets sent on a PTO MUST be ack-eliciting.
+    TEXT[!SHOULD,implementation]:    In addition to sending data in the packet number space for which the
+    TEXT[!SHOULD,implementation]:    timer expired, the sender SHOULD send ack-eliciting packets from
+    TEXT[!SHOULD,implementation]:    other packet number spaces with in-flight data, coalescing packets if
+    TEXT[!SHOULD,implementation]:    possible.
+    TEXT[!SHOULD,todo]:    An endpoint SHOULD include new data in packets that are sent on PTO
+    TEXT[!SHOULD,todo]:    expiration.
     TEXT[!MAY,implementation]: Previously sent data MAY be sent if no new data can be
     TEXT[!MAY,implementation]:    sent.
-    TEXT[!MAY]: Implementations MAY use alternative strategies for determining
-    TEXT[!MAY]:    the content of probe packets, including sending new or retransmitted
-    TEXT[!MAY]:    data based on the application's priorities.
+    TEXT[!MAY,todo]: Implementations MAY use alternative strategies for determining
+    TEXT[!MAY,todo]:    the content of probe packets, including sending new or retransmitted
+    TEXT[!MAY,todo]:    data based on the application's priorities.
     TEXT[!SHOULD,implementation,test]: When there is no data to send, the sender SHOULD send
     TEXT[!SHOULD,implementation,test]:    a PING or other ack-eliciting frame in a single packet, rearming the
     TEXT[!SHOULD,implementation,test]:    PTO timer.
-    TEXT[!MAY]:    Alternatively, instead of sending an ack-eliciting packet, the sender
-    TEXT[!MAY]:    MAY mark any packets still in flight as lost.
+    TEXT[!MAY,todo]:    Alternatively, instead of sending an ack-eliciting packet, the sender
+    TEXT[!MAY,todo]:    MAY mark any packets still in flight as lost.
 
   SECTION: [Handling Retry Packets](#section-6.3)
-    TEXT[!MAY]:    The client MAY compute an RTT estimate to the server as the time
-    TEXT[!MAY]:    period from when the first Initial packet was sent to when a Retry or
-    TEXT[!MAY]:    a Version Negotiation packet is received.
-    TEXT[!MAY]: The client MAY use this
-    TEXT[!MAY]:    value in place of its default for the initial RTT estimate.
+    TEXT[!MAY,todo]:    The client MAY compute an RTT estimate to the server as the time
+    TEXT[!MAY,todo]:    period from when the first Initial packet was sent to when a Retry or
+    TEXT[!MAY,todo]:    a Version Negotiation packet is received.
+    TEXT[!MAY,todo]: The client MAY use this
+    TEXT[!MAY,todo]:    value in place of its default for the initial RTT estimate.
 
   SECTION: [Discarding Keys and Packet State](#section-6.4)
-    TEXT[!MUST]: The sender MUST discard all recovery state
-    TEXT[!MUST]:    associated with those packets and MUST remove them from the count of
-    TEXT[!MUST]:    bytes in flight.
+    TEXT[!MUST,implementation]: The sender MUST discard all recovery state
+    TEXT[!MUST,implementation]:    associated with those packets and MUST remove them from the count of
+    TEXT[!MUST,implementation]:    bytes in flight.
 
   SECTION: [Congestion Control](#section-7)
-    TEXT[!MUST]:    If a sender uses a different controller than that specified in this
-    TEXT[!MUST]:    document, the chosen controller MUST conform to the congestion
-    TEXT[!MUST]:    control guidelines specified in Section 3.1 of [RFC8085].
+    TEXT[!MUST,todo]:    If a sender uses a different controller than that specified in this
+    TEXT[!MUST,todo]:    document, the chosen controller MUST conform to the congestion
+    TEXT[!MUST,todo]:    control guidelines specified in Section 3.1 of [RFC8085].
     TEXT[implementation]:    Similar to TCP, packets containing only ACK frames do not count
     TEXT[implementation]:    toward bytes in flight and are not congestion controlled.
-    TEXT[!MAY]: Unlike
-    TEXT[!MAY]:    TCP, QUIC can detect the loss of these packets and MAY use that
-    TEXT[!MAY]:    information to adjust the congestion controller or the rate of ACK-
-    TEXT[!MAY]:    only packets being sent, but this document does not describe a
-    TEXT[!MAY]:    mechanism for doing so.
+    TEXT[!MAY,todo]: Unlike
+    TEXT[!MAY,todo]:    TCP, QUIC can detect the loss of these packets and MAY use that
+    TEXT[!MAY,todo]:    information to adjust the congestion controller or the rate of ACK-
+    TEXT[!MAY,todo]:    only packets being sent, but this document does not describe a
+    TEXT[!MAY,todo]:    mechanism for doing so.
     TEXT[!MUST,implementation]:    An endpoint MUST NOT send a packet if it would cause bytes_in_flight
     TEXT[!MUST,implementation]:    (see Appendix B.2) to be larger than the congestion window, unless
     TEXT[!MUST,implementation]:    the packet is sent on a PTO timer expiration (see Section 6.2) or
     TEXT[!MUST,implementation]:    when entering recovery (see Section 7.3.2).
 
   SECTION: [Initial and Minimum Congestion Window](#section-7.2)
-    TEXT[!SHOULD]: Endpoints SHOULD use an initial congestion
-    TEXT[!SHOULD]:    window of ten times the maximum datagram size (max_datagram_size),
-    TEXT[!SHOULD]:    while limiting the window to the larger of 14,720 bytes or twice the
-    TEXT[!SHOULD]:    maximum datagram size.
-    TEXT[!SHOULD]:    If the maximum datagram size changes during the connection, the
-    TEXT[!SHOULD]:    initial congestion window SHOULD be recalculated with the new size.
-    TEXT[!SHOULD]:    If the maximum datagram size is decreased in order to complete the
-    TEXT[!SHOULD]:    handshake, the congestion window SHOULD be set to the new initial
-    TEXT[!SHOULD]:    congestion window.
+    TEXT[!SHOULD,implementation]: Endpoints SHOULD use an initial congestion
+    TEXT[!SHOULD,implementation]:    window of ten times the maximum datagram size (max_datagram_size),
+    TEXT[!SHOULD,implementation]:    while limiting the window to the larger of 14,720 bytes or twice the
+    TEXT[!SHOULD,implementation]:    maximum datagram size.
+    TEXT[!SHOULD,todo]:    If the maximum datagram size changes during the connection, the
+    TEXT[!SHOULD,todo]:    initial congestion window SHOULD be recalculated with the new size.
+    TEXT[!SHOULD,todo]:    If the maximum datagram size is decreased in order to complete the
+    TEXT[!SHOULD,todo]:    handshake, the congestion window SHOULD be set to the new initial
+    TEXT[!SHOULD,todo]:    congestion window.
     TEXT[!SHOULD,implementation]: The RECOMMENDED
     TEXT[!SHOULD,implementation]:    value is 2 * max_datagram_size.
 
@@ -2438,9 +2437,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9002
     TEXT[implementation]:    While a sender is in slow start, the congestion window increases by
     TEXT[implementation]:    the number of bytes acknowledged when each acknowledgment is
     TEXT[implementation]:    processed.
-    TEXT[!MUST]:    The sender MUST exit slow start and enter a recovery period when a
-    TEXT[!MUST]:    packet is lost or when the ECN-CE count reported by its peer
-    TEXT[!MUST]:    increases.
+    TEXT[!MUST,implementation]:    The sender MUST exit slow start and enter a recovery period when a
+    TEXT[!MUST,implementation]:    packet is lost or when the ECN-CE count reported by its peer
+    TEXT[!MUST,implementation]:    increases.
 
   SECTION: [Recovery](#section-7.3.2)
     TEXT[implementation]:    sender that is already in a recovery period stays in it and does not
@@ -2462,235 +2461,235 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9002
     TEXT[!MUST,implementation]:    each congestion window that is acknowledged.
 
   SECTION: [Ignoring Loss of Undecryptable Packets](#section-7.4)
-    TEXT[!MAY]: Endpoints MAY ignore the
-    TEXT[!MAY]:    loss of Handshake, 0-RTT, and 1-RTT packets that might have arrived
-    TEXT[!MAY]:    before the peer had packet protection keys to process those packets.
-    TEXT[!MUST]:    Endpoints MUST NOT ignore the loss of packets that were sent after
-    TEXT[!MUST]:    the earliest acknowledged packet in a given packet number space.
+    TEXT[!MAY,todo]: Endpoints MAY ignore the
+    TEXT[!MAY,todo]:    loss of Handshake, 0-RTT, and 1-RTT packets that might have arrived
+    TEXT[!MAY,todo]:    before the peer had packet protection keys to process those packets.
+    TEXT[!MUST,todo]:    Endpoints MUST NOT ignore the loss of packets that were sent after
+    TEXT[!MUST,todo]:    the earliest acknowledged packet in a given packet number space.
 
   SECTION: [Probe Timeout](#section-7.5)
-    TEXT[!MUST]:    Probe packets MUST NOT be blocked by the congestion controller.
-    TEXT[!MUST]:    sender MUST however count these packets as being additionally in
-    TEXT[!MUST]:    flight, since these packets add network load without establishing
-    TEXT[!MUST]:    packet loss.
+    TEXT[!MUST,implementation]:    Probe packets MUST NOT be blocked by the congestion controller.
+    TEXT[!MUST,implementation]:    sender MUST however count these packets as being additionally in
+    TEXT[!MUST,implementation]:    flight, since these packets add network load without establishing
+    TEXT[!MUST,implementation]:    packet loss.
 
   SECTION: [Duration](#section-7.6.1)
-    TEXT[!SHOULD]:    The RECOMMENDED value for kPersistentCongestionThreshold is 3, which
-    TEXT[!SHOULD]:    results in behavior that is approximately equivalent to a TCP sender
-    TEXT[!SHOULD]:    declaring an RTO after two TLPs.
+    TEXT[!SHOULD,implementation]:    The RECOMMENDED value for kPersistentCongestionThreshold is 3, which
+    TEXT[!SHOULD,implementation]:    results in behavior that is approximately equivalent to a TCP sender
+    TEXT[!SHOULD,implementation]:    declaring an RTO after two TLPs.
 
   SECTION: [Establishing Persistent Congestion](#section-7.6.2)
-    TEXT[!MUST]:    These two packets MUST be ack-eliciting, since a receiver is required
-    TEXT[!MUST]:    to acknowledge only ack-eliciting packets within its maximum
-    TEXT[!MUST]:    acknowledgment delay; see Section 13.2 of [QUIC-TRANSPORT].
-    TEXT[!SHOULD]:    The persistent congestion period SHOULD NOT start until there is at
-    TEXT[!SHOULD]:    least one RTT sample.
-    TEXT[!SHOULD]:    Since network congestion is not affected by packet number spaces,
-    TEXT[!SHOULD]:    persistent congestion SHOULD consider packets sent across packet
-    TEXT[!SHOULD]:    number spaces.
-    TEXT[!MAY]: A sender that does not have state for all packet
-    TEXT[!MAY]:    number spaces or an implementation that cannot compare send times
-    TEXT[!MAY]:    across packet number spaces MAY use state for just the packet number
-    TEXT[!MAY]:    space that was acknowledged.
+    TEXT[!MUST,implementation]:    These two packets MUST be ack-eliciting, since a receiver is required
+    TEXT[!MUST,implementation]:    to acknowledge only ack-eliciting packets within its maximum
+    TEXT[!MUST,implementation]:    acknowledgment delay; see Section 13.2 of [QUIC-TRANSPORT].
+    TEXT[!SHOULD,implementation]:    The persistent congestion period SHOULD NOT start until there is at
+    TEXT[!SHOULD,implementation]:    least one RTT sample.
+    TEXT[!SHOULD,todo]:    Since network congestion is not affected by packet number spaces,
+    TEXT[!SHOULD,todo]:    persistent congestion SHOULD consider packets sent across packet
+    TEXT[!SHOULD,todo]:    number spaces.
+    TEXT[!MAY,todo]: A sender that does not have state for all packet
+    TEXT[!MAY,todo]:    number spaces or an implementation that cannot compare send times
+    TEXT[!MAY,todo]:    across packet number spaces MAY use state for just the packet number
+    TEXT[!MAY,todo]:    space that was acknowledged.
     TEXT[!MUST,implementation]:    When persistent congestion is declared, the sender's congestion
     TEXT[!MUST,implementation]:    window MUST be reduced to the minimum congestion window
-    TEXT[!MUST]:    (kMinimumWindow), similar to a TCP sender's response on an RTO
-    TEXT[!MUST]:    [RFC5681].
+    TEXT[!MUST,implementation]:    (kMinimumWindow), similar to a TCP sender's response on an RTO
+    TEXT[!MUST,implementation]:    [RFC5681].
 
   SECTION: [Pacing](#section-7.7)
-    TEXT[!SHOULD]:    A sender SHOULD pace sending of all in-flight packets based on input
-    TEXT[!SHOULD]:    from the congestion controller.
-    TEXT[!MUST]: Senders MUST either use pacing or limit such bursts.
-    TEXT[!SHOULD]:    Senders SHOULD limit bursts to the initial congestion window; see
-    TEXT[!SHOULD]:    Section 7.2.
-    TEXT[!MAY]: A sender with knowledge that the network path to the
-    TEXT[!MAY]:    receiver can absorb larger bursts MAY use a higher limit.
-    TEXT[!SHOULD]: To avoid delaying their delivery to the peer, packets
-    TEXT[!SHOULD]:    containing only ACK frames SHOULD therefore not be paced.
+    TEXT[!SHOULD,implementation]:    A sender SHOULD pace sending of all in-flight packets based on input
+    TEXT[!SHOULD,implementation]:    from the congestion controller.
+    TEXT[!MUST,implementation]: Senders MUST either use pacing or limit such bursts.
+    TEXT[!SHOULD,implementation]:    Senders SHOULD limit bursts to the initial congestion window; see
+    TEXT[!SHOULD,implementation]:    Section 7.2.
+    TEXT[!MAY,todo]: A sender with knowledge that the network path to the
+    TEXT[!MAY,todo]:    receiver can absorb larger bursts MAY use a higher limit.
+    TEXT[!SHOULD,implementation]: To avoid delaying their delivery to the peer, packets
+    TEXT[!SHOULD,implementation]:    containing only ACK frames SHOULD therefore not be paced.
 
   SECTION: [Underutilizing the Congestion Window](#section-7.8)
-    TEXT[!SHOULD]: When this occurs, the congestion window
-    TEXT[!SHOULD]:    SHOULD NOT be increased in either slow start or congestion avoidance.
-    TEXT[!SHOULD]: A sender SHOULD NOT consider itself application limited if it
-    TEXT[!SHOULD]:    would have fully utilized the congestion window without pacing delay.
-    TEXT[!MAY]:    A sender MAY implement alternative mechanisms to update its
-    TEXT[!MAY]:    congestion window after periods of underutilization, such as those
-    TEXT[!MAY]:    proposed for TCP in [RFC7661].
+    TEXT[!SHOULD,todo]: When this occurs, the congestion window
+    TEXT[!SHOULD,todo]:    SHOULD NOT be increased in either slow start or congestion avoidance.
+    TEXT[!SHOULD,todo]: A sender SHOULD NOT consider itself application limited if it
+    TEXT[!SHOULD,todo]:    would have fully utilized the congestion window without pacing delay.
+    TEXT[!MAY,todo]:    A sender MAY implement alternative mechanisms to update its
+    TEXT[!MAY,todo]:    congestion window after periods of underutilization, such as those
+    TEXT[!MAY,todo]:    proposed for TCP in [RFC7661].
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
   SECTION: [Discovering an HTTP/3 Endpoint](#section-3.1)
-    TEXT[!MUST]: Upon receiving a
-    TEXT[!MUST]:    server certificate in the TLS handshake, the client MUST verify that
-    TEXT[!MUST]:    the certificate is an acceptable match for the URI's origin server
-    TEXT[!MUST]:    using the process described in Section 4.3.4 of [HTTP].
-    TEXT[!MUST]: If the
-    TEXT[!MUST]:    certificate cannot be verified with respect to the URI's origin
-    TEXT[!MUST]:    server, the client MUST NOT consider the server authoritative for
-    TEXT[!MUST]:    that origin.
-    TEXT[!MAY]:    A client MAY attempt access to a resource with an "https" URI by
-    TEXT[!MAY]:    resolving the host identifier to an IP address, establishing a QUIC
-    TEXT[!MAY]:    connection to that address on the indicated port (including
-    TEXT[!MAY]:    validation of the server certificate as described above), and sending
-    TEXT[!MAY]:    an HTTP/3 request message targeting the URI to the server over that
-    TEXT[!MAY]:    secured connection.
-    TEXT[!SHOULD]:    Connectivity problems (e.g., blocking UDP) can result in a failure to
-    TEXT[!SHOULD]:    establish a QUIC connection; clients SHOULD attempt to use TCP-based
-    TEXT[!SHOULD]:    versions of HTTP in this case.
-    TEXT[!MAY]:    Servers MAY serve HTTP/3 on any UDP port; an alternative service
-    TEXT[!MAY]:    advertisement always includes an explicit port, and URIs contain
-    TEXT[!MAY]:    either an explicit port or a default port associated with the scheme.
+    TEXT[!MUST,todo]: Upon receiving a
+    TEXT[!MUST,todo]:    server certificate in the TLS handshake, the client MUST verify that
+    TEXT[!MUST,todo]:    the certificate is an acceptable match for the URI's origin server
+    TEXT[!MUST,todo]:    using the process described in Section 4.3.4 of [HTTP].
+    TEXT[!MUST,todo]: If the
+    TEXT[!MUST,todo]:    certificate cannot be verified with respect to the URI's origin
+    TEXT[!MUST,todo]:    server, the client MUST NOT consider the server authoritative for
+    TEXT[!MUST,todo]:    that origin.
+    TEXT[!MAY,todo]:    A client MAY attempt access to a resource with an "https" URI by
+    TEXT[!MAY,todo]:    resolving the host identifier to an IP address, establishing a QUIC
+    TEXT[!MAY,todo]:    connection to that address on the indicated port (including
+    TEXT[!MAY,todo]:    validation of the server certificate as described above), and sending
+    TEXT[!MAY,todo]:    an HTTP/3 request message targeting the URI to the server over that
+    TEXT[!MAY,todo]:    secured connection.
+    TEXT[!SHOULD,todo]:    Connectivity problems (e.g., blocking UDP) can result in a failure to
+    TEXT[!SHOULD,todo]:    establish a QUIC connection; clients SHOULD attempt to use TCP-based
+    TEXT[!SHOULD,todo]:    versions of HTTP in this case.
+    TEXT[!MAY,todo]:    Servers MAY serve HTTP/3 on any UDP port; an alternative service
+    TEXT[!MAY,todo]:    advertisement always includes an explicit port, and URIs contain
+    TEXT[!MAY,todo]:    either an explicit port or a default port associated with the scheme.
 
   SECTION: [HTTP Alternative Services](#section-3.1.1)
-    TEXT[!MAY]:    On receipt of an Alt-Svc record indicating HTTP/3 support, a client
-    TEXT[!MAY]:    MAY attempt to establish a QUIC connection to the indicated host and
-    TEXT[!MAY]:    port; if this connection is successful, the client can send HTTP
-    TEXT[!MAY]:    requests using the mapping described in this document.
+    TEXT[!MAY,todo]:    On receipt of an Alt-Svc record indicating HTTP/3 support, a client
+    TEXT[!MAY,todo]:    MAY attempt to establish a QUIC connection to the indicated host and
+    TEXT[!MAY,todo]:    port; if this connection is successful, the client can send HTTP
+    TEXT[!MAY,todo]:    requests using the mapping described in this document.
 
   SECTION: [Other Schemes](#section-3.1.2)
-    TEXT[!MUST]:    Prior to making requests for an origin whose scheme is not "https",
-    TEXT[!MUST]:    the client MUST ensure the server is willing to serve that scheme.
+    TEXT[!MUST,todo]:    Prior to making requests for an origin whose scheme is not "https",
+    TEXT[!MUST,todo]:    the client MUST ensure the server is willing to serve that scheme.
 
   SECTION: [Connection Establishment](#section-3.2)
-    TEXT[!MAY]: The use
-    TEXT[!MAY]:    of other QUIC transport versions with HTTP/3 MAY be defined by future
-    TEXT[!MAY]:    specifications.
-    TEXT[!MUST]: HTTP/3 clients MUST support a mechanism to indicate the
-    TEXT[!MUST]:    target host to the server during the TLS handshake.
-    TEXT[!MUST]: If the server is
-    TEXT[!MUST]:    identified by a domain name ([DNS-TERMS]), clients MUST send the
-    TEXT[!MUST]:    Server Name Indication (SNI; [RFC6066]) TLS extension unless an
-    TEXT[!MUST]:    alternative mechanism to indicate the target host is used.
-    TEXT[!MAY]: Support for
-    TEXT[!MAY]:    other application-layer protocols MAY be offered in the same
-    TEXT[!MAY]:    handshake.
+    TEXT[!MAY,todo]: The use
+    TEXT[!MAY,todo]:    of other QUIC transport versions with HTTP/3 MAY be defined by future
+    TEXT[!MAY,todo]:    specifications.
+    TEXT[!MUST,todo]: HTTP/3 clients MUST support a mechanism to indicate the
+    TEXT[!MUST,todo]:    target host to the server during the TLS handshake.
+    TEXT[!MUST,todo]: If the server is
+    TEXT[!MUST,todo]:    identified by a domain name ([DNS-TERMS]), clients MUST send the
+    TEXT[!MUST,todo]:    Server Name Indication (SNI; [RFC6066]) TLS extension unless an
+    TEXT[!MUST,todo]:    alternative mechanism to indicate the target host is used.
+    TEXT[!MAY,todo]: Support for
+    TEXT[!MAY,todo]:    other application-layer protocols MAY be offered in the same
+    TEXT[!MAY,todo]:    handshake.
     TEXT[!MUST,implementation]: After the QUIC connection is
     TEXT[!MUST,implementation]:    established, a SETTINGS frame MUST be sent by each endpoint as the
     TEXT[!MUST,implementation]:    initial frame of their respective HTTP control stream.
 
   SECTION: [Connection Reuse](#section-3.3)
-    TEXT[!MAY]:    Once a connection to a server endpoint exists, this connection MAY be
-    TEXT[!MAY]:    reused for requests with multiple different URI authority components.
-    TEXT[!MUST]:    To use an existing connection for a new origin, clients MUST validate
-    TEXT[!MUST]:    the certificate presented by the server for the new origin server
-    TEXT[!MUST]:    using the process described in Section 4.3.4 of [HTTP].
-    TEXT[!MUST]:    If the certificate is not acceptable with regard to the new origin
-    TEXT[!MUST]:    for any reason, the connection MUST NOT be reused and a new
-    TEXT[!MUST]:    connection SHOULD be established for the new origin.
-    TEXT[!SHOULD]: If the reason
-    TEXT[!SHOULD]:    the certificate cannot be verified might apply to other origins
-    TEXT[!SHOULD]:    already associated with the connection, the client SHOULD revalidate
-    TEXT[!SHOULD]:    the server certificate for those origins.
-    TEXT[!SHOULD]:    Clients SHOULD NOT open more than one HTTP/3 connection to a given IP
-    TEXT[!SHOULD]:    address and UDP port, where the IP address and port might be derived
-    TEXT[!SHOULD]:    from a URI, a selected alternative service ([ALTSVC]), a configured
-    TEXT[!SHOULD]:    proxy, or name resolution of any of these.
-    TEXT[!SHOULD]: A client MAY open
-    TEXT[!SHOULD]:    multiple HTTP/3 connections to the same IP address and UDP port using
-    TEXT[!SHOULD]:    different transport or TLS configurations but SHOULD avoid creating
-    TEXT[!SHOULD]:    multiple connections with the same configuration.
-    TEXT[!SHOULD]: When either endpoint chooses to close the HTTP/3
-    TEXT[!SHOULD]:    connection, the terminating endpoint SHOULD first send a GOAWAY frame
-    TEXT[!SHOULD]:    (Section 5.2) so that both endpoints can reliably determine whether
-    TEXT[!SHOULD]:    previously sent frames have been processed and gracefully complete or
-    TEXT[!SHOULD]:    terminate any necessary remaining tasks.
+    TEXT[!MAY,todo]:    Once a connection to a server endpoint exists, this connection MAY be
+    TEXT[!MAY,todo]:    reused for requests with multiple different URI authority components.
+    TEXT[!MUST,todo]:    To use an existing connection for a new origin, clients MUST validate
+    TEXT[!MUST,todo]:    the certificate presented by the server for the new origin server
+    TEXT[!MUST,todo]:    using the process described in Section 4.3.4 of [HTTP].
+    TEXT[!MUST,todo]:    If the certificate is not acceptable with regard to the new origin
+    TEXT[!MUST,todo]:    for any reason, the connection MUST NOT be reused and a new
+    TEXT[!MUST,todo]:    connection SHOULD be established for the new origin.
+    TEXT[!SHOULD,todo]: If the reason
+    TEXT[!SHOULD,todo]:    the certificate cannot be verified might apply to other origins
+    TEXT[!SHOULD,todo]:    already associated with the connection, the client SHOULD revalidate
+    TEXT[!SHOULD,todo]:    the server certificate for those origins.
+    TEXT[!SHOULD,todo]:    Clients SHOULD NOT open more than one HTTP/3 connection to a given IP
+    TEXT[!SHOULD,todo]:    address and UDP port, where the IP address and port might be derived
+    TEXT[!SHOULD,todo]:    from a URI, a selected alternative service ([ALTSVC]), a configured
+    TEXT[!SHOULD,todo]:    proxy, or name resolution of any of these.
+    TEXT[!SHOULD,todo]: A client MAY open
+    TEXT[!SHOULD,todo]:    multiple HTTP/3 connections to the same IP address and UDP port using
+    TEXT[!SHOULD,todo]:    different transport or TLS configurations but SHOULD avoid creating
+    TEXT[!SHOULD,todo]:    multiple connections with the same configuration.
+    TEXT[!SHOULD,todo]: When either endpoint chooses to close the HTTP/3
+    TEXT[!SHOULD,todo]:    connection, the terminating endpoint SHOULD first send a GOAWAY frame
+    TEXT[!SHOULD,todo]:    (Section 5.2) so that both endpoints can reliably determine whether
+    TEXT[!SHOULD,todo]:    previously sent frames have been processed and gracefully complete or
+    TEXT[!SHOULD,todo]:    terminate any necessary remaining tasks.
 
   SECTION: [HTTP Message Framing](#section-4.1)
-    TEXT[!MUST]:    client MUST send only a single request on a given stream.
-    TEXT[!MUST]:    On a given stream, receipt of multiple requests or receipt of an
-    TEXT[!MUST]:    additional HTTP response following a final HTTP response MUST be
-    TEXT[!MUST]:    treated as malformed.
+    TEXT[!MUST,implementation]:    client MUST send only a single request on a given stream.
+    TEXT[!MUST,todo]:    On a given stream, receipt of multiple requests or receipt of an
+    TEXT[!MUST,todo]:    additional HTTP response following a final HTTP response MUST be
+    TEXT[!MUST,todo]:    treated as malformed.
     TEXT[!MUST,implementation]:    Receipt of an invalid sequence of frames MUST be treated as a
     TEXT[!MUST,implementation]:    connection error of type H3_FRAME_UNEXPECTED.
-    TEXT[!MAY]:    A server MAY send one or more PUSH_PROMISE frames before, after, or
-    TEXT[!MAY]:    interleaved with the frames of a response message.
+    TEXT[!MAY,todo]:    A server MAY send one or more PUSH_PROMISE frames before, after, or
+    TEXT[!MAY,todo]:    interleaved with the frames of a response message.
     TEXT[!MUST,implementation]: PUSH_PROMISE frames are not permitted on push streams;
     TEXT[!MUST,implementation]:    a pushed response that includes PUSH_PROMISE frames MUST be treated
     TEXT[!MUST,implementation]:    as a connection error of type H3_FRAME_UNEXPECTED.
-    TEXT[!MAY]:    Frames of unknown types (Section 9), including reserved frames
-    TEXT[!MAY]:    (Section 7.2.8) MAY be sent on a request or push stream before,
-    TEXT[!MAY]:    after, or interleaved with other frames described in this section.
-    TEXT[!MUST]:    Transfer codings (see Section 7 of [HTTP/1.1]) are not defined for
-    TEXT[!MUST]:    HTTP/3; the Transfer-Encoding header field MUST NOT be used.
-    TEXT[!MAY]:    A response MAY consist of multiple messages when and only when one or
-    TEXT[!MAY]:    more interim responses (1xx; see Section 15.2 of [HTTP]) precede a
-    TEXT[!MAY]:    final response to the same request.
-    TEXT[!MUST]: After sending a request, a client MUST
-    TEXT[!MUST]:    close the stream for sending.
-    TEXT[!MUST]: Unless using the CONNECT method (see
-    TEXT[!MUST]:    Section 4.4), clients MUST NOT make stream closure dependent on
-    TEXT[!MUST]:    receiving a response to their request.
-    TEXT[!MUST]: After sending a final
-    TEXT[!MUST]:    response, the server MUST close the stream for sending.
-    TEXT[!SHOULD]: Because some messages are large or unbounded, endpoints
-    TEXT[!SHOULD]:    SHOULD begin processing partial HTTP messages once enough of the
-    TEXT[!SHOULD]:    message has been received to make progress.
-    TEXT[!SHOULD]: If a client-initiated
-    TEXT[!SHOULD]:    stream terminates without enough of the HTTP message to provide a
-    TEXT[!SHOULD]:    complete response, the server SHOULD abort its response stream with
-    TEXT[!SHOULD]:    the error code H3_REQUEST_INCOMPLETE.
-    TEXT[!MAY]: When the server does
-    TEXT[!MAY]:    not need to receive the remainder of the request, it MAY abort
-    TEXT[!MAY]:    reading the request stream, send a complete response, and cleanly
-    TEXT[!MAY]:    close the sending part of the stream.
-    TEXT[!SHOULD]: The error code H3_NO_ERROR
-    TEXT[!SHOULD]:    SHOULD be used when requesting that the client stop sending on the
-    TEXT[!SHOULD]:    request stream.
-    TEXT[!MUST]: Clients MUST NOT discard complete responses as a
-    TEXT[!MUST]:    result of having their request terminated abruptly, though clients
-    TEXT[!MUST]:    can always discard responses at their discretion for other reasons.
-    TEXT[!SHOULD]:    If the server sends a partial or complete response but does not abort
-    TEXT[!SHOULD]:    reading the request, clients SHOULD continue sending the content of
-    TEXT[!SHOULD]:    the request and close the stream normally.
+    TEXT[!MAY,implementation]:    Frames of unknown types (Section 9), including reserved frames
+    TEXT[!MAY,implementation]:    (Section 7.2.8) MAY be sent on a request or push stream before,
+    TEXT[!MAY,implementation]:    after, or interleaved with other frames described in this section.
+    TEXT[!MUST,todo]:    Transfer codings (see Section 7 of [HTTP/1.1]) are not defined for
+    TEXT[!MUST,todo]:    HTTP/3; the Transfer-Encoding header field MUST NOT be used.
+    TEXT[!MAY,implementation]:    A response MAY consist of multiple messages when and only when one or
+    TEXT[!MAY,implementation]:    more interim responses (1xx; see Section 15.2 of [HTTP]) precede a
+    TEXT[!MAY,implementation]:    final response to the same request.
+    TEXT[!MUST,implementation]: After sending a request, a client MUST
+    TEXT[!MUST,implementation]:    close the stream for sending.
+    TEXT[!MUST,todo]: Unless using the CONNECT method (see
+    TEXT[!MUST,todo]:    Section 4.4), clients MUST NOT make stream closure dependent on
+    TEXT[!MUST,todo]:    receiving a response to their request.
+    TEXT[!MUST,implementation]: After sending a final
+    TEXT[!MUST,implementation]:    response, the server MUST close the stream for sending.
+    TEXT[!SHOULD,todo]: Because some messages are large or unbounded, endpoints
+    TEXT[!SHOULD,todo]:    SHOULD begin processing partial HTTP messages once enough of the
+    TEXT[!SHOULD,todo]:    message has been received to make progress.
+    TEXT[!SHOULD,implementation]: If a client-initiated
+    TEXT[!SHOULD,implementation]:    stream terminates without enough of the HTTP message to provide a
+    TEXT[!SHOULD,implementation]:    complete response, the server SHOULD abort its response stream with
+    TEXT[!SHOULD,implementation]:    the error code H3_REQUEST_INCOMPLETE.
+    TEXT[!MAY,todo]: When the server does
+    TEXT[!MAY,todo]:    not need to receive the remainder of the request, it MAY abort
+    TEXT[!MAY,todo]:    reading the request stream, send a complete response, and cleanly
+    TEXT[!MAY,todo]:    close the sending part of the stream.
+    TEXT[!SHOULD,todo]: The error code H3_NO_ERROR
+    TEXT[!SHOULD,todo]:    SHOULD be used when requesting that the client stop sending on the
+    TEXT[!SHOULD,todo]:    request stream.
+    TEXT[!MUST,todo]: Clients MUST NOT discard complete responses as a
+    TEXT[!MUST,todo]:    result of having their request terminated abruptly, though clients
+    TEXT[!MUST,todo]:    can always discard responses at their discretion for other reasons.
+    TEXT[!SHOULD,todo]:    If the server sends a partial or complete response but does not abort
+    TEXT[!SHOULD,todo]:    reading the request, clients SHOULD continue sending the content of
+    TEXT[!SHOULD,todo]:    the request and close the stream normally.
 
   SECTION: [Request Cancellation and Rejection](#section-4.1.1)
-    TEXT[!MAY]:    Once a request stream has been opened, the request MAY be cancelled
-    TEXT[!MAY]:    by either endpoint.
-    TEXT[!SHOULD]: When possible, it is RECOMMENDED that servers
-    TEXT[!SHOULD]:    send an HTTP response with an appropriate status code rather than
-    TEXT[!SHOULD]:    cancelling a request it has already begun processing.
-    TEXT[!SHOULD]:    Implementations SHOULD cancel requests by abruptly terminating any
-    TEXT[!SHOULD]:    directions of a stream that are still open.
-    TEXT[!SHOULD]: The server SHOULD
-    TEXT[!SHOULD]:    abort its response stream with the error code H3_REQUEST_REJECTED.
-    TEXT[!MUST]:    Servers MUST NOT use the H3_REQUEST_REJECTED error code for requests
-    TEXT[!MUST]:    that were partially or fully processed.
-    TEXT[!SHOULD]: When a server abandons a
-    TEXT[!SHOULD]:    response after partial processing, it SHOULD abort its response
-    TEXT[!SHOULD]:    stream with the error code H3_REQUEST_CANCELLED.
-    TEXT[!SHOULD]:    Client SHOULD use the error code H3_REQUEST_CANCELLED to cancel
-    TEXT[!SHOULD]:    requests.
-    TEXT[!MAY]: Upon receipt of this error code, a server MAY abruptly
-    TEXT[!MAY]:    terminate the response using the error code H3_REQUEST_REJECTED if no
-    TEXT[!MAY]:    processing was performed.
-    TEXT[!MUST]: Clients MUST NOT use the
-    TEXT[!MUST]:    H3_REQUEST_REJECTED error code, except when a server has requested
-    TEXT[!MUST]:    closure of the request stream with this error code.
-    TEXT[!MAY]:    If a stream is cancelled after receiving a complete response, the
-    TEXT[!MAY]:    client MAY ignore the cancellation and use the response.
-    TEXT[!SHOULD]: However, if
-    TEXT[!SHOULD]:    a stream is cancelled after receiving a partial response, the
-    TEXT[!SHOULD]:    response SHOULD NOT be used.
-    TEXT[!SHOULD]: Only idempotent actions such as GET,
-    TEXT[!SHOULD]:    PUT, or DELETE can be safely retried; a client SHOULD NOT
-    TEXT[!SHOULD]:    automatically retry a request with a non-idempotent method unless it
-    TEXT[!SHOULD]:    has some means to know that the request semantics are idempotent
-    TEXT[!SHOULD]:    independent of the method or some means to detect that the original
-    TEXT[!SHOULD]:    request was never applied.
+    TEXT[!MAY,todo]:    Once a request stream has been opened, the request MAY be cancelled
+    TEXT[!MAY,todo]:    by either endpoint.
+    TEXT[!SHOULD,todo]: When possible, it is RECOMMENDED that servers
+    TEXT[!SHOULD,todo]:    send an HTTP response with an appropriate status code rather than
+    TEXT[!SHOULD,todo]:    cancelling a request it has already begun processing.
+    TEXT[!SHOULD,todo]:    Implementations SHOULD cancel requests by abruptly terminating any
+    TEXT[!SHOULD,todo]:    directions of a stream that are still open.
+    TEXT[!SHOULD,todo]: The server SHOULD
+    TEXT[!SHOULD,todo]:    abort its response stream with the error code H3_REQUEST_REJECTED.
+    TEXT[!MUST,todo]:    Servers MUST NOT use the H3_REQUEST_REJECTED error code for requests
+    TEXT[!MUST,todo]:    that were partially or fully processed.
+    TEXT[!SHOULD,todo]: When a server abandons a
+    TEXT[!SHOULD,todo]:    response after partial processing, it SHOULD abort its response
+    TEXT[!SHOULD,todo]:    stream with the error code H3_REQUEST_CANCELLED.
+    TEXT[!SHOULD,todo]:    Client SHOULD use the error code H3_REQUEST_CANCELLED to cancel
+    TEXT[!SHOULD,todo]:    requests.
+    TEXT[!MAY,todo]: Upon receipt of this error code, a server MAY abruptly
+    TEXT[!MAY,todo]:    terminate the response using the error code H3_REQUEST_REJECTED if no
+    TEXT[!MAY,todo]:    processing was performed.
+    TEXT[!MUST,todo]: Clients MUST NOT use the
+    TEXT[!MUST,todo]:    H3_REQUEST_REJECTED error code, except when a server has requested
+    TEXT[!MUST,todo]:    closure of the request stream with this error code.
+    TEXT[!MAY,todo]:    If a stream is cancelled after receiving a complete response, the
+    TEXT[!MAY,todo]:    client MAY ignore the cancellation and use the response.
+    TEXT[!SHOULD,todo]: However, if
+    TEXT[!SHOULD,todo]:    a stream is cancelled after receiving a partial response, the
+    TEXT[!SHOULD,todo]:    response SHOULD NOT be used.
+    TEXT[!SHOULD,todo]: Only idempotent actions such as GET,
+    TEXT[!SHOULD,todo]:    PUT, or DELETE can be safely retried; a client SHOULD NOT
+    TEXT[!SHOULD,todo]:    automatically retry a request with a non-idempotent method unless it
+    TEXT[!SHOULD,todo]:    has some means to know that the request semantics are idempotent
+    TEXT[!SHOULD,todo]:    independent of the method or some means to detect that the original
+    TEXT[!SHOULD,todo]:    request was never applied.
 
   SECTION: [Malformed Requests and Responses](#section-4.1.2)
-    TEXT[!MUST]:    Intermediaries that process HTTP requests or responses (i.e., any
-    TEXT[!MUST]:    intermediary not acting as a tunnel) MUST NOT forward a malformed
-    TEXT[!MUST]:    request or response.
-    TEXT[!MUST]: Malformed requests or responses that are
-    TEXT[!MUST]:    detected MUST be treated as a stream error of type H3_MESSAGE_ERROR.
-    TEXT[!MAY]:    For malformed requests, a server MAY send an HTTP response indicating
-    TEXT[!MAY]:    the error prior to closing or resetting the stream.
-    TEXT[!MUST]: Clients MUST NOT
-    TEXT[!MUST]:    accept a malformed response.
+    TEXT[!MUST,todo]:    Intermediaries that process HTTP requests or responses (i.e., any
+    TEXT[!MUST,todo]:    intermediary not acting as a tunnel) MUST NOT forward a malformed
+    TEXT[!MUST,todo]:    request or response.
+    TEXT[!MUST,implementation]: Malformed requests or responses that are
+    TEXT[!MUST,implementation]:    detected MUST be treated as a stream error of type H3_MESSAGE_ERROR.
+    TEXT[!MAY,todo]:    For malformed requests, a server MAY send an HTTP response indicating
+    TEXT[!MAY,todo]:    the error prior to closing or resetting the stream.
+    TEXT[!MUST,implementation]: Clients MUST NOT
+    TEXT[!MUST,implementation]:    accept a malformed response.
 
   SECTION: [HTTP Fields](#section-4.2)
-    TEXT[!MUST]: Characters in field names MUST be
-    TEXT[!MUST]:    converted to lowercase prior to their encoding.
+    TEXT[!MUST,todo]: Characters in field names MUST be
+    TEXT[!MUST,todo]:    converted to lowercase prior to their encoding.
     TEXT[!MUST,implementation,test]: A request or
     TEXT[!MUST,implementation,test]:    response containing uppercase characters in field names MUST be
     TEXT[!MUST,implementation,test]:    treated as malformed.
@@ -2701,256 +2700,256 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
     TEXT[!MUST,implementation,test]:    The only exception to this is the TE header field, which MAY be
     TEXT[!MUST,implementation,test]:    present in an HTTP/3 request header; when it is, it MUST NOT contain
     TEXT[!MUST,implementation,test]:    any value other than "trailers".
-    TEXT[!MUST]:    An intermediary transforming an HTTP/1.x message to HTTP/3 MUST
-    TEXT[!MUST]:    remove connection-specific header fields as discussed in
-    TEXT[!MUST]:    Section 7.6.1 of [HTTP], or their messages will be treated by other
-    TEXT[!MUST]:    HTTP/3 endpoints as malformed.
+    TEXT[!MUST,todo]:    An intermediary transforming an HTTP/1.x message to HTTP/3 MUST
+    TEXT[!MUST,todo]:    remove connection-specific header fields as discussed in
+    TEXT[!MUST,todo]:    Section 7.6.1 of [HTTP], or their messages will be treated by other
+    TEXT[!MUST,todo]:    HTTP/3 endpoints as malformed.
 
   SECTION: [Field Compression](#section-4.2.1)
-    TEXT[!MAY]:    To allow for better compression efficiency, the Cookie header field
-    TEXT[!MAY]:    ([COOKIES]) MAY be split into separate field lines, each with one or
-    TEXT[!MAY]:    more cookie-pairs, before compression.
-    TEXT[!MUST]: If a decompressed field
-    TEXT[!MUST]:    section contains multiple cookie field lines, these MUST be
-    TEXT[!MUST]:    concatenated into a single byte string using the two-byte delimiter
-    TEXT[!MUST]:    of "; " (ASCII 0x3b, 0x20) before being passed into a context other
-    TEXT[!MUST]:    than HTTP/2 or HTTP/3, such as an HTTP/1.1 connection, or a generic
-    TEXT[!MUST]:    HTTP server application.
+    TEXT[!MAY,todo]:    To allow for better compression efficiency, the Cookie header field
+    TEXT[!MAY,todo]:    ([COOKIES]) MAY be split into separate field lines, each with one or
+    TEXT[!MAY,todo]:    more cookie-pairs, before compression.
+    TEXT[!MUST,todo]: If a decompressed field
+    TEXT[!MUST,todo]:    section contains multiple cookie field lines, these MUST be
+    TEXT[!MUST,todo]:    concatenated into a single byte string using the two-byte delimiter
+    TEXT[!MUST,todo]:    of "; " (ASCII 0x3b, 0x20) before being passed into a context other
+    TEXT[!MUST,todo]:    than HTTP/2 or HTTP/3, such as an HTTP/1.1 connection, or a generic
+    TEXT[!MUST,todo]:    HTTP server application.
 
   SECTION: [Header Size Constraints](#section-4.2.2)
-    TEXT[!MAY]:    An HTTP/3 implementation MAY impose a limit on the maximum size of
-    TEXT[!MAY]:    the message header it will accept on an individual HTTP message.
-    TEXT[!SHOULD]: An implementation that
-    TEXT[!SHOULD]:    has received this parameter SHOULD NOT send an HTTP message header
-    TEXT[!SHOULD]:    that exceeds the indicated size, as the peer will likely refuse to
-    TEXT[!SHOULD]:    process it.
+    TEXT[!MAY,implementation]:    An HTTP/3 implementation MAY impose a limit on the maximum size of
+    TEXT[!MAY,implementation]:    the message header it will accept on an individual HTTP message.
+    TEXT[!SHOULD,implementation]: An implementation that
+    TEXT[!SHOULD,implementation]:    has received this parameter SHOULD NOT send an HTTP message header
+    TEXT[!SHOULD,implementation]:    that exceeds the indicated size, as the peer will likely refuse to
+    TEXT[!SHOULD,implementation]:    process it.
 
   SECTION: [HTTP Control Data](#section-4.3)
-    TEXT[!MUST]: Endpoints MUST NOT
-    TEXT[!MUST]:    generate pseudo-header fields other than those defined in this
-    TEXT[!MUST]:    document.
-    TEXT[!MUST]: Pseudo-header fields defined for requests MUST NOT appear
-    TEXT[!MUST]:    in responses; pseudo-header fields defined for responses MUST NOT
-    TEXT[!MUST]:    appear in requests.
-    TEXT[!MUST]: Pseudo-header fields MUST NOT appear in trailer
-    TEXT[!MUST]:    sections.
-    TEXT[!MUST]: Endpoints MUST treat a request or response that contains
-    TEXT[!MUST]:    undefined or invalid pseudo-header fields as malformed.
-    TEXT[!MUST]:    All pseudo-header fields MUST appear in the header section before
-    TEXT[!MUST]:    regular header fields.
-    TEXT[!MUST]: Any request or response that contains a
-    TEXT[!MUST]:    pseudo-header field that appears in a header section after a regular
-    TEXT[!MUST]:    header field MUST be treated as malformed.
+    TEXT[!MUST,implementation]: Endpoints MUST NOT
+    TEXT[!MUST,implementation]:    generate pseudo-header fields other than those defined in this
+    TEXT[!MUST,implementation]:    document.
+    TEXT[!MUST,implementation]: Pseudo-header fields defined for requests MUST NOT appear
+    TEXT[!MUST,implementation]:    in responses; pseudo-header fields defined for responses MUST NOT
+    TEXT[!MUST,implementation]:    appear in requests.
+    TEXT[!MUST,implementation]: Pseudo-header fields MUST NOT appear in trailer
+    TEXT[!MUST,implementation]:    sections.
+    TEXT[!MUST,implementation]: Endpoints MUST treat a request or response that contains
+    TEXT[!MUST,implementation]:    undefined or invalid pseudo-header fields as malformed.
+    TEXT[!MUST,implementation]:    All pseudo-header fields MUST appear in the header section before
+    TEXT[!MUST,implementation]:    regular header fields.
+    TEXT[!MUST,implementation]: Any request or response that contains a
+    TEXT[!MUST,implementation]:    pseudo-header field that appears in a header section after a regular
+    TEXT[!MUST,implementation]:    header field MUST be treated as malformed.
 
   SECTION: [Request Pseudo-Header Fields](#section-4.3.1)
-    TEXT[!MUST]: The authority MUST NOT include the
-    TEXT[!MUST]:       deprecated userinfo subcomponent for URIs of scheme "http" or
-    TEXT[!MUST]:       "https".
-    TEXT[!MUST]:       To ensure that the HTTP/1.1 request line can be reproduced
-    TEXT[!MUST]:       accurately, this pseudo-header field MUST be omitted when
-    TEXT[!MUST]:       translating from an HTTP/1.1 request that has a request target in
-    TEXT[!MUST]:       a method-specific form; see Section 7.1 of [HTTP].
-    TEXT[!SHOULD]: Clients that
-    TEXT[!SHOULD]:       generate HTTP/3 requests directly SHOULD use the :authority
-    TEXT[!SHOULD]:       pseudo-header field instead of the Host header field.
-    TEXT[!MUST]: An
-    TEXT[!MUST]:       intermediary that converts an HTTP/3 request to HTTP/1.1 MUST
-    TEXT[!MUST]:       create a Host field if one is not present in a request by copying
-    TEXT[!MUST]:       the value of the :authority pseudo-header field.
-    TEXT[!MUST]:       This pseudo-header field MUST NOT be empty for "http" or "https"
-    TEXT[!MUST]:       URIs; "http" or "https" URIs that do not contain a path component
-    TEXT[!MUST]:       MUST include a value of / (ASCII 0x2f).
-    TEXT[!MUST]:    All HTTP/3 requests MUST include exactly one value for the :method,
-    TEXT[!MUST]:    :scheme, and :path pseudo-header fields, unless the request is a
-    TEXT[!MUST]:    CONNECT request; see Section 4.4.
-    TEXT[!MUST]:    If the :scheme pseudo-header field identifies a scheme that has a
-    TEXT[!MUST]:    mandatory authority component (including "http" and "https"), the
-    TEXT[!MUST]:    request MUST contain either an :authority pseudo-header field or a
-    TEXT[!MUST]:    Host header field.
-    TEXT[!MUST]: If these fields are present, they MUST NOT be
-    TEXT[!MUST]:    empty.
-    TEXT[!MUST]: If both fields are present, they MUST contain the same value.
-    TEXT[!MUST]:    If the scheme does not have a mandatory authority component and none
-    TEXT[!MUST]:    is provided in the request target, the request MUST NOT contain the
-    TEXT[!MUST]:    :authority pseudo-header or Host header fields.
+    TEXT[!MUST,implementation]: The authority MUST NOT include the
+    TEXT[!MUST,implementation]:       deprecated userinfo subcomponent for URIs of scheme "http" or
+    TEXT[!MUST,implementation]:       "https".
+    TEXT[!MUST,todo]:       To ensure that the HTTP/1.1 request line can be reproduced
+    TEXT[!MUST,todo]:       accurately, this pseudo-header field MUST be omitted when
+    TEXT[!MUST,todo]:       translating from an HTTP/1.1 request that has a request target in
+    TEXT[!MUST,todo]:       a method-specific form; see Section 7.1 of [HTTP].
+    TEXT[!SHOULD,todo]: Clients that
+    TEXT[!SHOULD,todo]:       generate HTTP/3 requests directly SHOULD use the :authority
+    TEXT[!SHOULD,todo]:       pseudo-header field instead of the Host header field.
+    TEXT[!MUST,todo]: An
+    TEXT[!MUST,todo]:       intermediary that converts an HTTP/3 request to HTTP/1.1 MUST
+    TEXT[!MUST,todo]:       create a Host field if one is not present in a request by copying
+    TEXT[!MUST,todo]:       the value of the :authority pseudo-header field.
+    TEXT[!MUST,implementation]:       This pseudo-header field MUST NOT be empty for "http" or "https"
+    TEXT[!MUST,implementation]:       URIs; "http" or "https" URIs that do not contain a path component
+    TEXT[!MUST,implementation]:       MUST include a value of / (ASCII 0x2f).
+    TEXT[!MUST,implementation]:    All HTTP/3 requests MUST include exactly one value for the :method,
+    TEXT[!MUST,implementation]:    :scheme, and :path pseudo-header fields, unless the request is a
+    TEXT[!MUST,implementation]:    CONNECT request; see Section 4.4.
+    TEXT[!MUST,implementation]:    If the :scheme pseudo-header field identifies a scheme that has a
+    TEXT[!MUST,implementation]:    mandatory authority component (including "http" and "https"), the
+    TEXT[!MUST,implementation]:    request MUST contain either an :authority pseudo-header field or a
+    TEXT[!MUST,implementation]:    Host header field.
+    TEXT[!MUST,implementation]: If these fields are present, they MUST NOT be
+    TEXT[!MUST,implementation]:    empty.
+    TEXT[!MUST,implementation]: If both fields are present, they MUST contain the same value.
+    TEXT[!MUST,todo]:    If the scheme does not have a mandatory authority component and none
+    TEXT[!MUST,todo]:    is provided in the request target, the request MUST NOT contain the
+    TEXT[!MUST,todo]:    :authority pseudo-header or Host header fields.
 
   SECTION: [Response Pseudo-Header Fields](#section-4.3.2)
-    TEXT[!MUST]: This pseudo-
-    TEXT[!MUST]:    header field MUST be included in all responses; otherwise, the
-    TEXT[!MUST]:    response is malformed (see Section 4.1.2).
+    TEXT[!MUST,implementation]: This pseudo-
+    TEXT[!MUST,implementation]:    header field MUST be included in all responses; otherwise, the
+    TEXT[!MUST,implementation]:    response is malformed (see Section 4.1.2).
 
   SECTION: [The CONNECT Method](#section-4.4)
-    TEXT[!MUST]:    A CONNECT request MUST be constructed as follows:
-    TEXT[!MAY]: Extension frames MAY be used if
-    TEXT[!MAY]:    specifically permitted by the definition of the extension.
-    TEXT[!MUST]: Receipt
-    TEXT[!MUST]:    of any other known frame type MUST be treated as a connection error
-    TEXT[!MUST]:    of type H3_FRAME_UNEXPECTED.
-    TEXT[!SHOULD]: TCP connections that remain half closed in a single
-    TEXT[!SHOULD]:    direction are not invalid, but are often handled poorly by servers,
-    TEXT[!SHOULD]:    so clients SHOULD NOT close a stream for sending while they still
-    TEXT[!SHOULD]:    expect to receive data from the target of the CONNECT.
-    TEXT[!MUST]:    Correspondingly, if a proxy detects an error with the stream or the
-    TEXT[!MUST]:    QUIC connection, it MUST close the TCP connection.
-    TEXT[!MUST]: If the proxy
-    TEXT[!MUST]:    detects that the client has reset the stream or aborted reading from
-    TEXT[!MUST]:    the stream, it MUST close the TCP connection.
-    TEXT[!SHOULD]: If the stream is reset
-    TEXT[!SHOULD]:    or reading is aborted by the client, a proxy SHOULD perform the same
-    TEXT[!SHOULD]:    operation on the other direction in order to ensure that both
-    TEXT[!SHOULD]:    directions of the stream are cancelled.
-    TEXT[!SHOULD]: In all these cases, if the
-    TEXT[!SHOULD]:    underlying TCP implementation permits it, the proxy SHOULD send a TCP
-    TEXT[!SHOULD]:    segment with the RST bit set.
-    TEXT[!SHOULD]:    Since CONNECT creates a tunnel to an arbitrary server, proxies that
-    TEXT[!SHOULD]:    support CONNECT SHOULD restrict its use to a set of known ports or a
-    TEXT[!SHOULD]:    list of safe request targets; see Section 9.3.6 of [HTTP] for more
-    TEXT[!SHOULD]:    details.
+    TEXT[!MUST,implementation]:    A CONNECT request MUST be constructed as follows:
+    TEXT[!MAY,todo]: Extension frames MAY be used if
+    TEXT[!MAY,todo]:    specifically permitted by the definition of the extension.
+    TEXT[!MUST,todo]: Receipt
+    TEXT[!MUST,todo]:    of any other known frame type MUST be treated as a connection error
+    TEXT[!MUST,todo]:    of type H3_FRAME_UNEXPECTED.
+    TEXT[!SHOULD,todo]: TCP connections that remain half closed in a single
+    TEXT[!SHOULD,todo]:    direction are not invalid, but are often handled poorly by servers,
+    TEXT[!SHOULD,todo]:    so clients SHOULD NOT close a stream for sending while they still
+    TEXT[!SHOULD,todo]:    expect to receive data from the target of the CONNECT.
+    TEXT[!MUST,todo]:    Correspondingly, if a proxy detects an error with the stream or the
+    TEXT[!MUST,todo]:    QUIC connection, it MUST close the TCP connection.
+    TEXT[!MUST,todo]: If the proxy
+    TEXT[!MUST,todo]:    detects that the client has reset the stream or aborted reading from
+    TEXT[!MUST,todo]:    the stream, it MUST close the TCP connection.
+    TEXT[!SHOULD,todo]: If the stream is reset
+    TEXT[!SHOULD,todo]:    or reading is aborted by the client, a proxy SHOULD perform the same
+    TEXT[!SHOULD,todo]:    operation on the other direction in order to ensure that both
+    TEXT[!SHOULD,todo]:    directions of the stream are cancelled.
+    TEXT[!SHOULD,todo]: In all these cases, if the
+    TEXT[!SHOULD,todo]:    underlying TCP implementation permits it, the proxy SHOULD send a TCP
+    TEXT[!SHOULD,todo]:    segment with the RST bit set.
+    TEXT[!SHOULD,todo]:    Since CONNECT creates a tunnel to an arbitrary server, proxies that
+    TEXT[!SHOULD,todo]:    support CONNECT SHOULD restrict its use to a set of known ports or a
+    TEXT[!SHOULD,todo]:    list of safe request targets; see Section 9.3.6 of [HTTP] for more
+    TEXT[!SHOULD,todo]:    details.
 
   SECTION: [Server Push](#section-4.6)
-    TEXT[!SHOULD]: A server SHOULD use push IDs sequentially, beginning from
-    TEXT[!SHOULD]:    zero.
-    TEXT[!MUST]: A client MUST treat receipt of a push stream as a connection
-    TEXT[!MUST]:    error of type H3_ID_ERROR when no MAX_PUSH_ID frame has been sent or
-    TEXT[!MUST]:    when the stream references a push ID that is greater than the maximum
-    TEXT[!MUST]:    push ID.
-    TEXT[!MUST]: When the
-    TEXT[!MUST]:    same push ID is promised on multiple request streams, the
-    TEXT[!MUST]:    decompressed request field sections MUST contain the same fields in
-    TEXT[!MUST]:    the same order, and both the name and the value in each field MUST be
-    TEXT[!MUST]:    identical.
-    TEXT[!MAY]: A server MAY push requests that have
-    TEXT[!MAY]:    the following properties:
-    TEXT[!MUST]:    The server MUST include a value in the :authority pseudo-header field
-    TEXT[!MUST]:    for which the server is authoritative.
-    TEXT[!MUST]: If the client has not yet
-    TEXT[!MUST]:    validated the connection for the origin indicated by the pushed
-    TEXT[!MUST]:    request, it MUST perform the same verification process it would do
-    TEXT[!MUST]:    before sending a request for that origin on the connection; see
-    TEXT[!MUST]:    Section 3.3.
-    TEXT[!MUST]: If this verification fails, the client MUST NOT
-    TEXT[!MUST]:    consider the server authoritative for that origin.
-    TEXT[!SHOULD]:    Clients SHOULD send a CANCEL_PUSH frame upon receipt of a
-    TEXT[!SHOULD]:    PUSH_PROMISE frame carrying a request that is not cacheable, is not
-    TEXT[!SHOULD]:    known to be safe, that indicates the presence of request content, or
-    TEXT[!SHOULD]:    for which it does not consider the server authoritative.
-    TEXT[!MUST]: Any
-    TEXT[!MUST]:    corresponding responses MUST NOT be used or cached.
-    TEXT[!MAY]: These
-    TEXT[!MAY]:    associations do not affect the operation of the protocol, but they
-    TEXT[!MAY]:    MAY be considered by user agents when deciding how to use pushed
-    TEXT[!MAY]:    resources.
-    TEXT[!SHOULD]: The server SHOULD send PUSH_PROMISE frames
-    TEXT[!SHOULD]:    prior to sending HEADERS or DATA frames that reference the promised
-    TEXT[!SHOULD]:    responses.
-    TEXT[!SHOULD]: Clients SHOULD abort reading and discard data
-    TEXT[!SHOULD]:    already read from push streams if no corresponding PUSH_PROMISE frame
-    TEXT[!SHOULD]:    is processed in a reasonable amount of time.
-    TEXT[!MUST]:    Pushed responses that are not cacheable MUST NOT be stored by any
-    TEXT[!MUST]:    HTTP cache.
-    TEXT[!MAY]: They MAY be made available to the application
-    TEXT[!MAY]:    separately.
+    TEXT[!SHOULD,todo]: A server SHOULD use push IDs sequentially, beginning from
+    TEXT[!SHOULD,todo]:    zero.
+    TEXT[!MUST,implementation]: A client MUST treat receipt of a push stream as a connection
+    TEXT[!MUST,implementation]:    error of type H3_ID_ERROR when no MAX_PUSH_ID frame has been sent or
+    TEXT[!MUST,implementation]:    when the stream references a push ID that is greater than the maximum
+    TEXT[!MUST,implementation]:    push ID.
+    TEXT[!MUST,todo]: When the
+    TEXT[!MUST,todo]:    same push ID is promised on multiple request streams, the
+    TEXT[!MUST,todo]:    decompressed request field sections MUST contain the same fields in
+    TEXT[!MUST,todo]:    the same order, and both the name and the value in each field MUST be
+    TEXT[!MUST,todo]:    identical.
+    TEXT[!MAY,todo]: A server MAY push requests that have
+    TEXT[!MAY,todo]:    the following properties:
+    TEXT[!MUST,todo]:    The server MUST include a value in the :authority pseudo-header field
+    TEXT[!MUST,todo]:    for which the server is authoritative.
+    TEXT[!MUST,todo]: If the client has not yet
+    TEXT[!MUST,todo]:    validated the connection for the origin indicated by the pushed
+    TEXT[!MUST,todo]:    request, it MUST perform the same verification process it would do
+    TEXT[!MUST,todo]:    before sending a request for that origin on the connection; see
+    TEXT[!MUST,todo]:    Section 3.3.
+    TEXT[!MUST,todo]: If this verification fails, the client MUST NOT
+    TEXT[!MUST,todo]:    consider the server authoritative for that origin.
+    TEXT[!SHOULD,todo]:    Clients SHOULD send a CANCEL_PUSH frame upon receipt of a
+    TEXT[!SHOULD,todo]:    PUSH_PROMISE frame carrying a request that is not cacheable, is not
+    TEXT[!SHOULD,todo]:    known to be safe, that indicates the presence of request content, or
+    TEXT[!SHOULD,todo]:    for which it does not consider the server authoritative.
+    TEXT[!MUST,todo]: Any
+    TEXT[!MUST,todo]:    corresponding responses MUST NOT be used or cached.
+    TEXT[!MAY,todo]: These
+    TEXT[!MAY,todo]:    associations do not affect the operation of the protocol, but they
+    TEXT[!MAY,todo]:    MAY be considered by user agents when deciding how to use pushed
+    TEXT[!MAY,todo]:    resources.
+    TEXT[!SHOULD,todo]: The server SHOULD send PUSH_PROMISE frames
+    TEXT[!SHOULD,todo]:    prior to sending HEADERS or DATA frames that reference the promised
+    TEXT[!SHOULD,todo]:    responses.
+    TEXT[!SHOULD,todo]: Clients SHOULD abort reading and discard data
+    TEXT[!SHOULD,todo]:    already read from push streams if no corresponding PUSH_PROMISE frame
+    TEXT[!SHOULD,todo]:    is processed in a reasonable amount of time.
+    TEXT[!MUST,todo]:    Pushed responses that are not cacheable MUST NOT be stored by any
+    TEXT[!MUST,todo]:    HTTP cache.
+    TEXT[!MAY,todo]: They MAY be made available to the application
+    TEXT[!MAY,todo]:    separately.
 
   SECTION: [Idle Connections](#section-5.1)
-    TEXT[!SHOULD]: HTTP/3 implementations will need to open a new HTTP/3
-    TEXT[!SHOULD]:    connection for new requests if the existing connection has been idle
-    TEXT[!SHOULD]:    for longer than the idle timeout negotiated during the QUIC
-    TEXT[!SHOULD]:    handshake, and they SHOULD do so if approaching the idle timeout; see
-    TEXT[!SHOULD]:    Section 10.1 of [QUIC-TRANSPORT].
-    TEXT[!MAY]: A gateway MAY
-    TEXT[!MAY]:    maintain connections in anticipation of need rather than incur the
-    TEXT[!MAY]:    latency cost of connection establishment to servers.
-    TEXT[!SHOULD]: Servers SHOULD
-    TEXT[!SHOULD]:    NOT actively keep connections open.
+    TEXT[!SHOULD,todo]: HTTP/3 implementations will need to open a new HTTP/3
+    TEXT[!SHOULD,todo]:    connection for new requests if the existing connection has been idle
+    TEXT[!SHOULD,todo]:    for longer than the idle timeout negotiated during the QUIC
+    TEXT[!SHOULD,todo]:    handshake, and they SHOULD do so if approaching the idle timeout; see
+    TEXT[!SHOULD,todo]:    Section 10.1 of [QUIC-TRANSPORT].
+    TEXT[!MAY,todo]: A gateway MAY
+    TEXT[!MAY,todo]:    maintain connections in anticipation of need rather than incur the
+    TEXT[!MAY,todo]:    latency cost of connection establishment to servers.
+    TEXT[!SHOULD,todo]: Servers SHOULD
+    TEXT[!SHOULD,todo]:    NOT actively keep connections open.
 
   SECTION: [Connection Shutdown](#section-5.2)
-    TEXT[!MAY]: This
-    TEXT[!MAY]:    identifier MAY be zero if no requests or pushes were processed.
-    TEXT[!SHOULD]: Upon sending a GOAWAY frame, the endpoint
-    TEXT[!SHOULD]:    SHOULD explicitly cancel (see Sections 4.1.1 and 7.2.3) any requests
-    TEXT[!SHOULD]:    or pushes that have identifiers greater than or equal to the one
-    TEXT[!SHOULD]:    indicated, in order to clean up transport state for the affected
-    TEXT[!SHOULD]:    streams.
-    TEXT[!SHOULD]: The endpoint SHOULD continue to do so as more requests or
-    TEXT[!SHOULD]:    pushes arrive.
-    TEXT[!MUST]:    Endpoints MUST NOT initiate new requests or promise new pushes on the
-    TEXT[!MUST]:    connection after receipt of a GOAWAY frame from the peer.
-    TEXT[!MAY]: Clients
-    TEXT[!MAY]:    MAY establish a new connection to send additional requests.
-    TEXT[!MAY]:       Servers MAY reject individual requests on streams below the
-    TEXT[!MAY]:       indicated ID if these requests were not processed.
-    TEXT[!SHOULD]:    Servers SHOULD send a GOAWAY frame when the closing of a connection
-    TEXT[!SHOULD]:    is known in advance, even if the advance notice is small, so that the
-    TEXT[!SHOULD]:    remote peer can know whether or not a request has been partially
-    TEXT[!SHOULD]:    processed.
-    TEXT[!MUST]:    An endpoint MAY send multiple GOAWAY frames indicating different
-    TEXT[!MUST]:    identifiers, but the identifier in each frame MUST NOT be greater
-    TEXT[!MUST]:    than the identifier in any previous frame, since clients might
-    TEXT[!MUST]:    already have retried unprocessed requests on another HTTP connection.
+    TEXT[!MAY,todo]: This
+    TEXT[!MAY,todo]:    identifier MAY be zero if no requests or pushes were processed.
+    TEXT[!SHOULD,todo]: Upon sending a GOAWAY frame, the endpoint
+    TEXT[!SHOULD,todo]:    SHOULD explicitly cancel (see Sections 4.1.1 and 7.2.3) any requests
+    TEXT[!SHOULD,todo]:    or pushes that have identifiers greater than or equal to the one
+    TEXT[!SHOULD,todo]:    indicated, in order to clean up transport state for the affected
+    TEXT[!SHOULD,todo]:    streams.
+    TEXT[!SHOULD,todo]: The endpoint SHOULD continue to do so as more requests or
+    TEXT[!SHOULD,todo]:    pushes arrive.
+    TEXT[!MUST,implementation]:    Endpoints MUST NOT initiate new requests or promise new pushes on the
+    TEXT[!MUST,implementation]:    connection after receipt of a GOAWAY frame from the peer.
+    TEXT[!MAY,todo]: Clients
+    TEXT[!MAY,todo]:    MAY establish a new connection to send additional requests.
+    TEXT[!MAY,todo]:       Servers MAY reject individual requests on streams below the
+    TEXT[!MAY,todo]:       indicated ID if these requests were not processed.
+    TEXT[!SHOULD,todo]:    Servers SHOULD send a GOAWAY frame when the closing of a connection
+    TEXT[!SHOULD,todo]:    is known in advance, even if the advance notice is small, so that the
+    TEXT[!SHOULD,todo]:    remote peer can know whether or not a request has been partially
+    TEXT[!SHOULD,todo]:    processed.
+    TEXT[!MUST,implementation]:    An endpoint MAY send multiple GOAWAY frames indicating different
+    TEXT[!MUST,implementation]:    identifiers, but the identifier in each frame MUST NOT be greater
+    TEXT[!MUST,implementation]:    than the identifier in any previous frame, since clients might
+    TEXT[!MUST,implementation]:    already have retried unprocessed requests on another HTTP connection.
     TEXT[!MUST,implementation]:    Receiving a GOAWAY containing a larger identifier than previously
     TEXT[!MUST,implementation]:    received MUST be treated as a connection error of type H3_ID_ERROR.
-    TEXT[!MAY]: Like the server,
-    TEXT[!MAY]:    the client MAY send subsequent GOAWAY frames so long as the specified
-    TEXT[!MAY]:    push ID is no greater than any previously sent value.
-    TEXT[!MAY]:    Once all accepted requests and pushes have been processed, the
-    TEXT[!MAY]:    endpoint can permit the connection to become idle, or it MAY initiate
-    TEXT[!MAY]:    an immediate closure of the connection.
-    TEXT[!SHOULD]: An endpoint that completes a
-    TEXT[!SHOULD]:    graceful shutdown SHOULD use the H3_NO_ERROR error code when closing
-    TEXT[!SHOULD]:    the connection.
+    TEXT[!MAY,todo]: Like the server,
+    TEXT[!MAY,todo]:    the client MAY send subsequent GOAWAY frames so long as the specified
+    TEXT[!MAY,todo]:    push ID is no greater than any previously sent value.
+    TEXT[!MAY,todo]:    Once all accepted requests and pushes have been processed, the
+    TEXT[!MAY,todo]:    endpoint can permit the connection to become idle, or it MAY initiate
+    TEXT[!MAY,todo]:    an immediate closure of the connection.
+    TEXT[!SHOULD,todo]: An endpoint that completes a
+    TEXT[!SHOULD,todo]:    graceful shutdown SHOULD use the H3_NO_ERROR error code when closing
+    TEXT[!SHOULD,todo]:    the connection.
 
   SECTION: [Immediate Application Closure](#section-5.3)
-    TEXT[!MAY]:    Before closing the connection, a GOAWAY frame MAY be sent to allow
-    TEXT[!MAY]:    the client to retry some requests.
+    TEXT[!MAY,todo]:    Before closing the connection, a GOAWAY frame MAY be sent to allow
+    TEXT[!MAY,todo]:    the client to retry some requests.
 
   SECTION: [Transport Closure](#section-5.4)
-    TEXT[!MUST]:    If a connection terminates without a GOAWAY frame, clients MUST
-    TEXT[!MUST]:    assume that any request that was sent, whether in whole or in part,
-    TEXT[!MUST]:    might have been processed.
+    TEXT[!MUST,todo]:    If a connection terminates without a GOAWAY frame, clients MUST
+    TEXT[!MUST,todo]:    assume that any request that was sent, whether in whole or in part,
+    TEXT[!MUST,todo]:    might have been processed.
 
   SECTION: [Bidirectional Streams](#section-6.1)
-    TEXT[!SHOULD]: In order to
-    TEXT[!SHOULD]:    permit these streams to open, an HTTP/3 server SHOULD configure non-
-    TEXT[!SHOULD]:    zero minimum values for the number of permitted streams and the
-    TEXT[!SHOULD]:    initial stream flow-control window.
-    TEXT[!SHOULD]: So as to not unnecessarily limit
-    TEXT[!SHOULD]:    parallelism, at least 100 request streams SHOULD be permitted at a
-    TEXT[!SHOULD]:    time.
-    TEXT[!MUST]: Clients MUST treat
-    TEXT[!MUST]:    receipt of a server-initiated bidirectional stream as a connection
-    TEXT[!MUST]:    error of type H3_STREAM_CREATION_ERROR unless such an extension has
-    TEXT[!MUST]:    been negotiated.
+    TEXT[!SHOULD,todo]: In order to
+    TEXT[!SHOULD,todo]:    permit these streams to open, an HTTP/3 server SHOULD configure non-
+    TEXT[!SHOULD,todo]:    zero minimum values for the number of permitted streams and the
+    TEXT[!SHOULD,todo]:    initial stream flow-control window.
+    TEXT[!SHOULD,todo]: So as to not unnecessarily limit
+    TEXT[!SHOULD,todo]:    parallelism, at least 100 request streams SHOULD be permitted at a
+    TEXT[!SHOULD,todo]:    time.
+    TEXT[!MUST,implementation]: Clients MUST treat
+    TEXT[!MUST,implementation]:    receipt of a server-initiated bidirectional stream as a connection
+    TEXT[!MUST,implementation]:    error of type H3_STREAM_CREATION_ERROR unless such an extension has
+    TEXT[!MUST,implementation]:    been negotiated.
 
   SECTION: [Unidirectional Streams](#section-6.2)
-    TEXT[!MUST]: Therefore, the transport parameters sent by both clients
-    TEXT[!MUST]:    and servers MUST allow the peer to create at least three
-    TEXT[!MUST]:    unidirectional streams.
-    TEXT[!SHOULD]: These transport parameters SHOULD also
-    TEXT[!SHOULD]:    provide at least 1,024 bytes of flow-control credit to each
-    TEXT[!SHOULD]:    unidirectional stream.
-    TEXT[!SHOULD]:    Endpoints SHOULD create the HTTP control stream as well as the
-    TEXT[!SHOULD]:    unidirectional streams required by mandatory extensions (such as the
-    TEXT[!SHOULD]:    QPACK encoder and decoder streams) first, and then create additional
-    TEXT[!SHOULD]:    streams as allowed by their peer.
-    TEXT[!MUST]: Recipients of unknown stream types MUST
-    TEXT[!MUST]:    either abort reading of the stream or discard incoming data without
-    TEXT[!MUST]:    further processing.
-    TEXT[!SHOULD]: If reading is aborted, the recipient SHOULD use
-    TEXT[!SHOULD]:    the H3_STREAM_CREATION_ERROR error code or a reserved error code
-    TEXT[!SHOULD]:    (Section 8.1).
-    TEXT[!MUST]: The recipient MUST NOT consider unknown stream types
-    TEXT[!MUST]:    to be a connection error of any kind.
-    TEXT[!SHOULD]:    As certain stream types can affect connection state, a recipient
-    TEXT[!SHOULD]:    SHOULD NOT discard data from incoming unidirectional streams prior to
-    TEXT[!SHOULD]:    reading the stream type.
-    TEXT[!MAY]:    Implementations MAY send stream types before knowing whether the peer
-    TEXT[!MAY]:    supports them.
-    TEXT[!MUST]: However, stream types that could modify the state or
-    TEXT[!MUST]:    semantics of existing protocol components, including QPACK or other
-    TEXT[!MUST]:    extensions, MUST NOT be sent until the peer is known to support them.
-    TEXT[!MUST]: A receiver MUST tolerate unidirectional streams being
-    TEXT[!MUST]:    closed or reset prior to the reception of the unidirectional stream
-    TEXT[!MUST]:    header.
+    TEXT[!MUST,todo]: Therefore, the transport parameters sent by both clients
+    TEXT[!MUST,todo]:    and servers MUST allow the peer to create at least three
+    TEXT[!MUST,todo]:    unidirectional streams.
+    TEXT[!SHOULD,todo]: These transport parameters SHOULD also
+    TEXT[!SHOULD,todo]:    provide at least 1,024 bytes of flow-control credit to each
+    TEXT[!SHOULD,todo]:    unidirectional stream.
+    TEXT[!SHOULD,todo]:    Endpoints SHOULD create the HTTP control stream as well as the
+    TEXT[!SHOULD,todo]:    unidirectional streams required by mandatory extensions (such as the
+    TEXT[!SHOULD,todo]:    QPACK encoder and decoder streams) first, and then create additional
+    TEXT[!SHOULD,todo]:    streams as allowed by their peer.
+    TEXT[!MUST,implementation]: Recipients of unknown stream types MUST
+    TEXT[!MUST,implementation]:    either abort reading of the stream or discard incoming data without
+    TEXT[!MUST,implementation]:    further processing.
+    TEXT[!SHOULD,todo]: If reading is aborted, the recipient SHOULD use
+    TEXT[!SHOULD,todo]:    the H3_STREAM_CREATION_ERROR error code or a reserved error code
+    TEXT[!SHOULD,todo]:    (Section 8.1).
+    TEXT[!MUST,implementation]: The recipient MUST NOT consider unknown stream types
+    TEXT[!MUST,implementation]:    to be a connection error of any kind.
+    TEXT[!SHOULD,todo]:    As certain stream types can affect connection state, a recipient
+    TEXT[!SHOULD,todo]:    SHOULD NOT discard data from incoming unidirectional streams prior to
+    TEXT[!SHOULD,todo]:    reading the stream type.
+    TEXT[!MAY,todo]:    Implementations MAY send stream types before knowing whether the peer
+    TEXT[!MAY,todo]:    supports them.
+    TEXT[!MUST,todo]: However, stream types that could modify the state or
+    TEXT[!MUST,todo]:    semantics of existing protocol components, including QPACK or other
+    TEXT[!MUST,todo]:    extensions, MUST NOT be sent until the peer is known to support them.
+    TEXT[!MUST,todo]: A receiver MUST tolerate unidirectional streams being
+    TEXT[!MUST,todo]:    closed or reset prior to the reception of the unidirectional stream
+    TEXT[!MUST,todo]:    header.
 
   SECTION: [Control Streams](#section-6.2.1)
     TEXT[!MUST,implementation]:    Each side MUST initiate a single control stream at the beginning of
@@ -2968,34 +2967,34 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
     TEXT[!MUST,implementation]: If either control
     TEXT[!MUST,implementation]:    stream is closed at any point, this MUST be treated as a connection
     TEXT[!MUST,implementation]:    error of type H3_CLOSED_CRITICAL_STREAM.
-    TEXT[!SHOULD]:    Because the contents of the control stream are used to manage the
-    TEXT[!SHOULD]:    behavior of other streams, endpoints SHOULD provide enough flow-
-    TEXT[!SHOULD]:    control credit to keep the peer's control stream from becoming
-    TEXT[!SHOULD]:    blocked.
+    TEXT[!SHOULD,todo]:    Because the contents of the control stream are used to manage the
+    TEXT[!SHOULD,todo]:    behavior of other streams, endpoints SHOULD provide enough flow-
+    TEXT[!SHOULD,todo]:    control credit to keep the peer's control stream from becoming
+    TEXT[!SHOULD,todo]:    blocked.
 
   SECTION: [Push Streams](#section-6.2.2)
-    TEXT[!MUST]:    Only servers can push; if a server receives a client-initiated push
-    TEXT[!MUST]:    stream, this MUST be treated as a connection error of type
-    TEXT[!MUST]:    H3_STREAM_CREATION_ERROR.
-    TEXT[!SHOULD]:    A client SHOULD NOT abort reading on a push stream prior to reading
-    TEXT[!SHOULD]:    the push stream header, as this could lead to disagreement between
-    TEXT[!SHOULD]:    client and server on which push IDs have already been consumed.
-    TEXT[!MUST]:    Each push ID MUST only be used once in a push stream header.
-    TEXT[!MUST]: If a
-    TEXT[!MUST]:    client detects that a push stream header includes a push ID that was
-    TEXT[!MUST]:    used in another push stream header, the client MUST treat this as a
-    TEXT[!MUST]:    connection error of type H3_ID_ERROR.
+    TEXT[!MUST,implementation]:    Only servers can push; if a server receives a client-initiated push
+    TEXT[!MUST,implementation]:    stream, this MUST be treated as a connection error of type
+    TEXT[!MUST,implementation]:    H3_STREAM_CREATION_ERROR.
+    TEXT[!SHOULD,todo]:    A client SHOULD NOT abort reading on a push stream prior to reading
+    TEXT[!SHOULD,todo]:    the push stream header, as this could lead to disagreement between
+    TEXT[!SHOULD,todo]:    client and server on which push IDs have already been consumed.
+    TEXT[!MUST,implementation]:    Each push ID MUST only be used once in a push stream header.
+    TEXT[!MUST,implementation]: If a
+    TEXT[!MUST,implementation]:    client detects that a push stream header includes a push ID that was
+    TEXT[!MUST,implementation]:    used in another push stream header, the client MUST treat this as a
+    TEXT[!MUST,implementation]:    connection error of type H3_ID_ERROR.
 
   SECTION: [Reserved Stream Types](#section-6.2.3)
-    TEXT[!MAY]: They MAY also be
-    TEXT[!MAY]:    sent on connections where no data is currently being transferred.
-    TEXT[!MUST]:    Endpoints MUST NOT consider these streams to have any meaning upon
-    TEXT[!MUST]:    receipt.
-    TEXT[!MAY]: When sending a reserved stream type,
-    TEXT[!MAY]:    the implementation MAY either terminate the stream cleanly or reset
-    TEXT[!MAY]:    it.
-    TEXT[!SHOULD]: When resetting the stream, either the H3_NO_ERROR error code or
-    TEXT[!SHOULD]:    a reserved error code (Section 8.1) SHOULD be used.
+    TEXT[!MAY,todo]: They MAY also be
+    TEXT[!MAY,todo]:    sent on connections where no data is currently being transferred.
+    TEXT[!MUST,todo]:    Endpoints MUST NOT consider these streams to have any meaning upon
+    TEXT[!MUST,todo]:    receipt.
+    TEXT[!MAY,todo]: When sending a reserved stream type,
+    TEXT[!MAY,todo]:    the implementation MAY either terminate the stream cleanly or reset
+    TEXT[!MAY,todo]:    it.
+    TEXT[!SHOULD,todo]: When resetting the stream, either the H3_NO_ERROR error code or
+    TEXT[!SHOULD,todo]:    a reserved error code (Section 8.1) SHOULD be used.
 
   SECTION: [Frame Layout](#section-7.1)
     TEXT[!MUST,implementation,test]:    Each frame's payload MUST contain exactly the fields identified in
@@ -3004,43 +3003,43 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
     TEXT[!MUST,implementation,test]:    after the identified fields or a frame payload that terminates before
     TEXT[!MUST,implementation,test]:    the end of the identified fields MUST be treated as a connection
     TEXT[!MUST,implementation,test]:    error of type H3_FRAME_ERROR.
-    TEXT[!MUST]: In particular, redundant length
-    TEXT[!MUST]:    encodings MUST be verified to be self-consistent; see Section 10.8.
-    TEXT[!MUST]:    When a stream terminates cleanly, if the last frame on the stream was
-    TEXT[!MUST]:    truncated, this MUST be treated as a connection error of type
-    TEXT[!MUST]:    H3_FRAME_ERROR.
+    TEXT[!MUST,todo]: In particular, redundant length
+    TEXT[!MUST,todo]:    encodings MUST be verified to be self-consistent; see Section 10.8.
+    TEXT[!MUST,implementation]:    When a stream terminates cleanly, if the last frame on the stream was
+    TEXT[!MUST,implementation]:    truncated, this MUST be treated as a connection error of type
+    TEXT[!MUST,implementation]:    H3_FRAME_ERROR.
 
   SECTION: [DATA](#section-7.2.1)
-    TEXT[!MUST]:    DATA frames MUST be associated with an HTTP request or response.
-    TEXT[!MUST]: If
-    TEXT[!MUST]:    a DATA frame is received on a control stream, the recipient MUST
-    TEXT[!MUST]:    respond with a connection error of type H3_FRAME_UNEXPECTED.
+    TEXT[!MUST,implementation]:    DATA frames MUST be associated with an HTTP request or response.
+    TEXT[!MUST,implementation]: If
+    TEXT[!MUST,implementation]:    a DATA frame is received on a control stream, the recipient MUST
+    TEXT[!MUST,implementation]:    respond with a connection error of type H3_FRAME_UNEXPECTED.
 
   SECTION: [HEADERS](#section-7.2.2)
-    TEXT[!MUST]:    If a HEADERS frame is received on a control stream, the recipient
-    TEXT[!MUST]:    MUST respond with a connection error of type H3_FRAME_UNEXPECTED.
+    TEXT[!MUST,implementation]:    If a HEADERS frame is received on a control stream, the recipient
+    TEXT[!MUST,implementation]:    MUST respond with a connection error of type H3_FRAME_UNEXPECTED.
 
   SECTION: [CANCEL_PUSH](#section-7.2.3)
-    TEXT[!SHOULD]: The server SHOULD
-    TEXT[!SHOULD]:    abort sending the resource, but the mechanism to do so depends on the
-    TEXT[!SHOULD]:    state of the corresponding push stream.
-    TEXT[!SHOULD]: If the push stream is
-    TEXT[!SHOULD]:    open, the server SHOULD abruptly terminate that stream.
-    TEXT[!MAY]: If the push
-    TEXT[!MAY]:    stream has already ended, the server MAY still abruptly terminate the
-    TEXT[!MAY]:    stream or MAY take no action.
-    TEXT[!SHOULD]: Regardless of
-    TEXT[!SHOULD]:    whether a push stream has been opened, a server SHOULD send a
-    TEXT[!SHOULD]:    CANCEL_PUSH frame when it determines that promise will not be
-    TEXT[!SHOULD]:    fulfilled.
-    TEXT[!SHOULD]: A client SHOULD NOT send a CANCEL_PUSH frame
-    TEXT[!SHOULD]:    when it has already received a corresponding push stream.
-    TEXT[!SHOULD]: The
-    TEXT[!SHOULD]:    client SHOULD abort reading the stream with an error code of
-    TEXT[!SHOULD]:    H3_REQUEST_CANCELLED.
-    TEXT[!MUST]: Receiving a
-    TEXT[!MUST]:    CANCEL_PUSH frame on a stream other than the control stream MUST be
-    TEXT[!MUST]:    treated as a connection error of type H3_FRAME_UNEXPECTED.
+    TEXT[!SHOULD,todo]: The server SHOULD
+    TEXT[!SHOULD,todo]:    abort sending the resource, but the mechanism to do so depends on the
+    TEXT[!SHOULD,todo]:    state of the corresponding push stream.
+    TEXT[!SHOULD,todo]: If the push stream is
+    TEXT[!SHOULD,todo]:    open, the server SHOULD abruptly terminate that stream.
+    TEXT[!MAY,todo]: If the push
+    TEXT[!MAY,todo]:    stream has already ended, the server MAY still abruptly terminate the
+    TEXT[!MAY,todo]:    stream or MAY take no action.
+    TEXT[!SHOULD,todo]: Regardless of
+    TEXT[!SHOULD,todo]:    whether a push stream has been opened, a server SHOULD send a
+    TEXT[!SHOULD,todo]:    CANCEL_PUSH frame when it determines that promise will not be
+    TEXT[!SHOULD,todo]:    fulfilled.
+    TEXT[!SHOULD,todo]: A client SHOULD NOT send a CANCEL_PUSH frame
+    TEXT[!SHOULD,todo]:    when it has already received a corresponding push stream.
+    TEXT[!SHOULD,todo]: The
+    TEXT[!SHOULD,todo]:    client SHOULD abort reading the stream with an error code of
+    TEXT[!SHOULD,todo]:    H3_REQUEST_CANCELLED.
+    TEXT[!MUST,todo]: Receiving a
+    TEXT[!MUST,todo]:    CANCEL_PUSH frame on a stream other than the control stream MUST be
+    TEXT[!MUST,todo]:    treated as a connection error of type H3_FRAME_UNEXPECTED.
     TEXT[!MUST,implementation]: If a CANCEL_PUSH frame is received that
     TEXT[!MUST,implementation]:    references a push ID greater than currently allowed on the
     TEXT[!MUST,implementation]:    connection, this MUST be treated as a connection error of type
@@ -3050,356 +3049,356 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9114
     TEXT[!MUST,implementation]:    be treated as a connection error of type H3_ID_ERROR.
 
   SECTION: [SETTINGS](#section-7.2.4)
-    TEXT[!MUST]: A SETTINGS frame MUST be sent as the first frame of
-    TEXT[!MUST]:    each control stream (see Section 6.2.1) by each peer, and it MUST NOT
-    TEXT[!MUST]:    be sent subsequently.
+    TEXT[!MUST,implementation]: A SETTINGS frame MUST be sent as the first frame of
+    TEXT[!MUST,implementation]:    each control stream (see Section 6.2.1) by each peer, and it MUST NOT
+    TEXT[!MUST,implementation]:    be sent subsequently.
     TEXT[!MUST,implementation]: If an endpoint receives a second SETTINGS
     TEXT[!MUST,implementation]:    frame on the control stream, the endpoint MUST respond with a
     TEXT[!MUST,implementation]:    connection error of type H3_FRAME_UNEXPECTED.
-    TEXT[!MUST]:    SETTINGS frames MUST NOT be sent on any stream other than the control
-    TEXT[!MUST]:    stream.
+    TEXT[!MUST,implementation]:    SETTINGS frames MUST NOT be sent on any stream other than the control
+    TEXT[!MUST,implementation]:    stream.
     TEXT[!MUST,test]: If an endpoint receives a SETTINGS frame on a different
     TEXT[!MUST,test]:    stream, the endpoint MUST respond with a connection error of type
     TEXT[!MUST,test]:    H3_FRAME_UNEXPECTED.
-    TEXT[!MUST]:    The same setting identifier MUST NOT occur more than once in the
-    TEXT[!MUST]:    SETTINGS frame.
-    TEXT[!MAY]: A receiver MAY treat the presence of duplicate
-    TEXT[!MAY]:    setting identifiers as a connection error of type H3_SETTINGS_ERROR.
-    TEXT[!MUST]:    An implementation MUST ignore any parameter with an identifier it
-    TEXT[!MUST]:    does not understand.
+    TEXT[!MUST,implementation]:    The same setting identifier MUST NOT occur more than once in the
+    TEXT[!MUST,implementation]:    SETTINGS frame.
+    TEXT[!MAY,implementation]: A receiver MAY treat the presence of duplicate
+    TEXT[!MAY,implementation]:    setting identifiers as a connection error of type H3_SETTINGS_ERROR.
+    TEXT[!MUST,implementation]:    An implementation MUST ignore any parameter with an identifier it
+    TEXT[!MUST,implementation]:    does not understand.
 
   SECTION: [Defined SETTINGS Parameters](#section-7.2.4.1)
     TEXT[!SHOULD,implementation]: Endpoints SHOULD include at least one such setting in their
     TEXT[!SHOULD,implementation]:    SETTINGS frame.
-    TEXT[!MUST]: Endpoints MUST NOT consider such settings to have
-    TEXT[!MUST]:    any meaning upon receipt.
-    TEXT[!MUST]: These reserved settings MUST NOT be sent, and
-    TEXT[!MUST]:    their receipt MUST be treated as a connection error of type
-    TEXT[!MUST]:    H3_SETTINGS_ERROR.
+    TEXT[!MUST,todo]: Endpoints MUST NOT consider such settings to have
+    TEXT[!MUST,todo]:    any meaning upon receipt.
+    TEXT[!MUST,implementation]: These reserved settings MUST NOT be sent, and
+    TEXT[!MUST,implementation]:    their receipt MUST be treated as a connection error of type
+    TEXT[!MUST,implementation]:    H3_SETTINGS_ERROR.
 
   SECTION: [Initialization](#section-7.2.4.2)
-    TEXT[!MUST]:    An HTTP implementation MUST NOT send frames or requests that would be
-    TEXT[!MUST]:    invalid based on its current understanding of the peer's settings.
-    TEXT[!SHOULD]: Each endpoint SHOULD use
-    TEXT[!SHOULD]:    these initial values to send messages before the peer's SETTINGS
-    TEXT[!SHOULD]:    frame has arrived, as packets carrying the settings can be lost or
-    TEXT[!SHOULD]:    delayed.
-    TEXT[!MUST]: Endpoints MUST NOT require any data to be received from
-    TEXT[!MUST]:    the peer prior to sending the SETTINGS frame; settings MUST be sent
-    TEXT[!MUST]:    as soon as the transport is ready to send data.
-    TEXT[!SHOULD]: Clients SHOULD
-    TEXT[!SHOULD]:    NOT wait indefinitely for SETTINGS to arrive before sending requests,
-    TEXT[!SHOULD]:    but they SHOULD process received datagrams in order to increase the
-    TEXT[!SHOULD]:    likelihood of processing SETTINGS before sending the first request.
-    TEXT[!SHOULD]: Clients
-    TEXT[!SHOULD]:    SHOULD store the settings the server provided in the HTTP/3
-    TEXT[!SHOULD]:    connection where resumption information was provided, but they MAY
-    TEXT[!SHOULD]:    opt not to store settings in certain cases (e.g., if the session
-    TEXT[!SHOULD]:    ticket is received before the SETTINGS frame).
-    TEXT[!MUST]: A client MUST comply
-    TEXT[!MUST]:    with stored settings -- or default values if no values are stored --
-    TEXT[!MUST]:    when attempting 0-RTT.
-    TEXT[!MUST]: Once a server has provided new settings,
-    TEXT[!MUST]:    clients MUST comply with those values.
-    TEXT[!MUST]: If the
-    TEXT[!MUST]:    server cannot determine that the settings remembered by a client are
-    TEXT[!MUST]:    compatible with its current settings, it MUST NOT accept 0-RTT data.
-    TEXT[!MAY]:    A server MAY accept 0-RTT and subsequently provide different settings
-    TEXT[!MAY]:    in its SETTINGS frame.
-    TEXT[!MUST]: If 0-RTT data is accepted by the server, its
-    TEXT[!MUST]:    SETTINGS frame MUST NOT reduce any limits or alter any values that
-    TEXT[!MUST]:    might be violated by the client with its 0-RTT data.
-    TEXT[!MUST]: The server MUST
-    TEXT[!MUST]:    include all settings that differ from their default values.
+    TEXT[!MUST,implementation]:    An HTTP implementation MUST NOT send frames or requests that would be
+    TEXT[!MUST,implementation]:    invalid based on its current understanding of the peer's settings.
+    TEXT[!SHOULD,todo]: Each endpoint SHOULD use
+    TEXT[!SHOULD,todo]:    these initial values to send messages before the peer's SETTINGS
+    TEXT[!SHOULD,todo]:    frame has arrived, as packets carrying the settings can be lost or
+    TEXT[!SHOULD,todo]:    delayed.
+    TEXT[!MUST,todo]: Endpoints MUST NOT require any data to be received from
+    TEXT[!MUST,todo]:    the peer prior to sending the SETTINGS frame; settings MUST be sent
+    TEXT[!MUST,todo]:    as soon as the transport is ready to send data.
+    TEXT[!SHOULD,todo]: Clients SHOULD
+    TEXT[!SHOULD,todo]:    NOT wait indefinitely for SETTINGS to arrive before sending requests,
+    TEXT[!SHOULD,todo]:    but they SHOULD process received datagrams in order to increase the
+    TEXT[!SHOULD,todo]:    likelihood of processing SETTINGS before sending the first request.
+    TEXT[!SHOULD,todo]: Clients
+    TEXT[!SHOULD,todo]:    SHOULD store the settings the server provided in the HTTP/3
+    TEXT[!SHOULD,todo]:    connection where resumption information was provided, but they MAY
+    TEXT[!SHOULD,todo]:    opt not to store settings in certain cases (e.g., if the session
+    TEXT[!SHOULD,todo]:    ticket is received before the SETTINGS frame).
+    TEXT[!MUST,todo]: A client MUST comply
+    TEXT[!MUST,todo]:    with stored settings -- or default values if no values are stored --
+    TEXT[!MUST,todo]:    when attempting 0-RTT.
+    TEXT[!MUST,todo]: Once a server has provided new settings,
+    TEXT[!MUST,todo]:    clients MUST comply with those values.
+    TEXT[!MUST,todo]: If the
+    TEXT[!MUST,todo]:    server cannot determine that the settings remembered by a client are
+    TEXT[!MUST,todo]:    compatible with its current settings, it MUST NOT accept 0-RTT data.
+    TEXT[!MAY,todo]:    A server MAY accept 0-RTT and subsequently provide different settings
+    TEXT[!MAY,todo]:    in its SETTINGS frame.
+    TEXT[!MUST,implementation]: If 0-RTT data is accepted by the server, its
+    TEXT[!MUST,implementation]:    SETTINGS frame MUST NOT reduce any limits or alter any values that
+    TEXT[!MUST,implementation]:    might be violated by the client with its 0-RTT data.
+    TEXT[!MUST,todo]: The server MUST
+    TEXT[!MUST,todo]:    include all settings that differ from their default values.
     TEXT[!MUST,implementation]: If a
     TEXT[!MUST,implementation]:    server accepts 0-RTT but then sends settings that are not compatible
     TEXT[!MUST,implementation]:    with the previously specified settings, this MUST be treated as a
     TEXT[!MUST,implementation]:    connection error of type H3_SETTINGS_ERROR.
-    TEXT[!MUST]: If a server accepts
-    TEXT[!MUST]:    0-RTT but then sends a SETTINGS frame that omits a setting value that
-    TEXT[!MUST]:    the client understands (apart from reserved setting identifiers) that
-    TEXT[!MUST]:    was previously specified to have a non-default value, this MUST be
-    TEXT[!MUST]:    treated as a connection error of type H3_SETTINGS_ERROR.
+    TEXT[!MUST,implementation]: If a server accepts
+    TEXT[!MUST,implementation]:    0-RTT but then sends a SETTINGS frame that omits a setting value that
+    TEXT[!MUST,implementation]:    the client understands (apart from reserved setting identifiers) that
+    TEXT[!MUST,implementation]:    was previously specified to have a non-default value, this MUST be
+    TEXT[!MUST,implementation]:    treated as a connection error of type H3_SETTINGS_ERROR.
 
   SECTION: [PUSH_PROMISE](#section-7.2.5)
-    TEXT[!MUST]:    A server MUST NOT use a push ID that is larger than the client has
-    TEXT[!MUST]:    provided in a MAX_PUSH_ID frame (Section 7.2.7).
+    TEXT[!MUST,implementation]:    A server MUST NOT use a push ID that is larger than the client has
+    TEXT[!MUST,implementation]:    provided in a MAX_PUSH_ID frame (Section 7.2.7).
     TEXT[!MUST,implementation]: A client MUST treat
     TEXT[!MUST,implementation]:    receipt of a PUSH_PROMISE frame that contains a larger push ID than
     TEXT[!MUST,implementation]:    the client has advertised as a connection error of H3_ID_ERROR.
-    TEXT[!MAY]:    A server MAY use the same push ID in multiple PUSH_PROMISE frames.
-    TEXT[!MUST]:    If so, the decompressed request header sets MUST contain the same
-    TEXT[!MUST]:    fields in the same order, and both the name and the value in each
-    TEXT[!MUST]:    field MUST be exact matches.
-    TEXT[!SHOULD]: Clients SHOULD compare the request
-    TEXT[!SHOULD]:    header sections for resources promised multiple times.
+    TEXT[!MAY,todo]:    A server MAY use the same push ID in multiple PUSH_PROMISE frames.
+    TEXT[!MUST,todo]:    If so, the decompressed request header sets MUST contain the same
+    TEXT[!MUST,todo]:    fields in the same order, and both the name and the value in each
+    TEXT[!MUST,todo]:    field MUST be exact matches.
+    TEXT[!SHOULD,todo]: Clients SHOULD compare the request
+    TEXT[!SHOULD,todo]:    header sections for resources promised multiple times.
     TEXT[!MUST,implementation]: If a client
     TEXT[!MUST,implementation]:    receives a push ID that has already been promised and detects a
     TEXT[!MUST,implementation]:    mismatch, it MUST respond with a connection error of type
     TEXT[!MUST,implementation]:    H3_GENERAL_PROTOCOL_ERROR.
-    TEXT[!SHOULD]: If the decompressed field sections match
-    TEXT[!SHOULD]:    exactly, the client SHOULD associate the pushed content with each
-    TEXT[!SHOULD]:    stream on which a PUSH_PROMISE frame was received.
-    TEXT[!SHOULD]: A server SHOULD
-    TEXT[!SHOULD]:    avoid reusing a push ID over a long period.
-    TEXT[!MUST]:    If a PUSH_PROMISE frame is received on the control stream, the client
-    TEXT[!MUST]:    MUST respond with a connection error of type H3_FRAME_UNEXPECTED.
+    TEXT[!SHOULD,todo]: If the decompressed field sections match
+    TEXT[!SHOULD,todo]:    exactly, the client SHOULD associate the pushed content with each
+    TEXT[!SHOULD,todo]:    stream on which a PUSH_PROMISE frame was received.
+    TEXT[!SHOULD,todo]: A server SHOULD
+    TEXT[!SHOULD,todo]:    avoid reusing a push ID over a long period.
+    TEXT[!MUST,implementation]:    If a PUSH_PROMISE frame is received on the control stream, the client
+    TEXT[!MUST,implementation]:    MUST respond with a connection error of type H3_FRAME_UNEXPECTED.
     TEXT[!MUST,implementation]:    A client MUST NOT send a PUSH_PROMISE frame.
     TEXT[!MUST,implementation]: A server MUST treat the
     TEXT[!MUST,implementation]:    receipt of a PUSH_PROMISE frame as a connection error of type
     TEXT[!MUST,implementation]:    H3_FRAME_UNEXPECTED.
 
   SECTION: [GOAWAY](#section-7.2.6)
-    TEXT[!MUST]:    A client MUST treat receipt of a GOAWAY frame containing a stream ID
-    TEXT[!MUST]:    of any other type as a connection error of type H3_ID_ERROR.
-    TEXT[!MUST]: A client MUST treat a GOAWAY frame on a stream other than
-    TEXT[!MUST]:    the control stream as a connection error of type H3_FRAME_UNEXPECTED.
+    TEXT[!MUST,implementation]:    A client MUST treat receipt of a GOAWAY frame containing a stream ID
+    TEXT[!MUST,implementation]:    of any other type as a connection error of type H3_ID_ERROR.
+    TEXT[!MUST,implementation]: A client MUST treat a GOAWAY frame on a stream other than
+    TEXT[!MUST,implementation]:    the control stream as a connection error of type H3_FRAME_UNEXPECTED.
 
   SECTION: [MAX_PUSH_ID](#section-7.2.7)
-    TEXT[!MUST]: Receipt
-    TEXT[!MUST]:    of a MAX_PUSH_ID frame on any other stream MUST be treated as a
-    TEXT[!MUST]:    connection error of type H3_FRAME_UNEXPECTED.
-    TEXT[!MUST]:    A server MUST NOT send a MAX_PUSH_ID frame.
-    TEXT[!MUST]: A client MUST treat the
-    TEXT[!MUST]:    receipt of a MAX_PUSH_ID frame as a connection error of type
-    TEXT[!MUST]:    H3_FRAME_UNEXPECTED.
+    TEXT[!MUST,implementation]: Receipt
+    TEXT[!MUST,implementation]:    of a MAX_PUSH_ID frame on any other stream MUST be treated as a
+    TEXT[!MUST,implementation]:    connection error of type H3_FRAME_UNEXPECTED.
+    TEXT[!MUST,implementation]:    A server MUST NOT send a MAX_PUSH_ID frame.
+    TEXT[!MUST,implementation]: A client MUST treat the
+    TEXT[!MUST,implementation]:    receipt of a MAX_PUSH_ID frame as a connection error of type
+    TEXT[!MUST,implementation]:    H3_FRAME_UNEXPECTED.
     TEXT[!MUST,implementation,test]: A MAX_PUSH_ID frame cannot reduce the maximum push
     TEXT[!MUST,implementation,test]:    ID; receipt of a MAX_PUSH_ID frame that contains a smaller value than
     TEXT[!MUST,implementation,test]:    previously received MUST be treated as a connection error of type
     TEXT[!MUST,implementation,test]:    H3_ID_ERROR.
 
   SECTION: [Reserved Frame Types](#section-7.2.8)
-    TEXT[!MAY]: These frames have no semantics, and
-    TEXT[!MAY]:    they MAY be sent on any stream where frames are allowed to be sent.
-    TEXT[!MUST]: Endpoints MUST
-    TEXT[!MUST]:    NOT consider these frames to have any meaning upon receipt.
-    TEXT[!MUST]: These frame
-    TEXT[!MUST]:    types MUST NOT be sent, and their receipt MUST be treated as a
-    TEXT[!MUST]:    connection error of type H3_FRAME_UNEXPECTED.
+    TEXT[!MAY,implementation]: These frames have no semantics, and
+    TEXT[!MAY,implementation]:    they MAY be sent on any stream where frames are allowed to be sent.
+    TEXT[!MUST,implementation]: Endpoints MUST
+    TEXT[!MUST,implementation]:    NOT consider these frames to have any meaning upon receipt.
+    TEXT[!MUST,implementation]: These frame
+    TEXT[!MUST,implementation]:    types MUST NOT be sent, and their receipt MUST be treated as a
+    TEXT[!MUST,implementation]:    connection error of type H3_FRAME_UNEXPECTED.
 
   SECTION: [Error Handling](#section-8)
-    TEXT[!MAY]:    An endpoint MAY choose to treat a stream error as a connection error
-    TEXT[!MAY]:    under certain circumstances, closing the entire connection in
-    TEXT[!MAY]:    response to a condition on a single stream.
-    TEXT[!MUST]:    Because new error codes can be defined without negotiation (see
-    TEXT[!MUST]:    Section 9), use of an error code in an unexpected context or receipt
-    TEXT[!MUST]:    of an unknown error code MUST be treated as equivalent to
-    TEXT[!MUST]:    H3_NO_ERROR.
+    TEXT[!MAY,todo]:    An endpoint MAY choose to treat a stream error as a connection error
+    TEXT[!MAY,todo]:    under certain circumstances, closing the entire connection in
+    TEXT[!MAY,todo]:    response to a condition on a single stream.
+    TEXT[!MUST,todo]:    Because new error codes can be defined without negotiation (see
+    TEXT[!MUST,todo]:    Section 9), use of an error code in an unexpected context or receipt
+    TEXT[!MUST,todo]:    of an unknown error code MUST be treated as equivalent to
+    TEXT[!MUST,todo]:    H3_NO_ERROR.
 
   SECTION: [HTTP/3 Error Codes](#section-8.1)
-    TEXT[!SHOULD]:    Implementations SHOULD select an error code from this space with some
-    TEXT[!SHOULD]:    probability when they would have sent H3_NO_ERROR.
+    TEXT[!SHOULD,todo]:    Implementations SHOULD select an error code from this space with some
+    TEXT[!SHOULD,todo]:    probability when they would have sent H3_NO_ERROR.
 
   SECTION: [Extensions to HTTP/3](#section-9)
-    TEXT[!MUST]:    Implementations MUST ignore unknown or unsupported values in all
-    TEXT[!MUST]:    extensible protocol elements.
-    TEXT[!MUST]: Implementations MUST discard data or
-    TEXT[!MUST]:    abort reading on unidirectional streams that have unknown or
-    TEXT[!MUST]:    unsupported types.
-    TEXT[!SHOULD]: However, where a known frame type is required to be in
-    TEXT[!SHOULD]:    a specific location, such as the SETTINGS frame as the first frame of
-    TEXT[!SHOULD]:    the control stream (see Section 6.2.1), an unknown frame type does
-    TEXT[!SHOULD]:    not satisfy that requirement and SHOULD be treated as an error.
-    TEXT[!MUST]:    Extensions that could change the semantics of existing protocol
-    TEXT[!MUST]:    components MUST be negotiated before being used.
-    TEXT[!MUST]: If a setting is used for extension negotiation, the default
-    TEXT[!MUST]:    value MUST be defined in such a fashion that the extension is
-    TEXT[!MUST]:    disabled if the setting is omitted.
+    TEXT[!MUST,implementation]:    Implementations MUST ignore unknown or unsupported values in all
+    TEXT[!MUST,implementation]:    extensible protocol elements.
+    TEXT[!MUST,todo]: Implementations MUST discard data or
+    TEXT[!MUST,todo]:    abort reading on unidirectional streams that have unknown or
+    TEXT[!MUST,todo]:    unsupported types.
+    TEXT[!SHOULD,todo]: However, where a known frame type is required to be in
+    TEXT[!SHOULD,todo]:    a specific location, such as the SETTINGS frame as the first frame of
+    TEXT[!SHOULD,todo]:    the control stream (see Section 6.2.1), an unknown frame type does
+    TEXT[!SHOULD,todo]:    not satisfy that requirement and SHOULD be treated as an error.
+    TEXT[!MUST,todo]:    Extensions that could change the semantics of existing protocol
+    TEXT[!MUST,todo]:    components MUST be negotiated before being used.
+    TEXT[!MUST,todo]: If a setting is used for extension negotiation, the default
+    TEXT[!MUST,todo]:    value MUST be defined in such a fashion that the extension is
+    TEXT[!MUST,todo]:    disabled if the setting is omitted.
 
   SECTION: [Intermediary-Encapsulation Attacks](#section-10.3)
-    TEXT[!MUST]:    Requests or responses containing invalid field names MUST be treated
-    TEXT[!MUST]:    as malformed.
-    TEXT[!MUST]: Any request or response that contains a
-    TEXT[!MUST]:    character not permitted in a field value MUST be treated as
-    TEXT[!MUST]:    malformed.
+    TEXT[!MUST,implementation]:    Requests or responses containing invalid field names MUST be treated
+    TEXT[!MUST,implementation]:    as malformed.
+    TEXT[!MUST,implementation]: Any request or response that contains a
+    TEXT[!MUST,implementation]:    character not permitted in a field value MUST be treated as
+    TEXT[!MUST,implementation]:    malformed.
 
   SECTION: [Cacheability of Pushed Responses](#section-10.4)
-    TEXT[!MUST]:    Where multiple tenants share space on the same server, that server
-    TEXT[!MUST]:    MUST ensure that tenants are not able to push representations of
-    TEXT[!MUST]:    resources that they do not have authority over.
+    TEXT[!MUST,todo]:    Where multiple tenants share space on the same server, that server
+    TEXT[!MUST,todo]:    MUST ensure that tenants are not able to push representations of
+    TEXT[!MUST,todo]:    resources that they do not have authority over.
 
   SECTION: [Denial-of-Service Considerations](#section-10.5)
-    TEXT[!SHOULD]: A client that accepts server push SHOULD limit the number
-    TEXT[!SHOULD]:    of push IDs it issues at a time.
-    TEXT[!SHOULD]: Implementations SHOULD track the
-    TEXT[!SHOULD]:    use of these features and set limits on their use.
-    TEXT[!MAY]: An endpoint MAY
-    TEXT[!MAY]:    treat activity that is suspicious as a connection error of type
-    TEXT[!MAY]:    H3_EXCESSIVE_LOAD, but false positives will result in disrupting
-    TEXT[!MAY]:    valid connections and requests.
+    TEXT[!SHOULD,implementation]: A client that accepts server push SHOULD limit the number
+    TEXT[!SHOULD,implementation]:    of push IDs it issues at a time.
+    TEXT[!SHOULD,todo]: Implementations SHOULD track the
+    TEXT[!SHOULD,todo]:    use of these features and set limits on their use.
+    TEXT[!MAY,todo]: An endpoint MAY
+    TEXT[!MAY,todo]:    treat activity that is suspicious as a connection error of type
+    TEXT[!MAY,todo]:    H3_EXCESSIVE_LOAD, but false positives will result in disrupting
+    TEXT[!MAY,todo]:    valid connections and requests.
 
   SECTION: [Limits on Field Section Size](#section-10.5.1)
-    TEXT[!MAY]: This setting is only advisory, so
-    TEXT[!MAY]:    endpoints MAY choose to send field sections that exceed this limit
-    TEXT[!MAY]:    and risk having the request or response being treated as malformed.
+    TEXT[!MAY,todo]: This setting is only advisory, so
+    TEXT[!MAY,todo]:    endpoints MAY choose to send field sections that exceed this limit
+    TEXT[!MAY,todo]:    and risk having the request or response being treated as malformed.
 
   SECTION: [Use of Compression](#section-10.6)
-    TEXT[!MUST]:    Implementations communicating on a secure channel MUST NOT compress
-    TEXT[!MUST]:    content that includes both confidential and attacker-controlled data
-    TEXT[!MUST]:    unless separate compression contexts are used for each source of
-    TEXT[!MUST]:    data.
-    TEXT[!MUST]: Compression MUST NOT be used if the source of data cannot be
-    TEXT[!MUST]:    reliably determined.
+    TEXT[!MUST,todo]:    Implementations communicating on a secure channel MUST NOT compress
+    TEXT[!MUST,todo]:    content that includes both confidential and attacker-controlled data
+    TEXT[!MUST,todo]:    unless separate compression contexts are used for each source of
+    TEXT[!MUST,todo]:    data.
+    TEXT[!MUST,todo]: Compression MUST NOT be used if the source of data cannot be
+    TEXT[!MUST,todo]:    reliably determined.
 
   SECTION: [Frame Parsing](#section-10.8)
-    TEXT[!MUST]: An implementation MUST ensure that the length of a
-    TEXT[!MUST]:    frame exactly matches the length of the fields it contains.
+    TEXT[!MUST,implementation]: An implementation MUST ensure that the length of a
+    TEXT[!MUST,implementation]:    frame exactly matches the length of the fields it contains.
 
   SECTION: [Early Data](#section-10.9)
-    TEXT[!MUST]:    The anti-replay mitigations in [HTTP-REPLAY] MUST be applied when
-    TEXT[!MUST]:    using HTTP/3 with 0-RTT.
+    TEXT[!MUST,todo]:    The anti-replay mitigations in [HTTP-REPLAY] MUST be applied when
+    TEXT[!MUST,todo]:    using HTTP/3 with 0-RTT.
 
   SECTION: [Frame Types](#section-11.2.1)
-    TEXT[!SHOULD]: If an entry is present in
-    TEXT[!SHOULD]:    only one registry, every effort SHOULD be made to avoid assigning the
-    TEXT[!SHOULD]:    corresponding value to an unrelated operation.
-    TEXT[!MAY]: Expert reviewers MAY
-    TEXT[!MAY]:    reject unrelated registrations that would conflict with the same
-    TEXT[!MAY]:    value in the corresponding registry.
-    TEXT[!MUST]:    In addition to common fields as described in Section 11.2, permanent
-    TEXT[!MUST]:    registrations in this registry MUST include the following field:
-    TEXT[!MUST]:    Specifications of frame types MUST include a description of the frame
-    TEXT[!MUST]:    layout and its semantics, including any parts of the frame that are
-    TEXT[!MUST]:    conditionally present.
-    TEXT[!MUST]:    Each code of the format 0x1f * N + 0x21 for non-negative integer
-    TEXT[!MUST]:    values of N (that is, 0x21, 0x40, ..., through 0x3ffffffffffffffe)
-    TEXT[!MUST]:    MUST NOT be assigned by IANA and MUST NOT appear in the listing of
-    TEXT[!MUST]:    assigned values.
+    TEXT[!SHOULD,todo]: If an entry is present in
+    TEXT[!SHOULD,todo]:    only one registry, every effort SHOULD be made to avoid assigning the
+    TEXT[!SHOULD,todo]:    corresponding value to an unrelated operation.
+    TEXT[!MAY,todo]: Expert reviewers MAY
+    TEXT[!MAY,todo]:    reject unrelated registrations that would conflict with the same
+    TEXT[!MAY,todo]:    value in the corresponding registry.
+    TEXT[!MUST,todo]:    In addition to common fields as described in Section 11.2, permanent
+    TEXT[!MUST,todo]:    registrations in this registry MUST include the following field:
+    TEXT[!MUST,todo]:    Specifications of frame types MUST include a description of the frame
+    TEXT[!MUST,todo]:    layout and its semantics, including any parts of the frame that are
+    TEXT[!MUST,todo]:    conditionally present.
+    TEXT[!MUST,todo]:    Each code of the format 0x1f * N + 0x21 for non-negative integer
+    TEXT[!MUST,todo]:    values of N (that is, 0x21, 0x40, ..., through 0x3ffffffffffffffe)
+    TEXT[!MUST,todo]:    MUST NOT be assigned by IANA and MUST NOT appear in the listing of
+    TEXT[!MUST,todo]:    assigned values.
 
   SECTION: [Settings Parameters](#section-11.2.2)
-    TEXT[!SHOULD]: If an entry is present in only one registry, every
-    TEXT[!SHOULD]:    effort SHOULD be made to avoid assigning the corresponding value to
-    TEXT[!SHOULD]:    an unrelated operation.
-    TEXT[!MAY]: Expert reviewers MAY reject unrelated
-    TEXT[!MAY]:    registrations that would conflict with the same value in the
-    TEXT[!MAY]:    corresponding registry.
-    TEXT[!MUST]:    In addition to common fields as described in Section 11.2, permanent
-    TEXT[!MUST]:    registrations in this registry MUST include the following fields:
-    TEXT[!SHOULD]:       default SHOULD be the most restrictive possible value.
-    TEXT[!MUST]:    Each code of the format 0x1f * N + 0x21 for non-negative integer
-    TEXT[!MUST]:    values of N (that is, 0x21, 0x40, ..., through 0x3ffffffffffffffe)
-    TEXT[!MUST]:    MUST NOT be assigned by IANA and MUST NOT appear in the listing of
-    TEXT[!MUST]:    assigned values.
+    TEXT[!SHOULD,todo]: If an entry is present in only one registry, every
+    TEXT[!SHOULD,todo]:    effort SHOULD be made to avoid assigning the corresponding value to
+    TEXT[!SHOULD,todo]:    an unrelated operation.
+    TEXT[!MAY,todo]: Expert reviewers MAY reject unrelated
+    TEXT[!MAY,todo]:    registrations that would conflict with the same value in the
+    TEXT[!MAY,todo]:    corresponding registry.
+    TEXT[!MUST,todo]:    In addition to common fields as described in Section 11.2, permanent
+    TEXT[!MUST,todo]:    registrations in this registry MUST include the following fields:
+    TEXT[!SHOULD,todo]:       default SHOULD be the most restrictive possible value.
+    TEXT[!MUST,todo]:    Each code of the format 0x1f * N + 0x21 for non-negative integer
+    TEXT[!MUST,todo]:    values of N (that is, 0x21, 0x40, ..., through 0x3ffffffffffffffe)
+    TEXT[!MUST,todo]:    MUST NOT be assigned by IANA and MUST NOT appear in the listing of
+    TEXT[!MUST,todo]:    assigned values.
 
   SECTION: [Error Codes](#section-11.2.3)
-    TEXT[!MAY]:    Use of values that are registered in the "HTTP/2 Error Code" registry
-    TEXT[!MAY]:    is discouraged, and expert reviewers MAY reject such registrations.
-    TEXT[!MUST]: Permanent registrations in
-    TEXT[!MUST]:    this registry MUST include the following field:
-    TEXT[!MUST]:    Each code of the format 0x1f * N + 0x21 for non-negative integer
-    TEXT[!MUST]:    values of N (that is, 0x21, 0x40, ..., through 0x3ffffffffffffffe)
-    TEXT[!MUST]:    MUST NOT be assigned by IANA and MUST NOT appear in the listing of
-    TEXT[!MUST]:    assigned values.
+    TEXT[!MAY,todo]:    Use of values that are registered in the "HTTP/2 Error Code" registry
+    TEXT[!MAY,todo]:    is discouraged, and expert reviewers MAY reject such registrations.
+    TEXT[!MUST,todo]: Permanent registrations in
+    TEXT[!MUST,todo]:    this registry MUST include the following field:
+    TEXT[!MUST,todo]:    Each code of the format 0x1f * N + 0x21 for non-negative integer
+    TEXT[!MUST,todo]:    values of N (that is, 0x21, 0x40, ..., through 0x3ffffffffffffffe)
+    TEXT[!MUST,todo]:    MUST NOT be assigned by IANA and MUST NOT appear in the listing of
+    TEXT[!MUST,todo]:    assigned values.
 
   SECTION: [Stream Types](#section-11.2.4)
-    TEXT[!MUST]:    In addition to common fields as described in Section 11.2, permanent
-    TEXT[!MUST]:    registrations in this registry MUST include the following fields:
-    TEXT[!MUST]:    Specifications for permanent registrations MUST include a description
-    TEXT[!MUST]:    of the stream type, including the layout and semantics of the stream
-    TEXT[!MUST]:    contents.
-    TEXT[!MUST]:    Each code of the format 0x1f * N + 0x21 for non-negative integer
-    TEXT[!MUST]:    values of N (that is, 0x21, 0x40, ..., through 0x3ffffffffffffffe)
-    TEXT[!MUST]:    MUST NOT be assigned by IANA and MUST NOT appear in the listing of
-    TEXT[!MUST]:    assigned values.
+    TEXT[!MUST,todo]:    In addition to common fields as described in Section 11.2, permanent
+    TEXT[!MUST,todo]:    registrations in this registry MUST include the following fields:
+    TEXT[!MUST,todo]:    Specifications for permanent registrations MUST include a description
+    TEXT[!MUST,todo]:    of the stream type, including the layout and semantics of the stream
+    TEXT[!MUST,todo]:    contents.
+    TEXT[!MUST,todo]:    Each code of the format 0x1f * N + 0x21 for non-negative integer
+    TEXT[!MUST,todo]:    values of N (that is, 0x21, 0x40, ..., through 0x3ffffffffffffffe)
+    TEXT[!MUST,todo]:    MUST NOT be assigned by IANA and MUST NOT appear in the listing of
+    TEXT[!MUST,todo]:    assigned values.
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9204
   SECTION: [Encoder](#section-2.1)
-    TEXT[!MAY]:    An encoder MAY insert any entry in the dynamic table it chooses; it
-    TEXT[!MAY]:    is not limited to field lines it is compressing.
-    TEXT[!MUST]: An encoder MUST emit field representations in the order
-    TEXT[!MUST]:    they appear in the input field section.
+    TEXT[!MAY,todo]:    An encoder MAY insert any entry in the dynamic table it chooses; it
+    TEXT[!MAY,todo]:    is not limited to field lines it is compressing.
+    TEXT[!MUST,implementation]: An encoder MUST emit field representations in the order
+    TEXT[!MUST,implementation]:    they appear in the input field section.
 
   SECTION: [Limits on Dynamic Table Insertions](#section-2.1.1)
-    TEXT[!MUST]:    If the dynamic table does not contain enough room for a new entry
-    TEXT[!MUST]:    without evicting other entries, and the entries that would be evicted
-    TEXT[!MUST]:    are not evictable, the encoder MUST NOT insert that entry into the
-    TEXT[!MUST]:    dynamic table (including duplicates of existing entries).
+    TEXT[!MUST,implementation]:    If the dynamic table does not contain enough room for a new entry
+    TEXT[!MUST,implementation]:    without evicting other entries, and the entries that would be evicted
+    TEXT[!MUST,implementation]:    are not evictable, the encoder MUST NOT insert that entry into the
+    TEXT[!MUST,implementation]:    dynamic table (including duplicates of existing entries).
 
   SECTION: [Blocked Streams](#section-2.1.2)
-    TEXT[!MUST]: An encoder MUST limit the number of streams that could
-    TEXT[!MUST]:    become blocked to the value of SETTINGS_QPACK_BLOCKED_STREAMS at all
-    TEXT[!MUST]:    times.
-    TEXT[!MUST]: If a decoder encounters more blocked streams than it promised
-    TEXT[!MUST]:    to support, it MUST treat this as a connection error of type
-    TEXT[!MUST]:    QPACK_DECOMPRESSION_FAILED.
+    TEXT[!MUST,implementation]: An encoder MUST limit the number of streams that could
+    TEXT[!MUST,implementation]:    become blocked to the value of SETTINGS_QPACK_BLOCKED_STREAMS at all
+    TEXT[!MUST,implementation]:    times.
+    TEXT[!MUST,implementation,test]: If a decoder encounters more blocked streams than it promised
+    TEXT[!MUST,implementation,test]:    to support, it MUST treat this as a connection error of type
+    TEXT[!MUST,implementation,test]:    QPACK_DECOMPRESSION_FAILED.
 
   SECTION: [Avoiding Flow-Control Deadlocks](#section-2.1.3)
-    TEXT[!SHOULD]:    To avoid these deadlocks, an encoder SHOULD NOT write an instruction
-    TEXT[!SHOULD]:    unless sufficient stream and connection flow-control credit is
-    TEXT[!SHOULD]:    available for the entire instruction.
+    TEXT[!SHOULD,todo]:    To avoid these deadlocks, an encoder SHOULD NOT write an instruction
+    TEXT[!SHOULD,todo]:    unless sufficient stream and connection flow-control credit is
+    TEXT[!SHOULD,todo]:    available for the entire instruction.
 
   SECTION: [Decoder](#section-2.2)
-    TEXT[!MUST]:    The decoder MUST emit field lines in the order their representations
-    TEXT[!MUST]:    appear in the encoded field section.
+    TEXT[!MUST,implementation,test]:    The decoder MUST emit field lines in the order their representations
+    TEXT[!MUST,implementation,test]:    appear in the encoded field section.
 
   SECTION: [Blocked Decoding](#section-2.2.1)
-    TEXT[!SHOULD]:    While blocked, encoded field section data SHOULD remain in the
-    TEXT[!SHOULD]:    blocked stream's flow-control window.
-    TEXT[!MUST]: If it encounters a Required Insert
-    TEXT[!MUST]:    Count smaller than expected, it MUST treat this as a connection error
-    TEXT[!MUST]:    of type QPACK_DECOMPRESSION_FAILED; see Section 2.2.3.
-    TEXT[!MAY]: If it
-    TEXT[!MAY]:    encounters a Required Insert Count larger than expected, it MAY treat
-    TEXT[!MAY]:    this as a connection error of type QPACK_DECOMPRESSION_FAILED.
+    TEXT[!SHOULD,todo]:    While blocked, encoded field section data SHOULD remain in the
+    TEXT[!SHOULD,todo]:    blocked stream's flow-control window.
+    TEXT[!MUST,implementation,test]: If it encounters a Required Insert
+    TEXT[!MUST,implementation,test]:    Count smaller than expected, it MUST treat this as a connection error
+    TEXT[!MUST,implementation,test]:    of type QPACK_DECOMPRESSION_FAILED; see Section 2.2.3.
+    TEXT[!MAY,todo]: If it
+    TEXT[!MAY,todo]:    encounters a Required Insert Count larger than expected, it MAY treat
+    TEXT[!MAY,todo]:    this as a connection error of type QPACK_DECOMPRESSION_FAILED.
 
   SECTION: [Completed Processing of a Field Section](#section-2.2.2.1)
-    TEXT[!MUST]:    After the decoder finishes decoding a field section encoded using
-    TEXT[!MUST]:    representations containing dynamic table references, it MUST emit a
-    TEXT[!MUST]:    Section Acknowledgment instruction (Section 4.4.1).
+    TEXT[!MUST,implementation,test]:    After the decoder finishes decoding a field section encoded using
+    TEXT[!MUST,implementation,test]:    representations containing dynamic table references, it MUST emit a
+    TEXT[!MUST,implementation,test]:    Section Acknowledgment instruction (Section 4.4.1).
 
   SECTION: [Abandonment of a Stream](#section-2.2.2.2)
-    TEXT[!MAY]: A decoder with a maximum dynamic table
-    TEXT[!MAY]:    capacity (Section 3.2.3) equal to zero MAY omit sending Stream
-    TEXT[!MAY]:    Cancellations, because the encoder cannot have any dynamic table
-    TEXT[!MAY]:    references.
+    TEXT[!MAY,todo]: A decoder with a maximum dynamic table
+    TEXT[!MAY,todo]:    capacity (Section 3.2.3) equal to zero MAY omit sending Stream
+    TEXT[!MAY,todo]:    Cancellations, because the encoder cannot have any dynamic table
+    TEXT[!MAY,todo]:    references.
 
   SECTION: [Invalid References](#section-2.2.3)
-    TEXT[!MUST]:    If the decoder encounters a reference in a field line representation
-    TEXT[!MUST]:    to a dynamic table entry that has already been evicted or that has an
-    TEXT[!MUST]:    absolute index greater than or equal to the declared Required Insert
-    TEXT[!MUST]:    Count (Section 4.5.1), it MUST treat this as a connection error of
-    TEXT[!MUST]:    type QPACK_DECOMPRESSION_FAILED.
-    TEXT[!MUST]:    If the decoder encounters a reference in an encoder instruction to a
-    TEXT[!MUST]:    dynamic table entry that has already been evicted, it MUST treat this
-    TEXT[!MUST]:    as a connection error of type QPACK_ENCODER_STREAM_ERROR.
+    TEXT[!MUST,implementation]:    If the decoder encounters a reference in a field line representation
+    TEXT[!MUST,implementation]:    to a dynamic table entry that has already been evicted or that has an
+    TEXT[!MUST,implementation]:    absolute index greater than or equal to the declared Required Insert
+    TEXT[!MUST,implementation]:    Count (Section 4.5.1), it MUST treat this as a connection error of
+    TEXT[!MUST,implementation]:    type QPACK_DECOMPRESSION_FAILED.
+    TEXT[!MUST,implementation]:    If the decoder encounters a reference in an encoder instruction to a
+    TEXT[!MUST,implementation]:    dynamic table entry that has already been evicted, it MUST treat this
+    TEXT[!MUST,implementation]:    as a connection error of type QPACK_ENCODER_STREAM_ERROR.
 
   SECTION: [Static Table](#section-3.1)
     TEXT[!MUST,test]:    When the decoder encounters an invalid static table index in a field
     TEXT[!MUST,test]:    line representation, it MUST treat this as a connection error of type
     TEXT[!MUST,test]:    QPACK_DECOMPRESSION_FAILED.
-    TEXT[!MUST]: If this index is received on the encoder
-    TEXT[!MUST]:    stream, this MUST be treated as a connection error of type
-    TEXT[!MUST]:    QPACK_ENCODER_STREAM_ERROR.
+    TEXT[!MUST,test]: If this index is received on the encoder
+    TEXT[!MUST,test]:    stream, this MUST be treated as a connection error of type
+    TEXT[!MUST,test]:    QPACK_ENCODER_STREAM_ERROR.
 
   SECTION: [Dynamic Table](#section-3.2)
-    TEXT[!MUST]: Therefore, duplicate entries MUST NOT
-    TEXT[!MUST]:    be treated as an error by the decoder.
+    TEXT[!MUST,implementation,test]: Therefore, duplicate entries MUST NOT
+    TEXT[!MUST,implementation,test]:    be treated as an error by the decoder.
 
   SECTION: [Dynamic Table Capacity and Eviction](#section-3.2.2)
-    TEXT[!MUST]: The
-    TEXT[!MUST]:    encoder MUST NOT cause a dynamic table entry to be evicted unless
-    TEXT[!MUST]:    that entry is evictable; see Section 2.1.1.
-    TEXT[!MUST]: It is an error if the encoder attempts to add an
-    TEXT[!MUST]:    entry that is larger than the dynamic table capacity; the decoder
-    TEXT[!MUST]:    MUST treat this as a connection error of type
-    TEXT[!MUST]:    QPACK_ENCODER_STREAM_ERROR.
+    TEXT[!MUST,implementation,test]: The
+    TEXT[!MUST,implementation,test]:    encoder MUST NOT cause a dynamic table entry to be evicted unless
+    TEXT[!MUST,implementation,test]:    that entry is evictable; see Section 2.1.1.
+    TEXT[!MUST,implementation,test]: It is an error if the encoder attempts to add an
+    TEXT[!MUST,implementation,test]:    entry that is larger than the dynamic table capacity; the decoder
+    TEXT[!MUST,implementation,test]:    MUST treat this as a connection error of type
+    TEXT[!MUST,implementation,test]:    QPACK_ENCODER_STREAM_ERROR.
 
   SECTION: [Maximum Dynamic Table Capacity](#section-3.2.3)
-    TEXT[!MUST]:    The encoder MUST NOT set a dynamic table capacity that exceeds this
-    TEXT[!MUST]:    maximum, but it can choose to use a lower dynamic table capacity; see
-    TEXT[!MUST]:    Section 4.3.1.
-    TEXT[!MAY]: When the client's 0-RTT value of the
-    TEXT[!MAY]:    SETTING is zero, the server MAY set it to a non-zero value in its
-    TEXT[!MAY]:    SETTINGS frame.
-    TEXT[!MUST]: If the remembered value is non-zero, the server MUST
-    TEXT[!MUST]:    send the same non-zero value in its SETTINGS frame.
-    TEXT[!MUST]:    When the maximum table capacity is zero, the encoder MUST NOT insert
-    TEXT[!MUST]:    entries into the dynamic table and MUST NOT send any encoder
-    TEXT[!MUST]:    instructions on the encoder stream.
+    TEXT[!MUST,implementation]:    The encoder MUST NOT set a dynamic table capacity that exceeds this
+    TEXT[!MUST,implementation]:    maximum, but it can choose to use a lower dynamic table capacity; see
+    TEXT[!MUST,implementation]:    Section 4.3.1.
+    TEXT[!MAY,test]: When the client's 0-RTT value of the
+    TEXT[!MAY,test]:    SETTING is zero, the server MAY set it to a non-zero value in its
+    TEXT[!MAY,test]:    SETTINGS frame.
+    TEXT[!MUST,implementation]: If the remembered value is non-zero, the server MUST
+    TEXT[!MUST,implementation]:    send the same non-zero value in its SETTINGS frame.
+    TEXT[!MUST,implementation]:    When the maximum table capacity is zero, the encoder MUST NOT insert
+    TEXT[!MUST,implementation]:    entries into the dynamic table and MUST NOT send any encoder
+    TEXT[!MUST,implementation]:    instructions on the encoder stream.
 
   SECTION: [Prefixed Integers](#section-4.1.1)
-    TEXT[!MUST]:    QPACK implementations MUST be able to decode integers up to and
-    TEXT[!MUST]:    including 62 bits long.
+    TEXT[!MUST,implementation]:    QPACK implementations MUST be able to decode integers up to and
+    TEXT[!MUST,implementation]:    including 62 bits long.
 
   SECTION: [Encoder and Decoder Streams](#section-4.2)
     TEXT[!MUST,implementation,test]: Each endpoint
@@ -3411,29 +3410,29 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9204
     TEXT[!MUST,implementation]:    MUST NOT request that the sender close either of these streams.
     TEXT[!MUST,implementation]:    Closure of either unidirectional stream type MUST be treated as a
     TEXT[!MUST,implementation]:    connection error of type H3_CLOSED_CRITICAL_STREAM.
-    TEXT[!MAY]:    An endpoint MAY avoid creating an encoder stream if it will not be
-    TEXT[!MAY]:    used (for example, if its encoder does not wish to use the dynamic
-    TEXT[!MAY]:    table or if the maximum size of the dynamic table permitted by the
-    TEXT[!MAY]:    peer is zero).
-    TEXT[!MAY]:    An endpoint MAY avoid creating a decoder stream if its decoder sets
-    TEXT[!MAY]:    the maximum capacity of the dynamic table to zero.
-    TEXT[!MUST]:    An endpoint MUST allow its peer to create an encoder stream and a
-    TEXT[!MUST]:    decoder stream even if the connection's settings prevent their use.
+    TEXT[!MAY,todo]:    An endpoint MAY avoid creating an encoder stream if it will not be
+    TEXT[!MAY,todo]:    used (for example, if its encoder does not wish to use the dynamic
+    TEXT[!MAY,todo]:    table or if the maximum size of the dynamic table permitted by the
+    TEXT[!MAY,todo]:    peer is zero).
+    TEXT[!MAY,todo]:    An endpoint MAY avoid creating a decoder stream if its decoder sets
+    TEXT[!MAY,todo]:    the maximum capacity of the dynamic table to zero.
+    TEXT[!MUST,implementation]:    An endpoint MUST allow its peer to create an encoder stream and a
+    TEXT[!MUST,implementation]:    decoder stream even if the connection's settings prevent their use.
 
   SECTION: [Set Dynamic Table Capacity](#section-4.3.1)
-    TEXT[!MUST]:    The new capacity MUST be lower than or equal to the limit described
-    TEXT[!MUST]:    in Section 3.2.3.
-    TEXT[!MUST]: The decoder MUST treat a new dynamic table capacity
-    TEXT[!MUST]:    value that exceeds this limit as a connection error of type
-    TEXT[!MUST]:    QPACK_ENCODER_STREAM_ERROR.
-    TEXT[!MUST]: This MUST NOT cause the eviction of entries that
-    TEXT[!MUST]:    are not evictable; see Section 2.1.1.
+    TEXT[!MUST,implementation,test]:    The new capacity MUST be lower than or equal to the limit described
+    TEXT[!MUST,implementation,test]:    in Section 3.2.3.
+    TEXT[!MUST,implementation,test]: The decoder MUST treat a new dynamic table capacity
+    TEXT[!MUST,implementation,test]:    value that exceeds this limit as a connection error of type
+    TEXT[!MUST,implementation,test]:    QPACK_ENCODER_STREAM_ERROR.
+    TEXT[!MUST,implementation,test]: This MUST NOT cause the eviction of entries that
+    TEXT[!MUST,implementation,test]:    are not evictable; see Section 2.1.1.
 
   SECTION: [Section Acknowledgment](#section-4.4.1)
-    TEXT[!MUST]:    If an encoder receives a Section Acknowledgment instruction referring
-    TEXT[!MUST]:    to a stream on which every encoded field section with a non-zero
-    TEXT[!MUST]:    Required Insert Count has already been acknowledged, this MUST be
-    TEXT[!MUST]:    treated as a connection error of type QPACK_DECODER_STREAM_ERROR.
+    TEXT[!MUST,implementation,test]:    If an encoder receives a Section Acknowledgment instruction referring
+    TEXT[!MUST,implementation,test]:    to a stream on which every encoded field section with a non-zero
+    TEXT[!MUST,implementation,test]:    Required Insert Count has already been acknowledged, this MUST be
+    TEXT[!MUST,implementation,test]:    treated as a connection error of type QPACK_DECODER_STREAM_ERROR.
 
   SECTION: [Insert Count Increment](#section-4.4.3)
     TEXT[!MUST,test]:    An encoder that receives an Increment field equal to zero, or one
@@ -3442,44 +3441,44 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9204
     TEXT[!MUST,test]:    QPACK_DECODER_STREAM_ERROR.
 
   SECTION: [Required Insert Count](#section-4.5.1.1)
-    TEXT[!MUST]: If the decoder encounters a value
-    TEXT[!MUST]:    of EncodedInsertCount that could not have been produced by a
-    TEXT[!MUST]:    conformant encoder, it MUST treat this as a connection error of type
-    TEXT[!MUST]:    QPACK_DECOMPRESSION_FAILED.
+    TEXT[!MUST,implementation,test]: If the decoder encounters a value
+    TEXT[!MUST,implementation,test]:    of EncodedInsertCount that could not have been produced by a
+    TEXT[!MUST,implementation,test]:    conformant encoder, it MUST treat this as a connection error of type
+    TEXT[!MUST,implementation,test]:    QPACK_DECOMPRESSION_FAILED.
 
   SECTION: [Base](#section-4.5.1.2)
-    TEXT[!MUST]:    The value of Base MUST NOT be negative.
-    TEXT[!MUST]: An endpoint MUST treat a field block
-    TEXT[!MUST]:    with a Sign bit of 1 as invalid if the value of Required Insert Count
-    TEXT[!MUST]:    is less than or equal to the value of Delta Base.
+    TEXT[!MUST,implementation,test]:    The value of Base MUST NOT be negative.
+    TEXT[!MUST,implementation,test]: An endpoint MUST treat a field block
+    TEXT[!MUST,implementation,test]:    with a Sign bit of 1 as invalid if the value of Required Insert Count
+    TEXT[!MUST,implementation,test]:    is less than or equal to the value of Delta Base.
 
   SECTION: [Literal Field Line with Name Reference](#section-4.5.4)
-    TEXT[!MUST]: When
-    TEXT[!MUST]:    the 'N' bit is set, the encoded field line MUST always be encoded
-    TEXT[!MUST]:    with a literal representation.
-    TEXT[!MUST]: In particular, when a peer sends a
-    TEXT[!MUST]:    field line that it received represented as a literal field line with
-    TEXT[!MUST]:    the 'N' bit set, it MUST use a literal representation to forward this
-    TEXT[!MUST]:    field line.
+    TEXT[!MUST,todo]: When
+    TEXT[!MUST,todo]:    the 'N' bit is set, the encoded field line MUST always be encoded
+    TEXT[!MUST,todo]:    with a literal representation.
+    TEXT[!MUST,todo]: In particular, when a peer sends a
+    TEXT[!MUST,todo]:    field line that it received represented as a literal field line with
+    TEXT[!MUST,todo]:    the 'N' bit set, it MUST use a literal representation to forward this
+    TEXT[!MUST,todo]:    field line.
 
   SECTION: [Never-Indexed Literals](#section-7.1.3)
-    TEXT[!MUST]:    An intermediary MUST NOT re-encode a value that uses a literal
-    TEXT[!MUST]:    representation with the 'N' bit set with another representation that
-    TEXT[!MUST]:    would index it.
-    TEXT[!MUST]: If QPACK is used for re-encoding, a literal
-    TEXT[!MUST]:    representation with the 'N' bit set MUST be used.
-    TEXT[!MUST]: If HPACK is used
-    TEXT[!MUST]:    for re-encoding, the never-indexed literal representation (see
-    TEXT[!MUST]:    Section 6.2.3 of [RFC7541]) MUST be used.
+    TEXT[!MUST,todo]:    An intermediary MUST NOT re-encode a value that uses a literal
+    TEXT[!MUST,todo]:    representation with the 'N' bit set with another representation that
+    TEXT[!MUST,todo]:    would index it.
+    TEXT[!MUST,todo]: If QPACK is used for re-encoding, a literal
+    TEXT[!MUST,todo]:    representation with the 'N' bit set MUST be used.
+    TEXT[!MUST,todo]: If HPACK is used
+    TEXT[!MUST,todo]:    for re-encoding, the never-indexed literal representation (see
+    TEXT[!MUST,todo]:    Section 6.2.3 of [RFC7541]) MUST be used.
 
   SECTION: [Implementation Limits](#section-7.4)
-    TEXT[!SHOULD]: These limits SHOULD be large
-    TEXT[!SHOULD]:    enough to process the largest individual field the HTTP
-    TEXT[!SHOULD]:    implementation can be configured to accept.
-    TEXT[!MUST]:    If an implementation encounters a value larger than it is able to
-    TEXT[!MUST]:    decode, this MUST be treated as a stream error of type
-    TEXT[!MUST]:    QPACK_DECOMPRESSION_FAILED if on a request stream or a connection
-    TEXT[!MUST]:    error of the appropriate type if on the encoder or decoder stream.
+    TEXT[!SHOULD,todo]: These limits SHOULD be large
+    TEXT[!SHOULD,todo]:    enough to process the largest individual field the HTTP
+    TEXT[!SHOULD,todo]:    implementation can be configured to accept.
+    TEXT[!MUST,implementation]:    If an implementation encounters a value larger than it is able to
+    TEXT[!MUST,implementation]:    decode, this MUST be treated as a stream error of type
+    TEXT[!MUST,implementation]:    QPACK_DECOMPRESSION_FAILED if on a request stream or a connection
+    TEXT[!MUST,implementation]:    error of the appropriate type if on the encoder or decoder stream.
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9221
   SECTION: [Transport Parameter](#section-3)
@@ -3501,33 +3500,33 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9221
     TEXT[!MUST,implementation]:    that receives a DATAGRAM frame that is larger than the value it sent
     TEXT[!MUST,implementation]:    in its max_datagram_frame_size transport parameter MUST terminate the
     TEXT[!MUST,implementation]:    connection with an error of type PROTOCOL_VIOLATION.
-    TEXT[!SHOULD]:    For most uses of DATAGRAM frames, it is RECOMMENDED to send a value
-    TEXT[!SHOULD]:    of 65535 in the max_datagram_frame_size transport parameter to
-    TEXT[!SHOULD]:    indicate that this endpoint will accept any DATAGRAM frame that fits
-    TEXT[!SHOULD]:    inside a QUIC packet.
-    TEXT[!MAY]: Application
-    TEXT[!MAY]:    protocols that use DATAGRAM frames MAY choose to only negotiate and
-    TEXT[!MAY]:    use them in a single direction.
-    TEXT[!MAY]:    When clients use 0-RTT, they MAY store the value of the server's
-    TEXT[!MAY]:    max_datagram_frame_size transport parameter.
-    TEXT[!MUST]: When servers decide
-    TEXT[!MUST]:    to accept 0-RTT data, they MUST send a max_datagram_frame_size
-    TEXT[!MUST]:    transport parameter greater than or equal to the value they sent to
-    TEXT[!MUST]:    the client in the connection where they sent them the
-    TEXT[!MUST]:    NewSessionTicket message.
-    TEXT[!MUST]: If a client stores the value of the
-    TEXT[!MUST]:    max_datagram_frame_size transport parameter with their 0-RTT state,
-    TEXT[!MUST]:    they MUST validate that the new value of the max_datagram_frame_size
-    TEXT[!MUST]:    transport parameter sent by the server in the handshake is greater
-    TEXT[!MUST]:    than or equal to the stored value; if not, the client MUST terminate
-    TEXT[!MUST]:    the connection with error PROTOCOL_VIOLATION.
-    TEXT[!MUST]:    Application protocols that use datagrams MUST define how they react
-    TEXT[!MUST]:    to the absence of the max_datagram_frame_size transport parameter.
+    TEXT[!SHOULD,implementation]:    For most uses of DATAGRAM frames, it is RECOMMENDED to send a value
+    TEXT[!SHOULD,implementation]:    of 65535 in the max_datagram_frame_size transport parameter to
+    TEXT[!SHOULD,implementation]:    indicate that this endpoint will accept any DATAGRAM frame that fits
+    TEXT[!SHOULD,implementation]:    inside a QUIC packet.
+    TEXT[!MAY,test]: Application
+    TEXT[!MAY,test]:    protocols that use DATAGRAM frames MAY choose to only negotiate and
+    TEXT[!MAY,test]:    use them in a single direction.
+    TEXT[!MAY,implementation]:    When clients use 0-RTT, they MAY store the value of the server's
+    TEXT[!MAY,implementation]:    max_datagram_frame_size transport parameter.
+    TEXT[!MUST,todo]: When servers decide
+    TEXT[!MUST,todo]:    to accept 0-RTT data, they MUST send a max_datagram_frame_size
+    TEXT[!MUST,todo]:    transport parameter greater than or equal to the value they sent to
+    TEXT[!MUST,todo]:    the client in the connection where they sent them the
+    TEXT[!MUST,todo]:    NewSessionTicket message.
+    TEXT[!MUST,implementation,test]: If a client stores the value of the
+    TEXT[!MUST,implementation,test]:    max_datagram_frame_size transport parameter with their 0-RTT state,
+    TEXT[!MUST,implementation,test]:    they MUST validate that the new value of the max_datagram_frame_size
+    TEXT[!MUST,implementation,test]:    transport parameter sent by the server in the handshake is greater
+    TEXT[!MUST,implementation,test]:    than or equal to the stored value; if not, the client MUST terminate
+    TEXT[!MUST,implementation,test]:    the connection with error PROTOCOL_VIOLATION.
+    TEXT[!MUST,todo]:    Application protocols that use datagrams MUST define how they react
+    TEXT[!MUST,todo]:    to the absence of the max_datagram_frame_size transport parameter.
 
   SECTION: [Behavior and Usage](#section-5)
-    TEXT[!SHOULD]: This frame SHOULD be sent as soon as possible (as determined
-    TEXT[!SHOULD]:    by factors like congestion control, described below) and MAY be
-    TEXT[!SHOULD]:    coalesced with other frames.
+    TEXT[!SHOULD,test]: This frame SHOULD be sent as soon as possible (as determined
+    TEXT[!SHOULD,test]:    by factors like congestion control, described below) and MAY be
+    TEXT[!SHOULD,test]:    coalesced with other frames.
     TEXT[!SHOULD,implementation]:    When a QUIC endpoint receives a valid DATAGRAM frame, it SHOULD
     TEXT[!SHOULD,implementation]:    deliver the data to the application immediately, as long as it is
     TEXT[!SHOULD,implementation]:    able to process the frame and can store the contents in memory.
@@ -3535,32 +3534,32 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9221
     TEXT[!MUST,implementation]:    be protected with either 0-RTT or 1-RTT keys.
 
   SECTION: [Multiplexing Datagrams](#section-5.1)
-    TEXT[!SHOULD]:    QUIC implementations SHOULD present an API to applications to assign
-    TEXT[!SHOULD]:    relative priorities to DATAGRAM frames with respect to each other and
-    TEXT[!SHOULD]:    to QUIC streams.
+    TEXT[!SHOULD,implementation,test]:    QUIC implementations SHOULD present an API to applications to assign
+    TEXT[!SHOULD,implementation,test]:    relative priorities to DATAGRAM frames with respect to each other and
+    TEXT[!SHOULD,implementation,test]:    to QUIC streams.
 
   SECTION: [Acknowledgement Handling](#section-5.2)
-    TEXT[!SHOULD]: Receivers SHOULD support
-    TEXT[!SHOULD]:    delaying ACK frames (within the limits specified by max_ack_delay) in
-    TEXT[!SHOULD]:    response to receiving packets that only contain DATAGRAM frames,
-    TEXT[!SHOULD]:    since the sender takes no action if these packets are temporarily
-    TEXT[!SHOULD]:    unacknowledged.
-    TEXT[!MAY]:    If a sender detects that a packet containing a specific DATAGRAM
-    TEXT[!MAY]:    frame might have been lost, the implementation MAY notify the
-    TEXT[!MAY]:    application that it believes the datagram was lost.
-    TEXT[!MAY]:    Similarly, if a packet containing a DATAGRAM frame is acknowledged,
-    TEXT[!MAY]:    the implementation MAY notify the sender application that the
-    TEXT[!MAY]:    datagram was successfully transmitted and received.
+    TEXT[!SHOULD,implementation]: Receivers SHOULD support
+    TEXT[!SHOULD,implementation]:    delaying ACK frames (within the limits specified by max_ack_delay) in
+    TEXT[!SHOULD,implementation]:    response to receiving packets that only contain DATAGRAM frames,
+    TEXT[!SHOULD,implementation]:    since the sender takes no action if these packets are temporarily
+    TEXT[!SHOULD,implementation]:    unacknowledged.
+    TEXT[!MAY,todo]:    If a sender detects that a packet containing a specific DATAGRAM
+    TEXT[!MAY,todo]:    frame might have been lost, the implementation MAY notify the
+    TEXT[!MAY,todo]:    application that it believes the datagram was lost.
+    TEXT[!MAY,todo]:    Similarly, if a packet containing a DATAGRAM frame is acknowledged,
+    TEXT[!MAY,todo]:    the implementation MAY notify the sender application that the
+    TEXT[!MAY,todo]:    datagram was successfully transmitted and received.
 
   SECTION: [Flow Control](#section-5.3)
-    TEXT[!MAY]: However, since DATAGRAM
-    TEXT[!MAY]:    frames are inherently unreliable, they MAY be dropped by the receiver
-    TEXT[!MAY]:    if the receiver cannot process them.
+    TEXT[!MAY,todo]: However, since DATAGRAM
+    TEXT[!MAY,todo]:    frames are inherently unreliable, they MAY be dropped by the receiver
+    TEXT[!MAY,todo]:    if the receiver cannot process them.
 
   SECTION: [Congestion Control](#section-5.4)
-    TEXT[!MUST]: The sender MUST either delay sending the frame until
-    TEXT[!MUST]:    the controller allows it or drop the frame without sending it (at
-    TEXT[!MUST]:    which point it MAY notify the application).
+    TEXT[!MUST,implementation]: The sender MUST either delay sending the frame until
+    TEXT[!MUST,implementation]:    the controller allows it or drop the frame without sending it (at
+    TEXT[!MUST,implementation]:    which point it MAY notify the application).
 
   SECTION: [Security Considerations](#section-6)
     TEXT[!MUST,implementation]: All application data
@@ -3577,82 +3576,82 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9287
     TEXT[!MUST,implementation,test]:    MUST accept packets with the QUIC Bit set to a value of 0.
 
   SECTION: [Clearing the QUIC Bit](#section-3.1)
-    TEXT[!SHOULD]:    Endpoints that receive the grease_quic_bit transport parameter from a
-    TEXT[!SHOULD]:    peer SHOULD set the QUIC Bit to an unpredictable value unless another
-    TEXT[!SHOULD]:    extension assigns specific meaning to the value of the bit.
-    TEXT[!MAY]:    A client MAY also set the QUIC Bit to 0 in Initial, Handshake, or
-    TEXT[!MAY]:    0-RTT packets that are sent prior to receiving transport parameters
-    TEXT[!MAY]:    from the server.
-    TEXT[!MUST]: However, a client MUST NOT set the QUIC Bit to 0
-    TEXT[!MUST]:    unless the Initial packets it sends include a token provided by the
-    TEXT[!MUST]:    server in a NEW_TOKEN frame (Section 19.7 of [QUIC]), received less
-    TEXT[!MUST]:    than 604800 seconds (7 days) prior on a connection where the server
-    TEXT[!MUST]:    also included the grease_quic_bit transport parameter.
-    TEXT[!MUST]:    A server MUST set the QUIC Bit to 0 only after processing transport
-    TEXT[!MUST]:    parameters from a client.
-    TEXT[!MUST]: A server MUST NOT remember that a client
-    TEXT[!MUST]:    negotiated the extension in a previous connection and set the QUIC
-    TEXT[!MUST]:    Bit to 0 based on that information.
-    TEXT[!MUST]:    An endpoint MUST NOT set the QUIC Bit to 0 without knowing whether
-    TEXT[!MUST]:    the peer supports the extension.
+    TEXT[!SHOULD,implementation]:    Endpoints that receive the grease_quic_bit transport parameter from a
+    TEXT[!SHOULD,implementation]:    peer SHOULD set the QUIC Bit to an unpredictable value unless another
+    TEXT[!SHOULD,implementation]:    extension assigns specific meaning to the value of the bit.
+    TEXT[!MAY,todo]:    A client MAY also set the QUIC Bit to 0 in Initial, Handshake, or
+    TEXT[!MAY,todo]:    0-RTT packets that are sent prior to receiving transport parameters
+    TEXT[!MAY,todo]:    from the server.
+    TEXT[!MUST,implementation]: However, a client MUST NOT set the QUIC Bit to 0
+    TEXT[!MUST,implementation]:    unless the Initial packets it sends include a token provided by the
+    TEXT[!MUST,implementation]:    server in a NEW_TOKEN frame (Section 19.7 of [QUIC]), received less
+    TEXT[!MUST,implementation]:    than 604800 seconds (7 days) prior on a connection where the server
+    TEXT[!MUST,implementation]:    also included the grease_quic_bit transport parameter.
+    TEXT[!MUST,implementation]:    A server MUST set the QUIC Bit to 0 only after processing transport
+    TEXT[!MUST,implementation]:    parameters from a client.
+    TEXT[!MUST,implementation]: A server MUST NOT remember that a client
+    TEXT[!MUST,implementation]:    negotiated the extension in a previous connection and set the QUIC
+    TEXT[!MUST,implementation]:    Bit to 0 based on that information.
+    TEXT[!MUST,implementation]:    An endpoint MUST NOT set the QUIC Bit to 0 without knowing whether
+    TEXT[!MUST,implementation]:    the peer supports the extension.
 
   SECTION: [Using the QUIC Bit](#section-3.2)
-    TEXT[!MUST]: Extensions that use the QUIC Bit MUST negotiate their use
-    TEXT[!MUST]:    prior to acting on any semantic.
+    TEXT[!MUST,todo]: Extensions that use the QUIC Bit MUST negotiate their use
+    TEXT[!MUST,todo]:    prior to acting on any semantic.
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9368
   SECTION: [Definitions](#section-1.2)
-    TEXT[!SHOULD]: Implementations can make this
-    TEXT[!SHOULD]:       configurable, and a RECOMMENDED value is one minute.
+    TEXT[!SHOULD,todo]: Implementations can make this
+    TEXT[!SHOULD,todo]:       configurable, and a RECOMMENDED value is one minute.
 
   SECTION: [Version Negotiation Mechanism](#section-2)
-    TEXT[!MAY]:    If the server can parse the first flight, it can establish the
-    TEXT[!MAY]:    connection using the client's Chosen Version, or it MAY select any
-    TEXT[!MAY]:    other compatible version, as described in Section 2.3.
+    TEXT[!MAY,implementation]:    If the server can parse the first flight, it can establish the
+    TEXT[!MAY,implementation]:    connection using the client's Chosen Version, or it MAY select any
+    TEXT[!MAY,implementation]:    other compatible version, as described in Section 2.3.
 
   SECTION: [Incompatible Version Negotiation](#section-2.1)
-    TEXT[!MUST]: This packet SHALL include each entry
-    TEXT[!MUST]:    from the server's set of Offered Versions (see Section 5) in a
-    TEXT[!MUST]:    Supported Version field.
-    TEXT[!MAY]: The server MAY add reserved versions (as
-    TEXT[!MAY]:    defined in Section 6.3 of [QUIC]) in Supported Version fields.
-    TEXT[!MUST]:    Upon receiving the Version Negotiation packet, the client SHALL
-    TEXT[!MUST]:    search for a version it supports in the list provided by the server.
-    TEXT[!MUST]:    If it doesn't find one, it SHALL abort the connection attempt.
-    TEXT[!MUST]:    Otherwise, it SHALL select a mutually supported version and send a
-    TEXT[!MUST]:    new first flight with that version -- this version is now the
-    TEXT[!MUST]:    Negotiated Version.
-    TEXT[!MUST]: Clients
-    TEXT[!MUST]:    MUST NOT send Version Negotiation packets and servers MUST ignore all
-    TEXT[!MUST]:    received Version Negotiation packets.
+    TEXT[!MUST,implementation]: This packet SHALL include each entry
+    TEXT[!MUST,implementation]:    from the server's set of Offered Versions (see Section 5) in a
+    TEXT[!MUST,implementation]:    Supported Version field.
+    TEXT[!MAY,implementation]: The server MAY add reserved versions (as
+    TEXT[!MAY,implementation]:    defined in Section 6.3 of [QUIC]) in Supported Version fields.
+    TEXT[!MUST,implementation]:    Upon receiving the Version Negotiation packet, the client SHALL
+    TEXT[!MUST,implementation]:    search for a version it supports in the list provided by the server.
+    TEXT[!MUST,implementation]:    If it doesn't find one, it SHALL abort the connection attempt.
+    TEXT[!MUST,implementation,test]:    Otherwise, it SHALL select a mutually supported version and send a
+    TEXT[!MUST,implementation,test]:    new first flight with that version -- this version is now the
+    TEXT[!MUST,implementation,test]:    Negotiated Version.
+    TEXT[!MUST,implementation]: Clients
+    TEXT[!MUST,implementation]:    MUST NOT send Version Negotiation packets and servers MUST ignore all
+    TEXT[!MUST,implementation]:    received Version Negotiation packets.
 
   SECTION: [Compatible Versions](#section-2.2)
-    TEXT[!MUST]: Implementations MUST NOT assume compatibility
-    TEXT[!MUST]:    between versions unless explicitly specified.
+    TEXT[!MUST,implementation]: Implementations MUST NOT assume compatibility
+    TEXT[!MUST,implementation]:    between versions unless explicitly specified.
 
   SECTION: [Compatible Version Negotiation](#section-2.3)
     TEXT[!MUST,implementation]:    In order to perform compatible version negotiation, the server MUST
     TEXT[!MUST,implementation]:    select one of these versions that it (1) supports and (2) knows the
     TEXT[!MUST,implementation]:    client's Chosen Version is compatible with.
-    TEXT[!MUST]: If the first flight is correctly
-    TEXT[!MUST]:    formatted, then this conversion process cannot fail by definition of
-    TEXT[!MUST]:    the first flight being compatible; if the server is unable to convert
-    TEXT[!MUST]:    the first flight, it MUST abort the handshake.
-    TEXT[!MUST]:    If a document specifies that a QUIC version is compatible with
-    TEXT[!MUST]:    another, that document MUST specify the mechanism by which clients
-    TEXT[!MUST]:    are made aware of the Negotiated Version.
-    TEXT[!SHOULD]:    Mutually compatible versions SHOULD use the same mechanism.
-    TEXT[!MUST]: In particular, if the Negotiated Version
-    TEXT[!MUST]:    mandates that endpoints perform validations on Handshake packets,
-    TEXT[!MUST]:    endpoints MUST also perform such validations on the converted first
-    TEXT[!MUST]:    flight.
+    TEXT[!MUST,implementation]: If the first flight is correctly
+    TEXT[!MUST,implementation]:    formatted, then this conversion process cannot fail by definition of
+    TEXT[!MUST,implementation]:    the first flight being compatible; if the server is unable to convert
+    TEXT[!MUST,implementation]:    the first flight, it MUST abort the handshake.
+    TEXT[!MUST,todo]:    If a document specifies that a QUIC version is compatible with
+    TEXT[!MUST,todo]:    another, that document MUST specify the mechanism by which clients
+    TEXT[!MUST,todo]:    are made aware of the Negotiated Version.
+    TEXT[!SHOULD,todo]:    Mutually compatible versions SHOULD use the same mechanism.
+    TEXT[!MUST,todo]: In particular, if the Negotiated Version
+    TEXT[!MUST,todo]:    mandates that endpoints perform validations on Handshake packets,
+    TEXT[!MUST,todo]:    endpoints MUST also perform such validations on the converted first
+    TEXT[!MUST,todo]:    flight.
 
   SECTION: [Client Choice of Original Version](#section-2.5)
-    TEXT[!SHOULD]:    When the client picks its Original Version, it SHOULD try to avoid
-    TEXT[!SHOULD]:    incompatible version negotiation to save a round trip.
-    TEXT[!SHOULD]: Therefore,
-    TEXT[!SHOULD]:    the client SHOULD pick an Original Version to maximize the combined
-    TEXT[!SHOULD]:    probability that both:
+    TEXT[!SHOULD,todo]:    When the client picks its Original Version, it SHOULD try to avoid
+    TEXT[!SHOULD,todo]:    incompatible version negotiation to save a round trip.
+    TEXT[!SHOULD,todo]: Therefore,
+    TEXT[!SHOULD,todo]:    the client SHOULD pick an Original Version to maximize the combined
+    TEXT[!SHOULD,todo]:    probability that both:
 
   SECTION: [Version Information](#section-3)
     TEXT[!MUST,implementation]:    Any version of QUIC that supports this mechanism MUST provide a
@@ -3661,56 +3660,56 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9368
     TEXT[implementation]:    Version Information {
     TEXT[implementation]:      Chosen Version (32),
     TEXT[implementation]:      Available Versions (32) ...,
-    TEXT[!MUST]: Note that the
-    TEXT[!MUST]:       version in the Chosen Version field MUST be included in this list
-    TEXT[!MUST]:       to allow the client to communicate the Chosen Version's
-    TEXT[!MUST]:       preference.
-    TEXT[!MAY]: Note that this preference is only advisory; servers
-    TEXT[!MAY]:       MAY choose to use their own preference instead.
-    TEXT[!MAY]: For the same reason, the
-    TEXT[!MAY]:       Available Versions field MAY be empty.
-    TEXT[!MAY]:    Clients and servers MAY both include versions following the pattern
-    TEXT[!MAY]:    0x?a?a?a?a in their Available Versions list.
+    TEXT[!MUST,implementation]: Note that the
+    TEXT[!MUST,implementation]:       version in the Chosen Version field MUST be included in this list
+    TEXT[!MUST,implementation]:       to allow the client to communicate the Chosen Version's
+    TEXT[!MUST,implementation]:       preference.
+    TEXT[!MAY,implementation]: Note that this preference is only advisory; servers
+    TEXT[!MAY,implementation]:       MAY choose to use their own preference instead.
+    TEXT[!MAY,todo]: For the same reason, the
+    TEXT[!MAY,todo]:       Available Versions field MAY be empty.
+    TEXT[!MAY,todo]:    Clients and servers MAY both include versions following the pattern
+    TEXT[!MAY,todo]:    0x?a?a?a?a in their Available Versions list.
 
   SECTION: [Version Downgrade Prevention](#section-4)
-    TEXT[!MUST]:    Clients MUST ignore any received Version Negotiation packets that
-    TEXT[!MUST]:    contain the Original Version.
-    TEXT[!MUST]: A client that makes a connection
-    TEXT[!MUST]:    attempt based on information received from a Version Negotiation
-    TEXT[!MUST]:    packet MUST ignore any Version Negotiation packets it receives in
-    TEXT[!MUST]:    response to that connection attempt.
-    TEXT[!MUST]:    Both endpoints MUST parse their peer's Version Information during the
-    TEXT[!MUST]:    handshake.
-    TEXT[!MUST]: If that leads to a parsing failure (for example, if it is
-    TEXT[!MUST]:    too short or if its length is not divisible by four), then the
-    TEXT[!MUST]:    endpoint MUST close the connection; if the connection was using QUIC
-    TEXT[!MUST]:    version 1, that connection closure MUST use a transport error of type
-    TEXT[!MUST]:    TRANSPORT_PARAMETER_ERROR.
+    TEXT[!MUST,implementation,test]:    Clients MUST ignore any received Version Negotiation packets that
+    TEXT[!MUST,implementation,test]:    contain the Original Version.
+    TEXT[!MUST,implementation,test]: A client that makes a connection
+    TEXT[!MUST,implementation,test]:    attempt based on information received from a Version Negotiation
+    TEXT[!MUST,implementation,test]:    packet MUST ignore any Version Negotiation packets it receives in
+    TEXT[!MUST,implementation,test]:    response to that connection attempt.
+    TEXT[!MUST,implementation]:    Both endpoints MUST parse their peer's Version Information during the
+    TEXT[!MUST,implementation]:    handshake.
+    TEXT[!MUST,implementation]: If that leads to a parsing failure (for example, if it is
+    TEXT[!MUST,implementation]:    too short or if its length is not divisible by four), then the
+    TEXT[!MUST,implementation]:    endpoint MUST close the connection; if the connection was using QUIC
+    TEXT[!MUST,implementation]:    version 1, that connection closure MUST use a transport error of type
+    TEXT[!MUST,implementation]:    TRANSPORT_PARAMETER_ERROR.
     TEXT[!MUST,implementation,test]: If an endpoint receives a Chosen Version
     TEXT[!MUST,implementation,test]:    equal to zero, or any Available Version equal to zero, it MUST treat
     TEXT[!MUST,implementation,test]:    it as a parsing failure.
     TEXT[!MUST,implementation]: If a server receives Version Information
     TEXT[!MUST,implementation]:    where the Chosen Version is not included in Available Versions, it
     TEXT[!MUST,implementation]:    MUST treat it as a parsing failure.
-    TEXT[!MUST]:    Every QUIC version that supports version negotiation MUST define a
-    TEXT[!MUST]:    method for closing the connection with a version negotiation error.
+    TEXT[!MUST,implementation]:    Every QUIC version that supports version negotiation MUST define a
+    TEXT[!MUST,implementation]:    method for closing the connection with a version negotiation error.
     TEXT[!MUST,implementation]: When the server then processes the client's Version
     TEXT[!MUST,implementation]:    Information, the server MUST validate that the client's Chosen
     TEXT[!MUST,implementation]:    Version matches the version in use for the connection.
-    TEXT[!MUST]: If the two
-    TEXT[!MUST]:    differ, the server MUST close the connection with a version
-    TEXT[!MUST]:    negotiation error.
-    TEXT[!MUST]: Subsequently,
-    TEXT[!MUST]:    if the server receives the client's Version Information over QUIC
-    TEXT[!MUST]:    version 1 (as indicated by the Version field of the Long Header
-    TEXT[!MUST]:    packets that carried the transport parameters) and the client's
-    TEXT[!MUST]:    Chosen Version is not set to 0x00000001, the server MUST close the
-    TEXT[!MUST]:    connection with a version negotiation error.
-    TEXT[!MAY]:    Servers MAY complete the handshake even if the Version Information is
-    TEXT[!MAY]:    missing.
-    TEXT[!MUST]: Clients MUST NOT complete the handshake if they are
-    TEXT[!MUST]:    reacting to a Version Negotiation packet and the Version Information
-    TEXT[!MUST]:    is missing, but MAY do so otherwise.
+    TEXT[!MUST,implementation]: If the two
+    TEXT[!MUST,implementation]:    differ, the server MUST close the connection with a version
+    TEXT[!MUST,implementation]:    negotiation error.
+    TEXT[!MUST,implementation]: Subsequently,
+    TEXT[!MUST,implementation]:    if the server receives the client's Version Information over QUIC
+    TEXT[!MUST,implementation]:    version 1 (as indicated by the Version field of the Long Header
+    TEXT[!MUST,implementation]:    packets that carried the transport parameters) and the client's
+    TEXT[!MUST,implementation]:    Chosen Version is not set to 0x00000001, the server MUST close the
+    TEXT[!MUST,implementation]:    connection with a version negotiation error.
+    TEXT[!MAY,implementation]:    Servers MAY complete the handshake even if the Version Information is
+    TEXT[!MAY,implementation]:    missing.
+    TEXT[!MUST,implementation]: Clients MUST NOT complete the handshake if they are
+    TEXT[!MUST,implementation]:    reacting to a Version Negotiation packet and the Version Information
+    TEXT[!MUST,implementation]:    is missing, but MAY do so otherwise.
     TEXT[!MUST,implementation,test]:    If a client receives Version Information where the server's Chosen
     TEXT[!MUST,implementation,test]:    Version was not sent by the client as part of its Available Versions,
     TEXT[!MUST,implementation,test]:    the client MUST close the connection with a version negotiation
@@ -3718,8 +3717,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9368
     TEXT[!MUST,test]: If a client has reacted to a Version Negotiation packet and
     TEXT[!MUST,test]:    the server's Version Information was missing, the client MUST close
     TEXT[!MUST,test]:    the connection with a version negotiation error.
-    TEXT[!MUST]:    If the client received and acted on a Version Negotiation packet, the
-    TEXT[!MUST]:    client MUST validate the server's Available Versions field.
+    TEXT[!MUST,implementation]:    If the client received and acted on a Version Negotiation packet, the
+    TEXT[!MUST,implementation]:    client MUST validate the server's Available Versions field.
     TEXT[!MUST,implementation,test]: If the client would have selected a different
     TEXT[!MUST,implementation,test]:    version, the client MUST close the connection with a version
     TEXT[!MUST,implementation,test]:    negotiation error.
@@ -3727,66 +3726,66 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9368
     TEXT[!MUST,implementation]:    Negotiation packet and the server's Available Versions field is
     TEXT[!MUST,implementation]:    empty, the client MUST close the connection with a version
     TEXT[!MUST,implementation]:    negotiation error.
-    TEXT[!MUST]: In particular, since the client can be made aware of the
-    TEXT[!MUST]:    Negotiated Version by the QUIC long header version during compatible
-    TEXT[!MUST]:    version negotiation (see Section 2.3), clients MUST validate that the
-    TEXT[!MUST]:    server's Chosen Version is equal to the Negotiated Version; if they
-    TEXT[!MUST]:    do not match, the client MUST close the connection with a version
-    TEXT[!MUST]:    negotiation error.
+    TEXT[!MUST,implementation]: In particular, since the client can be made aware of the
+    TEXT[!MUST,implementation]:    Negotiated Version by the QUIC long header version during compatible
+    TEXT[!MUST,implementation]:    version negotiation (see Section 2.3), clients MUST validate that the
+    TEXT[!MUST,implementation]:    server's Chosen Version is equal to the Negotiated Version; if they
+    TEXT[!MUST,implementation]:    do not match, the client MUST close the connection with a version
+    TEXT[!MUST,implementation]:    negotiation error.
 
   SECTION: [Server Deployments of QUIC](#section-5)
-    TEXT[!SHOULD]: To avoid that,
-    TEXT[!SHOULD]:    server operators SHOULD perform a three-step process when they wish
-    TEXT[!SHOULD]:    to add or remove support for a version, as described below.
+    TEXT[!SHOULD,todo]: To avoid that,
+    TEXT[!SHOULD,todo]:    server operators SHOULD perform a three-step process when they wish
+    TEXT[!SHOULD,todo]:    to add or remove support for a version, as described below.
 
   SECTION: [Application-Layer Protocol Considerations](#section-6)
-    TEXT[!MUST]:    A given ALPN token MUST NOT be used with a new QUIC version that is
-    TEXT[!MUST]:    different from the version for which the ALPN token was originally
-    TEXT[!MUST]:    defined, unless all the following requirements are met:
-    TEXT[!MUST]:    When incompatible version negotiation is in use, the second
-    TEXT[!MUST]:    connection that is created in response to the received Version
-    TEXT[!MUST]:    Negotiation packet MUST restart its application-layer protocol
-    TEXT[!MUST]:    negotiation process without taking into account the Original Version.
+    TEXT[!MUST,todo]:    A given ALPN token MUST NOT be used with a new QUIC version that is
+    TEXT[!MUST,todo]:    different from the version for which the ALPN token was originally
+    TEXT[!MUST,todo]:    defined, unless all the following requirements are met:
+    TEXT[!MUST,implementation]:    When incompatible version negotiation is in use, the second
+    TEXT[!MUST,implementation]:    connection that is created in response to the received Version
+    TEXT[!MUST,implementation]:    Negotiation packet MUST restart its application-layer protocol
+    TEXT[!MUST,implementation]:    negotiation process without taking into account the Original Version.
 
   SECTION: [Considerations for Future Versions](#section-7)
-    TEXT[!SHOULD]:    In order to facilitate the deployment of future versions of QUIC,
-    TEXT[!SHOULD]:    designers of future versions SHOULD attempt to design their new
-    TEXT[!SHOULD]:    version such that commonly deployed versions are compatible with it.
+    TEXT[!SHOULD,todo]:    In order to facilitate the deployment of future versions of QUIC,
+    TEXT[!SHOULD,todo]:    designers of future versions SHOULD attempt to design their new
+    TEXT[!SHOULD,todo]:    version such that commonly deployed versions are compatible with it.
 
   SECTION: [Interaction with Retry](#section-7.1)
-    TEXT[!MUST]:    If a future document wishes to define compatibility between two
-    TEXT[!MUST]:    versions that support Retry, that document MUST specify how version
-    TEXT[!MUST]:    negotiation (both compatible and incompatible) interacts with Retry
-    TEXT[!MUST]:    during a handshake that requires both.
+    TEXT[!MUST,todo]:    If a future document wishes to define compatibility between two
+    TEXT[!MUST,todo]:    versions that support Retry, that document MUST specify how version
+    TEXT[!MUST,todo]:    negotiation (both compatible and incompatible) interacts with Retry
+    TEXT[!MUST,todo]:    during a handshake that requires both.
 
   SECTION: [Interaction with TLS Resumption](#section-7.2)
-    TEXT[!SHOULD]: New versions that also use
-    TEXT[!SHOULD]:    TLS 1.3 SHOULD mandate that their session tickets are tightly scoped
-    TEXT[!SHOULD]:    to one version of QUIC, i.e., require that clients not use them
-    TEXT[!SHOULD]:    across multiple version and that servers validate this client
-    TEXT[!SHOULD]:    requirement.
+    TEXT[!SHOULD,todo]: New versions that also use
+    TEXT[!SHOULD,todo]:    TLS 1.3 SHOULD mandate that their session tickets are tightly scoped
+    TEXT[!SHOULD,todo]:    to one version of QUIC, i.e., require that clients not use them
+    TEXT[!SHOULD,todo]:    across multiple version and that servers validate this client
+    TEXT[!SHOULD,todo]:    requirement.
 
   SECTION: [Interaction with 0-RTT](#section-7.3)
-    TEXT[!MUST]: If a future document
-    TEXT[!MUST]:    wishes to define compatibility between two versions that support
-    TEXT[!MUST]:    0-RTT, that document MUST address the scenario where there are 0-RTT
-    TEXT[!MUST]:    packets in the client's first flight.
+    TEXT[!MUST,todo]: If a future document
+    TEXT[!MUST,todo]:    wishes to define compatibility between two versions that support
+    TEXT[!MUST,todo]:    0-RTT, that document MUST address the scenario where there are 0-RTT
+    TEXT[!MUST,todo]:    packets in the client's first flight.
 
   SECTION: [Special Handling for QUIC Version 1](#section-8)
-    TEXT[!MUST]:    Because QUIC version 1 was the only QUIC version that was published
-    TEXT[!MUST]:    on the IETF Standards Track before this document, it is handled
-    TEXT[!MUST]:    specially as follows: if a client is starting a QUIC version 1
-    TEXT[!MUST]:    connection in response to a received Version Negotiation packet and
-    TEXT[!MUST]:    the version_information transport parameter is missing from the
-    TEXT[!MUST]:    server's transport parameters, then the client SHALL proceed as if
-    TEXT[!MUST]:    the server's transport parameters contained a version_information
-    TEXT[!MUST]:    transport parameter with a Chosen Version set to 0x00000001 and an
-    TEXT[!MUST]:    Available Version list containing exactly one version set to
-    TEXT[!MUST]:    0x00000001.
-    TEXT[!MUST]: Note that implementations that
-    TEXT[!MUST]:    wish to use version negotiation to negotiate versions other than QUIC
-    TEXT[!MUST]:    version 1 MUST implement the version negotiation mechanism defined in
-    TEXT[!MUST]:    this document.
+    TEXT[!MUST,todo]:    Because QUIC version 1 was the only QUIC version that was published
+    TEXT[!MUST,todo]:    on the IETF Standards Track before this document, it is handled
+    TEXT[!MUST,todo]:    specially as follows: if a client is starting a QUIC version 1
+    TEXT[!MUST,todo]:    connection in response to a received Version Negotiation packet and
+    TEXT[!MUST,todo]:    the version_information transport parameter is missing from the
+    TEXT[!MUST,todo]:    server's transport parameters, then the client SHALL proceed as if
+    TEXT[!MUST,todo]:    the server's transport parameters contained a version_information
+    TEXT[!MUST,todo]:    transport parameter with a Chosen Version set to 0x00000001 and an
+    TEXT[!MUST,todo]:    Available Version list containing exactly one version set to
+    TEXT[!MUST,todo]:    0x00000001.
+    TEXT[!MUST,todo]: Note that implementations that
+    TEXT[!MUST,todo]:    wish to use version negotiation to negotiate versions other than QUIC
+    TEXT[!MUST,todo]:    version 1 MUST implement the version negotiation mechanism defined in
+    TEXT[!MUST,todo]:    this document.
 
 SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9369
   SECTION: [Differences with QUIC Version 1](#section-3)
@@ -3795,50 +3794,59 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9369
     TEXT[!MUST,implementation,test]:    and [QUIC-RECOVERY].
 
   SECTION: [Version Negotiation Considerations](#section-4)
-    TEXT[!SHOULD]: As
-    TEXT[!SHOULD]:    this mechanism does not currently distinguish between QUIC versions,
-    TEXT[!SHOULD]:    HTTP servers SHOULD support multiple versions to reduce the
-    TEXT[!SHOULD]:    probability of incompatibility and the cost associated with QUIC
-    TEXT[!SHOULD]:    version negotiation or TCP fallback.
+    TEXT[!SHOULD,implementation,test]: As
+    TEXT[!SHOULD,implementation,test]:    this mechanism does not currently distinguish between QUIC versions,
+    TEXT[!SHOULD,implementation,test]:    HTTP servers SHOULD support multiple versions to reduce the
+    TEXT[!SHOULD,implementation,test]:    probability of incompatibility and the cost associated with QUIC
+    TEXT[!SHOULD,implementation,test]:    version negotiation or TCP fallback.
     TEXT[!MUST,implementation]:    Any QUIC endpoint that supports QUIC version 2 MUST send, process,
     TEXT[!MUST,implementation]:    and validate the version_information transport parameter specified in
     TEXT[!MUST,implementation]:    [QUIC-VN] to prevent version downgrade attacks.
-    TEXT[!SHOULD]: Endpoints that support both
-    TEXT[!SHOULD]:    versions SHOULD support compatible version negotiation to avoid a
-    TEXT[!SHOULD]:    round trip.
+    TEXT[!SHOULD,implementation,test]: Endpoints that support both
+    TEXT[!SHOULD,implementation,test]:    versions SHOULD support compatible version negotiation to avoid a
+    TEXT[!SHOULD,implementation,test]:    round trip.
 
   SECTION: [Compatible Negotiation Requirements](#section-4.1)
-    TEXT[!MUST]:    If the server sends a Retry packet, it MUST use the original version.
-    TEXT[!MUST]: The client
-    TEXT[!MUST]:    MUST NOT use a different version in the subsequent Initial packet
-    TEXT[!MUST]:    that contains the Retry token.
-    TEXT[!MAY]: The server MAY encode the QUIC
-    TEXT[!MAY]:    version in its Retry token to validate that the client did not switch
-    TEXT[!MAY]:    versions, and drop the packet if it switched, to enforce client
-    TEXT[!MAY]:    compliance.
-    TEXT[!MUST]: After switching to a negotiated version
-    TEXT[!MUST]:    after a Retry, the server MUST include the relevant transport
-    TEXT[!MUST]:    parameters to validate that the server sent the Retry and the
-    TEXT[!MUST]:    connection IDs used in the exchange, as described in Section 7.3 of
-    TEXT[!MUST]:    [QUIC].
-    TEXT[!MUST]: The server MUST send all CRYPTO
-    TEXT[!MUST]:    frames using the negotiated version.
-    TEXT[!SHOULD]:    Once the client has learned the negotiated version, it SHOULD send
-    TEXT[!SHOULD]:    subsequent Initial packets using that version.
-    TEXT[!MUST]: The server MUST NOT
-    TEXT[!MUST]:    discard its original version Initial receive keys until it
-    TEXT[!MUST]:    successfully processes a Handshake packet with the negotiated
-    TEXT[!MUST]:    version.
-    TEXT[!MUST]:    Both endpoints MUST send Handshake and 1-RTT packets using the
-    TEXT[!MUST]:    negotiated version.
-    TEXT[!MUST]: An endpoint MUST drop packets using any other
-    TEXT[!MUST]:    version.
-    TEXT[!MUST]:    The client MUST NOT send 0-RTT packets using the negotiated version,
-    TEXT[!MUST]:    even after processing a packet of that version from the server.
+    TEXT[!MUST,implementation]:    If the server sends a Retry packet, it MUST use the original version.
+    TEXT[!MUST,implementation]: The client
+    TEXT[!MUST,implementation]:    MUST NOT use a different version in the subsequent Initial packet
+    TEXT[!MUST,implementation]:    that contains the Retry token.
+    TEXT[!MAY,implementation]: The server MAY encode the QUIC
+    TEXT[!MAY,implementation]:    version in its Retry token to validate that the client did not switch
+    TEXT[!MAY,implementation]:    versions, and drop the packet if it switched, to enforce client
+    TEXT[!MAY,implementation]:    compliance.
+    TEXT[!MUST,implementation]: After switching to a negotiated version
+    TEXT[!MUST,implementation]:    after a Retry, the server MUST include the relevant transport
+    TEXT[!MUST,implementation]:    parameters to validate that the server sent the Retry and the
+    TEXT[!MUST,implementation]:    connection IDs used in the exchange, as described in Section 7.3 of
+    TEXT[!MUST,implementation]:    [QUIC].
+    TEXT[implementation]:    The server cannot send CRYPTO frames until it has processed the
+    TEXT[implementation]:    client's transport parameters.
+    TEXT[!MUST,implementation,test]: The server MUST send all CRYPTO
+    TEXT[!MUST,implementation,test]:    frames using the negotiated version.
+    TEXT[implementation]:    Before the server is able to process transport parameters from the
+    TEXT[implementation]:    client, it might need to respond to Initial packets from the client.
+    TEXT[implementation]:    For these packets, the server uses the original version.
+    TEXT[!SHOULD,implementation,test]:    Once the client has learned the negotiated version, it SHOULD send
+    TEXT[!SHOULD,implementation,test]:    subsequent Initial packets using that version.
+    TEXT[!MUST,todo]: The server MUST NOT
+    TEXT[!MUST,todo]:    discard its original version Initial receive keys until it
+    TEXT[!MUST,todo]:    successfully processes a Handshake packet with the negotiated
+    TEXT[!MUST,todo]:    version.
+    TEXT[!MUST,implementation,test]:    Both endpoints MUST send Handshake and 1-RTT packets using the
+    TEXT[!MUST,implementation,test]:    negotiated version.
+    TEXT[!MUST,implementation]: An endpoint MUST drop packets using any other
+    TEXT[!MUST,implementation]:    version.
+    TEXT[!MUST,todo]:    The client MUST NOT send 0-RTT packets using the negotiated version,
+    TEXT[!MUST,todo]:    even after processing a packet of that version from the server.
 
   SECTION: [TLS Resumption and NEW_TOKEN Tokens](#section-5)
-    TEXT[!MUST]: Clients MUST NOT use a
-    TEXT[!MUST]:    session ticket or token from a QUIC version 1 connection to initiate
-    TEXT[!MUST]:    a QUIC version 2 connection, and vice versa.
-    TEXT[!MUST]:    Servers MUST validate the originating version of any session ticket
-    TEXT[!MUST]:    or token and not accept one issued from a different version.
+    TEXT[!MUST,implementation]: Clients MUST NOT use a
+    TEXT[!MUST,implementation]:    session ticket or token from a QUIC version 1 connection to initiate
+    TEXT[!MUST,implementation]:    a QUIC version 2 connection, and vice versa.
+    TEXT[implementation]: When a connection
+    TEXT[implementation]:    includes compatible version negotiation, any issued server tokens are
+    TEXT[implementation]:    considered to originate from the negotiated version, not the original
+    TEXT[implementation]:    one.
+    TEXT[!MUST,todo]:    Servers MUST validate the originating version of any session ticket
+    TEXT[!MUST,todo]:    or token and not accept one issued from a different version.

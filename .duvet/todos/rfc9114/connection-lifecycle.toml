@@ -1,0 +1,212 @@
+# RFC 9114 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-3.3"
+# report-id = 811
+quote = '''
+When either endpoint chooses to close the HTTP/3
+connection, the terminating endpoint SHOULD first send a GOAWAY frame
+(Section 5.2) so that both endpoints can reliably determine whether
+previously sent frames have been processed and gracefully complete or
+terminate any necessary remaining tasks.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.1"
+# report-id = 894
+quote = '''
+HTTP/3 implementations will need to open a new HTTP/3
+connection for new requests if the existing connection has been idle
+for longer than the idle timeout negotiated during the QUIC
+handshake, and they SHOULD do so if approaching the idle timeout; see
+Section 10.1 of [QUIC-TRANSPORT].
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.1"
+# report-id = 895
+quote = '''
+A gateway MAY
+maintain connections in anticipation of need rather than incur the
+latency cost of connection establishment to servers.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.1"
+# report-id = 896
+quote = '''
+Servers SHOULD
+NOT actively keep connections open.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.2"
+# report-id = 897
+quote = '''
+This
+identifier MAY be zero if no requests or pushes were processed.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.2"
+# report-id = 898
+quote = '''
+Upon sending a GOAWAY frame, the endpoint
+SHOULD explicitly cancel (see Sections 4.1.1 and 7.2.3) any requests
+or pushes that have identifiers greater than or equal to the one
+indicated, in order to clean up transport state for the affected
+streams.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.2"
+# report-id = 899
+quote = '''
+The endpoint SHOULD continue to do so as more requests or
+pushes arrive.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.2"
+# report-id = 901
+quote = '''
+Clients
+MAY establish a new connection to send additional requests.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.2"
+# report-id = 902
+quote = '''
+Servers MAY reject individual requests on streams below the
+indicated ID if these requests were not processed.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.2"
+# report-id = 903
+quote = '''
+Servers SHOULD send a GOAWAY frame when the closing of a connection
+is known in advance, even if the advance notice is small, so that the
+remote peer can know whether or not a request has been partially
+processed.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.2"
+# report-id = 906
+quote = '''
+Like the server,
+the client MAY send subsequent GOAWAY frames so long as the specified
+push ID is no greater than any previously sent value.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.2"
+# report-id = 907
+quote = '''
+Once all accepted requests and pushes have been processed, the
+endpoint can permit the connection to become idle, or it MAY initiate
+an immediate closure of the connection.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.2"
+# report-id = 908
+quote = '''
+An endpoint that completes a
+graceful shutdown SHOULD use the H3_NO_ERROR error code when closing
+the connection.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.3"
+# report-id = 909
+quote = '''
+Before closing the connection, a GOAWAY frame MAY be sent to allow
+the client to retry some requests.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-5.4"
+# report-id = 910
+quote = '''
+If a connection terminates without a GOAWAY frame, clients MUST
+assume that any request that was sent, whether in whole or in part,
+might have been processed.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/56"
+reason = '''
+HTTP/3 connection lifecycle, idle-timeout, GOAWAY, graceful shutdown, and request-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]

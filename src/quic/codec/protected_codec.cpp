@@ -427,6 +427,10 @@ std::uint8_t quic_bit_mask(bool grease_quic_bit, std::uint64_t seed, std::uint64
         return 0x40u;
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9287#section-3.1
+    // # Endpoints that receive the grease_quic_bit transport parameter from a
+    // # peer SHOULD set the QUIC Bit to an unpredictable value unless another
+    // # extension assigns specific meaning to the value of the bit.
     auto mixed = seed ^ (packet_number * 0x9e3779b97f4a7c15ull);
     mixed ^= mixed >> 30u;
     mixed *= 0xbf58476d1ce4e5b9ull;

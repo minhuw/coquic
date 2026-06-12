@@ -1,0 +1,16 @@
+# RFC 9287 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9287#section-3.2"
+# report-id = 1077
+quote = '''
+Extensions that use the QUIC Bit MUST negotiate their use
+prior to acting on any semantic.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/70"
+reason = '''
+No current extension assigns semantic meaning to the QUIC Bit, and the codebase
+does not yet have an explicit extension-negotiation guard or policy for future
+QUIC-bit semantics.
+'''
+tags = ["rfc9287"]

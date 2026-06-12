@@ -976,6 +976,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     bool defer_server_compatible_negotiation_crypto = (config_.role == EndpointRole::server) &&
                                                       (original_version_ != current_version_) &&
                                                       !peer_transport_parameters_validated_;
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+    // # Before the server is able to process transport parameters from the
+    // # client, it might need to respond to Initial packets from the client.
+    // # For these packets, the server uses the original version.
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+    // # Once the client has learned the negotiated version, it SHOULD send
+    // # subsequent Initial packets using that version.
     auto initial_packet_version =
         defer_server_compatible_negotiation_crypto ? original_version_ : current_version_;
     static const std::vector<std::byte> kEmptyInitialToken;
@@ -1236,6 +1243,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         }
         {
             COQUIC_SEND_PROFILE_TIMER(burst_note_timer, commit_burst_note_ns);
+            //= https://www.rfc-editor.org/rfc/rfc9002#section-7.5
+            // # A sender MUST however count these packets as being
+            // # additionally in flight, since these packets add network load
+            // # without establishing packet loss.
             note_burst_limited_ack_eliciting_send(options.unpaced_ack_eliciting_packets,
                                                   options.bypass_burst_limit,
                                                   options.pacing_controlled);
@@ -1692,6 +1703,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     // # number space as the packet being acknowledged; see Section 12.1.
     auto initial_crypto_ranges = std::vector<ByteRange>{};
     if (!initial_packet_space_discarded_ && !defer_server_compatible_negotiation_crypto) {
+        //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+        // # The server cannot send CRYPTO frames until it has processed the
+        // # client's transport parameters.
         initial_crypto_ranges =
             initial_space_.send_crypto.take_ranges(std::numeric_limits<std::size_t>::max());
     }
@@ -2018,6 +2032,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             -> CodecResult<SerializedProtectedDatagram> {
             auto candidate_packets = packets;
             candidate_packets.emplace_back(ProtectedHandshakePacket{
+                //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+                // # The server MUST send all CRYPTO
+                // # frames using the negotiated version.
+                //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+                // # Both endpoints MUST send Handshake and 1-RTT packets using the
+                // # negotiated version.
                 .version = current_version_,
                 .destination_connection_id = send_destination_connection_id,
                 .source_connection_id = config_.source_connection_id,
@@ -2033,6 +2053,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             -> CodecResult<SerializedProtectedDatagram> {
             auto candidate_packets = packets;
             candidate_packets.emplace_back(ProtectedHandshakePacket{
+                //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+                // # The server MUST send all CRYPTO
+                // # frames using the negotiated version.
+                //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+                // # Both endpoints MUST send Handshake and 1-RTT packets using the
+                // # negotiated version.
                 .version = current_version_,
                 .destination_connection_id = send_destination_connection_id,
                 .source_connection_id = config_.source_connection_id,
@@ -2099,6 +2125,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         }
 
         packets.emplace_back(ProtectedHandshakePacket{
+            //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+            // # The server MUST send all CRYPTO
+            // # frames using the negotiated version.
+            //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+            // # Both endpoints MUST send Handshake and 1-RTT packets using the
+            // # negotiated version.
             .version = current_version_,
             .destination_connection_id = send_destination_connection_id,
             .source_connection_id = config_.source_connection_id,
@@ -2392,6 +2424,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             application_space_.received_packets.on_ack_sent();
             application_space_.pending_ack_deadline = std::nullopt;
             application_space_.force_ack_send = false;
+            //= https://www.rfc-editor.org/rfc/rfc9002#section-7.7
+            // # To avoid delaying their delivery to the peer, packets
+            // # containing only ACK frames SHOULD therefore not be paced.
             return commit_serialized_datagram({}, std::move(ack_only_datagram.value()),
                                               CommitSerializedDatagramOptions{
                                                   .one_rtt_encrypted_packets = 1,
@@ -4161,6 +4196,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                         datagram_wire_size <= peer_transport_parameters_->max_datagram_frame_size;
                     if (pending_application_stream_priority.has_value() &&
                         pending_datagram.priority < *pending_application_stream_priority) {
+                        //= https://www.rfc-editor.org/rfc/rfc9221#section-5.1
+                        // # QUIC implementations SHOULD present an API to applications to assign
+                        // # relative priorities to DATAGRAM frames with respect to each other and
+                        // # to QUIC streams.
                         continue;
                     }
                     if (!peer_limit_allows_datagram ||
@@ -4430,6 +4469,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 const bool has_non_pmtu_application_probe =
                     application_space_.pending_probe_packet.has_value() &&
                     !application_space_.pending_probe_packet->is_pmtu_probe;
+                //= https://www.rfc-editor.org/rfc/rfc9002#section-7.5
+                // # Probe packets MUST NOT be blocked by the congestion
+                // # controller.
                 return has_non_pmtu_application_probe ||
                        (application_path_validation_frames.challenge.has_value() &&
                         stream_fragments.empty());
@@ -4819,15 +4861,24 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 // # (see Appendix B.2) to be larger than the congestion window, unless
                 // # the packet is sent on a PTO timer expiration (see Section 6.2) or
                 // # when entering recovery (see Section 7.3.2).
+                //= https://www.rfc-editor.org/rfc/rfc9221#section-5.4
+                // # The sender MUST either delay sending the frame until the
+                // # controller allows it or drop the frame without sending it (at
+                // # which point it MAY notify the application).
                 note_application_congestion_blocked(candidate_datagram_size);
                 return restore_and_fallback_blocked_application_candidate();
             }
             if (send_pacing_deadline.has_value() && now < *send_pacing_deadline) {
+                //= https://www.rfc-editor.org/rfc/rfc9002#section-7.7
+                // # A sender SHOULD pace sending of all in-flight packets
+                // # based on input from the congestion controller.
                 note_application_pacing_blocked(candidate_datagram_size);
                 return restore_and_fallback_blocked_application_candidate();
             }
             if (!non_paced_burst_allows_send(ack_eliciting, bypass_congestion_window,
                                              send_pacing_deadline.has_value())) {
+                //= https://www.rfc-editor.org/rfc/rfc9002#section-7.7
+                // # Senders MUST either use pacing or limit such bursts.
                 note_application_burst_blocked(candidate_datagram_size);
                 return restore_and_fallback_blocked_application_candidate();
             }

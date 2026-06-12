@@ -1,0 +1,90 @@
+# RFC 9002 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-7.7"
+# report-id = 758
+quote = '''
+A sender with knowledge that the network path to the
+receiver can absorb larger bursts MAY use a higher limit.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/50"
+reason = '''
+Application-limited congestion-window behavior, optional underutilization mechanisms, ACK-only loss feedback, and RFC8085 conformance policy need implementation, tests, or durable documentation.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-7.8"
+# report-id = 760
+quote = '''
+When this occurs, the congestion window
+SHOULD NOT be increased in either slow start or congestion avoidance.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/50"
+reason = '''
+Application-limited congestion-window behavior, optional underutilization mechanisms, ACK-only loss feedback, and RFC8085 conformance policy need implementation, tests, or durable documentation.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-7.8"
+# report-id = 761
+quote = '''
+A sender SHOULD NOT consider itself application limited if it
+would have fully utilized the congestion window without pacing delay.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/50"
+reason = '''
+Application-limited congestion-window behavior, optional underutilization mechanisms, ACK-only loss feedback, and RFC8085 conformance policy need implementation, tests, or durable documentation.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-7.8"
+# report-id = 762
+quote = '''
+A sender MAY implement alternative mechanisms to update its
+congestion window after periods of underutilization, such as those
+proposed for TCP in [RFC7661].
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/50"
+reason = '''
+Application-limited congestion-window behavior, optional underutilization mechanisms, ACK-only loss feedback, and RFC8085 conformance policy need implementation, tests, or durable documentation.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-7"
+# report-id = 763
+quote = '''
+If a sender uses a different controller than that specified in this
+document, the chosen controller MUST conform to the congestion
+control guidelines specified in Section 3.1 of [RFC8085].
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/50"
+reason = '''
+Application-limited congestion-window behavior, optional underutilization mechanisms, ACK-only loss feedback, and RFC8085 conformance policy need implementation, tests, or durable documentation.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-7"
+# report-id = 764
+quote = '''
+Unlike
+TCP, QUIC can detect the loss of these packets and MAY use that
+information to adjust the congestion controller or the rate of ACK-
+only packets being sent, but this document does not describe a
+mechanism for doing so.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/50"
+reason = '''
+Application-limited congestion-window behavior, optional underutilization mechanisms, ACK-only loss feedback, and RFC8085 conformance policy need implementation, tests, or durable documentation.
+'''
+tags = ["rfc9002"]

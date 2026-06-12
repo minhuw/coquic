@@ -255,6 +255,11 @@ void BbrCongestionController::on_loss_event(QuicCoreTimePoint loss_detection_tim
 void BbrCongestionController::on_persistent_congestion() {
     const auto max_datagram_size = max_datagram_size_;
     *this = BbrCongestionController(max_datagram_size);
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-7.6.2
+    // # When persistent congestion is declared, the sender's congestion
+    // # window MUST be reduced to the minimum congestion window
+    // # (kMinimumWindow), similar to a TCP sender's response on an RTO
+    // # [RFC5681].
     congestion_window_ = minimum_window();
     max_inflight_ = minimum_window();
 }

@@ -1,0 +1,15 @@
+# RFC 9368 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-1.2"
+# report-id = 1080
+quote = '''
+Implementations can make this
+configurable, and a RECOMMENDED value is one minute.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/71"
+reason = '''
+CoQUIC does not yet expose or document an RFC 9368 Maximum Segment Lifetime
+configuration with the recommended one-minute default.
+'''
+tags = ["rfc9368"]

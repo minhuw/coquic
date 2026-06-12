@@ -1,0 +1,16 @@
+# RFC 9369 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9369#section-5"
+# report-id = 1143
+quote = '''
+Servers MUST validate the originating version of any session ticket
+or token and not accept one issued from a different version.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/80"
+reason = '''
+NEW_TOKEN validation is version-scoped, but server-side TLS session-ticket
+acceptance does not yet appear to validate the QUIC version that issued the
+ticket.
+'''
+tags = ["rfc9369"]

@@ -1,0 +1,16 @@
+# RFC 9368 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-6"
+# report-id = 1120
+quote = '''
+A given ALPN token MUST NOT be used with a new QUIC version that is
+different from the version for which the ALPN token was originally
+defined, unless all the following requirements are met:
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/75"
+reason = '''
+CoQUIC does not yet enforce or document an ALPN-to-QUIC-version compatibility
+policy for introducing new QUIC versions.
+'''
+tags = ["rfc9368"]

@@ -27,8 +27,12 @@ struct PacketSpaceRecoveryTestPeer;
 } // namespace test
 
 //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.1
-// # In order to remain similar to TCP,
-// # implementations SHOULD NOT use a packet threshold less than 3;
+// # The RECOMMENDED initial value for the packet reordering threshold
+// # (kPacketThreshold) is 3, based on best practices for TCP loss
+// # detection [RFC5681] [RFC6675].
+//= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.1
+// # In order to remain similar to TCP, implementations SHOULD NOT use a
+// # packet threshold less than 3; see [RFC5681].
 inline constexpr std::uint64_t kPacketThreshold = 3;
 //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.2
 // # The RECOMMENDED time threshold (kTimeThreshold), expressed as an RTT

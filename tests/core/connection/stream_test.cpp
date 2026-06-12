@@ -109,6 +109,10 @@ TEST(QuicCoreTest, TwoPeersExchangeDatagramFramesThroughEffects) {
 
     auto datagram_events = coquic::quic::test::received_datagram_data_from(received);
     ASSERT_EQ(datagram_events.size(), 1u);
+    //= https://www.rfc-editor.org/rfc/rfc9221#section-5
+    // # This frame SHOULD be sent as soon as possible (as determined
+    // # by factors like congestion control, described below) and MAY be
+    // # coalesced with other frames.
     EXPECT_EQ(datagram_events[0].connection, 1u);
     EXPECT_EQ(coquic::quic::test::string_from_bytes(datagram_events[0].payload()), "ping");
     EXPECT_EQ(datagram_events[0].byte_count(), 4u);
@@ -123,6 +127,10 @@ TEST(QuicCoreTest, DatagramSendPriorityChoosesHigherPriorityThenFifo) {
 
     auto first = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     ASSERT_FALSE(first.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9221#section-5.1
+    // # QUIC implementations SHOULD present an API to applications to assign
+    // # relative priorities to DATAGRAM frames with respect to each other and
+    // # to QUIC streams.
     EXPECT_EQ(application_datagram_payloads_from_datagram(connection, first),
               std::vector<std::vector<std::byte>>({bytes_from_ints({0x02})}));
 
@@ -797,6 +805,9 @@ TEST(QuicCoreTest, DatagramSendReportsPeerSupportAndSizeLocalErrors) {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-19.21
     // # An extension to QUIC that wishes to use a new type of frame MUST first
     // # ensure that a peer is able to understand the frame.
+    //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+    // # Application protocols that use DATAGRAM frames MAY choose to only
+    // # negotiate and use them in a single direction.
     EXPECT_EQ(optional_ref_or_terminate(unsupported.local_error).code,
               coquic::quic::QuicCoreLocalErrorCode::datagram_not_supported);
     EXPECT_FALSE(optional_ref_or_terminate(unsupported.local_error).stream_id.has_value());

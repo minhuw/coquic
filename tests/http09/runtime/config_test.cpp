@@ -477,6 +477,12 @@ TEST(QuicHttp09RuntimeTest, RuntimePropagatesConfiguredCipherSuites) {
 TEST(QuicHttp09RuntimeTest, RuntimeBuildsCoreConfigsWithConfiguredVersionSupport) {
     const auto runtime = coquic::http09::Http09RuntimeConfig{
         .mode = coquic::http09::Http09RuntimeMode::client,
+        //= https://www.rfc-editor.org/rfc/rfc9369#section-4
+        // # As
+        // # this mechanism does not currently distinguish between QUIC versions,
+        // # HTTP servers SHOULD support multiple versions to reduce the
+        // # probability of incompatibility and the cost associated with QUIC
+        // # version negotiation or TCP fallback.
         .supported_versions = {0x6b3343cfu, 0x00000001u},
         .requests_env = "https://localhost/a.txt",
     };

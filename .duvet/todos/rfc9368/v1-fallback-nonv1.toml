@@ -1,0 +1,39 @@
+# RFC 9368 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-8"
+# report-id = 1126
+quote = '''
+Because QUIC version 1 was the only QUIC version that was published
+on the IETF Standards Track before this document, it is handled
+specially as follows: if a client is starting a QUIC version 1
+connection in response to a received Version Negotiation packet and
+the version_information transport parameter is missing from the
+server's transport parameters, then the client SHALL proceed as if
+the server's transport parameters contained a version_information
+transport parameter with a Chosen Version set to 0x00000001 and an
+Available Version list containing exactly one version set to
+0x00000001.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/78"
+reason = '''
+The special QUIC v1 fallback for missing server Version Information after
+reacting to a Version Negotiation packet is not yet implemented.
+'''
+tags = ["rfc9368"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-8"
+# report-id = 1127
+quote = '''
+Note that implementations that
+wish to use version negotiation to negotiate versions other than QUIC
+version 1 MUST implement the version negotiation mechanism defined in
+this document.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/78"
+reason = '''
+CoQUIC's non-v1 version negotiation paths need an explicit audit against the
+complete RFC 9368 mechanism before full support is declared.
+'''
+tags = ["rfc9368"]

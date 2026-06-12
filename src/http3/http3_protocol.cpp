@@ -399,6 +399,9 @@ template <typename T> Http3Result<T> validate_field_wire_syntax(const Http3Field
     if (field.name.empty()) {
         return http3_failure<T>(Http3ErrorCode::message_error, "empty header name");
     }
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-10.3
+    // # Requests or responses containing invalid field names MUST be treated
+    // # as malformed.
     if (!header_name_is_valid(field.name)) {
         return http3_failure<T>(Http3ErrorCode::message_error, "invalid header name");
     }
@@ -409,6 +412,9 @@ template <typename T> Http3Result<T> validate_field_wire_syntax(const Http3Field
     if (header_name_has_uppercase(field.name)) {
         return http3_failure<T>(Http3ErrorCode::message_error, "uppercase header name");
     }
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-10.3
+    // # Any request or response that contains a character not permitted in a
+    // # field value MUST be treated as malformed.
     if (!header_value_is_valid(field.value)) {
         return http3_failure<T>(Http3ErrorCode::message_error, "invalid header value");
     }
@@ -504,6 +510,9 @@ CodecResult<Http3DecodedFrame> parse_http3_frame(std::span<const std::byte> byte
                                                 frame_length.error().offset);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-10.8
+    // # An implementation MUST ensure that the length of a frame exactly
+    // # matches the length of the fields it contains.
     if (frame_length.value() > reader.remaining()) {
         return codec_failure<Http3DecodedFrame>(CodecErrorCode::http3_parse_error, reader.offset());
     }
@@ -776,9 +785,18 @@ Http3Result<bool> validate_http3_settings_frame(const Http3SettingsFrame &frame)
 
     std::unordered_set<std::uint64_t> ids;
     for (const auto &setting : frame.settings) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4
+        // # The same setting identifier MUST NOT occur more than once in the
+        // # SETTINGS frame.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4
+        // # A receiver MAY treat the presence of duplicate setting identifiers
+        // # as a connection error of type H3_SETTINGS_ERROR.
         if (!ids.insert(setting.id).second) {
             return http3_failure<bool>(Http3ErrorCode::settings_error, "duplicate setting");
         }
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.1
+        // # These reserved settings MUST NOT be sent, and their receipt MUST
+        // # be treated as a connection error of type H3_SETTINGS_ERROR.
         if (kReservedHttp2Settings.contains(setting.id)) {
             return http3_failure<bool>(Http3ErrorCode::settings_error,
                                        "reserved setting identifier");
@@ -791,10 +809,16 @@ Http3Result<bool> validate_http3_settings_frame(const Http3SettingsFrame &frame)
         }
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4
+    // # An implementation MUST ignore any parameter with an identifier it does
+    // # not understand.
     return Http3Result<bool>::success(true);
 }
 
 Http3Result<bool> validate_http3_goaway_id(Http3ConnectionRole role, std::uint64_t id) {
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.6
+    // # A client MUST treat receipt of a GOAWAY frame containing a stream ID
+    // # of any other type as a connection error of type H3_ID_ERROR.
     if (role == Http3ConnectionRole::client && ((id & 0x03u) != 0u)) {
         return http3_failure<bool>(Http3ErrorCode::id_error, "invalid server goaway stream id");
     }
@@ -820,6 +844,13 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
         }
         const bool is_pseudo = field.name.front() == ':';
         if (is_pseudo && saw_regular_header) {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
+            // # All pseudo-header fields MUST appear in the header section
+            // # before regular header fields.
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
+            // # Any request or response that contains a pseudo-header field
+            // # that appears in a header section after a regular header field
+            // # MUST be treated as malformed.
             return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                    "pseudo header after regular header");
         }
@@ -868,6 +899,10 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
         }
 
         if (field.name == ":method") {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+            // # All HTTP/3 requests MUST include exactly one value for the
+            // # :method, :scheme, and :path pseudo-header fields, unless the
+            // # request is a CONNECT request; see Section 4.4.
             if (saw_method) {
                 return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                        "duplicate request pseudo header");
@@ -881,6 +916,10 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
             continue;
         }
         if (field.name == ":scheme") {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+            // # All HTTP/3 requests MUST include exactly one value for the
+            // # :method, :scheme, and :path pseudo-header fields, unless the
+            // # request is a CONNECT request; see Section 4.4.
             if (saw_scheme) {
                 return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                        "duplicate request pseudo header");
@@ -898,6 +937,8 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
                 return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                        "duplicate request pseudo header");
             }
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+            // # If these fields are present, they MUST NOT be empty.
             if (field.value.empty()) {
                 return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                        "empty :authority pseudo header");
@@ -911,6 +952,10 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
             continue;
         }
         if (field.name == ":path") {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+            // # All HTTP/3 requests MUST include exactly one value for the
+            // # :method, :scheme, and :path pseudo-header fields, unless the
+            // # request is a CONNECT request; see Section 4.4.
             if (saw_path) {
                 return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                        "duplicate request pseudo header");
@@ -920,6 +965,10 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
                                                        ":path before :method");
             }
             saw_path = true;
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+            // # This pseudo-header field MUST NOT be empty for "http" or
+            // # "https" URIs; "http" or "https" URIs that do not contain a
+            // # path component MUST include a value of / (ASCII 0x2f).
             if (!path_is_valid(field.value, head.method)) {
                 return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                        "invalid :path pseudo header");
@@ -941,10 +990,22 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
             continue;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
+        // # Endpoints MUST NOT generate pseudo-header fields other than those
+        // # defined in this document.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
+        // # Pseudo-header fields defined for requests MUST NOT appear in
+        // # responses; pseudo-header fields defined for responses MUST NOT
+        // # appear in requests.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
+        // # Endpoints MUST treat a request or response that contains undefined
+        // # or invalid pseudo-header fields as malformed.
         return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                "unexpected request pseudo header");
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.4
+    // # A CONNECT request MUST be constructed as follows:
     if (head.method == "CONNECT") {
         if (head.protocol.has_value()) {
             if (!saw_scheme || !saw_path) {
@@ -976,21 +1037,35 @@ Http3Result<Http3RequestHead> validate_http3_request_headers(std::span<const Htt
                                                ":protocol requires CONNECT");
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+    // # All HTTP/3 requests MUST include exactly one value for the :method,
+    // # :scheme, and :path pseudo-header fields, unless the request is a
+    // # CONNECT request; see Section 4.4.
     if (head.method.empty() || head.scheme.empty() || head.path.empty()) {
         return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                "missing required request pseudo header");
     }
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+    // # If the :scheme pseudo-header field identifies a scheme that has a
+    // # mandatory authority component (including "http" and "https"), the
+    // # request MUST contain either an :authority pseudo-header field or a
+    // # Host header field.
     if ((head.scheme == "http" || head.scheme == "https") && head.authority.empty() &&
         !host_header.has_value()) {
         return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                "missing required authority information");
     }
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+    // # The authority MUST NOT include the deprecated userinfo subcomponent
+    // # for URIs of scheme "http" or "https".
     if ((head.scheme == "http" || head.scheme == "https") &&
         ((!head.authority.empty() && authority_contains_userinfo(head.authority)) ||
          (host_header.has_value() && authority_contains_userinfo(*host_header)))) {
         return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                "userinfo is not permitted in authority");
     }
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
+    // # If both fields are present, they MUST contain the same value.
     if (saw_authority && host_header.has_value() && *host_header != head.authority) {
         return http3_failure<Http3RequestHead>(Http3ErrorCode::message_error,
                                                "mismatched :authority and host");
@@ -1014,6 +1089,13 @@ Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const H
         }
         const bool is_pseudo = field.name.front() == ':';
         if (is_pseudo && saw_regular_header) {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
+            // # All pseudo-header fields MUST appear in the header section
+            // # before regular header fields.
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
+            // # Any request or response that contains a pseudo-header field
+            // # that appears in a header section after a regular header field
+            // # MUST be treated as malformed.
             return http3_failure<Http3ResponseHead>(Http3ErrorCode::message_error,
                                                     "pseudo header after regular header");
         }
@@ -1046,6 +1128,16 @@ Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const H
         }
 
         if (field.name != ":status") {
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
+            // # Endpoints MUST NOT generate pseudo-header fields other than
+            // # those defined in this document.
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
+            // # Pseudo-header fields defined for requests MUST NOT appear in
+            // # responses; pseudo-header fields defined for responses MUST NOT
+            // # appear in requests.
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
+            // # Endpoints MUST treat a request or response that contains
+            // # undefined or invalid pseudo-header fields as malformed.
             return http3_failure<Http3ResponseHead>(Http3ErrorCode::message_error,
                                                     "unexpected response pseudo header");
         }
@@ -1067,6 +1159,9 @@ Http3Result<Http3ResponseHead> validate_http3_response_headers(std::span<const H
         head.status = static_cast<std::uint16_t>(status);
     }
 
+    //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.2
+    // # This pseudo- header field MUST be included in all responses;
+    // # otherwise, the response is malformed (see Section 4.1.2).
     if (!saw_status) {
         return http3_failure<Http3ResponseHead>(Http3ErrorCode::message_error,
                                                 "missing required response pseudo header");
@@ -1083,6 +1178,8 @@ Http3Result<Http3Headers> validate_http3_trailers(std::span<const Http3Field> fi
             !syntax.has_value()) {
             return syntax;
         }
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3
+        // # Pseudo-header fields MUST NOT appear in trailer sections.
         if (field.name.front() == ':') {
             return http3_failure<Http3Headers>(Http3ErrorCode::message_error,
                                                "trailers must not contain pseudo headers");
@@ -1107,9 +1204,20 @@ bool http3_frame_allowed_on_control_stream(Http3ConnectionRole role, const Http3
         return role == Http3ConnectionRole::server;
     }
     if (std::holds_alternative<Http3MaxPushIdFrame>(frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.7
+        // # A server MUST NOT send a MAX_PUSH_ID frame.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.7
+        // # A client MUST treat the receipt of a MAX_PUSH_ID frame as a
+        // # connection error of type H3_FRAME_UNEXPECTED.
         return role == Http3ConnectionRole::server;
     }
     if (const auto *unknown = std::get_if<Http3UnknownFrame>(&frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.8
+        // # These frame types MUST NOT be sent, and their receipt MUST be
+        // # treated as a connection error of type H3_FRAME_UNEXPECTED.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-9
+        // # Implementations MUST ignore unknown or unsupported values in all
+        // # extensible protocol elements.
         return !is_reserved_http2_derived_frame_type(unknown->type);
     }
     return false;
@@ -1122,6 +1230,22 @@ bool http3_frame_allowed_on_request_stream(const Http3Frame &frame) {
         return true;
     }
     if (const auto *unknown = std::get_if<Http3UnknownFrame>(&frame)) {
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-4.1
+        // # Frames of unknown types (Section 9), including reserved frames
+        // # (Section 7.2.8) MAY be sent on a request or push stream before,
+        // # after, or interleaved with other frames described in this section.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.8
+        // # These frames have no semantics, and they MAY be sent on any stream
+        // # where frames are allowed to be sent.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.8
+        // # Endpoints MUST NOT consider these frames to have any meaning upon
+        // # receipt.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.8
+        // # These frame types MUST NOT be sent, and their receipt MUST be
+        // # treated as a connection error of type H3_FRAME_UNEXPECTED.
+        //= https://www.rfc-editor.org/rfc/rfc9114#section-9
+        // # Implementations MUST ignore unknown or unsupported values in all
+        // # extensible protocol elements.
         return !is_reserved_http2_derived_frame_type(unknown->type);
     }
     return false;

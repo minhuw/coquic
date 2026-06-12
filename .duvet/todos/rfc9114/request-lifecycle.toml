@@ -1,0 +1,265 @@
+# RFC 9114 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1"
+# report-id = 812
+quote = '''
+Once a request stream has been opened, the request MAY be cancelled
+by either endpoint.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1"
+# report-id = 813
+quote = '''
+When possible, it is RECOMMENDED that servers
+send an HTTP response with an appropriate status code rather than
+cancelling a request it has already begun processing.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1"
+# report-id = 814
+quote = '''
+Implementations SHOULD cancel requests by abruptly terminating any
+directions of a stream that are still open.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1"
+# report-id = 815
+quote = '''
+The server SHOULD
+abort its response stream with the error code H3_REQUEST_REJECTED.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1"
+# report-id = 816
+quote = '''
+Servers MUST NOT use the H3_REQUEST_REJECTED error code for requests
+that were partially or fully processed.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1"
+# report-id = 817
+quote = '''
+When a server abandons a
+response after partial processing, it SHOULD abort its response
+stream with the error code H3_REQUEST_CANCELLED.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1"
+# report-id = 818
+quote = '''
+Client SHOULD use the error code H3_REQUEST_CANCELLED to cancel
+requests.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1"
+# report-id = 819
+quote = '''
+Upon receipt of this error code, a server MAY abruptly
+terminate the response using the error code H3_REQUEST_REJECTED if no
+processing was performed.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1"
+# report-id = 820
+quote = '''
+Clients MUST NOT use the
+H3_REQUEST_REJECTED error code, except when a server has requested
+closure of the request stream with this error code.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1"
+# report-id = 821
+quote = '''
+If a stream is cancelled after receiving a complete response, the
+client MAY ignore the cancellation and use the response.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1"
+# report-id = 822
+quote = '''
+However, if
+a stream is cancelled after receiving a partial response, the
+response SHOULD NOT be used.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1.1"
+# report-id = 823
+quote = '''
+Only idempotent actions such as GET,
+PUT, or DELETE can be safely retried; a client SHOULD NOT
+automatically retry a request with a non-idempotent method unless it
+has some means to know that the request semantics are idempotent
+independent of the method or some means to detect that the original
+request was never applied.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1"
+# report-id = 829
+quote = '''
+On a given stream, receipt of multiple requests or receipt of an
+additional HTTP response following a final HTTP response MUST be
+treated as malformed.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1"
+# report-id = 837
+quote = '''
+Unless using the CONNECT method (see
+Section 4.4), clients MUST NOT make stream closure dependent on
+receiving a response to their request.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1"
+# report-id = 839
+quote = '''
+Because some messages are large or unbounded, endpoints
+SHOULD begin processing partial HTTP messages once enough of the
+message has been received to make progress.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1"
+# report-id = 841
+quote = '''
+When the server does
+not need to receive the remainder of the request, it MAY abort
+reading the request stream, send a complete response, and cleanly
+close the sending part of the stream.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1"
+# report-id = 842
+quote = '''
+The error code H3_NO_ERROR
+SHOULD be used when requesting that the client stop sending on the
+request stream.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1"
+# report-id = 843
+quote = '''
+Clients MUST NOT discard complete responses as a
+result of having their request terminated abruptly, though clients
+can always discard responses at their discretion for other reasons.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-4.1"
+# report-id = 844
+quote = '''
+If the server sends a partial or complete response but does not abort
+reading the request, clients SHOULD continue sending the content of
+the request and close the stream normally.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/52"
+reason = '''
+HTTP/3 request cancellation, retry, stream-abort, partial-response, and response-disposition behavior need implementation, tests, or durable unsupported-status documentation.
+'''
+tags = ["rfc9114"]

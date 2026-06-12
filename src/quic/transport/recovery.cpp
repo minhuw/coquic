@@ -2430,6 +2430,10 @@ void PacketSpaceRecovery::maybe_adapt_reordering_thresholds_from_spurious_loss(
         const auto adapted_threshold =
             std::max(packet_reordering_threshold_, std::max(observed_reordering, kPacketThreshold));
         if (adapted_threshold > packet_reordering_threshold_) {
+            //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.2
+            // # Implementations MAY experiment with absolute thresholds,
+            // # thresholds from previous connections, adaptive thresholds, or
+            // # the including of RTT variation.
             packet_reordering_threshold_ = adapted_threshold;
             next_packet_threshold_loss_slot_ =
                 std::min(next_packet_threshold_loss_slot_,
@@ -2446,6 +2450,14 @@ void PacketSpaceRecovery::maybe_adapt_reordering_thresholds_from_spurious_loss(
     if (packet.lost_by_time_threshold && now > packet.sent_time) {
         const auto observed_delay =
             std::chrono::ceil<QuicCoreDuration>(now - packet.sent_time + kGranularity);
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1.2
+        // # Implementations MAY experiment with absolute thresholds,
+        // # thresholds from previous connections, adaptive thresholds, or the
+        // # including of RTT variation.
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.1
+        // # Implementations with adaptive time thresholds MAY choose to start
+        // # with smaller initial reordering thresholds to minimize recovery
+        // # latency.
         time_reordering_threshold_ = std::max(time_reordering_threshold_, observed_delay);
     }
 }
@@ -2482,6 +2494,9 @@ QuicCoreTimePoint compute_pto_deadline(const RecoveryRttState &rtt_state,
     if (rtt_state.latest_rtt.has_value()) {
         //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
         // # PTO = smoothed_rtt + max(4*rttvar, kGranularity) + max_ack_delay
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.1
+        // # The PTO period MUST be at least kGranularity to avoid the timer
+        // # expiring immediately.
         timeout =
             rtt_state.smoothed_rtt + std::max(rtt_state.rttvar * 4, kGranularity) + max_ack_delay;
     }
@@ -2533,6 +2548,9 @@ void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
     //= https://www.rfc-editor.org/rfc/rfc9002#section-5.2
     // # min_rtt MUST be set to the lesser of min_rtt and latest_rtt
     // # (Section 5.1) on all other samples.
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-5.2
+    // # Implementations SHOULD NOT refresh the min_rtt value too often since
+    // # the actual minimum RTT of the path is not frequently observable.
     rtt_state.min_rtt =
         rtt_state.min_rtt.has_value() ? std::min(*rtt_state.min_rtt, latest_sample) : latest_sample;
     rtt_state.min_rtt_sample = previous_min_rtt_sample.has_value()
@@ -2557,6 +2575,13 @@ void update_rtt(RecoveryRttState &rtt_state, QuicCoreTimePoint ack_receive_time,
     }
 
     auto adjusted_rtt = latest_sample;
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-5.3
+    // # To account for this, the endpoint SHOULD ignore max_ack_delay until
+    // # the handshake is confirmed, as defined in Section 4.1.2 of
+    // # [QUIC-TLS].
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-5.3
+    // # *  SHOULD ignore the peer's max_ack_delay until the handshake is
+    // #    confirmed;
     //= https://www.rfc-editor.org/rfc/rfc9002#section-5.3
     // # *  MUST use the lesser of the acknowledgment delay and the peer's
     // # max_ack_delay after the handshake is confirmed; and

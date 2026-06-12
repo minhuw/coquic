@@ -1,0 +1,14 @@
+# RFC 9204 Duvet tracking TODOs generated from the compliance report.
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9204#section-7.4"
+# report-id = 1049
+quote = '''
+These limits SHOULD be large
+enough to process the largest individual field the HTTP
+implementation can be configured to accept.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/65"
+reason = '''
+QPACK literal/string/integer decode limits need a documented and tested relationship to the largest individual field the HTTP implementation can be configured to accept.
+'''
+tags = ["rfc9204"]

@@ -110,6 +110,10 @@ std::optional<QuicCoreTimePoint> QuicConnection::loss_deadline() const {
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2.1
+    // # If no additional data can be sent, the server's PTO timer MUST NOT be
+    // # armed until datagrams have been received from the client because
+    // # packets sent on PTO count against the anti-amplification limit.
     if (anti_amplification_applies() && anti_amplification_remaining_send_budget() == 0) {
         return std::nullopt;
     }
@@ -555,6 +559,10 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
             return;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2.1
+        // # When the PTO fires, the client MUST send a Handshake packet if it
+        // # has Handshake keys, otherwise it MUST send an Initial packet in a
+        // # UDP datagram with a payload of at least 1200 bytes.
         if (&packet_space != &application_space_ && packet_space.send_crypto.has_pending_data()) {
             return;
         }
@@ -574,6 +582,11 @@ void QuicConnection::arm_pto_probe(QuicCoreTimePoint now) {
             return;
         }
 
+        //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.4
+        // # In addition to sending data in the packet number space for which
+        // # the timer expired, the sender SHOULD send ack-eliciting packets
+        // # from other packet number spaces with in-flight data, coalescing
+        // # packets if possible.
         arm_packet_space_probe(packet_space);
     };
 
@@ -1228,6 +1241,10 @@ void QuicConnection::start_client_if_needed(QuicCoreTimePoint now) {
                 // # A client therefore MUST NOT use 0-RTT for application data
                 // # unless specifically requested by the application that is in use.
                 config_.zero_rtt.attempt &
+                //= https://www.rfc-editor.org/rfc/rfc9369#section-5
+                // # Clients MUST NOT use a
+                // # session ticket or token from a QUIC version 1 connection to initiate
+                // # a QUIC version 2 connection, and vice versa.
                 (decoded_resumption_state_->quic_version == current_version_) &
                 (decoded_resumption_state_->application_protocol == config_.application_protocol) &
                 (decoded_resumption_state_->application_context ==
@@ -1237,6 +1254,9 @@ void QuicConnection::start_client_if_needed(QuicCoreTimePoint now) {
                 // # A client that attempts to send 0-RTT data MUST remember
                 // # all other transport parameters used by the server that it
                 // # is able to process.
+                //= https://www.rfc-editor.org/rfc/rfc9221#section-3
+                // # When clients use 0-RTT, they MAY store the value of the server's
+                // # max_datagram_frame_size transport parameter.
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1
                 // # When sending frames in 0-RTT packets, a client MUST only
                 // # use remembered transport parameters; importantly, it MUST
@@ -1308,6 +1328,8 @@ void QuicConnection::start_server_if_needed(
     ack_eliciting_sent_since_idle_reset_ = false;
     original_version_ = client_initial_version;
     if (config_.retry_source_connection_id.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+        // # If the server sends a Retry packet, it MUST use the original version.
         current_version_ = client_initial_version;
     } else {
         current_version_ =
@@ -1334,6 +1356,12 @@ void QuicConnection::start_server_if_needed(
         .initial_max_streams_bidi = config_.transport.initial_max_streams_bidi,
         .initial_max_streams_uni = config_.transport.initial_max_streams_uni,
         .initial_source_connection_id = config_.source_connection_id,
+        //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+        // # After switching to a negotiated version
+        // # after a Retry, the server MUST include the relevant transport
+        // # parameters to validate that the server sent the Retry and the
+        // # connection IDs used in the exchange, as described in Section 7.3 of
+        // # [QUIC].
         .retry_source_connection_id = config_.retry_source_connection_id,
         .preferred_address = config_.transport.preferred_address,
         .version_information = version_information_for_handshake(
@@ -1387,6 +1415,8 @@ void QuicConnection::start_server_if_needed(
             kMinimumInitialDatagramSize;
     }
     if (config_.retry_source_connection_id.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+        // # If the server sends a Retry packet, it MUST use the original version.
         mark_peer_address_validated();
     }
 }
@@ -1497,6 +1527,10 @@ void QuicConnection::apply_client_retry(const ConnectionId &original_destination
 
     config_.original_destination_connection_id = original_destination_connection_id;
     config_.retry_source_connection_id = retry_source_connection_id;
+    //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
+    // # The client
+    // # MUST NOT use a different version in the subsequent Initial packet
+    // # that contains the Retry token.
     config_.retry_token = std::move(retry_token);
     //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.1
     // # The client MUST use the value from the Source

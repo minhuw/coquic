@@ -1,0 +1,46 @@
+# RFC 9368 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-2.3"
+# report-id = 1090
+quote = '''
+If a document specifies that a QUIC version is compatible with
+another, that document MUST specify the mechanism by which clients
+are made aware of the Negotiated Version.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/72"
+reason = '''
+The repository needs a durable compatibility contract for future compatible
+QUIC versions, including how clients learn the negotiated version.
+'''
+tags = ["rfc9368"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-2.3"
+# report-id = 1091
+quote = '''
+Mutually compatible versions SHOULD use the same mechanism.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/72"
+reason = '''
+The repository needs a durable compatibility contract for future compatible
+QUIC versions, including a common negotiated-version discovery mechanism where
+possible.
+'''
+tags = ["rfc9368"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9368#section-2.3"
+# report-id = 1092
+quote = '''
+In particular, if the Negotiated Version
+mandates that endpoints perform validations on Handshake packets,
+endpoints MUST also perform such validations on the converted first
+flight.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/72"
+reason = '''
+Converted first-flight validation requirements are not yet documented or tested
+as part of CoQUIC's future compatible-version contract.
+'''
+tags = ["rfc9368"]

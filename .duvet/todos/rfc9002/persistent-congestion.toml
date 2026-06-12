@@ -1,0 +1,32 @@
+# RFC 9002 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-7.6.2"
+# report-id = 752
+quote = '''
+Since network congestion is not affected by packet number spaces,
+persistent congestion SHOULD consider packets sent across packet
+number spaces.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/49"
+reason = '''
+Persistent congestion cross-packet-space scope is incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9002"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9002#section-7.6.2"
+# report-id = 753
+quote = '''
+A sender that does not have state for all packet
+number spaces or an implementation that cannot compare send times
+across packet number spaces MAY use state for just the packet number
+space that was acknowledged.
+
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/49"
+reason = '''
+Persistent congestion cross-packet-space scope is incomplete or not yet proven by tests and source annotations.
+'''
+tags = ["rfc9002"]

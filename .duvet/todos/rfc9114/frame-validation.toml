@@ -1,0 +1,43 @@
+# RFC 9114 Duvet tracking TODOs generated from the compliance report.
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.1"
+# report-id = 940
+quote = '''
+In particular, redundant length
+encodings MUST be verified to be self-consistent; see Section 10.8.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/60"
+reason = '''
+HTTP/3 frame length, redundant encoding, and frame-placement edge cases need implementation, tests, or stronger Duvet annotations.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-7.2.3"
+# report-id = 951
+quote = '''
+Receiving a
+CANCEL_PUSH frame on a stream other than the control stream MUST be
+treated as a connection error of type H3_FRAME_UNEXPECTED.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/60"
+reason = '''
+HTTP/3 frame length, redundant encoding, and frame-placement edge cases need implementation, tests, or stronger Duvet annotations.
+'''
+tags = ["rfc9114"]
+
+[[TODO]]
+target = "https://www.rfc-editor.org/rfc/rfc9114#section-9"
+# report-id = 1002
+quote = '''
+However, where a known frame type is required to be in
+a specific location, such as the SETTINGS frame as the first frame of
+the control stream (see Section 6.2.1), an unknown frame type does
+not satisfy that requirement and SHOULD be treated as an error.
+'''
+tracking-issue = "https://github.com/minhuw/coquic/issues/60"
+reason = '''
+HTTP/3 frame length, redundant encoding, and frame-placement edge cases need implementation, tests, or stronger Duvet annotations.
+'''
+tags = ["rfc9114"]

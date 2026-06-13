@@ -1131,35 +1131,7 @@ TEST(QuicCoreTest, ClosedPeerInitiatedBidirectionalStreamRefreshesMaxStreams) {
         ADD_FAILURE() << "stream fin was not set";
     }
 
-    ASSERT_TRUE(connection.queue_stream_send(0, bytes_from_ints({0x6f, 0x6b}), true).has_value());
-
-    auto response_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
-    if (response_datagram.empty()) {
-        ADD_FAILURE() << "missing response datagram";
-        return;
-    }
-    if (tracked_packet_count(connection.application_space_) == 0u) {
-        ADD_FAILURE() << "response datagram was not tracked";
-        return;
-    }
-
-    auto response_packet_number = first_tracked_packet(connection.application_space_).packet_number;
-    auto acked_response =
-        connection.process_inbound_ack(connection.application_space_,
-                                       coquic::quic::AckFrame{
-                                           .largest_acknowledged = response_packet_number,
-                                           .first_ack_range = 0,
-                                       },
-                                       coquic::quic::test::test_time(2),
-                                       /*ack_delay_exponent=*/3,
-                                       /*max_ack_delay_ms=*/25,
-                                       /*suppress_pto_reset=*/false);
-    if (!acked_response.has_value()) {
-        ADD_FAILURE() << "response ack was rejected";
-        return;
-    }
-
-    auto refresh_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+    auto refresh_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     if (refresh_datagram.empty()) {
         ADD_FAILURE() << "missing stream limit refresh datagram";
         return;
@@ -1188,6 +1160,67 @@ TEST(QuicCoreTest, ClosedPeerInitiatedBidirectionalStreamRefreshesMaxStreams) {
     if (!saw_max_streams) {
         ADD_FAILURE() << "missing MAX_STREAMS refresh";
     }
+}
+
+TEST(QuicCoreTest, ClosedPeerReceiveSideRefreshesBidirectionalStreamLimitBeforeResponseAck) {
+    auto connection = make_connected_server_connection();
+    connection.config_.transport.initial_max_streams_bidi = 1;
+    connection.local_transport_parameters_.initial_max_streams_bidi = 1;
+    connection.local_stream_limit_state_.initialize(coquic::quic::PeerStreamOpenLimits{
+        .bidirectional = 1,
+        .unidirectional = connection.local_stream_limit_state_.advertised_max_streams_uni,
+    });
+
+    ASSERT_TRUE(coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection, {coquic::quic::test::make_inbound_application_stream_frame("GET /one\r\n",
+                                                                               /*offset=*/0,
+                                                                               /*stream_id=*/0,
+                                                                               /*fin=*/true)}));
+
+    auto received_data = optional_value_or_terminate(connection.take_received_stream_data());
+    EXPECT_EQ(received_data.stream_id, 0u);
+    EXPECT_TRUE(received_data.fin);
+    EXPECT_TRUE(connection.streams_.at(0).peer_stream_limit_released);
+    ASSERT_TRUE(connection.local_stream_limit_state_.pending_max_streams_bidi_frame.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(
+                  connection.local_stream_limit_state_.pending_max_streams_bidi_frame)
+                  .maximum_streams,
+              2u);
+}
+
+TEST(QuicCoreTest, RefreshedBidirectionalLimitAllowsNextPeerStreamBeforeResponseAck) {
+    auto connection = make_connected_server_connection();
+    connection.config_.transport.initial_max_streams_bidi = 1;
+    connection.local_transport_parameters_.initial_max_streams_bidi = 1;
+    connection.local_stream_limit_state_.initialize(coquic::quic::PeerStreamOpenLimits{
+        .bidirectional = 1,
+        .unidirectional = connection.local_stream_limit_state_.advertised_max_streams_uni,
+    });
+
+    ASSERT_TRUE(coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection, {coquic::quic::test::make_inbound_application_stream_frame("GET /one\r\n",
+                                                                               /*offset=*/0,
+                                                                               /*stream_id=*/0,
+                                                                               /*fin=*/true)}));
+    ASSERT_TRUE(connection.take_received_stream_data().has_value());
+    EXPECT_TRUE(connection.local_stream_limit_state_.pending_max_streams_bidi_frame.has_value());
+
+    const auto injected = coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection,
+        {coquic::quic::test::make_inbound_application_stream_frame("GET /two\r\n",
+                                                                   /*offset=*/0,
+                                                                   /*stream_id=*/4,
+                                                                   /*fin=*/true)},
+        /*packet_number=*/2);
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
+    // # Implementations might choose to increase limits as streams are closed,
+    // # to keep the number of streams available to peers roughly consistent.
+    EXPECT_TRUE(injected);
+    EXPECT_FALSE(connection.has_failed());
+    auto received_data = optional_value_or_terminate(connection.take_received_stream_data());
+    EXPECT_EQ(received_data.stream_id, 4u);
+    EXPECT_TRUE(received_data.fin);
 }
 
 TEST(QuicCoreTest, StreamReceiveEffectCarriesFin) {
@@ -4375,7 +4408,6 @@ TEST(QuicCoreTest, ClosingPeerInitiatedBidirectionalStreamRefreshesStreamLimit) 
             .first->second;
 
     stream.peer_fin_delivered = true;
-    stream.send_fin_state = coquic::quic::StreamSendFinState::acknowledged;
 
     connection.maybe_refresh_peer_stream_limit(stream);
 

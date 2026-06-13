@@ -99,6 +99,20 @@ jobs:
           docker version
           docker compose version
 
+      - name: Fetch Upstream Interop Results
+        continue-on-error: true
+        run: |
+          mkdir -p .interop-results/upstream
+          curl --fail --location --show-error --silent \
+            --connect-timeout 10 \
+            --max-time 60 \
+            --retry 3 \
+            --retry-delay 2 \
+            https://interop.seemann.io/logs/quic/latest/result.json \
+            --output .interop-results/upstream/interop-seemann-latest.json.tmp
+          mv .interop-results/upstream/interop-seemann-latest.json.tmp \
+            .interop-results/upstream/interop-seemann-latest.json
+
       - name: Run Official ${{ matrix.display_name }} Interop Tests
         id: run_interop
         continue-on-error: true
@@ -111,6 +125,7 @@ jobs:
           INTEROP_DIRECTIONS: both
           INTEROP_RETRY_FAILED_TESTCASES: "1"
           INTEROP_PRESERVE_TESTCASE_LOGS: "0"
+          INTEROP_KNOWN_BROKEN_RESULT: .interop-results/upstream/interop-seemann-latest.json
           COQUIC_CONGESTION_CONTROL: ${{ matrix.congestion_control || '' }}
         run: bash interop/run-official.sh
 

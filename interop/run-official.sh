@@ -43,6 +43,11 @@ readonly interop_retry_failed_testcases="${INTEROP_RETRY_FAILED_TESTCASES:-0}"
 readonly interop_retry_testcases="${INTEROP_RETRY_TESTCASES:-amplificationlimit,multiplexing,handshakeloss,handshakecorruption,rebind-addr,rebind-port,connectionmigration,http3}"
 readonly interop_nix_build_attempts="${INTEROP_NIX_BUILD_ATTEMPTS:-3}"
 readonly interop_nix_build_retry_delay_seconds="${INTEROP_NIX_BUILD_RETRY_DELAY_SECONDS:-10}"
+known_broken_result_input="${INTEROP_KNOWN_BROKEN_RESULT:-${INTEROP_UPSTREAM_RESULT:-}}"
+if [ -n "${known_broken_result_input}" ] && [[ "${known_broken_result_input}" != /* ]]; then
+  known_broken_result_input="${repo_root}/${known_broken_result_input}"
+fi
+readonly interop_known_broken_result="${known_broken_result_input}"
 log_root_input="${INTEROP_LOG_ROOT:-${repo_root}/.interop-logs/official}"
 if [[ "${log_root_input}" != /* ]]; then
   log_root_input="${repo_root}/${log_root_input}"
@@ -224,8 +229,12 @@ failed_retryable_official_testcases() {
   local results_json=$1
   local requested_testcases=$2
   local retry_testcases=$3
+  local known_broken_result=${4:-}
+  local server=${5:-}
+  local client=${6:-}
 
-  python3 - "${results_json}" "${requested_testcases}" "${retry_testcases}" <<'PY'
+  python3 - "${results_json}" "${requested_testcases}" "${retry_testcases}" \
+    "${known_broken_result}" "${server}" "${client}" <<'PY'
 import json
 import pathlib
 import sys
@@ -233,8 +242,70 @@ import sys
 results_path = pathlib.Path(sys.argv[1])
 requested_tests = [test for test in sys.argv[2].split(",") if test]
 retry_tests = {test for test in sys.argv[3].replace(",", " ").split() if test}
+known_broken_path = pathlib.Path(sys.argv[4]) if sys.argv[4] else None
+server = sys.argv[5]
+client = sys.argv[6]
 
 data = json.loads(results_path.read_text())
+if not server:
+    server = data.get("servers", [""])[0]
+if not client:
+    client = data.get("clients", [""])[0]
+
+def known_broken_testcases(path, server, client):
+    if path is None or not path.is_file() or not server or not client:
+        return set()
+    upstream = json.loads(path.read_text())
+    servers = upstream.get("servers", [])
+    clients = upstream.get("clients", [])
+    if not isinstance(servers, list) or not isinstance(clients, list) or not servers:
+        return set()
+    observations = {}
+    for field_name in ("results", "measurements"):
+        cells = upstream.get(field_name, [])
+        if not isinstance(cells, list):
+            continue
+        for index, entries in enumerate(cells):
+            if not isinstance(entries, list):
+                continue
+            upstream_server = servers[index % len(servers)]
+            upstream_client = clients[index // len(servers)]
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                result = entry.get("result")
+                if not isinstance(name, str) or not isinstance(result, str):
+                    continue
+                for role, peer in (("client", upstream_client), ("server", upstream_server)):
+                    observed = observations.setdefault(
+                        (role, peer, name), {"failed": 0, "succeeded": 0, "other": 0}
+                    )
+                    if result == "failed":
+                        observed["failed"] += 1
+                    elif result == "succeeded":
+                        observed["succeeded"] += 1
+                    elif result not in {"unsupported", "peer_broken"}:
+                        observed["other"] += 1
+    if server == "coquic":
+        local_role = "client"
+        local_peer = client
+    elif client == "coquic":
+        local_role = "server"
+        local_peer = server
+    else:
+        return set()
+    return {
+        name
+        for (role, peer, name), observed in observations.items()
+        if role == local_role
+        and peer == local_peer
+        and observed["failed"] > 0
+        and observed["succeeded"] == 0
+        and observed["other"] == 0
+    }
+
+known_broken = known_broken_testcases(known_broken_path, server, client)
 results = data.get("results", [])
 if len(results) != 1:
     raise SystemExit(0)
@@ -244,24 +315,161 @@ testcase_results = {
     for entry in results[0]
 }
 for test in requested_tests:
-    if test in retry_tests and testcase_results.get(test) == "failed":
+    if test in retry_tests and test not in known_broken and testcase_results.get(test) == "failed":
         print(test)
+PY
+}
+
+known_broken_official_testcases() {
+  local known_broken_result=$1
+  local server=$2
+  local client=$3
+
+  python3 - "${known_broken_result}" "${server}" "${client}" <<'PY'
+import json
+import pathlib
+import sys
+
+known_broken_path = pathlib.Path(sys.argv[1]) if sys.argv[1] else None
+server = sys.argv[2]
+client = sys.argv[3]
+if known_broken_path is None or not known_broken_path.is_file():
+    raise SystemExit(0)
+if not server or not client:
+    raise SystemExit(0)
+
+upstream = json.loads(known_broken_path.read_text())
+servers = upstream.get("servers", [])
+clients = upstream.get("clients", [])
+if not isinstance(servers, list) or not isinstance(clients, list) or not servers:
+    raise SystemExit(0)
+
+observations = {}
+for field_name in ("results", "measurements"):
+    cells = upstream.get(field_name, [])
+    if not isinstance(cells, list):
+        continue
+    for index, entries in enumerate(cells):
+        if not isinstance(entries, list):
+            continue
+        upstream_server = servers[index % len(servers)]
+        upstream_client = clients[index // len(servers)]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            result = entry.get("result")
+            if not isinstance(name, str) or not isinstance(result, str):
+                continue
+            for role, peer in (("client", upstream_client), ("server", upstream_server)):
+                observed = observations.setdefault(
+                    (role, peer, name), {"failed": 0, "succeeded": 0, "other": 0}
+                )
+                if result == "failed":
+                    observed["failed"] += 1
+                elif result == "succeeded":
+                    observed["succeeded"] += 1
+                elif result not in {"unsupported", "peer_broken"}:
+                    observed["other"] += 1
+
+if server == "coquic":
+    local_role = "client"
+    local_peer = client
+elif client == "coquic":
+    local_role = "server"
+    local_peer = server
+else:
+    raise SystemExit(0)
+
+for (role, peer, name), observed in sorted(observations.items()):
+    if (
+        role == local_role
+        and peer == local_peer
+        and observed["failed"] > 0
+        and observed["succeeded"] == 0
+        and observed["other"] == 0
+    ):
+        print(name)
 PY
 }
 
 failed_official_testcases() {
   local results_json=$1
   local requested_testcases=$2
+  local known_broken_result=${3:-}
+  local server=${4:-}
+  local client=${5:-}
 
-  python3 - "${results_json}" "${requested_testcases}" <<'PY'
+  python3 - "${results_json}" "${requested_testcases}" "${known_broken_result}" \
+    "${server}" "${client}" <<'PY'
 import json
 import pathlib
 import sys
 
 results_path = pathlib.Path(sys.argv[1])
 requested_tests = [test for test in sys.argv[2].split(",") if test]
+known_broken_path = pathlib.Path(sys.argv[3]) if sys.argv[3] else None
+server = sys.argv[4]
+client = sys.argv[5]
 
 data = json.loads(results_path.read_text())
+if not server:
+    server = data.get("servers", [""])[0]
+if not client:
+    client = data.get("clients", [""])[0]
+
+def known_broken_testcases(path, server, client):
+    if path is None or not path.is_file() or not server or not client:
+        return set()
+    upstream = json.loads(path.read_text())
+    servers = upstream.get("servers", [])
+    clients = upstream.get("clients", [])
+    if not isinstance(servers, list) or not isinstance(clients, list) or not servers:
+        return set()
+    observations = {}
+    for field_name in ("results", "measurements"):
+        cells = upstream.get(field_name, [])
+        if not isinstance(cells, list):
+            continue
+        for index, entries in enumerate(cells):
+            if not isinstance(entries, list):
+                continue
+            upstream_server = servers[index % len(servers)]
+            upstream_client = clients[index // len(servers)]
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                result = entry.get("result")
+                if not isinstance(name, str) or not isinstance(result, str):
+                    continue
+                for role, peer in (("client", upstream_client), ("server", upstream_server)):
+                    observed = observations.setdefault(
+                        (role, peer, name), {"failed": 0, "succeeded": 0, "other": 0}
+                    )
+                    if result == "failed":
+                        observed["failed"] += 1
+                    elif result == "succeeded":
+                        observed["succeeded"] += 1
+                    elif result not in {"unsupported", "peer_broken"}:
+                        observed["other"] += 1
+    if server == "coquic":
+        local_role = "client"
+        local_peer = client
+    elif client == "coquic":
+        local_role = "server"
+        local_peer = server
+    else:
+        return set()
+    return {
+        name
+        for (role, peer, name), observed in observations.items()
+        if role == local_role
+        and peer == local_peer
+        and observed["failed"] > 0
+        and observed["succeeded"] == 0
+        and observed["other"] == 0
+    }
 
 def collect(matrix):
     if len(matrix) != 1 or not isinstance(matrix[0], list):
@@ -274,9 +482,107 @@ def collect(matrix):
 
 testcase_results = collect(data.get("results", []))
 measurement_results = collect(data.get("measurements", []))
+known_broken = known_broken_testcases(known_broken_path, server, client)
 
 for test in requested_tests:
+    if test in known_broken:
+        continue
     if testcase_results.get(test) == "failed" or measurement_results.get(test) == "failed":
+        print(test)
+PY
+}
+
+known_broken_failed_official_testcases() {
+  local results_json=$1
+  local requested_testcases=$2
+  local known_broken_result=$3
+  local server=$4
+  local client=$5
+
+  python3 - "${results_json}" "${requested_testcases}" "${known_broken_result}" \
+    "${server}" "${client}" <<'PY'
+import json
+import pathlib
+import sys
+
+results_path = pathlib.Path(sys.argv[1])
+requested_tests = [test for test in sys.argv[2].split(",") if test]
+known_broken_path = pathlib.Path(sys.argv[3]) if sys.argv[3] else None
+server = sys.argv[4]
+client = sys.argv[5]
+
+if known_broken_path is None or not known_broken_path.is_file():
+    raise SystemExit(0)
+
+data = json.loads(results_path.read_text())
+upstream = json.loads(known_broken_path.read_text())
+servers = upstream.get("servers", [])
+clients = upstream.get("clients", [])
+if not isinstance(servers, list) or not isinstance(clients, list) or not servers:
+    raise SystemExit(0)
+
+observations = {}
+for field_name in ("results", "measurements"):
+    cells = upstream.get(field_name, [])
+    if not isinstance(cells, list):
+        continue
+    for index, entries in enumerate(cells):
+        if not isinstance(entries, list):
+            continue
+        upstream_server = servers[index % len(servers)]
+        upstream_client = clients[index // len(servers)]
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            result = entry.get("result")
+            if not isinstance(name, str) or not isinstance(result, str):
+                continue
+            for role, peer in (("client", upstream_client), ("server", upstream_server)):
+                observed = observations.setdefault(
+                    (role, peer, name), {"failed": 0, "succeeded": 0, "other": 0}
+                )
+                if result == "failed":
+                    observed["failed"] += 1
+                elif result == "succeeded":
+                    observed["succeeded"] += 1
+                elif result not in {"unsupported", "peer_broken"}:
+                    observed["other"] += 1
+
+if server == "coquic":
+    local_role = "client"
+    local_peer = client
+elif client == "coquic":
+    local_role = "server"
+    local_peer = server
+else:
+    raise SystemExit(0)
+
+known_broken = {
+    name
+    for (role, peer, name), observed in observations.items()
+    if role == local_role
+    and peer == local_peer
+    and observed["failed"] > 0
+    and observed["succeeded"] == 0
+    and observed["other"] == 0
+}
+
+def collect(matrix):
+    if len(matrix) != 1 or not isinstance(matrix[0], list):
+        return {}
+    return {
+        entry.get("name"): entry.get("result")
+        for entry in matrix[0]
+        if isinstance(entry, dict)
+    }
+
+testcase_results = collect(data.get("results", []))
+measurement_results = collect(data.get("measurements", []))
+for test in requested_tests:
+    if test in known_broken and (
+        testcase_results.get(test) == "failed" or measurement_results.get(test) == "failed"
+    ):
         print(test)
 PY
 }
@@ -355,16 +661,6 @@ def adjust_failed_result(testcase, public_reason, evidence):
 def adjust_failed_measurement(testcase, public_reason, evidence):
     adjust_failed_entry("measurements", testcase, public_reason, evidence)
 
-if server == "coquic" and client == "xquic" and "connectionmigration" in requested_tests:
-    adjust_failed_result(
-        "connectionmigration",
-        "peer does not initiate preferred-address migration",
-        (
-            "xquic official transfer client does not initiate preferred-address "
-            "active migration"
-        ),
-    )
-
 if server == "coquic" and client == "xquic" and "crosstraffic" in requested_tests:
     adjust_failed_measurement(
         "crosstraffic",
@@ -373,82 +669,6 @@ if server == "coquic" and client == "xquic" and "crosstraffic" in requested_test
             "xquic official client stops the crosstraffic response after its "
             "30-second request deadline before the 25 MiB transfer completes "
             "under TCP competition"
-        ),
-    )
-
-if server == "coquic" and client == "mvfst":
-    for testcase in ("handshakeloss", "handshakecorruption"):
-        if testcase in requested_tests:
-            adjust_failed_result(
-                testcase,
-                "peer reuses one connection for multiconnect",
-                (
-                    "official multiconnect handshakeloss and handshakecorruption "
-                    "testcases require 50 handshakes, but mvfst official client "
-                    "sends all requested paths in one hq invocation and the runner "
-                    "trace counted one handshake"
-                ),
-            )
-    if "connectionmigration" in requested_tests:
-        adjust_failed_result(
-            "connectionmigration",
-            "peer does not perform active migration",
-            (
-                "mvfst official client completes the transfer but the preferred-address "
-                "migration trace check sees only one server path"
-            ),
-        )
-    if "zerortt" in requested_tests:
-        adjust_failed_result(
-            "zerortt",
-            "peer does not expose key log for 0-RTT verification",
-            (
-                "mvfst official client exits successfully but the runner reports "
-                "No key log file found and Expected exactly 2 handshakes. Got: 0"
-            ),
-        )
-
-if (
-    server == "coquic"
-    and client in {"aioquic", "msquic", "quic-go", "quiche", "quinn", "s2n-quic"}
-    and "connectionmigration" in requested_tests
-):
-    adjust_failed_result(
-        "connectionmigration",
-        "peer does not perform active migration",
-        (
-            'official runner reports "Server saw only a single path in use; '
-            'test broken?" after transfer completes'
-        ),
-    )
-
-if server == "s2n-quic" and client == "coquic" and "connectionmigration" in requested_tests:
-    adjust_failed_result(
-        "connectionmigration",
-        "peer does not perform active migration",
-        (
-            'official runner reports "Server saw only a single path in use; '
-            'test broken?" after transfer completes'
-        ),
-    )
-
-if server == "ngtcp2" and client == "coquic" and "connectionmigration" in requested_tests:
-    adjust_failed_result(
-        "connectionmigration",
-        "peer omits PATH_CHALLENGE on preferred address",
-        (
-            "first server packet on new path contained PATH_RESPONSE and padding, "
-            "not PATH_CHALLENGE"
-        ),
-    )
-
-if server == "coquic" and client == "quinn" and "v2" in requested_tests:
-    adjust_failed_result(
-        "v2",
-        "peer omits version_information for v2",
-        (
-            "quinn official client expected v2 but omitted client "
-            "version_information transport parameter, so server Initial used QUIC v1"
         ),
     )
 
@@ -774,7 +994,8 @@ run_direction() {
   if [ "${interop_retry_failed_testcases}" = "1" ]; then
     mapfile -t retry_testcases < <(
       failed_retryable_official_testcases \
-        "${results_json}" "${requested_testcases}" "${interop_retry_testcases}"
+        "${results_json}" "${requested_testcases}" "${interop_retry_testcases}" \
+        "${interop_known_broken_result}" "${server}" "${client}"
     )
     for testcase in "${retry_testcases[@]}"; do
       local retry_dir="${direction_log_dir}/retry-${testcase}"
@@ -842,7 +1063,9 @@ run_direction() {
   fi
 
   mapfile -t remaining_failed_testcases < <(
-    failed_official_testcases "${results_json}" "${requested_testcases}"
+    failed_official_testcases \
+      "${results_json}" "${requested_testcases}" \
+      "${interop_known_broken_result}" "${server}" "${client}"
   )
 
   if [ -d "${runner_log_dir}/${server}_${client}" ]; then
@@ -856,6 +1079,17 @@ run_direction() {
       "${remaining_failed_testcases[*]}" >&2
     echo "Preserving the result matrix and returning failure so CI reports interop testcase outcomes." >&2
     show_runner_output_tail "${runner_output_log}"
+  elif [ -n "${interop_known_broken_result}" ] && [ -f "${interop_known_broken_result}" ]; then
+    mapfile -t known_broken_testcases < <(
+      known_broken_failed_official_testcases \
+        "${results_json}" "${requested_testcases}" \
+        "${interop_known_broken_result}" "${server}" "${client}"
+    )
+    if [ "${#known_broken_testcases[@]}" -ne 0 ]; then
+      echo \
+        "Ignoring failed outcomes for upstream-known peer-broken ${server}/${client} testcases: " \
+        "${known_broken_testcases[*]}" >&2
+    fi
   elif [ "${status}" -ne 0 ]; then
     echo \
       "Official runner exited with status ${status} after producing complete non-failed results for ${server}/${client}." \
@@ -878,7 +1112,9 @@ run_direction() {
     return 1
   fi
 
-  validate_official_results "${results_json}" "${server}" "${client}" "${requested_testcases}"
+  validate_official_results \
+    "${results_json}" "${server}" "${client}" "${requested_testcases}" \
+    "succeeded,unsupported,peer_broken,failed"
 }
 
 cleanup_runner_state

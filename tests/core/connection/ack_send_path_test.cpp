@@ -2624,6 +2624,19 @@ TEST(QuicCoreTest, LargePartialResponseSchedulesAckAndClearsOutstandingRequest) 
         request, server, coquic::quic::test::test_time(2));
     EXPECT_FALSE(coquic::quic::test::received_application_data_from(request_delivered).empty());
 
+    const auto server_control_datagrams =
+        coquic::quic::test::send_datagrams_from(request_delivered);
+    const bool request_ack_sent_with_control =
+        std::any_of(server_control_datagrams.begin(), server_control_datagrams.end(),
+                    [&](const auto &control_datagram) {
+                        return datagram_has_application_ack(*server.connection_, control_datagram);
+                    });
+    if (!server_control_datagrams.empty()) {
+        const auto control_ack = coquic::quic::test::relay_send_datagrams_to_peer(
+            request_delivered, client, coquic::quic::test::test_time(2));
+        static_cast<void>(control_ack);
+    }
+
     const auto response_payload = coquic::quic::test::bytes_from_string(
         std::string(static_cast<std::size_t>(256) * 1024u, 'r'));
     const auto response = server.advance(
@@ -2636,10 +2649,11 @@ TEST(QuicCoreTest, LargePartialResponseSchedulesAckAndClearsOutstandingRequest) 
     const auto response_datagrams = coquic::quic::test::send_datagrams_from(response);
     ASSERT_FALSE(response_datagrams.empty());
 
-    EXPECT_TRUE(std::any_of(
+    const bool request_ack_sent_with_response = std::any_of(
         response_datagrams.begin(), response_datagrams.end(), [&](const auto &response_datagram) {
             return datagram_has_application_ack(*server.connection_, response_datagram);
-        }));
+        });
+    EXPECT_TRUE(request_ack_sent_with_control || request_ack_sent_with_response);
 
     auto response_delivered = coquic::quic::test::relay_send_datagrams_to_peer(
         response, client, coquic::quic::test::test_time(4));
@@ -2657,6 +2671,25 @@ TEST(QuicCoreTest, LargePartialResponseSchedulesAckAndClearsOutstandingRequest) 
         ack_datagrams.begin(), ack_datagrams.end(), [&](const auto &client_ack_datagram) {
             return datagram_has_application_ack(*client.connection_, client_ack_datagram);
         }));
+
+    if (!request_ack_sent_with_control && !request_ack_sent_with_response) {
+        ASSERT_TRUE(server.connection_->application_space_.received_packets.has_ack_to_send());
+        const auto server_ack_deadline = server.connection_->next_wakeup();
+        ASSERT_TRUE(server_ack_deadline.has_value());
+
+        const auto server_ack = server.advance(coquic::quic::QuicCoreTimerExpired{},
+                                               optional_value_or_terminate(server_ack_deadline));
+        const auto server_ack_datagrams = coquic::quic::test::send_datagrams_from(server_ack);
+        ASSERT_FALSE(server_ack_datagrams.empty());
+        EXPECT_TRUE(std::any_of(server_ack_datagrams.begin(), server_ack_datagrams.end(),
+                                [&](const auto &server_ack_datagram) {
+                                    return datagram_has_application_ack(*server.connection_,
+                                                                        server_ack_datagram);
+                                }));
+        const auto request_ack_delivered = coquic::quic::test::relay_send_datagrams_to_peer(
+            server_ack, client, optional_value_or_terminate(server_ack_deadline));
+        static_cast<void>(request_ack_delivered);
+    }
 
     ASSERT_TRUE(client.connection_->handshake_confirmed_);
     ASSERT_TRUE(client.connection_->streams_.contains(0));

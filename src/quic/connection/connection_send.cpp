@@ -796,7 +796,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
     // # Senders MUST NOT coalesce QUIC packets with different connection IDs
     // # into a single UDP datagram.
-    auto send_destination_connection_id = outbound_destination_connection_id();
+    auto send_destination_connection_id = outbound_destination_connection_id(selected_send_path_id);
     const auto application_destination_connection_id = [&]() {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
         // # Senders MUST NOT coalesce QUIC packets with different connection IDs
@@ -2648,7 +2648,14 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     };
                     mark_path_challenge_sent(response_path->second);
                 }
-                if (!response_path->second.validated &
+                const auto current_path = current_send_path_id_.has_value()
+                                              ? paths_.find(*current_send_path_id_)
+                                              : paths_.end();
+                const bool preserve_validated_preferred_address_path =
+                    current_path != paths_.end() && current_path->second.preferred_address_path &&
+                    current_path->second.validated && !response_path->second.preferred_address_path;
+                if (!preserve_validated_preferred_address_path &&
+                    !response_path->second.validated &&
                     current_send_path_id_ != response_path->first) {
                     if (current_send_path_id_.has_value()) {
                         previous_path_id_ = current_send_path_id_;
@@ -3426,6 +3433,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             }
             return current_send_path_id_;
         };
+        const auto response_validation_on_non_current_path =
+            [&](const PendingPathValidationFrames &path_validation_frames) {
+                return path_validation_frames.response.has_value() &&
+                       current_send_path_id_.has_value() &&
+                       path_validation_frames.path_id != *current_send_path_id_;
+            };
         const auto path_send_is_validation_only = [&](QuicPathId path_id) {
             const auto validation_path = paths_.find(path_id);
             if (validation_path == paths_.end() || validation_path->second.validated) {
@@ -4071,9 +4084,14 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     take_path_validation_frames(/*ack_only_mode=*/false);
                 selected_send_path_id = send_path_for_path_validation_frames(
                     ack_only_path_validation_frames, current_send_path_id_);
+                const bool probing_response_only =
+                    response_validation_on_non_current_path(ack_only_path_validation_frames);
                 std::vector<Frame> ack_only_frames;
-                append_application_ack_frame(ack_only_frames, application_space_.received_packets,
-                                             std::optional<OutboundAckHeader>{ack_header});
+                if (!probing_response_only) {
+                    append_application_ack_frame(ack_only_frames,
+                                                 application_space_.received_packets,
+                                                 std::optional<OutboundAckHeader>{ack_header});
+                }
                 if (ack_only_path_validation_frames.response.has_value()) {
                     ack_only_frames.emplace_back(*ack_only_path_validation_frames.response);
                 }
@@ -4134,8 +4152,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                             .in_flight = path_validation_ack_eliciting,
                             .bytes_in_flight = ack_only_datagram.value().bytes.size(),
                             .largest_received_packet_number_acked =
-                                ack_largest_for_path_validation_sent_record(
-                                    path_validation_ack_eliciting, ack_header),
+                                probing_response_only
+                                    ? std::nullopt
+                                    : ack_largest_for_path_validation_sent_record(
+                                          path_validation_ack_eliciting, ack_header),
                             .path_id = selected_send_path_id.value_or(0),
                             .ecn = outbound_ecn_codepoint_for_path(selected_send_path_id),
                         },
@@ -4190,9 +4210,23 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             }
             selected_send_path_id = send_path_for_path_validation_frames(
                 application_path_validation_frames, current_send_path_id_);
+            const bool probing_response_only =
+                response_validation_on_non_current_path(application_path_validation_frames);
             auto &reset_stream_frames = stream_control_frames.reset_stream;
             auto &stop_sending_frames = stream_control_frames.stop_sending;
             auto &stream_data_blocked_frames = stream_control_frames.stream_data_blocked;
+            if (probing_response_only) {
+                application_max_data_frame = std::nullopt;
+                data_blocked_frame = std::nullopt;
+                max_stream_data_frames.clear();
+                max_streams_frames.clear();
+                streams_blocked_frames.clear();
+                reset_stream_frames.clear();
+                stop_sending_frames.clear();
+                stream_data_blocked_frames.clear();
+                new_token_frames.clear();
+                retire_connection_id_frames.clear();
+            }
             auto congestion_limited_datagram_size = [&]() {
                 if (application_space_.pending_probe_packet.has_value() ||
                     send_application_close_only) {
@@ -4229,7 +4263,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             std::optional<DatagramFrame> selected_datagram_frame;
             std::optional<std::size_t> selected_datagram_queue_index;
             bool can_select_datagram_frame = !ack_only_mode && !send_application_close_only &&
-                                             !validation_only_send &&
+                                             !validation_only_send && !probing_response_only &&
                                              !pending_datagram_send_queue_.empty();
             if (can_select_datagram_frame) {
                 for (std::size_t index = 0; index < pending_datagram_send_queue_.size(); ++index) {
@@ -4282,7 +4316,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             } application_stream_scratch_guard{stream_fragments, active_stream_iterator_scratch_};
             std::optional<OutboundAckHeader> selected_ack_frame;
             if (!send_application_close_only && !suppress_ack_for_preferred_address_validation &&
-                base_ack_frame.has_value()) {
+                !probing_response_only && base_ack_frame.has_value()) {
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2
                 // # When sending a packet for any reason, an endpoint SHOULD attempt to
                 // # include an ACK frame if one has not been sent recently.
@@ -4349,7 +4383,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 ++send_profile_counters().application_select_pacing_blocked;
             }
             const bool select_application_stream_data =
-                !ack_only_mode && !send_application_close_only && application_stream_pacing_ready;
+                !ack_only_mode && !send_application_close_only && !probing_response_only &&
+                application_stream_pacing_ready;
 
             if (select_application_stream_data) {
                 auto application_stream_budget = base_application_stream_budget;

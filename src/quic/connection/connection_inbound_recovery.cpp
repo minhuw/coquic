@@ -3288,7 +3288,18 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             const bool matched_outstanding_challenge =
                 had_outstanding_challenge &&
                 path->outstanding_challenge.value() == path_response->data;
-            if (matched_outstanding_challenge) {
+            const bool ignore_original_address_validation =
+                matched_outstanding_challenge &&
+                should_ignore_original_address_validation_after_preferred_success(
+                    validated_path_id);
+            if (ignore_original_address_validation) {
+                path->challenge_pending = false;
+                path->validation_probe_only = false;
+                path->path_mtu_validation_pending = false;
+                path->outstanding_challenge.reset();
+                path->outstanding_challenge_sent_with_expanded_datagram = true;
+                path->validation_deadline.reset();
+            } else if (matched_outstanding_challenge) {
                 const bool validation_probe_only = path->validation_probe_only;
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.2
                 // # This requirement MUST NOT be enforced by the endpoint
@@ -3315,6 +3326,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                           << " path=" << path_id << " validated_path=" << validated_path_id
                           << " had_outstanding=" << static_cast<int>(had_outstanding_challenge)
                           << " matched=" << static_cast<int>(matched_outstanding_challenge)
+                          << " ignored=" << static_cast<int>(ignore_original_address_validation)
                           << " current=" << format_optional_path_id(current_send_path_id_)
                           << " last_validated=" << format_optional_path_id(last_validated_path_id_)
                           << " path_state={" << format_path_state_summary(path) << "}\n";
@@ -3787,7 +3799,18 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             const bool matched_outstanding_challenge =
                 had_outstanding_challenge &&
                 path->outstanding_challenge.value() == path_response->data;
-            if (matched_outstanding_challenge) {
+            const bool ignore_original_address_validation =
+                matched_outstanding_challenge &&
+                should_ignore_original_address_validation_after_preferred_success(
+                    validated_path_id);
+            if (ignore_original_address_validation) {
+                path->challenge_pending = false;
+                path->validation_probe_only = false;
+                path->path_mtu_validation_pending = false;
+                path->outstanding_challenge.reset();
+                path->outstanding_challenge_sent_with_expanded_datagram = true;
+                path->validation_deadline.reset();
+            } else if (matched_outstanding_challenge) {
                 const bool validation_probe_only = path->validation_probe_only;
                 complete_path_validation(validated_path_id, *path, now);
                 note_peer_progress();
@@ -3805,6 +3828,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                           << " path=" << path_id << " validated_path=" << validated_path_id
                           << " had_outstanding=" << static_cast<int>(had_outstanding_challenge)
                           << " matched=" << static_cast<int>(matched_outstanding_challenge)
+                          << " ignored=" << static_cast<int>(ignore_original_address_validation)
                           << " current=" << format_optional_path_id(current_send_path_id_)
                           << " last_validated=" << format_optional_path_id(last_validated_path_id_)
                           << " path_state={" << format_path_state_summary(path) << "}\n";

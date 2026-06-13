@@ -206,6 +206,44 @@ cat >"${retryable_results}" <<'JSON'
 }
 JSON
 
+known_broken_results="${tmpdir}/known-broken-results.json"
+cat >"${known_broken_results}" <<'JSON'
+{
+  "servers": ["xquic", "quiche", "ngtcp2"],
+  "clients": ["coquic", "quinn"],
+  "results": [
+    [
+      {"name": "rebind-addr", "result": "failed"},
+      {"name": "http3", "result": "succeeded"}
+    ],
+    [
+      {"name": "connectionmigration", "result": "failed"}
+    ],
+    [
+      {"name": "connectionmigration", "result": "failed"}
+    ],
+    [
+      {"name": "multiplexing", "result": "failed"}
+    ],
+    [
+      {"name": "rebind-addr", "result": "failed"},
+      {"name": "connectionmigration", "result": "succeeded"}
+    ],
+    [
+      {"name": "connectionmigration", "result": "failed"}
+    ]
+  ],
+  "measurements": [
+    [],
+    [],
+    [],
+    [],
+    [],
+    []
+  ]
+}
+JSON
+
 mapfile -t retryable_tests < <(
   failed_retryable_official_testcases \
     "${retryable_results}" \
@@ -217,6 +255,20 @@ if [ "${#retryable_tests[@]}" -ne 2 ] ||
   [ "${retryable_tests[1]}" != "multiplexing" ]
 then
   echo "expected failed retryable http3 and multiplexing testcases to be selected" >&2
+  exit 1
+fi
+
+mapfile -t retryable_tests_with_known < <(
+  failed_retryable_official_testcases \
+    "${retryable_results}" \
+    http3,multiplexing,retry,handshake,crosstraffic \
+    amplificationlimit,multiplexing,handshakeloss,handshakecorruption,rebind-addr,rebind-port,connectionmigration,http3 \
+    "${known_broken_results}" xquic coquic
+)
+if [ "${#retryable_tests_with_known[@]}" -ne 1 ] ||
+  [ "${retryable_tests_with_known[0]}" != "http3" ]
+then
+  echo "expected known peer-broken retryable xquic multiplexing to be skipped" >&2
   exit 1
 fi
 
@@ -232,6 +284,56 @@ if [ "${#failed_tests[@]}" -ne 4 ] ||
   [ "${failed_tests[3]}" != "crosstraffic" ]
 then
   echo "expected failed testcase helper to include testcase and measurement failures" >&2
+  exit 1
+fi
+
+mapfile -t failed_tests_with_known < <(
+  failed_official_testcases \
+    "${retryable_results}" \
+    http3,multiplexing,retry,handshake,crosstraffic \
+    "${known_broken_results}" xquic coquic
+)
+if [ "${#failed_tests_with_known[@]}" -ne 3 ] ||
+  [ "${failed_tests_with_known[0]}" != "http3" ] ||
+  [ "${failed_tests_with_known[1]}" != "handshake" ] ||
+  [ "${failed_tests_with_known[2]}" != "crosstraffic" ]
+then
+  echo "expected known peer-broken xquic multiplexing to be omitted from failure helper" >&2
+  exit 1
+fi
+
+mapfile -t known_broken_tests < <(
+  known_broken_official_testcases "${known_broken_results}" quiche coquic
+)
+if [ "${#known_broken_tests[@]}" -ne 1 ] ||
+  [ "${known_broken_tests[0]}" != "rebind-addr" ]
+then
+  echo "expected known peer-broken helper to list quiche rebind-addr" >&2
+  exit 1
+fi
+
+known_broken_local_results="${tmpdir}/known-broken-local-results.json"
+cat >"${known_broken_local_results}" <<'JSON'
+{
+  "servers": ["quiche"],
+  "clients": ["coquic"],
+  "results": [[
+    {"name": "rebind-addr", "result": "failed"},
+    {"name": "connectionmigration", "result": "succeeded"}
+  ]],
+  "measurements": [[]]
+}
+JSON
+
+mapfile -t known_broken_failed_tests < <(
+  known_broken_failed_official_testcases \
+    "${known_broken_local_results}" rebind-addr,connectionmigration \
+    "${known_broken_results}" quiche coquic
+)
+if [ "${#known_broken_failed_tests[@]}" -ne 1 ] ||
+  [ "${known_broken_failed_tests[0]}" != "rebind-addr" ]
+then
+  echo "expected known peer-broken failed helper to list only failed local rows" >&2
   exit 1
 fi
 
@@ -264,12 +366,8 @@ connectionmigration = next(
     entry for entry in data["results"][0]
     if entry["name"] == "connectionmigration"
 )
-if connectionmigration["result"] != "peer_broken":
-    raise SystemExit("expected xquic connectionmigration to be marked peer_broken")
-if connectionmigration.get("details") != "peer does not initiate preferred-address migration":
-    raise SystemExit("expected xquic connectionmigration public reason")
-if "preferred-address active migration" not in connectionmigration.get("evidence", ""):
-    raise SystemExit("expected xquic connectionmigration evidence")
+if connectionmigration["result"] != "failed":
+    raise SystemExit("expected xquic connectionmigration to remain failed for known-broken annotation")
 xquic_crosstraffic = next(
     entry for entry in data["measurements"][0]
     if entry["name"] == "crosstraffic"
@@ -282,209 +380,10 @@ if "30-second request deadline" not in xquic_crosstraffic.get("evidence", ""):
     raise SystemExit("expected xquic crosstraffic evidence")
 adjustments = data.get("coquic_compat_adjustments", [])
 adjusted_names = {entry.get("name") for entry in adjustments}
-if adjusted_names != {"connectionmigration", "crosstraffic"}:
+if adjusted_names != {"crosstraffic"}:
     raise SystemExit("expected compatibility adjustment audit trail")
 if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
     raise SystemExit("expected compatibility adjustments to include reason and evidence")
-PY
-
-mvfst_client_results="${tmpdir}/mvfst-client-results.json"
-cat >"${mvfst_client_results}" <<'JSON'
-{
-  "servers": ["coquic"],
-  "clients": ["mvfst"],
-  "results": [[
-    {"name": "handshakeloss", "result": "failed"},
-    {"name": "handshakecorruption", "result": "failed"},
-    {"name": "connectionmigration", "result": "failed"},
-    {"name": "zerortt", "result": "failed"}
-  ]],
-  "measurements": [[]]
-}
-JSON
-
-apply_official_result_compatibility_adjustments \
-  "${mvfst_client_results}" coquic mvfst \
-  handshakeloss,handshakecorruption,connectionmigration,zerortt
-
-python3 - "${mvfst_client_results}" <<'PY'
-import json
-import pathlib
-import sys
-
-data = json.loads(pathlib.Path(sys.argv[1]).read_text())
-results = {
-    entry["name"]: entry
-    for entry in data["results"][0]
-}
-for name in ("handshakeloss", "handshakecorruption"):
-    entry = results[name]
-    if entry["result"] != "peer_broken":
-        raise SystemExit(f"expected mvfst client {name} to be marked peer_broken")
-    if entry.get("details") != "peer reuses one connection for multiconnect":
-        raise SystemExit(f"expected mvfst client {name} public reason")
-    if "require 50 handshakes" not in entry.get("evidence", ""):
-        raise SystemExit(f"expected mvfst client {name} evidence")
-connectionmigration = results["connectionmigration"]
-if connectionmigration["result"] != "peer_broken":
-    raise SystemExit("expected mvfst client connectionmigration to be marked peer_broken")
-if connectionmigration.get("details") != "peer does not perform active migration":
-    raise SystemExit("expected mvfst client connectionmigration public reason")
-if "sees only one server path" not in connectionmigration.get("evidence", ""):
-    raise SystemExit("expected mvfst client connectionmigration evidence")
-zerortt = results["zerortt"]
-if zerortt["result"] != "peer_broken":
-    raise SystemExit("expected mvfst client zerortt to be marked peer_broken")
-if zerortt.get("details") != "peer does not expose key log for 0-RTT verification":
-    raise SystemExit("expected mvfst client zerortt public reason")
-if "No key log file found" not in zerortt.get("evidence", ""):
-    raise SystemExit("expected mvfst client zerortt evidence")
-adjustments = data.get("coquic_compat_adjustments", [])
-adjusted_names = {entry.get("name") for entry in adjustments}
-if adjusted_names != {"handshakeloss", "handshakecorruption", "connectionmigration", "zerortt"}:
-    raise SystemExit("expected mvfst client compatibility adjustment audit trail")
-if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
-    raise SystemExit("expected mvfst client audit trail to include reason and evidence")
-PY
-
-for active_migration_client in aioquic msquic quic-go quiche quinn s2n-quic; do
-  active_migration_client_results="${tmpdir}/active-migration-${active_migration_client}.json"
-  cat >"${active_migration_client_results}" <<'JSON'
-{
-  "servers": ["coquic"],
-  "clients": ["peer"],
-  "results": [[
-    {"name": "connectionmigration", "result": "failed"}
-  ]],
-  "measurements": [[]]
-}
-JSON
-
-  apply_official_result_compatibility_adjustments \
-    "${active_migration_client_results}" coquic "${active_migration_client}" \
-    connectionmigration
-
-  python3 - "${active_migration_client_results}" "${active_migration_client}" <<'PY'
-import json
-import pathlib
-import sys
-
-data = json.loads(pathlib.Path(sys.argv[1]).read_text())
-client = sys.argv[2]
-connectionmigration = data["results"][0][0]
-if connectionmigration["result"] != "peer_broken":
-    raise SystemExit(f"expected {client} connectionmigration to be marked peer_broken")
-if connectionmigration.get("details") != "peer does not perform active migration":
-    raise SystemExit(f"expected {client} connectionmigration public reason")
-if "Server saw only a single path in use" not in connectionmigration.get("evidence", ""):
-    raise SystemExit(f"expected {client} connectionmigration evidence")
-adjustments = data.get("coquic_compat_adjustments", [])
-if len(adjustments) != 1 or adjustments[0].get("name") != "connectionmigration":
-    raise SystemExit(f"expected {client} connectionmigration audit trail")
-if adjustments[0].get("client") != client:
-    raise SystemExit(f"expected {client} connectionmigration audit trail client")
-if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
-    raise SystemExit(f"expected {client} audit trail to include reason and evidence")
-PY
-done
-
-s2n_quic_server_results="${tmpdir}/s2n-quic-server-results.json"
-cat >"${s2n_quic_server_results}" <<'JSON'
-{
-  "servers": ["s2n-quic"],
-  "clients": ["coquic"],
-  "results": [[
-    {"name": "connectionmigration", "result": "failed"}
-  ]],
-  "measurements": [[]]
-}
-JSON
-
-apply_official_result_compatibility_adjustments \
-  "${s2n_quic_server_results}" s2n-quic coquic connectionmigration
-
-python3 - "${s2n_quic_server_results}" <<'PY'
-import json
-import pathlib
-import sys
-
-data = json.loads(pathlib.Path(sys.argv[1]).read_text())
-connectionmigration = data["results"][0][0]
-if connectionmigration["result"] != "peer_broken":
-    raise SystemExit("expected s2n-quic server connectionmigration to be marked peer_broken")
-if connectionmigration.get("details") != "peer does not perform active migration":
-    raise SystemExit("expected s2n-quic server connectionmigration public reason")
-if "Server saw only a single path in use" not in connectionmigration.get("evidence", ""):
-    raise SystemExit("expected s2n-quic server connectionmigration evidence")
-adjustments = data.get("coquic_compat_adjustments", [])
-if len(adjustments) != 1 or adjustments[0].get("name") != "connectionmigration":
-    raise SystemExit("expected s2n-quic server connectionmigration audit trail")
-PY
-
-ngtcp2_results="${tmpdir}/ngtcp2-results.json"
-cat >"${ngtcp2_results}" <<'JSON'
-{
-  "servers": ["ngtcp2"],
-  "clients": ["coquic"],
-  "results": [[
-    {"name": "connectionmigration", "result": "failed"}
-  ]],
-  "measurements": [[]]
-}
-JSON
-
-apply_official_result_compatibility_adjustments \
-  "${ngtcp2_results}" ngtcp2 coquic connectionmigration
-
-python3 - "${ngtcp2_results}" <<'PY'
-import json
-import pathlib
-import sys
-
-data = json.loads(pathlib.Path(sys.argv[1]).read_text())
-connectionmigration = data["results"][0][0]
-if connectionmigration["result"] != "peer_broken":
-    raise SystemExit("expected ngtcp2 connectionmigration to be marked peer_broken")
-if connectionmigration.get("details") != "peer omits PATH_CHALLENGE on preferred address":
-    raise SystemExit("expected ngtcp2 connectionmigration public reason")
-if "PATH_RESPONSE" not in connectionmigration.get("evidence", ""):
-    raise SystemExit("expected ngtcp2 connectionmigration evidence")
-adjustments = data.get("coquic_compat_adjustments", [])
-if len(adjustments) != 1 or adjustments[0].get("name") != "connectionmigration":
-    raise SystemExit("expected ngtcp2 connectionmigration audit trail")
-PY
-
-quinn_v2_results="${tmpdir}/quinn-v2-results.json"
-cat >"${quinn_v2_results}" <<'JSON'
-{
-  "servers": ["coquic"],
-  "clients": ["quinn"],
-  "results": [[
-    {"name": "v2", "result": "failed"}
-  ]],
-  "measurements": [[]]
-}
-JSON
-
-apply_official_result_compatibility_adjustments \
-  "${quinn_v2_results}" coquic quinn v2
-
-python3 - "${quinn_v2_results}" <<'PY'
-import json
-import pathlib
-import sys
-
-data = json.loads(pathlib.Path(sys.argv[1]).read_text())
-v2 = data["results"][0][0]
-if v2["result"] != "peer_broken":
-    raise SystemExit("expected quinn v2 to be marked peer_broken")
-if v2.get("details") != "peer omits version_information for v2":
-    raise SystemExit("expected quinn v2 public reason")
-if "version_information" not in v2.get("evidence", ""):
-    raise SystemExit("expected quinn v2 evidence")
-adjustments = data.get("coquic_compat_adjustments", [])
-if len(adjustments) != 1 or adjustments[0].get("name") != "v2":
-    raise SystemExit("expected quinn v2 audit trail")
 PY
 
 xquic_server_results="${tmpdir}/xquic-server-results.json"

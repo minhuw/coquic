@@ -185,8 +185,11 @@ fixed. Published `peer_broken` rows use a short public reason; the JSON audit
 trail keeps the longer diagnostic evidence.
 
 Known peer failures derived from upstream interop.seemann.io results are not
-skipped; they remain published as `failed` rows with a known peer-broken
-annotation unless the local result is explicitly classified as `peer_broken`.
+skipped or converted to `peer_broken`; they remain published as `failed` rows
+with a known peer-broken annotation. The GitHub Actions interop runner ignores
+those annotated failures when deciding whether the peer job failed, so a peer
+does not need a local manual `peer_broken` classification only because the
+upstream matrix shows that peer is broken for every supported counterpart.
 
 For local diagnosis, `INTEROP_RETRY_FAILED_TESTCASES=1` can retry a small set of
 simulator-sensitive cases in isolation after an initial `failed` result.

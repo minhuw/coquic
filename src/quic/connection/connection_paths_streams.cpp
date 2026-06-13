@@ -3299,10 +3299,13 @@ void QuicConnection::maybe_refresh_peer_stream_limit(StreamState &stream) {
     if (stream.id_info.initiator != StreamInitiator::peer) {
         return;
     }
-    if (!stream_receive_terminal(stream) || !stream_send_terminal(stream)) {
+    if (!stream_receive_terminal(stream)) {
         return;
     }
 
+    // Stream open credit limits the peer's send side.  A peer-initiated
+    // stream releases that receive capacity once the peer's side is terminal,
+    // even if our response side of a bidirectional stream is still active.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-4.6
     // # An endpoint MUST NOT wait to receive this signal before advertising
     // # additional credit, since doing so will mean that the peer will be
@@ -3388,9 +3391,27 @@ bool QuicConnection::should_keep_current_send_path_for_inbound_non_probing(
 
     const auto *current = find_path_state(paths_, current_send_path_id_);
     const auto *inbound = find_path_state(paths_, inbound_path_id);
+    if (current != nullptr && current->preferred_address_path &&
+        current->validation_initiated_locally && current->outstanding_challenge.has_value()) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+        // # A client that migrates to a preferred address MUST validate the
+        // # address it chooses before migrating; see Section 21.5.3.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+        // # As soon as path validation succeeds, the client SHOULD begin sending
+        // # all future packets to the new server address using the new connection
+        // # ID and discontinue use of the old server address.
+        return true;
+    }
     if (current != nullptr && current->validated && packet_number.has_value() &&
         current->largest_inbound_application_packet_number.has_value() &&
-        *packet_number < *current->largest_inbound_application_packet_number) {
+        (path_state_is_validated(inbound)
+             ? *packet_number <= *current->largest_inbound_application_packet_number
+             : *packet_number < *current->largest_inbound_application_packet_number)) {
+        if (path_state_is_validated(inbound)) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
+            // # An endpoint only changes the address to which it sends packets in
+            // # response to the highest-numbered non-probing packet.
+        }
         return true;
     }
     if (path_state_is_validating(current) && path_state_is_validated(inbound) &&
@@ -3429,6 +3450,17 @@ bool QuicConnection::should_drop_inbound_packet_on_old_path_after_preferred_succ
     // # The server SHOULD drop newer packets for this connection that are
     // # received on the old IP address.
     return *packet_number > *inbound->largest_inbound_application_packet_number;
+}
+
+bool QuicConnection::should_ignore_original_address_validation_after_preferred_success(
+    QuicPathId path_id) const {
+    const auto *path = find_path_state(paths_, path_id);
+    if (path == nullptr || path->preferred_address_path || !current_send_path_id_.has_value()) {
+        return false;
+    }
+
+    const auto *current = find_path_state(paths_, current_send_path_id_);
+    return current != nullptr && current->preferred_address_path && current->validated;
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)

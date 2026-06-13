@@ -1545,6 +1545,80 @@ TEST(QuicCoreTest, PreferredAddressSuccessAbandonsOriginalAddressValidation) {
     EXPECT_FALSE(connection.paths_.at(9).validated);
 }
 
+TEST(QuicCoreTest, PreferredAddressIgnoresLateOriginalPathResponseAfterSuccess) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+    connection.local_transport_parameters_.active_connection_id_limit = 8;
+    auto &peer_parameters = optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_parameters.active_connection_id_limit = 8;
+    peer_parameters.preferred_address = coquic::quic::PreferredAddress{
+        .ipv4_address = {std::byte{127}, std::byte{0}, std::byte{0}, std::byte{2}},
+        .ipv4_port = 4444,
+        .connection_id = bytes_from_ints({0x41, 0x42}),
+    };
+    install_spare_peer_connection_id(connection);
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::preferred_address,
+        coquic::quic::test::test_time(1));
+    ASSERT_TRUE(requested.has_value());
+    ASSERT_TRUE(connection.paths_.contains(3));
+    ASSERT_TRUE(connection.paths_.contains(7));
+    ASSERT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+    const auto preferred_address_challenge =
+        optional_value_or_terminate(connection.paths_.at(7).outstanding_challenge);
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 7,
+        {coquic::quic::PathResponseFrame{
+            .data = preferred_address_challenge,
+        }}));
+    ASSERT_TRUE(connection.paths_.at(7).validated);
+    ASSERT_EQ(connection.current_send_path_id_, 7u);
+    ASSERT_EQ(connection.last_validated_path_id_, 7u);
+
+    const auto original_address_challenge = std::array<std::byte, 8>{
+        std::byte{0x50}, std::byte{0x51}, std::byte{0x52}, std::byte{0x53},
+        std::byte{0x54}, std::byte{0x55}, std::byte{0x56}, std::byte{0x57},
+    };
+    auto &original_path = connection.paths_.at(3);
+    original_path.validated = false;
+    original_path.challenge_pending = false;
+    original_path.validation_probe_only = true;
+    original_path.path_mtu_validation_pending = false;
+    original_path.outstanding_challenge = original_address_challenge;
+    original_path.validation_deadline = coquic::quic::test::test_time(10);
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{
+                            coquic::quic::PathResponseFrame{
+                                .data = original_address_challenge,
+                            },
+                        },
+                        coquic::quic::test::test_time(2), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/3, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/200)
+                    .has_value());
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.3
+    // # If path validation of the server's preferred address succeeds, the
+    // # client MUST abandon validation of the original address and migrate to
+    // # using the server's preferred address.
+    EXPECT_FALSE(connection.paths_.at(3).validated);
+    EXPECT_FALSE(connection.paths_.at(3).outstanding_challenge.has_value());
+    EXPECT_FALSE(connection.paths_.at(3).validation_deadline.has_value());
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_EQ(connection.last_validated_path_id_, 7u);
+    EXPECT_TRUE(connection.paths_.at(7).is_current_send_path);
+    EXPECT_FALSE(connection.paths_.at(3).is_current_send_path);
+}
+
 TEST(QuicCoreTest, PreferredAddressMigrationValidatesOriginalAddressConcurrently) {
     auto connection = make_connected_client_connection();
     connection.paths_.clear();
@@ -1582,6 +1656,61 @@ TEST(QuicCoreTest, PreferredAddressMigrationValidatesOriginalAddressConcurrently
     EXPECT_FALSE(connection.paths_.at(7).validation_probe_only);
     EXPECT_EQ(connection.current_send_path_id_, 7u);
     EXPECT_EQ(connection.previous_path_id_, 3u);
+}
+
+TEST(QuicCoreTest, PreferredAddressMigrationKeepsPreferredPathDuringOldPathTraffic) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.ensure_path_state(3).peer_connection_id_sequence = 0;
+    connection.local_transport_parameters_.active_connection_id_limit = 8;
+    auto &peer_parameters = optional_ref_or_terminate(connection.peer_transport_parameters_);
+    peer_parameters.active_connection_id_limit = 8;
+    peer_parameters.preferred_address = coquic::quic::PreferredAddress{
+        .ipv4_address = {std::byte{127}, std::byte{0}, std::byte{0}, std::byte{2}},
+        .ipv4_port = 4444,
+        .connection_id = bytes_from_ints({0x41, 0x42}),
+    };
+    install_spare_peer_connection_id(connection);
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::preferred_address,
+        coquic::quic::test::test_time(1));
+    ASSERT_TRUE(requested.has_value());
+    ASSERT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+    const auto preferred_address_challenge =
+        optional_value_or_terminate(connection.paths_.at(7).outstanding_challenge);
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{coquic::quic::PingFrame{}},
+                        coquic::quic::test::test_time(2), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/3, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/100)
+                    .has_value());
+
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_TRUE(connection.paths_.at(7).preferred_address_path);
+    EXPECT_FALSE(connection.paths_.at(7).validation_probe_only);
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{
+                            coquic::quic::PathResponseFrame{
+                                .data = preferred_address_challenge,
+                            },
+                        },
+                        coquic::quic::test::test_time(3), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/7, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/101)
+                    .has_value());
+
+    EXPECT_TRUE(connection.paths_.at(7).validated);
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_EQ(connection.last_validated_path_id_, 7u);
 }
 
 TEST(QuicCoreTest, PreferredAddressValidationFailureContinuesOnOriginalPath) {
@@ -1706,6 +1835,109 @@ TEST(QuicCoreTest, PreferredAddressSuccessDropsNewerReceivedStreamPacketOnOldPat
     EXPECT_FALSE(connection.streams_.contains(0));
     EXPECT_EQ(connection.current_send_path_id_, 7u);
     EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 100u);
+}
+
+TEST(QuicCoreTest, PreferredAddressOldPathChallengeResponseIsProbingOnly) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 7;
+    connection.current_send_path_id_ = 7;
+    auto &old_path = connection.ensure_path_state(3);
+    old_path.validated = true;
+    old_path.largest_inbound_application_packet_number = 100;
+    auto &preferred_path = connection.ensure_path_state(7);
+    preferred_path.validated = true;
+    preferred_path.is_current_send_path = true;
+    preferred_path.preferred_address_path = true;
+    connection.application_space_.received_packets.record_received(
+        /*packet_number=*/101, /*ack_eliciting=*/true, coquic::quic::test::test_time(1));
+    const auto challenge_data = std::array<std::byte, 8>{
+        std::byte{0x10}, std::byte{0x11}, std::byte{0x12}, std::byte{0x13},
+        std::byte{0x14}, std::byte{0x15}, std::byte{0x16}, std::byte{0x17},
+    };
+
+    connection.queue_path_response(3, challenge_data);
+    auto response_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+
+    ASSERT_FALSE(response_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 3u);
+    EXPECT_GE(response_datagram.size(), 1200u);
+
+    auto packets = decode_sender_datagram(connection, response_datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(one_rtt, nullptr);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.1
+    // # PATH_CHALLENGE, PATH_RESPONSE, NEW_CONNECTION_ID, and PADDING frames
+    // # are "probing frames", and all other frames are "non-probing frames".
+    EXPECT_TRUE(connection.is_probing_only(one_rtt->frames));
+    EXPECT_TRUE(std::ranges::any_of(one_rtt->frames, [&](const auto &frame) {
+        const auto *path_response = std::get_if<coquic::quic::PathResponseFrame>(&frame);
+        return path_response != nullptr &&
+               std::equal(path_response->data.begin(), path_response->data.end(),
+                          challenge_data.begin(), challenge_data.end());
+    }));
+    EXPECT_FALSE(datagram_has_application_ack(connection, response_datagram));
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
+}
+
+TEST(QuicCoreTest, PreferredAddressOldPathChallengeResponseDoesNotRevertCurrentPath) {
+    auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 7;
+    connection.current_send_path_id_ = 7;
+    auto &old_path = connection.ensure_path_state(3);
+    old_path.validated = false;
+    old_path.peer_connection_id_sequence = 0;
+    old_path.largest_inbound_application_packet_number = 100;
+    auto &preferred_path = connection.ensure_path_state(7);
+    preferred_path.validated = true;
+    preferred_path.is_current_send_path = true;
+    preferred_path.preferred_address_path = true;
+    preferred_path.peer_connection_id_sequence = 2;
+    connection.peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa, 0xab}),
+    };
+    connection.peer_connection_ids_[2] = coquic::quic::PeerConnectionIdRecord{
+        .sequence_number = 2,
+        .connection_id = bytes_from_ints({0x10, 0x11}),
+    };
+    connection.active_peer_connection_id_sequence_ = 2;
+    const auto challenge_data = std::array<std::byte, 8>{
+        std::byte{0x30}, std::byte{0x31}, std::byte{0x32}, std::byte{0x33},
+        std::byte{0x34}, std::byte{0x35}, std::byte{0x36}, std::byte{0x37},
+    };
+
+    connection.queue_path_response(3, challenge_data);
+    auto response_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+
+    ASSERT_FALSE(response_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 3u);
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_TRUE(connection.paths_.at(7).is_current_send_path);
+    EXPECT_FALSE(connection.paths_.at(3).is_current_send_path);
+
+    auto destination_connection_ids = protected_datagram_destination_connection_ids(
+        response_datagram, connection.config_.source_connection_id.size());
+    ASSERT_TRUE(destination_connection_ids.has_value());
+    const auto &destination_connection_ids_value =
+        optional_ref_or_terminate(destination_connection_ids);
+    ASSERT_EQ(destination_connection_ids_value.size(), 1u);
+    EXPECT_EQ(destination_connection_ids_value.front(), bytes_from_ints({0xaa, 0xab}));
+
+    auto packets = decode_sender_datagram(connection, response_datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(one_rtt, nullptr);
+    EXPECT_TRUE(connection.is_probing_only(one_rtt->frames));
+    EXPECT_TRUE(std::ranges::any_of(one_rtt->frames, [&](const auto &frame) {
+        const auto *path_response = std::get_if<coquic::quic::PathResponseFrame>(&frame);
+        return path_response != nullptr &&
+               std::equal(path_response->data.begin(), path_response->data.end(),
+                          challenge_data.begin(), challenge_data.end());
+    }));
 }
 
 TEST(QuicCoreTest, PreferredAddressMigrationDefersOldCidRetirementUntilAfterPathResponse) {

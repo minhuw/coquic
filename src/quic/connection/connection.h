@@ -987,6 +987,8 @@ class QuicConnection {
     bool should_drop_inbound_packet_on_old_path_after_preferred_success(
         QuicPathId inbound_path_id,
         std::optional<std::uint64_t> packet_number = std::nullopt) const;
+    bool
+    should_ignore_original_address_validation_after_preferred_success(QuicPathId path_id) const;
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     void note_inbound_application_packet_for_path(QuicPathId path_id, std::uint64_t packet_number);
     void maybe_switch_to_path(QuicPathId path_id, bool initiated_locally,

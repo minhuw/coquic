@@ -1728,7 +1728,7 @@ TEST(QuicCoreTest, ServerHandshakeStatusUpdateConfirmsHandshakeOnTlsCompletion) 
     EXPECT_EQ(tracked_packet_count(connection.handshake_space_), 0u);
 }
 
-TEST(QuicCoreTest, ServerHandshakeStatusUpdateFlushesPendingHandshakeAckBeforeDiscard) {
+TEST(QuicCoreTest, ServerHandshakeStatusUpdateDiscardsPendingHandshakeAck) {
     coquic::quic::QuicCore client(coquic::quic::test::make_client_core_config());
     coquic::quic::QuicCore server(coquic::quic::test::make_server_core_config());
     coquic::quic::test::drive_quic_handshake(client, server, coquic::quic::test::test_time());
@@ -1756,9 +1756,11 @@ TEST(QuicCoreTest, ServerHandshakeStatusUpdateFlushesPendingHandshakeAckBeforeDi
     connection.update_handshake_status();
 
     EXPECT_TRUE(connection.handshake_confirmed_);
-    EXPECT_FALSE(connection.handshake_packet_space_discarded_);
-    EXPECT_TRUE(connection.discard_handshake_packet_space_after_ack_);
-    EXPECT_TRUE(connection.handshake_space_.received_packets.has_ack_to_send());
+    EXPECT_TRUE(connection.handshake_packet_space_discarded_);
+    //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.2
+    // # An endpoint MUST discard its Handshake keys when the TLS handshake is
+    // # confirmed (Section 4.1.2).
+    EXPECT_FALSE(connection.handshake_space_.received_packets.has_ack_to_send());
     EXPECT_EQ(connection.handshake_done_state_, coquic::quic::StreamControlFrameState::pending);
 
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
@@ -1799,10 +1801,9 @@ TEST(QuicCoreTest, ServerHandshakeStatusUpdateFlushesPendingHandshakeAckBeforeDi
         }
     }
 
-    EXPECT_TRUE(saw_handshake_ack);
+    EXPECT_FALSE(saw_handshake_ack);
     EXPECT_TRUE(saw_handshake_done);
     EXPECT_TRUE(connection.handshake_packet_space_discarded_);
-    EXPECT_FALSE(connection.discard_handshake_packet_space_after_ack_);
     EXPECT_FALSE(connection.handshake_space_.read_secret.has_value());
     EXPECT_FALSE(connection.handshake_space_.write_secret.has_value());
 }

@@ -11,6 +11,7 @@ namespace coquic::interop {
 enum class Http09InteropTestcase : std::uint8_t {
     handshake,
     transfer,
+    multiplexing,
     keyupdate,
     rebind_port,
     rebind_addr,

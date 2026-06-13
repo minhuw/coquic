@@ -1147,25 +1147,79 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 return serialize_datagram(serialize_context);
             };
 
-            auto padded_datagram = serialize_padded_initial(padding_deficit);
-            if (!padded_datagram.has_value()) {
-                return padded_datagram;
-            }
+            auto best_oversized_datagram = std::optional<SerializedProtectedDatagram>{};
+            const auto remember_candidate = [&](SerializedProtectedDatagram candidate) {
+                const auto candidate_size = candidate.bytes.size();
+                if (candidate_size < kMinimumInitialDatagramSize) {
+                    return false;
+                }
+                if (candidate_size <= max_outbound_datagram_size) {
+                    best_oversized_datagram.reset();
+                    best_oversized_datagram = std::move(candidate);
+                    return true;
+                }
+                if (!best_oversized_datagram.has_value() ||
+                    candidate_size < best_oversized_datagram->bytes.size()) {
+                    best_oversized_datagram = std::move(candidate);
+                }
+                return false;
+            };
+            const auto try_padding_length = [&](std::size_t padding_length) -> CodecResult<bool> {
+                auto padded_datagram = serialize_padded_initial(padding_length);
+                if (!padded_datagram.has_value()) {
+                    return CodecResult<bool>::failure(padded_datagram.error().code,
+                                                      padded_datagram.error().offset);
+                }
+                return CodecResult<bool>::success(
+                    remember_candidate(std::move(padded_datagram.value())));
+            };
 
-            if (padded_datagram.value().bytes.size() == kMinimumInitialDatagramSize) {
+            if (auto exact_or_fit = try_padding_length(padding_deficit);
+                !exact_or_fit.has_value() || exact_or_fit.value()) {
+                if (!exact_or_fit.has_value()) {
+                    return CodecResult<SerializedProtectedDatagram>::failure(
+                        exact_or_fit.error().code, exact_or_fit.error().offset);
+                }
                 return CodecResult<SerializedProtectedDatagram>::success(
-                    std::move(padded_datagram.value()));
+                    std::move(best_oversized_datagram.value()));
             }
 
-            // Padding here only adjusts a single Initial packet. The only reachable size jump in
-            // this path is the one-byte growth of the long-header length varint, so retrying with
-            // one less byte covers the alternate exact-1200 serialization.
-            auto alternate_padded_datagram = serialize_padded_initial(padding_deficit - 1);
-            if (!alternate_padded_datagram.has_value()) {
-                return alternate_padded_datagram;
+            constexpr std::size_t kInitialPaddingSearchWindow = 32;
+            for (std::size_t delta = 1; delta <= kInitialPaddingSearchWindow; ++delta) {
+                if (padding_deficit >= delta) {
+                    auto exact_or_fit = try_padding_length(padding_deficit - delta);
+                    if (!exact_or_fit.has_value()) {
+                        return CodecResult<SerializedProtectedDatagram>::failure(
+                            exact_or_fit.error().code, exact_or_fit.error().offset);
+                    }
+                    if (exact_or_fit.value()) {
+                        return CodecResult<SerializedProtectedDatagram>::success(
+                            std::move(best_oversized_datagram.value()));
+                    }
+                }
+
+                const auto larger_padding = padding_deficit + delta;
+                if (larger_padding < padding_deficit) {
+                    break;
+                }
+                auto exact_or_fit = try_padding_length(larger_padding);
+                if (!exact_or_fit.has_value()) {
+                    return CodecResult<SerializedProtectedDatagram>::failure(
+                        exact_or_fit.error().code, exact_or_fit.error().offset);
+                }
+                if (exact_or_fit.value()) {
+                    return CodecResult<SerializedProtectedDatagram>::success(
+                        std::move(best_oversized_datagram.value()));
+                }
             }
-            return CodecResult<SerializedProtectedDatagram>::success(
-                std::move(alternate_padded_datagram.value()));
+
+            if (best_oversized_datagram.has_value()) {
+                return CodecResult<SerializedProtectedDatagram>::success(
+                    std::move(best_oversized_datagram.value()));
+            }
+
+            return CodecResult<SerializedProtectedDatagram>::failure(
+                CodecErrorCode::packet_length_mismatch, 0);
         }
 
         return datagram;
@@ -1367,12 +1421,6 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             profile.datagrams_le_1434 += static_cast<std::uint64_t>(datagram.bytes.size() <= 1434);
             profile.datagrams_le_1472 += static_cast<std::uint64_t>(datagram.bytes.size() <= 1472);
             profile.datagrams_gt_1472 += static_cast<std::uint64_t>(datagram.bytes.size() > 1472);
-        }
-        if (discard_handshake_packet_space_after_ack_ &&
-            std::ranges::any_of(datagram_packets, [](const ProtectedPacket &packet) {
-                return std::holds_alternative<ProtectedHandshakePacket>(packet);
-            })) {
-            discard_handshake_packet_space();
         }
         return std::move(datagram.bytes);
     };

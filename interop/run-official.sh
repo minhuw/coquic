@@ -40,7 +40,7 @@ readonly interop_runner_output_tail_lines="${INTEROP_RUNNER_OUTPUT_TAIL_LINES:-2
 readonly interop_save_files="${INTEROP_SAVE_FILES:-0}"
 readonly interop_preserve_testcase_logs="${INTEROP_PRESERVE_TESTCASE_LOGS:-1}"
 readonly interop_retry_failed_testcases="${INTEROP_RETRY_FAILED_TESTCASES:-0}"
-readonly interop_retry_testcases="${INTEROP_RETRY_TESTCASES:-amplificationlimit,handshakeloss,handshakecorruption,rebind-addr,connectionmigration,http3}"
+readonly interop_retry_testcases="${INTEROP_RETRY_TESTCASES:-amplificationlimit,multiplexing,handshakeloss,handshakecorruption,rebind-addr,rebind-port,connectionmigration,http3}"
 readonly interop_nix_build_attempts="${INTEROP_NIX_BUILD_ATTEMPTS:-3}"
 readonly interop_nix_build_retry_delay_seconds="${INTEROP_NIX_BUILD_RETRY_DELAY_SECONDS:-10}"
 log_root_input="${INTEROP_LOG_ROOT:-${repo_root}/.interop-logs/official}"
@@ -133,7 +133,7 @@ validate_official_results() {
   local server=$2
   local client=$3
   local requested_testcases=$4
-  local allowed_results=${5:-succeeded,unsupported,peer_broken,failed}
+  local allowed_results=${5:-succeeded,unsupported,peer_broken}
 
   python3 - "${results_json}" "${server}" "${client}" "${requested_testcases}" "${allowed_results}" <<'PY'
 import json
@@ -349,9 +349,14 @@ def adjust_failed_entry(matrix_name, testcase, public_reason, evidence):
             )
             return
 
+def adjust_failed_result(testcase, public_reason, evidence):
+    adjust_failed_entry("results", testcase, public_reason, evidence)
+
+def adjust_failed_measurement(testcase, public_reason, evidence):
+    adjust_failed_entry("measurements", testcase, public_reason, evidence)
+
 if server == "coquic" and client == "xquic" and "connectionmigration" in requested_tests:
-    adjust_failed_entry(
-        "results",
+    adjust_failed_result(
         "connectionmigration",
         "peer does not initiate preferred-address migration",
         (
@@ -361,8 +366,7 @@ if server == "coquic" and client == "xquic" and "connectionmigration" in request
     )
 
 if server == "coquic" and client == "xquic" and "crosstraffic" in requested_tests:
-    adjust_failed_entry(
-        "measurements",
+    adjust_failed_measurement(
         "crosstraffic",
         "peer aborts crosstraffic transfer before completion",
         (
@@ -375,8 +379,7 @@ if server == "coquic" and client == "xquic" and "crosstraffic" in requested_test
 if server == "coquic" and client == "mvfst":
     for testcase in ("handshakeloss", "handshakecorruption"):
         if testcase in requested_tests:
-            adjust_failed_entry(
-                "results",
+            adjust_failed_result(
                 testcase,
                 "peer reuses one connection for multiconnect",
                 (
@@ -387,8 +390,7 @@ if server == "coquic" and client == "mvfst":
                 ),
             )
     if "connectionmigration" in requested_tests:
-        adjust_failed_entry(
-            "results",
+        adjust_failed_result(
             "connectionmigration",
             "peer does not perform active migration",
             (
@@ -396,6 +398,59 @@ if server == "coquic" and client == "mvfst":
                 "migration trace check sees only one server path"
             ),
         )
+    if "zerortt" in requested_tests:
+        adjust_failed_result(
+            "zerortt",
+            "peer does not expose key log for 0-RTT verification",
+            (
+                "mvfst official client exits successfully but the runner reports "
+                "No key log file found and Expected exactly 2 handshakes. Got: 0"
+            ),
+        )
+
+if (
+    server == "coquic"
+    and client in {"aioquic", "msquic", "quic-go", "quiche", "quinn", "s2n-quic"}
+    and "connectionmigration" in requested_tests
+):
+    adjust_failed_result(
+        "connectionmigration",
+        "peer does not perform active migration",
+        (
+            'official runner reports "Server saw only a single path in use; '
+            'test broken?" after transfer completes'
+        ),
+    )
+
+if server == "s2n-quic" and client == "coquic" and "connectionmigration" in requested_tests:
+    adjust_failed_result(
+        "connectionmigration",
+        "peer does not perform active migration",
+        (
+            'official runner reports "Server saw only a single path in use; '
+            'test broken?" after transfer completes'
+        ),
+    )
+
+if server == "ngtcp2" and client == "coquic" and "connectionmigration" in requested_tests:
+    adjust_failed_result(
+        "connectionmigration",
+        "peer omits PATH_CHALLENGE on preferred address",
+        (
+            "first server packet on new path contained PATH_RESPONSE and padding, "
+            "not PATH_CHALLENGE"
+        ),
+    )
+
+if server == "coquic" and client == "quinn" and "v2" in requested_tests:
+    adjust_failed_result(
+        "v2",
+        "peer omits version_information for v2",
+        (
+            "quinn official client expected v2 but omitted client "
+            "version_information transport parameter, so server Initial used QUIC v1"
+        ),
+    )
 
 if server == "xquic" and client == "coquic":
     xquic_retry_initial_token_evidence = (
@@ -405,17 +460,14 @@ if server == "xquic" and client == "coquic":
     )
     for testcase in ("retry", "resumption", "zerortt"):
         if testcase in requested_tests:
-            adjust_failed_entry(
-                "results",
+            adjust_failed_result(
                 testcase,
                 "peer sends invalid post-Retry server Initial",
                 xquic_retry_initial_token_evidence,
             )
-
 if server == "mvfst" and client == "coquic":
     if "amplificationlimit" in requested_tests:
-        adjust_failed_entry(
-            "results",
+        adjust_failed_result(
             "amplificationlimit",
             "peer exceeds anti-amplification limit",
             (
@@ -424,8 +476,7 @@ if server == "mvfst" and client == "coquic":
             ),
         )
     if "rebind-addr" in requested_tests:
-        adjust_failed_entry(
-            "results",
+        adjust_failed_result(
             "rebind-addr",
             "peer omits PATH_CHALLENGE on the new address",
             (
@@ -434,8 +485,7 @@ if server == "mvfst" and client == "coquic":
             ),
         )
     if "crosstraffic" in requested_tests:
-        adjust_failed_entry(
-            "measurements",
+        adjust_failed_measurement(
             "crosstraffic",
             "peer resets crosstraffic response stream",
             (
@@ -707,14 +757,19 @@ run_direction() {
     return 1
   fi
 
-  if ! validate_official_results "${results_json}" "${server}" "${client}" "${requested_testcases}"; then
+  if ! validate_official_results \
+    "${results_json}" "${server}" "${client}" "${requested_testcases}" \
+    "succeeded,unsupported,peer_broken,failed"
+  then
     show_runner_output_tail "${runner_output_log}"
     return 1
   fi
 
   apply_official_result_compatibility_adjustments \
     "${results_json}" "${server}" "${client}" "${requested_testcases}"
-  validate_official_results "${results_json}" "${server}" "${client}" "${requested_testcases}"
+  validate_official_results \
+    "${results_json}" "${server}" "${client}" "${requested_testcases}" \
+    "succeeded,unsupported,peer_broken,failed"
 
   if [ "${interop_retry_failed_testcases}" = "1" ]; then
     mapfile -t retry_testcases < <(
@@ -777,7 +832,9 @@ run_direction() {
       mark_official_testcases_recovered "${results_json}" "${recovered_testcases[@]}"
       apply_official_result_compatibility_adjustments \
         "${results_json}" "${server}" "${client}" "${requested_testcases}"
-      validate_official_results "${results_json}" "${server}" "${client}" "${requested_testcases}"
+      validate_official_results \
+        "${results_json}" "${server}" "${client}" "${requested_testcases}" \
+        "succeeded,unsupported,peer_broken,failed"
     fi
     if [ "${#recovered_testcases[@]}" -ne 0 ]; then
       status=0
@@ -820,6 +877,8 @@ run_direction() {
   if [ "${#remaining_failed_testcases[@]}" -ne 0 ]; then
     return 1
   fi
+
+  validate_official_results "${results_json}" "${server}" "${client}" "${requested_testcases}"
 }
 
 cleanup_runner_state

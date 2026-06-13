@@ -11,17 +11,17 @@ using quic::CipherSuite;
 using quic::QuicTransportConfig;
 
 constexpr std::uint64_t kHttp09InteropActiveConnectionIdLimit = 8;
-// The official multiplexing testcase invokes endpoints with TESTCASE=transfer,
-// generates thousands of requests, and rejects server transport parameters
-// above 1000 streams. Use that ceiling so peers can open a large first wave of
-// request streams while still satisfying the runner's transport-parameter check.
-constexpr std::uint64_t kHttp09InteropServerInitialMaxStreamsBidi = 1000;
+// The official multiplexing testcase invokes endpoints with TESTCASE=transfer.
+// Keep the initial stream window moderate and rely on MAX_STREAMS refreshes so
+// peers do not flood thousands of partially-written request streams at once.
+constexpr std::uint64_t kHttp09InteropServerInitialMaxStreamsBidi = 64;
 constexpr int kHttp09InteropClientReceiveTimeoutMs = 30000;
 constexpr int kHttp09InteropMulticonnectClientReceiveTimeoutMs = 180000;
 constexpr std::string_view kHttp09InteropApplicationProtocol = "hq-interop";
 
 constexpr Http09InteropTestcase transfer_profile_testcase(Http09InteropTestcase testcase) {
-    if (testcase == Http09InteropTestcase::keyupdate ||
+    if (testcase == Http09InteropTestcase::multiplexing ||
+        testcase == Http09InteropTestcase::keyupdate ||
         testcase == Http09InteropTestcase::rebind_port ||
         testcase == Http09InteropTestcase::rebind_addr || testcase == Http09InteropTestcase::ecn ||
         testcase == Http09InteropTestcase::connectionmigration) {
@@ -100,6 +100,9 @@ std::optional<Http09InteropTestcase> parse_http09_interop_testcase(std::string_v
     }
     if (value == "transfer" || value == "amplificationlimit") {
         return Http09InteropTestcase::transfer;
+    }
+    if (value == "multiplexing") {
+        return Http09InteropTestcase::multiplexing;
     }
     if (value == "keyupdate") {
         return Http09InteropTestcase::keyupdate;

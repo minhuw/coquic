@@ -4394,6 +4394,31 @@ TEST(QuicCoreTest, ClosingPeerInitiatedBidirectionalStreamRefreshesStreamLimit) 
               coquic::quic::StreamLimitType::bidirectional);
 }
 
+TEST(QuicCoreTest, ClosingHighIndexPeerBidirectionalStreamRefreshesLimitByWindow) {
+    auto connection = make_connected_server_connection();
+    connection.local_transport_parameters_.initial_max_streams_bidi = 4;
+    connection.local_stream_limit_state_.initialize(coquic::quic::PeerStreamOpenLimits{
+        .bidirectional = 4,
+        .unidirectional = connection.local_stream_limit_state_.advertised_max_streams_uni,
+    });
+    auto &stream =
+        connection.streams_
+            .emplace(12, coquic::quic::make_implicit_stream_state(12, connection.config_.role))
+            .first->second;
+
+    stream.peer_fin_delivered = true;
+    stream.send_fin_state = coquic::quic::StreamSendFinState::acknowledged;
+
+    connection.maybe_refresh_peer_stream_limit(stream);
+
+    EXPECT_TRUE(stream.peer_stream_limit_released);
+    ASSERT_TRUE(connection.local_stream_limit_state_.pending_max_streams_bidi_frame.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(
+                  connection.local_stream_limit_state_.pending_max_streams_bidi_frame)
+                  .maximum_streams,
+              8u);
+}
+
 TEST(QuicCoreTest, NonTerminalPeerStreamDoesNotRefreshStreamLimit) {
     auto connection = make_connected_server_connection();
     auto &stream =

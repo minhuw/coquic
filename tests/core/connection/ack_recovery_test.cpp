@@ -2601,6 +2601,57 @@ TEST(QuicCoreTest, InitialProbePacketCanFallbackToPing) {
     EXPECT_FALSE(connection.initial_space_.pending_probe_packet.has_value());
 }
 
+TEST(QuicCoreTest, ClientInitialPingOnlyPtoProbeAfterServerInitialIsPaddedToMinimum) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.source_connection_id = bytes_from_hex("c100000000000003");
+    config.initial_destination_connection_id = bytes_from_hex("8300000000000002");
+    config.max_outbound_datagram_size = 1452;
+    config.transport.pmtud_base_datagram_size = 1452;
+    config.transport.pmtud_max_datagram_size = 1452;
+    config.transport.max_udp_payload_size = 1452;
+
+    coquic::quic::QuicConnection connection(std::move(config));
+    connection.started_ = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.peer_source_connection_id_ = bytes_from_hex("18cc625bc2c9774526890359");
+    connection.initial_space_.recovery.largest_acked_packet_number_ = 2;
+    connection.initial_space_.next_send_packet_number = 5;
+    connection.initial_space_.pending_probe_packet = coquic::quic::SentPacketRecord{
+        .packet_number = 4,
+        .ack_eliciting = true,
+        .in_flight = true,
+        .has_ping = true,
+    };
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(datagram.empty());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
+    // # A client MUST expand the payload of all UDP datagrams carrying Initial
+    // # packets to at least the smallest allowed maximum datagram size of 1200
+    // # bytes by adding PADDING frames to the Initial packet or by coalescing
+    // # the Initial packet; see Section 12.2.
+    EXPECT_GE(datagram.size(), 1200u);
+    EXPECT_LE(datagram.size(), 1452u);
+
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *initial = std::get_if<coquic::quic::ProtectedInitialPacket>(&packets[0]);
+    ASSERT_NE(initial, nullptr);
+    EXPECT_EQ(initial->packet_number, 5u);
+    EXPECT_EQ(initial->packet_number_length, 1u);
+
+    bool saw_ping = false;
+    bool saw_padding = false;
+    for (const auto &frame : initial->frames) {
+        saw_ping = saw_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
+        saw_padding = saw_padding || std::holds_alternative<coquic::quic::PaddingFrame>(frame);
+    }
+    EXPECT_TRUE(saw_ping);
+    EXPECT_TRUE(saw_padding);
+}
+
 TEST(QuicCoreTest, InitialSendPrefersFreshCryptoRangesOverStoredProbeSnapshot) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
     connection.initial_space_.send_crypto.append(coquic::quic::test::bytes_from_string("live"));

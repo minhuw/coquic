@@ -8,7 +8,7 @@ using namespace coquic::http09::test_support;
 
 constexpr std::uint64_t kTransferClientInitialMaxData = 32ull * 1024ull * 1024ull;
 constexpr std::uint64_t kTransferClientInitialMaxStreamData = 16ull * 1024ull * 1024ull;
-constexpr std::uint64_t kTransferServerInitialMaxStreamsBidi = 1000;
+constexpr std::uint64_t kTransferServerInitialMaxStreamsBidi = 64;
 
 void expect_interop_defaults(const coquic::http09::Http09RuntimeConfig &runtime) {
     EXPECT_EQ(runtime.application_protocol, "hq-interop");
@@ -492,6 +492,16 @@ TEST(QuicHttp09InteropTest, RuntimeTreatsAmplificationLimitCliAliasAsTransfer) {
                           "--requests", "https://localhost/a.txt"};
 
     const auto parsed = coquic::interop::parse_http09_interop_args(6, const_cast<char **>(argv));
+    ASSERT_TRUE(parsed.has_value());
+    expect_transfer_transport_profile(optional_ref_or_terminate(parsed));
+}
+
+TEST(QuicHttp09InteropTest, RuntimeTreatsMultiplexingAliasAsTransfer) {
+    const char *argv[] = {"coquic"};
+    ScopedEnvVar role("ROLE", "server");
+    ScopedEnvVar testcase("TESTCASE", "multiplexing");
+
+    const auto parsed = coquic::interop::parse_http09_interop_args(1, const_cast<char **>(argv));
     ASSERT_TRUE(parsed.has_value());
     expect_transfer_transport_profile(optional_ref_or_terminate(parsed));
 }

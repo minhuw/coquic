@@ -541,20 +541,10 @@ void QuicConnection::confirm_handshake() {
     handshake_confirmed_ = true;
     queue_state_change(QuicCoreStateChange::handshake_confirmed);
     issue_spare_connection_ids();
-    if (should_defer_server_handshake_discard_for_ack()) {
-        discard_handshake_packet_space_after_ack_ = true;
-        return;
-    }
     //= https://www.rfc-editor.org/rfc/rfc9001#section-4.9.2
     // # An endpoint MUST discard its Handshake keys when the TLS handshake is
     // # confirmed (Section 4.1.2).
     discard_handshake_packet_space();
-}
-
-bool QuicConnection::should_defer_server_handshake_discard_for_ack() const {
-    return config_.role == EndpointRole::server && !handshake_packet_space_discarded_ &&
-           handshake_space_.write_secret.has_value() &&
-           handshake_space_.received_packets.has_ack_to_send();
 }
 
 PathState &QuicConnection::ensure_path_state(QuicPathId path_id) {
@@ -1638,7 +1628,6 @@ void QuicConnection::discard_initial_packet_space() {
 void QuicConnection::discard_handshake_packet_space() {
     recovery_rtt_state_ = shared_recovery_rtt_state();
     handshake_packet_space_discarded_ = true;
-    discard_handshake_packet_space_after_ack_ = false;
     discard_packet_space_state(handshake_space_);
     //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.2
     // # When Initial or Handshake keys are discarded, the PTO and loss
@@ -3314,19 +3303,23 @@ void QuicConnection::maybe_refresh_peer_stream_limit(StreamState &stream) {
     // # indefinitely if the peer chooses not to send STREAMS_BLOCKED frames.
     stream.peer_stream_limit_released = true;
 
-    const auto limits = peer_stream_open_limits();
     const auto direction_index =
         static_cast<std::size_t>(stream.id_info.direction == StreamDirection::unidirectional);
     constexpr std::array limit_types = {
         StreamLimitType::bidirectional,
         StreamLimitType::unidirectional,
     };
-    const std::array limit_values = {
-        limits.bidirectional + 1,
-        limits.unidirectional + 1,
+    const std::array initial_windows = {
+        local_transport_parameters_.initial_max_streams_bidi,
+        local_transport_parameters_.initial_max_streams_uni,
     };
-    local_stream_limit_state_.queue_max_streams(limit_types[direction_index],
-                                                limit_values[direction_index]);
+    const auto stream_count = (stream.stream_id >> 2u) + 1u;
+    const auto initial_window = std::max<std::uint64_t>(initial_windows[direction_index], 1u);
+    const auto limit_value =
+        stream_count > std::numeric_limits<std::uint64_t>::max() - initial_window
+            ? std::numeric_limits<std::uint64_t>::max()
+            : stream_count + initial_window;
+    local_stream_limit_state_.queue_max_streams(limit_types[direction_index], limit_value);
 }
 
 bool QuicConnection::is_probing_only(std::span<const Frame> frames) const {

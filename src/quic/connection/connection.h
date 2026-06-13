@@ -825,7 +825,6 @@ class QuicConnection {
     CodecResult<bool> validate_peer_transport_parameters_if_ready();
     void update_handshake_status();
     void confirm_handshake();
-    bool should_defer_server_handshake_discard_for_ack() const;
     PathState &ensure_path_state(QuicPathId path_id);
     void start_path_validation(QuicPathId path_id, bool initiated_locally,
                                QuicCoreTimePoint now = QuicCoreClock::now());
@@ -1187,7 +1186,6 @@ class QuicConnection {
     bool initial_packet_space_discarded_ = false;
     bool handshake_packet_space_discarded_ = false;
     bool handshake_confirmed_ = false;
-    bool discard_handshake_packet_space_after_ack_ = false;
     StreamControlFrameState handshake_done_state_ = StreamControlFrameState::none;
     bool handshake_ready_emitted_ = false;
     bool handshake_confirmed_emitted_ = false;

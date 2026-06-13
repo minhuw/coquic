@@ -432,7 +432,7 @@ TEST(QuicCoreTest, ProcessInboundDatagramBuffersOutOfOrderOneRttStreamDataUntilG
         ADD_FAILURE() << "coalesced stream fin was not set";
     }
     ASSERT_TRUE(received_stream.final_size.has_value());
-    EXPECT_EQ(*received_stream.final_size, 5u);
+    EXPECT_EQ(optional_value_or_terminate(received_stream.final_size), 5u);
     EXPECT_TRUE(connection.streams_.at(0).receive_buffer.buffered_bytes_.empty());
 }
 
@@ -555,7 +555,7 @@ TEST(QuicCoreTest, OutOfOrderReceiveModeReportsFinAndFinalSizeOnce) {
     EXPECT_EQ(coquic::quic::test::string_from_bytes(late.payload()), "lo");
     EXPECT_TRUE(late.fin);
     ASSERT_TRUE(late.final_size.has_value());
-    EXPECT_EQ(*late.final_size, 5u);
+    EXPECT_EQ(optional_value_or_terminate(late.final_size), 5u);
     EXPECT_EQ(connection.streams_.at(0).receive_flow_control_consumed, 2u);
     EXPECT_FALSE(connection.streams_.at(0).peer_fin_delivered);
 
@@ -628,7 +628,7 @@ TEST(QuicCoreTest, OutOfOrderReceiveModeReportsEmptyFinFinalSize) {
     EXPECT_TRUE(fin.payload().empty());
     EXPECT_TRUE(fin.fin);
     ASSERT_TRUE(fin.final_size.has_value());
-    EXPECT_EQ(*fin.final_size, 4u);
+    EXPECT_EQ(optional_value_or_terminate(fin.final_size), 4u);
     EXPECT_TRUE(connection.streams_.at(0).peer_fin_delivered);
 }
 

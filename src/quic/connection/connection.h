@@ -557,12 +557,12 @@ class QuicConnection {
                                           std::int32_t priority = 0);
     CodecResult<bool> queue_datagram_send_shared(SharedBytes bytes, std::int32_t priority = 0);
     StreamStateResult<bool> queue_stream_reset(LocalResetCommand command);
-    StreamStateResult<bool> queue_stop_sending(LocalStopSendingCommand command);
+    StreamStateResult<bool> queue_stop_sending(const LocalStopSendingCommand &command);
     CodecResult<bool> request_connection_migration(QuicPathId path_id,
                                                    QuicMigrationRequestReason reason,
                                                    QuicCoreTimePoint now = QuicCoreClock::now());
     void apply_path_mtu_update(QuicPathId path_id, std::size_t max_udp_payload_size);
-    StreamStateResult<bool> queue_application_close(LocalApplicationCloseCommand command);
+    StreamStateResult<bool> queue_application_close(const LocalApplicationCloseCommand &command);
     void queue_new_token(std::vector<std::byte> token);
     void request_key_update();
     DatagramBuffer drain_outbound_datagram(QuicCoreTimePoint now);

@@ -1311,12 +1311,13 @@ NewConnectionIdFrame QuicConnection::issue_local_connection_id(std::uint64_t ret
 }
 
 void QuicConnection::issue_spare_connection_ids() {
-    if (!can_issue_local_connection_id()) {
+    if (!can_issue_local_connection_id() || !peer_transport_parameters_.has_value()) {
         return;
     }
 
+    const auto &peer_transport_parameters = peer_transport_parameters_.value();
     const auto peer_limit =
-        static_cast<std::size_t>(peer_transport_parameters_->active_connection_id_limit);
+        static_cast<std::size_t>(peer_transport_parameters.active_connection_id_limit);
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1.1
     // # An endpoint SHOULD ensure that its peer has a sufficient number of
@@ -1346,10 +1347,11 @@ void QuicConnection::issue_spare_connection_ids() {
 }
 
 bool QuicConnection::request_local_connection_id_rotation() {
-    if (!can_issue_local_connection_id()) {
+    if (!can_issue_local_connection_id() || !peer_transport_parameters_.has_value()) {
         return false;
     }
 
+    const auto &peer_transport_parameters = peer_transport_parameters_.value();
     const auto has_pending_requested_retirement =
         std::ranges::any_of(local_connection_ids_, [](const auto &entry) {
             return !entry.second.retired && entry.second.retirement_requested;
@@ -1363,7 +1365,7 @@ bool QuicConnection::request_local_connection_id_rotation() {
     }
 
     const auto peer_limit =
-        static_cast<std::size_t>(peer_transport_parameters_->active_connection_id_limit);
+        static_cast<std::size_t>(peer_transport_parameters.active_connection_id_limit);
     const auto active_after_retire_prior_to = [&](std::uint64_t retire_prior_to) {
         const auto retained = std::count_if(
             local_connection_ids_.begin(), local_connection_ids_.end(), [&](const auto &entry) {
@@ -1424,8 +1426,13 @@ void QuicConnection::note_local_connection_id_used_by_peer(
         return;
     }
 
+    if (!peer_transport_parameters_.has_value()) {
+        return;
+    }
+
+    const auto &peer_transport_parameters = peer_transport_parameters_.value();
     const auto peer_limit =
-        static_cast<std::size_t>(peer_transport_parameters_->active_connection_id_limit);
+        static_cast<std::size_t>(peer_transport_parameters.active_connection_id_limit);
     if (count_active_connection_ids(local_connection_ids_) >= peer_limit) {
         return;
     }

@@ -1665,11 +1665,12 @@ TEST(QuicCoreTest, AcceptedZeroRttRejectsReducedRememberedMaxDatagramFrameSize) 
 
     const auto serialized_reduced = coquic::quic::serialize_transport_parameters(reduced);
     ASSERT_TRUE(serialized_reduced.has_value());
+    auto &tls = optional_ref_or_terminate(connection.tls_);
     coquic::quic::test::TlsAdapterTestPeer::set_peer_transport_parameters(
-        *connection.tls_, serialized_reduced.value());
-    coquic::quic::test::TlsAdapterTestPeer::set_early_data_attempted(*connection.tls_, true);
-    coquic::quic::test::TlsAdapterTestPeer::apply_early_data_status(*connection.tls_,
-                                                                    SSL_EARLY_DATA_ACCEPTED, true);
+        tls, serialized_reduced.value());
+    coquic::quic::test::TlsAdapterTestPeer::set_early_data_attempted(tls, true);
+    coquic::quic::test::TlsAdapterTestPeer::apply_early_data_status(tls, SSL_EARLY_DATA_ACCEPTED,
+                                                                    true);
 
     auto validated = connection.validate_peer_transport_parameters_if_ready();
 

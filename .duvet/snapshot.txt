@@ -1930,8 +1930,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9001
     TEXT[!MUST,implementation]:    Initial packets after this point.
 
   SECTION: [Discarding Handshake Keys](#section-4.9.2)
-    TEXT[!MUST,implementation]:    An endpoint MUST discard its Handshake keys when the TLS handshake is
-    TEXT[!MUST,implementation]:    confirmed (Section 4.1.2).
+    TEXT[!MUST,implementation,test]:    An endpoint MUST discard its Handshake keys when the TLS handshake is
+    TEXT[!MUST,implementation,test]:    confirmed (Section 4.1.2).
 
   SECTION: [Discarding 0-RTT Keys](#section-4.9.3)
     TEXT[!SHOULD,implementation]:    Therefore, a client SHOULD discard 0-RTT keys as soon as it installs

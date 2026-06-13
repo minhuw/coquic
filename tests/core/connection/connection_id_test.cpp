@@ -1147,8 +1147,9 @@ TEST(QuicCoreTest, PreferredAddressFirstUseReplenishesSequenceTwoWithUniqueReset
     EXPECT_EQ(frame.sequence_number, 2u);
     EXPECT_EQ(frame.retire_prior_to, 0u);
     EXPECT_TRUE(connection.local_connection_ids_.at(1).used_by_peer);
-    EXPECT_EQ(connection.local_connection_ids_.at(1).connection_id,
-              connection.config_.transport.preferred_address->connection_id);
+    EXPECT_EQ(
+        connection.local_connection_ids_.at(1).connection_id,
+        optional_ref_or_terminate(connection.config_.transport.preferred_address).connection_id);
 
     std::set<std::array<std::byte, 16>> stateless_reset_tokens;
     for (const auto &[sequence_number, record] : connection.local_connection_ids_) {
@@ -1322,8 +1323,9 @@ TEST(QuicCoreTest, ProactiveRotationHonorsPreferredAddressSequenceOne) {
     EXPECT_EQ(frame.retire_prior_to, 1u);
     EXPECT_TRUE(connection.local_connection_ids_.at(0).retirement_requested);
     EXPECT_FALSE(connection.local_connection_ids_.at(1).retirement_requested);
-    EXPECT_EQ(connection.local_connection_ids_.at(1).connection_id,
-              connection.config_.transport.preferred_address->connection_id);
+    EXPECT_EQ(
+        connection.local_connection_ids_.at(1).connection_id,
+        optional_ref_or_terminate(connection.config_.transport.preferred_address).connection_id);
     EXPECT_EQ(peer_visible_local_connection_id_count_after_retire_prior_to(connection,
                                                                            frame.retire_prior_to),
               2u);

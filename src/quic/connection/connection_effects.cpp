@@ -91,7 +91,7 @@ CodecResult<bool> QuicConnection::queue_datagram_send(std::span<const std::byte>
         SharedBytes(std::vector<std::byte>(bytes.begin(), bytes.end())), priority);
 }
 
-StreamStateResult<bool> QuicConnection::queue_stop_sending(LocalStopSendingCommand command) {
+StreamStateResult<bool> QuicConnection::queue_stop_sending(const LocalStopSendingCommand &command) {
     if (status_ == HandshakeStatus::failed) {
         return StreamStateResult<bool>::success(true);
     }
@@ -117,7 +117,7 @@ StreamStateResult<bool> QuicConnection::queue_stop_sending(LocalStopSendingComma
 }
 
 StreamStateResult<bool>
-QuicConnection::queue_application_close(LocalApplicationCloseCommand command) {
+QuicConnection::queue_application_close(const LocalApplicationCloseCommand &command) {
     if (status_ == HandshakeStatus::failed) {
         return StreamStateResult<bool>::success(true);
     }

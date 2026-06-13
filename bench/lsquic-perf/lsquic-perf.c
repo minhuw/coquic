@@ -1402,6 +1402,9 @@ static void client_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
 static void client_on_close(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     (void)stream;
     struct lsquic_stream_ctx *stream_ctx = h;
+    if (!stream_ctx) {
+        return;
+    }
     DEBUG_LOG("client close completed=%d response=%" PRIu64 "/%" PRIu64 "\n", stream_ctx->completed,
               stream_ctx->response_read, stream_ctx->response_bytes);
     client_state_t *state = stream_ctx->state;

@@ -615,8 +615,10 @@ apply_official_result_compatibility_adjustments() {
   local server=$2
   local client=$3
   local requested_testcases=$4
+  local known_broken_result=${5:-}
 
-  python3 - "${results_json}" "${server}" "${client}" "${requested_testcases}" <<'PY'
+  python3 - "${results_json}" "${server}" "${client}" "${requested_testcases}" \
+    "${known_broken_result}" <<'PY'
 import json
 import pathlib
 import sys
@@ -625,11 +627,69 @@ results_path = pathlib.Path(sys.argv[1])
 server = sys.argv[2]
 client = sys.argv[3]
 requested_tests = {test for test in sys.argv[4].split(",") if test}
+known_broken_path = pathlib.Path(sys.argv[5]) if sys.argv[5] else None
 
 data = json.loads(results_path.read_text())
 adjustments = list(data.get("coquic_compat_adjustments", []))
 
+def known_broken_testcases(path, server, client):
+    if path is None or not path.is_file() or not server or not client:
+        return set()
+    upstream = json.loads(path.read_text())
+    servers = upstream.get("servers", [])
+    clients = upstream.get("clients", [])
+    if not isinstance(servers, list) or not isinstance(clients, list) or not servers:
+        return set()
+    observations = {}
+    for field_name in ("results", "measurements"):
+        cells = upstream.get(field_name, [])
+        if not isinstance(cells, list):
+            continue
+        for index, entries in enumerate(cells):
+            if not isinstance(entries, list):
+                continue
+            upstream_server = servers[index % len(servers)]
+            upstream_client = clients[index // len(servers)]
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                result = entry.get("result")
+                if not isinstance(name, str) or not isinstance(result, str):
+                    continue
+                for role, peer in (("client", upstream_client), ("server", upstream_server)):
+                    observed = observations.setdefault(
+                        (role, peer, name), {"failed": 0, "succeeded": 0, "other": 0}
+                    )
+                    if result == "failed":
+                        observed["failed"] += 1
+                    elif result == "succeeded":
+                        observed["succeeded"] += 1
+                    elif result not in {"unsupported", "peer_broken"}:
+                        observed["other"] += 1
+    if server == "coquic":
+        local_role = "client"
+        local_peer = client
+    elif client == "coquic":
+        local_role = "server"
+        local_peer = server
+    else:
+        return set()
+    return {
+        name
+        for (role, peer, name), observed in observations.items()
+        if role == local_role
+        and peer == local_peer
+        and observed["failed"] > 0
+        and observed["succeeded"] == 0
+        and observed["other"] == 0
+    }
+
+known_broken = known_broken_testcases(known_broken_path, server, client)
+
 def adjust_failed_entry(matrix_name, testcase, public_reason, evidence):
+    if testcase in known_broken:
+        return
     matrix = data.get(matrix_name, [[]])
     if not matrix or not isinstance(matrix[0], list):
         return
@@ -986,7 +1046,8 @@ run_direction() {
   fi
 
   apply_official_result_compatibility_adjustments \
-    "${results_json}" "${server}" "${client}" "${requested_testcases}"
+    "${results_json}" "${server}" "${client}" "${requested_testcases}" \
+    "${interop_known_broken_result}"
   validate_official_results \
     "${results_json}" "${server}" "${client}" "${requested_testcases}" \
     "succeeded,unsupported,peer_broken,failed"
@@ -1052,7 +1113,8 @@ run_direction() {
     if [ "${#recovered_testcases[@]}" -ne 0 ]; then
       mark_official_testcases_recovered "${results_json}" "${recovered_testcases[@]}"
       apply_official_result_compatibility_adjustments \
-        "${results_json}" "${server}" "${client}" "${requested_testcases}"
+        "${results_json}" "${server}" "${client}" "${requested_testcases}" \
+        "${interop_known_broken_result}"
       validate_official_results \
         "${results_json}" "${server}" "${client}" "${requested_testcases}" \
         "succeeded,unsupported,peer_broken,failed"

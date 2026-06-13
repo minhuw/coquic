@@ -386,6 +386,59 @@ if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustm
     raise SystemExit("expected compatibility adjustments to include reason and evidence")
 PY
 
+xquic_client_known_broken_results="${tmpdir}/xquic-client-known-broken-results.json"
+cat >"${xquic_client_known_broken_results}" <<'JSON'
+{
+  "servers": ["coquic"],
+  "clients": ["xquic"],
+  "results": [[
+    {"name": "connectionmigration", "result": "failed"}
+  ]],
+  "measurements": [[
+    {"name": "crosstraffic", "result": "failed"}
+  ]]
+}
+JSON
+
+xquic_known_results="${tmpdir}/xquic-known-results.json"
+cat >"${xquic_known_results}" <<'JSON'
+{
+  "servers": ["coquic"],
+  "clients": ["xquic"],
+  "results": [[
+    {"name": "connectionmigration", "result": "failed"},
+    {"name": "retry", "result": "succeeded"},
+    {"name": "transfer", "result": "succeeded"}
+  ]],
+  "measurements": [[
+    {"name": "crosstraffic", "result": "failed"}
+  ]]
+}
+JSON
+
+apply_official_result_compatibility_adjustments \
+  "${xquic_known_results}" coquic xquic connectionmigration,transfer,crosstraffic \
+  "${xquic_client_known_broken_results}"
+
+python3 - "${xquic_known_results}" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+xquic_crosstraffic = next(
+    entry for entry in data["measurements"][0]
+    if entry["name"] == "crosstraffic"
+)
+if xquic_crosstraffic["result"] != "failed":
+    raise SystemExit("expected upstream-known xquic crosstraffic to remain failed")
+if "details" in xquic_crosstraffic or "evidence" in xquic_crosstraffic:
+    raise SystemExit("expected upstream-known xquic crosstraffic to avoid local peer-broken metadata")
+adjustments = data.get("coquic_compat_adjustments", [])
+if any(entry.get("name") == "crosstraffic" for entry in adjustments):
+    raise SystemExit("expected no local adjustment audit entry for upstream-known xquic crosstraffic")
+PY
+
 xquic_server_results="${tmpdir}/xquic-server-results.json"
 cat >"${xquic_server_results}" <<'JSON'
 {

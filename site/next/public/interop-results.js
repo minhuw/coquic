@@ -113,7 +113,7 @@ function laneSortKey(source) {
 }
 
 function resultToken(result) {
-  if (result === "succeeded") {
+  if (result === "succeeded" || isPeerBrokenResult(result)) {
     return "pass";
   }
   if (result === "failed") {
@@ -132,24 +132,25 @@ function isKnownBrokenFailure(row, result) {
   return result === "failed" && row && row.known_broken;
 }
 
+function isDisplaySuccess(row, result) {
+  return result === "succeeded" || isPeerBrokenResult(result) || isKnownBrokenFailure(row, result);
+}
+
 function resultTokenForRow(row, result) {
-  if (isKnownBrokenFailure(row, result)) {
-    return "kb";
+  if (isDisplaySuccess(row, result)) {
+    return "pass";
   }
   return resultToken(result);
 }
 
 function resultClass(result, row) {
-  if (isKnownBrokenFailure(row, result)) {
-    return "known-broken";
+  if (isDisplaySuccess(row, result)) {
+    return "succeeded";
   }
   if (isSkippedResult(result)) {
     return "unsupported";
   }
-  if (isPeerBrokenResult(result)) {
-    return "peer-broken";
-  }
-  if (result === "succeeded" || result === "failed") {
+  if (result === "failed") {
     return result;
   }
   return "unknown";
@@ -172,7 +173,7 @@ function knownBrokenTitle(row) {
   const supported = known.supported_peers ?? failed;
   const unsupported = known.unsupported_peers ?? 0;
   const run = known.run || "latest";
-  return ` Known peer-broken: upstream ${known.peer || row.peer} ${known.role || "peer"} fails ${known.case || row.name} against ${failed}/${supported} supported peers in ${known.source || "upstream"} run ${run}${unsupported ? `; ${unsupported} unsupported upstream peers` : ""}.`;
+  return ` Upstream compatibility note: ${known.peer || row.peer} ${known.role || "peer"} fails ${known.case || row.name} against ${failed}/${supported} supported peers in ${known.source || "upstream"} run ${run}${unsupported ? `; ${unsupported} unsupported upstream peers` : ""}.`;
 }
 
 function implementationDisplayName(name) {
@@ -180,17 +181,11 @@ function implementationDisplayName(name) {
 }
 
 function resultLabel(result, row) {
-  if (isKnownBrokenFailure(row, result)) {
-    return "known peer-broken";
+  if (isDisplaySuccess(row, result)) {
+    return "pass";
   }
   if (isSkippedResult(result)) {
     return "unsupported";
-  }
-  if (isPeerBrokenResult(result)) {
-    return "peer-broken";
-  }
-  if (result === "succeeded") {
-    return "pass";
   }
   if (result === "failed") {
     return "failed";
@@ -323,31 +318,22 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
   let sawUnknown = false;
   let sawSucceeded = false;
   let sawUnsupported = false;
-  let sawPeerBroken = false;
   for (const test of tests) {
     const row = rowByLaneAndTest.get(`${laneKey}:${test}`);
     if (!row) {
       continue;
     }
     const result = row.result || "unknown";
-    if (result === "failed") {
-      if (isKnownBrokenFailure(row, result)) {
-        sawSucceeded = true;
-        continue;
-      }
-      sawFailed = true;
+    if (isDisplaySuccess(row, result)) {
+      sawSucceeded = true;
       continue;
     }
     if (isSkippedResult(result)) {
       sawUnsupported = true;
       continue;
     }
-    if (isPeerBrokenResult(result)) {
-      sawPeerBroken = true;
-      continue;
-    }
-    if (result === "succeeded") {
-      sawSucceeded = true;
+    if (result === "failed") {
+      sawFailed = true;
       continue;
     }
     sawUnknown = true;
@@ -358,9 +344,6 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
   if (sawUnknown) {
     return "unknown";
   }
-  if (sawPeerBroken) {
-    return "peer_broken";
-  }
   if (sawSucceeded) {
     return "succeeded";
   }
@@ -368,17 +351,11 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
 }
 
 function legendCategoryForResult(result, row) {
-  if (isKnownBrokenFailure(row, result)) {
-    return "known-broken";
+  if (isDisplaySuccess(row, result)) {
+    return "pass";
   }
   if (isSkippedResult(result)) {
     return "unsupported";
-  }
-  if (isPeerBrokenResult(result)) {
-    return "peer-broken";
-  }
-  if (result === "succeeded") {
-    return "pass";
   }
   if (result === "failed") {
     return "failed";
@@ -390,9 +367,7 @@ function updateLegendCounts(lanes, tests, rowByLaneAndTest) {
   const counts = {
     pass: 0,
     unsupported: 0,
-    "peer-broken": 0,
     failed: 0,
-    "known-broken": 0,
     "not-reported": 0,
   };
 

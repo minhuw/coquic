@@ -249,6 +249,38 @@ for test in requested_tests:
 PY
 }
 
+failed_official_testcases() {
+  local results_json=$1
+  local requested_testcases=$2
+
+  python3 - "${results_json}" "${requested_testcases}" <<'PY'
+import json
+import pathlib
+import sys
+
+results_path = pathlib.Path(sys.argv[1])
+requested_tests = [test for test in sys.argv[2].split(",") if test]
+
+data = json.loads(results_path.read_text())
+
+def collect(matrix):
+    if len(matrix) != 1 or not isinstance(matrix[0], list):
+        return {}
+    return {
+        entry.get("name"): entry.get("result")
+        for entry in matrix[0]
+        if isinstance(entry, dict)
+    }
+
+testcase_results = collect(data.get("results", []))
+measurement_results = collect(data.get("measurements", []))
+
+for test in requested_tests:
+    if testcase_results.get(test) == "failed" or measurement_results.get(test) == "failed":
+        print(test)
+PY
+}
+
 logged_official_testcases() {
   local results_json=$1
   local requested_testcases=$2
@@ -624,6 +656,7 @@ run_direction() {
   local testcase_log_dir
   local retry_testcases=()
   local recovered_testcases=()
+  local remaining_failed_testcases=()
 
   cleanup_runner_state
   rm -rf "${direction_log_dir}"
@@ -751,15 +784,25 @@ run_direction() {
     fi
   fi
 
+  mapfile -t remaining_failed_testcases < <(
+    failed_official_testcases "${results_json}" "${requested_testcases}"
+  )
+
   if [ -d "${runner_log_dir}/${server}_${client}" ]; then
     mv "${runner_log_dir}/${server}_${client}" "${direction_log_dir}/${server}_${client}"
   fi
   rmdir "${runner_log_dir}" >/dev/null 2>&1 || true
 
-  if [ "${status}" -ne 0 ]; then
-    echo "Official runner exited with status ${status} after producing complete results for ${server}/${client}." >&2
-    echo "Preserving the result matrix instead of failing CI on interop testcase outcomes." >&2
+  if [ "${#remaining_failed_testcases[@]}" -ne 0 ]; then
+    echo \
+      "Official runner produced failed requested testcase outcomes for ${server}/${client}: " \
+      "${remaining_failed_testcases[*]}" >&2
+    echo "Preserving the result matrix and returning failure so CI reports interop testcase outcomes." >&2
     show_runner_output_tail "${runner_output_log}"
+  elif [ "${status}" -ne 0 ]; then
+    echo \
+      "Official runner exited with status ${status} after producing complete non-failed results for ${server}/${client}." \
+      >&2
   fi
 
   if [ "${interop_preserve_testcase_logs}" = "1" ]; then
@@ -773,6 +816,10 @@ run_direction() {
   fi
 
   cleanup_runner_state
+
+  if [ "${#remaining_failed_testcases[@]}" -ne 0 ]; then
+    return 1
+  fi
 }
 
 cleanup_runner_state

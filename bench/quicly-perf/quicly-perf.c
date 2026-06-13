@@ -1037,8 +1037,9 @@ static void configure_context(const config_t *cfg, int server) {
     context->transport_params.max_stream_data.bidi_local = TRANSFER_STREAM_WINDOW;
     context->transport_params.max_stream_data.bidi_remote = TRANSFER_STREAM_WINDOW;
     context->transport_params.max_stream_data.uni = TRANSFER_STREAM_WINDOW;
-    uint64_t max_streams_bidi = is_mode(cfg, "rr") ? cfg->requests_in_flight * cfg->connections
-                                                   : cfg->streams * cfg->connections;
+    uint64_t max_streams_bidi = (is_mode(cfg, "rr") || is_mode(cfg, "persistent-rr"))
+                                    ? cfg->requests_in_flight * cfg->connections
+                                    : cfg->streams * cfg->connections;
     if (max_streams_bidi < 100) {
         max_streams_bidi = 100;
     }

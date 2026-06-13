@@ -1016,7 +1016,7 @@ impl Client<'_> {
         if self.phase == BenchmarkPhase::Measure && now >= self.measure_deadline {
             self.enter_drain_phase(now).await?;
         }
-        self.force_close_timed_bulk_drain(now).await?;
+        self.force_close_timed_drain(now).await?;
         Ok(())
     }
 
@@ -1034,30 +1034,44 @@ impl Client<'_> {
         }
     }
 
-    async fn force_close_timed_bulk_drain(&mut self, now: u64) -> Result<()> {
-        if !self.timed_bulk_mode() || self.phase != BenchmarkPhase::Drain {
-            return Ok(());
+    async fn force_close_timed_drain(&mut self, now: u64) -> Result<()> {
+        for command in self.force_close_timed_drain_commands(now)? {
+            if let Some(result) = self.execute_command(command, now)? {
+                self.handle_result(result, now).await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn force_close_timed_drain_commands(&mut self, now: u64) -> Result<Vec<ClientCommand>> {
+        if !self.timed_mode() || self.phase != BenchmarkPhase::Drain {
+            return Ok(Vec::new());
         }
         if !self
             .drain_deadline
             .map(|deadline| now >= deadline)
             .unwrap_or(false)
         {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
+        let mut commands = Vec::new();
         let handles: Vec<_> = self.connections.keys().copied().collect();
         for handle in handles {
-            if let Some(state) = self.connections.get_mut(&handle) {
-                state.active_bulk_streams.clear();
-            }
-            for command in self.maybe_close_bulk_connection(handle)? {
-                if let Some(result) = self.execute_command(command, now)? {
-                    self.handle_result(result, now).await?;
+            let next = match self.config.mode {
+                Mode::Bulk => {
+                    if let Some(state) = self.connections.get_mut(&handle) {
+                        state.active_bulk_streams.clear();
+                    }
+                    self.maybe_close_bulk_connection(handle)?
                 }
-            }
+                Mode::Rr => self.maybe_close_rr_connection(handle)?,
+                Mode::PersistentRr => self.maybe_close_persistent_rr_connection(handle)?,
+                Mode::Crr => self.maybe_close_crr_connection(handle)?,
+            };
+            commands.extend(next);
         }
-        Ok(())
+        Ok(commands)
     }
 
     fn maybe_start_timed_benchmark(&mut self, now: u64) {
@@ -1097,7 +1111,7 @@ impl Client<'_> {
         }
         self.phase = BenchmarkPhase::Drain;
         self.summary.elapsed_ms = duration_millis(self.result_elapsed(now));
-        if self.timed_bulk_mode() {
+        if self.timed_mode() {
             self.drain_deadline =
                 Some(now.saturating_add(duration_us(self.config.duration.min(DRAIN_TIMEOUT))));
         }
@@ -1160,13 +1174,7 @@ impl Client<'_> {
                 .benchmark_started_at
                 .map(|started| started.saturating_add(duration_us(self.config.warmup))),
             BenchmarkPhase::Measure => Some(self.measure_deadline),
-            BenchmarkPhase::Drain => {
-                if self.timed_bulk_mode() {
-                    self.drain_deadline
-                } else {
-                    None
-                }
-            }
+            BenchmarkPhase::Drain => self.drain_deadline,
         }
     }
 
@@ -1378,6 +1386,106 @@ mod tests {
         config.mode = Mode::Rr;
         config.requests = Some(10);
         assert_eq!(target_for_test(&config), 1);
+    }
+
+    #[tokio::test]
+    async fn timed_persistent_rr_drain_schedules_deadline() {
+        let mut config = PerfConfig::default();
+        config.role = crate::config::Role::Client;
+        config.mode = Mode::PersistentRr;
+        config.duration = Duration::from_secs(45);
+        let mut endpoint = Endpoint::new(&client_endpoint_config(&config)).unwrap();
+        let (mut io, primary_route, primary_identity) =
+            UdpRuntime::client(&config.host, config.port, config.max_outbound_datagram_size)
+                .await
+                .unwrap();
+
+        let mut client = Client {
+            config: config.clone(),
+            endpoint: &mut endpoint,
+            io: &mut io,
+            primary_route,
+            primary_identity,
+            connections: HashMap::new(),
+            closing_connections: HashSet::new(),
+            closed_connections: HashSet::new(),
+            requests_started: 0,
+            crr_requests_opened: 0,
+            next_connection_index: 0,
+            phase: BenchmarkPhase::Measure,
+            run_started_at: 0,
+            benchmark_started_at: Some(1_000),
+            measure_started_at: 1_000,
+            measure_deadline: 2_000,
+            drain_deadline: None,
+            summary: new_run_summary(&config),
+        };
+
+        client.enter_drain_phase(2_000).await.unwrap();
+
+        assert_eq!(
+            client.drain_deadline,
+            Some(2_000 + duration_us(DRAIN_TIMEOUT))
+        );
+        assert_eq!(
+            client.benchmark_next_wakeup(),
+            Some(2_000 + duration_us(DRAIN_TIMEOUT))
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_persistent_rr_drain_deadline_forces_close_with_pending_responses() {
+        let mut config = PerfConfig::default();
+        config.role = crate::config::Role::Client;
+        config.mode = Mode::PersistentRr;
+        let mut endpoint = Endpoint::new(&client_endpoint_config(&config)).unwrap();
+        let (mut io, primary_route, primary_identity) =
+            UdpRuntime::client(&config.host, config.port, config.max_outbound_datagram_size)
+                .await
+                .unwrap();
+
+        let mut state = ConnectionState::new(1, None);
+        state.persistent_rr_fin_sent = true;
+        state
+            .persistent_rr_outstanding_requests
+            .push_back(OutstandingRequest {
+                started_at: 1_000,
+                counts_toward_measurement: true,
+            });
+
+        let mut client = Client {
+            config: config.clone(),
+            endpoint: &mut endpoint,
+            io: &mut io,
+            primary_route,
+            primary_identity,
+            connections: HashMap::from([(1, state)]),
+            closing_connections: HashSet::new(),
+            closed_connections: HashSet::new(),
+            requests_started: 0,
+            crr_requests_opened: 0,
+            next_connection_index: 0,
+            phase: BenchmarkPhase::Drain,
+            run_started_at: 0,
+            benchmark_started_at: Some(1_000),
+            measure_started_at: 1_000,
+            measure_deadline: 2_000,
+            drain_deadline: Some(4_000),
+            summary: new_run_summary(&config),
+        };
+
+        let commands = client.force_close_timed_drain_commands(3_999).unwrap();
+        assert!(commands.is_empty());
+        assert!(!client.connections.get(&1).unwrap().close_requested);
+
+        let commands = client.force_close_timed_drain_commands(4_000).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            &commands[0],
+            ClientCommand::Close { connection, .. } if *connection == 1
+        ));
+        assert!(client.connections.get(&1).unwrap().close_requested);
+        assert!(client.closing_connections.contains(&1));
     }
 
     fn target_for_test(config: &PerfConfig) -> usize {

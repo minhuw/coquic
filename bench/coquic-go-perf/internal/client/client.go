@@ -891,7 +891,7 @@ func (c *Client) advanceBenchmarkPhase(now coquic.TimeUs) error {
 			return err
 		}
 	}
-	return c.forceCloseTimedBulkDrain(now)
+	return c.forceCloseTimedDrain(now)
 }
 
 func (c *Client) advanceBenchmarkPhaseSync(now coquic.TimeUs) {
@@ -904,37 +904,58 @@ func (c *Client) advanceBenchmarkPhaseSync(now coquic.TimeUs) {
 	}
 }
 
-func (c *Client) forceCloseTimedBulkDrain(now coquic.TimeUs) error {
-	if !c.timedBulkMode() || c.phase != phaseDrain {
-		return nil
+func (c *Client) forceCloseTimedDrain(now coquic.TimeUs) error {
+	commands, err := c.forceCloseTimedDrainCommands(now)
+	if err != nil {
+		return err
+	}
+	for _, command := range commands {
+		result, err := c.executeCommand(command, now)
+		if err != nil {
+			return err
+		}
+		if err := c.handleResult(result, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) forceCloseTimedDrainCommands(now coquic.TimeUs) ([]clientCommand, error) {
+	if !c.timedMode() || c.phase != phaseDrain {
+		return nil, nil
 	}
 	if c.drainDeadline == nil || now < *c.drainDeadline {
-		return nil
+		return nil, nil
 	}
 
+	commands := make([]clientCommand, 0, len(c.connections))
 	handles := make([]coquic.ConnectionHandle, 0, len(c.connections))
 	for handle := range c.connections {
 		handles = append(handles, handle)
 	}
 	for _, handle := range handles {
-		if state := c.connections[handle]; state != nil {
-			clear(state.activeBulkStreams)
+		var next []clientCommand
+		var err error
+		switch c.config.Mode {
+		case config.ModeBulk:
+			if state := c.connections[handle]; state != nil {
+				clear(state.activeBulkStreams)
+			}
+			next, err = c.maybeCloseBulkConnection(handle)
+		case config.ModeRR:
+			next, err = c.maybeCloseRRConnection(handle)
+		case config.ModePersistentRR:
+			next, err = c.maybeClosePersistentRRConnection(handle)
+		case config.ModeCRR:
+			next, err = c.maybeCloseCRRConnection(handle)
 		}
-		commands, err := c.maybeCloseBulkConnection(handle)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		for _, command := range commands {
-			result, err := c.executeCommand(command, now)
-			if err != nil {
-				return err
-			}
-			if err := c.handleResult(result, now); err != nil {
-				return err
-			}
-		}
+		commands = append(commands, next...)
 	}
-	return nil
+	return commands, nil
 }
 
 func (c *Client) maybeStartTimedBenchmark(now coquic.TimeUs) {
@@ -975,7 +996,7 @@ func (c *Client) enterDrainPhase(now coquic.TimeUs) error {
 	}
 	c.phase = phaseDrain
 	c.summary.ElapsedMs = metrics.DurationMillis(c.resultElapsed(now))
-	if c.timedBulkMode() {
+	if c.timedMode() {
 		drain := c.config.Duration
 		if drain > drainTimeout {
 			drain = drainTimeout
@@ -1050,7 +1071,7 @@ func (c *Client) benchmarkNextWakeup() (coquic.TimeUs, bool) {
 	case phaseMeasure:
 		return c.measureDeadline, true
 	case phaseDrain:
-		if c.timedBulkMode() && c.drainDeadline != nil {
+		if c.drainDeadline != nil {
 			return *c.drainDeadline, true
 		}
 	}

@@ -1328,11 +1328,19 @@ TEST(QuicHttp3BootstrapTest, StopRequestedWakeupExitsCleanly) {
     ASSERT_NE(bootstrap_port, 0);
 
     std::atomic<bool> stop_requested = false;
+    std::atomic<bool> listener_ready = false;
     const auto config = make_bootstrap_config(document_root.path(), bootstrap_port);
     auto future = std::async(std::launch::async, run_bootstrap_server_guarded, config,
-                             &stop_requested, nullptr);
+                             &stop_requested, &listener_ready);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+    const auto startup_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (!listener_ready.load(std::memory_order_acquire) &&
+           future.wait_for(std::chrono::milliseconds{0}) != std::future_status::ready) {
+        ASSERT_LT(std::chrono::steady_clock::now(), startup_deadline);
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    ASSERT_TRUE(listener_ready.load(std::memory_order_acquire));
+
     stop_requested.store(true);
     ASSERT_TRUE(wake_bootstrap_listener("127.0.0.1", bootstrap_port));
 

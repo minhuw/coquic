@@ -1725,8 +1725,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]:    SHOULD track cost of processing relative to progress and treat
     TEXT[!SHOULD,implementation,test]:    excessive quantities of any non-productive packets as indicative of
     TEXT[!SHOULD,implementation,test]:    an attack.
-    TEXT[!MAY,implementation]: Endpoints MAY respond to this condition with a connection
-    TEXT[!MAY,implementation]:    error or by dropping packets.
+    TEXT[!MAY,implementation,test]: Endpoints MAY respond to this condition with a connection
+    TEXT[!MAY,implementation,test]:    error or by dropping packets.
 
   SECTION: [Stateless Reset Oracle](#section-21.11)
     TEXT[!MUST,exception]: To defend

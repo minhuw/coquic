@@ -189,10 +189,12 @@ class coquic_endpoint_config_t(C.Structure):
     _fields_ = [
         ("size", C.c_size_t),
         ("role", C.c_uint8),
+        ("reserved_role_padding", C.c_uint8 * 7),
         ("supported_versions", C.POINTER(C.c_uint32)),
         ("supported_versions_count", C.c_size_t),
         ("verify_peer", C.c_uint8),
         ("retry_enabled", C.c_uint8),
+        ("reserved_retry_padding", C.c_uint8 * 6),
         ("application_protocol", C.POINTER(C.c_char)),
         ("application_protocol_length", C.c_size_t),
         ("identity", C.POINTER(coquic_tls_identity_t)),
@@ -202,10 +204,13 @@ class coquic_endpoint_config_t(C.Structure):
         ("emit_shared_receive_stream_data", C.c_uint8),
         ("enable_packet_inspection", C.c_uint8),
         ("allow_peer_address_change", C.c_uint8),
+        ("reserved_server_connections_padding", C.c_uint8 * 5),
         ("max_server_connections", C.c_size_t),
         ("enable_out_of_order_receive", C.c_uint8),
+        ("reserved_orphan_zero_rtt_padding", C.c_uint8 * 7),
         ("orphan_zero_rtt_buffer", coquic_orphan_zero_rtt_buffer_config_t),
         ("enable_reserved_version_probe", C.c_uint8),
+        ("reserved_endpoint_config_tail_padding", C.c_uint8 * 7),
     ]
 
 

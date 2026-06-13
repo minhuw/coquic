@@ -491,10 +491,12 @@ impl EndpointConfig {
             config: ffi::coquic_endpoint_config_t {
                 size: std::mem::size_of::<ffi::coquic_endpoint_config_t>(),
                 role: self.role.into_raw(),
+                reserved_role_padding: [0; 7],
                 supported_versions: self.supported_versions.as_ptr(),
                 supported_versions_count: self.supported_versions.len(),
                 verify_peer: self.verify_peer as u8,
                 retry_enabled: self.retry_enabled as u8,
+                reserved_retry_padding: [0; 6],
                 application_protocol: self.application_protocol.as_ptr().cast::<c_char>(),
                 application_protocol_length: self.application_protocol.len(),
                 identity: std::ptr::null(),
@@ -507,7 +509,10 @@ impl EndpointConfig {
                 enable_packet_inspection: self.enable_packet_inspection as u8,
                 enable_reserved_version_probe: self.enable_reserved_version_probe as u8,
                 allow_peer_address_change: self.allow_peer_address_change as u8,
+                reserved_server_connections_padding: [0; 5],
                 max_server_connections: 0,
+                reserved_orphan_zero_rtt_padding: [0; 7],
+                reserved_endpoint_config_tail_padding: [0; 7],
             },
             _marker: PhantomData,
         }

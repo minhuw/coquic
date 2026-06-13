@@ -834,10 +834,12 @@ void coquic_endpoint_config_init(coquic_endpoint_config_t *config) {
     *config = coquic_endpoint_config_t{
         .size = sizeof(coquic_endpoint_config_t),
         .role = COQUIC_ROLE_CLIENT,
+        .reserved_role_padding = {},
         .supported_versions = nullptr,
         .supported_versions_count = 0,
         .verify_peer = 1,
         .retry_enabled = 0,
+        .reserved_retry_padding = {},
         .application_protocol = "coquic",
         .application_protocol_length = 6,
         .identity = nullptr,
@@ -847,10 +849,13 @@ void coquic_endpoint_config_init(coquic_endpoint_config_t *config) {
         .emit_shared_receive_stream_data = 0,
         .enable_packet_inspection = 0,
         .allow_peer_address_change = 1,
+        .reserved_server_connections_padding = {},
         .max_server_connections = 0,
         .enable_out_of_order_receive = 0,
+        .reserved_orphan_zero_rtt_padding = {},
         .orphan_zero_rtt_buffer = {},
         .enable_reserved_version_probe = 0,
+        .reserved_endpoint_config_tail_padding = {},
     };
 }
 

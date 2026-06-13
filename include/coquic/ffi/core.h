@@ -205,10 +205,12 @@ typedef struct coquic_transport_config {
 typedef struct coquic_endpoint_config {
     size_t size;
     coquic_role_t role;
+    uint8_t reserved_role_padding[7];
     const uint32_t *supported_versions;
     size_t supported_versions_count;
     uint8_t verify_peer;
     uint8_t retry_enabled;
+    uint8_t reserved_retry_padding[6];
     const char *application_protocol;
     size_t application_protocol_length;
     const coquic_tls_identity_t *identity;
@@ -218,10 +220,13 @@ typedef struct coquic_endpoint_config {
     uint8_t emit_shared_receive_stream_data;
     uint8_t enable_packet_inspection;
     uint8_t allow_peer_address_change;
+    uint8_t reserved_server_connections_padding[5];
     size_t max_server_connections;
     uint8_t enable_out_of_order_receive;
+    uint8_t reserved_orphan_zero_rtt_padding[7];
     coquic_orphan_zero_rtt_buffer_config_t orphan_zero_rtt_buffer;
     uint8_t enable_reserved_version_probe;
+    uint8_t reserved_endpoint_config_tail_padding[7];
 } coquic_endpoint_config_t;
 
 typedef struct coquic_resumption_state {

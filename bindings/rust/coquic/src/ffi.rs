@@ -234,10 +234,12 @@ pub struct coquic_transport_config_t {
 pub struct coquic_endpoint_config_t {
     pub size: usize,
     pub role: coquic_role_t,
+    pub reserved_role_padding: [u8; 7],
     pub supported_versions: *const u32,
     pub supported_versions_count: usize,
     pub verify_peer: u8,
     pub retry_enabled: u8,
+    pub reserved_retry_padding: [u8; 6],
     pub application_protocol: *const c_char,
     pub application_protocol_length: usize,
     pub identity: *const coquic_tls_identity_t,
@@ -247,10 +249,13 @@ pub struct coquic_endpoint_config_t {
     pub emit_shared_receive_stream_data: u8,
     pub enable_packet_inspection: u8,
     pub allow_peer_address_change: u8,
+    pub reserved_server_connections_padding: [u8; 5],
     pub max_server_connections: usize,
     pub enable_out_of_order_receive: u8,
+    pub reserved_orphan_zero_rtt_padding: [u8; 7],
     pub orphan_zero_rtt_buffer: coquic_orphan_zero_rtt_buffer_config_t,
     pub enable_reserved_version_probe: u8,
+    pub reserved_endpoint_config_tail_padding: [u8; 7],
 }
 
 #[repr(C)]

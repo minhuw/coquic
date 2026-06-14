@@ -290,15 +290,56 @@ jobs:
             --json-out ".bench-results/perf-results-${{ matrix.label }}.json" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload ${{ matrix.display_name }} Perf Result Snapshot
+        id: upload_perf_result_snapshot_1
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: perf-results-${{ matrix.label }}
           path: .bench-results/perf-results-${{ matrix.label }}.json
+          overwrite: true
           if-no-files-found: error
 
+      - name: Wait Before Retrying ${{ matrix.display_name }} Perf Result Snapshot Upload
+        if: always() && steps.upload_perf_result_snapshot_1.outcome != 'success'
+        run: sleep 15
+
+      - name: Retry Upload ${{ matrix.display_name }} Perf Result Snapshot
+        id: upload_perf_result_snapshot_2
+        if: always() && steps.upload_perf_result_snapshot_1.outcome != 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ matrix.label }}
+          path: .bench-results/perf-results-${{ matrix.label }}.json
+          overwrite: true
+          if-no-files-found: error
+
+      - name: Wait Before Retrying ${{ matrix.display_name }} Perf Result Snapshot Upload Again
+        if: always() && steps.upload_perf_result_snapshot_1.outcome != 'success' && steps.upload_perf_result_snapshot_2.outcome != 'success'
+        run: sleep 45
+
+      - name: Retry Upload ${{ matrix.display_name }} Perf Result Snapshot Again
+        id: upload_perf_result_snapshot_3
+        if: always() && steps.upload_perf_result_snapshot_1.outcome != 'success' && steps.upload_perf_result_snapshot_2.outcome != 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ matrix.label }}
+          path: .bench-results/perf-results-${{ matrix.label }}.json
+          overwrite: true
+          if-no-files-found: error
+
+      - name: Fail On ${{ matrix.display_name }} Perf Result Snapshot Upload Errors
+        if: always() && steps.upload_perf_result_snapshot_1.outcome != 'success' && steps.upload_perf_result_snapshot_2.outcome != 'success' && steps.upload_perf_result_snapshot_3.outcome != 'success'
+        run: |
+          echo "${{ matrix.display_name }} perf result snapshot upload failed after 3 attempts" >&2
+          exit 1
+
       - name: Upload ${{ matrix.display_name }} Perf Artifacts
+        id: upload_perf_artifacts_1
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: perf-artifacts-${{ matrix.label }}
@@ -311,7 +352,60 @@ jobs:
             .bench-results/${{ matrix.label }}/*.stats.jsonl
             .bench-results/${{ matrix.label }}/*.profile.status
           include-hidden-files: true
+          overwrite: true
           if-no-files-found: warn
+
+      - name: Wait Before Retrying ${{ matrix.display_name }} Perf Artifact Upload
+        if: always() && steps.upload_perf_artifacts_1.outcome != 'success'
+        run: sleep 15
+
+      - name: Retry Upload ${{ matrix.display_name }} Perf Artifacts
+        id: upload_perf_artifacts_2
+        if: always() && steps.upload_perf_artifacts_1.outcome != 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-artifacts-${{ matrix.label }}
+          path: |
+            .bench-results/${{ matrix.label }}/*.json
+            .bench-results/${{ matrix.label }}/*.txt
+            .bench-results/${{ matrix.label }}/*.log
+            .bench-results/${{ matrix.label }}/*.flamegraph.svg
+            .bench-results/${{ matrix.label }}/*.perf.log
+            .bench-results/${{ matrix.label }}/*.stats.jsonl
+            .bench-results/${{ matrix.label }}/*.profile.status
+          include-hidden-files: true
+          overwrite: true
+          if-no-files-found: warn
+
+      - name: Wait Before Retrying ${{ matrix.display_name }} Perf Artifact Upload Again
+        if: always() && steps.upload_perf_artifacts_1.outcome != 'success' && steps.upload_perf_artifacts_2.outcome != 'success'
+        run: sleep 45
+
+      - name: Retry Upload ${{ matrix.display_name }} Perf Artifacts Again
+        id: upload_perf_artifacts_3
+        if: always() && steps.upload_perf_artifacts_1.outcome != 'success' && steps.upload_perf_artifacts_2.outcome != 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-artifacts-${{ matrix.label }}
+          path: |
+            .bench-results/${{ matrix.label }}/*.json
+            .bench-results/${{ matrix.label }}/*.txt
+            .bench-results/${{ matrix.label }}/*.log
+            .bench-results/${{ matrix.label }}/*.flamegraph.svg
+            .bench-results/${{ matrix.label }}/*.perf.log
+            .bench-results/${{ matrix.label }}/*.stats.jsonl
+            .bench-results/${{ matrix.label }}/*.profile.status
+          include-hidden-files: true
+          overwrite: true
+          if-no-files-found: warn
+
+      - name: Fail On ${{ matrix.display_name }} Perf Artifact Upload Errors
+        if: always() && steps.upload_perf_artifacts_1.outcome != 'success' && steps.upload_perf_artifacts_2.outcome != 'success' && steps.upload_perf_artifacts_3.outcome != 'success'
+        run: |
+          echo "${{ matrix.display_name }} perf artifact upload failed after 3 attempts" >&2
+          exit 1
 
       - name: Fail On ${{ matrix.display_name }} Perf Errors
         if: always()
@@ -607,10 +701,51 @@ jobs:
           exit "${failed}"
 
       - name: Upload Perf Artifacts
+        id: upload_perf_results_1
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: quic-perf-results
           path: .bench-results
           include-hidden-files: true
+          overwrite: true
           if-no-files-found: warn
+
+      - name: Wait Before Retrying Perf Artifact Upload
+        if: always() && steps.upload_perf_results_1.outcome != 'success'
+        run: sleep 15
+
+      - name: Retry Upload Perf Artifacts
+        id: upload_perf_results_2
+        if: always() && steps.upload_perf_results_1.outcome != 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: quic-perf-results
+          path: .bench-results
+          include-hidden-files: true
+          overwrite: true
+          if-no-files-found: warn
+
+      - name: Wait Before Retrying Perf Artifact Upload Again
+        if: always() && steps.upload_perf_results_1.outcome != 'success' && steps.upload_perf_results_2.outcome != 'success'
+        run: sleep 45
+
+      - name: Retry Upload Perf Artifacts Again
+        id: upload_perf_results_3
+        if: always() && steps.upload_perf_results_1.outcome != 'success' && steps.upload_perf_results_2.outcome != 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: quic-perf-results
+          path: .bench-results
+          include-hidden-files: true
+          overwrite: true
+          if-no-files-found: warn
+
+      - name: Fail On Perf Artifact Upload Errors
+        if: always() && steps.upload_perf_results_1.outcome != 'success' && steps.upload_perf_results_2.outcome != 'success' && steps.upload_perf_results_3.outcome != 'success'
+        run: |
+          echo "perf artifact upload failed after 3 attempts" >&2
+          exit 1

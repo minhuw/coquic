@@ -204,6 +204,52 @@ TEST(QuicCoreTest, PeerDataBlockedTriggersMaxDataRefresh) {
     EXPECT_TRUE(saw_max_data);
 }
 
+TEST(QuicCoreTest, OutOfOrderStreamDataRefreshesConnectionReceiveCredit) {
+    auto connection = make_connected_client_connection();
+    connection.connection_flow_control_.local_receive_window = 100;
+    connection.connection_flow_control_.advertised_max_data = 100;
+    connection.connection_flow_control_.delivered_bytes = 0;
+    connection.connection_flow_control_.received_committed = 0;
+
+    auto receive_stream = connection.get_or_open_receive_stream(/*stream_id=*/1);
+    ASSERT_TRUE(receive_stream.has_value());
+    auto *stream = receive_stream.value();
+    stream->flow_control.local_receive_window = 1000;
+    stream->flow_control.advertised_max_stream_data = 1000;
+
+    ASSERT_TRUE(coquic::quic::test::QuicConnectionTestPeer::inject_inbound_one_rtt_frames(
+        connection, {coquic::quic::StreamFrame{
+                        .has_offset = true,
+                        .stream_id = 1,
+                        .offset = 60,
+                        .stream_data = bytes_from_ints({0x01}),
+                        .fin = false,
+                    }}));
+
+    EXPECT_EQ(connection.connection_flow_control_.received_committed, 61u);
+    EXPECT_EQ(connection.connection_flow_control_.delivered_bytes, 0u);
+    ASSERT_TRUE(connection.connection_flow_control_.pending_max_data_frame.has_value());
+    const auto &pending_max_data =
+        optional_ref_or_terminate(connection.connection_flow_control_.pending_max_data_frame);
+    EXPECT_EQ(pending_max_data.maximum_data, 161u);
+
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(datagram.empty());
+    auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets[0]);
+    ASSERT_NE(application, nullptr);
+
+    bool saw_max_data = false;
+    for (const auto &frame : application->frames) {
+        if (const auto *max_data = std::get_if<coquic::quic::MaxDataFrame>(&frame)) {
+            saw_max_data = true;
+            EXPECT_EQ(max_data->maximum_data, 161u);
+        }
+    }
+    EXPECT_TRUE(saw_max_data);
+}
+
 TEST(QuicCoreTest, ApplicationProbeForceAckDoesNotDuplicateMatchingMaxStreamDataFrame) {
     auto connection = make_connected_client_connection();
     connection.connection_flow_control_.pending_max_data_frame =

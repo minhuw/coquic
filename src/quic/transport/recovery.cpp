@@ -336,6 +336,37 @@ void ReceivedPacketHistory::on_ack_sent() {
 }
 
 void ReceivedPacketHistory::retire_acknowledged_ranges_up_to(std::uint64_t largest_acknowledged) {
+    if (ranges_.empty()) {
+        return;
+    }
+
+    auto contiguous_prefix_end = least_untracked_packet_number_;
+    bool have_contiguous_prefix = false;
+    for (const auto &[smallest, range] : ranges_) {
+        if (!have_contiguous_prefix) {
+            if (smallest > least_untracked_packet_number_) {
+                return;
+            }
+            contiguous_prefix_end = range.largest_packet_number;
+            have_contiguous_prefix = true;
+        } else {
+            if (smallest != contiguous_prefix_end + 1) {
+                break;
+            }
+            contiguous_prefix_end = range.largest_packet_number;
+        }
+        if (largest_acknowledged <= contiguous_prefix_end) {
+            break;
+        }
+        if (contiguous_prefix_end == std::numeric_limits<std::uint64_t>::max()) {
+            break;
+        }
+    }
+
+    if (!have_contiguous_prefix || largest_acknowledged > contiguous_prefix_end) {
+        return;
+    }
+
     const auto retired_floor = largest_acknowledged == std::numeric_limits<std::uint64_t>::max()
                                    ? std::numeric_limits<std::uint64_t>::max()
                                    : largest_acknowledged + 1;

@@ -2447,6 +2447,41 @@ TEST(QuicCoreTest, ClientReceiveKeepalivePtoDeadlineArmsProbeWithApplicationInFl
     EXPECT_EQ(connection.last_drained_path_id(), std::optional<coquic::quic::QuicPathId>{0});
 }
 
+TEST(QuicCoreTest, ApplicationPtoBurstAckOnlyFallbackAddsPing) {
+    auto connection = make_connected_client_connection();
+    connection.remaining_pto_probe_datagrams_ = 1;
+    connection.application_space_.received_packets.record_received(
+        /*packet_number=*/91, /*ack_eliciting=*/true, coquic::quic::test::test_time(10));
+    connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(10);
+
+    const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(11));
+
+    ASSERT_FALSE(datagram.empty());
+    const auto packets = decode_sender_datagram(connection, datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(application, nullptr);
+
+    bool saw_ack = false;
+    bool saw_ping = false;
+    for (const auto &frame : application->frames) {
+        if (const auto *ack = std::get_if<coquic::quic::AckFrame>(&frame)) {
+            saw_ack = saw_ack || ack_frame_acks_packet_number_for_tests(*ack, 91);
+        }
+        saw_ping = saw_ping || std::holds_alternative<coquic::quic::PingFrame>(frame);
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9002#section-6.2.4
+    // # All probe packets sent on a PTO MUST be ack-eliciting.
+    EXPECT_TRUE(saw_ack);
+    EXPECT_TRUE(saw_ping);
+    ASSERT_NE(tracked_packet_count(connection.application_space_), 0u);
+    const auto &tracked = last_tracked_packet(connection.application_space_);
+    EXPECT_TRUE(tracked.ack_eliciting);
+    EXPECT_TRUE(tracked.has_ping);
+    EXPECT_EQ(connection.remaining_pto_probe_datagrams_, 0u);
+}
+
 TEST(QuicCoreTest, ClientReceiveKeepaliveSkipsPathChallengeOnUnvalidatedCurrentPath) {
     auto connection = make_connected_client_connection();
     connection.streams_.emplace(

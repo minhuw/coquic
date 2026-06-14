@@ -1023,6 +1023,36 @@ inline std::string format_ack_ranges(const ReceivedAckFrame &ack) {
     return ranges.str();
 }
 
+inline std::string format_ack_ranges(const OutboundAckHeader &ack) {
+    std::ostringstream ranges;
+    ranges << '[';
+    if (ack.largest_acknowledged < ack.first_ack_range) {
+        ranges << "invalid";
+    } else {
+        auto range_smallest = ack.largest_acknowledged - ack.first_ack_range;
+        ranges << range_smallest << '-' << ack.largest_acknowledged;
+        auto previous_smallest = range_smallest;
+        for (const auto &range : ack.additional_ranges) {
+            if (previous_smallest < range.gap + 2) {
+                ranges << ",invalid";
+                break;
+            }
+
+            const auto range_largest = previous_smallest - range.gap - 2;
+            if (range_largest < range.range_length) {
+                ranges << ",invalid";
+                break;
+            }
+
+            range_smallest = range_largest - range.range_length;
+            ranges << ',' << range_smallest << '-' << range_largest;
+            previous_smallest = range_smallest;
+        }
+    }
+    ranges << ']';
+    return ranges.str();
+}
+
 inline COQUIC_NO_PROFILE std::optional<std::uint64_t>
 largest_acknowledged_by_ack_frame(std::span<const Frame> frames) {
     for (const auto &frame : frames) {
@@ -3987,6 +4017,7 @@ struct SimpleApplicationAckOnlyEligibility {
     bool qlog_enabled = false;
     bool use_zero_rtt_packet_protection = false;
     bool can_send_one_rtt_packets = false;
+    bool pto_probe_credit_pending = false;
     bool pending_application_send_after_blocked_queue = false;
     bool application_probe_pending = false;
     bool has_pending_new_token_frames = false;
@@ -4015,6 +4046,9 @@ can_try_simple_application_ack_only(const SimpleApplicationAckOnlyEligibility &e
         return false;
     }
     if (!eligibility.can_send_one_rtt_packets) {
+        return false;
+    }
+    if (eligibility.pto_probe_credit_pending) {
         return false;
     }
     if (eligibility.pending_application_send_after_blocked_queue) {

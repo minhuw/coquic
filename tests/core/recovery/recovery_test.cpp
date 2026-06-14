@@ -797,14 +797,11 @@ TEST(QuicRecoveryTest, AckHistoryCapStillMergesRetainedBridgedRanges) {
 
 TEST(QuicRecoveryTest, AckHistoryRetiresRangesAcknowledgedByPeerAck) {
     ReceivedPacketHistory history;
-    history.record_received(/*packet_number=*/0, /*ack_eliciting=*/true,
-                            coquic::quic::test::test_time(1));
-    history.record_received(/*packet_number=*/1, /*ack_eliciting=*/true,
-                            coquic::quic::test::test_time(2));
-    history.record_received(/*packet_number=*/4, /*ack_eliciting=*/true,
-                            coquic::quic::test::test_time(3));
-    history.record_received(/*packet_number=*/7, /*ack_eliciting=*/true,
-                            coquic::quic::test::test_time(4));
+    for (std::uint64_t packet_number = 0; packet_number <= 7; ++packet_number) {
+        history.record_received(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+    }
 
     history.retire_acknowledged_ranges_up_to(4);
 
@@ -816,7 +813,7 @@ TEST(QuicRecoveryTest, AckHistoryRetiresRangesAcknowledgedByPeerAck) {
         coquic::quic::test::ReceivedPacketHistoryTestPeer::least_untracked_packet_number(history),
         5u);
     EXPECT_TRUE(history.should_ignore(4));
-    EXPECT_FALSE(history.should_ignore(6));
+    EXPECT_TRUE(history.should_ignore(6));
     EXPECT_TRUE(history.should_ignore(7));
 
     const auto ack =
@@ -824,8 +821,41 @@ TEST(QuicRecoveryTest, AckHistoryRetiresRangesAcknowledgedByPeerAck) {
     ASSERT_TRUE(ack.has_value());
     auto ack_value = optional_value_or_terminate(ack);
     EXPECT_EQ(ack_value.largest_acknowledged, 7u);
-    EXPECT_EQ(ack_value.first_ack_range, 0u);
+    EXPECT_EQ(ack_value.first_ack_range, 2u);
     EXPECT_TRUE(ack_value.additional_ranges.empty());
+}
+
+TEST(QuicRecoveryTest, AckHistoryDoesNotRetireAcrossMissingPackets) {
+    ReceivedPacketHistory history;
+    for (std::uint64_t packet_number = 6022; packet_number <= 6059; ++packet_number) {
+        history.record_received(
+            packet_number, /*ack_eliciting=*/true,
+            coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+    }
+    history.record_received(/*packet_number=*/6110, /*ack_eliciting=*/true,
+                            coquic::quic::test::test_time(6110));
+
+    history.retire_acknowledged_ranges_up_to(6110);
+
+    EXPECT_EQ(coquic::quic::test::ReceivedPacketHistoryTestPeer::range_count(history), 2u);
+    EXPECT_EQ(
+        coquic::quic::test::ReceivedPacketHistoryTestPeer::least_untracked_packet_number(history),
+        0u);
+    EXPECT_TRUE(
+        coquic::quic::test::ReceivedPacketHistoryTestPeer::contains_range_start(history, 6022));
+    EXPECT_TRUE(
+        coquic::quic::test::ReceivedPacketHistoryTestPeer::contains_range_start(history, 6110));
+    EXPECT_FALSE(history.should_ignore(6060));
+
+    const auto ack =
+        history.build_ack_frame(/*ack_delay_exponent=*/3, coquic::quic::test::test_time(6111));
+    ASSERT_TRUE(ack.has_value());
+    auto ack_value = optional_value_or_terminate(ack);
+    EXPECT_EQ(ack_value.largest_acknowledged, 6110u);
+    EXPECT_EQ(ack_value.first_ack_range, 0u);
+    ASSERT_EQ(ack_value.additional_ranges.size(), 1u);
+    EXPECT_EQ(ack_value.additional_ranges[0].gap, 49u);
+    EXPECT_EQ(ack_value.additional_ranges[0].range_length, 37u);
 }
 
 TEST(QuicRecoveryTest, AckHistoryRetirementShrinksRangeCrossingLargestAcknowledged) {

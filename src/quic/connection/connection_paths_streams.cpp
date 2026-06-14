@@ -1,6 +1,7 @@
 #include "src/quic/connection/connection.h"
 #include "src/quic/connection/connection_internal.h"
 
+#include <algorithm>
 #include <limits>
 
 namespace coquic::quic {
@@ -3262,7 +3263,11 @@ void QuicConnection::maybe_queue_stream_blocked_frame(StreamState &stream) {
 }
 
 void QuicConnection::maybe_refresh_connection_receive_credit(bool force) {
-    if (!should_refresh_receive_window(connection_flow_control_.delivered_bytes,
+    // Connection-level flow control counts STREAM bytes that have been received, even when a
+    // stream gap prevents immediate application delivery.
+    const auto connection_receive_credit_basis = std::max(
+        connection_flow_control_.delivered_bytes, connection_flow_control_.received_committed);
+    if (!should_refresh_receive_window(connection_receive_credit_basis,
                                        connection_flow_control_.advertised_max_data,
                                        connection_flow_control_.local_receive_window, force)) {
         return;
@@ -3272,7 +3277,7 @@ void QuicConnection::maybe_refresh_connection_receive_credit(bool force) {
     // # To avoid blocking a sender, a receiver MAY send a MAX_STREAM_DATA or
     // # MAX_DATA frame multiple times within a round trip or send it early
     // # enough to allow time for loss of the frame and subsequent recovery.
-    connection_flow_control_.queue_max_data(connection_flow_control_.delivered_bytes +
+    connection_flow_control_.queue_max_data(connection_receive_credit_basis +
                                             connection_flow_control_.local_receive_window);
 }
 

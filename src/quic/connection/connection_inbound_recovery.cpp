@@ -4007,7 +4007,7 @@ CodecResult<bool> QuicConnection::process_inbound_application_stream_data(
                 *stream_state->peer_final_size) {
             stream_state->peer_fin_delivered = true;
         }
-        if (delivered_delta != 0 || should_report_empty_fin) {
+        if (delivered_delta != 0 || should_report_empty_fin || received_delta != 0) {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-4.2
             // # Therefore, a receiver MUST NOT wait for a STREAM_DATA_BLOCKED
             // # or DATA_BLOCKED frame before sending a MAX_STREAM_DATA or
@@ -4015,6 +4015,8 @@ CodecResult<bool> QuicConnection::process_inbound_application_stream_data(
             // # blocked for the rest of the connection.
             maybe_refresh_stream_receive_credit(*stream_state, /*force=*/false);
             maybe_refresh_connection_receive_credit(/*force=*/false);
+        }
+        if (delivered_delta != 0 || should_report_empty_fin) {
             maybe_refresh_peer_stream_limit(*stream_state);
             maybe_retire_stream(stream_id);
         }
@@ -4085,6 +4087,13 @@ CodecResult<bool> QuicConnection::process_inbound_application_stream_data(
         maybe_refresh_connection_receive_credit(/*force=*/false);
         maybe_refresh_peer_stream_limit(*stream_state);
         maybe_retire_stream(stream_id);
+    } else if (received_delta != 0) {
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-4.2
+        // # Therefore, a receiver MUST NOT wait for a STREAM_DATA_BLOCKED or
+        // # DATA_BLOCKED frame before sending a MAX_STREAM_DATA or MAX_DATA
+        // # frame; doing so could result in the sender being blocked for the
+        // # rest of the connection.
+        maybe_refresh_connection_receive_credit(/*force=*/false);
     }
 
     return CodecResult<bool>::success(true);

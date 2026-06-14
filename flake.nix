@@ -1880,6 +1880,19 @@ EOF
             language = "system";
             types_or = [ "c" "c++" ];
           };
+          coquic-rfc-compliance = {
+            enable = true;
+            name = "RFC compliance";
+            entry = "${pkgs.bash}/bin/bash ./scripts/compliance --ci";
+            extraPackages = [
+              pkgs.cargo
+              pkgs.rustc
+              pkgs.pkg-config
+            ];
+            files = "^((src|include|tests|interop|fuzz)/.*\\.(c|cc|cpp|cxx|h|hh|hpp|hxx)|\\.duvet/(config\\.toml|snapshot\\.txt|(todos|exceptions)/.*\\.toml))$";
+            language = "system";
+            pass_filenames = false;
+          };
         };
       };
       qdrant-dev-app = pkgs.writeShellApplication {

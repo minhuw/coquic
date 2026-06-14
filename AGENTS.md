@@ -48,6 +48,8 @@ constraints clearly.
 - Do not commit downloaded remote CI state such as `.remote-ci/`.
 - Keep `main` as the only remote branch; merge all local branch work back into
   `main` before syncing or pushing to the remote.
+- Run and pass the configured pre-commit hooks before creating commits and
+  before pushing changes.
 - Use Conventional Commits for git commit messages.
 
 ## Standard

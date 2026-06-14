@@ -2391,7 +2391,7 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9002
     TEXT[!MAY,implementation]:    packets to avoid an expensive consecutive PTO expiration due to a
     TEXT[!MAY,implementation]:    single lost datagram or to transmit data from multiple packet number
     TEXT[!MAY,implementation]:    spaces.
-    TEXT[!MUST,todo]: All probe packets sent on a PTO MUST be ack-eliciting.
+    TEXT[!MUST,test,todo]: All probe packets sent on a PTO MUST be ack-eliciting.
     TEXT[!SHOULD,implementation]:    In addition to sending data in the packet number space for which the
     TEXT[!SHOULD,implementation]:    timer expired, the sender SHOULD send ack-eliciting packets from
     TEXT[!SHOULD,implementation]:    other packet number spaces with in-flight data, coalescing packets if

@@ -1772,6 +1772,7 @@ static int prepare_client_socket(const config_t *cfg, int *fd, struct sockaddr_s
     }
     if (prep_socket(*fd) != 0) {
         close(*fd);
+        *fd = -1;
         snprintf(failure_reason, failure_reason_len, "could not prepare socket");
         return -1;
     }
@@ -1781,6 +1782,7 @@ static int prepare_client_socket(const config_t *cfg, int *fd, struct sockaddr_s
     if (bind(*fd, &local.sa,
              local.sa.sa_family == AF_INET ? sizeof(local.sin) : sizeof(local.sin6)) != 0) {
         close(*fd);
+        *fd = -1;
         snprintf(failure_reason, failure_reason_len, "bind failed: %s", strerror(errno));
         return -1;
     }
@@ -1921,6 +1923,56 @@ static client_conn_t *open_client_sessions(const config_t *cfg, size_t count,
             return NULL;
         }
         *opened_count = i + 1;
+    }
+    return clients;
+}
+
+static client_conn_t *open_timed_client_sessions(const config_t *cfg, size_t count,
+                                                 uint64_t request_bytes, uint64_t response_bytes,
+                                                 int counts_latency, counters_t *counters,
+                                                 char *failure_reason, size_t failure_reason_len,
+                                                 size_t *opened_count) {
+    *opened_count = 0;
+    client_conn_t *clients = calloc(count, sizeof(*clients));
+    if (clients == NULL) {
+        snprintf(failure_reason, failure_reason_len, "out of memory");
+        return NULL;
+    }
+    for (size_t i = 0; i != count; ++i) {
+        clients[i].fd = -1;
+    }
+
+    char last_failure_reason[256] = "";
+    for (size_t i = 0; i != count; ++i) {
+        char setup_failure_reason[256] = "";
+        client_conn_t *client = &clients[*opened_count];
+        if (init_client_session(cfg, client, 0, request_bytes, response_bytes, counts_latency,
+                                setup_failure_reason, sizeof(setup_failure_reason)) != 0) {
+            if (counters != NULL) {
+                counters->skipped_setup_errors += 1;
+            }
+            if (setup_failure_reason[0] != '\0') {
+                snprintf(last_failure_reason, sizeof(last_failure_reason), "%s",
+                         setup_failure_reason);
+            }
+            close_client_session(client);
+            free_batch(client->batch);
+            memset(client, 0, sizeof(*client));
+            client->fd = -1;
+            continue;
+        }
+        *opened_count += 1;
+    }
+
+    if (*opened_count == 0) {
+        if (last_failure_reason[0] != '\0') {
+            snprintf(failure_reason, failure_reason_len, "all client sessions failed setup: %s",
+                     last_failure_reason);
+        } else {
+            snprintf(failure_reason, failure_reason_len, "all client sessions failed setup");
+        }
+        close_client_sessions(clients, count, NULL);
+        return NULL;
     }
     return clients;
 }
@@ -2105,9 +2157,9 @@ static int run_rr_requests(const config_t *cfg, uint64_t request_limit, counters
 static int run_timed_rr(const config_t *cfg, counters_t *counters, char *failure_reason,
                         size_t failure_reason_len) {
     size_t opened = 0;
-    client_conn_t *clients =
-        open_client_sessions(cfg, (size_t)cfg->connections, 0, cfg->request_bytes,
-                             cfg->response_bytes, 1, failure_reason, failure_reason_len, &opened);
+    client_conn_t *clients = open_timed_client_sessions(
+        cfg, (size_t)cfg->connections, cfg->request_bytes, cfg->response_bytes, 1, counters,
+        failure_reason, failure_reason_len, &opened);
     if (clients == NULL) {
         return -1;
     }

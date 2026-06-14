@@ -129,6 +129,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    STREAM_LIMIT_ERROR; see Section 11 for details on error handling.
     TEXT[!MUST,implementation,test]: MAX_STREAMS frames
     TEXT[!MUST,implementation,test]:    that do not increase the stream limit MUST be ignored.
+    TEXT[test]: Implementations might choose
+    TEXT[test]:    to increase limits as streams are closed, to keep the number of
+    TEXT[test]:    streams available to peers roughly consistent.
     TEXT[!SHOULD,implementation,test]:    An endpoint that is unable to open a new stream due to the peer's
     TEXT[!SHOULD,implementation,test]:    limits SHOULD send a STREAMS_BLOCKED frame (Section 19.14).
     TEXT[!MUST,implementation,test]: An endpoint MUST NOT wait
@@ -615,6 +618,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MAY,implementation]:    An endpoint MAY probe for peer reachability from a new local address
     TEXT[!MAY,implementation]:    using path validation (Section 8.2) prior to migrating the connection
     TEXT[!MAY,implementation]:    to the new local address.
+    TEXT[test]:    PATH_CHALLENGE, PATH_RESPONSE, NEW_CONNECTION_ID, and PADDING frames
+    TEXT[test]:    are "probing frames", and all other frames are "non-probing frames".
 
   SECTION: [Initiating Connection Migration](#section-9.2)
     TEXT[!MAY]: An endpoint MAY defer path
@@ -627,6 +632,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]: and MUST initiate path validation
     TEXT[!MUST,implementation,test]:    (Section 8.2) to verify the peer's ownership of the address if
     TEXT[!MUST,implementation,test]:    validation is not already underway.
+    TEXT[implementation]:    An endpoint only changes the address to which it sends packets in
+    TEXT[implementation]:    response to the highest-numbered non-probing packet.
     TEXT[!MUST,implementation,test]:    An endpoint MAY send data to an unvalidated peer address, but it MUST
     TEXT[!MUST,implementation,test]:    protect against potential attacks as described in Sections 9.3.1 and
     TEXT[!MUST,implementation,test]:    9.3.2.

@@ -54,6 +54,10 @@
     --danger: #cf2d56;
     --warning: #8d6d00;
     --ok: #1f8a65;
+    --peer-broken: #6f6f6f;
+    --known-peer-broken: #6929c4;
+    --peer-broken-soft: #f4f4f4;
+    --known-peer-broken-soft: #f6f2ff;
     --radius: 4px;
   }
 
@@ -101,6 +105,10 @@
     --danger: #ff7eb6;
     --warning: #f1c21b;
     --ok: #42be65;
+    --peer-broken: #c6c6c6;
+    --known-peer-broken: #d4bbff;
+    --peer-broken-soft: rgb(198 198 198 / 14%);
+    --known-peer-broken-soft: rgb(190 149 255 / 16%);
   }
 
   * {
@@ -3014,7 +3022,7 @@
 
   .compat-matrix th:nth-child(n + 4),
   .compat-matrix td:nth-child(n + 4) {
-    @apply w-[82px] min-w-[82px] max-w-[82px];
+    @apply w-[88px] min-w-[88px] max-w-[88px];
   }
 
   .row-status-column {
@@ -3091,6 +3099,14 @@
 
   .test-cell.unsupported {
     @apply border-[rgba(141,109,0,0.3)] bg-[var(--warning-soft)] text-[var(--warning)];
+  }
+
+  .test-cell.peer-broken {
+    @apply border-[var(--line-strong)] bg-[var(--peer-broken-soft)] text-[var(--peer-broken)];
+  }
+
+  .test-cell.known-peer-broken {
+    @apply border-[rgba(105,41,196,0.32)] bg-[var(--known-peer-broken-soft)] text-[var(--known-peer-broken)];
   }
 
   .test-cell.unknown {
@@ -3336,9 +3352,9 @@
 
     .compat-matrix th:nth-child(n + 4),
     .compat-matrix td:nth-child(n + 4) {
-      width: 72px;
-      min-width: 72px;
-      max-width: 72px;
+      width: 76px;
+      min-width: 76px;
+      max-width: 76px;
     }
 
     .row-status-column {

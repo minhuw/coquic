@@ -113,11 +113,34 @@ function laneSortKey(source) {
 }
 
 function resultToken(result) {
-  if (result === "succeeded" || isPeerBrokenResult(result)) {
+  if (result === "succeeded") {
     return "pass";
+  }
+  if (isKnownPeerBrokenResult(result)) {
+    return "kpb";
+  }
+  if (isPeerBrokenResult(result)) {
+    return "pb";
   }
   if (result === "failed") {
     return "fail";
+  }
+  if (isSkippedResult(result)) {
+    return "unsup";
+  }
+  return "?";
+}
+
+function resultTokenForRow(row, result) {
+  if (isKnownBrokenFailure(row, result)) {
+    return "kpb";
+  }
+  return resultToken(result);
+}
+
+function rowResultToken(result) {
+  if (result === "succeeded") {
+    return "pass";
   }
   if (isPeerBrokenResult(result)) {
     return "pb";
@@ -132,20 +155,25 @@ function isKnownBrokenFailure(row, result) {
   return result === "failed" && row && row.known_broken;
 }
 
-function isDisplaySuccess(row, result) {
-  return result === "succeeded" || isPeerBrokenResult(result) || isKnownBrokenFailure(row, result);
-}
-
-function resultTokenForRow(row, result) {
-  if (isDisplaySuccess(row, result)) {
-    return "pass";
-  }
-  return resultToken(result);
+function isRowAcceptableResult(row, result) {
+  return (
+    result === "succeeded" ||
+    isSkippedResult(result) ||
+    isPeerBrokenResult(result) ||
+    isKnownPeerBrokenResult(result) ||
+    isKnownBrokenFailure(row, result)
+  );
 }
 
 function resultClass(result, row) {
-  if (isDisplaySuccess(row, result)) {
+  if (result === "succeeded") {
     return "succeeded";
+  }
+  if (isKnownPeerBrokenResult(result) || isKnownBrokenFailure(row, result)) {
+    return "known-peer-broken";
+  }
+  if (isPeerBrokenResult(result)) {
+    return "peer-broken";
   }
   if (isSkippedResult(result)) {
     return "unsupported";
@@ -162,6 +190,10 @@ function isSkippedResult(result) {
 
 function isPeerBrokenResult(result) {
   return result === "peer_broken";
+}
+
+function isKnownPeerBrokenResult(result) {
+  return result === "known_peer_broken";
 }
 
 function knownBrokenTitle(row) {
@@ -181,8 +213,14 @@ function implementationDisplayName(name) {
 }
 
 function resultLabel(result, row) {
-  if (isDisplaySuccess(row, result)) {
+  if (result === "succeeded") {
     return "pass";
+  }
+  if (isKnownPeerBrokenResult(result) || isKnownBrokenFailure(row, result)) {
+    return "known peer-broken";
+  }
+  if (isPeerBrokenResult(result)) {
+    return "peer-broken";
   }
   if (isSkippedResult(result)) {
     return "unsupported";
@@ -316,20 +354,16 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
   }
   let sawFailed = false;
   let sawUnknown = false;
-  let sawSucceeded = false;
-  let sawUnsupported = false;
+  let sawAcceptable = false;
   for (const test of tests) {
     const row = rowByLaneAndTest.get(`${laneKey}:${test}`);
     if (!row) {
+      sawUnknown = true;
       continue;
     }
     const result = row.result || "unknown";
-    if (isDisplaySuccess(row, result)) {
-      sawSucceeded = true;
-      continue;
-    }
-    if (isSkippedResult(result)) {
-      sawUnsupported = true;
+    if (isRowAcceptableResult(row, result)) {
+      sawAcceptable = true;
       continue;
     }
     if (result === "failed") {
@@ -344,15 +378,21 @@ function rowResultForTests(laneKey, tests, rowByLaneAndTest) {
   if (sawUnknown) {
     return "unknown";
   }
-  if (sawSucceeded) {
+  if (sawAcceptable) {
     return "succeeded";
   }
-  return sawUnsupported ? "unsupported" : "unknown";
+  return "unknown";
 }
 
 function legendCategoryForResult(result, row) {
-  if (isDisplaySuccess(row, result)) {
+  if (result === "succeeded") {
     return "pass";
+  }
+  if (isKnownPeerBrokenResult(result) || isKnownBrokenFailure(row, result)) {
+    return "known-peer-broken";
+  }
+  if (isPeerBrokenResult(result)) {
+    return "peer-broken";
   }
   if (isSkippedResult(result)) {
     return "unsupported";
@@ -367,6 +407,8 @@ function updateLegendCounts(lanes, tests, rowByLaneAndTest) {
   const counts = {
     pass: 0,
     unsupported: 0,
+    "peer-broken": 0,
+    "known-peer-broken": 0,
     failed: 0,
     "not-reported": 0,
   };
@@ -495,7 +537,7 @@ function renderMatrix() {
       const rowStatus = rowResultForTests(laneKey, tests, rowByLaneAndTest);
       const rowStatusPill = document.createElement("span");
       rowStatusPill.className = `test-cell row-status ${resultClass(rowStatus)}`;
-      rowStatusPill.textContent = resultToken(rowStatus);
+      rowStatusPill.textContent = rowResultToken(rowStatus);
       attachResultTooltip(rowStatusPill, resultDetails(source, "all", null, rowStatus));
       rowStatusCell.append(rowStatusPill);
       tr.append(rowStatusCell);

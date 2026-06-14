@@ -34,6 +34,16 @@ export default function InteropPage() {
               <b data-interop-count="unsupported">0</b>
             </span>
             <span>
+              <i style={{ '--legend-color': 'var(--peer-broken)' } as React.CSSProperties} />
+              peer-broken
+              <b data-interop-count="peer-broken">0</b>
+            </span>
+            <span>
+              <i style={{ '--legend-color': 'var(--known-peer-broken)' } as React.CSSProperties} />
+              known peer-broken
+              <b data-interop-count="known-peer-broken">0</b>
+            </span>
+            <span>
               <i style={{ '--legend-color': 'var(--danger)' } as React.CSSProperties} />
               failed
               <b data-interop-count="failed">0</b>

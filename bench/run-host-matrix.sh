@@ -96,7 +96,7 @@ USAGE
 nix_build_error_is_retryable() {
   local log_path="$1"
   grep -Eiq \
-    'Could not resolve (host|hostname)|Temporary failure in name resolution|Name or service not known|Connection (timed out|reset by peer|refused)|network is unreachable|No route to host|TLS connection was non-properly terminated|unexpected EOF|HTTP error 5[0-9][0-9]|status code 5[0-9][0-9]' \
+    'Could not resolve (host|hostname)|Could not connect to server|Temporary failure in name resolution|Name or service not known|Failed to connect to [^ ]+ port [0-9]+|Connection (timed out|reset by peer|refused)|network is unreachable|No route to host|TLS connection was non-properly terminated|unexpected EOF|HTTP error 5[0-9][0-9]|status code 5[0-9][0-9]' \
     "${log_path}"
 }
 

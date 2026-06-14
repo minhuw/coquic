@@ -20,8 +20,9 @@ client_impl="${PERF_CLIENT_IMPL:-coquic}"
 server_impl="${PERF_SERVER_IMPL:-coquic}"
 implementations_manifest="${PERF_IMPLEMENTATIONS_JSON:-${repo_root}/bench/implementations.json}"
 library_version="${PERF_LIBRARY_VERSION:-}"
-nix_build_attempts="${PERF_NIX_BUILD_ATTEMPTS:-3}"
-nix_build_retry_delay_seconds="${PERF_NIX_BUILD_RETRY_DELAY_SECONDS:-10}"
+nix_build_attempts="${PERF_NIX_BUILD_ATTEMPTS:-6}"
+nix_build_retry_delay_seconds="${PERF_NIX_BUILD_RETRY_DELAY_SECONDS:-15}"
+nix_build_retry_max_delay_seconds="${PERF_NIX_BUILD_RETRY_MAX_DELAY_SECONDS:-120}"
 utilization_enabled="${PERF_UTILIZATION_ENABLED:-1}"
 stats_sample_interval_seconds="${PERF_STATS_SAMPLE_INTERVAL_SECONDS:-1}"
 profile_flamegraphs_enabled="${PERF_PROFILE_FLAMEGRAPHS:-0}"
@@ -76,9 +77,11 @@ environment overrides:
   PERF_IMPLEMENTATIONS_JSON  implementation metadata JSON (default: bench/implementations.json)
   PERF_LIBRARY_VERSION       explicit implementation library version override
   PERF_DOCKER_ENV            space-separated NAME=value environment entries passed to both containers
-  PERF_NIX_BUILD_ATTEMPTS    attempts for the perf image nix build (default: 3)
+  PERF_NIX_BUILD_ATTEMPTS    attempts for retryable perf image nix build failures (default: 6)
   PERF_NIX_BUILD_RETRY_DELAY_SECONDS
-                             delay before retrying a failed image build (default: 10)
+                             base delay before retrying a retryable image build failure (default: 15)
+  PERF_NIX_BUILD_RETRY_MAX_DELAY_SECONDS
+                             maximum exponential retry delay for retryable image build failures (default: 120)
   PERF_UTILIZATION_ENABLED   sample Docker CPU and memory stats (default: 1)
   PERF_STATS_SAMPLE_INTERVAL_SECONDS
                              Docker stats sample interval in seconds (default: 1)
@@ -90,17 +93,51 @@ environment overrides:
 USAGE
 }
 
+nix_build_error_is_retryable() {
+  local log_path="$1"
+  grep -Eiq \
+    'Could not resolve (host|hostname)|Temporary failure in name resolution|Name or service not known|Connection (timed out|reset by peer|refused)|network is unreachable|No route to host|TLS connection was non-properly terminated|unexpected EOF|HTTP error 5[0-9][0-9]|status code 5[0-9][0-9]' \
+    "${log_path}"
+}
+
+nix_build_retry_delay() {
+  local attempt="$1"
+  local delay="${nix_build_retry_delay_seconds}"
+  local step=1
+  while [ "${step}" -lt "${attempt}" ]; do
+    delay=$((delay * 2))
+    if [ "${delay}" -ge "${nix_build_retry_max_delay_seconds}" ]; then
+      delay="${nix_build_retry_max_delay_seconds}"
+      break
+    fi
+    step=$((step + 1))
+  done
+  printf '%s\n' "${delay}"
+}
+
 build_perf_image() {
   local attempt=1
+  local attempt_log
+  local delay
+  local image_path
   while :; do
-    if nix build --print-out-paths ".#${image_attr}"; then
+    attempt_log="${results_root}/nix-build-${image_attr}-attempt-${attempt}.log"
+    printf 'nix build attempt %s/%s for .#%s\n' "${attempt}" "${nix_build_attempts}" "${image_attr}" > "${attempt_log}"
+    if image_path="$(nix build --print-out-paths ".#${image_attr}" 2> >(tee -a "${attempt_log}" >&2))"; then
+      printf '%s\n' "${image_path}" >> "${attempt_log}"
+      printf '%s\n' "${image_path}"
       return 0
     fi
     if [ "${attempt}" -ge "${nix_build_attempts}" ]; then
       return 1
     fi
-    echo "nix build for .#${image_attr} failed; retrying in ${nix_build_retry_delay_seconds}s (${attempt}/${nix_build_attempts})" >&2
-    sleep "${nix_build_retry_delay_seconds}"
+    if ! nix_build_error_is_retryable "${attempt_log}"; then
+      echo "nix build for .#${image_attr} failed with a non-retryable error; see ${attempt_log}" >&2
+      return 1
+    fi
+    delay="$(nix_build_retry_delay "${attempt}")"
+    echo "nix build for .#${image_attr} failed with a retryable fetch/cache error; retrying in ${delay}s (${attempt}/${nix_build_attempts})" >&2
+    sleep "${delay}"
     attempt=$((attempt + 1))
   done
 }

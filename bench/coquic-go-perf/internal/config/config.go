@@ -357,6 +357,10 @@ func CongestionControlName(cc coquic.CongestionControl) string {
 		return "bbr"
 	case coquic.CongestionControlCopa:
 		return "copa"
+	case coquic.CongestionControlPCC:
+		return "pcc"
+	case coquic.CongestionControlPCCVivace:
+		return "pcc-vivace"
 	default:
 		return "unknown"
 	}
@@ -364,7 +368,7 @@ func CongestionControlName(cc coquic.CongestionControl) string {
 
 func Usage() string {
 	return "usage: coquic-go-perf [server|client] [--host HOST] [--port PORT] " +
-		"[--io-backend socket] [--congestion-control newreno|cubic|bbr|copa] " +
+		"[--io-backend socket] [--congestion-control newreno|cubic|bbr|copa|pcc|pcc-vivace] " +
 		"[--mode bulk|rr|crr|persistent-rr] [--direction upload|download] [--request-bytes N] " +
 		"[--response-bytes N] [--streams N] [--connections N] " +
 		"[--requests-in-flight N] [--requests N] [--total-bytes N] " +
@@ -410,6 +414,10 @@ func parseCongestionControl(value string) (coquic.CongestionControl, error) {
 		return coquic.CongestionControlBBR, nil
 	case "copa":
 		return coquic.CongestionControlCopa, nil
+	case "pcc":
+		return coquic.CongestionControlPCC, nil
+	case "pcc-vivace", "pcc_vivace":
+		return coquic.CongestionControlPCCVivace, nil
 	default:
 		return 0, fmt.Errorf("%s", Usage())
 	}

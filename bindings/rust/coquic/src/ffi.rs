@@ -33,6 +33,8 @@ pub const COQUIC_CONGESTION_CONTROL_NEWRENO: coquic_congestion_control_t = 0;
 pub const COQUIC_CONGESTION_CONTROL_CUBIC: coquic_congestion_control_t = 1;
 pub const COQUIC_CONGESTION_CONTROL_BBR: coquic_congestion_control_t = 2;
 pub const COQUIC_CONGESTION_CONTROL_COPA: coquic_congestion_control_t = 3;
+pub const COQUIC_CONGESTION_CONTROL_PCC: coquic_congestion_control_t = 4;
+pub const COQUIC_CONGESTION_CONTROL_PCC_VIVACE: coquic_congestion_control_t = 5;
 
 pub type coquic_ecn_codepoint_t = u8;
 pub const COQUIC_ECN_UNAVAILABLE: coquic_ecn_codepoint_t = 0;

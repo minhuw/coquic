@@ -1804,6 +1804,16 @@ TEST(QuicHttp3RuntimeTest, RuntimeParsesAndPropagatesCongestionControlSelection)
     EXPECT_EQ(optional_ref_or_terminate(server_core).transport.congestion_control,
               coquic::quic::QuicCongestionControlAlgorithm::bbr);
     EXPECT_EQ(optional_ref_or_terminate(server_core).transport.active_connection_id_limit, 8u);
+
+    const char *vivace_argv[] = {
+        "coquic-http3",         "h3-client",  "https://localhost:9443/ok",
+        "--congestion-control", "pcc-vivace",
+    };
+    const auto vivace_parsed = coquic::http3::parse_http3_runtime_args(
+        static_cast<int>(std::size(vivace_argv)), const_cast<char **>(vivace_argv));
+    ASSERT_TRUE(vivace_parsed.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(vivace_parsed).congestion_control,
+              coquic::quic::QuicCongestionControlAlgorithm::pcc_vivace);
 }
 
 TEST(QuicHttp3RuntimeTest, RuntimeParserRejectsInvalidCongestionControlArguments) {

@@ -13,7 +13,7 @@ namespace {
 
 constexpr std::string_view kUsageLine =
     "usage: coquic [interop-server|interop-client] [--host HOST] [--port PORT] "
-    "[--io-backend socket|io_uring] [--congestion-control newreno|cubic|bbr|copa] "
+    "[--io-backend socket|io_uring] [--congestion-control newreno|cubic|bbr|copa|pcc|pcc-vivace] "
     "[--testcase "
     "handshake|transfer|keyupdate|amplificationlimit|rebind-port|rebind-addr|"
     "connectionmigration|ecn|multiconnect|chacha20|retry|resumption|zerortt|v2] "

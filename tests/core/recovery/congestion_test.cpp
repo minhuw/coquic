@@ -208,6 +208,21 @@ TEST(QuicCongestionTest, ParsesCongestionControlAlgorithms) {
     EXPECT_EQ(coquic::quic::congestion_control_algorithm_name(optional_ref_or_terminate(copa)),
               "copa");
 
+    const auto pcc = coquic::quic::parse_congestion_control_algorithm("pcc");
+    ASSERT_TRUE(pcc.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(pcc), coquic::quic::QuicCongestionControlAlgorithm::pcc);
+    EXPECT_EQ(coquic::quic::congestion_control_algorithm_name(optional_ref_or_terminate(pcc)),
+              "pcc");
+
+    const auto vivace = coquic::quic::parse_congestion_control_algorithm("pcc-vivace");
+    ASSERT_TRUE(vivace.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(vivace),
+              coquic::quic::QuicCongestionControlAlgorithm::pcc_vivace);
+    EXPECT_EQ(coquic::quic::congestion_control_algorithm_name(optional_ref_or_terminate(vivace)),
+              "pcc-vivace");
+    EXPECT_EQ(optional_ref_or_terminate(coquic::quic::parse_congestion_control_algorithm("vivace")),
+              coquic::quic::QuicCongestionControlAlgorithm::pcc_vivace);
+
     EXPECT_FALSE(coquic::quic::parse_congestion_control_algorithm("vegas").has_value());
 }
 
@@ -1992,6 +2007,324 @@ TEST(QuicCongestionTest, CopaWrapperDispatchCoversAccessorsAndCopyMove) {
     EXPECT_EQ(move_assigned.algorithm(), coquic::quic::QuicCongestionControlAlgorithm::copa);
     EXPECT_EQ(move_assigned.congestion_window(), 12000u);
     EXPECT_EQ(move_assigned.bytes_in_flight(), 0u);
+}
+
+TEST(QuicCongestionTest, PccAllegroStartupAndDecisionFollowUtilitySamples) {
+    coquic::quic::PccCongestionController controller(
+        /*max_datagram_size=*/1200, coquic::quic::PccCongestionController::Variant::allegro);
+
+    const auto initial_rate = controller.sending_rate_bytes_per_second_;
+    EXPECT_EQ(controller.mode_, coquic::quic::PccCongestionController::Mode::startup);
+
+    controller.apply_utility_sample(coquic::quic::PccCongestionController::UtilitySample{
+        .sending_rate_bytes_per_second = initial_rate,
+        .utility = 10.0,
+    });
+    EXPECT_EQ(controller.mode_, coquic::quic::PccCongestionController::Mode::startup);
+    EXPECT_GT(controller.sending_rate_bytes_per_second_, initial_rate);
+
+    controller.apply_utility_sample(coquic::quic::PccCongestionController::UtilitySample{
+        .sending_rate_bytes_per_second = controller.sending_rate_bytes_per_second_,
+        .utility = 5.0,
+    });
+    EXPECT_EQ(controller.mode_, coquic::quic::PccCongestionController::Mode::decision);
+    EXPECT_DOUBLE_EQ(controller.decision_base_rate_bytes_per_second_, initial_rate);
+    EXPECT_GT(controller.sending_rate_bytes_per_second_, initial_rate);
+
+    controller.set_sending_rate(100000.0);
+    controller.enter_decision_mode();
+    const auto decision_base = controller.decision_base_rate_bytes_per_second_;
+    const auto epsilon = controller.epsilon_;
+    const auto high_rate = decision_base * (1.0 + epsilon);
+    const auto low_rate = decision_base * (1.0 - epsilon);
+
+    controller.apply_utility_sample(coquic::quic::PccCongestionController::UtilitySample{
+        .sending_rate_bytes_per_second = high_rate,
+        .utility = 20.0,
+    });
+    controller.apply_utility_sample(coquic::quic::PccCongestionController::UtilitySample{
+        .sending_rate_bytes_per_second = low_rate,
+        .utility = 10.0,
+    });
+    controller.apply_utility_sample(coquic::quic::PccCongestionController::UtilitySample{
+        .sending_rate_bytes_per_second = high_rate,
+        .utility = 18.0,
+    });
+    controller.apply_utility_sample(coquic::quic::PccCongestionController::UtilitySample{
+        .sending_rate_bytes_per_second = low_rate,
+        .utility = 12.0,
+    });
+
+    EXPECT_EQ(controller.mode_, coquic::quic::PccCongestionController::Mode::rate_adjust);
+    EXPECT_EQ(controller.rate_adjust_direction_, 1);
+    EXPECT_GT(controller.sending_rate_bytes_per_second_, decision_base);
+}
+
+TEST(QuicCongestionTest, PccStartsFromInitialWindowPacingRate) {
+    for (const auto variant : {coquic::quic::PccCongestionController::Variant::allegro,
+                               coquic::quic::PccCongestionController::Variant::vivace}) {
+        coquic::quic::PccCongestionController controller(/*max_datagram_size=*/1200, variant);
+
+        const auto expected_rate =
+            static_cast<double>(coquic::quic::congestion_initial_window(1200)) /
+            std::chrono::duration<double>(coquic::quic::kInitialRtt).count();
+        EXPECT_DOUBLE_EQ(controller.sending_rate_bytes_per_second_, expected_rate);
+        EXPECT_DOUBLE_EQ(controller.pacing_rate_bytes_per_second_, expected_rate);
+        EXPECT_GE(controller.congestion_window(), coquic::quic::congestion_initial_window(1200));
+    }
+}
+
+TEST(QuicCongestionTest, PccAttributesAcksToSendingMonitorInterval) {
+    coquic::quic::PccCongestionController controller(
+        /*max_datagram_size=*/1200, coquic::quic::PccCongestionController::Variant::allegro);
+
+    auto first_packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                         /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                         coquic::quic::test::test_time(1));
+    controller.on_packet_sent(first_packet);
+    ASSERT_TRUE(controller.current_interval_.active);
+    const auto first_sequence = controller.current_interval_.sequence;
+    const auto first_rate = controller.current_interval_.sending_rate_bytes_per_second;
+    const auto first_interval_end = controller.current_interval_.end_time;
+
+    controller.maybe_finish_monitor_interval(first_interval_end,
+                                             coquic::quic::RecoveryRttState{
+                                                 .latest_rtt = std::chrono::milliseconds{50},
+                                                 .min_rtt = std::chrono::milliseconds{50},
+                                                 .smoothed_rtt = std::chrono::milliseconds{50},
+                                             });
+    ASSERT_EQ(controller.pending_monitor_intervals_.size(), 1u);
+    EXPECT_EQ(controller.pending_monitor_intervals_.front().sequence, first_sequence);
+    EXPECT_EQ(controller.pending_monitor_intervals_.front().acked_bytes, 0u);
+    ASSERT_TRUE(controller.current_interval_.active);
+    EXPECT_NE(controller.current_interval_.sequence, first_sequence);
+
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{first_packet},
+                                /*app_limited=*/false, first_interval_end,
+                                coquic::quic::RecoveryRttState{
+                                    .latest_rtt = std::chrono::milliseconds{50},
+                                    .min_rtt = std::chrono::milliseconds{50},
+                                    .smoothed_rtt = std::chrono::milliseconds{50},
+                                });
+
+    EXPECT_TRUE(controller.pending_monitor_intervals_.empty());
+    EXPECT_FALSE(controller.current_interval_.active);
+    ASSERT_TRUE(controller.previous_startup_sample_.has_value());
+    const auto &startup_sample = optional_ref_or_terminate(controller.previous_startup_sample_);
+    EXPECT_EQ(startup_sample.sending_rate_bytes_per_second, first_rate);
+    EXPECT_GT(controller.sending_rate_bytes_per_second_,
+              startup_sample.sending_rate_bytes_per_second);
+}
+
+TEST(QuicCongestionTest, PccAttributesLossToSendingMonitorInterval) {
+    coquic::quic::PccCongestionController controller(
+        /*max_datagram_size=*/1200, coquic::quic::PccCongestionController::Variant::allegro);
+
+    auto packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                   /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                   coquic::quic::test::test_time(1));
+    controller.on_packet_sent(packet);
+    const auto sequence = controller.current_interval_.sequence;
+    const auto interval_end = controller.current_interval_.end_time;
+    controller.maybe_finish_monitor_interval(interval_end,
+                                             coquic::quic::RecoveryRttState{
+                                                 .latest_rtt = std::chrono::milliseconds{50},
+                                                 .min_rtt = std::chrono::milliseconds{50},
+                                                 .smoothed_rtt = std::chrono::milliseconds{50},
+                                             });
+
+    ASSERT_EQ(controller.pending_monitor_intervals_.size(), 1u);
+    ASSERT_EQ(controller.pending_monitor_intervals_.front().sequence, sequence);
+    const auto first_rate =
+        controller.pending_monitor_intervals_.front().sending_rate_bytes_per_second;
+
+    controller.on_packets_lost(std::array<SentPacketRecord, 1>{packet});
+
+    EXPECT_TRUE(controller.pending_monitor_intervals_.empty());
+    ASSERT_TRUE(controller.previous_startup_sample_.has_value());
+    const auto &startup_sample = optional_ref_or_terminate(controller.previous_startup_sample_);
+    EXPECT_EQ(startup_sample.sending_rate_bytes_per_second, first_rate);
+    EXPECT_DOUBLE_EQ(startup_sample.loss_rate, 1.0);
+}
+
+TEST(QuicCongestionTest, PccWindowUsesMinRttInsteadOfInflatedLatestRtt) {
+    coquic::quic::PccCongestionController controller(
+        /*max_datagram_size=*/1200, coquic::quic::PccCongestionController::Variant::allegro);
+
+    controller.set_sending_rate(1000000.0);
+    controller.update_rtt_model(coquic::quic::RecoveryRttState{
+        .latest_rtt = std::chrono::milliseconds{50},
+        .min_rtt = std::chrono::milliseconds{50},
+        .smoothed_rtt = std::chrono::milliseconds{50},
+    });
+    const auto min_rtt_window = controller.congestion_window();
+
+    controller.update_rtt_model(coquic::quic::RecoveryRttState{
+        .latest_rtt = std::chrono::milliseconds{250},
+        .min_rtt = std::chrono::milliseconds{50},
+        .smoothed_rtt = std::chrono::milliseconds{250},
+    });
+
+    EXPECT_EQ(controller.congestion_window(), min_rtt_window);
+    EXPECT_EQ(controller.latest_rtt_, std::chrono::milliseconds{250});
+    EXPECT_EQ(controller.min_rtt_, std::chrono::milliseconds{50});
+}
+
+TEST(QuicCongestionTest, PccAllegroMonitorIntervalUsesOneToTwoRttRange) {
+    coquic::quic::PccCongestionController controller(
+        /*max_datagram_size=*/1200, coquic::quic::PccCongestionController::Variant::allegro);
+
+    controller.set_sending_rate(1000000.0);
+    controller.update_rtt_model(coquic::quic::RecoveryRttState{
+        .latest_rtt = std::chrono::milliseconds{50},
+        .min_rtt = std::chrono::milliseconds{50},
+        .smoothed_rtt = std::chrono::milliseconds{50},
+    });
+    EXPECT_EQ(controller.monitor_interval_duration(), std::chrono::milliseconds{50});
+
+    controller.set_sending_rate(10000.0);
+    const auto packets_duration =
+        std::chrono::duration_cast<coquic::quic::QuicCoreDuration>(std::chrono::duration<double>(
+            static_cast<double>(10 * 1200) / controller.sending_rate_bytes_per_second_));
+    EXPECT_EQ(controller.monitor_interval_duration(), packets_duration);
+    EXPECT_GT(controller.monitor_interval_duration(), std::chrono::milliseconds{50});
+}
+
+TEST(QuicCongestionTest, PccVivaceStartupAndGradientUpdateFollowPaperControlLoop) {
+    coquic::quic::PccCongestionController controller(
+        /*max_datagram_size=*/1200, coquic::quic::PccCongestionController::Variant::vivace);
+
+    const auto initial_rate = controller.sending_rate_bytes_per_second_;
+    EXPECT_EQ(controller.mode_, coquic::quic::PccCongestionController::Mode::startup);
+
+    controller.apply_utility_sample(coquic::quic::PccCongestionController::UtilitySample{
+        .sending_rate_bytes_per_second = initial_rate,
+        .utility = 10.0,
+    });
+    EXPECT_EQ(controller.mode_, coquic::quic::PccCongestionController::Mode::startup);
+    EXPECT_GT(controller.sending_rate_bytes_per_second_, initial_rate);
+
+    controller.apply_utility_sample(coquic::quic::PccCongestionController::UtilitySample{
+        .sending_rate_bytes_per_second = controller.sending_rate_bytes_per_second_,
+        .utility = 5.0,
+    });
+    EXPECT_EQ(controller.mode_, coquic::quic::PccCongestionController::Mode::vivace);
+    EXPECT_DOUBLE_EQ(controller.vivace_base_rate_bytes_per_second_, initial_rate);
+    EXPECT_GT(controller.sending_rate_bytes_per_second_, initial_rate);
+
+    controller.set_sending_rate(100000.0);
+    controller.enter_vivace_mode();
+    const auto base_rate = controller.vivace_base_rate_bytes_per_second_;
+    const auto high_probe_rate = controller.sending_rate_bytes_per_second_;
+    ASSERT_GT(high_probe_rate, base_rate);
+
+    controller.apply_utility_sample(coquic::quic::PccCongestionController::UtilitySample{
+        .sending_rate_bytes_per_second = high_probe_rate,
+        .utility = 1000.0,
+    });
+    const auto low_probe_rate = controller.sending_rate_bytes_per_second_;
+    ASSERT_LT(low_probe_rate, base_rate);
+
+    controller.apply_utility_sample(coquic::quic::PccCongestionController::UtilitySample{
+        .sending_rate_bytes_per_second = low_probe_rate,
+        .utility = 0.0,
+    });
+    EXPECT_EQ(controller.mode_, coquic::quic::PccCongestionController::Mode::vivace);
+    EXPECT_GT(controller.vivace_base_rate_bytes_per_second_, base_rate);
+    EXPECT_EQ(controller.previous_vivace_direction_, 1);
+    EXPECT_FALSE(controller.previous_adjust_sample_.has_value());
+    EXPECT_GT(controller.sending_rate_bytes_per_second_, high_probe_rate);
+}
+
+TEST(QuicCongestionTest, PccVivaceUtilityGradientUsesAdjustedRttSamples) {
+    coquic::quic::PccCongestionController controller(
+        /*max_datagram_size=*/1200, coquic::quic::PccCongestionController::Variant::vivace);
+
+    auto first_packet = make_sent_packet(/*packet_number=*/1, /*ack_eliciting=*/true,
+                                         /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                         coquic::quic::test::test_time(0));
+    controller.on_packet_sent(first_packet);
+
+    auto second_packet = make_sent_packet(/*packet_number=*/2, /*ack_eliciting=*/true,
+                                          /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                          coquic::quic::test::test_time(10));
+    controller.on_packet_sent(second_packet);
+
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{first_packet},
+                                /*app_limited=*/false, coquic::quic::test::test_time(20),
+                                coquic::quic::RecoveryRttState{
+                                    .latest_rtt = std::chrono::milliseconds{100},
+                                    .latest_adjusted_rtt = std::chrono::milliseconds{60},
+                                    .min_rtt = std::chrono::milliseconds{50},
+                                    .latest_rtt_sample = std::chrono::milliseconds{100},
+                                    .latest_adjusted_rtt_sample = std::chrono::milliseconds{60},
+                                    .smoothed_rtt = std::chrono::milliseconds{60},
+                                });
+    controller.on_packets_acked(std::array<SentPacketRecord, 1>{second_packet},
+                                /*app_limited=*/false, coquic::quic::test::test_time(40),
+                                coquic::quic::RecoveryRttState{
+                                    .latest_rtt = std::chrono::milliseconds{140},
+                                    .latest_adjusted_rtt = std::chrono::milliseconds{60},
+                                    .min_rtt = std::chrono::milliseconds{50},
+                                    .latest_rtt_sample = std::chrono::milliseconds{140},
+                                    .latest_adjusted_rtt_sample = std::chrono::milliseconds{60},
+                                    .smoothed_rtt = std::chrono::milliseconds{60},
+                                });
+
+    ASSERT_TRUE(controller.current_interval_.active);
+    const auto sample = controller.build_utility_sample(controller.current_interval_);
+    EXPECT_DOUBLE_EQ(sample.rtt_gradient, 0.0);
+}
+
+TEST(QuicCongestionTest, PccWrapperDispatchCoversAccessorsAndPacing) {
+    for (const auto algorithm : {coquic::quic::QuicCongestionControlAlgorithm::pcc,
+                                 coquic::quic::QuicCongestionControlAlgorithm::pcc_vivace}) {
+        coquic::quic::QuicCongestionController wrapper(algorithm, /*max_datagram_size=*/1200);
+
+        EXPECT_EQ(wrapper.algorithm(), algorithm);
+        const auto expected_name = algorithm == coquic::quic::QuicCongestionControlAlgorithm::pcc
+                                       ? std::string_view{"pcc"}
+                                       : std::string_view{"pcc-vivace"};
+        EXPECT_EQ(wrapper.name(), expected_name);
+        EXPECT_EQ(wrapper.minimum_window(), 4800u);
+        EXPECT_TRUE(
+            std::holds_alternative<coquic::quic::PccCongestionController>(wrapper.storage_));
+        EXPECT_GE(wrapper.congestion_window(), 12000u);
+
+        auto packet = make_sent_packet(/*packet_number=*/5, /*ack_eliciting=*/true,
+                                       /*in_flight=*/true, /*bytes_in_flight=*/1200,
+                                       coquic::quic::test::test_time(5));
+        wrapper.on_packet_sent(packet);
+        EXPECT_EQ(wrapper.bytes_in_flight(), 1200u);
+        EXPECT_TRUE(wrapper.can_send_ack_eliciting(1200));
+        EXPECT_FALSE(wrapper.next_send_time(/*bytes=*/0).has_value());
+
+        wrapper.on_packets_acked(std::array<SentPacketRecord, 1>{packet}, /*app_limited=*/false,
+                                 coquic::quic::test::test_time(505),
+                                 coquic::quic::RecoveryRttState{
+                                     .latest_rtt = std::chrono::milliseconds{100},
+                                     .min_rtt = std::chrono::milliseconds{100},
+                                     .smoothed_rtt = std::chrono::milliseconds{100},
+                                 });
+        EXPECT_EQ(wrapper.bytes_in_flight(), 0u);
+        EXPECT_GT(wrapper.pacing_send_quantum(), 0u);
+        const auto metrics = wrapper.debug_metrics(coquic::quic::test::test_time(505));
+        EXPECT_EQ(metrics.latest_rtt_us, 100000u);
+        EXPECT_EQ(metrics.min_rtt_us, 100000u);
+
+        auto copied = wrapper;
+        EXPECT_EQ(copied.algorithm(), algorithm);
+
+        auto assigned = coquic::quic::QuicCongestionController(
+            coquic::quic::QuicCongestionControlAlgorithm::newreno, /*max_datagram_size=*/1200);
+        assigned = wrapper;
+        EXPECT_EQ(assigned.algorithm(), algorithm);
+
+        assigned.on_persistent_congestion();
+        EXPECT_EQ(assigned.congestion_window(), assigned.minimum_window());
+        assigned.reset_for_new_path();
+        EXPECT_EQ(assigned.algorithm(), algorithm);
+    }
 }
 
 TEST(QuicCongestionTest, CopaPacingBudgetAndAckGuardsCoverColdPaths) {

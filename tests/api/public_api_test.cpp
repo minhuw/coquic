@@ -92,7 +92,8 @@ TEST(CoquicPublicApiTest, QuicEndpointReturnsConnectionFacade) {
 TEST(CoquicPublicApiTest, CoreEndpointCoversServerAndTransportOptions) {
     for (const auto algorithm :
          {coquic::core::CongestionControl::cubic, coquic::core::CongestionControl::bbr,
-          coquic::core::CongestionControl::copa}) {
+          coquic::core::CongestionControl::copa, coquic::core::CongestionControl::pcc,
+          coquic::core::CongestionControl::pcc_vivace}) {
         coquic::core::Endpoint endpoint(coquic::core::EndpointConfig{
             .role = coquic::core::Role::server,
             .supported_versions = {1, 0x6b3343cfu},

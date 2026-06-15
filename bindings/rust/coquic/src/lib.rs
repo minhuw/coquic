@@ -91,6 +91,8 @@ pub enum CongestionControl {
     Cubic,
     Bbr,
     Copa,
+    Pcc,
+    PccVivace,
 }
 
 impl CongestionControl {
@@ -100,6 +102,8 @@ impl CongestionControl {
             Self::Cubic => ffi::COQUIC_CONGESTION_CONTROL_CUBIC,
             Self::Bbr => ffi::COQUIC_CONGESTION_CONTROL_BBR,
             Self::Copa => ffi::COQUIC_CONGESTION_CONTROL_COPA,
+            Self::Pcc => ffi::COQUIC_CONGESTION_CONTROL_PCC,
+            Self::PccVivace => ffi::COQUIC_CONGESTION_CONTROL_PCC_VIVACE,
         }
     }
 
@@ -108,6 +112,8 @@ impl CongestionControl {
             ffi::COQUIC_CONGESTION_CONTROL_CUBIC => Self::Cubic,
             ffi::COQUIC_CONGESTION_CONTROL_BBR => Self::Bbr,
             ffi::COQUIC_CONGESTION_CONTROL_COPA => Self::Copa,
+            ffi::COQUIC_CONGESTION_CONTROL_PCC => Self::Pcc,
+            ffi::COQUIC_CONGESTION_CONTROL_PCC_VIVACE => Self::PccVivace,
             _ => Self::NewReno,
         }
     }

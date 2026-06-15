@@ -491,6 +491,16 @@ TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
     ASSERT_NE(endpoint, nullptr);
     coquic_endpoint_destroy(endpoint);
 
+    endpoint_config.transport.congestion_control = COQUIC_CONGESTION_CONTROL_PCC;
+    ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);
+    ASSERT_NE(endpoint, nullptr);
+    coquic_endpoint_destroy(endpoint);
+
+    endpoint_config.transport.congestion_control = COQUIC_CONGESTION_CONTROL_PCC_VIVACE;
+    ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);
+    ASSERT_NE(endpoint, nullptr);
+    coquic_endpoint_destroy(endpoint);
+
     endpoint_config.transport.congestion_control = 99;
     ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);
     ASSERT_NE(endpoint, nullptr);

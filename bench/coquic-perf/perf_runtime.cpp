@@ -22,7 +22,7 @@ constexpr std::uint64_t kPerfCopaBulkAckElicitingThreshold = 1;
 constexpr std::uint64_t kPerfCopaInteractiveAckElicitingThreshold = 8;
 constexpr std::string_view kPerfUsageLine =
     "usage: coquic-perf [server|client] [--host HOST] [--port PORT] "
-    "[--io-backend socket|io_uring] [--congestion-control newreno|cubic|bbr|copa] "
+    "[--io-backend socket|io_uring] [--congestion-control newreno|cubic|bbr|copa|pcc|pcc-vivace] "
     "[--mode bulk|rr|crr|persistent-rr] "
     "[--direction upload|download] [--request-bytes N] [--response-bytes N] "
     "[--streams N] [--connections N] [--requests-in-flight N] [--requests N] "

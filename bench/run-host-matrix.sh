@@ -15,7 +15,7 @@ client_cpus="${PERF_CLIENT_CPUS:-3}"
 port="${PERF_PORT:-9443}"
 network_mtu="${PERF_NETWORK_MTU:-1500}"
 run_timeout_seconds="${PERF_RUN_TIMEOUT_SECONDS:-120}"
-congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno cubic bbr copa}"
+congestion_controls="${PERF_CONGESTION_CONTROLS:-newreno cubic bbr copa pcc pcc-vivace}"
 client_impl="${PERF_CLIENT_IMPL:-coquic}"
 server_impl="${PERF_SERVER_IMPL:-coquic}"
 implementations_manifest="${PERF_IMPLEMENTATIONS_JSON:-${repo_root}/bench/implementations.json}"
@@ -71,7 +71,7 @@ environment overrides:
   PERF_PORT                  UDP port for server/client (default: 9443)
   PERF_NETWORK_MTU           Docker bridge MTU (default: 1500)
   PERF_RUN_TIMEOUT_SECONDS   per-client Docker run timeout (default: 120)
-  PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr copa")
+  PERF_CONGESTION_CONTROLS   space-separated algorithms to run (default: "newreno cubic bbr copa pcc pcc-vivace")
   PERF_CLIENT_IMPL           client implementation to run, coquic, coquic-rust, coquic-python, coquic-go, coquic-js, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
   PERF_SERVER_IMPL           server implementation to run, coquic, coquic-rust, coquic-python, coquic-go, coquic-js, quic-go, quinn, picoquic, msquic, quiche, quicly, google-quiche, tquic, mvfst, s2n-quic, xquic, aioquic, ngtcp2, lsquic, or neqo (default: coquic)
   PERF_IMPLEMENTATIONS_JSON  implementation metadata JSON (default: bench/implementations.json)
@@ -478,7 +478,7 @@ if [ -n "${PERF_DOCKER_ENV:-}" ]; then
 fi
 for congestion_control in "${congestion_control_list[@]}"; do
   case "${congestion_control}" in
-    newreno|cubic|bbr|copa)
+    newreno|cubic|bbr|copa|pcc|pcc-vivace)
       ;;
     default)
       if [ "${client_impl}" = "${server_impl}" ] \

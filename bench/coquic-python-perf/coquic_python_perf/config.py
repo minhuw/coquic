@@ -247,6 +247,9 @@ def parse_congestion_control(value: str) -> coquic.CongestionControl:
         "cubic": coquic.CongestionControl.CUBIC,
         "bbr": coquic.CongestionControl.BBR,
         "copa": coquic.CongestionControl.COPA,
+        "pcc": coquic.CongestionControl.PCC,
+        "pcc-vivace": coquic.CongestionControl.PCC_VIVACE,
+        "pcc_vivace": coquic.CongestionControl.PCC_VIVACE,
     }
     try:
         return mapping[value]
@@ -268,6 +271,8 @@ def congestion_control_name(congestion_control: coquic.CongestionControl) -> str
         coquic.CongestionControl.CUBIC: "cubic",
         coquic.CongestionControl.BBR: "bbr",
         coquic.CongestionControl.COPA: "copa",
+        coquic.CongestionControl.PCC: "pcc",
+        coquic.CongestionControl.PCC_VIVACE: "pcc-vivace",
     }
     return mapping[congestion_control]
 
@@ -294,7 +299,7 @@ def _read_file(path: Path) -> bytes:
 def usage() -> str:
     return (
         "usage: coquic-python-perf [server|client] [--host HOST] [--port PORT] "
-        "[--io-backend socket] [--congestion-control newreno|cubic|bbr|copa] "
+        "[--io-backend socket] [--congestion-control newreno|cubic|bbr|copa|pcc|pcc-vivace] "
         "[--mode bulk|rr|crr] [--direction upload|download] [--request-bytes N] "
         "[--response-bytes N] [--streams N] [--connections N] "
         "[--requests-in-flight N] [--requests N] [--total-bytes N] "

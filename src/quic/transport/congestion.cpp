@@ -45,6 +45,12 @@ std::string_view congestion_control_algorithm_name(QuicCongestionControlAlgorith
     if (algorithm == QuicCongestionControlAlgorithm::copa) {
         return "copa";
     }
+    if (algorithm == QuicCongestionControlAlgorithm::pcc) {
+        return "pcc";
+    }
+    if (algorithm == QuicCongestionControlAlgorithm::pcc_vivace) {
+        return "pcc-vivace";
+    }
     return "newreno";
 }
 
@@ -61,6 +67,12 @@ parse_congestion_control_algorithm(std::string_view value) {
     }
     if (value == "copa") {
         return QuicCongestionControlAlgorithm::copa;
+    }
+    if (value == "pcc" || value == "pcc-allegro" || value == "pcc_allegro") {
+        return QuicCongestionControlAlgorithm::pcc;
+    }
+    if (value == "pcc-vivace" || value == "pcc_vivace" || value == "vivace") {
+        return QuicCongestionControlAlgorithm::pcc_vivace;
     }
     return std::nullopt;
 }
@@ -82,6 +94,16 @@ QuicCongestionController::QuicCongestionController(QuicCongestionControlAlgorith
     }
     if (algorithm == QuicCongestionControlAlgorithm::copa) {
         storage_.emplace<CopaCongestionController>(max_datagram_size);
+        return;
+    }
+    if (algorithm == QuicCongestionControlAlgorithm::pcc) {
+        storage_.emplace<PccCongestionController>(max_datagram_size,
+                                                  PccCongestionController::Variant::allegro);
+        return;
+    }
+    if (algorithm == QuicCongestionControlAlgorithm::pcc_vivace) {
+        storage_.emplace<PccCongestionController>(max_datagram_size,
+                                                  PccCongestionController::Variant::vivace);
     }
 }
 
@@ -124,6 +146,12 @@ QuicCongestionControlAlgorithm QuicCongestionController::algorithm() const {
     if (std::holds_alternative<CopaCongestionController>(storage_)) {
         return QuicCongestionControlAlgorithm::copa;
     }
+    if (std::holds_alternative<PccCongestionController>(storage_)) {
+        const auto &controller = std::get<PccCongestionController>(storage_);
+        return controller.variant_ == PccCongestionController::Variant::vivace
+                   ? QuicCongestionControlAlgorithm::pcc_vivace
+                   : QuicCongestionControlAlgorithm::pcc;
+    }
     return QuicCongestionControlAlgorithm::newreno;
 }
 
@@ -148,7 +176,8 @@ std::size_t QuicCongestionController::pacing_send_quantum() const {
             if constexpr (std::is_same_v<Controller, NewRenoCongestionController> ||
                           std::is_same_v<Controller, CubicCongestionController> ||
                           std::is_same_v<Controller, BbrCongestionController> ||
-                          std::is_same_v<Controller, CopaCongestionController>) {
+                          std::is_same_v<Controller, CopaCongestionController> ||
+                          std::is_same_v<Controller, PccCongestionController>) {
                 return controller.pacing_budget_cap();
             } else {
                 return controller.max_datagram_size_;
@@ -181,7 +210,8 @@ QuicCongestionController::on_simple_stream_packet_sent(std::size_t bytes_sent,
             if constexpr (std::is_same_v<Controller, NewRenoCongestionController> ||
                           std::is_same_v<Controller, CubicCongestionController> ||
                           std::is_same_v<Controller, BbrCongestionController> ||
-                          std::is_same_v<Controller, CopaCongestionController>) {
+                          std::is_same_v<Controller, CopaCongestionController> ||
+                          std::is_same_v<Controller, PccCongestionController>) {
                 return controller.on_simple_stream_packet_sent(bytes_sent, sent_time, app_limited);
             } else {
                 static_cast<void>(bytes_sent);
@@ -212,7 +242,8 @@ void QuicCongestionController::on_simple_stream_packets_acked(
             if constexpr (std::is_same_v<Controller, NewRenoCongestionController> ||
                           std::is_same_v<Controller, CubicCongestionController> ||
                           std::is_same_v<Controller, BbrCongestionController> ||
-                          std::is_same_v<Controller, CopaCongestionController>) {
+                          std::is_same_v<Controller, CopaCongestionController> ||
+                          std::is_same_v<Controller, PccCongestionController>) {
                 controller.on_simple_stream_packets_acked(packets, app_limited, now, rtt_state);
             } else {
                 static_cast<void>(packets);
@@ -233,7 +264,8 @@ void QuicCongestionController::on_simple_stream_packets_acked(
             if constexpr (std::is_same_v<Controller, NewRenoCongestionController> ||
                           std::is_same_v<Controller, CubicCongestionController> ||
                           std::is_same_v<Controller, BbrCongestionController> ||
-                          std::is_same_v<Controller, CopaCongestionController>) {
+                          std::is_same_v<Controller, CopaCongestionController> ||
+                          std::is_same_v<Controller, PccCongestionController>) {
                 controller.on_simple_stream_packets_acked(packets, app_limited, now, rtt_state);
             } else {
                 static_cast<void>(packets);
@@ -356,6 +388,16 @@ QuicCongestionDebugMetrics QuicCongestionController::debug_metrics(QuicCoreTimeP
                 metrics.slow_start = controller.slow_start_;
                 metrics.startup_probe_complete = controller.startup_probe_complete_;
                 metrics.finite_target_window = target.finite;
+            } else if constexpr (std::is_same_v<Controller, PccCongestionController>) {
+                metrics.mode = static_cast<std::uint64_t>(controller.mode_);
+                metrics.bandwidth_bps = double_to_u64(controller.sending_rate_bytes_per_second_);
+                metrics.pacing_rate_bps = double_to_u64(controller.pacing_rate_bytes_per_second_);
+                metrics.bdp_bytes = controller.congestion_window_;
+                metrics.send_quantum = controller.send_quantum_;
+                metrics.pacing_budget = controller.pacing_budget_at(now);
+                metrics.latest_rtt_us = duration_us(controller.latest_rtt_);
+                metrics.min_rtt_us = duration_us(controller.min_rtt_);
+                metrics.slow_start = controller.mode_ == PccCongestionController::Mode::startup;
             }
 
             return metrics;

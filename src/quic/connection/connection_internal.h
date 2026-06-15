@@ -3350,7 +3350,9 @@ inline COQUIC_NO_PROFILE bool simple_stream_ack_sample_collection_is_eligible(
     return algorithm == QuicCongestionControlAlgorithm::newreno ||
            algorithm == QuicCongestionControlAlgorithm::cubic ||
            algorithm == QuicCongestionControlAlgorithm::bbr ||
-           algorithm == QuicCongestionControlAlgorithm::copa;
+           algorithm == QuicCongestionControlAlgorithm::copa ||
+           algorithm == QuicCongestionControlAlgorithm::pcc ||
+           algorithm == QuicCongestionControlAlgorithm::pcc_vivace;
 }
 
 inline COQUIC_NO_PROFILE bool simple_stream_ack_fast_path_is_eligible(
@@ -3365,7 +3367,9 @@ inline COQUIC_NO_PROFILE bool simple_stream_ack_fast_path_is_eligible(
     return algorithm == QuicCongestionControlAlgorithm::newreno ||
            algorithm == QuicCongestionControlAlgorithm::cubic ||
            algorithm == QuicCongestionControlAlgorithm::bbr ||
-           algorithm == QuicCongestionControlAlgorithm::copa;
+           algorithm == QuicCongestionControlAlgorithm::copa ||
+           algorithm == QuicCongestionControlAlgorithm::pcc ||
+           algorithm == QuicCongestionControlAlgorithm::pcc_vivace;
 }
 
 inline COQUIC_NO_PROFILE bool
@@ -3373,7 +3377,9 @@ simple_stream_congestion_batch_algorithm_is_supported(QuicCongestionControlAlgor
     return algorithm == QuicCongestionControlAlgorithm::newreno ||
            algorithm == QuicCongestionControlAlgorithm::cubic ||
            algorithm == QuicCongestionControlAlgorithm::bbr ||
-           algorithm == QuicCongestionControlAlgorithm::copa;
+           algorithm == QuicCongestionControlAlgorithm::copa ||
+           algorithm == QuicCongestionControlAlgorithm::pcc ||
+           algorithm == QuicCongestionControlAlgorithm::pcc_vivace;
 }
 
 inline COQUIC_NO_PROFILE bool

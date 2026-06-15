@@ -109,7 +109,7 @@ constexpr std::uint64_t kHttp3RuntimeActiveConnectionIdLimit = 8;
 constexpr std::string_view kHttp3ServerUsageLine =
     "usage: h3-server [--host HOST] [--port PORT] [--bootstrap-port PORT] "
     "[--alt-svc-max-age SECONDS] [--io-backend socket|io_uring] "
-    "[--congestion-control newreno|cubic|bbr|copa] "
+    "[--congestion-control newreno|cubic|bbr|copa|pcc|pcc-vivace] "
     "[--certificate-chain PATH] [--private-key PATH] [--document-root PATH] "
     "[--reverse-proxy http://HOST:PORT]";
 
@@ -118,7 +118,7 @@ constexpr std::string_view kHttp3ClientUsageLine =
     "[--data TEXT] [--body-file PATH] [--output PATH] [--server-name NAME] "
     "[--verify-peer] [--no-verify-peer] [--host HOST] [--port PORT] "
     "[--io-backend socket|io_uring] "
-    "[--congestion-control newreno|cubic|bbr|copa]";
+    "[--congestion-control newreno|cubic|bbr|copa|pcc|pcc-vivace]";
 
 enum class Http3CliMode : std::uint8_t { server, client };
 

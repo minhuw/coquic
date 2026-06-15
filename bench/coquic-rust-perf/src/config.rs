@@ -308,6 +308,8 @@ fn parse_congestion_control(value: &str) -> Result<CongestionControl> {
         "cubic" => Ok(CongestionControl::Cubic),
         "bbr" => Ok(CongestionControl::Bbr),
         "copa" => Ok(CongestionControl::Copa),
+        "pcc" => Ok(CongestionControl::Pcc),
+        "pcc-vivace" | "pcc_vivace" => Ok(CongestionControl::PccVivace),
         _ => Err(PerfError::new(usage())),
     }
 }
@@ -334,12 +336,14 @@ pub fn congestion_control_name(congestion_control: CongestionControl) -> &'stati
         CongestionControl::Cubic => "cubic",
         CongestionControl::Bbr => "bbr",
         CongestionControl::Copa => "copa",
+        CongestionControl::Pcc => "pcc",
+        CongestionControl::PccVivace => "pcc-vivace",
     }
 }
 
 fn usage() -> &'static str {
     "usage: coquic-rust-perf [server|client] [--host HOST] [--port PORT] \
-     [--io-backend socket] [--congestion-control newreno|cubic|bbr|copa] \
+     [--io-backend socket] [--congestion-control newreno|cubic|bbr|copa|pcc|pcc-vivace] \
      [--mode bulk|rr|crr|persistent-rr] [--direction upload|download] [--request-bytes N] \
      [--response-bytes N] [--streams N] [--connections N] \
      [--requests-in-flight N] [--requests N] [--total-bytes N] \

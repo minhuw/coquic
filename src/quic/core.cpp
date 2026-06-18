@@ -317,30 +317,31 @@ QuicCoreLocalError datagram_send_error_to_local_error(const CodecError &error) {
     }
 }
 
-COQUIC_NO_PROFILE void emit_send_datagram(QuicCoreResult &result, QuicCoreSendDatagram datagram,
+COQUIC_NO_PROFILE void emit_send_datagram(QuicCoreResult &core_result,
+                                          QuicCoreSendDatagram datagram,
                                           QuicCoreSendDatagramSink *send_sink) {
     if (send_sink == nullptr) {
-        result.effects.emplace_back(std::move(datagram));
+        core_result.effects.emplace_back(std::move(datagram));
         return;
     }
     if (!send_sink->on_send_datagram(std::move(datagram))) {
-        result.send_sink_failed = true;
+        core_result.send_sink_failed = true;
     }
 }
 
 COQUIC_NO_PROFILE QuicCoreResult take_connection_non_send_effects(
     QuicConnectionHandle connection_handle, QuicConnection &quic_connection) {
-    QuicCoreResult result;
+    QuicCoreResult non_send_result;
     while (auto received = quic_connection.take_received_stream_data()) {
         received->connection = connection_handle;
-        result.effects.emplace_back(std::move(*received));
+        non_send_result.effects.emplace_back(std::move(*received));
     }
     while (auto received = quic_connection.take_received_datagram_data()) {
         received->connection = connection_handle;
-        result.effects.emplace_back(std::move(*received));
+        non_send_result.effects.emplace_back(std::move(*received));
     }
     while (const auto reset = quic_connection.take_peer_reset_stream()) {
-        result.effects.emplace_back(QuicCorePeerResetStream{
+        non_send_result.effects.emplace_back(QuicCorePeerResetStream{
             .connection = connection_handle,
             .stream_id = reset->stream_id,
             .application_error_code = reset->application_error_code,
@@ -348,55 +349,55 @@ COQUIC_NO_PROFILE QuicCoreResult take_connection_non_send_effects(
         });
     }
     while (const auto stop = quic_connection.take_peer_stop_sending()) {
-        result.effects.emplace_back(QuicCorePeerStopSending{
+        non_send_result.effects.emplace_back(QuicCorePeerStopSending{
             .connection = connection_handle,
             .stream_id = stop->stream_id,
             .application_error_code = stop->application_error_code,
         });
     }
     while (const auto event = quic_connection.take_state_change()) {
-        result.effects.emplace_back(QuicCoreStateEvent{
+        non_send_result.effects.emplace_back(QuicCoreStateEvent{
             .connection = connection_handle,
             .change = *event,
         });
     }
     while (const auto preferred = quic_connection.take_peer_preferred_address_available()) {
-        result.effects.emplace_back(QuicCorePeerPreferredAddressAvailable{
+        non_send_result.effects.emplace_back(QuicCorePeerPreferredAddressAvailable{
             .connection = connection_handle,
             .preferred_address = preferred->preferred_address,
         });
     }
     while (const auto state = quic_connection.take_resumption_state_available()) {
-        result.effects.emplace_back(QuicCoreResumptionStateAvailable{
+        non_send_result.effects.emplace_back(QuicCoreResumptionStateAvailable{
             .connection = connection_handle,
             .state = state->state,
         });
     }
     while (const auto status = quic_connection.take_zero_rtt_status_event()) {
-        result.effects.emplace_back(QuicCoreZeroRttStatusEvent{
+        non_send_result.effects.emplace_back(QuicCoreZeroRttStatusEvent{
             .connection = connection_handle,
             .status = status->status,
         });
     }
     while (auto new_token = quic_connection.take_new_token()) {
-        result.effects.emplace_back(QuicCoreNewTokenAvailable{
+        non_send_result.effects.emplace_back(QuicCoreNewTokenAvailable{
             .connection = connection_handle,
             .token = std::move(*new_token),
         });
     }
     while (auto inspection = quic_connection.take_packet_inspection()) {
         inspection->connection = connection_handle;
-        result.effects.emplace_back(std::move(*inspection));
+        non_send_result.effects.emplace_back(std::move(*inspection));
     }
     if (const auto terminal = quic_connection.take_terminal_state()) {
         if (*terminal == QuicConnectionTerminalState::closed) {
-            result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+            non_send_result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
                 .connection = connection_handle,
                 .event = QuicCoreConnectionLifecycle::closed,
             });
         }
     }
-    return result;
+    return non_send_result;
 }
 
 COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
@@ -420,11 +421,11 @@ COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
     if (send_sink != nullptr) {
         class FastBulkCoreSink final : public QuicConnectionDrainedDatagramSink {
           public:
-            FastBulkCoreSink(QuicCoreResult &result, QuicCoreSendDatagramSink &sink,
-                             QuicConnectionHandle connection,
+            FastBulkCoreSink(QuicCoreResult &drain_result, QuicCoreSendDatagramSink &sink,
+                             QuicConnectionHandle sink_connection_handle,
                              const std::optional<QuicRouteHandle> &default_route,
                              const std::unordered_map<QuicPathId, QuicRouteHandle> &routes)
-                : result_(result), sink_(sink), connection_(connection),
+                : result_(drain_result), sink_(sink), connection_(sink_connection_handle),
                   default_route_(default_route), routes_(routes) {
             }
 
@@ -485,7 +486,7 @@ COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
             }
         }
     }
-    for (; emitted < kMaxDatagramsPerDrain; ++emitted) {
+    while (emitted < kMaxDatagramsPerDrain) {
         if (drain_result.send_sink_failed) {
             break;
         }
@@ -531,6 +532,7 @@ COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
         if (core_profile_enabled()) {
             ++core_profile_counters().drain_send_effects;
         }
+        ++emitted;
     }
     if (core_profile_enabled()) {
         core_profile_counters().drain_datagrams += emitted;
@@ -2224,15 +2226,8 @@ std::optional<QuicCoreResult>
     }
 
     auto config = entry.connection->config_;
-    const bool valid_destination_connection_id =
-        version_negotiation->destination_connection_id == config.source_connection_id;
-    const bool valid_source_connection_id =
-        version_negotiation->source_connection_id == config.initial_destination_connection_id;
-    const bool echoes_original_version =
-        std::find(version_negotiation->supported_versions.begin(),
-                  version_negotiation->supported_versions.end(),
-                  config.original_version) != version_negotiation->supported_versions.end();
-    if (!valid_destination_connection_id || !valid_source_connection_id) {
+    if (version_negotiation->destination_connection_id != config.source_connection_id ||
+        version_negotiation->source_connection_id != config.initial_destination_connection_id) {
         return std::nullopt;
     }
     //= https://www.rfc-editor.org/rfc/rfc9000#section-6.2
@@ -2241,7 +2236,9 @@ std::optional<QuicCoreResult>
     //= https://www.rfc-editor.org/rfc/rfc9368#section-4
     // # Clients MUST ignore any received Version Negotiation packets that
     // # contain the Original Version.
-    if (echoes_original_version) {
+    if (std::find(version_negotiation->supported_versions.begin(),
+                  version_negotiation->supported_versions.end(),
+                  config.original_version) != version_negotiation->supported_versions.end()) {
         return QuicCoreResult{};
     }
 
@@ -3010,10 +3007,10 @@ COQUIC_NO_PROFILE void QuicCore::refresh_server_connection_routes(ConnectionEntr
         const auto key_already_active =
             std::find(active_connection_id_keys.begin(), active_connection_id_keys.end(), key) !=
             active_connection_id_keys.end();
-        const auto existing_route = connection_id_routes_.find(key);
+        const auto original_destination_route = connection_id_routes_.find(key);
         if (!key.empty() && !key_already_active &&
-            (existing_route == connection_id_routes_.end() ||
-             existing_route->second == entry.handle)) {
+            (original_destination_route == connection_id_routes_.end() ||
+             original_destination_route->second == entry.handle)) {
             connection_id_routes_[key] = entry.handle;
             active_connection_id_keys.push_back(std::move(key));
         }
@@ -4365,22 +4362,17 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                         const auto version_negotiation =
                             parse_version_negotiation_packet(inbound_payload);
                         if (version_negotiation.has_value()) {
-                            const bool valid_destination_connection_id =
-                                version_negotiation->destination_connection_id ==
-                                config.source_connection_id;
-                            const bool valid_source_connection_id =
-                                version_negotiation->source_connection_id ==
-                                config.initial_destination_connection_id;
-                            const bool echoes_original_version =
-                                std::find(version_negotiation->supported_versions.begin(),
-                                          version_negotiation->supported_versions.end(),
-                                          config.original_version) !=
-                                version_negotiation->supported_versions.end();
                             //= https://www.rfc-editor.org/rfc/rfc9000#section-6.2
                             // # A client MUST discard a Version Negotiation packet that
                             // # lists the QUIC version selected by the client.
-                            if (valid_destination_connection_id && valid_source_connection_id &&
-                                !echoes_original_version) {
+                            if (version_negotiation->destination_connection_id ==
+                                    config.source_connection_id &&
+                                version_negotiation->source_connection_id ==
+                                    config.initial_destination_connection_id &&
+                                std::find(version_negotiation->supported_versions.begin(),
+                                          version_negotiation->supported_versions.end(),
+                                          config.original_version) ==
+                                    version_negotiation->supported_versions.end()) {
                                 for (const auto supported_version : config.supported_versions) {
                                     if (std::find(version_negotiation->supported_versions.begin(),
                                                   version_negotiation->supported_versions.end(),
@@ -4451,26 +4443,22 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
                         // # that cannot be validated; see Section 5.8 of [QUIC-TLS].
                         const bool valid_integrity =
                             retry_integrity_valid.has_value() && retry_integrity_valid.value();
-                        const bool valid_destination_connection_id =
-                            retry->destination_connection_id == config.source_connection_id;
                         //= https://www.rfc-editor.org/rfc/rfc9369#section-4.1
                         // # The client
                         // # MUST NOT use a different version in the subsequent Initial packet
                         // # that contains the Retry token.
-                        const bool valid_version = retry->version == config.original_version;
                         //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.1
                         // # A client MUST discard a Retry packet that contains a Source
                         // # Connection ID field that is identical to the Destination
                         // # Connection ID field of its Initial packet.
-                        const bool valid_source_connection_id =
-                            retry->source_connection_id != original_destination_connection_id;
                         //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.5.2
                         // # A client
                         // # MUST discard a Retry packet with a zero-length Retry Token field.
-                        const bool valid_retry_token = !retry->retry_token.empty();
                         if (can_process_retry && valid_integrity &&
-                            valid_destination_connection_id && valid_version &&
-                            valid_source_connection_id && valid_retry_token) {
+                            retry->destination_connection_id == config.source_connection_id &&
+                            retry->version == config.original_version &&
+                            retry->source_connection_id != original_destination_connection_id &&
+                            !retry->retry_token.empty()) {
                             config.original_destination_connection_id =
                                 original_destination_connection_id;
                             config.retry_source_connection_id = retry->source_connection_id;

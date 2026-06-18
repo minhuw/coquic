@@ -352,12 +352,10 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                     initial_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now, ecn,
                         config_.transport.ack_eliciting_threshold);
-                    const bool suppress_keepalive_peer_activity =
-                        last_client_handshake_keepalive_probe_time_.has_value() &
-                        (config_.role == EndpointRole::client) &
-                        (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
-                        !ack_eliciting;
-                    if (!suppress_keepalive_peer_activity) {
+                    if (!(last_client_handshake_keepalive_probe_time_.has_value() &
+                          (config_.role == EndpointRole::client) &
+                          (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
+                          !ack_eliciting)) {
                         note_idle_peer_activity(now);
                     }
                     if (ack_eliciting) {
@@ -1315,9 +1313,8 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
     simple_stream_ack_samples.clear();
     acked_packets.reserve(ack_result.acked_packets.size());
     simple_stream_ack_samples.reserve(ack_result.acked_packets.size());
-    const bool retired_simple_stream_batch = try_retire_simple_stream_acked_packets_fast_path(
-        packet_space, ack_result, simple_stream_ack_samples, simple_stream_ack_aggregate);
-    if (!retired_simple_stream_batch) {
+    if (!try_retire_simple_stream_acked_packets_fast_path(
+            packet_space, ack_result, simple_stream_ack_samples, simple_stream_ack_aggregate)) {
         const auto can_collect_lightweight_simple_stream_ack_samples = [&]() {
             if (!simple_stream_ack_sample_collection_is_eligible(
                     !ack_result.late_acked_packets.empty(), !ack_result.lost_packets.empty(),
@@ -1958,12 +1955,12 @@ bool QuicConnection::try_retire_simple_stream_acked_packets_fast_path(
         std::size_t length = 0;
         bool has_value = false;
     };
-    StreamAckRun run;
+    StreamAckRun ack_run;
     const auto flush_run = [&]() {
-        if (!run.has_value) {
+        if (!ack_run.has_value) {
             return;
         }
-        const auto stream_it = streams_.find(run.stream_id);
+        const auto stream_it = streams_.find(ack_run.stream_id);
         if (stream_it != streams_.end()) {
             const auto previous_fresh_sendable_bytes =
                 fresh_sendable_bytes_for_cache(stream_it->second);
@@ -1971,14 +1968,14 @@ bool QuicConnection::try_retire_simple_stream_acked_packets_fast_path(
                 stream_it->second.reset_state == StreamControlFrameState::none &&
                 stream_it->second.send_buffer.has_lost_data();
             if (stream_it->second.reset_state == StreamControlFrameState::none) {
-                stream_it->second.send_buffer.acknowledge(run.offset, run.length);
+                stream_it->second.send_buffer.acknowledge(ack_run.offset, ack_run.length);
             }
             note_stream_send_state_changed(previous_fresh_sendable_bytes,
                                            previous_stream_has_lost_send_data, stream_it->second);
             maybe_refresh_peer_stream_limit(stream_it->second);
-            note_retirement_candidate(run.stream_id);
+            note_retirement_candidate(ack_run.stream_id);
         }
-        run = StreamAckRun{};
+        ack_run = StreamAckRun{};
     };
     const auto acknowledge_metadata = [&](const StreamFrameSendMetadata &metadata) {
         if (metadata.fin || metadata.length == 0) {
@@ -2000,15 +1997,15 @@ bool QuicConnection::try_retire_simple_stream_acked_packets_fast_path(
             return;
         }
 
-        if (run.has_value && run.stream_id == metadata.stream_id &&
-            metadata.offset == run.offset + static_cast<std::uint64_t>(run.length) &&
-            metadata.length <= std::numeric_limits<std::size_t>::max() - run.length) {
-            run.length += metadata.length;
+        if (ack_run.has_value && ack_run.stream_id == metadata.stream_id &&
+            metadata.offset == ack_run.offset + static_cast<std::uint64_t>(ack_run.length) &&
+            metadata.length <= std::numeric_limits<std::size_t>::max() - ack_run.length) {
+            ack_run.length += metadata.length;
             return;
         }
 
         flush_run();
-        run = StreamAckRun{
+        ack_run = StreamAckRun{
             .stream_id = metadata.stream_id,
             .offset = metadata.offset,
             .length = metadata.length,
@@ -2074,8 +2071,7 @@ bool QuicConnection::try_retire_simple_stream_acked_packets_fast_path(
     }
     flush_run();
 
-    const auto retired = packet_space.recovery.retire_simple_stream_packets_if_present(handles);
-    if (retired != handles.size()) {
+    if (packet_space.recovery.retire_simple_stream_packets_if_present(handles) != handles.size()) {
         return true;
     }
 
@@ -3375,12 +3371,12 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
         }
 
         const auto &retire_connection_id = std::get<RetireConnectionIdFrame>(frame);
-        const auto previous_endpoint_route_generation = endpoint_route_generation();
-        auto retired = process_retire_connection_id_frame(retire_connection_id);
-        if (!retired.has_value()) {
-            return CodecResult<bool>::failure(retired.error());
+        const auto route_generation_before_retire = endpoint_route_generation();
+        auto retire_result = process_retire_connection_id_frame(retire_connection_id);
+        if (!retire_result.has_value()) {
+            return CodecResult<bool>::failure(retire_result.error());
         }
-        if (endpoint_route_generation() != previous_endpoint_route_generation) {
+        if (endpoint_route_generation() != route_generation_before_retire) {
             note_peer_progress();
         }
         continue;
@@ -3877,12 +3873,12 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
         }
 
         const auto &retire_connection_id = std::get<RetireConnectionIdFrame>(frame);
-        const auto previous_endpoint_route_generation = endpoint_route_generation();
-        auto retired = process_retire_connection_id_frame(retire_connection_id);
-        if (!retired.has_value()) {
-            return CodecResult<bool>::failure(retired.error());
+        const auto route_generation_before_retire = endpoint_route_generation();
+        auto retire_result = process_retire_connection_id_frame(retire_connection_id);
+        if (!retire_result.has_value()) {
+            return CodecResult<bool>::failure(retire_result.error());
         }
-        if (endpoint_route_generation() != previous_endpoint_route_generation) {
+        if (endpoint_route_generation() != route_generation_before_retire) {
             note_peer_progress();
         }
     }
@@ -4215,17 +4211,15 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_ack_only(
     }
     note_inbound_application_packet_for_path(path_id, packet_number);
 
-    const auto ack_delay_exponent = peer_transport_parameters_.has_value()
-                                        ? peer_transport_parameters_->ack_delay_exponent
-                                        : TransportParameters{}.ack_delay_exponent;
-    const auto max_ack_delay_ms = peer_transport_parameters_.has_value()
-                                      ? peer_transport_parameters_->max_ack_delay
-                                      : TransportParameters{}.max_ack_delay;
-    const auto processed_ack =
-        process_inbound_ack(application_space_, ack, now, ack_delay_exponent, max_ack_delay_ms,
-                            /*suppress_pto_reset=*/false, used_previous_application_read_secret);
-    if (!processed_ack.has_value()) {
-        return processed_ack;
+    const auto ack_processing_result = process_inbound_ack(
+        application_space_, ack, now,
+        peer_transport_parameters_.has_value() ? peer_transport_parameters_->ack_delay_exponent
+                                               : TransportParameters{}.ack_delay_exponent,
+        peer_transport_parameters_.has_value() ? peer_transport_parameters_->max_ack_delay
+                                               : TransportParameters{}.max_ack_delay,
+        /*suppress_pto_reset=*/false, used_previous_application_read_secret);
+    if (!ack_processing_result.has_value()) {
+        return ack_processing_result;
     }
 
     processed_peer_packet_ = true;

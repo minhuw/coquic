@@ -922,6 +922,7 @@ static xqc_int_t stream_write_notify(xqc_stream_t *stream, void *strm_user_data)
 
 static xqc_int_t stream_read_notify(xqc_stream_t *stream, void *strm_user_data) {
     stream_ctx_t *s = (stream_ctx_t *)strm_user_data;
+    /* Drain readable data, then advance either control coordination or payload accounting. */
     if (s == NULL) {
         return XQC_OK;
     }

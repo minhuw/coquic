@@ -1304,6 +1304,8 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
                         picoquic_call_back_event_t event, void *callback_ctx, void *v_stream_ctx) {
     app_ctx_t *app = (app_ctx_t *)callback_ctx;
     stream_ctx_t *stream = (stream_ctx_t *)v_stream_ctx;
+    /* Drive connection setup, per-stream accounting, and control/data stream IO from one callback.
+     */
     if (app == NULL) {
         return -1;
     }

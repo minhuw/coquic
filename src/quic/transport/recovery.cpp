@@ -1721,14 +1721,15 @@ void PacketSpaceRecovery::on_simple_stream_packet_sent(SimpleStreamSentPacketRec
         last_live_slot_ = append_slot_index;
         set_live_slot_bit(append_slot_index);
 
-        const auto tracked = tracked_packet(slot);
+        const auto tracked_sent_packet = tracked_packet(slot);
         if (!latest_in_flight_ack_eliciting_packet_.has_value() ||
-            DeadlineTrackedPacketLess{}(*latest_in_flight_ack_eliciting_packet_, tracked)) {
-            latest_in_flight_ack_eliciting_packet_ = tracked;
+            DeadlineTrackedPacketLess{}(*latest_in_flight_ack_eliciting_packet_,
+                                        tracked_sent_packet)) {
+            latest_in_flight_ack_eliciting_packet_ = tracked_sent_packet;
         }
         if (largest_acked_packet_number_.has_value() &&
             slot.packet_number < *largest_acked_packet_number_) {
-            eligible_loss_packets_.insert(tracked);
+            eligible_loss_packets_.insert(tracked_sent_packet);
         }
         ++compatibility_version_;
         return;
@@ -1791,9 +1792,9 @@ void PacketSpaceRecovery::on_simple_stream_packets_sent(
     }
 
     const auto previous_last_live_slot = last_live_slot_;
-    const auto first_packet_number = packets.front().packet_number;
-    const auto first_sent_time = packets.front().sent_time;
-    const auto last_sent_time = packets.back().sent_time;
+    const auto first_batch_packet_number = packets.front().packet_number;
+    const auto first_batch_sent_time = packets.front().sent_time;
+    const auto last_batch_sent_time = packets.back().sent_time;
     slots_.resize(slots_.size() + packets.size());
     ensure_live_link_slot(slots_.size() - 1);
 
@@ -1817,23 +1818,24 @@ void PacketSpaceRecovery::on_simple_stream_packets_sent(
     } else {
         live_links_[previous_last_live_slot].next = first_slot_index;
         if (live_sent_times_monotonic_ &&
-            slot_sent_time(slots_[previous_last_live_slot]) > first_sent_time) {
+            slot_sent_time(slots_[previous_last_live_slot]) > first_batch_sent_time) {
             live_sent_times_monotonic_ = false;
         }
     }
-    if (live_sent_times_monotonic_ && (!monotonic_sent_time || first_sent_time > last_sent_time)) {
+    if (live_sent_times_monotonic_ &&
+        (!monotonic_sent_time || first_batch_sent_time > last_batch_sent_time)) {
         live_sent_times_monotonic_ = false;
     }
     last_live_slot_ = first_slot_index + packets.size() - 1;
 
-    const auto tracked = tracked_packet(slots_[last_live_slot_]);
+    const auto last_tracked_packet = tracked_packet(slots_[last_live_slot_]);
     if (!latest_in_flight_ack_eliciting_packet_.has_value() ||
-        DeadlineTrackedPacketLess{}(*latest_in_flight_ack_eliciting_packet_, tracked)) {
-        latest_in_flight_ack_eliciting_packet_ = tracked;
+        DeadlineTrackedPacketLess{}(*latest_in_flight_ack_eliciting_packet_, last_tracked_packet)) {
+        latest_in_flight_ack_eliciting_packet_ = last_tracked_packet;
     }
 
     if (largest_acked_packet_number_.has_value() &&
-        first_packet_number < *largest_acked_packet_number_) {
+        first_batch_packet_number < *largest_acked_packet_number_) {
         for (std::size_t index = 0; index < packets.size(); ++index) {
             auto &slot = slots_[first_slot_index + index];
             if (slot.packet_number >= *largest_acked_packet_number_) {

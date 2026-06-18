@@ -1104,6 +1104,7 @@ static void on_receive_reset(quicly_stream_t *stream, quicly_error_t err) {
 static void server_on_receive(quicly_stream_t *stream, size_t off, const void *src, size_t len) {
     server_stream_data_t *data = stream->data;
     server_conn_data_t *conn_data = server_conn_data(stream->conn);
+    /* Parse control stream requests separately from payload streams that need response bytes. */
     if (!quicly_sendstate_is_open(&stream->sendstate)) {
         return;
     }

@@ -488,15 +488,15 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
     auto deserialize_reader = reader;
     const auto serialize_context =
         make_serialize_context(serialize_reader, role, initial_dcid, suite);
-    const auto deserialize_context = make_deserialize_context(
+    const auto initial_deserialize_context = make_deserialize_context(
         deserialize_reader, role, initial_dcid, suite, one_rtt_dcid.size());
 
-    exercise_decode(coquic::fuzz::byte_span(bytes), deserialize_context);
+    exercise_decode(coquic::fuzz::byte_span(bytes), initial_deserialize_context);
 
     std::vector<coquic::quic::ProtectedPacket> packets;
-    const auto packet_count = 1u + reader.read_size(4);
-    packets.reserve(packet_count);
-    for (std::size_t i = 0; i < packet_count; ++i) {
+    const auto generated_packet_count = 1u + reader.read_size(4);
+    packets.reserve(generated_packet_count);
+    for (std::size_t i = 0; i < generated_packet_count; ++i) {
         packets.push_back(make_packet(reader, one_rtt_dcid));
     }
 
@@ -506,15 +506,16 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data, std::size_t size
         return 0;
     }
 
-    auto decode_context = deserialize_context;
+    auto decode_context = initial_deserialize_context;
     decode_context.peer_role = role;
-    const auto redecode =
+    const auto decoded_round_trip =
         coquic::quic::deserialize_received_protected_datagram(encoded.value(), decode_context);
-    if (!redecode.has_value()) {
-        coquic::fuzz::require_error_offset(redecode.error(), encoded.value().size());
+    if (!decoded_round_trip.has_value()) {
+        coquic::fuzz::require_error_offset(decoded_round_trip.error(), encoded.value().size());
         return 0;
     }
 
-    coquic::fuzz::require(!redecode.value().empty(), "encoded protected datagram decoded empty");
+    coquic::fuzz::require(!decoded_round_trip.value().empty(),
+                          "encoded protected datagram decoded empty");
     return 0;
 }

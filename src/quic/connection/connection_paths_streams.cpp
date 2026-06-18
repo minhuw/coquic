@@ -733,7 +733,7 @@ void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_lo
         return;
     }
     auto &path = ensure_path_state(path_id);
-    const bool validation_already_underway =
+    const bool path_validation_in_progress =
         !path.validated && path.outstanding_challenge.has_value();
     path.validated = false;
     path.path_mtu_validation_pending = false;
@@ -757,7 +757,7 @@ void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_lo
     // # address.
     path.challenge_pending = true;
     path.validation_initiated_locally = initiated_locally;
-    if (!validation_already_underway) {
+    if (!path_validation_in_progress) {
         path.outstanding_challenge = next_path_challenge_data(path_id);
     }
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
@@ -775,7 +775,7 @@ void QuicConnection::start_path_validation_probe(QuicPathId path_id, bool initia
     }
 
     auto &path = existing->second;
-    const bool validation_already_underway =
+    const bool probe_validation_in_progress =
         !path.validated && path.outstanding_challenge.has_value();
     path.validated = false;
     path.path_mtu_validation_pending = false;
@@ -786,7 +786,7 @@ void QuicConnection::start_path_validation_probe(QuicPathId path_id, bool initia
     // # previously active path using a PATH_CHALLENGE frame.
     path.challenge_pending = true;
     path.validation_initiated_locally = initiated_locally;
-    if (!validation_already_underway) {
+    if (!probe_validation_in_progress) {
         path.outstanding_challenge = next_path_challenge_data(path_id);
     }
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
@@ -935,7 +935,7 @@ QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &fram
     }
 
     const bool retire_prior_increased = frame.retire_prior_to > largest_peer_retire_prior_to_;
-    const auto effective_retire_prior_to =
+    const auto active_retire_prior_to =
         retire_prior_increased ? frame.retire_prior_to : largest_peer_retire_prior_to_;
     //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
     // # A receiver MUST ignore any Retire Prior To fields that do not increase
@@ -990,7 +990,7 @@ QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &fram
 
     for (const auto &[sequence_number, record] : peer_connection_ids_) {
         static_cast<void>(record);
-        if (sequence_number >= effective_retire_prior_to) {
+        if (sequence_number >= active_retire_prior_to) {
             continue;
         }
 
@@ -1001,7 +1001,7 @@ QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &fram
         // # connection ID to the set of active connection IDs.
         queue_peer_connection_id_retirement(sequence_number);
     }
-    if (frame.sequence_number < effective_retire_prior_to) {
+    if (frame.sequence_number < active_retire_prior_to) {
         if (!retired_peer_connection_id_sequences_.contains(frame.sequence_number)) {
             peer_connection_ids_[frame.sequence_number] = PeerConnectionIdRecord{
                 .sequence_number = frame.sequence_number,
@@ -1795,9 +1795,8 @@ void QuicConnection::queue_transport_close_for_error(QuicCoreTimePoint now, cons
         .frame_type = error.has_frame_type ? error.frame_type : frame_type,
     };
     pending_connection_close_terminal_state_ = QuicConnectionTerminalState::failed;
-    const bool can_send_close = can_send_connection_close_frame();
     enter_closing_state(now, QuicConnectionTerminalState::failed);
-    closing_close_packet_pending_ = can_send_close;
+    closing_close_packet_pending_ = can_send_connection_close_frame();
 }
 
 bool QuicConnection::note_aead_encryption_attempt(std::size_t packet_count, QuicCoreTimePoint now) {
@@ -3324,17 +3323,18 @@ void QuicConnection::maybe_refresh_peer_stream_limit(StreamState &stream) {
         StreamLimitType::bidirectional,
         StreamLimitType::unidirectional,
     };
-    const std::array initial_windows = {
+    const std::array initial_stream_windows = {
         local_transport_parameters_.initial_max_streams_bidi,
         local_transport_parameters_.initial_max_streams_uni,
     };
-    const auto stream_count = (stream.stream_id >> 2u) + 1u;
-    const auto initial_window = std::max<std::uint64_t>(initial_windows[direction_index], 1u);
-    const auto limit_value =
-        stream_count > std::numeric_limits<std::uint64_t>::max() - initial_window
+    const auto released_stream_count = (stream.stream_id >> 2u) + 1u;
+    const auto initial_stream_window =
+        std::max<std::uint64_t>(initial_stream_windows[direction_index], 1u);
+    const auto stream_limit_value =
+        released_stream_count > std::numeric_limits<std::uint64_t>::max() - initial_stream_window
             ? std::numeric_limits<std::uint64_t>::max()
-            : stream_count + initial_window;
-    local_stream_limit_state_.queue_max_streams(limit_types[direction_index], limit_value);
+            : released_stream_count + initial_stream_window;
+    local_stream_limit_state_.queue_max_streams(limit_types[direction_index], stream_limit_value);
 }
 
 bool QuicConnection::is_probing_only(std::span<const Frame> frames) const {

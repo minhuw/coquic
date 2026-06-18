@@ -12,8 +12,8 @@ constexpr std::size_t kMaxPendingBackendEventsBeforeFlush = 64;
 constexpr quic::QuicCoreDuration kMaxTimedDrainDuration{2000000};
 
 std::vector<std::byte> make_payload(std::size_t bytes) {
-    std::vector<std::byte> out(bytes, std::byte{0x5a});
-    return out;
+    std::vector<std::byte> payload(bytes, std::byte{0x5a});
+    return payload;
 }
 
 quic::ConnectionId make_connection_id(std::byte prefix, std::uint64_t sequence) {
@@ -679,8 +679,9 @@ std::string QuicPerfClient::benchmark_phase_name() const {
 
 std::string QuicPerfClient::describe_failed_connection(quic::QuicConnectionHandle connection,
                                                        quic::QuicCoreTimePoint now) const {
-    std::ostringstream out;
-    out << "client core state failed connection=" << connection
+    std::ostringstream description;
+    description
+        << "client core state failed connection=" << connection
         << " phase=" << benchmark_phase_name() << " elapsed_ms="
         << std::chrono::duration_cast<std::chrono::milliseconds>(result_elapsed(now)).count()
         << " requests_started=" << requests_started_
@@ -689,46 +690,55 @@ std::string QuicPerfClient::describe_failed_connection(quic::QuicConnectionHandl
     const auto connection_it = connections_.find(connection);
     if (connection_it != connections_.end()) {
         const auto &state = connection_it->second;
-        out << " conn_requests_started=" << state.requests_started
-            << " conn_outstanding=" << state.outstanding_requests.size()
-            << " conn_bytes_sent=" << state.bytes_sent
-            << " conn_bytes_received=" << state.bytes_received
-            << " conn_control_complete=" << static_cast<int>(state.control_complete)
-            << " conn_close_requested=" << static_cast<int>(state.close_requested)
-            << " conn_persistent_rr_fin_sent=" << static_cast<int>(state.persistent_rr_fin_sent)
-            << " conn_persistent_rr_response_pending_bytes="
-            << state.persistent_rr_response_pending_bytes;
+        description << " conn_requests_started=" << state.requests_started
+                    << " conn_outstanding=" << state.outstanding_requests.size()
+                    << " conn_bytes_sent=" << state.bytes_sent
+                    << " conn_bytes_received=" << state.bytes_received
+                    << " conn_control_complete=" << static_cast<int>(state.control_complete)
+                    << " conn_close_requested=" << static_cast<int>(state.close_requested)
+                    << " conn_persistent_rr_fin_sent="
+                    << static_cast<int>(state.persistent_rr_fin_sent)
+                    << " conn_persistent_rr_response_pending_bytes="
+                    << state.persistent_rr_response_pending_bytes;
     } else {
-        out << " conn_state=missing";
+        description << " conn_state=missing";
     }
 
     const auto diagnostics = core_.connection_diagnostics();
-    const auto diagnostics_it =
+    const auto diagnostics_entry =
         std::find_if(diagnostics.begin(), diagnostics.end(),
                      [&](const auto &entry) { return entry.handle == connection; });
-    if (diagnostics_it != diagnostics.end()) {
-        const auto &diagnostics = *diagnostics_it;
-        out << " core_handshake_status=" << static_cast<int>(diagnostics.handshake_status)
-            << " core_failed_emitted=" << static_cast<int>(diagnostics.failed_emitted)
-            << " core_active_streams=" << diagnostics.active_streams
-            << " core_retired_streams=" << diagnostics.retired_streams
-            << " core_streams=" << diagnostics.streams.size()
-            << " core_app_outstanding_packets=" << diagnostics.application_space.outstanding_packets
-            << " core_app_declared_lost_packets="
-            << diagnostics.application_space.declared_lost_packets << " core_app_pending_probe="
-            << static_cast<int>(diagnostics.application_space.pending_probe)
-            << " core_cwnd=" << diagnostics.recovery.congestion_window
-            << " core_bytes_in_flight=" << diagnostics.recovery.bytes_in_flight
-            << " core_pto_count=" << diagnostics.recovery.pto_count
-            << " core_smoothed_rtt_ms=" << diagnostics.recovery.smoothed_rtt_ms
-            << " core_peer_max_data=" << diagnostics.flow_control.peer_max_data
-            << " core_highest_sent=" << diagnostics.flow_control.highest_sent
-            << " core_advertised_max_data=" << diagnostics.flow_control.advertised_max_data
-            << " core_delivered_bytes=" << diagnostics.flow_control.delivered_bytes
-            << " core_received_committed=" << diagnostics.flow_control.received_committed;
-        if (!diagnostics.streams.empty()) {
-            const auto &stream = diagnostics.streams.front();
-            out << " core_first_stream_id=" << stream.stream_id
+    if (diagnostics_entry != diagnostics.end()) {
+        const auto &connection_diagnostics = *diagnostics_entry;
+        description << " core_handshake_status="
+                    << static_cast<int>(connection_diagnostics.handshake_status)
+                    << " core_failed_emitted="
+                    << static_cast<int>(connection_diagnostics.failed_emitted)
+                    << " core_active_streams=" << connection_diagnostics.active_streams
+                    << " core_retired_streams=" << connection_diagnostics.retired_streams
+                    << " core_streams=" << connection_diagnostics.streams.size()
+                    << " core_app_outstanding_packets="
+                    << connection_diagnostics.application_space.outstanding_packets
+                    << " core_app_declared_lost_packets="
+                    << connection_diagnostics.application_space.declared_lost_packets
+                    << " core_app_pending_probe="
+                    << static_cast<int>(connection_diagnostics.application_space.pending_probe)
+                    << " core_cwnd=" << connection_diagnostics.recovery.congestion_window
+                    << " core_bytes_in_flight=" << connection_diagnostics.recovery.bytes_in_flight
+                    << " core_pto_count=" << connection_diagnostics.recovery.pto_count
+                    << " core_smoothed_rtt_ms=" << connection_diagnostics.recovery.smoothed_rtt_ms
+                    << " core_peer_max_data=" << connection_diagnostics.flow_control.peer_max_data
+                    << " core_highest_sent=" << connection_diagnostics.flow_control.highest_sent
+                    << " core_advertised_max_data="
+                    << connection_diagnostics.flow_control.advertised_max_data
+                    << " core_delivered_bytes="
+                    << connection_diagnostics.flow_control.delivered_bytes
+                    << " core_received_committed="
+                    << connection_diagnostics.flow_control.received_committed;
+        if (!connection_diagnostics.streams.empty()) {
+            const auto &stream = connection_diagnostics.streams.front();
+            description
+                << " core_first_stream_id=" << stream.stream_id
                 << " core_first_stream_pending_send=" << static_cast<int>(stream.pending_send)
                 << " core_first_stream_outstanding_send="
                 << static_cast<int>(stream.outstanding_send)
@@ -742,10 +752,10 @@ std::string QuicPerfClient::describe_failed_connection(quic::QuicConnectionHandl
                 << " core_first_stream_receive_consumed=" << stream.receive_flow_control_consumed;
         }
     } else {
-        out << " core_state=missing";
+        description << " core_state=missing";
     }
 
-    return out.str();
+    return description.str();
 }
 
 quic::QuicCoreResult QuicPerfClient::advance_endpoint(quic::QuicCoreEndpointInput input,

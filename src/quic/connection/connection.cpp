@@ -959,12 +959,13 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         }
 
         const auto packet_bytes = bytes.subspan(offset, packet_length.value());
-        const auto packet_destination_connection_id =
+        const auto current_packet_destination_connection_id =
             peek_long_header_destination_connection_id(packet_bytes);
-        if (packet_destination_connection_id.has_value()) {
+        if (current_packet_destination_connection_id.has_value()) {
             if (!first_datagram_destination_connection_id.has_value()) {
-                first_datagram_destination_connection_id = packet_destination_connection_id.value();
-            } else if (packet_destination_connection_id.value() !=
+                first_datagram_destination_connection_id =
+                    current_packet_destination_connection_id.value();
+            } else if (current_packet_destination_connection_id.value() !=
                        first_datagram_destination_connection_id.value()) {
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-12.2
                 // # Receivers SHOULD ignore any subsequent packets with a

@@ -1498,6 +1498,8 @@ static lsquic_stream_ctx_t *server_on_new_stream(void *stream_if_ctx, lsquic_str
 
 static void server_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     struct lsquic_stream_ctx *stream_ctx = h;
+    /* Control streams carry the binary perf control protocol; data streams carry benchmark
+     * payloads. */
     if (stream_ctx->is_control) {
         uint8_t buf[1024];
         for (;;) {

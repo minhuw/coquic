@@ -1728,11 +1728,11 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
         }
         return current >= terminal_success_deadline.value_or(QuicCoreTimePoint::max());
     };
-    const auto drive_result = [&](const QuicCoreResult &result,
-                                  bool *observed_send_effects = nullptr) {
+    const auto drive_result = [&](const QuicCoreResult &core_result,
+                                  bool *saw_send_effects = nullptr) {
         return drive_endpoint_until_blocked_with_backend(
-            endpoint, core, io_context.primary_route_handle, backend, result, state, "client",
-            &config, &client_policy, &io_context, observed_send_effects);
+            endpoint, core, io_context.primary_route_handle, backend, core_result, state, "client",
+            &config, &client_policy, &io_context, saw_send_effects);
     };
 
     if (!drive_result(start_result)) {
@@ -1799,12 +1799,12 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
             return {};
         }
 
-        bool observed_send_effects = false;
+        bool saw_send_effects = false;
         const auto result = advance_core_with_inputs(core, endpoint_update.core_inputs, now());
         return PumpEndpointWorkResult{
-            .ok = drive_result(result, &observed_send_effects),
+            .ok = drive_result(result, &saw_send_effects),
             .advanced_core = true,
-            .observed_send_effects = observed_send_effects,
+            .observed_send_effects = saw_send_effects,
         };
     };
 

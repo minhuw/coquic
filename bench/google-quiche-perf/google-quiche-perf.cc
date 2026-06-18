@@ -627,7 +627,7 @@ class PerfStream : public quic::QuicStream {
     void CompletePersistentClientResponses();
     void FailClientStream(std::string message);
 
-    const bool is_server_;
+    const bool server_side_stream_;
     quic::QuicStreamId stream_id_;
     PerfClientSession *client_session_;
     PerfServerSession *server_session_ = nullptr;
@@ -983,7 +983,7 @@ class PerfServerSession : public PerfSessionBase {
 PerfStream::PerfStream(quic::QuicStreamId id, quic::QuicSession *session, bool is_server,
                        PerfClientSession *client_session)
     : quic::QuicStream(id, session, /*is_static=*/false, quic::BIDIRECTIONAL),
-      is_server_(is_server), stream_id_(id), client_session_(client_session) {
+      server_side_stream_(is_server), stream_id_(id), client_session_(client_session) {
 }
 
 void PerfStream::StartClientRequest(uint64_t request_bytes, uint64_t response_bytes, bool counts,
@@ -1117,7 +1117,7 @@ void PerfStream::OnDataAvailable() {
             break;
         }
         absl::string_view data(static_cast<const char *>(region.iov_base), region.iov_len);
-        size_t consumed = is_server_ ? ConsumeServerBytes(data) : ConsumeClientBytes(data);
+        size_t consumed = server_side_stream_ ? ConsumeServerBytes(data) : ConsumeClientBytes(data);
         if (consumed == 0) {
             break;
         }
@@ -1133,7 +1133,7 @@ void PerfStream::OnDataAvailable() {
 
 void PerfStream::OnPeerFin() {
     if (IsControl()) {
-        if (is_server_) {
+        if (server_side_stream_) {
             bool send_fin = false;
             control_out_ = server_session_ == nullptr
                                ? EncodeSessionError("missing server session")
@@ -1143,7 +1143,7 @@ void PerfStream::OnPeerFin() {
         }
         return;
     }
-    if (is_server_) {
+    if (server_side_stream_) {
         if (server_session_ == nullptr || !server_session_->SessionStarted()) {
             Reset(quic::QUIC_BAD_APPLICATION_PAYLOAD);
             return;
@@ -1203,7 +1203,7 @@ void PerfStream::SendMore() {
         SendControl();
         return;
     }
-    if (is_server_) {
+    if (server_side_stream_) {
         while (CanWriteNewData()) {
             if (persistent_server_) {
                 if (server_response_left_ == 0) {
@@ -1270,7 +1270,7 @@ void PerfStream::OnClose() {
 }
 
 void PerfStream::OnStreamReset(const quic::QuicRstStreamFrame &frame) {
-    if (!is_server_) {
+    if (!server_side_stream_) {
         FailClientStream("Google QUICHE stream was reset");
     }
     quic::QuicStream::OnStreamReset(frame);

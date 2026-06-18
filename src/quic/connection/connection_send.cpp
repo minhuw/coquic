@@ -527,10 +527,11 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
         auto selected = streams_.end();
         const auto visit_range = [&](auto begin, auto end) {
             for (auto it = begin; it != end; ++it) {
-                auto &stream = it->second;
-                if (stream.reset_state == StreamControlFrameState::none &&
-                    stream.sendable_bytes() != 0 && !stream.send_buffer.has_lost_data() &&
-                    !stream_fin_sendable(stream)) {
+                auto &candidate_stream = it->second;
+                if (candidate_stream.reset_state == StreamControlFrameState::none &&
+                    candidate_stream.sendable_bytes() != 0 &&
+                    !candidate_stream.send_buffer.has_lost_data() &&
+                    !stream_fin_sendable(candidate_stream)) {
                     selected = it;
                     return false;
                 }
@@ -552,38 +553,40 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
         }
 
         fragments.clear();
-        auto &stream = selected->second;
-        const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream);
-        const auto previous_has_lost_send_data = false;
-        const auto highest_sent_before = stream.flow_control.highest_sent;
-        const auto packet_payload_budget = std::min<std::uint64_t>(
-            remaining_connection_credit,
-            max_stream_frame_payload_for_wire_budget(
-                selected->first, stream.flow_control.highest_sent, packet_stream_wire_budget));
-        if (packet_payload_budget == 0) {
+        auto &selected_stream = selected->second;
+        const auto selected_previous_fresh_bytes = fresh_sendable_bytes_for_cache(selected_stream);
+        const auto selected_previous_had_lost_data = false;
+        const auto selected_highest_sent_before = selected_stream.flow_control.highest_sent;
+        const auto selected_packet_payload_budget =
+            std::min<std::uint64_t>(remaining_connection_credit,
+                                    max_stream_frame_payload_for_wire_budget(
+                                        selected->first, selected_stream.flow_control.highest_sent,
+                                        packet_stream_wire_budget));
+        if (selected_packet_payload_budget == 0) {
             break;
         }
-        stream.append_send_fragments(
+        selected_stream.append_send_fragments(
             StreamSendBudget{
-                .packet_bytes = static_cast<std::size_t>(packet_payload_budget),
-                .new_bytes = packet_payload_budget,
+                .packet_bytes = static_cast<std::size_t>(selected_packet_payload_budget),
+                .new_bytes = selected_packet_payload_budget,
                 .prefer_fresh_data = true,
             },
             fragments);
-        const auto new_bytes_sent = stream.flow_control.highest_sent - highest_sent_before;
-        connection_flow_control_.highest_sent += new_bytes_sent;
-        note_stream_send_state_changed(previous_fresh_sendable_bytes, previous_has_lost_send_data,
-                                       stream);
-        if (fragments.empty() || new_bytes_sent == 0) {
+        const auto selected_new_bytes_sent =
+            selected_stream.flow_control.highest_sent - selected_highest_sent_before;
+        connection_flow_control_.highest_sent += selected_new_bytes_sent;
+        note_stream_send_state_changed(selected_previous_fresh_bytes,
+                                       selected_previous_had_lost_data, selected_stream);
+        if (fragments.empty() || selected_new_bytes_sent == 0) {
             break;
         }
 
         const auto packet_number = reserve_packet_number(application_space_);
         if (!packet_number.has_value()) {
             for (const auto &fragment : fragments) {
-                stream.restore_send_fragment(fragment);
+                selected_stream.restore_send_fragment(fragment);
             }
-            connection_flow_control_.highest_sent -= new_bytes_sent;
+            connection_flow_control_.highest_sent -= selected_new_bytes_sent;
             break;
         }
         if (!current_write_phase_first_packet_number_.has_value()) {
@@ -693,7 +696,7 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
             auto &profile = send_profile_counters();
             ++profile.datagrams;
             profile.bytes += datagram.size();
-            profile.stream_bytes += new_bytes_sent;
+            profile.stream_bytes += selected_new_bytes_sent;
             profile.max_datagram = std::max<std::uint64_t>(profile.max_datagram, datagram.size());
             profile.datagrams_le_1200 += static_cast<std::uint64_t>(datagram.size() <= 1200);
             profile.datagrams_le_1434 += static_cast<std::uint64_t>(datagram.size() <= 1434);
@@ -812,12 +815,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     bool handshake_probe_pending =
         !handshake_packet_space_discarded_ && handshake_space_.pending_probe_packet.has_value();
     bool application_probe_pending = application_space_.pending_probe_packet.has_value();
-    const bool pto_probe_burst_active =
+    const bool has_pto_probe_burst =
         remaining_pto_probe_datagrams_ > 0 &&
         (initial_probe_pending || handshake_probe_pending || application_probe_pending);
-    const bool pto_probe_credit_pending = remaining_pto_probe_datagrams_ > 0;
-    bool pto_probe_datagram_requested = pto_probe_burst_active;
-    auto preserve_pto_probe_packets = pto_probe_burst_active && remaining_pto_probe_datagrams_ > 1;
+    const bool has_pto_probe_credit = remaining_pto_probe_datagrams_ > 0;
+    bool pto_probe_datagram_requested = has_pto_probe_burst;
+    auto preserve_pto_probe_packets = has_pto_probe_burst && remaining_pto_probe_datagrams_ > 1;
     bool track_client_handshake_keepalive_probes = (config_.role == EndpointRole::client) &
                                                    (status_ == HandshakeStatus::in_progress) &
                                                    !handshake_confirmed_;
@@ -1051,11 +1054,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         const auto *datagram_packets = &candidate_packets;
         std::optional<std::vector<ProtectedPacket>> mutable_datagram_packets;
 
-        const auto serialize_datagram = [&](const SerializeProtectionContext &serialize_context)
+        const auto serialize_datagram = [&](const SerializeProtectionContext &protection_context)
             -> CodecResult<SerializedProtectedDatagram> {
             if (appended_one_rtt_fragment_packet != nullptr) {
                 auto encoded = serialize_protected_datagram_with_metadata(*datagram_packets,
-                                                                          serialize_context);
+                                                                          protection_context);
                 if (connection_drain_test_hooks().force_appended_fragment_base_datagram_failure) {
                     encoded = CodecResult<SerializedProtectedDatagram>::failure(
                         CodecErrorCode::packet_length_mismatch, 0);
@@ -1065,7 +1068,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 }
                 const auto offset = encoded.value().bytes.size();
                 const auto appended = append_protected_one_rtt_packet_to_datagram(
-                    encoded.value().bytes, *appended_one_rtt_fragment_packet, serialize_context);
+                    encoded.value().bytes, *appended_one_rtt_fragment_packet, protection_context);
                 if (!appended.has_value()) {
                     return CodecResult<SerializedProtectedDatagram>::failure(
                         appended.error().code, appended.error().offset);
@@ -1078,30 +1081,30 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             }
             if (appended_packet == nullptr) {
                 return serialize_protected_datagram_with_metadata(*datagram_packets,
-                                                                  serialize_context);
+                                                                  protection_context);
             }
             return serialize_protected_datagram_with_metadata(*datagram_packets, *appended_packet,
-                                                              serialize_context);
+                                                              protection_context);
         };
 
-        const auto &serialize_context = context.value();
+        const auto &candidate_serialize_context = context.value();
         if (consume_connection_drain_countdown(
                 &ConnectionDrainTestHooks::
                     force_candidate_datagram_serialization_failure_countdown)) {
             return CodecResult<SerializedProtectedDatagram>::failure(
                 CodecErrorCode::packet_length_mismatch, 0);
         }
-        auto datagram = serialize_datagram(serialize_context);
-        if (!datagram.has_value()) {
-            return datagram;
+        auto serialized_datagram = serialize_datagram(candidate_serialize_context);
+        if (!serialized_datagram.has_value()) {
+            return serialized_datagram;
         }
 
-        if (datagram.value().bytes.size() >= kMinimumInitialDatagramSize) {
+        if (serialized_datagram.value().bytes.size() >= kMinimumInitialDatagramSize) {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-14.1
             // # Datagrams containing Initial packets MAY exceed 1200 bytes if
             // # the sender believes that the network path and peer both
             // # support the size that it chooses.
-            return datagram;
+            return serialized_datagram;
         }
 
         for (std::size_t packet_index = 0; packet_index < datagram_packets->size();
@@ -1117,7 +1120,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
 
             const auto frames_without_padding = mutable_initial->frames;
             const auto padding_deficit =
-                kMinimumInitialDatagramSize - datagram.value().bytes.size();
+                kMinimumInitialDatagramSize - serialized_datagram.value().bytes.size();
             //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
             // # Clients MUST ensure that UDP datagrams containing Initial
             // # packets have UDP payloads of at least 1200 bytes, adding
@@ -1146,7 +1149,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                                                    .length = padding_length,
                                                }});
 
-                return serialize_datagram(serialize_context);
+                return serialize_datagram(candidate_serialize_context);
             };
 
             auto best_oversized_datagram = std::optional<SerializedProtectedDatagram>{};
@@ -1224,7 +1227,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 CodecErrorCode::packet_length_mismatch, 0);
         }
 
-        return datagram;
+        return serialized_datagram;
     };
     struct CommitSerializedDatagramOptions {
         std::size_t one_rtt_encrypted_packets = 0;
@@ -1436,12 +1439,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     };
     const auto finalize_datagram =
         [&](const std::vector<ProtectedPacket> &datagram_packets) -> DatagramBuffer {
-        auto datagram = serialize_candidate_datagram_with_metadata(datagram_packets);
-        if (!datagram.has_value()) {
+        auto serialized_datagram = serialize_candidate_datagram_with_metadata(datagram_packets);
+        if (!serialized_datagram.has_value()) {
             return fail_datagram_send(/*preserve_pending_packets=*/true);
         }
 
-        return commit_serialized_datagram(datagram_packets, std::move(datagram.value()));
+        return commit_serialized_datagram(datagram_packets, std::move(serialized_datagram.value()));
     };
     if (close_mode_ == QuicConnectionCloseMode::closing) {
         if (!closing_close_packet_pending_ || !can_send_connection_close_frame()) {
@@ -1619,12 +1622,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         }
         const auto &close_destination_connection_id =
             packet_destination_connection_id(close_candidates.front().packet);
-        const bool coalesced_close_uses_one_destination_connection_id =
-            std::ranges::all_of(close_candidates, [&](const auto &candidate_packet) {
+        if (!std::ranges::all_of(close_candidates, [&](const auto &candidate_packet) {
                 return packet_destination_connection_id(candidate_packet.packet) ==
                        close_destination_connection_id;
-            });
-        if (!coalesced_close_uses_one_destination_connection_id) {
+            })) {
             reduce_close_candidates_to_strongest();
         }
         std::vector<ProtectedPacket> close_packets;
@@ -1941,10 +1942,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 if (duplicate_candidate_datagram.value().bytes.size() <=
                     max_outbound_datagram_size) {
                     bool bypass_congestion_window = initial_space_.pending_probe_packet.has_value();
-                    const bool duplicate_initial_congestion_blocked = congestion_blocks_datagram(
-                        duplicate_candidate_datagram.value().bytes.size(),
-                        bypass_congestion_window);
-                    if (initial_ack_eliciting & duplicate_initial_congestion_blocked) {
+                    if (initial_ack_eliciting &
+                        congestion_blocks_datagram(
+                            duplicate_candidate_datagram.value().bytes.size(),
+                            bypass_congestion_window)) {
                         return finalize_datagram(packets);
                     }
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.2
@@ -2297,21 +2298,19 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     return entry.second.pending_response.has_value() ||
                            entry.second.challenge_pending;
                 });
-            const bool eligible =
-                (config_.role == EndpointRole::client) & (status_ == HandshakeStatus::connected) &
-                base_ack_frame.has_value() & last_peer_activity_time_.has_value() &
-                has_receive_interest & !pending_application_send_after_blocked_queue &
-                !application_space_.pending_probe_packet.has_value() &
-                pending_new_token_frames_.empty() & pending_new_connection_id_frames_.empty() &
-                pending_retire_connection_id_frames_.empty() & application_crypto_frames.empty() &
-                !has_pending_path_validation &
-                (initial_packet_space_discarded_ ||
-                 !has_in_flight_ack_eliciting_packet(initial_space_)) &
-                (handshake_packet_space_discarded_ ||
-                 !has_in_flight_ack_eliciting_packet(handshake_space_)) &
-                !has_in_flight_ack_eliciting_packet(application_space_) &
-                current_send_path_id_.has_value();
-            if (!eligible) {
+            if (!((config_.role == EndpointRole::client) & (status_ == HandshakeStatus::connected) &
+                  base_ack_frame.has_value() & last_peer_activity_time_.has_value() &
+                  has_receive_interest & !pending_application_send_after_blocked_queue &
+                  !application_space_.pending_probe_packet.has_value() &
+                  pending_new_token_frames_.empty() & pending_new_connection_id_frames_.empty() &
+                  pending_retire_connection_id_frames_.empty() & application_crypto_frames.empty() &
+                  !has_pending_path_validation &
+                  (initial_packet_space_discarded_ ||
+                   !has_in_flight_ack_eliciting_packet(initial_space_)) &
+                  (handshake_packet_space_discarded_ ||
+                   !has_in_flight_ack_eliciting_packet(handshake_space_)) &
+                  !has_in_flight_ack_eliciting_packet(application_space_) &
+                  current_send_path_id_.has_value())) {
                 return;
             }
 
@@ -2407,7 +2406,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     .qlog_enabled = qlog_session_ != nullptr,
                     .use_zero_rtt_packet_protection = use_zero_rtt_packet_protection,
                     .can_send_one_rtt_packets = can_send_one_rtt_packets,
-                    .pto_probe_credit_pending = pto_probe_credit_pending,
+                    .pto_probe_credit_pending = has_pto_probe_credit,
                     .pending_application_send_after_blocked_queue =
                         pending_application_send_after_blocked_queue,
                     .application_probe_pending =
@@ -2782,55 +2781,58 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 bool found_priority_work = false;
                 decltype(streams.begin()) selected = streams.end();
                 visit_round_robin([&](const auto it) {
-                    auto &stream = it->second;
-                    if (stream.reset_state != StreamControlFrameState::none) {
+                    auto &candidate_stream = it->second;
+                    if (candidate_stream.reset_state != StreamControlFrameState::none) {
                         return true;
                     }
-                    if (stream_fin_sendable(stream)) {
+                    if (stream_fin_sendable(candidate_stream)) {
                         found_priority_work = true;
                         return false;
                     }
-                    if (stream.sendable_bytes() != 0) {
+                    if (candidate_stream.sendable_bytes() != 0) {
                         selected = it;
                         return false;
                     }
                     return true;
                 });
                 if (!found_priority_work && selected != streams.end()) {
-                    auto &stream = selected->second;
+                    auto &selected_stream = selected->second;
                     const auto stream_id = selected->first;
-                    const auto previous_fresh_sendable_bytes =
-                        fresh_sendable_bytes_for_cache(stream);
-                    const auto previous_has_lost_send_data =
-                        stream.reset_state == StreamControlFrameState::none &&
-                        stream.send_buffer.has_lost_data();
-                    const auto highest_sent_before = stream.flow_control.highest_sent;
-                    const auto packet_share = std::min(
-                        remaining_wire_bytes,
-                        max_stream_frame_payload_for_wire_budget(
-                            stream_id, stream.flow_control.highest_sent, remaining_wire_bytes));
+                    const auto selected_previous_fresh_bytes =
+                        fresh_sendable_bytes_for_cache(selected_stream);
+                    const auto selected_previous_had_lost_data =
+                        selected_stream.reset_state == StreamControlFrameState::none &&
+                        selected_stream.send_buffer.has_lost_data();
+                    const auto selected_highest_sent_before =
+                        selected_stream.flow_control.highest_sent;
+                    const auto packet_share =
+                        std::min(remaining_wire_bytes,
+                                 max_stream_frame_payload_for_wire_budget(
+                                     stream_id, selected_stream.flow_control.highest_sent,
+                                     remaining_wire_bytes));
                     if (packet_share == 0) {
                         return selected_payload_bytes;
                     }
                     const auto new_byte_share = std::min<std::uint64_t>(
                         remaining_connection_credit, static_cast<std::uint64_t>(packet_share));
                     const auto fragment_count_before = fragments.size();
-                    stream.append_send_fragments(
+                    selected_stream.append_send_fragments(
                         StreamSendBudget{
                             .packet_bytes = packet_share,
                             .new_bytes = new_byte_share,
                             .prefer_fresh_data = true,
                         },
                         fragments);
-                    const auto new_bytes_sent =
-                        stream.flow_control.highest_sent - highest_sent_before;
-                    connection_flow.highest_sent += new_bytes_sent;
+                    const auto selected_new_bytes_sent =
+                        selected_stream.flow_control.highest_sent - selected_highest_sent_before;
+                    connection_flow.highest_sent += selected_new_bytes_sent;
                     if (fragments.size() != fragment_count_before) {
                         last_stream_id = stream_id;
                         note_selected_payload_bytes(fragment_count_before);
                     }
-                    note_stream_send_state_changed(previous_fresh_sendable_bytes,
-                                                   previous_has_lost_send_data, stream);
+                    note_stream_send_state_changed(selected_previous_fresh_bytes,
+                                                   selected_previous_had_lost_data,
+                                                   selected_stream);
                     return selected_payload_bytes;
                 }
             }
@@ -2840,46 +2842,50 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     std::size_t wire_share, // NOLINT(bugprone-easily-swappable-parameters)
                     std::uint64_t new_byte_share) -> std::size_t {
                 const auto stream_id = selected->first;
-                auto &stream = selected->second;
+                auto &selected_stream = selected->second;
 
-                const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream);
-                const auto previous_has_lost_send_data =
-                    stream.reset_state == StreamControlFrameState::none &&
-                    stream.send_buffer.has_lost_data();
-                const auto highest_sent_before = stream.flow_control.highest_sent;
+                const auto selected_previous_fresh_bytes =
+                    fresh_sendable_bytes_for_cache(selected_stream);
+                const auto selected_previous_had_lost_data =
+                    selected_stream.reset_state == StreamControlFrameState::none &&
+                    selected_stream.send_buffer.has_lost_data();
+                const auto selected_highest_sent_before = selected_stream.flow_control.highest_sent;
                 auto packet_share =
                     loss_phase_for_stream
-                        ? std::min(
-                              remaining_wire_bytes,
-                              max_stream_frame_payload_for_wire_budget(
-                                  stream_id, stream.next_send_offset_for_budget(false), wire_share))
+                        ? std::min(remaining_wire_bytes,
+                                   max_stream_frame_payload_for_wire_budget(
+                                       stream_id,
+                                       selected_stream.next_send_offset_for_budget(false),
+                                       wire_share))
                         : std::min(remaining_wire_bytes,
                                    max_stream_frame_payload_for_wire_budget(
-                                       stream_id, stream.flow_control.highest_sent, wire_share));
-                const auto fin_sendable = stream_fin_sendable(stream);
+                                       stream_id, selected_stream.flow_control.highest_sent,
+                                       wire_share));
+                const auto fin_sendable = stream_fin_sendable(selected_stream);
                 if (packet_share == 0) {
-                    if (fin_only_stream_frame_cannot_fit(fin_sendable,
-                                                         stream.send_final_size.has_value())) {
+                    if (fin_only_stream_frame_cannot_fit(
+                            fin_sendable, selected_stream.send_final_size.has_value())) {
                         return 0;
                     }
-                    const auto fin_only_wire_size =
-                        stream_frame_header_wire_size(stream_id, *stream.send_final_size, 0);
+                    const auto fin_only_wire_size = stream_frame_header_wire_size(
+                        stream_id, *selected_stream.send_final_size, 0);
                     if (fin_only_wire_size > remaining_wire_bytes) {
                         return 0;
                     }
                 }
                 const auto fragment_count_before = fragments.size();
-                stream.append_send_fragments(
+                selected_stream.append_send_fragments(
                     StreamSendBudget{
                         .packet_bytes = packet_share,
                         .new_bytes = new_byte_share,
                         .prefer_fresh_data = !loss_phase_for_stream,
                     },
                     fragments);
-                const auto new_bytes_sent = stream.flow_control.highest_sent - highest_sent_before;
-                connection_flow.highest_sent += new_bytes_sent;
+                const auto selected_new_bytes_sent =
+                    selected_stream.flow_control.highest_sent - selected_highest_sent_before;
+                connection_flow.highest_sent += selected_new_bytes_sent;
                 remaining_connection_credit -=
-                    std::min<std::uint64_t>(remaining_connection_credit, new_bytes_sent);
+                    std::min<std::uint64_t>(remaining_connection_credit, selected_new_bytes_sent);
                 std::size_t selected_wire_bytes = 0;
                 for (std::size_t index = fragment_count_before; index < fragments.size(); ++index) {
                     auto &fragment = fragments[index];
@@ -2909,8 +2915,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     last_stream_id = stream_id;
                     note_selected_payload_bytes(fragment_count_before);
                 }
-                note_stream_send_state_changed(previous_fresh_sendable_bytes,
-                                               previous_has_lost_send_data, stream);
+                note_stream_send_state_changed(selected_previous_fresh_bytes,
+                                               selected_previous_had_lost_data, selected_stream);
                 return emitted_fragment ? selected_wire_bytes : 0;
             };
 
@@ -2938,11 +2944,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                         }
                     } else {
                         visit_round_robin([&](const auto it) {
-                            auto &stream = it->second;
-                            if (stream.reset_state != StreamControlFrameState::none) {
+                            auto &candidate_stream = it->second;
+                            if (candidate_stream.reset_state != StreamControlFrameState::none) {
                                 return true;
                             }
-                            if (stream.sendable_bytes() != 0 || stream_fin_sendable(stream)) {
+                            if (candidate_stream.sendable_bytes() != 0 ||
+                                stream_fin_sendable(candidate_stream)) {
                                 selected = it;
                                 return false;
                             }
@@ -2965,15 +2972,15 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 auto &active_streams = active_stream_iterator_scratch_;
                 active_streams.clear();
                 visit_round_robin([&](const auto it) {
-                    auto &stream = it->second;
-                    if (stream.reset_state != StreamControlFrameState::none) {
+                    auto &candidate_stream = it->second;
+                    if (candidate_stream.reset_state != StreamControlFrameState::none) {
                         return true;
                     }
 
-                    const auto fin_sendable = stream_fin_sendable(stream);
-                    const auto active = loss_phase
-                                            ? stream.send_buffer.has_lost_data() || fin_sendable
-                                            : (stream.sendable_bytes() != 0) || fin_sendable;
+                    const auto fin_sendable = stream_fin_sendable(candidate_stream);
+                    const auto active =
+                        loss_phase ? candidate_stream.send_buffer.has_lost_data() || fin_sendable
+                                   : (candidate_stream.sendable_bytes() != 0) || fin_sendable;
                     if (active) {
                         active_streams.push_back(it);
                     }
@@ -3056,12 +3063,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 bool has_application_close, std::uint64_t candidate_packet_number,
                 bool write_key_phase) -> CodecResult<SerializedProtectedDatagram> {
             const bool use_zero_rtt = use_zero_rtt_packet_protection & !has_application_close;
-            if (has_application_close && !use_zero_rtt) {
-                //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
-                // # After the handshake is confirmed (see Section 4.1.2 of
-                // # [QUIC-TLS]), an endpoint MUST send any CONNECTION_CLOSE frames
-                // # in a 1-RTT packet.
-            }
+            // Application CONNECTION_CLOSE frames force the 1-RTT serialization path below.
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.3
+            // # After the handshake is confirmed (see Section 4.1.2 of
+            // # [QUIC-TLS]), an endpoint MUST send any CONNECTION_CLOSE frames
+            // # in a 1-RTT packet.
             if (!use_zero_rtt) {
                 const auto candidate_destination_connection_id =
                     application_destination_connection_id();
@@ -3260,14 +3266,15 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 connection_flow_control_.highest_sent -=
                     static_cast<std::uint64_t>(fragment.bytes.size());
             }
-            auto &stream = streams_.at(fragment.stream_id);
-            const auto previous_fresh_sendable_bytes = fresh_sendable_bytes_for_cache(stream);
-            const auto previous_has_lost_send_data =
-                stream.reset_state == StreamControlFrameState::none &&
-                stream.send_buffer.has_lost_data();
-            stream.restore_send_fragment(fragment);
-            note_stream_send_state_changed(previous_fresh_sendable_bytes,
-                                           previous_has_lost_send_data, stream);
+            auto &fragment_stream = streams_.at(fragment.stream_id);
+            const auto fragment_previous_fresh_bytes =
+                fresh_sendable_bytes_for_cache(fragment_stream);
+            const auto fragment_previous_had_lost_data =
+                fragment_stream.reset_state == StreamControlFrameState::none &&
+                fragment_stream.send_buffer.has_lost_data();
+            fragment_stream.restore_send_fragment(fragment);
+            note_stream_send_state_changed(fragment_previous_fresh_bytes,
+                                           fragment_previous_had_lost_data, fragment_stream);
         };
         const auto restore_unsent_application_candidate =
             [&](const std::optional<MaxDataFrame> &max_data_to_restore,
@@ -3594,66 +3601,69 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                         });
                 };
             const auto make_probe_stream_fragments = [&]() {
-                auto fragments = probe_packet.stream_fragments;
-                if (fragments.empty() && packet_has_stream_frames(probe_packet)) {
-                    fragments.reserve(packet_stream_frame_count(probe_packet));
+                auto rebuilt_probe_fragments = probe_packet.stream_fragments;
+                if (rebuilt_probe_fragments.empty() && packet_has_stream_frames(probe_packet)) {
+                    rebuilt_probe_fragments.reserve(packet_stream_frame_count(probe_packet));
                     for_each_stream_frame_metadata(
                         probe_packet, [&](const StreamFrameSendMetadata &metadata) {
-                            const auto stream = streams_.find(metadata.stream_id);
-                            if (stream == streams_.end()) {
+                            const auto probe_stream_it = streams_.find(metadata.stream_id);
+                            if (probe_stream_it == streams_.end()) {
                                 return;
                             }
-                            const auto bytes = stream->second.send_buffer.bytes_for_range(
+                            const auto bytes = probe_stream_it->second.send_buffer.bytes_for_range(
                                 metadata.offset, metadata.length);
                             if (!bytes.has_value()) {
                                 return;
                             }
-                            auto &fragment = fragments.emplace_back(StreamFrameSendFragment{
-                                .stream_id = metadata.stream_id,
-                                .offset = metadata.offset,
-                                .bytes = *bytes,
-                                .fin = metadata.fin,
-                                .consumes_flow_control = metadata.consumes_flow_control,
-                            });
+                            auto &fragment =
+                                rebuilt_probe_fragments.emplace_back(StreamFrameSendFragment{
+                                    .stream_id = metadata.stream_id,
+                                    .offset = metadata.offset,
+                                    .bytes = *bytes,
+                                    .fin = metadata.fin,
+                                    .consumes_flow_control = metadata.consumes_flow_control,
+                                });
                             fragment.prime_stream_frame_header_cache();
                         });
                 }
-                for (auto &fragment : fragments) {
+                for (auto &fragment : rebuilt_probe_fragments) {
                     fragment.consumes_flow_control = false;
                 }
-                return fragments;
+                return rebuilt_probe_fragments;
             };
             auto restore_probe_fragment = [&](const StreamFrameSendFragment &fragment) {
-                const auto stream = streams_.find(fragment.stream_id);
-                if (stream == streams_.end()) {
+                const auto probe_stream_it = streams_.find(fragment.stream_id);
+                if (probe_stream_it == streams_.end()) {
                     return;
                 }
 
-                const auto previous_fresh_sendable_bytes =
-                    fresh_sendable_bytes_for_cache(stream->second);
-                const auto previous_has_lost_send_data =
-                    stream->second.reset_state == StreamControlFrameState::none &&
-                    stream->second.send_buffer.has_lost_data();
-                stream->second.mark_send_fragment_lost(fragment);
-                note_stream_send_state_changed(previous_fresh_sendable_bytes,
-                                               previous_has_lost_send_data, stream->second);
+                const auto fragment_previous_fresh_bytes =
+                    fresh_sendable_bytes_for_cache(probe_stream_it->second);
+                const auto fragment_previous_had_lost_data =
+                    probe_stream_it->second.reset_state == StreamControlFrameState::none &&
+                    probe_stream_it->second.send_buffer.has_lost_data();
+                probe_stream_it->second.mark_send_fragment_lost(fragment);
+                note_stream_send_state_changed(fragment_previous_fresh_bytes,
+                                               fragment_previous_had_lost_data,
+                                               probe_stream_it->second);
             };
             auto mark_probe_fragments_sent =
-                [&](std::span<const StreamFrameSendFragment> fragments) {
-                    for (const auto &fragment : fragments) {
-                        const auto stream = streams_.find(fragment.stream_id);
-                        if (stream == streams_.end()) {
+                [&](std::span<const StreamFrameSendFragment> probe_fragments) {
+                    for (const auto &fragment : probe_fragments) {
+                        const auto probe_stream_it = streams_.find(fragment.stream_id);
+                        if (probe_stream_it == streams_.end()) {
                             continue;
                         }
 
-                        const auto previous_fresh_sendable_bytes =
-                            fresh_sendable_bytes_for_cache(stream->second);
-                        const auto previous_has_lost_send_data =
-                            stream->second.reset_state == StreamControlFrameState::none &&
-                            stream->second.send_buffer.has_lost_data();
-                        stream->second.mark_send_fragment_sent(fragment);
-                        note_stream_send_state_changed(previous_fresh_sendable_bytes,
-                                                       previous_has_lost_send_data, stream->second);
+                        const auto fragment_previous_fresh_bytes =
+                            fresh_sendable_bytes_for_cache(probe_stream_it->second);
+                        const auto fragment_previous_had_lost_data =
+                            probe_stream_it->second.reset_state == StreamControlFrameState::none &&
+                            probe_stream_it->second.send_buffer.has_lost_data();
+                        probe_stream_it->second.mark_send_fragment_sent(fragment);
+                        note_stream_send_state_changed(fragment_previous_fresh_bytes,
+                                                       fragment_previous_had_lost_data,
+                                                       probe_stream_it->second);
                     }
                 };
             const auto restore_unsent_application_probe_candidate = [&]() {
@@ -4103,10 +4113,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     take_path_validation_frames(/*ack_only_mode=*/false);
                 selected_send_path_id = send_path_for_path_validation_frames(
                     ack_only_path_validation_frames, current_send_path_id_);
-                const bool probing_response_only =
+                const bool ack_only_probing_response_only =
                     response_validation_on_non_current_path(ack_only_path_validation_frames);
                 std::vector<Frame> ack_only_frames;
-                if (!probing_response_only) {
+                if (!ack_only_probing_response_only) {
                     append_application_ack_frame(ack_only_frames,
                                                  application_space_.received_packets,
                                                  std::optional<OutboundAckHeader>{ack_header});
@@ -4171,7 +4181,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                             .in_flight = path_validation_ack_eliciting,
                             .bytes_in_flight = ack_only_datagram.value().bytes.size(),
                             .largest_received_packet_number_acked =
-                                probing_response_only
+                                ack_only_probing_response_only
                                     ? std::nullopt
                                     : ack_largest_for_path_validation_sent_record(
                                           path_validation_ack_eliciting, ack_header),
@@ -4229,12 +4239,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             }
             selected_send_path_id = send_path_for_path_validation_frames(
                 application_path_validation_frames, current_send_path_id_);
-            const bool probing_response_only =
+            const bool application_probing_response_only =
                 response_validation_on_non_current_path(application_path_validation_frames);
             auto &reset_stream_frames = stream_control_frames.reset_stream;
             auto &stop_sending_frames = stream_control_frames.stop_sending;
             auto &stream_data_blocked_frames = stream_control_frames.stream_data_blocked;
-            if (probing_response_only) {
+            if (application_probing_response_only) {
                 application_max_data_frame = std::nullopt;
                 data_blocked_frame = std::nullopt;
                 max_stream_data_frames.clear();
@@ -4281,9 +4291,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             }();
             std::optional<DatagramFrame> selected_datagram_frame;
             std::optional<std::size_t> selected_datagram_queue_index;
-            bool can_select_datagram_frame = !ack_only_mode && !send_application_close_only &&
-                                             !validation_only_send && !probing_response_only &&
-                                             !pending_datagram_send_queue_.empty();
+            bool can_select_datagram_frame =
+                !ack_only_mode && !send_application_close_only && !validation_only_send &&
+                !application_probing_response_only && !pending_datagram_send_queue_.empty();
             if (can_select_datagram_frame) {
                 for (std::size_t index = 0; index < pending_datagram_send_queue_.size(); ++index) {
                     const auto &pending_datagram = pending_datagram_send_queue_[index];
@@ -4335,7 +4345,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             } application_stream_scratch_guard{stream_fragments, active_stream_iterator_scratch_};
             std::optional<OutboundAckHeader> selected_ack_frame;
             if (!send_application_close_only && !suppress_ack_for_preferred_address_validation &&
-                !probing_response_only && base_ack_frame.has_value()) {
+                !application_probing_response_only && base_ack_frame.has_value()) {
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2
                 // # When sending a packet for any reason, an endpoint SHOULD attempt to
                 // # include an ACK frame if one has not been sent recently.
@@ -4357,7 +4367,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             }
 
             const auto pto_burst_requires_ack_eliciting_application_packet = [&]() {
-                if (!pto_probe_credit_pending || use_zero_rtt_packet_protection ||
+                if (!has_pto_probe_credit || use_zero_rtt_packet_protection ||
                     send_application_close_only) {
                     return false;
                 }
@@ -4424,8 +4434,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 ++send_profile_counters().application_select_pacing_blocked;
             }
             const bool select_application_stream_data =
-                !ack_only_mode && !send_application_close_only && !probing_response_only &&
-                application_stream_pacing_ready;
+                !ack_only_mode && !send_application_close_only &&
+                !application_probing_response_only && application_stream_pacing_ready;
 
             if (select_application_stream_data) {
                 auto application_stream_budget = base_application_stream_budget;
@@ -4898,11 +4908,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     return true;
                 }
 
-                auto &last_fragment = stream_fragments.back();
-                const auto stream_id = last_fragment.stream_id;
-                last_fragment.fin = false;
-                last_fragment.prime_stream_frame_header_cache();
-                mark_stream_terminal_fin_pending(streams_, stream_id);
+                auto &terminal_fragment = stream_fragments.back();
+                const auto terminal_stream_id = terminal_fragment.stream_id;
+                terminal_fragment.fin = false;
+                terminal_fragment.prime_stream_frame_header_cache();
+                mark_stream_terminal_fin_pending(streams_, terminal_stream_id);
 
                 candidate_application_datagram = serialize_application_profiled(
                     application_candidate_frames.current(), stream_fragments,

@@ -914,8 +914,8 @@ Http3Result<std::uint64_t> decode_required_insert_count(const Http3QpackDecoderC
     }
 
     const auto max_value = decoder.insert_count + max_entries;
-    const auto max_wrapped = (max_value / full_range) * full_range;
-    std::uint64_t required_insert_count = max_wrapped + encoded_insert_count - 1;
+    const auto highest_wrapped_insert_count = (max_value / full_range) * full_range;
+    std::uint64_t required_insert_count = highest_wrapped_insert_count + encoded_insert_count - 1;
     if (required_insert_count > max_value) {
         if (required_insert_count <= full_range) {
             //= https://www.rfc-editor.org/rfc/rfc9204#section-4.5.1.1

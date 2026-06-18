@@ -54,7 +54,7 @@ Http3Result<bool> submit_request_to_connection(Http3Connection &connection, std:
 
 } // namespace
 
-Http3ClientEndpoint::Http3ClientEndpoint(Http3ClientConfig config)
+Http3ClientEndpoint::Http3ClientEndpoint(const Http3ClientConfig &config)
     : config_(config), connection_(Http3ConnectionConfig{
                            .role = Http3ConnectionRole::client,
                            .local_settings = config_.local_settings,
@@ -244,6 +244,7 @@ Http3Result<bool> Http3ClientEndpoint::abort_connect_stream(std::uint64_t stream
 
 bool Http3ClientEndpoint::handle_connection_events(Http3ClientEndpointUpdate &update,
                                                    std::span<const Http3EndpointEvent> events) {
+    // Partition connection events into public client notifications and pending response state.
     for (const auto &event : events) {
         if (const auto *priority = std::get_if<Http3PriorityUpdateEvent>(&event)) {
             update.priority_update_events.push_back(*priority);

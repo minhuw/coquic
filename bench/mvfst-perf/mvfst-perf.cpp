@@ -825,8 +825,8 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
                         return;
                     }
                     writeResponse(id, server_stream_state);
-                    auto cb = sock_->setReadCallback(id, nullptr);
-                    if (cb.hasError()) {
+                    auto callback_result = sock_->setReadCallback(id, nullptr);
+                    if (callback_result.hasError()) {
                         std::cerr << "mvfst server unset read callback failed\n";
                     }
                     return;
@@ -842,8 +842,8 @@ class PerfServerHandler : public quic::QuicSocket::ConnectionSetupCallback,
                 }
                 server_stream_state.responseBytes = responseBytesForNextRequest();
                 writeResponse(id, server_stream_state);
-                auto cb = sock_->setReadCallback(id, nullptr);
-                if (cb.hasError()) {
+                auto callback_result = sock_->setReadCallback(id, nullptr);
+                if (callback_result.hasError()) {
                     std::cerr << "mvfst server unset read callback failed\n";
                 }
             }
@@ -1168,8 +1168,8 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                 std::lock_guard<std::mutex> lock(mutex_);
                 streams_.emplace(streamId, std::move(state));
             }
-            auto cb = client_->setReadCallback(streamId, this);
-            if (cb.hasError()) {
+            auto callback_result = client_->setReadCallback(streamId, this);
+            if (callback_result.hasError()) {
                 setError("mvfst setReadCallback failed");
                 return;
             }
@@ -1229,8 +1229,8 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                 streams_.emplace(streamId, std::move(state));
                 persistentStream_ = streamId;
             }
-            auto cb = client_->setReadCallback(streamId, this);
-            if (cb.hasError()) {
+            auto callback_result = client_->setReadCallback(streamId, this);
+            if (callback_result.hasError()) {
                 setError("mvfst setReadCallback failed");
                 return;
             }
@@ -1308,8 +1308,8 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
     }
 
     void onNewBidirectionalStream(quic::StreamId id) noexcept override {
-        auto cb = client_->setReadCallback(id, this);
-        if (cb.hasError()) {
+        auto callback_result = client_->setReadCallback(id, this);
+        if (callback_result.hasError()) {
             setError("mvfst setReadCallback for peer stream failed");
         }
     }
@@ -1399,8 +1399,8 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                 }
             }
             if (done) {
-                auto cb = client_->setReadCallback(id, nullptr);
-                if (cb.hasError()) {
+                auto callback_result = client_->setReadCallback(id, nullptr);
+                if (callback_result.hasError()) {
                     setError("mvfst unset read callback failed");
                 }
                 cond_.notify_all();
@@ -1466,8 +1466,8 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
                 std::lock_guard<std::mutex> lock(mutex_);
                 streams_.emplace(streamId, std::move(state));
             }
-            auto cb = client_->setReadCallback(streamId, this);
-            if (cb.hasError()) {
+            auto callback_result = client_->setReadCallback(streamId, this);
+            if (callback_result.hasError()) {
                 setError("mvfst setReadCallback for control failed");
                 return;
             }
@@ -1611,10 +1611,10 @@ class MvfstClient : public quic::QuicSocket::ConnectionSetupCallback,
 };
 
 std::unique_ptr<MvfstClient> connectClient(const Config &cfg) {
-    auto client = std::make_unique<MvfstClient>(cfg);
-    client->start();
-    client->waitConnected();
-    return client;
+    auto mvfst_client = std::make_unique<MvfstClient>(cfg);
+    mvfst_client->start();
+    mvfst_client->waitConnected();
+    return mvfst_client;
 }
 
 std::vector<std::unique_ptr<MvfstClient>> connectClients(const Config &cfg, uint64_t count = 0) {
@@ -1629,9 +1629,9 @@ std::vector<std::unique_ptr<MvfstClient>> connectClients(const Config &cfg, uint
     return clients;
 }
 
-void collectCompleted(const std::vector<CompletedStream> &completed, Counters &counters,
+void collectCompleted(const std::vector<CompletedStream> &completed_streams, Counters &counters,
                       Clock::time_point measureStart) {
-    for (const auto &stream : completed) {
+    for (const auto &stream : completed_streams) {
         if (stream.counts && Clock::now() >= measureStart) {
             counters.bytesSent += stream.requestBytes;
             counters.bytesReceived += stream.received;
@@ -1645,33 +1645,34 @@ void runTimedBulk(const Config &cfg, Counters &counters) {
     auto clients = connectClients(cfg);
     auto measureStart = Clock::now() + cfg.warmup;
     auto deadline = measureStart + cfg.duration;
-    for (auto &client : clients) {
+    for (auto &mvfst_client : clients) {
         for (uint64_t i = 0; i < cfg.streams; ++i) {
-            client->openRequest(false, scenarioRequestBytes(cfg), scenarioResponseBytes(cfg));
+            mvfst_client->openRequest(false, scenarioRequestBytes(cfg), scenarioResponseBytes(cfg));
         }
     }
     while (Clock::now() < deadline) {
-        for (auto &client : clients) {
-            for (const auto &completed : client->driveUntil(deadline, false)) {
-                if (completed.counts && Clock::now() >= measureStart) {
-                    counters.bytesSent += completed.requestBytes;
-                    counters.bytesReceived += completed.received;
+        for (auto &mvfst_client : clients) {
+            for (const auto &completed_stream : mvfst_client->driveUntil(deadline, false)) {
+                if (completed_stream.counts && Clock::now() >= measureStart) {
+                    counters.bytesSent += completed_stream.requestBytes;
+                    counters.bytesReceived += completed_stream.received;
                 }
             }
         }
-        for (auto &client : clients) {
-            while (client->isConnected() && Clock::now() < deadline) {
-                if (client->streamCount() < intCap(cfg.streams)) {
-                    client->openRequest(Clock::now() >= measureStart, scenarioRequestBytes(cfg),
-                                        scenarioResponseBytes(cfg));
+        for (auto &mvfst_client : clients) {
+            while (mvfst_client->isConnected() && Clock::now() < deadline) {
+                if (mvfst_client->streamCount() < intCap(cfg.streams)) {
+                    mvfst_client->openRequest(Clock::now() >= measureStart,
+                                              scenarioRequestBytes(cfg),
+                                              scenarioResponseBytes(cfg));
                 } else {
                     break;
                 }
             }
         }
     }
-    for (auto &client : clients) {
-        client->driveUntil(Clock::now() + kDrainTimeout, false);
+    for (auto &mvfst_client : clients) {
+        mvfst_client->driveUntil(Clock::now() + kDrainTimeout, false);
     }
 }
 
@@ -1685,23 +1686,23 @@ void runFixedBulk(const Config &cfg, Counters &counters) {
     uint64_t remainder = cfg.totalBytes.value % cfg.streams;
     for (uint64_t i = 0; i < cfg.streams; ++i) {
         uint64_t target = perStream + static_cast<uint64_t>(i < remainder);
-        auto &client = clients[(i % clients.size())];
+        auto &mvfst_client = clients[(i % clients.size())];
         if (cfg.direction == kDirectionUpload) {
-            client->openRequest(true, target, 0);
+            mvfst_client->openRequest(true, target, 0);
         } else {
-            client->openRequest(true, scenarioRequestBytes(cfg), target);
+            mvfst_client->openRequest(true, scenarioRequestBytes(cfg), target);
         }
     }
     while (std::any_of(clients.begin(), clients.end(),
-                       [](const auto &client) { return client->hasStreams(); })) {
+                       [](const auto &mvfst_client) { return mvfst_client->hasStreams(); })) {
         if (Clock::now() >= deadline) {
             throw std::runtime_error("mvfst fixed bulk timed out waiting for stream completion");
         }
         auto waitDeadline = std::min(Clock::now() + std::chrono::seconds(10), deadline);
-        for (auto &client : clients) {
-            for (const auto &completed : client->driveUntil(waitDeadline, true)) {
-                counters.bytesSent += completed.requestBytes;
-                counters.bytesReceived += completed.received;
+        for (auto &mvfst_client : clients) {
+            for (const auto &completed_stream : mvfst_client->driveUntil(waitDeadline, true)) {
+                counters.bytesSent += completed_stream.requestBytes;
+                counters.bytesReceived += completed_stream.received;
             }
         }
     }
@@ -1714,17 +1715,18 @@ void runRr(const Config &cfg, Counters &counters) {
     uint64_t started = 0;
     std::vector<uint64_t> startedByConnection(clients.size(), 0);
     for (size_t index = 0; index < clients.size(); ++index) {
-        auto &client = clients[index];
-        while (client->streamCount() < intCap(cfg.requestsInFlight)) {
+        auto &mvfst_client = clients[index];
+        while (mvfst_client->streamCount() < intCap(cfg.requestsInFlight)) {
             if (!canStartRrRequest(cfg, started, startedByConnection, index)) {
                 break;
             }
             if (cfg.mode == kModePersistentRr) {
-                client->openPersistentRequest(cfg.requests.set || Clock::now() >= measureStart,
-                                              cfg.requestBytes, cfg.responseBytes);
+                mvfst_client->openPersistentRequest(cfg.requests.set ||
+                                                        Clock::now() >= measureStart,
+                                                    cfg.requestBytes, cfg.responseBytes);
             } else {
-                client->openRequest(cfg.requests.set || Clock::now() >= measureStart,
-                                    cfg.requestBytes, cfg.responseBytes);
+                mvfst_client->openRequest(cfg.requests.set || Clock::now() >= measureStart,
+                                          cfg.requestBytes, cfg.responseBytes);
             }
             ++started;
             ++startedByConnection[index];
@@ -1736,15 +1738,15 @@ void runRr(const Config &cfg, Counters &counters) {
         }
         if (cfg.requests.set && started >= cfg.requests.value &&
             std::none_of(clients.begin(), clients.end(),
-                         [](const auto &client) { return client->hasStreams(); })) {
+                         [](const auto &mvfst_client) { return mvfst_client->hasStreams(); })) {
             break;
         }
-        for (auto &client : clients) {
-            collectCompleted(client->driveUntil(deadline, false), counters, measureStart);
+        for (auto &mvfst_client : clients) {
+            collectCompleted(mvfst_client->driveUntil(deadline, false), counters, measureStart);
         }
         for (size_t index = 0; index < clients.size(); ++index) {
-            auto &client = clients[index];
-            while (client->streamCount() < intCap(cfg.requestsInFlight)) {
+            auto &mvfst_client = clients[index];
+            while (mvfst_client->streamCount() < intCap(cfg.requestsInFlight)) {
                 if (!canStartRrRequest(cfg, started, startedByConnection, index)) {
                     break;
                 }
@@ -1752,11 +1754,12 @@ void runRr(const Config &cfg, Counters &counters) {
                     break;
                 }
                 if (cfg.mode == kModePersistentRr) {
-                    client->openPersistentRequest(cfg.requests.set || Clock::now() >= measureStart,
-                                                  cfg.requestBytes, cfg.responseBytes);
+                    mvfst_client->openPersistentRequest(cfg.requests.set ||
+                                                            Clock::now() >= measureStart,
+                                                        cfg.requestBytes, cfg.responseBytes);
                 } else {
-                    client->openRequest(cfg.requests.set || Clock::now() >= measureStart,
-                                        cfg.requestBytes, cfg.responseBytes);
+                    mvfst_client->openRequest(cfg.requests.set || Clock::now() >= measureStart,
+                                              cfg.requestBytes, cfg.responseBytes);
                 }
                 ++started;
                 ++startedByConnection[index];
@@ -1764,15 +1767,16 @@ void runRr(const Config &cfg, Counters &counters) {
         }
     }
     if (cfg.mode == kModePersistentRr) {
-        for (auto &client : clients) {
-            client->finishPersistentRequests();
+        for (auto &mvfst_client : clients) {
+            mvfst_client->finishPersistentRequests();
         }
         auto drainDeadline = Clock::now() + kDrainTimeout;
         while (std::any_of(clients.begin(), clients.end(),
-                           [](const auto &client) { return client->hasStreams(); }) &&
+                           [](const auto &mvfst_client) { return mvfst_client->hasStreams(); }) &&
                Clock::now() < drainDeadline) {
-            for (auto &client : clients) {
-                collectCompleted(client->driveUntil(drainDeadline, false), counters, measureStart);
+            for (auto &mvfst_client : clients) {
+                collectCompleted(mvfst_client->driveUntil(drainDeadline, false), counters,
+                                 measureStart);
             }
         }
     }

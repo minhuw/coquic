@@ -1912,11 +1912,12 @@ bool runtime_server_backend_loop_prioritizes_due_timer_for_tests() {
             },
     });
 
-    const auto timer_it = std::find(operations.begin(), operations.end(), Operation::timer);
-    const auto wait_it = std::find(operations.begin(), operations.end(), Operation::wait);
-    const auto rx_it = std::find(operations.begin(), operations.end(), Operation::rx);
-    return exit_code == 1 && timer_it != operations.end() && wait_it != operations.end() &&
-           rx_it != operations.end() && timer_it < wait_it && timer_it < rx_it;
+    const auto timer_operation = std::find(operations.begin(), operations.end(), Operation::timer);
+    const auto wait_operation = std::find(operations.begin(), operations.end(), Operation::wait);
+    const auto rx_operation = std::find(operations.begin(), operations.end(), Operation::rx);
+    return exit_code == 1 && timer_operation != operations.end() &&
+           wait_operation != operations.end() && rx_operation != operations.end() &&
+           timer_operation < wait_operation && timer_operation < rx_operation;
 }
 
 } // namespace test

@@ -58,7 +58,7 @@ struct Http3ClientEndpointUpdate {
 
 class Http3ClientEndpoint {
   public:
-    explicit Http3ClientEndpoint(Http3ClientConfig config = {});
+    explicit Http3ClientEndpoint(const Http3ClientConfig &config = {});
 
     Http3Result<std::uint64_t> submit_request(Http3Request request);
     Http3Result<bool> submit_max_push_id(std::uint64_t push_id);

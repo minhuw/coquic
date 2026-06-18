@@ -645,7 +645,7 @@ CodecResult<std::vector<std::byte>> serialize_packet(const Packet &packet) {
 
     if (const auto *retry = std::get_if<RetryPacket>(&packet)) {
         const auto invalid_retry_packet =
-            (retry->version == kVersionNegotiationVersion) | (retry->retry_unused_bits > 0x0fu) |
+            retry->version == kVersionNegotiationVersion || retry->retry_unused_bits > 0x0fu ||
             !valid_long_header_connection_ids(retry->version, retry->destination_connection_id,
                                               retry->source_connection_id);
         if (invalid_retry_packet) {
@@ -766,10 +766,10 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
         }
 
         const auto payload_start_offset = reader.offset();
-        const auto payload = reader.read_exact(reader.remaining()).value();
+        const auto payload_bytes = reader.read_exact(reader.remaining()).value();
         std::vector<Frame> frames;
-        for (std::size_t payload_offset = 0; payload_offset < payload.size();) {
-            const auto decoded = deserialize_frame(payload.subspan(payload_offset));
+        for (std::size_t payload_offset = 0; payload_offset < payload_bytes.size();) {
+            const auto decoded = deserialize_frame(payload_bytes.subspan(payload_offset));
             if (!decoded.has_value()) {
                 return CodecResult<PacketDecodeResult>::failure(
                     decoded.error().code,

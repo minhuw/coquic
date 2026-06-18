@@ -70,6 +70,7 @@ std::optional<http09::Http09RuntimeConfig> parse_http09_interop_args(int argc, c
     if (const auto requests = getenv_string("REQUESTS"); requests.has_value()) {
         config.requests_env = *requests;
     }
+    // Apply network coordinates after the testcase profile so explicit runner values win.
     if (const auto host = getenv_string("HOST"); host.has_value()) {
         config.host = *host;
         host_specified = true;

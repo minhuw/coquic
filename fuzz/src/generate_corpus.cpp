@@ -293,6 +293,7 @@ void generate_varint_seeds(const std::filesystem::path &root) {
 }
 
 void generate_frame_seeds(const std::filesystem::path &root) {
+    // Cover each frame family with boundary values and representative optional fields.
     write_encoded_frame(root, "generated_padding_run", PaddingFrame{.length = 8});
     write_encoded_frame(root, "generated_ping", PingFrame{});
     write_encoded_frame(root, "generated_ack_ecn",
@@ -747,6 +748,7 @@ void stream_state_snapshot(FuzzInputBuilder &seed, bool prefer_fresh) {
 }
 
 void generate_stream_state_seeds(const std::filesystem::path &root) {
+    // Exercise send-buffer recovery, stream limits, reset paths, and receive-credit snapshots.
     {
         FuzzInputBuilder seed;
         write_stream_state_prefix(seed, false, 0, 8, 128);

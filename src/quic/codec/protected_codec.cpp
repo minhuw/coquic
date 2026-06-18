@@ -657,23 +657,25 @@ CodecResult<ReceivedFrameList> deserialize_received_frame_sequence(
 
     ReceivedFrameList frames;
     frames.reserve(1);
-    std::size_t offset = 0;
-    while (offset < payload.size()) {
-        auto decoded = deserialize_received_frame(payload.subspan(offset));
-        if (!decoded.has_value()) {
-            return CodecResult<ReceivedFrameList>::failure(
-                decoded.error().code, base_offset + offset + decoded.error().offset);
+    std::size_t payload_offset = 0;
+    while (payload_offset < payload.size()) {
+        auto decoded_frame = deserialize_received_frame(payload.subspan(payload_offset));
+        if (!decoded_frame.has_value()) {
+            return CodecResult<ReceivedFrameList>::failure(decoded_frame.error().code,
+                                                           base_offset + payload_offset +
+                                                               decoded_frame.error().offset);
         }
-        if (!frame_allowed_in_protected_payload_packet_type(decoded.value().frame, packet_type)) {
+        if (!frame_allowed_in_protected_payload_packet_type(decoded_frame.value().frame,
+                                                            packet_type)) {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-17.2.4
             // # Endpoints MUST treat receipt of Handshake packets with other frames
             // # as a connection error of type PROTOCOL_VIOLATION.
             return CodecResult<ReceivedFrameList>::failure(
-                CodecErrorCode::frame_not_allowed_in_packet_type, base_offset + offset);
+                CodecErrorCode::frame_not_allowed_in_packet_type, base_offset + payload_offset);
         }
 
-        frames.push_back(std::move(decoded.value().frame));
-        offset += decoded.value().bytes_consumed;
+        frames.push_back(std::move(decoded_frame.value().frame));
+        payload_offset += decoded_frame.value().bytes_consumed;
     }
 
     return CodecResult<ReceivedFrameList>::success(std::move(frames));
@@ -681,9 +683,9 @@ CodecResult<ReceivedFrameList> deserialize_received_frame_sequence(
 
 std::size_t encoded_stream_frame_payload_size(std::uint64_t frame_stream_id,
                                               std::uint64_t frame_offset,
-                                              std::size_t payload_size) {
+                                              std::size_t stream_payload_size) {
     return 1 + encoded_varint_size(frame_stream_id) + encoded_varint_size(frame_offset) +
-           encoded_varint_size(payload_size) + payload_size;
+           encoded_varint_size(stream_payload_size) + stream_payload_size;
 }
 
 CodecResult<std::size_t> serialize_stream_frame_header_into(std::vector<std::byte> &bytes,
@@ -2778,9 +2780,9 @@ append_protected_one_rtt_packet_to_datagram_impl(DatagramBuffer &out_datagram,
                 return CodecResult<std::size_t>::failure(CodecErrorCode::packet_length_mismatch,
                                                          written.value());
             }
-            const auto force_padding_fill = consume_protected_codec_fault(
-                test::ProtectedCodecFaultPoint::simple_ack_force_padding_fill);
-            if (force_padding_fill || payload_size < plaintext_payload_size) {
+            if (consume_protected_codec_fault(
+                    test::ProtectedCodecFaultPoint::simple_ack_force_padding_fill) ||
+                payload_size < plaintext_payload_size) {
                 std::fill(payload_bytes.begin() + static_cast<std::ptrdiff_t>(payload_size),
                           payload_bytes.end(), std::byte{0x00});
             }
@@ -3346,14 +3348,14 @@ append_protected_one_rtt_stream_fragment_packet_to_datagram(
     const auto datagram_begin = out_datagram.size();
     const auto rollback = [&]() { out_datagram.resize(datagram_begin); };
 
-    const auto header_bytes = fragment.stream_frame_header_bytes();
-    const auto payload_size = header_bytes.size() + fragment.bytes.size();
-    if (payload_size == 0) {
+    const auto stream_header_bytes = fragment.stream_frame_header_bytes();
+    const auto stream_payload_size = stream_header_bytes.size() + fragment.bytes.size();
+    if (stream_payload_size == 0) {
         return CodecResult<std::size_t>::failure(CodecErrorCode::empty_packet_payload, 0);
     }
 
     const auto plaintext_payload_size =
-        std::max(payload_size, minimum_short_header_payload_bytes(packet_number_length));
+        std::max(stream_payload_size, minimum_short_header_payload_bytes(packet_number_length));
     const auto maximum_packet_size =
         payload_offset + plaintext_payload_size + kPacketProtectionTagLength;
     std::span<std::byte> packet_bytes;
@@ -3382,26 +3384,27 @@ append_protected_one_rtt_stream_fragment_packet_to_datagram(
     auto payload_bytes = packet_bytes.subspan(payload_offset, plaintext_payload_size);
     {
         COQUIC_SERIALIZE_PROFILE_TIMER(payload_timer, payload_write_ns);
-        std::memcpy(payload_bytes.data(), header_bytes.data(), header_bytes.size());
-        if (payload_size < plaintext_payload_size) {
-            std::fill(payload_bytes.begin() + static_cast<std::ptrdiff_t>(payload_size),
+        std::memcpy(payload_bytes.data(), stream_header_bytes.data(), stream_header_bytes.size());
+        if (stream_payload_size < plaintext_payload_size) {
+            std::fill(payload_bytes.begin() + static_cast<std::ptrdiff_t>(stream_payload_size),
                       payload_bytes.end(), std::byte{0x00});
         }
     }
-    const std::array plaintext_chunks{
+    const std::array plaintext_stream_chunks{
         PlaintextChunk{
-            .bytes = std::span<const std::byte>(payload_bytes).first(header_bytes.size()),
+            .bytes = std::span<const std::byte>(payload_bytes).first(stream_header_bytes.size()),
         },
         PlaintextChunk{
             .bytes = fragment.bytes.span(),
         },
         PlaintextChunk{
-            .bytes = std::span<const std::byte>(payload_bytes)
-                         .subspan(payload_size, plaintext_payload_size - payload_size),
+            .bytes =
+                std::span<const std::byte>(payload_bytes)
+                    .subspan(stream_payload_size, plaintext_payload_size - stream_payload_size),
         },
     };
     capture_short_header_packet_with_chunk_payload(
-        std::span<const std::byte>(packet_bytes).first(payload_offset), plaintext_chunks);
+        std::span<const std::byte>(packet_bytes).first(payload_offset), plaintext_stream_chunks);
 
     auto ciphertext =
         CodecResult<std::size_t>::failure(CodecErrorCode::invalid_packet_protection_state, 0);
@@ -3412,7 +3415,7 @@ append_protected_one_rtt_stream_fragment_packet_to_datagram(
             .key = keys_ref_ptr->key,
             .nonce = nonce,
             .associated_data = std::span<const std::byte>(packet_bytes).first(payload_offset),
-            .plaintext_chunks = plaintext_chunks,
+            .plaintext_chunks = plaintext_stream_chunks,
             .ciphertext = packet_bytes.subspan(payload_offset),
         });
     }
@@ -3438,7 +3441,7 @@ append_protected_one_rtt_stream_fragment_packet_to_datagram(
     }
 
     COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_bytes, final_packet_size);
-    COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_payload_bytes, payload_size);
+    COQUIC_ADD_SERIALIZE_PROFILE_COUNTER(one_rtt_payload_bytes, stream_payload_size);
     return CodecResult<std::size_t>::success(final_packet_size);
 }
 

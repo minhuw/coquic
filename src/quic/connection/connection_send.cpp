@@ -1243,7 +1243,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     };
     const auto commit_serialized_datagram =
         [&](const std::vector<ProtectedPacket> &datagram_packets,
-            SerializedProtectedDatagram datagram,
+            SerializedProtectedDatagram serialized_datagram,
             CommitSerializedDatagramOptions options = {}) -> DatagramBuffer {
         COQUIC_SEND_PROFILE_TIMER(commit_timer, commit_ns);
         bool pmtu_probe_datagram = false;
@@ -1282,7 +1282,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 track_sent_simple_stream_packet(*packet.packet_space, std::move(packet));
                 tracked_pending_packets = true;
             }
-            if (!tracked_pending_packets && !track_pending_packets_from_datagram(datagram)) {
+            if (!tracked_pending_packets &&
+                !track_pending_packets_from_datagram(serialized_datagram)) {
                 mark_failed();
                 return {};
             }
@@ -1341,7 +1342,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     auto snapshot = make_qlog_packet_snapshot(
                         datagram_packets[index],
                         qlog::PacketSnapshotContext{
-                            .raw_length = datagram.packet_metadata[index].length,
+                            .raw_length = serialized_datagram.packet_metadata[index].length,
                             .datagram_id = *outbound_datagram_id,
                             .trigger = pto_probe_datagram_requested
                                            ? std::optional<std::string>("pto_probe")
@@ -1369,9 +1370,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         {
             COQUIC_SEND_PROFILE_TIMER(datagram_bookkeeping_timer, commit_datagram_bookkeeping_ns);
             if (options.path_challenge_path_id.has_value()) {
-                mark_path_challenge_sent(*options.path_challenge_path_id, datagram.bytes.size());
+                mark_path_challenge_sent(*options.path_challenge_path_id,
+                                         serialized_datagram.bytes.size());
             }
-            note_outbound_datagram_bytes(datagram.bytes.size(), selected_send_path_id, now);
+            note_outbound_datagram_bytes(serialized_datagram.bytes.size(), selected_send_path_id,
+                                         now);
             last_drained_path_id_ = selected_send_path_id;
             last_drained_ecn_codepoint_ = outbound_ecn_codepoint_for_path(selected_send_path_id);
             last_drained_is_pmtu_probe_ = pmtu_probe_datagram;
@@ -1407,7 +1410,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             if (config_.enable_packet_inspection) {
                 const auto datagram_id = next_packet_inspection_datagram_id_++;
                 const auto inspection_count =
-                    queue_outbound_packet_inspections(datagram, datagram_id);
+                    queue_outbound_packet_inspections(serialized_datagram, datagram_id);
                 maybe_record_packet_inspection_datagram_id(
                     last_drained_packet_inspection_datagram_id_,
                     PacketInspectionDatagramId{datagram_id},
@@ -1418,16 +1421,20 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             COQUIC_SEND_PROFILE_TIMER(profile_accounting_timer, commit_profile_accounting_ns);
             auto &profile = send_profile_counters();
             ++profile.datagrams;
-            profile.bytes += datagram.bytes.size();
+            profile.bytes += serialized_datagram.bytes.size();
             profile.max_datagram =
-                std::max<std::uint64_t>(profile.max_datagram, datagram.bytes.size());
+                std::max<std::uint64_t>(profile.max_datagram, serialized_datagram.bytes.size());
             profile.pmtu_probe_datagrams += static_cast<std::uint64_t>(pmtu_probe_datagram);
-            profile.datagrams_le_1200 += static_cast<std::uint64_t>(datagram.bytes.size() <= 1200);
-            profile.datagrams_le_1434 += static_cast<std::uint64_t>(datagram.bytes.size() <= 1434);
-            profile.datagrams_le_1472 += static_cast<std::uint64_t>(datagram.bytes.size() <= 1472);
-            profile.datagrams_gt_1472 += static_cast<std::uint64_t>(datagram.bytes.size() > 1472);
+            profile.datagrams_le_1200 +=
+                static_cast<std::uint64_t>(serialized_datagram.bytes.size() <= 1200);
+            profile.datagrams_le_1434 +=
+                static_cast<std::uint64_t>(serialized_datagram.bytes.size() <= 1434);
+            profile.datagrams_le_1472 +=
+                static_cast<std::uint64_t>(serialized_datagram.bytes.size() <= 1472);
+            profile.datagrams_gt_1472 +=
+                static_cast<std::uint64_t>(serialized_datagram.bytes.size() > 1472);
         }
-        return std::move(datagram.bytes);
+        return std::move(serialized_datagram.bytes);
     };
     const auto fail_datagram_send = [&](bool preserve_pending_packets = false) -> DatagramBuffer {
         if (preserve_pending_packets && !preserve_pending_tracked_packets()) {

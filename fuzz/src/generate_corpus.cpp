@@ -296,6 +296,7 @@ void generate_frame_seeds(const std::filesystem::path &root) {
     // Cover each frame family with boundary values and representative optional fields.
     write_encoded_frame(root, "generated_padding_run", PaddingFrame{.length = 8});
     write_encoded_frame(root, "generated_ping", PingFrame{});
+    // ACK includes ECN counters and multiple ranges because both change the encoded shape.
     write_encoded_frame(root, "generated_ack_ecn",
                         AckFrame{
                             .largest_acknowledged = 42,
@@ -355,6 +356,7 @@ void generate_frame_seeds(const std::filesystem::path &root) {
                             .has_length = false,
                             .data = bytes({0xbe, 0xef}),
                         });
+    // Flow-control seeds exercise connection, stream, and stream-count limit encodings.
     write_encoded_frame(root, "generated_max_data", MaxDataFrame{.maximum_data = 4096});
     write_encoded_frame(root, "generated_max_stream_data",
                         MaxStreamDataFrame{
@@ -379,6 +381,7 @@ void generate_frame_seeds(const std::filesystem::path &root) {
     write_encoded_frame(
         root, "generated_streams_blocked_uni",
         StreamsBlockedFrame{.stream_type = StreamLimitType::unidirectional, .maximum_streams = 16});
+    // Connection ID seeds include stateless reset token material for fixed-width parsing.
     write_encoded_frame(root, "generated_new_connection_id",
                         NewConnectionIdFrame{
                             .sequence_number = 3,
@@ -390,6 +393,7 @@ void generate_frame_seeds(const std::filesystem::path &root) {
                         RetireConnectionIdFrame{.sequence_number = 3});
     write_encoded_frame(root, "generated_path_challenge", PathChallengeFrame{.data = path_data(1)});
     write_encoded_frame(root, "generated_path_response", PathResponseFrame{.data = path_data(9)});
+    // Close-frame seeds cover both transport and application error namespaces.
     write_encoded_frame(root, "generated_transport_close",
                         TransportConnectionCloseFrame{
                             .error_code = 0x010c,

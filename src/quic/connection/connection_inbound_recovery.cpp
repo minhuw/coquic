@@ -1944,7 +1944,7 @@ bool QuicConnection::try_retire_simple_stream_acked_packets_fast_path(
     }
     std::optional<std::uint64_t> single_retirement_candidate;
     std::vector<std::uint64_t> additional_retirement_candidates;
-    const auto note_retirement_candidate = [&](std::uint64_t stream_id) {
+    auto note_retirement_candidate = [&](std::uint64_t stream_id) {
         note_retirement_candidate_stream_id(single_retirement_candidate,
                                             additional_retirement_candidates, stream_id);
     };
@@ -2113,7 +2113,7 @@ bool QuicConnection::try_retire_simple_stream_acked_packet(
 
         std::optional<std::uint64_t> single_retirement_candidate;
         std::vector<std::uint64_t> additional_retirement_candidates;
-        const auto note_retirement_candidate = [&](std::uint64_t stream_id) {
+        auto note_retirement_candidate = [&](std::uint64_t stream_id) {
             note_retirement_candidate_stream_id(single_retirement_candidate,
                                                 additional_retirement_candidates, stream_id);
         };
@@ -2169,7 +2169,7 @@ bool QuicConnection::try_retire_simple_stream_acked_packet(
 
     std::optional<std::uint64_t> single_retirement_candidate;
     std::vector<std::uint64_t> additional_retirement_candidates;
-    const auto note_retirement_candidate = [&](std::uint64_t stream_id) {
+    auto note_retirement_candidate = [&](std::uint64_t stream_id) {
         note_retirement_candidate_stream_id(single_retirement_candidate,
                                             additional_retirement_candidates, stream_id);
     };
@@ -2527,7 +2527,7 @@ std::optional<SentPacketRecord> QuicConnection::retire_acked_packet(PacketSpaceS
     }
     std::optional<std::uint64_t> single_retirement_candidate;
     std::vector<std::uint64_t> additional_retirement_candidates;
-    const auto note_retirement_candidate = [&](std::uint64_t stream_id) {
+    auto note_retirement_candidate = [&](std::uint64_t stream_id) {
         note_retirement_candidate_stream_id(single_retirement_candidate,
                                             additional_retirement_candidates, stream_id);
     };

@@ -3340,7 +3340,7 @@ append_protected_one_rtt_stream_fragment_packet_to_datagram(
     }
 
     const auto packet_number_offset = 1 + destination_connection_id.size();
-    const auto stream_payload_offset = packet_number_offset + packet_number_length;
+    auto stream_payload_offset = packet_number_offset + packet_number_length;
     auto packet_number_span = PacketNumberSpan{
         .packet_number_offset = packet_number_offset,
         .packet_number_length = packet_number_length,

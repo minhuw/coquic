@@ -940,6 +940,8 @@ static xqc_int_t stream_read_notify(xqc_stream_t *stream, void *strm_user_data) 
         }
 
         if (s->is_control) {
+            /* Control messages are length-prefixed, so partial reads stay buffered across
+             * callbacks. */
             if ((size_t)ret > 0) {
                 if (s->control_in_len + (size_t)ret > s->control_in_cap) {
                     size_t next_cap = s->control_in_cap == 0 ? 128 : s->control_in_cap * 2;
@@ -1017,6 +1019,8 @@ static xqc_int_t stream_read_notify(xqc_stream_t *stream, void *strm_user_data) 
         }
 
         if (ctx->is_server) {
+            /* Server payload streams translate completed request bytes into queued response bytes.
+             */
             if (!s->conn->session_started) {
                 continue;
             }
@@ -1108,6 +1112,7 @@ static xqc_int_t stream_read_notify(xqc_stream_t *stream, void *strm_user_data) 
                 return XQC_OK;
             }
         } else {
+            /* Client payload streams record completed responses and live byte counters. */
             uint64_t received = (uint64_t)ret;
             s->received += received;
             if (s->persistent_rr) {

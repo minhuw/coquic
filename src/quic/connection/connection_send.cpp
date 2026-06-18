@@ -389,7 +389,7 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
     }
     const auto destination_connection_id =
         outbound_destination_connection_id(current_send_path_id_);
-    const auto stream_wire_budget = application_stream_frame_budget(
+    auto stream_wire_budget = application_stream_frame_budget(
         max_outbound_datagram_size, destination_connection_id.size(),
         packet_number_length_for_send(application_space_,
                                       application_space_.next_send_packet_number));
@@ -554,30 +554,30 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
 
         fragments.clear();
         auto &selected_stream = selected->second;
-        const auto selected_previous_fresh_bytes = fresh_sendable_bytes_for_cache(selected_stream);
-        const auto selected_previous_had_lost_data = false;
-        const auto selected_highest_sent_before = selected_stream.flow_control.highest_sent;
-        const auto selected_packet_payload_budget =
+        auto fast_stream_previous_fresh_bytes = fresh_sendable_bytes_for_cache(selected_stream);
+        auto fast_stream_previous_had_lost_data = false;
+        auto fast_stream_highest_sent_before = selected_stream.flow_control.highest_sent;
+        auto fast_stream_packet_payload_budget =
             std::min<std::uint64_t>(remaining_connection_credit,
                                     max_stream_frame_payload_for_wire_budget(
                                         selected->first, selected_stream.flow_control.highest_sent,
                                         packet_stream_wire_budget));
-        if (selected_packet_payload_budget == 0) {
+        if (fast_stream_packet_payload_budget == 0) {
             break;
         }
         selected_stream.append_send_fragments(
             StreamSendBudget{
-                .packet_bytes = static_cast<std::size_t>(selected_packet_payload_budget),
-                .new_bytes = selected_packet_payload_budget,
+                .packet_bytes = static_cast<std::size_t>(fast_stream_packet_payload_budget),
+                .new_bytes = fast_stream_packet_payload_budget,
                 .prefer_fresh_data = true,
             },
             fragments);
-        const auto selected_new_bytes_sent =
-            selected_stream.flow_control.highest_sent - selected_highest_sent_before;
-        connection_flow_control_.highest_sent += selected_new_bytes_sent;
-        note_stream_send_state_changed(selected_previous_fresh_bytes,
-                                       selected_previous_had_lost_data, selected_stream);
-        if (fragments.empty() || selected_new_bytes_sent == 0) {
+        auto fast_stream_new_bytes_sent =
+            selected_stream.flow_control.highest_sent - fast_stream_highest_sent_before;
+        connection_flow_control_.highest_sent += fast_stream_new_bytes_sent;
+        note_stream_send_state_changed(fast_stream_previous_fresh_bytes,
+                                       fast_stream_previous_had_lost_data, selected_stream);
+        if (fragments.empty() || fast_stream_new_bytes_sent == 0) {
             break;
         }
 
@@ -586,7 +586,7 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
             for (const auto &fragment : fragments) {
                 selected_stream.restore_send_fragment(fragment);
             }
-            connection_flow_control_.highest_sent -= selected_new_bytes_sent;
+            connection_flow_control_.highest_sent -= fast_stream_new_bytes_sent;
             break;
         }
         if (!current_write_phase_first_packet_number_.has_value()) {
@@ -665,9 +665,9 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
             cached_fresh_sendable_stream_bytes() != 0 &&
             saturating_subtract(connection_flow_control_.peer_max_data,
                                 connection_flow_control_.highest_sent) != 0;
-        const auto app_limited = congestion_controller_.would_underutilize_congestion_window(
-                                     pending_packet.bytes_in_flight) &&
-                                 !fast_bulk_has_pending_stream_work;
+        auto app_limited = congestion_controller_.would_underutilize_congestion_window(
+                               pending_packet.bytes_in_flight) &&
+                           !fast_bulk_has_pending_stream_work;
         {
             COQUIC_SEND_PROFILE_TIMER(congestion_timer, track_sent_congestion_ns);
             pending_packet.congestion_result = congestion_controller_.on_simple_stream_packet_sent(
@@ -696,7 +696,7 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
             auto &profile = send_profile_counters();
             ++profile.datagrams;
             profile.bytes += datagram.size();
-            profile.stream_bytes += selected_new_bytes_sent;
+            profile.stream_bytes += fast_stream_new_bytes_sent;
             profile.max_datagram = std::max<std::uint64_t>(profile.max_datagram, datagram.size());
             profile.datagrams_le_1200 += static_cast<std::uint64_t>(datagram.size() <= 1200);
             profile.datagrams_le_1434 += static_cast<std::uint64_t>(datagram.size() <= 1434);
@@ -815,10 +815,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     bool handshake_probe_pending =
         !handshake_packet_space_discarded_ && handshake_space_.pending_probe_packet.has_value();
     bool application_probe_pending = application_space_.pending_probe_packet.has_value();
-    const bool has_pto_probe_burst =
+    bool has_pto_probe_burst =
         remaining_pto_probe_datagrams_ > 0 &&
         (initial_probe_pending || handshake_probe_pending || application_probe_pending);
-    const bool has_pto_probe_credit = remaining_pto_probe_datagrams_ > 0;
+    bool has_pto_probe_credit = remaining_pto_probe_datagrams_ > 0;
     bool pto_probe_datagram_requested = has_pto_probe_burst;
     auto preserve_pto_probe_packets = has_pto_probe_burst && remaining_pto_probe_datagrams_ > 1;
     bool track_client_handshake_keepalive_probes = (config_.role == EndpointRole::client) &
@@ -929,18 +929,18 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         return true;
     };
     const auto track_pending_packets_from_datagram =
-        [&](const SerializedProtectedDatagram &datagram) -> bool {
+        [&](const SerializedProtectedDatagram &tracked_datagram) -> bool {
         return track_pending_packets(
             [&](const auto &pending) {
                 if (connection_drain_test_hooks().force_missing_packet_metadata |
-                    (pending.packet_index >= datagram.packet_metadata.size())) {
+                    (pending.packet_index >= tracked_datagram.packet_metadata.size())) {
                     return std::optional<std::size_t>{};
                 }
                 return std::optional<std::size_t>{
-                    datagram.packet_metadata[pending.packet_index].length,
+                    tracked_datagram.packet_metadata[pending.packet_index].length,
                 };
             },
-            datagram.bytes.size());
+            tracked_datagram.bytes.size());
     };
     const auto preserve_pending_tracked_packets = [&]() -> bool {
         return track_pending_packets([&](const auto &pending) {
@@ -1153,19 +1153,19 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             };
 
             auto best_oversized_datagram = std::optional<SerializedProtectedDatagram>{};
-            const auto remember_candidate = [&](SerializedProtectedDatagram candidate) {
-                const auto candidate_size = candidate.bytes.size();
+            const auto remember_candidate = [&](SerializedProtectedDatagram datagram_candidate) {
+                const auto candidate_size = datagram_candidate.bytes.size();
                 if (candidate_size < kMinimumInitialDatagramSize) {
                     return false;
                 }
                 if (candidate_size <= max_outbound_datagram_size) {
                     best_oversized_datagram.reset();
-                    best_oversized_datagram = std::move(candidate);
+                    best_oversized_datagram = std::move(datagram_candidate);
                     return true;
                 }
                 if (!best_oversized_datagram.has_value() ||
                     candidate_size < best_oversized_datagram->bytes.size()) {
-                    best_oversized_datagram = std::move(candidate);
+                    best_oversized_datagram = std::move(datagram_candidate);
                 }
                 return false;
             };
@@ -2719,9 +2719,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         };
         const auto take_stream_fragments = [&](auto &connection_flow, auto &streams,
                                                std::size_t max_wire_bytes, auto &last_stream_id,
-                                               std::vector<StreamFrameSendFragment> &fragments,
+                                               std::vector<StreamFrameSendFragment>
+                                                   &output_fragments,
                                                bool prefer_fresh_data = false) {
-            fragments.clear();
+            output_fragments.clear();
             std::size_t selected_payload_bytes = 0;
             auto remaining_wire_bytes = max_wire_bytes;
             //= https://www.rfc-editor.org/rfc/rfc9000#section-4.1
@@ -2731,12 +2732,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     ? connection_flow.peer_max_data - connection_flow.highest_sent
                     : 0;
             const auto note_selected_payload_bytes = [&](std::size_t first_fragment_index) {
-                for (std::size_t index = first_fragment_index; index < fragments.size(); ++index) {
-                    selected_payload_bytes += fragments[index].bytes.size();
+                for (std::size_t index = first_fragment_index; index < output_fragments.size();
+                     ++index) {
+                    selected_payload_bytes += output_fragments[index].bytes.size();
                 }
             };
             const auto visit_round_robin = [&](auto &&visit) {
-                const auto visit_range = [&](auto begin, auto end) {
+                const auto visit_stream_range = [&](auto begin, auto end) {
                     for (auto it = begin; it != end; ++it) {
                         if (!visit(it)) {
                             return false;
@@ -2749,17 +2751,17 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     return;
                 }
                 if (!last_stream_id.has_value()) {
-                    static_cast<void>(visit_range(streams.begin(), streams.end()));
+                    static_cast<void>(visit_stream_range(streams.begin(), streams.end()));
                     return;
                 }
 
                 const auto start = config_.transport.send_stream_fairness
                                        ? streams.upper_bound(*last_stream_id)
                                        : streams.lower_bound(*last_stream_id);
-                if (!visit_range(start, streams.end())) {
+                if (!visit_stream_range(start, streams.end())) {
                     return;
                 }
-                static_cast<void>(visit_range(streams.begin(), start));
+                static_cast<void>(visit_stream_range(streams.begin(), start));
             };
 
             constexpr std::size_t kLargeDatagramFreshStreamBudgetBytes = std::size_t{8} * 1024u;
@@ -2796,43 +2798,43 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     return true;
                 });
                 if (!found_priority_work && selected != streams.end()) {
-                    auto &selected_stream = selected->second;
+                    auto &round_robin_stream = selected->second;
                     const auto stream_id = selected->first;
-                    const auto selected_previous_fresh_bytes =
-                        fresh_sendable_bytes_for_cache(selected_stream);
-                    const auto selected_previous_had_lost_data =
-                        selected_stream.reset_state == StreamControlFrameState::none &&
-                        selected_stream.send_buffer.has_lost_data();
-                    const auto selected_highest_sent_before =
-                        selected_stream.flow_control.highest_sent;
+                    auto round_robin_previous_fresh_bytes =
+                        fresh_sendable_bytes_for_cache(round_robin_stream);
+                    auto round_robin_previous_had_lost_data =
+                        round_robin_stream.reset_state == StreamControlFrameState::none &&
+                        round_robin_stream.send_buffer.has_lost_data();
+                    auto round_robin_highest_sent_before =
+                        round_robin_stream.flow_control.highest_sent;
                     const auto packet_share =
                         std::min(remaining_wire_bytes,
                                  max_stream_frame_payload_for_wire_budget(
-                                     stream_id, selected_stream.flow_control.highest_sent,
+                                     stream_id, round_robin_stream.flow_control.highest_sent,
                                      remaining_wire_bytes));
                     if (packet_share == 0) {
                         return selected_payload_bytes;
                     }
                     const auto new_byte_share = std::min<std::uint64_t>(
                         remaining_connection_credit, static_cast<std::uint64_t>(packet_share));
-                    const auto fragment_count_before = fragments.size();
-                    selected_stream.append_send_fragments(
+                    const auto fragment_count_before = output_fragments.size();
+                    round_robin_stream.append_send_fragments(
                         StreamSendBudget{
                             .packet_bytes = packet_share,
                             .new_bytes = new_byte_share,
                             .prefer_fresh_data = true,
                         },
-                        fragments);
-                    const auto selected_new_bytes_sent =
-                        selected_stream.flow_control.highest_sent - selected_highest_sent_before;
-                    connection_flow.highest_sent += selected_new_bytes_sent;
-                    if (fragments.size() != fragment_count_before) {
+                        output_fragments);
+                    auto round_robin_new_bytes_sent = round_robin_stream.flow_control.highest_sent -
+                                                      round_robin_highest_sent_before;
+                    connection_flow.highest_sent += round_robin_new_bytes_sent;
+                    if (output_fragments.size() != fragment_count_before) {
                         last_stream_id = stream_id;
                         note_selected_payload_bytes(fragment_count_before);
                     }
-                    note_stream_send_state_changed(selected_previous_fresh_bytes,
-                                                   selected_previous_had_lost_data,
-                                                   selected_stream);
+                    note_stream_send_state_changed(round_robin_previous_fresh_bytes,
+                                                   round_robin_previous_had_lost_data,
+                                                   round_robin_stream);
                     return selected_payload_bytes;
                 }
             }
@@ -2842,53 +2844,55 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     std::size_t wire_share, // NOLINT(bugprone-easily-swappable-parameters)
                     std::uint64_t new_byte_share) -> std::size_t {
                 const auto stream_id = selected->first;
-                auto &selected_stream = selected->second;
+                auto &fragment_stream = selected->second;
 
-                const auto selected_previous_fresh_bytes =
-                    fresh_sendable_bytes_for_cache(selected_stream);
-                const auto selected_previous_had_lost_data =
-                    selected_stream.reset_state == StreamControlFrameState::none &&
-                    selected_stream.send_buffer.has_lost_data();
-                const auto selected_highest_sent_before = selected_stream.flow_control.highest_sent;
+                auto fragment_stream_previous_fresh_bytes =
+                    fresh_sendable_bytes_for_cache(fragment_stream);
+                auto fragment_stream_previous_had_lost_data =
+                    fragment_stream.reset_state == StreamControlFrameState::none &&
+                    fragment_stream.send_buffer.has_lost_data();
+                auto fragment_stream_highest_sent_before =
+                    fragment_stream.flow_control.highest_sent;
                 auto packet_share =
                     loss_phase_for_stream
                         ? std::min(remaining_wire_bytes,
                                    max_stream_frame_payload_for_wire_budget(
                                        stream_id,
-                                       selected_stream.next_send_offset_for_budget(false),
+                                       fragment_stream.next_send_offset_for_budget(false),
                                        wire_share))
                         : std::min(remaining_wire_bytes,
                                    max_stream_frame_payload_for_wire_budget(
-                                       stream_id, selected_stream.flow_control.highest_sent,
+                                       stream_id, fragment_stream.flow_control.highest_sent,
                                        wire_share));
-                const auto fin_sendable = stream_fin_sendable(selected_stream);
+                const auto fin_sendable = stream_fin_sendable(fragment_stream);
                 if (packet_share == 0) {
                     if (fin_only_stream_frame_cannot_fit(
-                            fin_sendable, selected_stream.send_final_size.has_value())) {
+                            fin_sendable, fragment_stream.send_final_size.has_value())) {
                         return 0;
                     }
                     const auto fin_only_wire_size = stream_frame_header_wire_size(
-                        stream_id, *selected_stream.send_final_size, 0);
+                        stream_id, *fragment_stream.send_final_size, 0);
                     if (fin_only_wire_size > remaining_wire_bytes) {
                         return 0;
                     }
                 }
-                const auto fragment_count_before = fragments.size();
-                selected_stream.append_send_fragments(
+                const auto fragment_count_before = output_fragments.size();
+                fragment_stream.append_send_fragments(
                     StreamSendBudget{
                         .packet_bytes = packet_share,
                         .new_bytes = new_byte_share,
                         .prefer_fresh_data = !loss_phase_for_stream,
                     },
-                    fragments);
-                const auto selected_new_bytes_sent =
-                    selected_stream.flow_control.highest_sent - selected_highest_sent_before;
-                connection_flow.highest_sent += selected_new_bytes_sent;
-                remaining_connection_credit -=
-                    std::min<std::uint64_t>(remaining_connection_credit, selected_new_bytes_sent);
+                    output_fragments);
+                auto fragment_stream_new_bytes_sent =
+                    fragment_stream.flow_control.highest_sent - fragment_stream_highest_sent_before;
+                connection_flow.highest_sent += fragment_stream_new_bytes_sent;
+                remaining_connection_credit -= std::min<std::uint64_t>(
+                    remaining_connection_credit, fragment_stream_new_bytes_sent);
                 std::size_t selected_wire_bytes = 0;
-                for (std::size_t index = fragment_count_before; index < fragments.size(); ++index) {
-                    auto &fragment = fragments[index];
+                for (std::size_t index = fragment_count_before; index < output_fragments.size();
+                     ++index) {
+                    auto &fragment = output_fragments[index];
                     const auto fragment_wire_size = fragment.stream_frame_wire_size();
                     if (selected_wire_bytes + fragment_wire_size <= remaining_wire_bytes) {
                         selected_wire_bytes += fragment_wire_size;
@@ -2897,7 +2901,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
 
                     const auto fragment_budget = remaining_wire_bytes - selected_wire_bytes;
                     trim_or_restore_oversized_stream_fragment(
-                        streams, fragments,
+                        streams, output_fragments,
                         StreamFragmentTrimTarget{
                             .index = index,
                             .budget = fragment_budget,
@@ -2910,13 +2914,14 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     break;
                 }
                 remaining_wire_bytes -= selected_wire_bytes;
-                const bool emitted_fragment = fragments.size() != fragment_count_before;
+                const bool emitted_fragment = output_fragments.size() != fragment_count_before;
                 if (emitted_fragment) {
                     last_stream_id = stream_id;
                     note_selected_payload_bytes(fragment_count_before);
                 }
-                note_stream_send_state_changed(selected_previous_fresh_bytes,
-                                               selected_previous_had_lost_data, selected_stream);
+                note_stream_send_state_changed(fragment_stream_previous_fresh_bytes,
+                                               fragment_stream_previous_had_lost_data,
+                                               fragment_stream);
                 return emitted_fragment ? selected_wire_bytes : 0;
             };
 
@@ -3137,13 +3142,13 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 application_space_.next_send_packet_number, application_write_key_phase_);
         };
         const auto pad_path_validation_candidate_to_minimum_datagram =
-            [&](CodecResult<SerializedProtectedDatagram> &candidate,
+            [&](CodecResult<SerializedProtectedDatagram> &serialized_candidate,
                 const PendingPathValidationFrames &path_validation_frames,
                 std::span<const Frame> candidate_frames,
                 std::span<const StreamFrameSendFragment> stream_fragments,
                 bool has_application_close, std::uint64_t candidate_packet_number,
                 bool write_key_phase, std::size_t datagram_size_limit) -> bool {
-            if (!candidate.has_value()) {
+            if (!serialized_candidate.has_value()) {
                 return true;
             }
             if (!path_validation_needs_minimum_datagram(path_validation_frames, paths_)) {
@@ -3154,7 +3159,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             // # datagram containing the PATH_RESPONSE if the resulting data exceeds
             // # the anti-amplification limit.
             if (datagram_size_limit < kMinimumInitialDatagramSize ||
-                candidate.value().bytes.size() >= kMinimumInitialDatagramSize) {
+                serialized_candidate.value().bytes.size() >= kMinimumInitialDatagramSize) {
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
                 // # Unlike other cases where datagrams are expanded, endpoints
                 // # MUST NOT discard datagrams that appear to be too small when
@@ -3165,13 +3170,14 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             auto frames_with_padding =
                 std::vector<Frame>(candidate_frames.begin(), candidate_frames.end());
             std::size_t padding_length =
-                kMinimumInitialDatagramSize - candidate.value().bytes.size();
+                kMinimumInitialDatagramSize - serialized_candidate.value().bytes.size();
             if (!maybe_add_pmtu_probe_padding(padding_length, frames_with_padding,
                                               padding_length)) {
                 return true;
             }
             return retry_padded_pmtu_probe_serialization(
-                candidate, frames_with_padding, kMinimumInitialDatagramSize, padding_length, [&] {
+                serialized_candidate, frames_with_padding, kMinimumInitialDatagramSize,
+                padding_length, [&] {
                     return serialize_application_candidate_from_frames(
                         frames_with_padding, stream_fragments, has_application_close,
                         candidate_packet_number, write_key_phase);
@@ -4239,7 +4245,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             }
             selected_send_path_id = send_path_for_path_validation_frames(
                 application_path_validation_frames, current_send_path_id_);
-            const bool application_probing_response_only =
+            bool application_probing_response_only =
                 response_validation_on_non_current_path(application_path_validation_frames);
             auto &reset_stream_frames = stream_control_frames.reset_stream;
             auto &stop_sending_frames = stream_control_frames.stop_sending;

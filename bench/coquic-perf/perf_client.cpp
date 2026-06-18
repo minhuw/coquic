@@ -705,7 +705,7 @@ std::string QuicPerfClient::describe_failed_connection(quic::QuicConnectionHandl
     }
 
     const auto diagnostics = core_.connection_diagnostics();
-    const auto diagnostics_entry =
+    auto diagnostics_entry =
         std::find_if(diagnostics.begin(), diagnostics.end(),
                      [&](const auto &entry) { return entry.handle == connection; });
     if (diagnostics_entry != diagnostics.end()) {
@@ -1159,7 +1159,7 @@ bool QuicPerfClient::maybe_start_bulk_streams(ConnectionState &connection,
 }
 
 bool QuicPerfClient::maybe_issue_rr_requests(ConnectionState &connection,
-                                             quic::QuicCoreTimePoint now) {
+                                             quic::QuicCoreTimePoint current_time) {
     if (config_.mode != QuicPerfMode::rr || !connection.session_ready ||
         connection.control_complete || !benchmark_accepts_new_work()) {
         return true;
@@ -1179,7 +1179,7 @@ bool QuicPerfClient::maybe_issue_rr_requests(ConnectionState &connection,
         }
         connection.outstanding_requests.push_back(OutstandingRequest{
             .stream_id = stream_id,
-            .started_at = now,
+            .started_at = current_time,
             .counts_toward_measurement =
                 config_.requests.has_value() || phase_ == BenchmarkPhase::measure,
         });
@@ -1194,7 +1194,7 @@ bool QuicPerfClient::maybe_issue_rr_requests(ConnectionState &connection,
                         .fin = true,
                     },
             },
-            now);
+            current_time);
         if (send_result.local_error.has_value() || send_result.send_sink_failed) {
             summary_.failure_reason = "client rr request local error";
             connection.outstanding_requests.pop_back();
@@ -1218,7 +1218,7 @@ bool QuicPerfClient::maybe_issue_rr_requests(ConnectionState &connection,
 }
 
 bool QuicPerfClient::maybe_issue_persistent_rr_requests(ConnectionState &connection,
-                                                        quic::QuicCoreTimePoint now) {
+                                                        quic::QuicCoreTimePoint current_time) {
     if (config_.mode != QuicPerfMode::persistent_rr || !connection.session_ready ||
         connection.control_complete || connection.close_requested ||
         connection.persistent_rr_fin_sent || !benchmark_accepts_new_work()) {
@@ -1239,7 +1239,7 @@ bool QuicPerfClient::maybe_issue_persistent_rr_requests(ConnectionState &connect
             config_.requests.has_value() || phase_ == BenchmarkPhase::measure;
         connection.outstanding_requests.push_back(OutstandingRequest{
             .stream_id = *connection.persistent_rr_stream_id,
-            .started_at = now,
+            .started_at = current_time,
             .counts_toward_measurement = counts_toward_measurement,
         });
         auto send_result = advance_endpoint(
@@ -1252,7 +1252,7 @@ bool QuicPerfClient::maybe_issue_persistent_rr_requests(ConnectionState &connect
                         .fin = false,
                     },
             },
-            now);
+            current_time);
         if (send_result.local_error.has_value() || send_result.send_sink_failed) {
             summary_.failure_reason = "client persistent rr request local error";
             connection.outstanding_requests.pop_back();
@@ -1275,14 +1275,14 @@ bool QuicPerfClient::maybe_issue_persistent_rr_requests(ConnectionState &connect
     if (config_.requests.has_value() &&
         (!connection.request_limit.has_value() ||
          connection.requests_started >= *connection.request_limit)) {
-        return maybe_finish_persistent_rr_stream(connection, now);
+        return maybe_finish_persistent_rr_stream(connection, current_time);
     }
 
     return true;
 }
 
 bool QuicPerfClient::maybe_issue_crr_request(ConnectionState &connection,
-                                             quic::QuicCoreTimePoint now) {
+                                             quic::QuicCoreTimePoint current_time) {
     if (config_.mode != QuicPerfMode::crr || !connection.session_ready ||
         connection.control_complete || connection.close_requested ||
         !connection.outstanding_requests.empty()) {
@@ -1290,7 +1290,7 @@ bool QuicPerfClient::maybe_issue_crr_request(ConnectionState &connection,
     }
 
     if (!benchmark_accepts_new_work()) {
-        return maybe_close_crr_connection(connection, now);
+        return maybe_close_crr_connection(connection, current_time);
     }
 
     const auto stream_id = connection.next_stream_id;
@@ -1302,7 +1302,7 @@ bool QuicPerfClient::maybe_issue_crr_request(ConnectionState &connection,
     }
     connection.outstanding_requests.push_back(OutstandingRequest{
         .stream_id = stream_id,
-        .started_at = now,
+        .started_at = current_time,
         .counts_toward_measurement =
             config_.requests.has_value() || phase_ == BenchmarkPhase::measure,
     });
@@ -1317,7 +1317,7 @@ bool QuicPerfClient::maybe_issue_crr_request(ConnectionState &connection,
                     .fin = true,
                 },
         },
-        now);
+        current_time);
     if (send_result.local_error.has_value() || send_result.send_sink_failed) {
         summary_.failure_reason = "client crr request local error";
         connection.outstanding_requests.pop_back();

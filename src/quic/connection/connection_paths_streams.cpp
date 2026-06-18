@@ -733,8 +733,7 @@ void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_lo
         return;
     }
     auto &path = ensure_path_state(path_id);
-    const bool path_validation_in_progress =
-        !path.validated && path.outstanding_challenge.has_value();
+    bool path_validation_in_progress = !path.validated && path.outstanding_challenge.has_value();
     path.validated = false;
     path.path_mtu_validation_pending = false;
     path.outstanding_challenge_sent_with_expanded_datagram = true;
@@ -935,7 +934,7 @@ QuicConnection::process_new_connection_id_frame(const NewConnectionIdFrame &fram
     }
 
     const bool retire_prior_increased = frame.retire_prior_to > largest_peer_retire_prior_to_;
-    const auto active_retire_prior_to =
+    auto active_retire_prior_to =
         retire_prior_increased ? frame.retire_prior_to : largest_peer_retire_prior_to_;
     //= https://www.rfc-editor.org/rfc/rfc9000#section-19.15
     // # A receiver MUST ignore any Retire Prior To fields that do not increase
@@ -3323,14 +3322,14 @@ void QuicConnection::maybe_refresh_peer_stream_limit(StreamState &stream) {
         StreamLimitType::bidirectional,
         StreamLimitType::unidirectional,
     };
-    const std::array initial_stream_windows = {
+    std::array initial_stream_windows = {
         local_transport_parameters_.initial_max_streams_bidi,
         local_transport_parameters_.initial_max_streams_uni,
     };
-    const auto released_stream_count = (stream.stream_id >> 2u) + 1u;
-    const auto initial_stream_window =
+    auto released_stream_count = (stream.stream_id >> 2u) + 1u;
+    auto initial_stream_window =
         std::max<std::uint64_t>(initial_stream_windows[direction_index], 1u);
-    const auto stream_limit_value =
+    auto stream_limit_value =
         released_stream_count > std::numeric_limits<std::uint64_t>::max() - initial_stream_window
             ? std::numeric_limits<std::uint64_t>::max()
             : released_stream_count + initial_stream_window;

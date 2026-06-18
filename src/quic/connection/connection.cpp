@@ -959,7 +959,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         }
 
         const auto packet_bytes = bytes.subspan(offset, packet_length.value());
-        const auto current_packet_destination_connection_id =
+        auto current_packet_destination_connection_id =
             peek_long_header_destination_connection_id(packet_bytes);
         if (current_packet_destination_connection_id.has_value()) {
             if (!first_datagram_destination_connection_id.has_value()) {

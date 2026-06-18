@@ -1757,9 +1757,9 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
         }
 
         if (immediate_timer_pumps >= kClientBackendImmediateTimerBudget) {
-            with_runtime_trace([&](std::ostream &stream) {
-                stream << "http09-client trace: backend-yield due-timer"
-                       << " immediate_timer_pumps=" << immediate_timer_pumps << '\n';
+            with_runtime_trace([&](std::ostream &trace_stream) {
+                trace_stream << "http09-client trace: backend-yield due-timer"
+                             << " immediate_timer_pumps=" << immediate_timer_pumps << '\n';
             });
             return ClientBackendTimerProcessResult{
                 .deferred_for_backend = true,

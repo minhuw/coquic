@@ -2635,9 +2635,9 @@ bool poll_io_engine_keeps_queued_gro_receive_storage_shared_for_tests() {
         return false;
     }
 
-    const auto first_payload = first_event->rx->payload();
-    const auto second_payload = second_event->rx->payload();
-    const auto third_rx_payload = third_event->rx->payload();
+    auto first_payload = first_event->rx->payload();
+    auto second_payload = second_event->rx->payload();
+    auto third_rx_payload = third_event->rx->payload();
     return all_true({
         first_event->rx->shared_bytes != nullptr,
         second_event->rx->shared_bytes == first_event->rx->shared_bytes,

@@ -627,7 +627,7 @@ class PerfStream : public quic::QuicStream {
     void CompletePersistentClientResponses();
     void FailClientStream(std::string message);
 
-    const bool server_side_stream_;
+    bool server_side_stream_;
     quic::QuicStreamId stream_id_;
     PerfClientSession *client_session_;
     PerfServerSession *server_session_ = nullptr;

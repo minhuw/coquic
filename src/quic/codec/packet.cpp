@@ -766,7 +766,7 @@ CodecResult<PacketDecodeResult> deserialize_packet(std::span<const std::byte> by
         }
 
         const auto payload_start_offset = reader.offset();
-        const auto payload_bytes = reader.read_exact(reader.remaining()).value();
+        auto payload_bytes = reader.read_exact(reader.remaining()).value();
         std::vector<Frame> frames;
         for (std::size_t payload_offset = 0; payload_offset < payload_bytes.size();) {
             const auto decoded = deserialize_frame(payload_bytes.subspan(payload_offset));

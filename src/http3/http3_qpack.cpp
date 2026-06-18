@@ -914,7 +914,7 @@ Http3Result<std::uint64_t> decode_required_insert_count(const Http3QpackDecoderC
     }
 
     const auto max_value = decoder.insert_count + max_entries;
-    const auto highest_wrapped_insert_count = (max_value / full_range) * full_range;
+    auto highest_wrapped_insert_count = (max_value / full_range) * full_range;
     std::uint64_t required_insert_count = highest_wrapped_insert_count + encoded_insert_count - 1;
     if (required_insert_count > max_value) {
         if (required_insert_count <= full_range) {

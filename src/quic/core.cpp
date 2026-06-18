@@ -3007,7 +3007,7 @@ COQUIC_NO_PROFILE void QuicCore::refresh_server_connection_routes(ConnectionEntr
         const auto key_already_active =
             std::find(active_connection_id_keys.begin(), active_connection_id_keys.end(), key) !=
             active_connection_id_keys.end();
-        const auto original_destination_route = connection_id_routes_.find(key);
+        auto original_destination_route = connection_id_routes_.find(key);
         if (!key.empty() && !key_already_active &&
             (original_destination_route == connection_id_routes_.end() ||
              original_destination_route->second == entry.handle)) {

@@ -106,10 +106,10 @@ class QuicPerfClient {
                             quic::QuicCoreTimePoint now);
     bool run_complete() const;
     bool maybe_start_bulk_streams(ConnectionState &connection, quic::QuicCoreTimePoint now);
-    bool maybe_issue_rr_requests(ConnectionState &connection, quic::QuicCoreTimePoint now);
+    bool maybe_issue_rr_requests(ConnectionState &connection, quic::QuicCoreTimePoint current_time);
     bool maybe_issue_persistent_rr_requests(ConnectionState &connection,
-                                            quic::QuicCoreTimePoint now);
-    bool maybe_issue_crr_request(ConnectionState &connection, quic::QuicCoreTimePoint now);
+                                            quic::QuicCoreTimePoint current_time);
+    bool maybe_issue_crr_request(ConnectionState &connection, quic::QuicCoreTimePoint current_time);
     bool maybe_close_rr_connection(ConnectionState &connection, quic::QuicCoreTimePoint now);
     bool maybe_finish_persistent_rr_stream(ConnectionState &connection,
                                            quic::QuicCoreTimePoint now);

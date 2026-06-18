@@ -1741,9 +1741,9 @@ void Http3Connection::queue_startup_streams() {
         return;
     }
 
-    const auto encoder_prefix =
+    auto encoder_prefix =
         serialize_http3_uni_stream_prefix(Http3UniStreamType::qpack_encoder).value();
-    const auto qpack_decoder_prefix =
+    auto qpack_decoder_prefix =
         serialize_http3_uni_stream_prefix(Http3UniStreamType::qpack_decoder).value();
 
     //= https://www.rfc-editor.org/rfc/rfc9204#section-4.2

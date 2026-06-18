@@ -1111,7 +1111,7 @@ class TlsAdapter::Impl {
 
             const bool handshake_fault =
                 consume_tls_adapter_fault(TlsAdapterFaultPoint::drive_handshake);
-            const int handshake_ssl_error = SSL_get_error(ssl_.get(), result);
+            int handshake_ssl_error = SSL_get_error(ssl_.get(), result);
             if (should_retry_handshake(handshake_fault, handshake_ssl_error)) {
                 const bool pending_changed = total_pending_bytes() != pending_before;
                 const bool secrets_changed = available_secrets_.size() != secrets_before;

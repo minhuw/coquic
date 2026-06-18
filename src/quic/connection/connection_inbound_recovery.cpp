@@ -439,7 +439,7 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                     handshake_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now, ecn,
                         config_.transport.ack_eliciting_threshold);
-                    const bool suppress_keepalive_peer_activity =
+                    bool suppress_keepalive_peer_activity =
                         last_client_handshake_keepalive_probe_time_.has_value() &
                         (config_.role == EndpointRole::client) &
                         (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
@@ -643,7 +643,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                     initial_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now, ecn,
                         config_.transport.ack_eliciting_threshold);
-                    const bool suppress_keepalive_peer_activity =
+                    bool suppress_keepalive_peer_activity =
                         last_client_handshake_keepalive_probe_time_.has_value() &
                         (config_.role == EndpointRole::client) &
                         (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
@@ -720,7 +720,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                     handshake_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now, ecn,
                         config_.transport.ack_eliciting_threshold);
-                    const bool suppress_keepalive_peer_activity =
+                    bool suppress_keepalive_peer_activity =
                         last_client_handshake_keepalive_probe_time_.has_value() &
                         (config_.role == EndpointRole::client) &
                         (status_ == HandshakeStatus::in_progress) & !handshake_confirmed_ &
@@ -3371,7 +3371,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
         }
 
         const auto &retire_connection_id = std::get<RetireConnectionIdFrame>(frame);
-        const auto route_generation_before_retire = endpoint_route_generation();
+        auto route_generation_before_retire = endpoint_route_generation();
         auto retire_result = process_retire_connection_id_frame(retire_connection_id);
         if (!retire_result.has_value()) {
             return CodecResult<bool>::failure(retire_result.error());
@@ -3873,7 +3873,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
         }
 
         const auto &retire_connection_id = std::get<RetireConnectionIdFrame>(frame);
-        const auto route_generation_before_retire = endpoint_route_generation();
+        auto route_generation_before_retire = endpoint_route_generation();
         auto retire_result = process_retire_connection_id_frame(retire_connection_id);
         if (!retire_result.has_value()) {
             return CodecResult<bool>::failure(retire_result.error());
@@ -4211,7 +4211,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_ack_only(
     }
     note_inbound_application_packet_for_path(path_id, packet_number);
 
-    const auto ack_processing_result = process_inbound_ack(
+    auto ack_processing_result = process_inbound_ack(
         application_space_, ack, now,
         peer_transport_parameters_.has_value() ? peer_transport_parameters_->ack_delay_exponent
                                                : TransportParameters{}.ack_delay_exponent,

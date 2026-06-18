@@ -278,6 +278,7 @@ bool Http3ClientEndpoint::handle_connection_events(Http3ClientEndpointUpdate &up
         }
 
         if (const auto *reset = std::get_if<Http3PeerResponseResetEvent>(&event)) {
+            // A reset completes the request as an error and drops any partial response state.
             const auto request_it = active_requests_.find(reset->stream_id);
             pending_responses_.erase(reset->stream_id);
             if (request_it == active_requests_.end()) {
@@ -294,6 +295,7 @@ bool Http3ClientEndpoint::handle_connection_events(Http3ClientEndpointUpdate &up
         }
 
         if (const auto *promise = std::get_if<Http3PeerPushPromiseEvent>(&event)) {
+            // Push streams are assembled separately from request streams until completion.
             auto &pending = pending_push_responses_[promise->push_id];
             pending.request_stream_id = promise->request_stream_id;
             pending.request = promise->head;
@@ -378,6 +380,7 @@ bool Http3ClientEndpoint::handle_connection_events(Http3ClientEndpointUpdate &up
             continue;
         }
 
+        // Final response events require both the original request and a received response head.
         const auto request_it = active_requests_.find(complete->stream_id);
         const auto response_it = pending_responses_.find(complete->stream_id);
         if (request_it == active_requests_.end() || response_it == pending_responses_.end() ||

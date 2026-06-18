@@ -1117,6 +1117,7 @@ static void server_on_receive(quicly_stream_t *stream, size_t off, const void *s
     }
 
     if (stream->stream_id == CONTROL_STREAM_ID) {
+        /* Control stream input is buffered until the session_start message is complete. */
         for (;;) {
             ptls_iovec_t input = quicly_streambuf_ingress_get(stream);
             if (input.len == 0) {
@@ -1182,6 +1183,8 @@ static void server_on_receive(quicly_stream_t *stream, size_t off, const void *s
     }
 
     if (data->persistent_rr) {
+        /* Persistent RR turns each fixed-size request unit into another response on the same
+         * stream. */
         while (data->request_read >= conn_data->start.request_bytes) {
             data->request_read -= conn_data->start.request_bytes;
             ++conn_data->requests_completed;

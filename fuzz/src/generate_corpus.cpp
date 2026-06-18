@@ -750,6 +750,7 @@ void stream_state_snapshot(FuzzInputBuilder &seed, bool prefer_fresh) {
 void generate_stream_state_seeds(const std::filesystem::path &root) {
     // Exercise send-buffer recovery, stream limits, reset paths, and receive-credit snapshots.
     {
+        // Flow-control growth and loss recovery share one seed so corpus minimization keeps both.
         FuzzInputBuilder seed;
         write_stream_state_prefix(seed, false, 0, 8, 128);
         stream_state_append_payload(seed, counted_bytes(0x10, 48), false);
@@ -761,6 +762,7 @@ void generate_stream_state_seeds(const std::filesystem::path &root) {
         write_stream_state_seed(root, "generated_stream_flow_blocked_recovery", std::move(seed));
     }
     {
+        // Matrix seeds keep client/server stream-id classification and limit updates together.
         FuzzInputBuilder seed;
         write_stream_state_prefix(seed, false, 0, 4096, 4096);
         stream_state_append_payload(seed, counted_bytes(0x40, 96), false);

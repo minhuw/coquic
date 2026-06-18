@@ -1721,7 +1721,7 @@ void PacketSpaceRecovery::on_simple_stream_packet_sent(SimpleStreamSentPacketRec
         last_live_slot_ = append_slot_index;
         set_live_slot_bit(append_slot_index);
 
-        const auto tracked_sent_packet = tracked_packet(slot);
+        auto tracked_sent_packet = tracked_packet(slot);
         if (!latest_in_flight_ack_eliciting_packet_.has_value() ||
             DeadlineTrackedPacketLess{}(*latest_in_flight_ack_eliciting_packet_,
                                         tracked_sent_packet)) {
@@ -1792,9 +1792,9 @@ void PacketSpaceRecovery::on_simple_stream_packets_sent(
     }
 
     const auto previous_last_live_slot = last_live_slot_;
-    const auto first_batch_packet_number = packets.front().packet_number;
-    const auto first_batch_sent_time = packets.front().sent_time;
-    const auto last_batch_sent_time = packets.back().sent_time;
+    auto first_batch_packet_number = packets.front().packet_number;
+    auto first_batch_sent_time = packets.front().sent_time;
+    auto last_batch_sent_time = packets.back().sent_time;
     slots_.resize(slots_.size() + packets.size());
     ensure_live_link_slot(slots_.size() - 1);
 
@@ -1828,7 +1828,7 @@ void PacketSpaceRecovery::on_simple_stream_packets_sent(
     }
     last_live_slot_ = first_slot_index + packets.size() - 1;
 
-    const auto last_tracked_packet = tracked_packet(slots_[last_live_slot_]);
+    auto last_tracked_packet = tracked_packet(slots_[last_live_slot_]);
     if (!latest_in_flight_ack_eliciting_packet_.has_value() ||
         DeadlineTrackedPacketLess{}(*latest_in_flight_ack_eliciting_packet_, last_tracked_packet)) {
         latest_in_flight_ack_eliciting_packet_ = last_tracked_packet;

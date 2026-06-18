@@ -1336,6 +1336,8 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
     }
 
     if (event == picoquic_callback_stream_data || event == picoquic_callback_stream_fin) {
+        /* Client streams count responses; server streams accumulate requests before scheduling
+         * replies. */
         if (app->is_client) {
             if (stream == NULL) {
                 set_error(app, "client received stream data without context");
@@ -1372,6 +1374,7 @@ static int app_callback(picoquic_cnx_t *cnx, uint64_t stream_id, uint8_t *bytes,
     }
 
     if (event == picoquic_callback_prepare_to_send) {
+        /* prepare_to_send is the only callback path that writes application payload bytes. */
         if (stream == NULL) {
             set_error(app, "prepare_to_send without stream context");
             return -1;

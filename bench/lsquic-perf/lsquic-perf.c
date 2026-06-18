@@ -1554,6 +1554,7 @@ static void server_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
         }
         return;
     }
+    /* First data read lazily copies the negotiated benchmark shape into stream-local state. */
     DEBUG_LOG("server read stream=%" PRIu64 " left=%" PRIu64 "\n",
               (uint64_t)lsquic_stream_id(stream), stream_ctx->server.response_left);
     if (!stream_ctx->conn_ctx || !stream_ctx->conn_ctx->session_start.started) {
@@ -1586,6 +1587,8 @@ static void server_on_read(lsquic_stream_t *stream, lsquic_stream_ctx_t *h) {
     }
 
     if (stream_ctx->persistent_rr) {
+        /* Persistent RR keeps one stream open and converts each complete request chunk to a
+         * response. */
         if (stream_ctx->server.request_fin &&
             stream_ctx->server.request_read % stream_ctx->server.request_bytes != 0) {
             lsquic_stream_close(stream);

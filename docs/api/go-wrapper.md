@@ -70,11 +70,11 @@ package main
 import coquic "github.com/minhuw/coquic/bindings/go/coquic"
 
 func openEndpoint() (*coquic.Endpoint, error) {
-	config := coquic.DefaultEndpointConfig()
-	config.Role = coquic.RoleClient
-	config.ApplicationProtocol = []byte("coquic-perf/1")
-	config.MaxOutboundDatagramSize = 60 * 1024
-	return coquic.NewEndpoint(config)
+    config := coquic.DefaultEndpointConfig()
+    config.Role = coquic.RoleClient
+    config.ApplicationProtocol = []byte("coquic-perf/1")
+    config.MaxOutboundDatagramSize = 60 * 1024
+    return coquic.NewEndpoint(config)
 }
 ```
 
@@ -82,15 +82,15 @@ Open a client connection with `Endpoint.Connect()`:
 
 ```go
 client := coquic.NewClientConfig(
-	[]byte{0xc1, 0, 0, 0, 0, 0, 0, 1},
-	[]byte{0x83, 0, 0, 0, 0, 0, 0, 0x41},
+    []byte{0xc1, 0, 0, 0, 0, 0, 0, 1},
+    []byte{0x83, 0, 0, 0, 0, 0, 0, 0x41},
 )
 client.InitialRouteHandle = 7
 client.AddressValidationIdentity = []byte{0x04, 127, 0, 0, 1, 0x11, 0x51}
 
 connection, result, err := endpoint.Connect(client, nowUs())
 if err != nil {
-	return err
+    return err
 }
 defer result.Destroy()
 processResult(result)
@@ -100,14 +100,14 @@ Feed inbound UDP datagrams and timers through the endpoint:
 
 ```go
 result, err := endpoint.ReceiveDatagram(coquic.InboundDatagram{
-	Bytes:                     udpPayload,
-	RouteHandle:               routeHandle,
-	HasRouteHandle:            true,
-	AddressValidationIdentity: addressValidationIdentity,
-	Ecn:                       coquic.EcnUnavailable,
+    Bytes:                     udpPayload,
+    RouteHandle:               routeHandle,
+    HasRouteHandle:            true,
+    AddressValidationIdentity: addressValidationIdentity,
+    Ecn:                       coquic.EcnUnavailable,
 }, nowUs())
 if err != nil {
-	return err
+    return err
 }
 defer result.Destroy()
 processResult(result)

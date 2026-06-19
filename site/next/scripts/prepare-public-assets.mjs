@@ -14,16 +14,16 @@ if (existsSync('../../zig-out/share/wasm-quic/coquic-wasm-quic.wasm')) {
   chmodSync('public/coquic-wasm-quic.wasm', 0o644);
 }
 
-const duvetAssets = [
-  ['../../.duvet/reports/report.html', 'public/duvet/report.html'],
-  ['../../.duvet/reports/report.json', 'public/duvet/report.json'],
-  ['../../.duvet/snapshot.txt', 'public/duvet/snapshot.txt'],
-];
-
-if (duvetAssets.every(([source]) => existsSync(source))) {
+if (
+  existsSync('../../.duvet/reports/report.html') &&
+  existsSync('../../.duvet/reports/report.json') &&
+  existsSync('../../.duvet/snapshot.txt')
+) {
   mkdirSync('public/duvet', { recursive: true });
-  for (const [source, destination] of duvetAssets) {
-    copyFileSync(source, destination);
-    chmodSync(destination, 0o644);
-  }
+  copyFileSync('../../.duvet/reports/report.html', 'public/duvet/report.html');
+  chmodSync('public/duvet/report.html', 0o644);
+  copyFileSync('../../.duvet/reports/report.json', 'public/duvet/report.json');
+  chmodSync('public/duvet/report.json', 0o644);
+  copyFileSync('../../.duvet/snapshot.txt', 'public/duvet/snapshot.txt');
+  chmodSync('public/duvet/snapshot.txt', 0o644);
 }

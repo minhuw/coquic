@@ -370,25 +370,25 @@ single link after fuzzing is actually available.
 ## References
 
 - LLVM libFuzzer documentation:
-  https://llvm.org/docs/LibFuzzer.html
+  <https://llvm.org/docs/LibFuzzer.html>
 - OSS-Fuzz new project guide:
-  https://google.github.io/oss-fuzz/getting-started/new-project-guide/
+  <https://google.github.io/oss-fuzz/getting-started/new-project-guide/>
 - OSS-Fuzz continuous integration/CIFuzz:
-  https://google.github.io/oss-fuzz/getting-started/continuous-integration/
+  <https://google.github.io/oss-fuzz/getting-started/continuous-integration/>
 - Cloudflare quiche fuzzing:
-  https://github.com/cloudflare/quiche/tree/master/fuzz
+  <https://github.com/cloudflare/quiche/tree/master/fuzz>
 - ngtcp2 fuzz targets and ClusterFuzzLite config:
-  https://github.com/ngtcp2/ngtcp2/tree/main/fuzz
-  https://github.com/ngtcp2/ngtcp2/tree/main/.clusterfuzzlite
+  <https://github.com/ngtcp2/ngtcp2/tree/main/fuzz>
+  <https://github.com/ngtcp2/ngtcp2/tree/main/.clusterfuzzlite>
 - quic-go fuzzing:
-  https://github.com/quic-go/quic-go/blob/master/FUZZING.md
+  <https://github.com/quic-go/quic-go/blob/master/FUZZING.md>
 - MsQuic fuzzing:
-  https://github.com/microsoft/msquic/tree/main/src/fuzzing
+  <https://github.com/microsoft/msquic/tree/main/src/fuzzing>
 - s2n-quic fuzz corpus layout:
-  https://github.com/aws/s2n-quic/tree/main/quic/s2n-quic-core/src
+  <https://github.com/aws/s2n-quic/tree/main/quic/s2n-quic-core/src>
 - Google QUICHE QUIC fuzzing tools:
-  https://github.com/google/quiche/tree/main/quiche/quic/test_tools/fuzzing
+  <https://github.com/google/quiche/tree/main/quiche/quic/test_tools/fuzzing>
 - QUIC transport RFC:
-  https://www.rfc-editor.org/rfc/rfc9000.html
+  <https://www.rfc-editor.org/rfc/rfc9000.html>
 - QUIC version 2 RFC:
-  https://www.rfc-editor.org/rfc/rfc9369.html
+  <https://www.rfc-editor.org/rfc/rfc9369.html>

@@ -80,7 +80,12 @@ def safe_file_component(value: str) -> str:
 
 def history_file_name(snapshot: dict, suffix: str | None = None) -> str:
     instant = entry_instant(snapshot)
-    stamp = instant.strftime("%Y-%m-%dT%H%M%SZ")
+    stamp = (
+        instant.replace(microsecond=0)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+        .replace(":", "")
+    )
     safe_suffix = safe_file_component(suffix or "")
     if safe_suffix:
         return f"{stamp}-{safe_suffix}.json"

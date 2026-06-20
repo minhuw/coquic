@@ -22,8 +22,6 @@ constexpr double kPccVivaceT = 0.9;
 constexpr double kPccVivaceLatencyPenalty = 900.0;
 constexpr double kPccVivaceLossPenalty = 11.35;
 constexpr double kPccPacingGain = 1.0;
-constexpr double kPccStartupPacingGain = 1.0;
-constexpr double kPccStartupWindowGain = 2.0;
 constexpr double kPccWindowGain = 2.0;
 constexpr std::size_t kPccMinimumWindowPackets = 4;
 constexpr std::size_t kPccMinimumMiPackets = 10;
@@ -793,16 +791,14 @@ void PccCongestionController::refresh_congestion_window() {
     if (persistent_congestion_window_limited_) {
         return;
     }
-    const auto window = congestion_round_to_size_t(
-        sending_rate_bytes_per_second_ * duration_seconds(window_rtt()) *
-        (mode_ == Mode::startup ? kPccStartupWindowGain : kPccWindowGain));
+    const auto window = congestion_round_to_size_t(sending_rate_bytes_per_second_ *
+                                                   duration_seconds(window_rtt()) * kPccWindowGain);
     congestion_window_ =
         std::max({minimum_window(), congestion_initial_window(max_datagram_size_), window});
 }
 
 void PccCongestionController::set_pacing_rate() {
-    const auto gain = mode_ == Mode::startup ? kPccStartupPacingGain : kPccPacingGain;
-    pacing_rate_bytes_per_second_ = gain * sending_rate_bytes_per_second_;
+    pacing_rate_bytes_per_second_ = kPccPacingGain * sending_rate_bytes_per_second_;
     if (persistent_congestion_window_limited_ &&
         sending_rate_bytes_per_second_ >
             static_cast<double>(minimum_window()) / duration_seconds(positive_rtt())) {

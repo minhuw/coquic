@@ -3769,8 +3769,7 @@
     }
 
     .trend-chart {
-      overflow-x: auto;
-      overflow-y: hidden;
+      overflow: auto hidden;
       padding-bottom: 2px;
     }
 
@@ -3788,8 +3787,7 @@
       display: grid;
       grid-template-columns: 1fr;
       max-height: 180px;
-      overflow-y: auto;
-      overflow-x: hidden;
+      overflow: hidden auto;
       padding-right: 2px;
     }
 

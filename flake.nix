@@ -22,7 +22,13 @@
       llvmPkgs = pkgs.llvmPackages_20;
       coverageLlvmPkgs = pkgs.llvmPackages_21;
       zig = pkgs.zig_0_16;
-      goToolchain = pkgs.go_1_25;
+      goToolchain = pkgs.go_1_25.overrideAttrs (_: {
+        version = "1.25.11";
+        src = pkgs.fetchurl {
+          url = "https://go.dev/dl/go1.25.11.src.tar.gz";
+          hash = "sha256-e05bB5s8m8QgNzymhiGilrTRPBBzXUrKxBcZKNcPVIA=";
+        };
+      });
       ngtcp2TlsPackage = pkgs.openssl;
       staticPkgs = pkgs.pkgsStatic;
       staticLlvmPkgs = staticPkgs.llvmPackages_20;

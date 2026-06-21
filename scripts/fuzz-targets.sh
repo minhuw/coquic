@@ -13,3 +13,7 @@ COQUIC_FUZZ_TARGETS=(
   fuzz_recovery_ack
   fuzz_congestion
 )
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  printf '%s\n' "${COQUIC_FUZZ_TARGETS[@]}"
+fi

@@ -14,7 +14,7 @@ elif command -v afl-clang-fast++ >/dev/null 2>&1; then
 elif [ -n "$cxx" ]; then
   printf 'warning: AFL++ compiler wrappers not found; using CXX=%s for replay-only build\n' "$cxx" >&2
 else
-  printf 'error: AFL++ compiler wrappers not found; run inside `nix develop` after flake setup\n' >&2
+  printf 'error: AFL++ compiler wrappers not found; run inside nix develop after flake setup\n' >&2
   exit 1
 fi
 

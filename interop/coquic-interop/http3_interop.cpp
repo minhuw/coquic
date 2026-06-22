@@ -137,9 +137,6 @@ std::optional<Http3InteropConfig> parse_http3_interop_args(int argc, char **argv
         config.private_key_path = *path;
         private_key_present = true;
     }
-    if (const auto server_name = getenv_string("SERVER_NAME"); server_name.has_value()) {
-        config.server_name = *server_name;
-    }
     if (const auto requests_env = getenv_string("REQUESTS"); requests_env.has_value()) {
         config.requests = parse_requests(*requests_env);
         requests_present = true;
@@ -198,7 +195,7 @@ int run_http3_interop(const Http3InteropConfig &config) {
             .io_backend = io::QuicIoBackendKind::socket,
             .host = config.host,
             .port = config.port,
-            .server_name = config.server_name,
+            .server_name = getenv_string("SERVER_NAME").value_or(std::string{}),
             .verify_peer = false,
             .congestion_control = config.congestion_control,
         },

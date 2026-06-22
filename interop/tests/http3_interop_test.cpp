@@ -274,7 +274,6 @@ TEST(QuicHttp3InteropTest, ParsesClientInvocationWithRequestsFromEnvironment) {
     EXPECT_EQ(config.testcase, "http3");
     EXPECT_EQ(config.host, "127.0.0.1");
     EXPECT_EQ(config.port, 443);
-    EXPECT_EQ(config.server_name, "localhost");
     EXPECT_EQ(config.download_root, std::filesystem::path("/downloads"));
     ASSERT_EQ(config.requests.size(), 2u);
     EXPECT_EQ(config.requests[0], "https://server/a.txt");

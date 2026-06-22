@@ -27,6 +27,8 @@ import {
   getPlannerRun,
   getPlannerRuns,
   getState,
+  requestSchedulerTick,
+  requestSignalFetch,
 } from "./api";
 import { TimelineEvent } from "./timeline";
 import { TranscriptView } from "./transcript";
@@ -35,6 +37,8 @@ import type {
   PlannerRunArtifact,
   PlannerRunSummary,
   SignalItem,
+  SchedulerProviderState,
+  SchedulerWakeup,
   StewardState,
   TaskRecord,
   TaskStatus,
@@ -71,6 +75,16 @@ const EMPTY_STATE: StewardState = {
   signal_inbox: {
     items: [],
     fetch_runs: [],
+  },
+  scheduler: {
+    source_active: 0,
+    source_capacity: 0,
+    source_queued: 0,
+    integration_active: 0,
+    integration_queued: 0,
+    pending_wakeups: [],
+    recent_wakeups: [],
+    providers: [],
   },
   config: {
     repo_root: "",
@@ -159,6 +173,26 @@ export default function Dashboard() {
     }
   }
 
+  async function handleWakeScheduler() {
+    setBusy(true);
+    try {
+      await requestSchedulerTick({ plan: true, dispatch: true });
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleFetchSignals(providers: string[]) {
+    setBusy(true);
+    try {
+      await requestSignalFetch(providers);
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const counts = {
     ...countTasks(state.tasks),
     signals: state.signal_inbox?.items.length ?? 0,
@@ -199,10 +233,13 @@ export default function Dashboard() {
           counts={counts}
           loadError={loadError}
           onRefresh={refresh}
+          onRequestFetch={handleFetchSignals}
+          onWakeScheduler={handleWakeScheduler}
           plannerRuns={plannerRuns}
           selectedTask={selectedTask}
           state={state}
           view={view}
+          busy={busy}
         />
       </section>
       {createOpen && (
@@ -319,17 +356,23 @@ function SectionNav({
 }
 
 function DashboardView({
+  busy,
   counts,
   loadError,
+  onRequestFetch,
   onRefresh,
+  onWakeScheduler,
   plannerRuns,
   selectedTask,
   state,
   view,
 }: {
+  busy: boolean;
   counts: ReturnType<typeof countTasks>;
   loadError: string;
+  onRequestFetch: (providers: string[]) => Promise<void>;
   onRefresh: () => Promise<void>;
+  onWakeScheduler: () => Promise<void>;
   plannerRuns: PlannerRunSummary[];
   selectedTask?: TaskRecord;
   state: StewardState;
@@ -367,7 +410,12 @@ function DashboardView({
     return (
       <>
         {alert}
-        <SignalsPanel state={state} tasks={userTasks} />
+        <SignalsPanel
+          busy={busy}
+          onRequestFetch={onRequestFetch}
+          state={state}
+          tasks={userTasks}
+        />
       </>
     );
   }
@@ -382,6 +430,12 @@ function DashboardView({
       </section>
       <section className="control-grid">
         <div className="left-stack">
+          <SchedulerPanel
+            busy={busy}
+            onRequestFetch={onRequestFetch}
+            onWakeScheduler={onWakeScheduler}
+            state={state}
+          />
           <PlannerTranscriptPanel runs={plannerRuns} />
         </div>
       </section>
@@ -568,7 +622,179 @@ function CreateTaskModal({
   );
 }
 
-function SignalsPanel({ state, tasks }: { state: StewardState; tasks: TaskRecord[] }) {
+function SchedulerPanel({
+  busy,
+  onRequestFetch,
+  onWakeScheduler,
+  state,
+}: {
+  busy: boolean;
+  onRequestFetch: (providers: string[]) => Promise<void>;
+  onWakeScheduler: () => Promise<void>;
+  state: StewardState;
+}) {
+  const scheduler = schedulerState(state);
+  const providerNames = scheduler.providers.map((provider) => provider.provider);
+  return (
+    <section className="panel scheduler-panel">
+      <div className="scheduler-head">
+        <PanelTitle icon={<Activity size={17} />} title="Scheduler" />
+        <div className="scheduler-actions">
+          <button
+            className="button-link secondary"
+            disabled={busy}
+            onClick={() => void onWakeScheduler()}
+            type="button"
+          >
+            <RefreshCw size={14} />
+            <span>Wake</span>
+          </button>
+          <button
+            className="button-link secondary"
+            disabled={busy || providerNames.length === 0}
+            onClick={() => void onRequestFetch(providerNames)}
+            type="button"
+          >
+            <Inbox size={14} />
+            <span>Fetch All</span>
+          </button>
+        </div>
+      </div>
+      <div className="scheduler-lanes">
+        <SchedulerLane
+          active={scheduler.source_active}
+          capacity={scheduler.source_active + scheduler.source_capacity}
+          icon={<ListChecks size={15} />}
+          label="Source tasks"
+          queued={scheduler.source_queued}
+        />
+        <SchedulerLane
+          active={scheduler.integration_active}
+          capacity={1}
+          icon={<GitBranch size={15} />}
+          label="Integration lane"
+          queued={scheduler.integration_queued}
+        />
+      </div>
+      <div className="scheduler-grid">
+        <div className="scheduler-column">
+          <h3 className="section-subtitle">Providers</h3>
+          <ProviderSchedule
+            busy={busy}
+            onRequestFetch={onRequestFetch}
+            providers={scheduler.providers}
+          />
+        </div>
+        <div className="scheduler-column">
+          <h3 className="section-subtitle">Wakeups</h3>
+          <WakeupList wakeups={scheduler.pending_wakeups.length ? scheduler.pending_wakeups : scheduler.recent_wakeups} />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SchedulerLane({
+  active,
+  capacity,
+  icon,
+  label,
+  queued,
+}: {
+  active: number;
+  capacity: number;
+  icon: ReactNode;
+  label: string;
+  queued: number;
+}) {
+  const slots = Math.max(capacity, active, 1);
+  return (
+    <div className="scheduler-lane">
+      <div className="scheduler-lane-head">
+        {icon}
+        <span>{label}</span>
+      </div>
+      <div className="slot-row" aria-label={`${label}: ${active} active of ${slots}`}>
+        {Array.from({ length: slots }, (_, index) => (
+          <span className={index < active ? "slot active" : "slot"} key={index} />
+        ))}
+      </div>
+      <div className="scheduler-lane-meta">
+        <b>{active}/{slots}</b>
+        <span>{queued} queued</span>
+      </div>
+    </div>
+  );
+}
+
+function ProviderSchedule({
+  busy,
+  onRequestFetch,
+  providers,
+}: {
+  busy: boolean;
+  onRequestFetch: (providers: string[]) => Promise<void>;
+  providers: SchedulerProviderState[];
+}) {
+  if (!providers.length) return <div className="empty-state compact">No signal providers are enabled.</div>;
+  return (
+    <div className="provider-schedule">
+      {providers.map((provider) => (
+        <article className={`provider-row ${provider.due ? "due" : ""}`} key={provider.provider}>
+          <div>
+            <div className="signal-card-head">
+              <span className="provider-pill">{provider.provider}</span>
+              <StatusTextPill status={provider.last_status || (provider.due ? "due" : "scheduled")} />
+            </div>
+            <p>{providerStatusText(provider)}</p>
+            {provider.last_error && <p className="error-text">{provider.last_error}</p>}
+          </div>
+          <button
+            className="icon-button secondary"
+            disabled={busy}
+            onClick={() => void onRequestFetch([provider.provider])}
+            title={`Fetch ${provider.provider}`}
+            type="button"
+          >
+            <RefreshCw size={14} />
+          </button>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function WakeupList({ wakeups }: { wakeups: SchedulerWakeup[] }) {
+  if (!wakeups.length) return <div className="empty-state compact">No scheduler wakeups recorded yet.</div>;
+  return (
+    <div className="wakeup-list">
+      {wakeups.slice(0, 8).map((wakeup) => (
+        <article className={`wakeup-row ${wakeup.status}`} key={wakeup.id}>
+          <div>
+            <div className="signal-card-head">
+              <StatusTextPill status={wakeup.status} />
+              <time className="mono muted" dateTime={wakeup.created_at}>{compactDate(wakeup.created_at)}</time>
+            </div>
+            <h3>{wakeup.reason}</h3>
+            <p>{wakeupDataSummary(wakeup)}</p>
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function SignalsPanel({
+  busy,
+  onRequestFetch,
+  state,
+  tasks,
+}: {
+  busy: boolean;
+  onRequestFetch: (providers: string[]) => Promise<void>;
+  state: StewardState;
+  tasks: TaskRecord[];
+}) {
   const items = state.signal_inbox?.items ?? [];
   const fetchRuns = state.signal_inbox?.fetch_runs ?? [];
   const repository = state.config.github_repository || state.signals.repository;
@@ -585,6 +811,13 @@ function SignalsPanel({ state, tasks }: { state: StewardState; tasks: TaskRecord
         <Metric icon={<AlertTriangle size={18} />} label="Fetch Errors" value={fetchRuns.filter((run) => run.status === "error").length} />
       </section>
       <section className="signals-stack">
+        <FoldablePanel defaultOpen icon={<Activity size={17} />} meta={schedulerState(state).providers.length} title="Provider Schedule">
+          <ProviderSchedule
+            busy={busy}
+            onRequestFetch={onRequestFetch}
+            providers={schedulerState(state).providers}
+          />
+        </FoldablePanel>
         <FoldablePanel defaultOpen icon={<Inbox size={17} />} meta={items.length} title="Signal Inbox">
           <SignalInboxList
             items={items}
@@ -1182,6 +1415,10 @@ function countTasks(tasks: TaskRecord[]) {
   };
 }
 
+function schedulerState(state: StewardState) {
+  return state.scheduler ?? EMPTY_STATE.scheduler!;
+}
+
 function taskDisplay(task: TaskRecord) {
   if (isIntegrationTask(task)) {
     const source = typeof task.spec.metadata.source_task_id === "string" ? task.spec.metadata.source_task_id : "";
@@ -1301,6 +1538,24 @@ function integrationStageText(item: IntegrationRun) {
   return item.summary || item.status || "-";
 }
 
+function providerStatusText(provider: SchedulerProviderState) {
+  const interval = provider.last_status === "error" ? provider.error_retry_minutes : provider.poll_interval_minutes;
+  if (provider.due) return `Due now · ${provider.max_items} item limit`;
+  return `Next ${compactFuture(provider.next_due_at)} · every ${formatMinutes(interval)}`;
+}
+
+function wakeupDataSummary(wakeup: SchedulerWakeup) {
+  const providers = wakeup.data.providers;
+  if (Array.isArray(providers) && providers.length) {
+    return providers.filter((provider) => typeof provider === "string").join(", ");
+  }
+  const taskId = wakeup.data.task_id;
+  if (typeof taskId === "string") return taskId;
+  const signalId = wakeup.data.signal_item_id;
+  if (typeof signalId === "string") return signalId;
+  return Object.keys(wakeup.data).length ? JSON.stringify(wakeup.data) : "-";
+}
+
 function taskRemoteFromSummary(task: TaskRecord, githubRepository: string) {
   if (task.status !== "pushed" || !githubRepository) return null;
   const match = /^pushed\s+([0-9a-fA-F]{7,40})$/.exec(task.summary.trim());
@@ -1345,6 +1600,24 @@ function compactDate(value: string) {
   if (diffMs >= 0 && diffMs < day) return `${Math.floor(diffMs / hour)}h`;
   if (diffMs >= 0 && diffMs < 7 * day) return `${Math.floor(diffMs / day)}d`;
   return date.toLocaleDateString(undefined, { month: "numeric", day: "numeric" });
+}
+
+function compactFuture(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const diffMs = date.getTime() - Date.now();
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  if (diffMs <= 0) return "now";
+  if (diffMs < hour) return `in ${Math.ceil(diffMs / minute)}m`;
+  if (diffMs < 24 * hour) return `in ${Math.ceil(diffMs / hour)}h`;
+  return date.toLocaleDateString(undefined, { month: "numeric", day: "numeric" });
+}
+
+function formatMinutes(value: number) {
+  if (value < 60) return `${value}m`;
+  const hours = value / 60;
+  return Number.isInteger(hours) ? `${hours}h` : `${hours.toFixed(1)}h`;
 }
 
 function formatBytes(value: number) {

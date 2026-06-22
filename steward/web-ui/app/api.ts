@@ -65,6 +65,28 @@ export async function getPlannerRun(runId: string): Promise<PlannerRunArtifact |
   return response.json();
 }
 
+export async function requestSchedulerTick(payload: {
+  plan?: boolean;
+  dispatch?: boolean;
+  max_dispatch?: number | null;
+} = {}): Promise<void> {
+  const response = await fetch("/api/actions/tick", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await response.text());
+}
+
+export async function requestSignalFetch(providers: string[]): Promise<void> {
+  const response = await fetch("/api/actions/fetch-signals", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ providers }),
+  });
+  if (!response.ok) throw new Error(await response.text());
+}
+
 export async function createTask(payload: {
   title: string;
   prompt: string;

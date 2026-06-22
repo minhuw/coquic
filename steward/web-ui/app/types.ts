@@ -146,6 +146,39 @@ export type SignalFetchRun = {
   summary: string;
 };
 
+export type SchedulerWakeup = {
+  id: string;
+  reason: string;
+  status: "pending" | "consumed";
+  created_at: string;
+  consumed_at: string | null;
+  data: Record<string, unknown>;
+};
+
+export type SchedulerProviderState = {
+  provider: string;
+  poll_interval_minutes: number;
+  error_retry_minutes: number;
+  suppression_hours: number;
+  max_items: number;
+  last_fetch_at: string | null;
+  last_status: "ok" | "error" | null;
+  last_error: string | null;
+  next_due_at: string;
+  due: boolean;
+};
+
+export type SchedulerState = {
+  source_active: number;
+  source_capacity: number;
+  source_queued: number;
+  integration_active: number;
+  integration_queued: number;
+  pending_wakeups: SchedulerWakeup[];
+  recent_wakeups: SchedulerWakeup[];
+  providers: SchedulerProviderState[];
+};
+
 export type IntegrationRun = {
   run_id: string;
   task_id: string;
@@ -209,6 +242,7 @@ export type StewardState = {
     items: SignalItem[];
     fetch_runs: SignalFetchRun[];
   };
+  scheduler?: SchedulerState;
   integration: {
     queue: IntegrationRun[];
     active: IntegrationRun[];

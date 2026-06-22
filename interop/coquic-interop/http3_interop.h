@@ -23,7 +23,7 @@ struct Http3InteropConfig {
     std::filesystem::path certificate_chain_path;
     std::filesystem::path private_key_path;
     std::string server_name;
-    std::vector<std::string> requests;
+    std::vector<std::string> requests = {};
     quic::QuicCongestionControlAlgorithm congestion_control =
         quic::QuicCongestionControlAlgorithm::newreno;
 };

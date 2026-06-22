@@ -21,6 +21,7 @@ from .signals import (
     project_signals_from_items,
 )
 from .storage import TaskStore
+from .web.runtime import StewardWebRuntime
 
 app = typer.Typer(help="CoQUIC Steward maintenance manager.")
 enqueue_app = typer.Typer(help="Enqueue tasks.")
@@ -61,7 +62,7 @@ def run(task_id: str) -> None:
 def daemon(
     once: bool = typer.Option(False, help="Run one tick and exit."),
     web_ui: bool = typer.Option(
-        False,
+        True,
         "--web/--no-web",
         help="Launch the loopback API and Next.js dashboard with the daemon.",
     ),
@@ -83,8 +84,6 @@ def daemon(
                 )
                 typer.echo(result)
             elif web_ui:
-                from .web.runtime import StewardWebRuntime
-
                 with StewardWebRuntime(log_dir=config.logs_dir) as runtime:
                     typer.echo(f"Steward API: {runtime.api_url}")
                     typer.echo(f"Steward Web UI: {runtime.ui_url}")

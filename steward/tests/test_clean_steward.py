@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -75,6 +76,7 @@ from coquic_steward.storage.schema import (
     TaskRow,
     ValidationRow,
 )
+from coquic_steward.web.app import create_app
 
 def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
     config = load_config(repo_root=repo)
@@ -3725,4 +3727,839 @@ github_repository = "minhuw/coquic"
     assert "remote push preflight failed" in result.output
     assert "TickResult" not in result.output
 
+def test_cli_daemon_starts_web_runtime_for_forever_mode(repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(repo)
+    started = []
 
+    class FakeRuntime:
+        api_url = "http://127.0.0.1:8765"
+        ui_url = "http://127.0.0.1:3000"
+
+        def __init__(self, *, log_dir: Path | None = None):
+            started.append(f"log_dir={log_dir.name if log_dir else '-'}")
+
+        def __enter__(self):
+            started.append("enter")
+            return self
+
+        def __exit__(self, *_exc):
+            started.append("exit")
+
+    def fake_run_forever(self) -> None:
+        started.append("daemon")
+
+    monkeypatch.setattr("coquic_steward.cli.StewardWebRuntime", FakeRuntime)
+    monkeypatch.setattr(
+        "coquic_steward.cli.StewardDaemon.run_forever", fake_run_forever
+    )
+
+    result = CliRunner().invoke(app, ["daemon"])
+
+    assert result.exit_code == 0
+    assert started == ["log_dir=logs", "enter", "daemon", "exit"]
+    assert "Steward Web UI: http://127.0.0.1:3000" in result.output
+
+
+def test_cli_daemon_can_run_without_web_runtime(repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(repo)
+    started = []
+
+    class FakeRuntime:
+        def __enter__(self):
+            raise AssertionError("web runtime should not start")
+
+    def fake_run_forever(self) -> None:
+        started.append("daemon")
+
+    monkeypatch.setattr("coquic_steward.cli.StewardWebRuntime", FakeRuntime)
+    monkeypatch.setattr(
+        "coquic_steward.cli.StewardDaemon.run_forever", fake_run_forever
+    )
+
+    result = CliRunner().invoke(app, ["daemon", "--no-web"])
+
+    assert result.exit_code == 0
+    assert started == ["daemon"]
+
+
+def test_cli_daemon_once_does_not_start_web_runtime(repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(repo)
+
+    class FakeRuntime:
+        def __enter__(self):
+            raise AssertionError("web runtime should not start")
+
+    monkeypatch.setattr("coquic_steward.cli.StewardWebRuntime", FakeRuntime)
+
+    result = CliRunner().invoke(app, ["daemon", "--once", "--no-plan", "--no-dispatch"])
+
+    assert result.exit_code == 0
+    assert "TickResult" in result.output
+
+def test_web_runtime_rejects_api_without_signal_inbox(monkeypatch) -> None:
+    from coquic_steward.web import runtime
+
+    def fake_read_url(url: str) -> str | None:
+        return "ok" if url.endswith("/healthz") else None
+
+    def fake_read_json(url: str) -> object:
+        assert url.endswith("/api/runtime")
+        return {"api": "coquic-steward", "features": ["line-tail"]}
+
+    monkeypatch.setattr(runtime, "_read_url", fake_read_url)
+    monkeypatch.setattr(runtime, "_read_json", fake_read_json)
+
+    assert runtime._api_ready("http://127.0.0.1:8765") is False
+
+
+def test_web_runtime_reports_incompatible_running_api(tmp_path: Path, monkeypatch) -> None:
+    from coquic_steward.web import runtime
+
+    monkeypatch.setattr(runtime, "_api_ready", lambda _url: False)
+    monkeypatch.setattr(runtime, "_api_responding", lambda _url: True)
+
+    with pytest.raises(RuntimeError, match="incompatible Steward API"):
+        runtime.StewardWebRuntime(web_ui_dir=tmp_path).start()
+
+
+def test_cli_daemon_refuses_second_instance(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+
+    with acquire_daemon_lock(config):
+        result = CliRunner().invoke(
+            app, ["daemon", "--once", "--no-plan", "--no-dispatch"]
+        )
+
+    assert result.exit_code == 1
+    assert "Steward daemon already running" in result.output
+    assert str(config.state_dir / "daemon.lock") in result.output
+
+
+def test_web_health_and_dashboard(config: StewardConfig, monkeypatch) -> None:
+    monkeypatch.chdir(config.repo_root)
+    task, _ = TaskStore(config.db_path).add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    assert client.get("/healthz").text == "ok"
+    features = client.get("/api/runtime").json()["features"]
+    assert "line-tail" in features
+    assert "signal-inbox" in features
+    dashboard = client.get("/", follow_redirects=False)
+    assert dashboard.status_code == 307
+    assert dashboard.headers["location"] == "http://127.0.0.1:3000"
+    payload = client.get("/api/state").json()
+    assert payload["tasks"][0]["spec"]["id"] == task.id
+    assert payload["kinds"]
+    assert payload["workers"]
+
+
+def test_web_state_returns_signal_inbox_without_fetching(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    message, _ = store.add_signal_message(
+        SignalMessage(
+            provider="codacy",
+            kind="codacy-open",
+            fingerprint="codacy:open:2",
+            title="Open Codacy findings",
+            summary="Codacy issuesCount=2",
+            evidence_id="codacy:open",
+        )
+    )
+    item, _ = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy-issue",
+            fingerprint="wi-codacy-1",
+            title="Codacy issue",
+            evidence_id="codacy:open",
+        )
+    )
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    started = time.monotonic()
+    payload = client.get("/api/state").json()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.1
+    assert payload["signals"]["summary"] == "codacy: Codacy issuesCount=2"
+    assert payload["signals"]["has_codacy_findings"] is True
+    assert payload["signal_inbox"]["messages"][0]["id"] == message.id
+    assert payload["signal_inbox"]["items"][0]["id"] == item.id
+
+
+def test_web_state_hides_signal_fetch_errors_from_inbox(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    error_message, _ = store.add_signal_message(
+        SignalMessage(
+            provider="codacy",
+            kind="signal-error",
+            fingerprint="signal-error:codacy:dns failed",
+            title="codacy signal fetch failed",
+            summary="dns failed",
+            evidence_id="signal-error:codacy",
+        )
+    )
+    actionable, _ = store.add_signal_message(
+        SignalMessage(
+            provider="codacy",
+            kind="codacy-open",
+            fingerprint="codacy:open:2",
+            title="Open Codacy findings",
+            summary="Codacy issuesCount=2",
+            evidence_id="codacy:open",
+        )
+    )
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    payload = TestClient(app).get("/api/state").json()
+
+    assert [message["id"] for message in payload["signal_inbox"]["messages"]] == [
+        actionable.id
+    ]
+    assert [message.id for message in store.pending_signal_messages()] == [
+        actionable.id
+    ]
+    assert {
+        message.id for message in store.pending_signal_messages(include_errors=True)
+    } == {actionable.id, error_message.id}
+
+
+def test_web_serves_planner_run_list_and_lazy_artifact(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    older_id = "planner-task-20260618110000-abcdef12"
+    latest_id = "planner-task-20260618120000-abcdef12"
+    for planner_id, prompt_text, transcript_text in [
+        (older_id, "older prompt\n", '{"message":"older result"}\n'),
+        (latest_id, "planner prompt\n", '{"message":"planner result"}\n'),
+    ]:
+        prompt = config.prompts_dir / planner_id / "planner.md"
+        transcript = config.transcripts_dir / planner_id / "planner" / "codex.jsonl"
+        prompt.parent.mkdir(parents=True, exist_ok=True)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        prompt.write_text(prompt_text, encoding="utf-8")
+        transcript.write_text(transcript_text, encoding="utf-8")
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.get("/api/planner/runs")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [run["run_id"] for run in payload["runs"]] == [latest_id, older_id]
+    assert "prompt" not in payload["runs"][0]
+    assert "transcript" not in payload["runs"][0]
+    assert payload["runs"][0]["prompt_path"].endswith("/planner.md")
+    assert payload["runs"][0]["transcript_path"].endswith("/codex.jsonl")
+    assert payload["runs"][0]["prompt_bytes"] == len("planner prompt\n")
+    assert payload["runs"][0]["transcript_bytes"] == len('{"message":"planner result"}\n')
+
+    artifact = client.get(f"/api/planner/runs/{latest_id}").json()
+
+    assert artifact["run_id"] == latest_id
+    assert artifact["prompt"] == "planner prompt\n"
+    assert artifact["transcript"] == '{"message":"planner result"}\n'
+    assert artifact["diagnostics"]["status"] == "missing_last_message"
+    assert artifact["diagnostics"]["last_message_present"] is False
+
+
+def test_web_create_task_and_json(config: StewardConfig, monkeypatch) -> None:
+    monkeypatch.chdir(config.repo_root)
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/tasks",
+        json={
+            "title": "Web task",
+            "kind": "custom",
+            "worker": "custom",
+            "prompt": "from web",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["created"] is True
+
+    payload = client.get("/api/state").json()
+    assert payload["tasks"][0]["spec"]["title"] == "Web task"
+    task_id = payload["tasks"][0]["spec"]["id"]
+    detail = client.get(f"/api/tasks/{task_id}").json()
+    assert detail["task"]["spec"]["prompt"] == "from web"
+    assert detail["files"]["patch"] is None
+
+
+def test_web_run_task_action(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        "printf 'no changes\\n' > \"$last\"\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    monkeypatch.setattr("coquic_steward.web.app.load_config", lambda: config)
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post(f"/api/tasks/{task.id}/run")
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert store.get(task.id).status == TaskStatus.no_changes
+    assert "no changes" in client.get(f"/api/tasks/{task.id}/files/last-message").text
+
+
+def test_web_run_task_action_respects_daemon_lock(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    with acquire_daemon_lock(config):
+        response = client.post(f"/api/tasks/{task.id}/run")
+
+    assert response.status_code == 409
+    assert store.get(task.id).status == TaskStatus.queued
+
+
+def test_web_tick_action_respects_daemon_lock(config: StewardConfig, monkeypatch) -> None:
+    monkeypatch.chdir(config.repo_root)
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    with acquire_daemon_lock(config):
+        response = client.post(
+            "/api/actions/tick", json={"plan": False, "dispatch": False}
+        )
+
+    assert response.status_code == 409
+
+
+def test_web_validation_log_endpoint(config: StewardConfig, monkeypatch) -> None:
+    from coquic_steward.core.models import ValidationResult
+
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    log = config.logs_dir / task.id / "gate.txt"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("gate output\n", encoding="utf-8")
+    task.validations.append(
+        ValidationResult(
+            command=["gate"],
+            cwd=config.repo_root,
+            passed=True,
+            exit_code=0,
+            output_path=log,
+        )
+    )
+    store.save(task)
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.get(f"/api/tasks/{task.id}/validations/0")
+    assert response.status_code == 200
+    assert response.text == "gate output\n"
+
+
+def test_web_serves_latest_review_transcript(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    older = config.transcripts_dir / task.id / "reviewer-0" / "codex.jsonl"
+    newer = config.transcripts_dir / task.id / "reviewer-1" / "codex.jsonl"
+    older.parent.mkdir(parents=True, exist_ok=True)
+    newer.parent.mkdir(parents=True, exist_ok=True)
+    older.write_text('{"message":"old review"}\n', encoding="utf-8")
+    newer.write_text('{"message":"new review"}\n', encoding="utf-8")
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    detail = client.get(f"/api/tasks/{task.id}").json()
+    response = client.get(f"/api/tasks/{task.id}/files/review-transcript")
+
+    assert detail["files"]["review_transcript"].endswith("/reviewer-1/codex.jsonl")
+    assert response.status_code == 200
+    assert response.text == '{"message":"new review"}\n'
+
+
+def test_web_task_detail_returns_attempt_stack(
+    config: StewardConfig, monkeypatch
+) -> None:
+    from coquic_steward.core.models import ValidationResult
+
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worker = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    reviewer = config.transcripts_dir / task.id / "reviewer-0" / "codex.jsonl"
+    revision = config.transcripts_dir / task.id / "worker-revision-1" / "codex.jsonl"
+    for path, text in [(worker, '{"message":"worker"}\n')]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    log = config.logs_dir / task.id / "gate.txt"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("gate output\n", encoding="utf-8")
+    task.validations.append(
+        ValidationResult(
+            command=["gate"],
+            cwd=config.repo_root,
+            passed=True,
+            exit_code=0,
+            output_path=log,
+        )
+    )
+    store.save(task)
+    for path, text in [
+        (reviewer, '{"message":"reviewer"}\n'),
+        (revision, '{"message":"revision"}\n'),
+    ]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    detail = client.get(f"/api/tasks/{task.id}").json()
+    response = client.get(f"/api/tasks/{task.id}/runs/worker-revision-1/transcript")
+    unsafe = client.get(f"/api/tasks/{task.id}/runs/../worker/transcript")
+
+    assert [attempt["attempt"] for attempt in detail["attempts"]] == [0, 1]
+    assert detail["attempts"][0]["worker"]["name"] == "worker"
+    assert detail["attempts"][0]["reviewer"]["name"] == "reviewer-0"
+    assert detail["attempts"][1]["worker"]["name"] == "worker-revision-1"
+    assert detail["attempts"][0]["validations"][0]["index"] == 0
+    assert response.status_code == 200
+    assert response.text == '{"message":"revision"}\n'
+    assert unsafe.status_code in {400, 404}
+
+
+def test_web_task_detail_prefers_database_iterations(
+    config: StewardConfig, monkeypatch
+) -> None:
+    from coquic_steward.core.models import WorkerResult
+
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worker = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    worker.parent.mkdir(parents=True, exist_ok=True)
+    worker.write_text('{"message":"worker"}\n', encoding="utf-8")
+    last = worker.parent / "last-message.md"
+    last.write_text("done\n", encoding="utf-8")
+    patch = config.patches_dir / task.id / "iteration-0.patch"
+    patch.parent.mkdir(parents=True, exist_ok=True)
+    patch.write_text("diff --git a/README.md b/README.md\n", encoding="utf-8")
+    store.begin_iteration(
+        task.id,
+        0,
+        "Initial attempt",
+        worker_name="worker",
+        worker_prompt_path=config.prompts_dir / task.id / "worker.md",
+        worker_transcript_path=worker,
+        worker_last_message_path=last,
+    )
+    store.finish_iteration_worker(
+        task.id,
+        0,
+        WorkerResult(
+            completed=True,
+            command=["codex"],
+            cwd=config.repo_root,
+            exit_code=0,
+            prompt_path=config.prompts_dir / task.id / "worker.md",
+            transcript_path=worker,
+            last_message_path=last,
+            final_message="done",
+        ),
+    )
+    store.record_iteration_patch(task.id, 0, patch)
+    store.record_iteration_review(
+        task.id,
+        0,
+        WorkerResult(
+            completed=True,
+            command=["codex", "review"],
+            cwd=config.repo_root,
+            exit_code=0,
+            prompt_path=config.prompts_dir / task.id / "reviewer-0.md",
+            transcript_path=config.transcripts_dir / task.id / "reviewer-0" / "codex.jsonl",
+            last_message_path=config.transcripts_dir / task.id / "reviewer-0" / "last-message.md",
+            final_message="{}",
+        ),
+        reviewer_name="reviewer-0",
+        review_run=0,
+        review={
+            "verdict": "approve",
+            "summary": "ok",
+            "findings": [],
+            "validation_gaps": [],
+            "remaining_risk": "",
+        },
+    )
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    detail = client.get(f"/api/tasks/{task.id}").json()
+    patch_response = client.get(f"/api/tasks/{task.id}/iterations/0/patch")
+
+    assert detail["attempts"][0]["review"]["verdict"] == "approve"
+    assert detail["attempts"][0]["patch_path"].endswith("iteration-0.patch")
+    assert patch_response.status_code == 200
+    assert patch_response.text == "diff --git a/README.md b/README.md\n"
+
+
+def test_web_task_detail_falls_back_to_live_reviewer_file_for_iteration(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worker = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    reviewer = config.transcripts_dir / task.id / "reviewer-0" / "codex.jsonl"
+    for path, text in [
+        (worker, '{"message":"worker"}\n'),
+        (reviewer, '{"message":"live review"}\n'),
+    ]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    store.begin_iteration(
+        task.id,
+        0,
+        "Initial attempt",
+        worker_name="worker",
+        worker_prompt_path=config.prompts_dir / task.id / "worker.md",
+        worker_transcript_path=worker,
+        worker_last_message_path=worker.parent / "last-message.md",
+    )
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    detail = TestClient(app).get(f"/api/tasks/{task.id}").json()
+
+    assert detail["attempts"][0]["reviewer"]["name"] == "reviewer-0"
+    assert detail["attempts"][0]["reviewer"]["transcript_path"].endswith(
+        "reviewer-0/codex.jsonl"
+    )
+
+
+def test_web_task_detail_uses_latest_reviewer_retry(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worker = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    reviewer = config.transcripts_dir / task.id / "reviewer-0" / "codex.jsonl"
+    retry = config.transcripts_dir / task.id / "reviewer-0-retry-1" / "codex.jsonl"
+    for path, text in [
+        (worker, '{"message":"worker"}\n'),
+        (reviewer, '{"message":"invalid review"}\n'),
+        (retry, '{"message":"retry review"}\n'),
+    ]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    detail = TestClient(app).get(f"/api/tasks/{task.id}").json()
+
+    assert detail["attempts"][0]["reviewer"]["name"] == "reviewer-0-retry-1"
+    assert detail["attempts"][0]["reviewer"]["review_run"] == 1
+
+
+def test_web_task_detail_groups_validation_revision_attempt(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worker = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    revision = (
+        config.transcripts_dir
+        / task.id
+        / "worker-validation-revision-1"
+        / "codex.jsonl"
+    )
+    for path, text in [
+        (worker, '{"message":"worker"}\n'),
+        (revision, '{"message":"validation revision"}\n'),
+    ]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    detail = TestClient(app).get(f"/api/tasks/{task.id}").json()
+
+    assert [attempt["label"] for attempt in detail["attempts"]] == [
+        "Initial attempt",
+        "Validation revision 1",
+    ]
+    assert detail["attempts"][1]["worker"]["name"] == "worker-validation-revision-1"
+
+
+def test_web_task_detail_returns_pushed_commit_url(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.add_event(task.id, "main.pushed", "0123456789abcdef")
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    response = TestClient(app).get(f"/api/tasks/{task.id}")
+
+    assert response.status_code == 200
+    remote = response.json()["remote"]
+    assert remote["commit"] == "0123456789abcdef"
+    assert (
+        remote["commit_url"]
+        == "https://github.com/minhuw/coquic/commit/0123456789abcdef"
+    )
+
+
+def test_web_state_returns_integration_summary(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="Source", prompt="P")
+    )
+    patch = config.patches_dir / f"{source.id}.patch"
+    patch.parent.mkdir(parents=True, exist_ok=True)
+    patch.write_text("diff\n", encoding="utf-8")
+    source.patch_path = patch
+    store.save(source)
+    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate Source",
+            prompt="Integrate",
+            metadata={
+                "source_task_id": source.id,
+                "source_patch_path": str(patch),
+                "dedupe_key": f"integration:{source.id}",
+            },
+        ),
+        dedupe_key=f"integration:{source.id}",
+    )
+    store.add_event(
+        source.id,
+        "integration.queued",
+        integration.id,
+        {"integration_task_id": integration.id},
+    )
+    store.add_event(integration.id, "main.pushed", "0123456789abcdef")
+    store.add_event(source.id, "main.pushed", "0123456789abcdef")
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    payload = TestClient(app).get("/api/state").json()
+
+    assert payload["integration"]["queue"][0]["task_id"] == integration.id
+    assert payload["integration"]["queue"][0]["source_task_id"] == source.id
+    assert payload["integration"]["queue"][0]["source_patch_path"] == str(patch)
+    assert len(payload["integration"]["commits"]) == 1
+    assert payload["integration"]["commits"][0]["task_id"] == source.id
+    assert payload["integration"]["commits"][0]["commit"] == "0123456789abcdef"
+    assert (
+        payload["integration"]["commits"][0]["commit_url"]
+        == "https://github.com/minhuw/coquic/commit/0123456789abcdef"
+    )
+
+
+def test_web_integration_detail_returns_run_abstraction(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="Source", prompt="P")
+    )
+    patch = config.patches_dir / f"{source.id}.patch"
+    patch.parent.mkdir(parents=True, exist_ok=True)
+    patch.write_text("diff\n", encoding="utf-8")
+    source.patch_path = patch
+    store.save(source)
+    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate Source",
+            prompt="Integrate",
+            metadata={
+                "source_task_id": source.id,
+                "source_patch_path": str(patch),
+                "dedupe_key": f"integration:{source.id}",
+            },
+        ),
+        dedupe_key=f"integration:{source.id}",
+    )
+    store.add_event(
+        integration.id,
+        "integration.source",
+        source.id,
+        {"source_task_id": source.id, "source_patch_path": str(patch)},
+    )
+    store.add_event(
+        source.id,
+        "integration.started",
+        integration.id,
+        {"integration_task_id": integration.id},
+    )
+    store.add_event(integration.id, "main.pushed", "0123456789abcdef")
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.get(f"/api/integrations/{integration.id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["run"]["run_id"] == integration.id
+    assert payload["run"]["task_id"] == integration.id
+    assert payload["run"]["source_task_id"] == source.id
+    assert payload["run"]["source_title"] == "Source"
+    assert payload["run"]["source_patch_path"] == str(patch)
+    assert payload["run"]["transcript_path"] is None
+    assert payload["source_task"]["spec"]["id"] == source.id
+    assert [event["kind"] for event in payload["events"]] == [
+        "task.created",
+        "integration.source",
+        "main.pushed",
+    ]
+    assert [event["kind"] for event in payload["source_events"]] == [
+        "integration.started"
+    ]
+    assert payload["remote"]["commit"] == "0123456789abcdef"
+    assert (
+        payload["remote"]["commit_url"]
+        == "https://github.com/minhuw/coquic/commit/0123456789abcdef"
+    )
+    assert client.get(f"/api/integrations/{source.id}").status_code == 404
+
+
+def test_tail_text_can_skip_partial_first_line(tmp_path: Path) -> None:
+    from coquic_steward.web.app import tail_text
+
+    path = tmp_path / "codex.jsonl"
+    path.write_text(
+        '{"type":"item.completed","item":{"id":"1"}}\n'
+        '{"type":"item.completed","item":{"id":"2"}}\n',
+        encoding="utf-8",
+    )
+
+    text = tail_text(path, max_bytes=55, line_aligned=True)
+
+    assert text == '{"type":"item.completed","item":{"id":"2"}}\n'
+
+
+def test_web_task_asset_serves_task_image(config: StewardConfig, monkeypatch) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    task.worktree_path = config.worktrees_dir / task.id
+    task.worktree_path.mkdir(parents=True)
+    image = task.worktree_path / "plot.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    store.save(task)
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    response = TestClient(app).get(
+        f"/api/tasks/{task.id}/assets", params={"path": "plot.png"}
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content == b"\x89PNG\r\n\x1a\n"
+
+
+def test_web_task_asset_rejects_non_image(config: StewardConfig, monkeypatch) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    task.worktree_path = config.worktrees_dir / task.id
+    task.worktree_path.mkdir(parents=True)
+    text = task.worktree_path / "notes.txt"
+    text.write_text("not image\n", encoding="utf-8")
+    store.save(task)
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    response = TestClient(app).get(
+        f"/api/tasks/{task.id}/assets", params={"path": "notes.txt"}
+    )
+
+    assert response.status_code == 415

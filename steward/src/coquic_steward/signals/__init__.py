@@ -1,14 +1,13 @@
 from .collector import (
-    collect_signal_messages,
+    collect_signal_items,
     gather_signals,
     project_signals_from_items,
-    project_signals_from_messages,
-    signal_items_from_messages,
 )
 from .providers import (
     CodacyProvider,
     CodeScanningProvider,
     GitHubActionsProvider,
+    ProviderSignalResult,
     SignalProvider,
 )
 
@@ -16,10 +15,9 @@ __all__ = [
     "CodacyProvider",
     "CodeScanningProvider",
     "GitHubActionsProvider",
+    "ProviderSignalResult",
     "SignalProvider",
-    "collect_signal_messages",
+    "collect_signal_items",
     "gather_signals",
     "project_signals_from_items",
-    "project_signals_from_messages",
-    "signal_items_from_messages",
 ]

@@ -232,20 +232,20 @@ function SessionDiagnostics({
   isLiveRun: boolean;
 }) {
   if (!diagnostics || diagnostics.status === "ok") return null;
-  const finalMessagePending = isLiveRun && diagnostics.status === "missing_last_message";
+  if (diagnostics.status === "missing_last_message") {
+    return isLiveRun ? <SessionRunningNotice /> : null;
+  }
   const tail = diagnostics.last_item_type || diagnostics.last_event_type;
   return (
     <ToolCard
-      icon={finalMessagePending ? <Activity size={16} /> : <XCircle size={16} />}
-      meta={finalMessagePending ? "final message pending" : diagnostics.status.replaceAll("_", " ")}
-      title={finalMessagePending ? "Session running" : "Session diagnostics"}
-      tone={diagnostics.status === "missing_last_message" ? "pending" : "danger"}
+      icon={<XCircle size={16} />}
+      meta={diagnostics.status.replaceAll("_", " ")}
+      title="Session diagnostics"
+      tone="danger"
     >
       <div className="session-diagnostics">
         <p>
-          {finalMessagePending
-            ? "Codex is still running. The final structured message will appear after the session exits."
-            : diagnostics.summary || "Codex session did not finish cleanly."}
+          {diagnostics.summary || "Codex session did not finish cleanly."}
         </p>
         <dl>
           {diagnostics.exit_code !== null && <DiagFact label="Exit" value={String(diagnostics.exit_code)} />}
@@ -254,7 +254,7 @@ function SessionDiagnostics({
           {tail && <DiagFact label="Last event" value={tail} />}
           <DiagFact
             label="Last message"
-            value={diagnostics.last_message_present ? "written" : finalMessagePending ? "pending" : "missing"}
+            value={diagnostics.last_message_present ? "written" : "missing"}
           />
           {diagnostics.thread_id && <DiagFact label="Thread" value={diagnostics.thread_id} />}
         </dl>
@@ -262,6 +262,15 @@ function SessionDiagnostics({
         {!diagnostics.last_error && diagnostics.last_output && <pre>{diagnostics.last_output}</pre>}
       </div>
     </ToolCard>
+  );
+}
+
+function SessionRunningNotice() {
+  return (
+    <div className="session-running" role="status">
+      <Activity size={14} />
+      <span>Session running; final message pending.</span>
+    </div>
   );
 }
 
@@ -963,8 +972,8 @@ function parsePlannerInput(text: string): PlannerInput | null {
   const record = value as Record<string, unknown>;
   return {
     activeTasks: Array.isArray(record.active_tasks) ? record.active_tasks : [],
-    inboxMessages: Array.isArray(record.inbox_messages)
-      ? record.inbox_messages
+    inboxMessages: Array.isArray(record.signal_items)
+      ? record.signal_items
           .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
           .map((item) => ({
             id: stringValue(item.id),

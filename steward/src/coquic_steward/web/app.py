@@ -21,7 +21,7 @@ from fastapi.responses import (
 
 from ..agents.diagnostics import diagnostics_for_paths
 from ..core.config import load_config
-from ..core.models import SignalMessageStatus, TaskKind, TaskSpec, WorkerKind
+from ..core.models import TaskKind, TaskSpec, WorkerKind
 from ..execution import StewardExecutor, default_worker_for_kind
 from ..orchestration import (
     DaemonAlreadyRunning,
@@ -29,7 +29,7 @@ from ..orchestration import (
     StewardPreflightError,
     acquire_daemon_lock,
 )
-from ..signals import project_signals_from_messages
+from ..signals import project_signals_from_items
 from ..storage import TaskStore
 
 
@@ -311,7 +311,10 @@ def _register_runtime_routes(app: FastAPI) -> None:
     def runtime(request: Request) -> JSONResponse:
         _require_loopback(request)
         return JSONResponse(
-            {"api": "coquic-steward", "features": ["line-tail", "signal-inbox"]}
+            {
+                "api": "coquic-steward",
+                "features": ["line-tail", "signal-inbox", "signal-items-v2"],
+            }
         )
 
 
@@ -343,24 +346,17 @@ def _register_ui_routes(app: FastAPI) -> None:
 
 def _state_payload(config, store: TaskStore) -> dict[str, object]:
     tasks = store.list_tasks(limit=200)
-    inbox = store.list_signal_messages(limit=200)
     items = store.list_signal_items(limit=200)
-    pending = [
-        message
-        for message in inbox
-        if str(message.status) == SignalMessageStatus.pending.value
-    ]
-    signals = project_signals_from_messages(config, pending)
+    fetch_runs = store.list_signal_fetch_runs(limit=80)
+    signals = project_signals_from_items(config, items, fetches=fetch_runs)
     return {
         "tasks": [task.model_dump(mode="json") for task in tasks],
         "audit": store.audit(),
         "signals": signals.model_dump(mode="json"),
         "signal_inbox": {
-            "messages": [message.model_dump(mode="json") for message in inbox],
             "items": [item.model_dump(mode="json") for item in items],
             "fetch_runs": [
-                run.model_dump(mode="json")
-                for run in store.list_signal_fetch_runs(limit=80)
+                run.model_dump(mode="json") for run in fetch_runs
             ],
         },
         "planned": [],

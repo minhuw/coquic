@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import os
 from collections import Counter
+from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import (
@@ -16,7 +17,7 @@ from urllib.request import (
 )
 
 from ..core.config import StewardConfig
-from ..core.models import ProjectSignals
+from ..core.models import SignalItem
 from ..core.subprocesses import run_command
 
 SIGNAL_TIMEOUT_SECONDS = 15.0
@@ -24,17 +25,25 @@ MAX_SIGNAL_WORK_ITEMS = 12
 CODACY_API_HOST = "app.codacy.com"
 
 
+@dataclass(frozen=True)
+class ProviderSignalResult:
+    items: list[SignalItem] = field(default_factory=list)
+    summary: str = ""
+    error: str | None = None
+    has_more: bool = False
+
+
 class SignalProvider(Protocol):
     name: str
 
-    def collect(self, config: StewardConfig, signals: ProjectSignals) -> None:
-        """Mutate signals with observations from one source."""
+    def collect(self, config: StewardConfig) -> ProviderSignalResult:
+        """Return current actionable signal items from one source."""
 
 
 class GitHubActionsProvider:
     name = "github-actions"
 
-    def collect(self, config: StewardConfig, signals: ProjectSignals) -> None:
+    def collect(self, config: StewardConfig) -> ProviderSignalResult:
         runs = run_command(
             [
                 "gh",
@@ -52,31 +61,37 @@ class GitHubActionsProvider:
             cwd=config.repo_root,
             timeout=SIGNAL_TIMEOUT_SECONDS,
         )
-        signals.summary = runs.stdout if runs.ok else runs.stderr
         if not runs.ok:
-            signals.signal_errors[self.name] = runs.stderr
-            return
+            return ProviderSignalResult(error=runs.stderr, summary=runs.stderr)
         try:
             decoded = json.loads(runs.stdout)
         except json.JSONDecodeError:
             decoded = []
         for run in decoded:
-            if run.get("conclusion") == "failure":
-                signals.failed_workflow_run_id = str(run.get("databaseId"))
-                signals.failed_workflow_name = str(run.get("workflowName"))
-                signals.summary = (
-                    f"{signals.failed_workflow_name} run "
-                    f"{signals.failed_workflow_run_id} failed"
-                )
-                if signals.failed_workflow_name == "Interop":
-                    signals.failed_interop_run_id = signals.failed_workflow_run_id
-                return
+            if run.get("conclusion") != "failure":
+                continue
+            workflow_name = str(run.get("workflowName") or "workflow")
+            run_id = str(run.get("databaseId") or "")
+            if not run_id:
+                continue
+            item = _workflow_item(
+                repository=config.github_repository,
+                workflow_name=workflow_name,
+                run_id=run_id,
+                is_interop=workflow_name == "Interop",
+            )
+            return ProviderSignalResult(
+                items=[item],
+                summary=item.summary,
+                has_more=False,
+            )
+        return ProviderSignalResult(summary="No failed workflow runs found")
 
 
 class CodeScanningProvider:
     name = "code-scanning"
 
-    def collect(self, config: StewardConfig, signals: ProjectSignals) -> None:
+    def collect(self, config: StewardConfig) -> ProviderSignalResult:
         codeql = run_command(
             [
                 "gh",
@@ -89,52 +104,51 @@ class CodeScanningProvider:
             timeout=SIGNAL_TIMEOUT_SECONDS,
         )
         if not codeql.ok:
-            signals.signal_errors[self.name] = codeql.stderr
-            return
+            return ProviderSignalResult(error=codeql.stderr)
         try:
             payload = json.loads(codeql.stdout or "[]")
         except json.JSONDecodeError:
             payload = []
-        signals.has_codeql_findings = bool(payload)
-        signals.has_code_quality_findings = (
-            signals.has_code_quality_findings or signals.has_codeql_findings
+        items = [_code_scanning_item(item) for item in payload[:MAX_SIGNAL_WORK_ITEMS]]
+        return ProviderSignalResult(
+            items=items,
+            summary=_summary_from_items("CodeQL", items),
+            has_more=len(payload) > len(items),
         )
-        if payload:
-            items = [_code_scanning_item(item) for item in payload[:MAX_SIGNAL_WORK_ITEMS]]
-            signals.summary = _summary_from_items("CodeQL", items)
-            signals.signal_errors.pop(self.name, None)
-            signals.work_items = items
 
 
 class CodacyProvider:
     name = "codacy"
 
-    def collect(self, config: StewardConfig, signals: ProjectSignals) -> None:
+    def collect(self, config: StewardConfig) -> ProviderSignalResult:
         owner, repository = config.github_repository.split("/", 1)
-        token = os.getenv("CODACY_API_TOKEN")
-        if token:
-            self._collect_issue_search(owner, repository, signals, token)
-        else:
-            self._collect_public_analysis(owner, repository, config, signals)
+        issue_result = self._collect_issue_search(
+            owner,
+            repository,
+            os.getenv("CODACY_API_TOKEN"),
+        )
+        if issue_result.error is None:
+            return issue_result
+        return self._collect_public_analysis(owner, repository, config, issue_result.error)
 
     def _collect_issue_search(
         self,
         owner: str,
         repository: str,
-        signals: ProjectSignals,
-        token: str,
-    ) -> None:
+        token: str | None,
+    ) -> ProviderSignalResult:
         url = (
             f"https://{CODACY_API_HOST}/api/v3/analysis/organizations/gh/"
-            f"{quote(owner, safe='')}/repositories/{quote(repository, safe='')}/issues/search"
+            f"{quote(owner, safe='')}/repositories/{quote(repository, safe='')}"
+            f"/issues/search?limit={MAX_SIGNAL_WORK_ITEMS}"
         )
+        headers = {"content-type": "application/json"}
+        if token:
+            headers["api-token"] = token
         request = Request(
             url,
             data=json.dumps({"levels": ["Error", "Warning"]}).encode("utf-8"),
-            headers={
-                "api-token": token,
-                "content-type": "application/json",
-            },
+            headers=headers,
             method="POST",
         )
         try:
@@ -151,25 +165,22 @@ class CodacyProvider:
             OSError,
             json.JSONDecodeError,
         ) as exc:
-            signals.signal_errors[self.name] = str(exc)
-            return
+            return ProviderSignalResult(error=str(exc))
         data = payload.get("data", []) if isinstance(payload, dict) else []
-        signals.has_codacy_findings = bool(data)
-        signals.has_code_quality_findings = (
-            signals.has_code_quality_findings or signals.has_codacy_findings
+        items = [_codacy_item(item) for item in data[:MAX_SIGNAL_WORK_ITEMS]]
+        return ProviderSignalResult(
+            items=items,
+            summary=_summary_from_items("Codacy", items),
+            has_more=len(data) > len(items),
         )
-        if data:
-            items = [_codacy_item(item) for item in data[:MAX_SIGNAL_WORK_ITEMS]]
-            signals.summary = _summary_from_items("Codacy", items)
-            signals.work_items = items
 
     def _collect_public_analysis(
         self,
         owner: str,
         repository: str,
         config: StewardConfig,
-        signals: ProjectSignals,
-    ) -> None:
+        search_error: str,
+    ) -> ProviderSignalResult:
         url = (
             f"https://{CODACY_API_HOST}/api/v3/analysis/organizations/gh/"
             f"{quote(owner, safe='')}/repositories/{quote(repository, safe='')}"
@@ -190,30 +201,18 @@ class CodacyProvider:
             OSError,
             json.JSONDecodeError,
         ) as exc:
-            signals.signal_errors[self.name] = str(exc)
-            return
+            return ProviderSignalResult(error=f"{search_error}; fallback: {exc}")
         data = payload.get("data", {}) if isinstance(payload, dict) else {}
         issues_count = data.get("issuesCount") if isinstance(data, dict) else None
         if not isinstance(issues_count, int):
-            signals.signal_errors[self.name] = "Codacy response missing issuesCount"
-            return
-        signals.has_codacy_findings = issues_count > 0
-        signals.has_code_quality_findings = (
-            signals.has_code_quality_findings or signals.has_codacy_findings
-        )
-        signals.summary = (
-            f"{signals.summary}\n" if signals.summary else ""
-        ) + f"Codacy issuesCount={issues_count}"
-        signals.work_items = [
-            _with_item_id(
-                {
-                    "provider": "codacy",
-                    "kind": "codacy-summary",
-                    "summary": f"Codacy issuesCount={issues_count}",
-                    "url": f"https://app.codacy.com/gh/{owner}/{repository}/issues/current",
-                }
+            return ProviderSignalResult(
+                error=f"{search_error}; fallback: Codacy response missing issuesCount"
             )
-        ]
+        summary = f"Codacy issuesCount={issues_count}"
+        if issues_count <= 0:
+            return ProviderSignalResult(summary=summary)
+        item = _codacy_summary_item(owner, repository, issues_count)
+        return ProviderSignalResult(items=[item], summary=summary, has_more=True)
 
 
 def _open_codacy_request(request: Request, *, timeout: float):
@@ -231,74 +230,221 @@ def _codacy_opener() -> OpenerDirector:
     return opener
 
 
-def _code_scanning_item(item: object) -> dict[str, object]:
+def _workflow_item(
+    *,
+    repository: str,
+    workflow_name: str,
+    run_id: str,
+    is_interop: bool,
+) -> SignalItem:
+    kind = "github-actions.interop-failure" if is_interop else "github-actions.workflow-failure"
+    title = f"{workflow_name} workflow failed"
+    summary = f"{workflow_name} run {run_id} failed"
+    payload = {
+        "run_id": run_id,
+        "workflow_name": workflow_name,
+        "conclusion": "failure",
+    }
+    return _signal_item(
+        provider="github-actions",
+        kind=kind,
+        title=title,
+        summary=summary,
+        severity="high",
+        links=[
+            {
+                "label": "Open workflow run",
+                "url": f"https://github.com/{repository}/actions/runs/{run_id}",
+            }
+        ],
+        payload=payload,
+    )
+
+
+def _code_scanning_item(item: object) -> SignalItem:
     data = item if isinstance(item, dict) else {}
     rule = data.get("rule") if isinstance(data.get("rule"), dict) else {}
     location = data.get("most_recent_instance") if isinstance(data.get("most_recent_instance"), dict) else {}
     location = location.get("location") if isinstance(location.get("location"), dict) else {}
     region = location.get("region") if isinstance(location.get("region"), dict) else {}
-    path = location.get("path")
-    return _with_item_id(
-        {
-            "provider": "code-scanning",
-            "kind": "codeql-alert",
-            "rule_id": rule.get("id"),
-            "rule_name": rule.get("name") or rule.get("description"),
-            "severity": data.get("security_severity_level")
-            or data.get("severity")
-            or rule.get("severity"),
-            "file": path,
-            "line": region.get("start_line"),
-            "url": data.get("html_url"),
-            "state": data.get("state"),
-        }
+    path = _str_or_none(location.get("path"))
+    line = _int_or_none(region.get("start_line"))
+    rule_id = _str_or_none(rule.get("id"))
+    rule_name = _str_or_none(rule.get("name") or rule.get("description"))
+    severity = _str_or_none(
+        data.get("security_severity_level")
+        or data.get("severity")
+        or rule.get("severity")
+    )
+    payload = {
+        "rule_id": rule_id,
+        "rule_name": rule_name,
+        "state": data.get("state"),
+    }
+    return _signal_item(
+        provider="code-scanning",
+        kind="code-scanning.alert",
+        title=_finding_title(rule_id or rule_name or "Code scanning alert", path, line),
+        summary=_finding_summary("CodeQL", rule_id, rule_name),
+        severity=severity,
+        location=_location(path, line),
+        links=_links("Open alert", data.get("html_url")),
+        payload=payload,
     )
 
 
-def _codacy_item(item: object) -> dict[str, object]:
+def _codacy_item(item: object) -> SignalItem:
     data = item if isinstance(item, dict) else {}
     pattern = data.get("patternInfo") if isinstance(data.get("patternInfo"), dict) else {}
     tool = data.get("toolInfo") if isinstance(data.get("toolInfo"), dict) else {}
-    return _with_item_id(
-        {
-            "provider": "codacy",
-            "kind": "codacy-issue",
-            "rule_id": pattern.get("id") or data.get("patternId"),
-            "rule_name": pattern.get("title") or pattern.get("category"),
-            "severity": pattern.get("level") or data.get("level"),
-            "tool": tool.get("name"),
-            "file": data.get("filePath") or data.get("filename"),
-            "line": data.get("lineNumber") or data.get("line"),
-            "url": data.get("url") or data.get("htmlUrl"),
-        }
+    path = _str_or_none(data.get("filePath") or data.get("filename"))
+    line = _int_or_none(data.get("lineNumber") or data.get("line"))
+    rule_id = _str_or_none(pattern.get("id") or data.get("patternId"))
+    rule_name = _str_or_none(pattern.get("title") or pattern.get("category"))
+    severity = _str_or_none(pattern.get("level") or data.get("level"))
+    tool_name = _str_or_none(tool.get("name"))
+    payload = {
+        "rule_id": rule_id,
+        "rule_name": rule_name,
+        "tool": tool_name,
+    }
+    return _signal_item(
+        provider="codacy",
+        kind="codacy.issue",
+        title=_finding_title(rule_id or rule_name or "Codacy issue", path, line),
+        summary=_finding_summary("Codacy", rule_id, rule_name),
+        severity=severity,
+        location=_location(path, line),
+        links=_links("Open Codacy", data.get("url") or data.get("htmlUrl")),
+        payload=payload,
     )
 
 
-def _compact_item(item: dict[str, object]) -> dict[str, object]:
-    return {
-        key: value
-        for key, value in item.items()
-        if value not in (None, "", [], {})
-    }
+def _codacy_summary_item(owner: str, repository: str, issues_count: int) -> SignalItem:
+    return _signal_item(
+        provider="codacy",
+        kind="codacy.summary",
+        title="Open Codacy findings",
+        summary=f"Codacy issuesCount={issues_count}",
+        severity=None,
+        links=[
+            {
+                "label": "Open Codacy",
+                "url": f"https://app.codacy.com/gh/{owner}/{repository}/issues/current",
+            }
+        ],
+        payload={"issues_count": issues_count},
+    )
 
 
-def _with_item_id(item: dict[str, object]) -> dict[str, object]:
-    compact = _compact_item(item)
-    identity = json.dumps(compact, sort_keys=True, separators=(",", ":"))
-    provider = str(compact.get("provider") or "signal")
-    kind = str(compact.get("kind") or "item")
-    compact["id"] = f"wi-{provider}-{kind}-{sha256(identity.encode('utf-8')).hexdigest()[:12]}"
-    return compact
+def _signal_item(
+    *,
+    provider: str,
+    kind: str,
+    title: str,
+    summary: str,
+    severity: str | None = None,
+    location: dict[str, Any] | None = None,
+    links: list[dict[str, str]] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> SignalItem:
+    compact_payload = _compact_dict(payload or {})
+    identity = _compact_dict(
+        {
+            "provider": provider,
+            "kind": kind,
+            "title": title,
+            "severity": severity,
+            "location": location,
+            "links": links or [],
+            "payload": compact_payload,
+        }
+    )
+    digest = sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:12]
+    return SignalItem(
+        id=f"wi-{provider}-{kind.split('.')[-1]}-{digest}",
+        provider=provider,
+        kind=kind,
+        fingerprint=json.dumps(identity, sort_keys=True, separators=(",", ":")),
+        title=title,
+        summary=summary,
+        severity=severity,
+        location=location,
+        links=links or [],
+        payload=compact_payload,
+    )
 
 
-def _summary_from_items(provider: str, items: list[dict[str, object]]) -> str:
+def _summary_from_items(provider: str, items: list[SignalItem]) -> str:
     if not items:
-        return f"{provider} reports open findings"
-    files = Counter(str(item.get("file")) for item in items if item.get("file"))
-    rules = Counter(str(item.get("rule_id")) for item in items if item.get("rule_id"))
+        return f"{provider} reports no sampled open findings"
+    files = Counter(
+        str(item.location.get("path"))
+        for item in items
+        if item.location and item.location.get("path")
+    )
+    rules = Counter(
+        str(item.payload.get("rule_id"))
+        for item in items
+        if item.payload.get("rule_id")
+    )
     parts = [f"{provider} sampled {len(items)} open finding(s)"]
     if files:
         parts.append("top files: " + ", ".join(name for name, _ in files.most_common(3)))
     if rules:
         parts.append("top rules: " + ", ".join(name for name, _ in rules.most_common(3)))
     return "; ".join(parts)
+
+
+def _finding_title(rule: str, path: str | None, line: int | None) -> str:
+    if path and line is not None:
+        return f"{rule} in {path}:{line}"
+    if path:
+        return f"{rule} in {path}"
+    return rule
+
+
+def _finding_summary(provider: str, rule_id: str | None, rule_name: str | None) -> str:
+    if rule_id and rule_name:
+        return f"{provider} reports {rule_id}: {rule_name}"
+    if rule_id:
+        return f"{provider} reports {rule_id}"
+    if rule_name:
+        return f"{provider} reports {rule_name}"
+    return f"{provider} reports an open finding"
+
+
+def _location(path: str | None, line: int | None) -> dict[str, Any] | None:
+    if not path:
+        return None
+    result: dict[str, Any] = {"path": path}
+    if line is not None:
+        result["line"] = line
+    return result
+
+
+def _links(label: str, url: object) -> list[dict[str, str]]:
+    value = _str_or_none(url)
+    return [{"label": label, "url": value}] if value else []
+
+
+def _compact_dict(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: item
+        for key, item in value.items()
+        if item not in (None, "", [], {})
+    }
+
+
+def _str_or_none(value: object) -> str | None:
+    return str(value) if value not in (None, "") else None
+
+
+def _int_or_none(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None

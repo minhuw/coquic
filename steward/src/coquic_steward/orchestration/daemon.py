@@ -6,16 +6,15 @@ from dataclasses import dataclass
 
 from ..core.config import StewardConfig
 from ..core.models import (
-    SignalFetchRun,
     SignalFetchStatus,
     SignalItem,
-    SignalMessage,
     TaskRecord,
     TaskStatus,
+    WorkerKind,
 )
 from ..execution.executor import StewardExecutor
 from ..planning import run_planner
-from ..signals import collect_signal_messages, project_signals_from_items
+from ..signals import collect_signal_items, project_signals_from_items
 from ..storage import TaskStore
 from .preflight import preflight_remote_push
 
@@ -26,8 +25,6 @@ DAEMON_EVENT_TASK_ID = "daemon"
 class TickResult:
     recovered: int = 0
     signal_fetches: int = 0
-    signal_messages: int = 0
-    new_signal_messages: int = 0
     signal_items: int = 0
     new_signal_items: int = 0
     planned: int = 0
@@ -80,29 +77,11 @@ class StewardDaemon:
         if plan:
             self._poll_and_plan(result)
         if dispatch:
-            limit = max_dispatch or self.config.limits.max_active_tasks
-            for task in self.store.queued_tasks(limit=limit):
-                self._log(f"dispatch start {task.id} {_task_label(task)}")
-                if self.executor.run_task(task.id):
-                    result.dispatched += 1
-                    finished = self.store.get(task.id)
-                    self._log(
-                        f"dispatch finish {task.id} status={finished.status} ok=true"
-                    )
-                    if plan:
-                        self._plan_until_idle(result)
-                else:
-                    result.skipped += 1
-                    finished = self.store.get(task.id)
-                    self._log(
-                        f"dispatch finish {task.id} status={finished.status} ok=false"
-                    )
+            self._dispatch_queued(result, plan=plan, max_dispatch=max_dispatch)
         self._log(
             "tick finish "
             f"recovered={result.recovered} "
             f"signal_fetches={result.signal_fetches} "
-            f"signal_messages={result.signal_messages} "
-            f"new_signal_messages={result.new_signal_messages} "
             f"signal_items={result.signal_items} "
             f"new_signal_items={result.new_signal_items} "
             f"planned={result.planned} "
@@ -111,6 +90,58 @@ class StewardDaemon:
             f"skipped={result.skipped}"
         )
         return result
+
+    def _dispatch_queued(
+        self,
+        result: TickResult,
+        *,
+        plan: bool,
+        max_dispatch: int | None,
+    ) -> None:
+        base_limit = max_dispatch or self.config.limits.max_active_tasks
+        extra_integration_limit = (
+            0 if max_dispatch is not None else self.config.limits.max_active_tasks
+        )
+        base_attempts = 0
+        extra_integration_attempts = 0
+        seen: set[str] = set()
+        while True:
+            task = self._next_dispatchable_task(seen)
+            if task is None:
+                return
+            is_integration = _is_integration_manager_task(task)
+            if base_attempts >= base_limit:
+                if (
+                    not is_integration
+                    or extra_integration_attempts >= extra_integration_limit
+                ):
+                    return
+                extra_integration_attempts += 1
+            else:
+                base_attempts += 1
+            seen.add(task.id)
+            self._log(f"dispatch start {task.id} {_task_label(task)}")
+            if self.executor.run_task(task.id):
+                result.dispatched += 1
+                finished = self.store.get(task.id)
+                self._log(
+                    f"dispatch finish {task.id} status={finished.status} ok=true"
+                )
+                if plan:
+                    self._plan_until_idle(result)
+            else:
+                result.skipped += 1
+                finished = self.store.get(task.id)
+                self._log(
+                    f"dispatch finish {task.id} status={finished.status} ok=false"
+                )
+
+    def _next_dispatchable_task(self, seen: set[str]) -> TaskRecord | None:
+        for task in self.store.queued_tasks():
+            if task.id in seen:
+                continue
+            return task
+        return None
 
     def _poll_and_plan(self, result: TickResult) -> None:
         if self.store.active_count() >= self.config.limits.max_active_tasks:
@@ -121,39 +152,25 @@ class StewardDaemon:
         self._plan_until_idle(result)
 
     def _fetch_signals(self, result: TickResult) -> None:
-        for collection in collect_signal_messages(self.config):
+        for collection in collect_signal_items(self.config):
             if self.store.active_count() >= self.config.limits.max_active_tasks:
                 self._log("signals poll stopped active task limit reached")
                 return
             result.signal_fetches += 1
-            fetch_run = SignalFetchRun(
-                provider=collection.provider,
-                status=(
-                    SignalFetchStatus.error
-                    if collection.error
-                    else SignalFetchStatus.ok
-                ),
-                started_at=collection.started_at,
-                completed_at=collection.completed_at,
-                message_count=len(collection.messages),
-                new_message_count=0,
-                error=collection.error,
-                summary=collection.signals.summary,
+            fetch_run = collection.fetch.model_copy(
+                update={
+                    "status": (
+                        SignalFetchStatus.error
+                        if collection.error
+                        else SignalFetchStatus.ok
+                    ),
+                    "item_count": len(collection.items),
+                    "new_item_count": 0,
+                }
             )
-            messages = [
-                message.model_copy(
-                    update={"source_fetch_id": fetch_run.id},
-                    deep=True,
-                )
-                for message in collection.messages
-            ]
-            saved, created = self.store.add_signal_messages(messages)
-            items = _items_for_saved_messages(collection.items, saved)
-            saved_items, created_items = self.store.add_signal_items(items)
-            fetch_run = fetch_run.model_copy(update={"new_message_count": created})
+            saved_items, created_items = self.store.add_signal_items(collection.items)
+            fetch_run = fetch_run.model_copy(update={"new_item_count": created_items})
             self.store.add_signal_fetch_run(fetch_run)
-            result.signal_messages += len(saved)
-            result.new_signal_messages += created
             result.signal_items += len(saved_items)
             result.new_signal_items += created_items
             self.store.add_event(
@@ -166,10 +183,9 @@ class StewardDaemon:
                 {
                     "fetch_run_id": fetch_run.id,
                     "provider": collection.provider,
-                    "message_count": len(saved),
-                    "new_message_count": created,
                     "item_count": len(saved_items),
                     "new_item_count": created_items,
+                    "has_more": fetch_run.has_more,
                     "error": collection.error,
                 },
             )
@@ -177,7 +193,7 @@ class StewardDaemon:
                 "signals fetched "
                 f"provider={collection.provider} "
                 f"new={created_items} total={len(saved_items)} "
-                f"messages={len(saved)} "
+                f"has_more={str(fetch_run.has_more).lower()} "
                 f"error={collection.error or '-'}"
             )
 
@@ -210,10 +226,7 @@ class StewardDaemon:
         self._log(
             "planner start "
             f"active_tasks={len(active_tasks)} "
-            f"inbox={len(inbox_items)} "
-            f"code_quality={str(signals.has_code_quality_findings).lower()} "
-            f"workflow={signals.failed_workflow_run_id or '-'} "
-            f"interop={signals.failed_interop_run_id or '-'}"
+            f"inbox={len(inbox_items)}"
         )
         self.store.add_event(
             DAEMON_EVENT_TASK_ID,
@@ -223,9 +236,6 @@ class StewardDaemon:
                 "active_task_count": len(active_tasks),
                 "inbox_item_ids": [item.id for item in inbox_items],
                 "enabled_signals": list(self.config.enabled_signals),
-                "has_code_quality_findings": signals.has_code_quality_findings,
-                "failed_workflow_run_id": signals.failed_workflow_run_id,
-                "failed_interop_run_id": signals.failed_interop_run_id,
             },
         )
         planner_run = run_planner(self.config, signals, active_tasks)
@@ -324,33 +334,13 @@ def _task_label(task: TaskRecord) -> str:
     return f"kind={task.spec.kind} title={task.spec.title!r}"
 
 
-def _items_for_saved_messages(
-    items: list[SignalItem], messages: list[SignalMessage]
-) -> list[SignalItem]:
-    if not items:
-        return []
-    messages_by_evidence = {
-        message.evidence_id: message for message in messages if message.evidence_id
-    }
-    messages_by_provider = {message.provider: message for message in messages}
-    result: list[SignalItem] = []
-    for item in items:
-        source = None
-        if item.evidence_id:
-            source = messages_by_evidence.get(item.evidence_id)
-        if source is None:
-            source = messages_by_provider.get(item.provider)
-        updates = {}
-        if source is not None:
-            updates["source_message_id"] = source.id
-            updates["source_fetch_id"] = source.source_fetch_id
-        result.append(item.model_copy(update=updates))
-    return result
+def _is_integration_manager_task(task: TaskRecord) -> bool:
+    return task.spec.worker == WorkerKind.integration_manager.value
 
 
 def _selected_item_ids(spec, consumed_item_ids: list[str]) -> list[str]:
     metadata = spec.metadata or {}
-    selected = metadata.get("selected_work_item_ids")
+    selected = metadata.get("selected_signal_item_ids")
     candidates = selected if isinstance(selected, list) else consumed_item_ids
     ids: list[str] = []
     seen: set[str] = set()

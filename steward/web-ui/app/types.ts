@@ -113,23 +113,6 @@ export type StewardProject = {
   task_count: number;
 };
 
-export type SignalMessage = {
-  id: string;
-  provider: string;
-  kind: string;
-  fingerprint: string;
-  title: string;
-  summary: string;
-  evidence_id: string | null;
-  payload: Record<string, unknown>;
-  status: "pending" | "consumed" | "superseded" | "errored";
-  created_at: string;
-  updated_at: string;
-  consumed_at: string | null;
-  planner_run_id: string | null;
-  source_fetch_id: string | null;
-};
-
 export type SignalItem = {
   id: string;
   provider: string;
@@ -137,7 +120,9 @@ export type SignalItem = {
   fingerprint: string;
   title: string;
   summary: string;
-  evidence_id: string | null;
+  severity: string | null;
+  location: Record<string, unknown> | null;
+  links: Array<{ label: string; url: string }>;
   payload: Record<string, unknown>;
   status: "pending" | "planned" | "superseded" | "errored";
   created_at: string;
@@ -146,7 +131,6 @@ export type SignalItem = {
   planner_run_id: string | null;
   planned_task_id: string | null;
   source_fetch_id: string | null;
-  source_message_id: string | null;
 };
 
 export type SignalFetchRun = {
@@ -155,8 +139,9 @@ export type SignalFetchRun = {
   status: "ok" | "error";
   started_at: string;
   completed_at: string;
-  message_count: number;
-  new_message_count: number;
+  item_count: number;
+  new_item_count: number;
+  has_more: boolean;
   error: string | null;
   summary: string;
 };
@@ -212,20 +197,16 @@ export type StewardState = {
   kinds: string[];
   workers: string[];
   signals: {
-    github_repository: string;
+    schema_version: number;
+    repository: string;
     enabled_signals: string[];
-    failed_interop_run_id: string | null;
-    failed_workflow_run_id: string | null;
-    failed_workflow_name: string | null;
-    has_codeql_findings: boolean;
-    has_codacy_findings: boolean;
-    has_code_quality_findings: boolean;
-    signal_errors: Record<string, string>;
+    generated_at: string;
     summary: string;
+    items: SignalItem[];
+    fetches: SignalFetchRun[];
   };
   signal_inbox?: {
-    messages: SignalMessage[];
-    items?: SignalItem[];
+    items: SignalItem[];
     fetch_runs: SignalFetchRun[];
   };
   integration: {

@@ -280,7 +280,7 @@ def _api_ready(api_url: str) -> bool:
         return False
     runtime = _read_json(f"{api_url}/api/runtime")
     features = runtime.get("features") if isinstance(runtime, dict) else None
-    required = {"line-tail", "signal-inbox"}
+    required = {"line-tail", "signal-inbox", "signal-items-v2"}
     return isinstance(features, list) and required.issubset(set(features))
 
 

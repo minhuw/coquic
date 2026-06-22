@@ -9,7 +9,7 @@ from ..core.models import (
     Priority,
     ProjectSignals,
     Risk,
-    SignalMessage,
+    SignalItem,
     TaskKind,
     TaskSpec,
     TaskStatus,
@@ -103,7 +103,7 @@ class PlanVerifier:
                 continue
             accepted.append(
                 (
-                    _task_spec_from_proposal(proposed, signals.inbox_messages),
+                    _task_spec_from_proposal(proposed, signals.items),
                     proposed.dedupe_key,
                 )
             )
@@ -141,22 +141,8 @@ def summarize_active_tasks(tasks) -> list[ActiveTaskSummary]:
 
 def _evidence_ids(signals: ProjectSignals) -> set[str]:
     ids = {"project"}
-    for message in signals.inbox_messages:
-        ids.add(message.id)
-        if message.evidence_id:
-            ids.add(message.evidence_id)
-    for item in signals.inbox_items:
+    for item in signals.items:
         ids.add(item.id)
-        if item.evidence_id:
-            ids.add(item.evidence_id)
-    if signals.failed_interop_run_id:
-        ids.add(f"interop:{signals.failed_interop_run_id}")
-    if signals.failed_workflow_run_id:
-        ids.add(f"workflow:{signals.failed_workflow_run_id}")
-    if signals.has_codeql_findings:
-        ids.add("codeql:open")
-    if signals.has_codacy_findings:
-        ids.add("codacy:open")
     return ids
 
 
@@ -168,9 +154,7 @@ def _consumed_item_ids(
     values = decoded.get("consumed_item_ids")
     if not isinstance(values, list):
         return []
-    allowed = {item.id for item in signals.inbox_items}
-    if not allowed:
-        allowed = {message.id for message in signals.inbox_messages}
+    allowed = {item.id for item in signals.items}
     consumed: list[str] = []
     seen: set[str] = set()
     for value in values:
@@ -234,12 +218,12 @@ def _proposal_is_acceptable(
 
 
 def _task_spec_from_proposal(
-    proposed: ProposedTask, inbox_messages: list[SignalMessage]
+    proposed: ProposedTask, items: list[SignalItem]
 ) -> TaskSpec:
     metadata = dict(proposed.metadata)
     metadata["dedupe_key"] = proposed.dedupe_key
     metadata["evidence"] = list(proposed.evidence)
-    source_context = _source_context(inbox_messages, proposed)
+    source_context = _source_context(items, proposed)
     if source_context:
         metadata["source_context"] = source_context
     return TaskSpec(
@@ -262,75 +246,25 @@ def _metadata_is_bounded(metadata: dict[str, Any]) -> bool:
     return len(encoded) <= 4096
 
 
-def _source_context(
-    inbox_messages: list[SignalMessage], proposed: ProposedTask
-) -> dict[str, Any]:
-    messages_by_id = {message.id: message for message in inbox_messages}
-    source_ids = _source_message_ids(proposed, messages_by_id)
-    messages = [messages_by_id[item] for item in source_ids if item in messages_by_id]
-    selected_items = _selected_work_items(proposed, messages)
-    if not messages and not selected_items:
+def _source_context(items: list[SignalItem], proposed: ProposedTask) -> dict[str, Any]:
+    selected_items = _selected_signal_items(proposed, items)
+    if not selected_items:
         return {}
     return {
-        "source_message_ids": [message.id for message in messages],
-        "messages": [
-            {
-                "id": message.id,
-                "provider": message.provider,
-                "kind": message.kind,
-                "title": message.title,
-                "summary": message.summary,
-                "evidence_id": message.evidence_id,
-                "work_items": _message_work_items(message),
-            }
-            for message in messages
-        ],
-        "selected_work_items": selected_items,
+        "selected_signal_item_ids": [item["id"] for item in selected_items],
+        "selected_signal_items": selected_items,
     }
 
 
-def _source_message_ids(
-    proposed: ProposedTask, messages_by_id: dict[str, SignalMessage]
-) -> list[str]:
-    metadata_ids = proposed.metadata.get("source_message_ids")
-    candidates = metadata_ids if isinstance(metadata_ids, list) else proposed.evidence
-    result: list[str] = []
-    seen: set[str] = set()
-    for item in candidates:
-        if not isinstance(item, str) or item not in messages_by_id or item in seen:
-            continue
-        result.append(item)
-        seen.add(item)
-    return result
-
-
-def _selected_work_items(
-    proposed: ProposedTask, messages: list[SignalMessage]
+def _selected_signal_items(
+    proposed: ProposedTask, items: list[SignalItem]
 ) -> list[dict[str, Any]]:
-    available = _available_work_items(messages)
-    if not available:
-        return []
-    selected = proposed.metadata.get("selected_work_item_ids")
-    if not isinstance(selected, list) or not selected:
-        return available[:3]
-    selected_ids = {item for item in selected if isinstance(item, str)}
+    selected = proposed.metadata.get("selected_signal_item_ids")
+    candidates = selected if isinstance(selected, list) and selected else proposed.evidence
+    selected_ids = {item for item in candidates if isinstance(item, str)}
     matched = [
-        item
-        for item in available
-        if isinstance(item.get("id"), str) and item["id"] in selected_ids
+        item.model_dump(mode="json")
+        for item in items
+        if item.id in selected_ids
     ]
-    return matched[:8] if matched else available[:3]
-
-
-def _available_work_items(messages: list[SignalMessage]) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for message in messages:
-        items.extend(_message_work_items(message))
-    return items
-
-
-def _message_work_items(message: SignalMessage) -> list[dict[str, Any]]:
-    values = message.payload.get("work_items")
-    if not isinstance(values, list):
-        return []
-    return [item for item in values if isinstance(item, dict)]
+    return matched[:8]

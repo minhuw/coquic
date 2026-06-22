@@ -29,7 +29,6 @@ type IntegrationStage = {
 type LoadedIntegration = {
   detail: IntegrationDetail;
   patch: string;
-  transcript: string;
 };
 
 export function IntegrationDetailRoute({ integrationId }: { integrationId: string }) {
@@ -44,10 +43,7 @@ export function IntegrationDetailRoute({ integrationId }: { integrationId: strin
     if (!patch && detail.run.source_task_id) {
       patch = await getTaskFile(detail.run.source_task_id, "patch");
     }
-    const transcript = detail.run.transcript_path
-      ? await getTaskFile(integrationId, "transcript")
-      : "";
-    setLoaded({ detail, patch, transcript });
+    setLoaded({ detail, patch });
     setLoadError("");
   }, [integrationId]);
 
@@ -98,7 +94,7 @@ export function IntegrationDetailRoute({ integrationId }: { integrationId: strin
     );
   }
 
-  const { detail, patch, transcript } = loaded;
+  const { detail, patch } = loaded;
   const run = detail.run;
   const stages = integrationStages(detail);
   const timelineEvents = [...detail.events, ...detail.source_events]
@@ -154,15 +150,6 @@ export function IntegrationDetailRoute({ integrationId }: { integrationId: strin
                   </article>
                 ))}
               </div>
-            </section>
-
-            <section className="panel">
-              <PanelTitle icon={<FileText size={17} />} title="Integration Transcript" />
-              {transcript ? (
-                <pre className="integration-transcript code-pane compact">{transcript}</pre>
-              ) : (
-                <div className="empty-state">No integration transcript has been captured yet.</div>
-              )}
             </section>
 
             <section className="panel">

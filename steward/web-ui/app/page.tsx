@@ -34,7 +34,7 @@ import type {
   IntegrationRun,
   PlannerRunArtifact,
   PlannerRunSummary,
-  SignalMessage,
+  SignalItem,
   StewardState,
   TaskRecord,
   TaskStatus,
@@ -55,16 +55,13 @@ const EMPTY_STATE: StewardState = {
   kinds: ["custom"],
   workers: ["custom"],
   signals: {
-    github_repository: "",
+    schema_version: 2,
+    repository: "",
     enabled_signals: [],
-    failed_interop_run_id: null,
-    failed_workflow_run_id: null,
-    failed_workflow_name: null,
-    has_codeql_findings: false,
-    has_codacy_findings: false,
-    has_code_quality_findings: false,
-    signal_errors: {},
+    generated_at: "",
     summary: "",
+    items: [],
+    fetches: [],
   },
   integration: {
     queue: [],
@@ -72,7 +69,7 @@ const EMPTY_STATE: StewardState = {
     commits: [],
   },
   signal_inbox: {
-    messages: [],
+    items: [],
     fetch_runs: [],
   },
   config: {
@@ -164,7 +161,7 @@ export default function Dashboard() {
 
   const counts = {
     ...countTasks(state.tasks),
-    signals: state.signal_inbox?.messages.length ?? 0,
+    signals: state.signal_inbox?.items.length ?? 0,
   };
 
   return (
@@ -243,7 +240,7 @@ function PanelTitle({ icon, title }: { icon: ReactNode; title: string }) {
 }
 
 function ProjectSelector({ counts, state }: { counts: ReturnType<typeof countTasks>; state: StewardState }) {
-  const activeLabel = state.config.github_repository || state.signals.github_repository || "Loading project";
+  const activeLabel = state.config.github_repository || state.signals.repository || "Loading project";
   const stateProjects = state.projects ?? [];
   const projects = stateProjects.length
     ? stateProjects
@@ -347,7 +344,7 @@ function DashboardView({
         <div className="left-stack">
           <TaskGraphPanel selectedId={selectedTask?.spec.id || ""} tasks={userTasks} />
           <TaskQueuePanel
-            githubRepository={state.config.github_repository || state.signals.github_repository}
+            githubRepository={state.config.github_repository || state.signals.repository}
             selectedId={selectedTask?.spec.id || ""}
             tasks={userTasks}
           />
@@ -572,25 +569,25 @@ function CreateTaskModal({
 }
 
 function SignalsPanel({ state, tasks }: { state: StewardState; tasks: TaskRecord[] }) {
-  const messages = state.signal_inbox?.messages ?? [];
+  const items = state.signal_inbox?.items ?? [];
   const fetchRuns = state.signal_inbox?.fetch_runs ?? [];
-  const repository = state.config.github_repository || state.signals.github_repository;
+  const repository = state.config.github_repository || state.signals.repository;
   const [detailId, setDetailId] = useState("");
-  const selected = messages.find((message) => message.id === detailId) ?? null;
-  const pending = messages.filter((message) => message.status === "pending").length;
-  const consumed = messages.filter((message) => message.status === "consumed").length;
+  const selected = items.find((item) => item.id === detailId) ?? null;
+  const pending = items.filter((item) => item.status === "pending").length;
+  const planned = items.filter((item) => item.status === "planned").length;
   return (
     <div className="signals-page">
       <section className="metrics">
-        <Metric icon={<Inbox size={18} />} label="Inbox Messages" value={messages.length} />
+        <Metric icon={<Inbox size={18} />} label="Signal Items" value={items.length} />
         <Metric icon={<Clock3 size={18} />} label="Pending" value={pending} />
-        <Metric icon={<CheckCircle2 size={18} />} label="Consumed" value={consumed} />
+        <Metric icon={<CheckCircle2 size={18} />} label="Planned" value={planned} />
         <Metric icon={<AlertTriangle size={18} />} label="Fetch Errors" value={fetchRuns.filter((run) => run.status === "error").length} />
       </section>
       <section className="signals-stack">
-        <FoldablePanel defaultOpen icon={<Inbox size={17} />} meta={messages.length} title="Signal Inbox">
+        <FoldablePanel defaultOpen icon={<Inbox size={17} />} meta={items.length} title="Signal Inbox">
           <SignalInboxList
-            messages={messages}
+            items={items}
             onSelect={setDetailId}
             repository={repository}
             selectedId={selected?.id || ""}
@@ -601,8 +598,8 @@ function SignalsPanel({ state, tasks }: { state: StewardState; tasks: TaskRecord
         </FoldablePanel>
       </section>
       {selected && (
-        <SignalMessageModal
-          message={selected}
+        <SignalItemModal
+          item={selected}
           onClose={() => setDetailId("")}
           repository={repository}
           tasks={tasks}
@@ -613,36 +610,37 @@ function SignalsPanel({ state, tasks }: { state: StewardState; tasks: TaskRecord
 }
 
 function SignalInboxList({
-  messages,
+  items,
   onSelect,
   repository,
   selectedId,
 }: {
-  messages: SignalMessage[];
+  items: SignalItem[];
   onSelect: (id: string) => void;
   repository: string;
   selectedId: string;
 }) {
-  if (!messages.length) return <div className="empty-state">No signal messages have been recorded yet.</div>;
+  if (!items.length) return <div className="empty-state">No signal items have been recorded yet.</div>;
   return (
     <div className="signal-list">
-      {messages.map((message) => {
-        const codacy = codacySignal(message.summary, repository || repositoryFromPayload(message.payload));
+      {items.map((item) => {
+        const codacy = codacySignal(item.summary || "", repository || repositoryFromPayload(item.payload || {}));
+        const link = primarySignalLink(item) || (codacy?.url ? { label: "Open Codacy", url: codacy.url } : null);
         return (
-          <article className={`signal-card ${message.status} ${message.id === selectedId ? "active" : ""}`} key={message.id}>
+          <article className={`signal-card ${item.status} ${item.id === selectedId ? "active" : ""}`} key={item.id}>
             <button
               className="signal-card-select"
-              onClick={() => onSelect(message.id)}
+              onClick={() => onSelect(item.id)}
               type="button"
             >
-              <SignalCardContent message={message} />
+              <SignalCardContent item={item} />
             </button>
             <div className="signal-card-actions">
-              <code>{message.id}</code>
-              {codacy?.url && (
-                <a className="button-link signal-link" href={codacy.url} rel="noreferrer" target="_blank">
+              <code>{item.id}</code>
+              {link?.url && (
+                <a className="button-link signal-link" href={link.url} rel="noreferrer" target="_blank">
                   <ExternalLink size={13} />
-                  <span>Open Codacy</span>
+                  <span>{link.label}</span>
                 </a>
               )}
             </div>
@@ -654,28 +652,28 @@ function SignalInboxList({
 }
 
 function SignalCardContent({
-  message,
+  item,
 }: {
-  message: SignalMessage;
+  item: SignalItem;
 }) {
   return (
     <div className="signal-card-main">
       <div className="signal-card-head">
-        <span className="provider-pill">{message.provider}</span>
-        <time className="mono muted" dateTime={message.created_at}>{shortDate(message.created_at)}</time>
+        <span className="provider-pill">{item.provider}</span>
+        <time className="mono muted" dateTime={item.created_at}>{shortDate(item.created_at)}</time>
       </div>
-      <h3>{message.title}</h3>
-      <SignalSummary message={message} />
+      <h3>{item.title}</h3>
+      <SignalSummary item={item} />
     </div>
   );
 }
 
 function SignalSummary({
-  message,
+  item,
 }: {
-  message: SignalMessage;
+  item: SignalItem;
 }) {
-  const codacy = codacySignal(message.summary);
+  const codacy = codacySignal(item.summary);
   if (codacy) {
     return (
       <div className="signal-summary codacy">
@@ -686,7 +684,13 @@ function SignalSummary({
       </div>
     );
   }
-  return <p>{message.summary || message.kind}</p>;
+  const location = signalLocationLabel(item);
+  return (
+    <p>
+      {item.summary || item.kind}
+      {location ? <span className="mono"> {location}</span> : null}
+    </p>
+  );
 }
 
 function FoldablePanel({
@@ -718,63 +722,65 @@ function FoldablePanel({
   );
 }
 
-function SignalMessageModal({
-  message,
+function SignalItemModal({
+  item,
   onClose,
   repository,
   tasks,
 }: {
-  message: SignalMessage;
+  item: SignalItem;
   onClose: () => void;
   repository: string;
   tasks: TaskRecord[];
 }) {
   return (
     <section className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="signal-detail-title">
-      <button className="modal-backdrop" onClick={onClose} type="button" aria-label="Close message detail" />
+      <button className="modal-backdrop" onClick={onClose} type="button" aria-label="Close signal detail" />
       <div className="signal-detail-modal">
         <header className="modal-head">
           <div className="modal-title">
             <Info size={17} />
-            <h2 id="signal-detail-title">Message Detail</h2>
+            <h2 id="signal-detail-title">Signal Detail</h2>
           </div>
-          <button className="icon-button secondary" onClick={onClose} type="button" title="Close message detail" aria-label="Close message detail">
+          <button className="icon-button secondary" onClick={onClose} type="button" title="Close signal detail" aria-label="Close signal detail">
             <X size={16} />
           </button>
         </header>
-        <SignalMessageDetail message={message} repository={repository} tasks={tasks} />
+        <SignalItemDetail item={item} repository={repository} tasks={tasks} />
       </div>
     </section>
   );
 }
 
-function SignalMessageDetail({
-  message,
+function SignalItemDetail({
+  item,
   repository,
   tasks,
 }: {
-  message: SignalMessage | null;
+  item: SignalItem | null;
   repository: string;
   tasks: TaskRecord[];
 }) {
-  if (!message) return <div className="empty-state">Select a signal message to inspect its payload.</div>;
-  const relatedTasks = tasks.filter((task) => taskMatchesSignal(task, message));
+  if (!item) return <div className="empty-state">Select a signal item to inspect its payload.</div>;
+  const relatedTasks = tasks.filter((task) => taskMatchesSignal(task, item));
+  const location = signalLocationLabel(item);
   return (
     <div className="signal-detail">
       <div className="signal-detail-head">
         <div>
-          <StatusTextPill status={message.status} />
-          <h3>{message.title}</h3>
-          <p>{repository || message.provider}</p>
+          <StatusTextPill status={item.status} />
+          <h3>{item.title}</h3>
+          <p>{repository || item.provider}</p>
         </div>
       </div>
       <div className="signal-facts">
-        <KeyValue label="Provider" value={message.provider} />
-        <KeyValue label="Kind" value={message.kind} />
-        <KeyValue label="Evidence" value={message.evidence_id || "-"} />
-        <KeyValue label="Fingerprint" value={message.fingerprint} />
-        <KeyValue label="Fetch" value={message.source_fetch_id || "-"} />
-        <KeyValue label="Planner" value={message.planner_run_id || "-"} />
+        <KeyValue label="Provider" value={item.provider} />
+        <KeyValue label="Kind" value={item.kind} />
+        <KeyValue label="Severity" value={item.severity || "-"} />
+        <KeyValue label="Location" value={location || "-"} />
+        <KeyValue label="Fingerprint" value={item.fingerprint} />
+        <KeyValue label="Fetch" value={item.source_fetch_id || "-"} />
+        <KeyValue label="Planner" value={item.planner_run_id || "-"} />
       </div>
       <div className="signal-related">
         <h3 className="section-subtitle">Related Tasks</h3>
@@ -796,7 +802,7 @@ function SignalMessageDetail({
         )}
       </div>
       <h3 className="section-subtitle">Payload</h3>
-      <pre className="code-pane compact">{JSON.stringify(message.payload, null, 2)}</pre>
+      <pre className="code-pane compact">{JSON.stringify(item.payload, null, 2)}</pre>
     </div>
   );
 }
@@ -836,7 +842,7 @@ function SignalFetchHistory({
                   )}
                 </div>
               ) : (
-                <p>{run.summary || `${run.new_message_count} new of ${run.message_count} message(s)`}</p>
+                <p>{run.summary || `${run.new_item_count} new of ${run.item_count} item(s)`}</p>
               )}
             </div>
             <time className="mono muted" dateTime={run.completed_at}>{shortDate(run.completed_at)}</time>
@@ -1196,25 +1202,50 @@ function isIntegrationTask(task: TaskRecord) {
   return task.spec.kind === "integration" || task.spec.worker === "integration-manager";
 }
 
-function taskMatchesSignal(task: TaskRecord, message: SignalMessage) {
+function taskMatchesSignal(task: TaskRecord, item: SignalItem) {
   const metadata = task.spec.metadata;
   const evidence = Array.isArray(metadata.evidence) ? metadata.evidence : [];
-  if (evidence.some((item) => item === message.id || item === message.evidence_id)) {
+  if (evidence.some((value) => value === item.id)) {
     return true;
+  }
+  const selected = Array.isArray(metadata.selected_signal_item_ids)
+    ? metadata.selected_signal_item_ids
+    : [];
+  if (selected.some((value) => value === item.id)) {
+    return true;
+  }
+  const sourceContext = metadata.source_context;
+  if (sourceContext && typeof sourceContext === "object" && !Array.isArray(sourceContext)) {
+    const sourceIds = (sourceContext as Record<string, unknown>).selected_signal_item_ids;
+    if (Array.isArray(sourceIds) && sourceIds.some((value) => value === item.id)) {
+      return true;
+    }
   }
   const candidates = [
     metadata.signal_id,
-    metadata.message_id,
-    metadata.evidence_id,
     metadata.source_signal_id,
     metadata.planner_run_id,
   ];
   return candidates.some(
     (value) =>
-      value === message.id
-      || value === message.evidence_id
-      || (message.planner_run_id !== null && value === message.planner_run_id),
+      value === item.id
+      || (item.planner_run_id !== null && value === item.planner_run_id),
   );
+}
+
+function primarySignalLink(item: SignalItem): { label: string; url: string } | null {
+  const links = Array.isArray(item.links) ? item.links : [];
+  const link = links.find((candidate) => candidate.url);
+  return link ?? null;
+}
+
+function signalLocationLabel(item: SignalItem) {
+  const location = item.location;
+  if (!location) return "";
+  const path = typeof location.path === "string" ? location.path : "";
+  const line = typeof location.line === "number" || typeof location.line === "string" ? location.line : "";
+  if (path && line !== "") return `${path}:${line}`;
+  return path;
 }
 
 function integrationLabel(state: StewardState) {

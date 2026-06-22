@@ -26,7 +26,7 @@ Review active_tasks before proposing anything. If queued, running, reviewing, or
 integrating work already covers a signal or kind of work, do not create another
 task for it.
 
-Create only necessary tasks backed by provided inbox items. Do not speculate from
+Create only necessary tasks backed by provided signal items. Do not speculate from
 missing data. Prefer no task over a vague task.
 
 Mark an inbox item as consumed only when your output has either created the
@@ -39,7 +39,7 @@ Every task must:
 - use a stable dedupe_key derived from that evidence;
 - use only allowed kind, worker, priority, and risk values;
 - include a clear title and a worker-ready prompt;
-- select one concrete, bounded source context from the provided inbox items;
+- select one concrete, bounded source context from the provided signal items;
 - keep scope narrow enough for one Codex execution session.
 - use a title that names the selected source context, such as the affected file,
   rule, workflow, or run id.
@@ -49,7 +49,7 @@ commit/push to Steward's integration manager.
 
 The worker receives only the task prompt and the selected source context. Do not
 ask workers to fetch an unknown issue list to decide scope. They may only use
-remote APIs to verify that the provided source context is still current or to
+remote APIs to verify that the provided signal items are still current or to
 collect extra details for the same selected items.
 
 Return only JSON matching the requested schema. Do not include markdown,
@@ -159,12 +159,8 @@ def render_planner_prompt(
         "repository": config.github_repository,
         "enabled_signals": list(config.enabled_signals),
         "signals": signals.model_dump(mode="json"),
-        "inbox_messages": [
-            message.model_dump(mode="json") for message in signals.inbox_messages
-        ],
-        "inbox_items": [
-            item.model_dump(mode="json") for item in signals.inbox_items
-        ],
+        "signal_items": [item.model_dump(mode="json") for item in signals.items],
+        "signal_fetches": [fetch.model_dump(mode="json") for fetch in signals.fetches],
         "active_tasks": [task.model_dump(mode="json") for task in active_tasks],
         "allowed_kinds": [
             "code-quality",
@@ -194,17 +190,13 @@ def render_planner_prompt(
             PLANNER_SYSTEM_PROMPT.strip(),
             "",
             "Output schema:",
-            '{"consumed_item_ids":["wi-..."],"tasks":[{"dedupe_key":"string","kind":"code-quality","worker":"code-quality-janitor","title":"string","prompt":"string","priority":"high","risk":"medium","evidence":["wi-..."],"metadata":{"selected_work_item_ids":["wi-..."]}}]}',
+            '{"consumed_item_ids":["wi-..."],"tasks":[{"dedupe_key":"string","kind":"code-quality","worker":"code-quality-janitor","title":"string","prompt":"string","priority":"high","risk":"medium","evidence":["wi-..."],"metadata":{"selected_signal_item_ids":["wi-..."]}}]}',
             "",
             "Evidence IDs you may cite:",
-            "- any inbox item id",
-            "- codeql:open when has_codeql_findings is true",
-            "- codacy:open when has_codacy_findings is true",
-            "- interop:<run_id> when failed_interop_run_id is set",
-            "- workflow:<run_id> when failed_workflow_run_id is set",
+            "- any signal item id from signal_items",
             "",
             "For metadata:",
-            "- selected_work_item_ids must list the selected inbox item ids.",
+            "- selected_signal_item_ids must list the selected signal item ids.",
             "",
             "Planning input JSON:",
             json.dumps(payload, sort_keys=True),
@@ -285,12 +277,12 @@ PLANNER_OUTPUT_SCHEMA = {
                     "metadata": {
                         "type": "object",
                         "properties": {
-                            "selected_work_item_ids": {
+                            "selected_signal_item_ids": {
                                 "type": "array",
                                 "items": {"type": "string"},
                             },
                         },
-                        "required": ["selected_work_item_ids"],
+                        "required": ["selected_signal_item_ids"],
                         "additionalProperties": False,
                     },
                 },

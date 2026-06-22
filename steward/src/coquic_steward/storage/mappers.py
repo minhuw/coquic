@@ -9,7 +9,6 @@ from ..core.models import (
     Event,
     SignalFetchRun,
     SignalItem,
-    SignalMessage,
     TaskIteration,
     TaskRecord,
     TaskSpec,
@@ -19,7 +18,6 @@ from .schema import (
     EventRow,
     SignalFetchRunRow,
     SignalItemRow,
-    SignalMessageRow,
     TaskIterationRow,
     TaskRow,
     ValidationRow,
@@ -326,50 +324,6 @@ def row_to_event(row: EventRow, *, path_codec: PathCodec) -> Event:
     )
 
 
-def signal_message_to_row(
-    message: SignalMessage, *, path_codec: PathCodec
-) -> SignalMessageRow:
-    return SignalMessageRow(
-        id=message.id,
-        provider=message.provider,
-        kind=message.kind,
-        fingerprint=message.fingerprint,
-        title=message.title,
-        summary=message.summary,
-        evidence_id=message.evidence_id,
-        payload_json=_dump_json(message.payload, path_codec=path_codec) or "{}",
-        status=str(message.status),
-        created_at=_dump_datetime(message.created_at),
-        updated_at=_dump_datetime(message.updated_at),
-        consumed_at=(
-            _dump_datetime(message.consumed_at) if message.consumed_at else None
-        ),
-        planner_run_id=message.planner_run_id,
-        source_fetch_id=message.source_fetch_id,
-    )
-
-
-def row_to_signal_message(
-    row: SignalMessageRow, *, path_codec: PathCodec
-) -> SignalMessage:
-    return SignalMessage(
-        id=row.id,
-        provider=row.provider,
-        kind=row.kind,
-        fingerprint=row.fingerprint,
-        title=row.title,
-        summary=row.summary,
-        evidence_id=row.evidence_id,
-        payload=_loads_dict(row.payload_json, path_codec=path_codec),
-        status=row.status,
-        created_at=_load_datetime(row.created_at),
-        updated_at=_load_datetime(row.updated_at),
-        consumed_at=_load_datetime(row.consumed_at) if row.consumed_at else None,
-        planner_run_id=row.planner_run_id,
-        source_fetch_id=row.source_fetch_id,
-    )
-
-
 def signal_item_to_row(item: SignalItem, *, path_codec: PathCodec) -> SignalItemRow:
     return SignalItemRow(
         id=item.id,
@@ -378,7 +332,9 @@ def signal_item_to_row(item: SignalItem, *, path_codec: PathCodec) -> SignalItem
         fingerprint=item.fingerprint,
         title=item.title,
         summary=item.summary,
-        evidence_id=item.evidence_id,
+        severity=item.severity,
+        location_json=_dump_json(item.location, path_codec=path_codec),
+        links_json=_dump_list(item.links, path_codec=path_codec),
         payload_json=_dump_json(item.payload, path_codec=path_codec) or "{}",
         status=str(item.status),
         created_at=_dump_datetime(item.created_at),
@@ -387,7 +343,6 @@ def signal_item_to_row(item: SignalItem, *, path_codec: PathCodec) -> SignalItem
         planner_run_id=item.planner_run_id,
         planned_task_id=item.planned_task_id,
         source_fetch_id=item.source_fetch_id,
-        source_message_id=item.source_message_id,
     )
 
 
@@ -399,7 +354,9 @@ def row_to_signal_item(row: SignalItemRow, *, path_codec: PathCodec) -> SignalIt
         fingerprint=row.fingerprint,
         title=row.title,
         summary=row.summary,
-        evidence_id=row.evidence_id,
+        severity=row.severity,
+        location=_loads_optional_dict(row.location_json, path_codec=path_codec),
+        links=_loads_list(row.links_json, path_codec=path_codec),
         payload=_loads_dict(row.payload_json, path_codec=path_codec),
         status=row.status,
         created_at=_load_datetime(row.created_at),
@@ -408,7 +365,6 @@ def row_to_signal_item(row: SignalItemRow, *, path_codec: PathCodec) -> SignalIt
         planner_run_id=row.planner_run_id,
         planned_task_id=row.planned_task_id,
         source_fetch_id=row.source_fetch_id,
-        source_message_id=row.source_message_id,
     )
 
 
@@ -419,8 +375,9 @@ def signal_fetch_run_to_row(run: SignalFetchRun) -> SignalFetchRunRow:
         status=str(run.status),
         started_at=_dump_datetime(run.started_at),
         completed_at=_dump_datetime(run.completed_at),
-        message_count=run.message_count,
-        new_message_count=run.new_message_count,
+        item_count=run.item_count,
+        new_item_count=run.new_item_count,
+        has_more=run.has_more,
         error=run.error,
         summary=run.summary,
     )
@@ -433,8 +390,9 @@ def row_to_signal_fetch_run(row: SignalFetchRunRow) -> SignalFetchRun:
         status=row.status,
         started_at=_load_datetime(row.started_at),
         completed_at=_load_datetime(row.completed_at),
-        message_count=row.message_count,
-        new_message_count=row.new_message_count,
+        item_count=row.item_count,
+        new_item_count=row.new_item_count,
+        has_more=row.has_more,
         error=row.error,
         summary=row.summary,
     )
@@ -460,11 +418,24 @@ def _loads_dict(value: str, *, path_codec: PathCodec | None = None) -> dict[str,
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _loads_optional_dict(value: str | None) -> dict[str, Any] | None:
+def _loads_optional_dict(
+    value: str | None, *, path_codec: PathCodec | None = None
+) -> dict[str, Any] | None:
     if not value:
         return None
     loaded = json.loads(value)
+    if path_codec is not None:
+        loaded = path_codec.load_json(loaded)
     return loaded if isinstance(loaded, dict) else None
+
+
+def _loads_list(value: str | None, *, path_codec: PathCodec | None = None) -> list[Any]:
+    if not value:
+        return []
+    loaded = json.loads(value)
+    if path_codec is not None:
+        loaded = path_codec.load_json(loaded)
+    return loaded if isinstance(loaded, list) else []
 
 
 def _dump_json(
@@ -475,3 +446,12 @@ def _dump_json(
     if path_codec is not None:
         value = path_codec.dump_json(value)
     return json.dumps(value, sort_keys=True) if value is not None else None
+
+
+def _dump_list(
+    value: list[dict[str, str]], *, path_codec: PathCodec | None = None
+) -> str:
+    dumped: Any = value
+    if path_codec is not None:
+        dumped = path_codec.dump_json(dumped)
+    return json.dumps(dumped, sort_keys=True)

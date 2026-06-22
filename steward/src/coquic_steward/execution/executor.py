@@ -841,9 +841,26 @@ class StewardExecutor:
                 source.id, TaskStatus.failed, "validation failed after rebase"
             )
             return False
-        commit_subject, commit_body = self._commit_message_for_integration(
-            task, source, patch_text, validations, transcript
-        )
+        try:
+            commit_subject, commit_body = self._commit_message_for_integration(
+                task, source, patch_text, validations, transcript
+            )
+        except CommitMessageGenerationError as exc:
+            message = str(exc)[-2000:]
+            transcript.write("commit_message_failed", message)
+            self.store.finish_task(
+                task.id, TaskStatus.failed, "commit message generation failed"
+            )
+            self.store.finish_task(
+                source.id, TaskStatus.failed, "commit message generation failed"
+            )
+            self.store.add_event(
+                source.id,
+                "integration.commit_message_failed",
+                message,
+                {"integration_task_id": task.id, **exc.data},
+            )
+            return False
         transcript.write("commit", f"creating commit: {commit_subject}")
         try:
             sha = self.worktrees.commit_all(
@@ -926,19 +943,24 @@ class StewardExecutor:
         validations: list[ValidationResult],
         transcript: "IntegrationTranscript",
     ) -> tuple[str, str]:
-        fallback_subject, fallback_body = _integration_commit_message(
-            source, patch_text
-        )
         changed_files = _patch_paths(patch_text)
         prompt = render_commit_message_prompt(
             source, patch_text, changed_files, validations
         )
+        if task.worktree_path is None:
+            raise CommitMessageGenerationError(
+                "integration worktree missing",
+                {
+                    "integration_task_id": task.id,
+                    "reason": "integration worktree missing",
+                },
+            )
         result = self._run_with_heartbeat(
             task.id,
             lambda: self.runner.run_review(
                 task,
                 prompt,
-                self.config.state_dir,
+                task.worktree_path,
                 name="commit-message",
                 output_schema=commit_message_schema_path(self.config),
             ),
@@ -968,21 +990,13 @@ class StewardExecutor:
             if result.completed
             else result.final_message[-500:] or f"exit {result.exit_code}"
         )
-        transcript.write(
-            "commit_message_fallback",
-            f"using deterministic fallback: {reason}",
-        )
-        self.store.add_event(
-            source.id,
-            "integration.commit_message_fallback",
-            fallback_subject,
-            {
-                **event_data,
-                "fallback_subject": fallback_subject,
-                "reason": reason,
-            },
-        )
-        return fallback_subject, fallback_body
+        raise CommitMessageGenerationError(reason, {**event_data, "reason": reason})
+
+
+class CommitMessageGenerationError(RuntimeError):
+    def __init__(self, reason: str, data: dict[str, object]):
+        super().__init__(reason)
+        self.data = data
 
 
 def default_worker_for_kind(kind: str) -> WorkerKind:
@@ -1105,9 +1119,9 @@ def render_commit_message_prompt(
             json.dumps(_commit_source_task_context(source), indent=2, sort_keys=True),
             "</source_task>",
             "",
-            "<selected_work_items>",
-            json.dumps(_selected_work_items_context(source), indent=2, sort_keys=True),
-            "</selected_work_items>",
+            "<selected_signal_items>",
+            json.dumps(_selected_signal_items_context(source), indent=2, sort_keys=True),
+            "</selected_signal_items>",
             "",
             "<validation_results>",
             json.dumps(
@@ -1183,22 +1197,6 @@ def _is_integration_task(task) -> bool:
     )
 
 
-def _integration_commit_message(source: TaskRecord, patch_text: str) -> tuple[str, str]:
-    paths = _patch_paths(patch_text)
-    subject = f"{_commit_type(source)}: {_commit_summary(source, paths)}"
-    body_lines = [
-        f"Source task: {source.id}",
-        f"Source title: {source.spec.title}",
-    ]
-    if paths:
-        body_lines.append("")
-        body_lines.append("Changed files:")
-        body_lines.extend(f"- {path}" for path in paths[:12])
-        if len(paths) > 12:
-            body_lines.append(f"- ... and {len(paths) - 12} more")
-    return _limit_commit_subject(subject), "\n".join(body_lines)
-
-
 def _commit_source_task_context(source: TaskRecord) -> dict[str, object]:
     return {
         "id": source.id,
@@ -1212,11 +1210,11 @@ def _commit_source_task_context(source: TaskRecord) -> dict[str, object]:
     }
 
 
-def _selected_work_items_context(source: TaskRecord) -> list[object]:
+def _selected_signal_items_context(source: TaskRecord) -> list[object]:
     context = source.spec.metadata.get("source_context")
     if not isinstance(context, dict):
         return []
-    selected = context.get("selected_work_items")
+    selected = context.get("selected_signal_items")
     return selected if isinstance(selected, list) else []
 
 
@@ -1229,26 +1227,6 @@ def _validation_context(validation: ValidationResult) -> dict[str, object]:
         "summary": validation.summary,
         "output_path": str(validation.output_path),
     }
-
-
-def _commit_type(source: TaskRecord) -> str:
-    if TaskKind(source.spec.kind) in {TaskKind.ci, TaskKind.health}:
-        return "chore"
-    return "fix"
-
-
-def _commit_summary(source: TaskRecord, paths: list[str]) -> str:
-    title = _clean_commit_text(source.spec.title)
-    if title and not _generic_task_title(title):
-        return title
-    if not paths:
-        return f"integrate {source.spec.kind} task"
-    if len(paths) == 1:
-        return f"update {paths[0]}"
-    prefix = _common_path_prefix(paths)
-    if prefix:
-        return f"update {prefix}"
-    return f"update {len(paths)} files"
 
 
 def _patch_paths(patch_text: str) -> list[str]:
@@ -1266,38 +1244,6 @@ def _patch_paths(patch_text: str) -> list[str]:
         paths.append(path)
         seen.add(path)
     return paths
-
-
-def _common_path_prefix(paths: list[str]) -> str:
-    parts = [Path(path).parts for path in paths if path]
-    if not parts:
-        return ""
-    prefix: list[str] = []
-    for values in zip(*parts):
-        if len(set(values)) != 1:
-            break
-        prefix.append(values[0])
-    if not prefix:
-        return ""
-    if len(prefix) == 1 and len(paths) > 1:
-        return f"{prefix[0]}/"
-    return "/".join(prefix)
-
-
-def _clean_commit_text(value: str) -> str:
-    text = re.sub(r"\s+", " ", value).strip()
-    text = re.sub(r"^(integration|integrate)\s+", "", text, flags=re.IGNORECASE)
-    text = text.rstrip(".")
-    return text[:1].lower() + text[1:] if text else ""
-
-
-def _generic_task_title(title: str) -> bool:
-    return title.lower() in {
-        "fix a focused batch of current codacy findings",
-        "fix current codacy findings",
-        "fix current codeql alerts",
-        "resolve current code quality findings",
-    }
 
 
 def _limit_commit_subject(subject: str) -> str:

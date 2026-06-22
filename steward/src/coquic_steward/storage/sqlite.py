@@ -25,8 +25,6 @@ from ..core.models import (
     SignalFetchRun,
     SignalItem,
     SignalItemStatus,
-    SignalMessage,
-    SignalMessageStatus,
     TaskIteration,
     TaskRecord,
     TaskSpec,
@@ -42,12 +40,10 @@ from .mappers import (
     row_to_event,
     row_to_signal_fetch_run,
     row_to_signal_item,
-    row_to_signal_message,
     row_to_iteration,
     row_to_task,
     signal_fetch_run_to_row,
     signal_item_to_row,
-    signal_message_to_row,
     task_to_row,
     update_iteration_row,
     update_task_row,
@@ -58,7 +54,6 @@ from .schema import (
     EventRow,
     SignalFetchRunRow,
     SignalItemRow,
-    SignalMessageRow,
     TaskIterationRow,
     TaskRow,
     ValidationRow,
@@ -238,45 +233,6 @@ class SQLiteTaskStore:
                 for row in session.scalars(statement).all()
             ]
 
-    def add_signal_message(self, message: SignalMessage) -> tuple[SignalMessage, bool]:
-        now = utc_now()
-        message = message.model_copy(
-            update={"created_at": message.created_at, "updated_at": now}
-        )
-        with Session(self.engine) as session, session.begin():
-            existing = session.scalar(
-                select(SignalMessageRow)
-                .where(
-                    SignalMessageRow.provider == message.provider,
-                    SignalMessageRow.fingerprint == message.fingerprint,
-                    SignalMessageRow.status == SignalMessageStatus.pending.value,
-                )
-                .order_by(SignalMessageRow.created_at.desc())
-                .limit(1)
-            )
-            if existing is not None:
-                existing.updated_at = now.isoformat()
-                if message.source_fetch_id:
-                    existing.source_fetch_id = message.source_fetch_id
-                return (
-                    row_to_signal_message(existing, path_codec=self.path_codec),
-                    False,
-                )
-            session.add(signal_message_to_row(message, path_codec=self.path_codec))
-        return message, True
-
-    def add_signal_messages(
-        self, messages: list[SignalMessage]
-    ) -> tuple[list[SignalMessage], int]:
-        saved: list[SignalMessage] = []
-        created = 0
-        for message in messages:
-            item, was_created = self.add_signal_message(message)
-            saved.append(item)
-            if was_created:
-                created += 1
-        return saved, created
-
     def add_signal_item(self, item: SignalItem) -> tuple[SignalItem, bool]:
         now = utc_now()
         item = item.model_copy(
@@ -301,8 +257,6 @@ class SQLiteTaskStore:
                 existing.updated_at = now.isoformat()
                 if item.source_fetch_id:
                     existing.source_fetch_id = item.source_fetch_id
-                if item.source_message_id:
-                    existing.source_message_id = item.source_message_id
                 return row_to_signal_item(existing, path_codec=self.path_codec), False
             session.add(signal_item_to_row(item, path_codec=self.path_codec))
         return item, True
@@ -316,46 +270,6 @@ class SQLiteTaskStore:
             if was_created:
                 created += 1
         return saved, created
-
-    def list_signal_messages(
-        self,
-        *,
-        include_errors: bool = False,
-        status: SignalMessageStatus | str | None = None,
-        limit: int | None = None,
-    ) -> list[SignalMessage]:
-        statement = select(SignalMessageRow).order_by(
-            SignalMessageRow.created_at.desc()
-        )
-        if not include_errors:
-            statement = statement.where(SignalMessageRow.kind != "signal-error")
-        if status is not None:
-            statement = statement.where(SignalMessageRow.status == str(status))
-        if limit is not None:
-            statement = statement.limit(limit)
-        with Session(self.engine) as session:
-            return [
-                row_to_signal_message(row, path_codec=self.path_codec)
-                for row in session.scalars(statement).all()
-            ]
-
-    def pending_signal_messages(
-        self, *, include_errors: bool = False, limit: int | None = None
-    ) -> list[SignalMessage]:
-        statement = (
-            select(SignalMessageRow)
-            .where(SignalMessageRow.status == SignalMessageStatus.pending.value)
-            .order_by(SignalMessageRow.created_at)
-        )
-        if not include_errors:
-            statement = statement.where(SignalMessageRow.kind != "signal-error")
-        if limit is not None:
-            statement = statement.limit(limit)
-        with Session(self.engine) as session:
-            return [
-                row_to_signal_message(row, path_codec=self.path_codec)
-                for row in session.scalars(statement).all()
-            ]
 
     def list_signal_items(
         self,
@@ -435,26 +349,6 @@ class SQLiteTaskStore:
             ).all()
             for row in rows:
                 row.status = SignalItemStatus.superseded.value
-                row.updated_at = now
-                row.planner_run_id = planner_run_id
-            return len(rows)
-
-    def consume_signal_messages(
-        self, ids: list[str], *, planner_run_id: str | None
-    ) -> int:
-        if not ids:
-            return 0
-        now = utc_now().isoformat()
-        with Session(self.engine) as session, session.begin():
-            rows = session.scalars(
-                select(SignalMessageRow).where(
-                    SignalMessageRow.id.in_(ids),
-                    SignalMessageRow.status == SignalMessageStatus.pending.value,
-                )
-            ).all()
-            for row in rows:
-                row.status = SignalMessageStatus.consumed.value
-                row.consumed_at = now
                 row.updated_at = now
                 row.planner_run_id = planner_run_id
             return len(rows)
@@ -818,6 +712,31 @@ class SQLiteTaskStore:
 
     def _migrate_schema(self) -> None:
         with self.engine.begin() as connection:
+            item_columns = {
+                row[1]
+                for row in connection.exec_driver_sql("PRAGMA table_info(signal_items)")
+            }
+            if item_columns and (
+                "evidence_id" in item_columns
+                or "location_json" not in item_columns
+                or "links_json" not in item_columns
+            ):
+                connection.exec_driver_sql("DROP TABLE IF EXISTS signal_items")
+                connection.exec_driver_sql("DROP TABLE IF EXISTS signal_messages")
+                connection.exec_driver_sql("DROP TABLE IF EXISTS signal_fetch_runs")
+                Base.metadata.create_all(connection)
+            fetch_columns = {
+                row[1]
+                for row in connection.exec_driver_sql("PRAGMA table_info(signal_fetch_runs)")
+            }
+            if fetch_columns and (
+                "message_count" in fetch_columns
+                or "item_count" not in fetch_columns
+                or "has_more" not in fetch_columns
+            ):
+                connection.exec_driver_sql("DROP TABLE IF EXISTS signal_fetch_runs")
+                Base.metadata.create_all(connection)
+            connection.exec_driver_sql("DROP TABLE IF EXISTS signal_messages")
             validation_columns = {
                 row[1]
                 for row in connection.exec_driver_sql("PRAGMA table_info(validations)")
@@ -857,10 +776,10 @@ class SQLiteTaskStore:
             for row in session.scalars(select(EventRow)).all():
                 row.message = self._portable_path(row.message) or row.message
                 row.data_json = self._portable_json(row.data_json)
-            for row in session.scalars(select(SignalMessageRow)).all():
-                row.payload_json = self._portable_json(row.payload_json)
             for row in session.scalars(select(SignalItemRow)).all():
                 row.payload_json = self._portable_json(row.payload_json)
+                if row.location_json:
+                    row.location_json = self._portable_json(row.location_json)
 
     def _portable_path(self, value: str | None) -> str | None:
         if self.path_codec.is_portable(value):

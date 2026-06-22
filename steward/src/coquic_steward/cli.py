@@ -17,7 +17,7 @@ from .execution.executor import StewardExecutor, default_worker_for_kind
 from .core.models import Priority, Risk, TaskKind, TaskSpec, TaskStatus, WorkerKind
 from .planning import run_planner
 from .signals import (
-    collect_signal_messages,
+    collect_signal_items,
     project_signals_from_items,
 )
 from .storage import TaskStore
@@ -103,31 +103,13 @@ def daemon(
 @app.command()
 def plan(enqueue: bool = False) -> None:
     store, config = _context()
-    for collection in collect_signal_messages(config):
-        messages = [
-            message.model_copy(update={"source_fetch_id": "cli-plan"}, deep=True)
-            for message in collection.messages
-        ]
-        saved, _ = store.add_signal_messages(messages)
-        items = []
-        for item in collection.items:
-            source = next(
-                (
-                    message
-                    for message in saved
-                    if message.evidence_id and message.evidence_id == item.evidence_id
-                ),
-                saved[0] if saved else None,
+    for collection in collect_signal_items(config):
+        saved, created = store.add_signal_items(collection.items)
+        store.add_signal_fetch_run(
+            collection.fetch.model_copy(
+                update={"item_count": len(saved), "new_item_count": created}
             )
-            if source is not None:
-                item = item.model_copy(
-                    update={
-                        "source_fetch_id": source.source_fetch_id,
-                        "source_message_id": source.id,
-                    }
-                )
-            items.append(item)
-        store.add_signal_items(items)
+        )
     pending = store.pending_signal_items(limit=config.limits.max_active_tasks)
     planner_run = run_planner(
         config,
@@ -271,7 +253,7 @@ def _enqueue(spec: TaskSpec, dedupe_key: str) -> None:
 def _selected_item_ids(
     metadata: dict[str, object], consumed_item_ids: list[str]
 ) -> list[str]:
-    selected = metadata.get("selected_work_item_ids")
+    selected = metadata.get("selected_signal_item_ids")
     candidates = selected if isinstance(selected, list) else consumed_item_ids
     allowed = set(consumed_item_ids)
     result: list[str] = []

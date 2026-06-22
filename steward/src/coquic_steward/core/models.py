@@ -24,10 +24,6 @@ def new_task_id() -> str:
     return f"task-{_new_id_timestamp()}-{uuid4().hex[:8]}"
 
 
-def new_signal_id() -> str:
-    return f"sig-{_new_id_timestamp()}-{uuid4().hex[:8]}"
-
-
 def new_signal_fetch_id() -> str:
     return f"signal-fetch-{_new_id_timestamp()}-{uuid4().hex[:8]}"
 
@@ -92,13 +88,6 @@ class Risk(StrEnum):
 class IntegrationMode(StrEnum):
     local_only = "local-only"
     push_main = "push-main"
-
-
-class SignalMessageStatus(StrEnum):
-    pending = "pending"
-    consumed = "consumed"
-    superseded = "superseded"
-    errored = "errored"
 
 
 class SignalItemStatus(StrEnum):
@@ -208,23 +197,6 @@ class Event(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
-class SignalMessage(BaseModel):
-    id: str = Field(default_factory=new_signal_id)
-    provider: str
-    kind: str
-    fingerprint: str
-    title: str
-    summary: str = ""
-    evidence_id: str | None = None
-    payload: dict[str, Any] = Field(default_factory=dict)
-    status: SignalMessageStatus = SignalMessageStatus.pending
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime = Field(default_factory=utc_now)
-    consumed_at: datetime | None = None
-    planner_run_id: str | None = None
-    source_fetch_id: str | None = None
-
-
 class SignalItem(BaseModel):
     id: str = Field(default_factory=new_signal_item_id)
     provider: str
@@ -232,7 +204,9 @@ class SignalItem(BaseModel):
     fingerprint: str
     title: str
     summary: str = ""
-    evidence_id: str | None = None
+    severity: str | None = None
+    location: dict[str, Any] | None = None
+    links: list[dict[str, str]] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)
     status: SignalItemStatus = SignalItemStatus.pending
     created_at: datetime = Field(default_factory=utc_now)
@@ -241,7 +215,6 @@ class SignalItem(BaseModel):
     planner_run_id: str | None = None
     planned_task_id: str | None = None
     source_fetch_id: str | None = None
-    source_message_id: str | None = None
 
 
 class SignalFetchRun(BaseModel):
@@ -250,26 +223,21 @@ class SignalFetchRun(BaseModel):
     status: SignalFetchStatus
     started_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime = Field(default_factory=utc_now)
-    message_count: int = 0
-    new_message_count: int = 0
+    item_count: int = 0
+    new_item_count: int = 0
+    has_more: bool = False
     error: str | None = None
     summary: str = ""
 
 
 class ProjectSignals(BaseModel):
-    github_repository: str
+    schema_version: int = 2
+    repository: str
     enabled_signals: list[str] = Field(default_factory=list)
-    failed_interop_run_id: str | None = None
-    failed_workflow_run_id: str | None = None
-    failed_workflow_name: str | None = None
-    has_codeql_findings: bool = False
-    has_codacy_findings: bool = False
-    has_code_quality_findings: bool = False
-    signal_errors: dict[str, str] = Field(default_factory=dict)
+    generated_at: datetime = Field(default_factory=utc_now)
     summary: str = ""
-    inbox_messages: list[SignalMessage] = Field(default_factory=list)
-    inbox_items: list[SignalItem] = Field(default_factory=list)
-    work_items: list[dict[str, Any]] = Field(default_factory=list)
+    items: list[SignalItem] = Field(default_factory=list)
+    fetches: list[SignalFetchRun] = Field(default_factory=list)
 
 
 class WorkerResult(BaseModel):

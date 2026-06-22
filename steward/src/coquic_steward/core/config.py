@@ -21,6 +21,7 @@ class StewardLimits:
     max_main_pushes_per_day: int = 10
     worker_timeout_minutes: int = 120
     review_timeout_minutes: int = 20
+    validation_timeout_minutes: int = 30
     stale_task_minutes: int | None = None
 
 
@@ -138,6 +139,9 @@ def load_config(
             max_main_pushes_per_day=int(limits_data.get("max_main_pushes_per_day", 10)),
             worker_timeout_minutes=int(limits_data.get("worker_timeout_minutes", 120)),
             review_timeout_minutes=int(limits_data.get("review_timeout_minutes", 20)),
+            validation_timeout_minutes=int(
+                limits_data.get("validation_timeout_minutes", 30)
+            ),
             stale_task_minutes=(
                 int(limits_data["stale_task_minutes"])
                 if "stale_task_minutes" in limits_data

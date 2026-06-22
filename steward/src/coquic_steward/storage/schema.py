@@ -111,25 +111,6 @@ class EventRow(Base):
     data_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
 
 
-class SignalMessageRow(Base):
-    __tablename__ = "signal_messages"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    provider: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    kind: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    fingerprint: Mapped[str] = mapped_column(String, nullable=False)
-    title: Mapped[str] = mapped_column(String, nullable=False)
-    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    evidence_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
-    status: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    created_at: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    updated_at: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    consumed_at: Mapped[str | None] = mapped_column(String, nullable=True)
-    planner_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    source_fetch_id: Mapped[str | None] = mapped_column(String, nullable=True)
-
-
 class SignalItemRow(Base):
     __tablename__ = "signal_items"
 
@@ -139,7 +120,9 @@ class SignalItemRow(Base):
     fingerprint: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[str] = mapped_column(String, nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    evidence_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    severity: Mapped[str | None] = mapped_column(String, nullable=True)
+    location_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    links_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     status: Mapped[str] = mapped_column(String, nullable=False, index=True)
     created_at: Mapped[str] = mapped_column(String, nullable=False, index=True)
@@ -148,7 +131,6 @@ class SignalItemRow(Base):
     planner_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
     planned_task_id: Mapped[str | None] = mapped_column(String, nullable=True)
     source_fetch_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    source_message_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class SignalFetchRunRow(Base):
@@ -159,8 +141,9 @@ class SignalFetchRunRow(Base):
     status: Mapped[str] = mapped_column(String, nullable=False, index=True)
     started_at: Mapped[str] = mapped_column(String, nullable=False, index=True)
     completed_at: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    new_message_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    item_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    new_item_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    has_more: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
@@ -184,14 +167,6 @@ Index(
     TaskIterationRow.task_id,
     TaskIterationRow.iteration,
     unique=True,
-)
-
-Index(
-    "ix_signal_messages_provider_fingerprint_status",
-    SignalMessageRow.provider,
-    SignalMessageRow.fingerprint,
-    unique=True,
-    sqlite_where=SignalMessageRow.status == "pending",
 )
 
 Index(

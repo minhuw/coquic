@@ -2804,6 +2804,28 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.session-running {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #c9d7f2;
+  border-radius: 999px;
+  padding: 6px 10px;
+  color: #244b8f;
+  background: #f3f7ff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.session-running span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tool-empty {
   color: var(--muted);
   font-size: 12px;

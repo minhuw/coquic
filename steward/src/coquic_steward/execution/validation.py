@@ -38,7 +38,11 @@ def run_validation(
     output_path = config.logs_dir / task_id / label / filename if label else config.logs_dir / task_id / filename
     output_path.parent.mkdir(parents=True, exist_ok=True)
     started = utc_now()
-    result = run_command(command, cwd=cwd)
+    result = run_command(
+        command,
+        cwd=cwd,
+        timeout=config.limits.validation_timeout_minutes * 60,
+    )
     output_path.write_text(
         f"$ {' '.join(command)}\n\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n",
         encoding="utf-8",

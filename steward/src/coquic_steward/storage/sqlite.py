@@ -23,7 +23,6 @@ from ..core.models import (
     ACTIVE_STATUSES,
     Event,
     SignalFetchRun,
-    SignalFetchStatus,
     SignalItem,
     SignalItemStatus,
     SignalMessage,

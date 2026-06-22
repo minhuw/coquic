@@ -148,6 +148,17 @@ class SignalFetchRunRow(Base):
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
 
+class SchedulerWakeupRow(Base):
+    __tablename__ = "scheduler_wakeups"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    reason: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    consumed_at: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    data_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+
+
 Index(
     "ix_tasks_active_dedupe_key",
     TaskRow.dedupe_key,

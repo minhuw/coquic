@@ -61,15 +61,24 @@ def gather_signals(
 def collect_signal_items(
     config: StewardConfig,
     providers: list[SignalProvider] | None = None,
+    provider_names: list[str] | None = None,
 ) -> list[SignalCollection]:
+    names = tuple(provider_names) if provider_names is not None else config.enabled_signals
     selected = (
-        providers if providers is not None else signal_providers(config.enabled_signals)
+        providers if providers is not None else signal_providers(names)
     )
     collections: list[SignalCollection] = []
     for provider in selected:
         started_at = utc_now()
         try:
-            result = provider.collect(config)
+            provider_config = config.signal_providers.get(provider.name)
+            max_items = provider_config.max_items if provider_config else 12
+            try:
+                result = provider.collect(config, max_items=max_items)
+            except TypeError as exc:
+                if "max_items" not in str(exc):
+                    raise
+                result = provider.collect(config)
             items = result.items
             error = result.error
             summary = result.summary

@@ -3,9 +3,12 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from ..core.config import StewardConfig
 from ..core.models import (
+    SchedulerProviderState,
+    SchedulerState,
     SignalFetchStatus,
     SignalItem,
     TaskRecord,
@@ -33,6 +36,12 @@ class TickResult:
     skipped: int = 0
 
 
+@dataclass(frozen=True)
+class SchedulerTrigger:
+    reason: str
+    providers: list[str]
+
+
 class StewardDaemon:
     def __init__(
         self,
@@ -58,9 +67,35 @@ class StewardDaemon:
         dispatch: bool = True,
         max_dispatch: int | None = None,
     ) -> TickResult:
+        return self.run_cycle(
+            plan=plan,
+            dispatch=dispatch,
+            max_dispatch=max_dispatch,
+            reason="manual-tick",
+        )
+
+    def run_cycle(
+        self,
+        *,
+        plan: bool = True,
+        dispatch: bool = True,
+        fetch_providers: list[str] | None = None,
+        max_dispatch: int | None = None,
+        reason: str = "scheduled",
+    ) -> TickResult:
         result = TickResult()
+        wakeups = self.store.pending_wakeups(limit=200)
+        if wakeups:
+            self.store.consume_wakeups([wakeup.id for wakeup in wakeups])
+        explicit_fetch_providers = _fetch_providers_from_wakeups(
+            self.config, wakeups
+        )
+        if explicit_fetch_providers:
+            fetch_providers = explicit_fetch_providers
         self._log(
-            "tick start "
+            "cycle start "
+            f"reason={reason} "
+            f"wakeups={len(wakeups)} "
             f"plan={str(plan).lower()} "
             f"dispatch={str(dispatch).lower()} "
             f"max_dispatch={max_dispatch or '-'}"
@@ -75,11 +110,13 @@ class StewardDaemon:
             )
             self._log(f"recovered stale task {task_id}")
         if plan:
-            self._poll_and_plan(result)
+            if fetch_providers:
+                self._fetch_signals(result, fetch_providers)
+            self._plan_until_idle(result)
         if dispatch:
             self._dispatch_queued(result, plan=plan, max_dispatch=max_dispatch)
         self._log(
-            "tick finish "
+            "cycle finish "
             f"recovered={result.recovered} "
             f"signal_fetches={result.signal_fetches} "
             f"signal_items={result.signal_items} "
@@ -98,27 +135,28 @@ class StewardDaemon:
         plan: bool,
         max_dispatch: int | None,
     ) -> None:
-        base_limit = max_dispatch or self.config.limits.max_active_tasks
-        extra_integration_limit = (
-            0 if max_dispatch is not None else self.config.limits.max_active_tasks
-        )
-        base_attempts = 0
-        extra_integration_attempts = 0
+        source_limit = max_dispatch or self.config.limits.max_active_tasks
+        source_attempts = 0
+        integration_attempted = False
         seen: set[str] = set()
         while True:
             task = self._next_dispatchable_task(seen)
             if task is None:
                 return
             is_integration = _is_integration_manager_task(task)
-            if base_attempts >= base_limit:
-                if (
-                    not is_integration
-                    or extra_integration_attempts >= extra_integration_limit
-                ):
-                    return
-                extra_integration_attempts += 1
+            if is_integration:
+                if integration_attempted or self.store.integration_active_count() > 0:
+                    seen.add(task.id)
+                    continue
+                integration_attempted = True
             else:
-                base_attempts += 1
+                if source_attempts >= source_limit:
+                    seen.add(task.id)
+                    continue
+                if self.store.source_active_count() >= self.config.limits.max_active_tasks:
+                    seen.add(task.id)
+                    continue
+                source_attempts += 1
             seen.add(task.id)
             self._log(f"dispatch start {task.id} {_task_label(task)}")
             if self.executor.run_task(task.id):
@@ -143,19 +181,14 @@ class StewardDaemon:
             return task
         return None
 
-    def _poll_and_plan(self, result: TickResult) -> None:
-        if self.store.active_count() >= self.config.limits.max_active_tasks:
-            self._log("signals skipped active task limit reached")
-            self._log("planner skipped active task limit reached")
-            return
-        self._fetch_signals(result)
-        self._plan_until_idle(result)
-
-    def _fetch_signals(self, result: TickResult) -> None:
-        for collection in collect_signal_items(self.config):
-            if self.store.active_count() >= self.config.limits.max_active_tasks:
-                self._log("signals poll stopped active task limit reached")
-                return
+    def _fetch_signals(self, result: TickResult, providers: list[str]) -> None:
+        try:
+            collections = collect_signal_items(self.config, provider_names=providers)
+        except TypeError as exc:
+            if "provider_names" not in str(exc):
+                raise
+            collections = collect_signal_items(self.config)
+        for collection in collections:
             result.signal_fetches += 1
             fetch_run = collection.fetch.model_copy(
                 update={
@@ -200,11 +233,12 @@ class StewardDaemon:
     def _plan_until_idle(self, result: TickResult) -> None:
         turns = 0
         while turns < self.config.limits.max_active_tasks:
-            if self.store.active_count() >= self.config.limits.max_active_tasks:
+            if self.store.source_active_count() >= self.config.limits.max_active_tasks:
                 self._log("planner skipped active task limit reached")
                 return
+            available = self.config.limits.max_active_tasks - self.store.source_active_count()
             pending = self.store.pending_signal_items(
-                limit=self.config.limits.max_active_tasks
+                limit=max(1, available)
             )
             if not pending:
                 return
@@ -221,11 +255,13 @@ class StewardDaemon:
                 return
 
     def _plan(self, result: TickResult, inbox_items: list[SignalItem]) -> None:
-        active_tasks = self.store.list_tasks(limit=200)
+        task_context = self.store.list_tasks(limit=200)
         signals = project_signals_from_items(self.config, inbox_items)
+        active_count = self.store.source_active_count()
         self._log(
             "planner start "
-            f"active_tasks={len(active_tasks)} "
+            f"source_active={active_count} "
+            f"task_context={len(task_context)} "
             f"inbox={len(inbox_items)}"
         )
         self.store.add_event(
@@ -233,12 +269,13 @@ class StewardDaemon:
             "planner.started",
             "planner turn started",
             {
-                "active_task_count": len(active_tasks),
+                "active_task_count": active_count,
+                "task_context_count": len(task_context),
                 "inbox_item_ids": [item.id for item in inbox_items],
                 "enabled_signals": list(self.config.enabled_signals),
             },
         )
-        planner_run = run_planner(self.config, signals, active_tasks)
+        planner_run = run_planner(self.config, signals, task_context)
         planned_item_count = 0
         planned_item_ids: set[str] = set()
         run_id = planner_run.run_id or planner_run.thread_id
@@ -306,8 +343,11 @@ class StewardDaemon:
 
     def run_forever(self) -> None:
         while True:
-            self.tick()
-            time.sleep(self.config.daemon_poll_interval_sec)
+            trigger = wait_for_scheduler_event(self.config, self.store)
+            self.run_cycle(
+                fetch_providers=trigger.providers,
+                reason=trigger.reason,
+            )
 
     def _log(self, message: str) -> None:
         if self.logger is not None:
@@ -317,17 +357,122 @@ class StewardDaemon:
 def stale_task_minutes(config: StewardConfig) -> int:
     if config.limits.stale_task_minutes is not None:
         return config.limits.stale_task_minutes
-    poll_minutes = max(1, config.daemon_poll_interval_sec // 60)
-    return config.limits.worker_timeout_minutes + poll_minutes
+    return config.limits.worker_timeout_minutes + 5
 
 
 def status_stale_minutes(config: StewardConfig) -> dict[str, int]:
     if config.limits.stale_task_minutes is not None:
         return {}
-    poll_minutes = max(1, config.daemon_poll_interval_sec // 60)
     return {
-        TaskStatus.reviewing.value: config.limits.review_timeout_minutes + poll_minutes
+        TaskStatus.reviewing.value: config.limits.review_timeout_minutes + 5
     }
+
+
+def wait_for_scheduler_event(config: StewardConfig, store: TaskStore) -> SchedulerTrigger:
+    while True:
+        if store.pending_wakeups(limit=1):
+            return SchedulerTrigger(reason="wakeup", providers=[])
+        state = scheduler_state(config, store)
+        due_providers = [provider.provider for provider in state.providers if provider.due]
+        if due_providers:
+            return SchedulerTrigger(reason="provider-due", providers=due_providers)
+        next_due = min((provider.next_due_at for provider in state.providers), default=None)
+        sleep_for = config.scheduler_wait_interval_sec
+        if next_due is not None:
+            sleep_for = min(
+                sleep_for,
+                max(0.0, (next_due - _now()).total_seconds()),
+            )
+        time.sleep(max(0.1, sleep_for))
+
+
+def scheduler_state(config: StewardConfig, store: TaskStore) -> SchedulerState:
+    source_active = store.source_active_count()
+    return SchedulerState(
+        source_active=source_active,
+        source_capacity=max(0, config.limits.max_active_tasks - source_active),
+        source_queued=store.source_queued_count(),
+        integration_active=store.integration_active_count(),
+        integration_queued=store.integration_queued_count(),
+        pending_wakeups=store.pending_wakeups(limit=20),
+        recent_wakeups=store.recent_wakeups(limit=20),
+        providers=[_provider_state(config, store, name) for name in config.enabled_signals],
+    )
+
+
+def due_provider_names(config: StewardConfig, store: TaskStore) -> list[str]:
+    return [
+        provider.provider
+        for provider in scheduler_state(config, store).providers
+        if provider.due
+    ]
+
+
+def _provider_state(
+    config: StewardConfig, store: TaskStore, provider: str
+) -> SchedulerProviderState:
+    provider_config = config.signal_providers[provider]
+    latest = store.latest_signal_fetch_run(provider)
+    now = _now()
+    if latest is None:
+        next_due = now
+        return SchedulerProviderState(
+            provider=provider,
+            poll_interval_minutes=provider_config.poll_interval_minutes,
+            error_retry_minutes=provider_config.error_retry_minutes,
+            suppression_hours=provider_config.suppression_hours,
+            max_items=provider_config.max_items,
+            next_due_at=next_due,
+            due=True,
+        )
+    interval = (
+        provider_config.error_retry_minutes
+        if latest.status == SignalFetchStatus.error
+        else provider_config.poll_interval_minutes
+    )
+    next_due = latest.completed_at + timedelta(minutes=interval)
+    next_due = next_due + _provider_jitter(config, provider)
+    return SchedulerProviderState(
+        provider=provider,
+        poll_interval_minutes=provider_config.poll_interval_minutes,
+        error_retry_minutes=provider_config.error_retry_minutes,
+        suppression_hours=provider_config.suppression_hours,
+        max_items=provider_config.max_items,
+        last_fetch_at=latest.completed_at,
+        last_status=latest.status,
+        last_error=latest.error,
+        next_due_at=next_due,
+        due=next_due <= now,
+    )
+
+
+def _provider_jitter(config: StewardConfig, provider: str) -> timedelta:
+    import hashlib
+
+    seed = f"{config.state_dir.name}:{provider}".encode("utf-8")
+    value = int(hashlib.sha256(seed).hexdigest()[:8], 16)
+    minutes = value % 17
+    return timedelta(minutes=minutes)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _fetch_providers_from_wakeups(config: StewardConfig, wakeups) -> list[str]:
+    requested: list[str] = []
+    enabled = set(config.enabled_signals)
+    for wakeup in wakeups:
+        if wakeup.reason != "signal.fetch":
+            continue
+        raw = wakeup.data.get("providers")
+        values = raw if isinstance(raw, list) else list(config.enabled_signals)
+        for value in values:
+            if not isinstance(value, str) or value not in enabled:
+                continue
+            if value not in requested:
+                requested.append(value)
+    return requested
 
 
 def _task_label(task: TaskRecord) -> str:

@@ -25,10 +25,9 @@ from ..core.models import TaskKind, TaskSpec, WorkerKind
 from ..execution import StewardExecutor, default_worker_for_kind
 from ..orchestration import (
     DaemonAlreadyRunning,
-    StewardDaemon,
-    StewardPreflightError,
     acquire_daemon_lock,
 )
+from ..orchestration.daemon import scheduler_state
 from ..signals import project_signals_from_items
 from ..storage import TaskStore
 
@@ -98,21 +97,32 @@ def _register_tick_route(app: FastAPI, config, store: TaskStore) -> None:
     async def tick(request: Request) -> JSONResponse:
         _require_loopback(request)
         body = await _body(request)
-        try:
-            with acquire_daemon_lock(config):
-                result = StewardDaemon(config, store).tick(
-                    plan=bool(body.get("plan", True)),
-                    dispatch=bool(body.get("dispatch", False)),
-                    max_dispatch=_positive_int(body.get("max_dispatch")),
-                )
-        except DaemonAlreadyRunning as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except StewardPreflightError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        wakeup = store.request_wakeup(
+            "scheduler.manual",
+            {
+                "plan": bool(body.get("plan", True)),
+                "dispatch": bool(body.get("dispatch", True)),
+                "max_dispatch": _positive_int(body.get("max_dispatch")),
+            },
+        )
         return JSONResponse(
             {
                 "ok": True,
-                "result": result.__dict__,
+                "wakeup": wakeup.model_dump(mode="json"),
+                "state": _state_payload(config, store),
+            }
+        )
+
+    @app.post("/api/actions/fetch-signals")
+    async def fetch_signals(request: Request) -> JSONResponse:
+        require_loopback(request)
+        body = await _body(request)
+        providers = _provider_list(body.get("providers"), config.enabled_signals)
+        wakeup = store.request_wakeup("signal.fetch", {"providers": providers})
+        return JSONResponse(
+            {
+                "ok": True,
+                "wakeup": wakeup.model_dump(mode="json"),
                 "state": _state_payload(config, store),
             }
         )
@@ -313,7 +323,12 @@ def _register_runtime_routes(app: FastAPI) -> None:
         return JSONResponse(
             {
                 "api": "coquic-steward",
-                "features": ["line-tail", "signal-inbox", "signal-items-v2"],
+                "features": [
+                    "line-tail",
+                    "signal-inbox",
+                    "signal-items-v2",
+                    "scheduler-v1",
+                ],
             }
         )
 
@@ -359,6 +374,7 @@ def _state_payload(config, store: TaskStore) -> dict[str, object]:
                 run.model_dump(mode="json") for run in fetch_runs
             ],
         },
+        "scheduler": scheduler_state(config, store).model_dump(mode="json"),
         "planned": [],
         "kinds": [kind.value for kind in TaskKind],
         "workers": [worker.value for worker in WorkerKind],
@@ -375,6 +391,21 @@ def _state_payload(config, store: TaskStore) -> dict[str, object]:
             "enabled_signals": list(config.enabled_signals),
         },
     }
+
+
+def _provider_list(value: object, enabled: tuple[str, ...]) -> list[str]:
+    enabled_set = set(enabled)
+    if value is None:
+        return list(enabled)
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="providers must be a list")
+    providers: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or item not in enabled_set:
+            raise HTTPException(status_code=400, detail=f"unknown provider {item!r}")
+        if item not in providers:
+            providers.append(item)
+    return providers
 
 
 def _project_payload(config, current_tasks) -> list[dict[str, object]]:

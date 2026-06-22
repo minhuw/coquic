@@ -28,6 +28,10 @@ def new_signal_fetch_id() -> str:
     return f"signal-fetch-{_new_id_timestamp()}-{uuid4().hex[:8]}"
 
 
+def new_scheduler_wakeup_id() -> str:
+    return f"wakeup-{utc_now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+
+
 def new_signal_item_id() -> str:
     return f"wi-signal-item-{uuid4().hex[:12]}"
 
@@ -100,6 +104,11 @@ class SignalItemStatus(StrEnum):
 class SignalFetchStatus(StrEnum):
     ok = "ok"
     error = "error"
+
+
+class SchedulerWakeupStatus(StrEnum):
+    pending = "pending"
+    consumed = "consumed"
 
 
 TERMINAL_STATUSES = {
@@ -228,6 +237,39 @@ class SignalFetchRun(BaseModel):
     has_more: bool = False
     error: str | None = None
     summary: str = ""
+
+
+class SchedulerWakeup(BaseModel):
+    id: str = Field(default_factory=new_scheduler_wakeup_id)
+    reason: str
+    status: SchedulerWakeupStatus = SchedulerWakeupStatus.pending
+    created_at: datetime = Field(default_factory=utc_now)
+    consumed_at: datetime | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class SchedulerProviderState(BaseModel):
+    provider: str
+    poll_interval_minutes: int
+    error_retry_minutes: int
+    suppression_hours: int
+    max_items: int
+    last_fetch_at: datetime | None = None
+    last_status: SignalFetchStatus | None = None
+    last_error: str | None = None
+    next_due_at: datetime
+    due: bool = False
+
+
+class SchedulerState(BaseModel):
+    source_active: int = 0
+    source_capacity: int = 0
+    source_queued: int = 0
+    integration_active: int = 0
+    integration_queued: int = 0
+    pending_wakeups: list[SchedulerWakeup] = Field(default_factory=list)
+    recent_wakeups: list[SchedulerWakeup] = Field(default_factory=list)
+    providers: list[SchedulerProviderState] = Field(default_factory=list)
 
 
 class ProjectSignals(BaseModel):

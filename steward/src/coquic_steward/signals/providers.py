@@ -21,7 +21,7 @@ from ..core.models import SignalItem
 from ..core.subprocesses import run_command
 
 SIGNAL_TIMEOUT_SECONDS = 15.0
-MAX_SIGNAL_WORK_ITEMS = 12
+DEFAULT_SIGNAL_WORK_ITEMS = 12
 CODACY_API_HOST = "app.codacy.com"
 
 
@@ -36,14 +36,18 @@ class ProviderSignalResult:
 class SignalProvider(Protocol):
     name: str
 
-    def collect(self, config: StewardConfig) -> ProviderSignalResult:
+    def collect(
+        self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS
+    ) -> ProviderSignalResult:
         """Return current actionable signal items from one source."""
 
 
 class GitHubActionsProvider:
     name = "github-actions"
 
-    def collect(self, config: StewardConfig) -> ProviderSignalResult:
+    def collect(
+        self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS
+    ) -> ProviderSignalResult:
         runs = run_command(
             [
                 "gh",
@@ -54,7 +58,7 @@ class GitHubActionsProvider:
                 "--branch",
                 config.main_branch,
                 "--limit",
-                "10",
+                str(max_items),
                 "--json",
                 "databaseId,workflowName,conclusion",
             ],
@@ -91,14 +95,16 @@ class GitHubActionsProvider:
 class CodeScanningProvider:
     name = "code-scanning"
 
-    def collect(self, config: StewardConfig) -> ProviderSignalResult:
+    def collect(
+        self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS
+    ) -> ProviderSignalResult:
         codeql = run_command(
             [
                 "gh",
                 "api",
                 "-X",
                 "GET",
-                f"repos/{config.github_repository}/code-scanning/alerts?state=open&per_page={MAX_SIGNAL_WORK_ITEMS}",
+                f"repos/{config.github_repository}/code-scanning/alerts?state=open&per_page={max_items}",
             ],
             cwd=config.repo_root,
             timeout=SIGNAL_TIMEOUT_SECONDS,
@@ -109,7 +115,7 @@ class CodeScanningProvider:
             payload = json.loads(codeql.stdout or "[]")
         except json.JSONDecodeError:
             payload = []
-        items = [_code_scanning_item(item) for item in payload[:MAX_SIGNAL_WORK_ITEMS]]
+        items = [_code_scanning_item(item) for item in payload[:max_items]]
         return ProviderSignalResult(
             items=items,
             summary=_summary_from_items("CodeQL", items),
@@ -120,12 +126,15 @@ class CodeScanningProvider:
 class CodacyProvider:
     name = "codacy"
 
-    def collect(self, config: StewardConfig) -> ProviderSignalResult:
+    def collect(
+        self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS
+    ) -> ProviderSignalResult:
         owner, repository = config.github_repository.split("/", 1)
         issue_result = self._collect_issue_search(
             owner,
             repository,
             os.getenv("CODACY_API_TOKEN"),
+            max_items=max_items,
         )
         if issue_result.error is None:
             return issue_result
@@ -136,11 +145,13 @@ class CodacyProvider:
         owner: str,
         repository: str,
         token: str | None,
+        *,
+        max_items: int,
     ) -> ProviderSignalResult:
         url = (
             f"https://{CODACY_API_HOST}/api/v3/analysis/organizations/gh/"
             f"{quote(owner, safe='')}/repositories/{quote(repository, safe='')}"
-            f"/issues/search?limit={MAX_SIGNAL_WORK_ITEMS}"
+            f"/issues/search?limit={max_items}"
         )
         headers = {"content-type": "application/json"}
         if token:
@@ -167,7 +178,7 @@ class CodacyProvider:
         ) as exc:
             return ProviderSignalResult(error=str(exc))
         data = payload.get("data", []) if isinstance(payload, dict) else []
-        items = [_codacy_item(item) for item in data[:MAX_SIGNAL_WORK_ITEMS]]
+        items = [_codacy_item(item) for item in data[:max_items]]
         return ProviderSignalResult(
             items=items,
             summary=_summary_from_items("Codacy", items),

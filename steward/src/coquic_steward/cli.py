@@ -150,6 +150,21 @@ def timeline(task_id: str, limit: int = 100) -> None:
         typer.echo(f"{event.created_at.isoformat()}\t{event.kind}\t{event.message}")
 
 
+@app.command("fetch-signals")
+def fetch_signals(
+    provider: list[str] = typer.Option(
+        None,
+        "--provider",
+        "-p",
+        help="Signal provider to force-fetch; repeat for multiple providers.",
+    ),
+) -> None:
+    store, config = _context()
+    selected = _selected_providers(provider, config.enabled_signals)
+    wakeup = store.request_wakeup("signal.fetch", {"providers": selected})
+    typer.echo(f"requested {wakeup.id} providers={','.join(selected)}")
+
+
 @app.command("audit-invariants")
 def audit_invariants() -> None:
     store, _ = _context()
@@ -248,6 +263,22 @@ def _enqueue(spec: TaskSpec, dedupe_key: str) -> None:
     store, _ = _context()
     record, created = store.add_task(spec, dedupe_key=dedupe_key)
     typer.echo(f"{'enqueued' if created else 'duplicate'} {record.id}")
+
+
+def _selected_providers(values: list[str] | None, enabled: tuple[str, ...]) -> list[str]:
+    if not values:
+        return list(enabled)
+    enabled_set = set(enabled)
+    selected: list[str] = []
+    for value in values:
+        if value not in enabled_set:
+            choices = ", ".join(enabled)
+            raise typer.BadParameter(
+                f"unknown provider {value!r}; expected one of: {choices}"
+            )
+        if value not in selected:
+            selected.append(value)
+    return selected
 
 
 def _selected_item_ids(

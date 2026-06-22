@@ -28,6 +28,7 @@ from coquic_steward.core.models import (
     Priority,
     ProjectSignals,
     Risk,
+    SchedulerWakeupStatus,
     SignalFetchRun,
     SignalFetchStatus,
     SignalItem,
@@ -58,8 +59,13 @@ from coquic_steward.orchestration import (
     StewardPreflightError,
     acquire_daemon_lock,
 )
-from coquic_steward.orchestration.daemon import DAEMON_EVENT_TASK_ID
-from coquic_steward.orchestration.daemon import status_stale_minutes
+from coquic_steward.orchestration.daemon import (
+    DAEMON_EVENT_TASK_ID,
+    due_provider_names,
+    scheduler_state,
+    status_stale_minutes,
+    wait_for_scheduler_event,
+)
 from coquic_steward.planning import (
     CodexPlanner,
     PLANNER_SYSTEM_PROMPT,
@@ -97,6 +103,9 @@ def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
     assert config.integration_mode == "local-only"
     assert config.local_only is False
     assert config.enabled_signals == ("github-actions", "code-scanning", "codacy")
+    assert config.signal_providers["github-actions"].poll_interval_minutes == 30
+    assert config.signal_providers["code-scanning"].poll_interval_minutes == 360
+    assert config.signal_providers["codacy"].poll_interval_minutes == 360
 
 
 def test_config_selects_enabled_signals(repo: Path) -> None:
@@ -115,6 +124,34 @@ enabled = ["codacy"]
     config = load_config(repo_root=repo, config_path=config_path)
 
     assert config.enabled_signals == ("codacy",)
+
+
+def test_config_reads_signal_provider_polling(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.signals]
+enabled = ["codacy"]
+
+[steward.signals.codacy]
+poll_interval_minutes = 720
+error_retry_minutes = 45
+suppression_hours = 12
+max_items = 25
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(repo_root=repo, config_path=config_path)
+    provider = config.signal_providers["codacy"]
+
+    assert provider.poll_interval_minutes == 720
+    assert provider.error_retry_minutes == 45
+    assert provider.suppression_hours == 12
+    assert provider.max_items == 25
 
 
 def test_config_reads_review_timeout_limit(repo: Path) -> None:
@@ -406,6 +443,70 @@ def test_store_tracks_signal_items_independently(config: StewardConfig) -> None:
     assert duplicate_created is False
     assert duplicate.id == item.id
     assert [pending.id for pending in store.pending_signal_items()] == ["wi-codacy-1"]
+
+
+def test_store_records_scheduler_wakeups_for_actionable_changes(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, created = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    item, item_created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="wi-codacy-1",
+            title="Open Codacy finding",
+        )
+    )
+
+    assert created
+    assert item_created
+    wakeups = store.pending_wakeups()
+    assert [wakeup.reason for wakeup in wakeups] == [
+        "task.created",
+        "signal.pending",
+    ]
+    assert wakeups[0].data["task_id"] == task.id
+    assert wakeups[1].data["signal_item_id"] == item.id
+
+    assert store.consume_wakeups([wakeup.id for wakeup in wakeups]) == 2
+    assert store.pending_wakeups() == []
+    assert [wakeup.status for wakeup in store.recent_wakeups()] == [
+        SchedulerWakeupStatus.consumed,
+        SchedulerWakeupStatus.consumed,
+    ]
+
+
+def test_store_suppresses_recent_duplicate_signal_fingerprints(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    first, created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        )
+    )
+    second, duplicate_created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-2",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        )
+    )
+
+    assert created
+    assert not duplicate_created
+    assert second.id == first.id
+    assert len(store.pending_signal_items()) == 1
 
 
 def test_store_marks_signal_items_planned(config: StewardConfig) -> None:
@@ -877,12 +978,12 @@ def test_daemon_streams_debug_lines_to_logger(
     result = StewardDaemon(config, store, logger=lines.append).tick(dispatch=False)
 
     assert result.enqueued == 0
-    assert any("tick start" in line for line in lines)
+    assert any("cycle start" in line for line in lines)
     assert any("planner start" in line for line in lines)
     assert any("planner finish" in line for line in lines)
     assert any("verifier=0/0" in line for line in lines)
     assert any("transcript=" in line for line in lines)
-    assert any("tick finish" in line for line in lines)
+    assert any("cycle finish" in line for line in lines)
 
 
 def test_daemon_replans_after_successful_dispatch(
@@ -999,6 +1100,54 @@ def test_daemon_dispatches_newly_queued_integration_continuation(
     assert store.get(source.id).status == TaskStatus.succeeded
 
 
+def test_daemon_dispatch_skips_full_integration_lane_for_source_capacity(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "limits": StewardLimits(max_active_tasks=1, worker_timeout_minutes=1),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    active_integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="active integration",
+            prompt="integrate",
+        )
+    )
+    store.update_status(active_integration.id, TaskStatus.running, "started")
+    queued_integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="queued integration",
+            prompt="integrate",
+        )
+    )
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    ran: list[str] = []
+
+    def fake_run(task_id: str) -> bool:
+        ran.append(task_id)
+        store.update_status(task_id, TaskStatus.succeeded, "done")
+        return True
+
+    daemon = StewardDaemon(config, store)
+    monkeypatch.setattr(daemon.executor, "run_task", fake_run)
+
+    result = daemon.tick(plan=False, dispatch=True)
+
+    assert result.dispatched == 1
+    assert ran == [source.id]
+    assert store.get(queued_integration.id).status == TaskStatus.queued
+
+
 def test_daemon_skips_signal_fetch_when_active_capacity_is_full(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -1035,6 +1184,111 @@ def test_daemon_skips_signal_fetch_when_active_capacity_is_full(
     assert called is False
     assert result.signal_fetches == 0
     assert result.enqueued == 0
+
+
+def test_daemon_local_wakeup_does_not_fetch_due_providers(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    store.request_wakeup("task.status", {"task_id": "task-1"})
+    called = False
+
+    def fake_collect(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_items",
+        fake_collect,
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        lambda *_args: PlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=config.transcripts_dir / "planner" / "codex.jsonl",
+        ),
+    )
+
+    result = StewardDaemon(config, store).run_cycle(dispatch=False, reason="wakeup")
+
+    assert called is False
+    assert result.signal_fetches == 0
+    assert store.pending_wakeups() == []
+
+
+def test_daemon_fetches_selected_providers_from_force_wakeup(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    store.request_wakeup("signal.fetch", {"providers": ["codacy"]})
+    fetched: list[list[str]] = []
+
+    def fake_collect(_config, *, provider_names=None):
+        fetched.append(list(provider_names or []))
+        return []
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_items",
+        fake_collect,
+    )
+
+    result = StewardDaemon(config, store).run_cycle(dispatch=False, reason="wakeup")
+
+    assert fetched == [["codacy"]]
+    assert result.signal_fetches == 0
+    assert store.pending_wakeups() == []
+
+
+def test_scheduler_state_tracks_provider_due_times(config: StewardConfig) -> None:
+    store = TaskStore(config.db_path)
+
+    initial = scheduler_state(config, store)
+
+    assert due_provider_names(config, store) == list(config.enabled_signals)
+    assert all(provider.due for provider in initial.providers)
+
+    store.add_signal_fetch_run(
+        SignalFetchRun(
+            provider="codacy",
+            status=SignalFetchStatus.ok,
+            item_count=0,
+            new_item_count=0,
+            summary="none",
+        )
+    )
+    state = scheduler_state(config, store)
+    codacy = next(provider for provider in state.providers if provider.provider == "codacy")
+
+    assert codacy.due is False
+    assert codacy.poll_interval_minutes == 360
+    assert codacy.next_due_at > codacy.last_fetch_at
+
+
+def test_wait_for_scheduler_event_returns_due_providers(config: StewardConfig) -> None:
+    store = TaskStore(config.db_path)
+
+    trigger = wait_for_scheduler_event(config, store)
+
+    assert trigger.reason == "provider-due"
+    assert trigger.providers == list(config.enabled_signals)
+
+
+def test_wait_for_scheduler_event_prioritizes_pending_wakeup(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    store.request_wakeup("task.created")
+
+    trigger = wait_for_scheduler_event(config, store)
+
+    assert trigger.reason == "wakeup"
+    assert trigger.providers == []
 
 
 def test_daemon_plans_bounded_signal_item_inbox(
@@ -3983,6 +4237,7 @@ def test_web_health_and_dashboard(config: StewardConfig, monkeypatch) -> None:
     assert "line-tail" in features
     assert "signal-inbox" in features
     assert "signal-items-v2" in features
+    assert "scheduler-v1" in features
     dashboard = client.get("/", follow_redirects=False)
     assert dashboard.status_code == 307
     assert dashboard.headers["location"] == "http://127.0.0.1:3000"
@@ -3990,6 +4245,13 @@ def test_web_health_and_dashboard(config: StewardConfig, monkeypatch) -> None:
     assert payload["tasks"][0]["spec"]["id"] == task.id
     assert payload["kinds"]
     assert payload["workers"]
+    assert payload["scheduler"]["source_queued"] == 1
+    assert payload["scheduler"]["source_capacity"] == config.limits.max_active_tasks
+    assert [provider["provider"] for provider in payload["scheduler"]["providers"]] == [
+        "github-actions",
+        "code-scanning",
+        "codacy",
+    ]
 
 
 def test_web_state_returns_signal_inbox_without_fetching(
@@ -4175,8 +4437,11 @@ def test_web_run_task_action_respects_daemon_lock(
     assert store.get(task.id).status == TaskStatus.queued
 
 
-def test_web_tick_action_respects_daemon_lock(config: StewardConfig, monkeypatch) -> None:
+def test_web_tick_action_requests_scheduler_wakeup(
+    config: StewardConfig, monkeypatch
+) -> None:
     monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
     app = create_app()
     from fastapi.testclient import TestClient
 
@@ -4186,7 +4451,33 @@ def test_web_tick_action_respects_daemon_lock(config: StewardConfig, monkeypatch
             "/api/actions/tick", json={"plan": False, "dispatch": False}
         )
 
-    assert response.status_code == 409
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["wakeup"]["reason"] == "scheduler.manual"
+    wakeup = store.pending_wakeups()[0]
+    assert wakeup.reason == "scheduler.manual"
+    assert wakeup.data["plan"] is False
+    assert wakeup.data["dispatch"] is False
+
+
+def test_web_force_signal_fetch_requests_provider_wakeup(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    response = client.post("/api/actions/fetch-signals", json={"providers": ["codacy"]})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["wakeup"]["reason"] == "signal.fetch"
+    wakeup = store.pending_wakeups()[0]
+    assert wakeup.reason == "signal.fetch"
+    assert wakeup.data["providers"] == ["codacy"]
 
 
 def test_web_validation_log_endpoint(config: StewardConfig, monkeypatch) -> None:

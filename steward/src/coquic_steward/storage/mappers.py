@@ -7,6 +7,7 @@ from typing import Any
 
 from ..core.models import (
     Event,
+    SchedulerWakeup,
     SignalFetchRun,
     SignalItem,
     TaskIteration,
@@ -16,6 +17,7 @@ from ..core.models import (
 )
 from .schema import (
     EventRow,
+    SchedulerWakeupRow,
     SignalFetchRunRow,
     SignalItemRow,
     TaskIterationRow,
@@ -395,6 +397,34 @@ def row_to_signal_fetch_run(row: SignalFetchRunRow) -> SignalFetchRun:
         has_more=row.has_more,
         error=row.error,
         summary=row.summary,
+    )
+
+
+def scheduler_wakeup_to_row(
+    wakeup: SchedulerWakeup, *, path_codec: PathCodec
+) -> SchedulerWakeupRow:
+    return SchedulerWakeupRow(
+        id=wakeup.id,
+        reason=wakeup.reason,
+        status=str(wakeup.status),
+        created_at=_dump_datetime(wakeup.created_at),
+        consumed_at=_dump_datetime(wakeup.consumed_at)
+        if wakeup.consumed_at
+        else None,
+        data_json=_dump_json(wakeup.data, path_codec=path_codec) or "{}",
+    )
+
+
+def row_to_scheduler_wakeup(
+    row: SchedulerWakeupRow, *, path_codec: PathCodec
+) -> SchedulerWakeup:
+    return SchedulerWakeup(
+        id=row.id,
+        reason=row.reason,
+        status=row.status,
+        created_at=_load_datetime(row.created_at),
+        consumed_at=_load_datetime(row.consumed_at) if row.consumed_at else None,
+        data=_loads_dict(row.data_json, path_codec=path_codec),
     )
 
 

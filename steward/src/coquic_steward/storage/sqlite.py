@@ -22,6 +22,8 @@ from ..core.lifecycle import (
 from ..core.models import (
     ACTIVE_STATUSES,
     Event,
+    SchedulerWakeup,
+    SchedulerWakeupStatus,
     SignalFetchRun,
     SignalItem,
     SignalItemStatus,
@@ -30,7 +32,9 @@ from ..core.models import (
     TaskSpec,
     TaskStatus,
     ValidationResult,
+    WorkerKind,
     WorkerResult,
+    new_signal_item_id,
     utc_now,
 )
 from .mappers import (
@@ -38,10 +42,12 @@ from .mappers import (
     event_to_row,
     iteration_to_row,
     row_to_event,
+    row_to_scheduler_wakeup,
     row_to_signal_fetch_run,
     row_to_signal_item,
     row_to_iteration,
     row_to_task,
+    scheduler_wakeup_to_row,
     signal_fetch_run_to_row,
     signal_item_to_row,
     task_to_row,
@@ -52,6 +58,7 @@ from .mappers import (
 from .schema import (
     Base,
     EventRow,
+    SchedulerWakeupRow,
     SignalFetchRunRow,
     SignalItemRow,
     TaskIterationRow,
@@ -118,6 +125,10 @@ class SQLiteTaskStore:
                 if existing is None:
                     raise
                 return existing, False
+        self.request_wakeup(
+            "task.created",
+            {"task_id": record.id, "kind": str(record.spec.kind)},
+        )
         return record, True
 
     def get(self, task_id: str) -> TaskRecord:
@@ -172,6 +183,14 @@ class SQLiteTaskStore:
                     path_codec=self.path_codec,
                 )
             )
+        self.request_wakeup(
+            "task.status",
+            {
+                "task_id": task_id,
+                "status": transition.status.value,
+                "phase": transition.phase.value,
+            },
+        )
         return self.get(task_id)
 
     def start_worker(self, task_id: str, summary: str) -> TaskRecord:
@@ -233,32 +252,46 @@ class SQLiteTaskStore:
                 for row in session.scalars(statement).all()
             ]
 
+    def latest_signal_fetch_run(self, provider: str) -> SignalFetchRun | None:
+        with Session(self.engine) as session:
+            row = session.scalar(
+                select(SignalFetchRunRow)
+                .where(SignalFetchRunRow.provider == provider)
+                .order_by(SignalFetchRunRow.completed_at.desc())
+                .limit(1)
+            )
+            return row_to_signal_fetch_run(row) if row is not None else None
+
     def add_signal_item(self, item: SignalItem) -> tuple[SignalItem, bool]:
         now = utc_now()
         item = item.model_copy(
             update={"created_at": item.created_at, "updated_at": now}
         )
-        active_item_statuses = {
-            SignalItemStatus.pending.value,
-            SignalItemStatus.planned.value,
-        }
         with Session(self.engine) as session, session.begin():
             existing = session.scalar(
                 select(SignalItemRow)
                 .where(
                     SignalItemRow.provider == item.provider,
                     SignalItemRow.fingerprint == item.fingerprint,
-                    SignalItemRow.status.in_(active_item_statuses),
                 )
-                .order_by(SignalItemRow.created_at.desc())
+                .order_by(SignalItemRow.updated_at.desc())
                 .limit(1)
             )
             if existing is not None:
-                existing.updated_at = now.isoformat()
-                if item.source_fetch_id:
-                    existing.source_fetch_id = item.source_fetch_id
-                return row_to_signal_item(existing, path_codec=self.path_codec), False
+                if _signal_row_suppressed(existing, session):
+                    existing.updated_at = now.isoformat()
+                    if item.source_fetch_id:
+                        existing.source_fetch_id = item.source_fetch_id
+                    return (
+                        row_to_signal_item(existing, path_codec=self.path_codec),
+                        False,
+                    )
+                item = item.model_copy(update={"id": new_signal_item_id()})
             session.add(signal_item_to_row(item, path_codec=self.path_codec))
+        self.request_wakeup(
+            "signal.pending",
+            {"signal_item_id": item.id, "provider": item.provider},
+        )
         return item, True
 
     def add_signal_items(self, items: list[SignalItem]) -> tuple[list[SignalItem], int]:
@@ -308,6 +341,69 @@ class SQLiteTaskStore:
                 row_to_signal_item(row, path_codec=self.path_codec)
                 for row in session.scalars(statement).all()
             ]
+
+    def request_wakeup(
+        self, reason: str, data: dict[str, object] | None = None
+    ) -> SchedulerWakeup:
+        wakeup = SchedulerWakeup(reason=reason, data=data or {})
+        with Session(self.engine) as session, session.begin():
+            session.add(scheduler_wakeup_to_row(wakeup, path_codec=self.path_codec))
+        return wakeup
+
+    def pending_wakeups(self, *, limit: int | None = None) -> list[SchedulerWakeup]:
+        statement = (
+            select(SchedulerWakeupRow)
+            .where(SchedulerWakeupRow.status == SchedulerWakeupStatus.pending.value)
+            .order_by(SchedulerWakeupRow.created_at)
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        with Session(self.engine) as session:
+            return [
+                row_to_scheduler_wakeup(row, path_codec=self.path_codec)
+                for row in session.scalars(statement).all()
+            ]
+
+    def recent_wakeups(self, *, limit: int = 20) -> list[SchedulerWakeup]:
+        statement = (
+            select(SchedulerWakeupRow)
+            .order_by(SchedulerWakeupRow.created_at.desc())
+            .limit(limit)
+        )
+        with Session(self.engine) as session:
+            return [
+                row_to_scheduler_wakeup(row, path_codec=self.path_codec)
+                for row in session.scalars(statement).all()
+            ]
+
+    def consume_wakeups(self, wakeup_ids: list[str]) -> int:
+        if not wakeup_ids:
+            return 0
+        now = utc_now().isoformat()
+        with Session(self.engine) as session, session.begin():
+            rows = session.scalars(
+                select(SchedulerWakeupRow).where(
+                    SchedulerWakeupRow.id.in_(wakeup_ids),
+                    SchedulerWakeupRow.status == SchedulerWakeupStatus.pending.value,
+                )
+            ).all()
+            for row in rows:
+                row.status = SchedulerWakeupStatus.consumed.value
+                row.consumed_at = now
+            return len(rows)
+
+    def prune_consumed_wakeups(self, *, older_than_days: int = 7) -> int:
+        cutoff = (utc_now() - timedelta(days=older_than_days)).isoformat()
+        with Session(self.engine) as session, session.begin():
+            rows = session.scalars(
+                select(SchedulerWakeupRow).where(
+                    SchedulerWakeupRow.status == SchedulerWakeupStatus.consumed.value,
+                    SchedulerWakeupRow.consumed_at < cutoff,
+                )
+            ).all()
+            for row in rows:
+                session.delete(row)
+            return len(rows)
 
     def mark_signal_items_planned(
         self,
@@ -540,6 +636,46 @@ class SQLiteTaskStore:
                 or 0
             )
 
+    def source_active_count(self) -> int:
+        with Session(self.engine) as session:
+            return _count_tasks(
+                session,
+                statuses=[
+                    TaskStatus.running.value,
+                    TaskStatus.reviewing.value,
+                    TaskStatus.integrating.value,
+                ],
+                integration=False,
+            )
+
+    def source_queued_count(self) -> int:
+        with Session(self.engine) as session:
+            return _count_tasks(
+                session,
+                statuses=[TaskStatus.queued.value],
+                integration=False,
+            )
+
+    def integration_active_count(self) -> int:
+        with Session(self.engine) as session:
+            return _count_tasks(
+                session,
+                statuses=[
+                    TaskStatus.running.value,
+                    TaskStatus.reviewing.value,
+                    TaskStatus.integrating.value,
+                ],
+                integration=True,
+            )
+
+    def integration_queued_count(self) -> int:
+        with Session(self.engine) as session:
+            return _count_tasks(
+                session,
+                statuses=[TaskStatus.queued.value],
+                integration=True,
+            )
+
     def events(self, task_id: str, *, limit: int | None = None) -> list[Event]:
         statement = (
             select(EventRow)
@@ -745,6 +881,14 @@ class SQLiteTaskStore:
                 connection.exec_driver_sql(
                     "ALTER TABLE validations ADD COLUMN iteration INTEGER"
                 )
+            wakeup_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(scheduler_wakeups)"
+                )
+            }
+            if not wakeup_columns:
+                Base.metadata.create_all(connection)
 
     def _migrate_portable_paths(self) -> None:
         task_columns = (
@@ -780,6 +924,8 @@ class SQLiteTaskStore:
                 row.payload_json = self._portable_json(row.payload_json)
                 if row.location_json:
                     row.location_json = self._portable_json(row.location_json)
+            for row in session.scalars(select(SchedulerWakeupRow)).all():
+                row.data_json = self._portable_json(row.data_json)
 
     def _portable_path(self, value: str | None) -> str | None:
         if self.path_codec.is_portable(value):
@@ -798,6 +944,32 @@ class SQLiteTaskStore:
 
 def _task_query() -> Select[tuple[TaskRow]]:
     return select(TaskRow).options(selectinload(TaskRow.validations))
+
+
+def _count_tasks(
+    session: Session, *, statuses: list[str], integration: bool
+) -> int:
+    statement = select(func.count()).select_from(TaskRow).where(TaskRow.status.in_(statuses))
+    if integration:
+        statement = statement.where(TaskRow.worker == WorkerKind.integration_manager.value)
+    else:
+        statement = statement.where(TaskRow.worker != WorkerKind.integration_manager.value)
+    return session.scalar(statement) or 0
+
+
+def _signal_row_suppressed(row: SignalItemRow, session: Session) -> bool:
+    if row.status == SignalItemStatus.pending.value:
+        return True
+    if row.status != SignalItemStatus.planned.value:
+        return False
+    if row.planned_task_id:
+        task = session.get(TaskRow, row.planned_task_id)
+        if task is not None and task.status in {
+            status.value for status in ACTIVE_STATUSES
+        }:
+            return True
+    cutoff = utc_now() - timedelta(hours=24)
+    return datetime.fromisoformat(row.updated_at) >= cutoff
 
 
 def _transition_for_status(status: TaskStatus, summary: str) -> TaskTransition:

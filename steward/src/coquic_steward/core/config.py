@@ -13,6 +13,14 @@ from .models import IntegrationMode
 VALID_INTEGRATION_MODES = {mode.value for mode in IntegrationMode}
 DEFAULT_ENABLED_SIGNALS = ("github-actions", "code-scanning", "codacy")
 DEFAULT_COQUIC_HOME = "~/.coquic"
+DEFAULT_SIGNAL_POLL_INTERVAL_MINUTES = {
+    "github-actions": 30,
+    "code-scanning": 360,
+    "codacy": 360,
+}
+DEFAULT_SIGNAL_ERROR_RETRY_MINUTES = 30
+DEFAULT_SIGNAL_SUPPRESSION_HOURS = 24
+DEFAULT_SIGNAL_MAX_ITEMS = 12
 
 
 @dataclass(frozen=True)
@@ -23,6 +31,14 @@ class StewardLimits:
     review_timeout_minutes: int = 20
     validation_timeout_minutes: int = 30
     stale_task_minutes: int | None = None
+
+
+@dataclass(frozen=True)
+class SignalProviderConfig:
+    poll_interval_minutes: int
+    error_retry_minutes: int = DEFAULT_SIGNAL_ERROR_RETRY_MINUTES
+    suppression_hours: int = DEFAULT_SIGNAL_SUPPRESSION_HOURS
+    max_items: int = DEFAULT_SIGNAL_MAX_ITEMS
 
 
 @dataclass(frozen=True)
@@ -38,7 +54,8 @@ class StewardConfig:
     main_branch: str = "main"
     github_repository: str = "minhuw/coquic"
     enabled_signals: tuple[str, ...] = DEFAULT_ENABLED_SIGNALS
-    daemon_poll_interval_sec: int = 300
+    signal_providers: dict[str, SignalProviderConfig] = field(default_factory=dict)
+    scheduler_wait_interval_sec: float = 1.0
     limits: StewardLimits = field(default_factory=StewardLimits)
 
     def __post_init__(self) -> None:
@@ -48,6 +65,10 @@ class StewardConfig:
                 f"invalid integration_mode {self.integration_mode!r}; expected {choices}"
             )
         _validate_github_repository(self.github_repository)
+        providers = dict(self.signal_providers)
+        for name in self.enabled_signals:
+            providers.setdefault(name, default_signal_provider_config(name))
+        object.__setattr__(self, "signal_providers", providers)
 
     @property
     def coquic_home(self) -> Path:
@@ -111,6 +132,11 @@ def load_config(
     steward = data.get("steward", data)
     limits_data = steward.get("limits", {})
     signals_data = steward.get("signals", {})
+    enabled_signals = _string_tuple(
+        signals_data.get(
+            "enabled", steward.get("enabled_signals", DEFAULT_ENABLED_SIGNALS)
+        )
+    )
     config = StewardConfig(
         repo_root=root,
         codex_bin=_resolve_executable(str(steward.get("codex_bin", "codex"))),
@@ -128,12 +154,11 @@ def load_config(
         git_remote=str(steward.get("git_remote", "origin")),
         main_branch=str(steward.get("main_branch", "main")),
         github_repository=str(steward.get("github_repository", "minhuw/coquic")),
-        enabled_signals=_string_tuple(
-            signals_data.get(
-                "enabled", steward.get("enabled_signals", DEFAULT_ENABLED_SIGNALS)
-            )
+        enabled_signals=enabled_signals,
+        signal_providers=_signal_provider_configs(signals_data, enabled_signals),
+        scheduler_wait_interval_sec=float(
+            steward.get("scheduler_wait_interval_sec", 1.0)
         ),
-        daemon_poll_interval_sec=int(steward.get("daemon_poll_interval_sec", 300)),
         limits=StewardLimits(
             max_active_tasks=int(limits_data.get("max_active_tasks", 4)),
             max_main_pushes_per_day=int(limits_data.get("max_main_pushes_per_day", 10)),
@@ -198,6 +223,31 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     if isinstance(value, list | tuple):
         return tuple(str(part).strip() for part in value if str(part).strip())
     raise ValueError(f"expected string or list of strings, got {type(value).__name__}")
+
+
+def _signal_provider_configs(
+    signals_data: object, enabled: tuple[str, ...]
+) -> dict[str, SignalProviderConfig]:
+    data = signals_data if isinstance(signals_data, dict) else {}
+    providers: dict[str, SignalProviderConfig] = {}
+    for name in enabled:
+        raw = data.get(name, {}) if isinstance(data.get(name, {}), dict) else {}
+        default = default_signal_provider_config(name)
+        providers[name] = SignalProviderConfig(
+            poll_interval_minutes=int(raw.get("poll_interval_minutes", default.poll_interval_minutes)),
+            error_retry_minutes=int(
+                raw.get("error_retry_minutes", default.error_retry_minutes)
+            ),
+            suppression_hours=int(raw.get("suppression_hours", default.suppression_hours)),
+            max_items=int(raw.get("max_items", default.max_items)),
+        )
+    return providers
+
+
+def default_signal_provider_config(name: str) -> SignalProviderConfig:
+    return SignalProviderConfig(
+        poll_interval_minutes=DEFAULT_SIGNAL_POLL_INTERVAL_MINUTES.get(name, 360),
+    )
 
 
 def _validate_github_repository(value: str) -> None:

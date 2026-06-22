@@ -95,7 +95,21 @@ def diagnostics_for_paths(
 
 
 def _transcript_facts(path: Path | None) -> dict[str, Any]:
-    facts: dict[str, Any] = {
+    facts = _empty_transcript_facts()
+    if path is None or not path.exists():
+        return facts
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        facts["last_error"] = str(exc)
+        return facts
+    for line in lines:
+        _record_transcript_line(facts, line)
+    return facts
+
+
+def _empty_transcript_facts() -> dict[str, Any]:
+    return {
         "event_count": 0,
         "error_count": 0,
         "last_event_type": "",
@@ -105,58 +119,68 @@ def _transcript_facts(path: Path | None) -> dict[str, Any]:
         "last_output": "",
         "thread_id": None,
     }
-    if path is None or not path.exists():
-        return facts
+
+
+def _record_transcript_line(facts: dict[str, Any], line: str) -> None:
+    if not line.strip():
+        return
+    facts["event_count"] += 1
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        facts["last_error"] = str(exc)
-        return facts
-    for line in lines:
-        if not line.strip():
-            continue
-        facts["event_count"] += 1
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            facts["last_output"] = line[-2000:]
-            continue
-        if not isinstance(event, dict):
-            continue
-        event_type = str(event.get("type") or "")
-        if event_type:
-            facts["last_event_type"] = event_type
-        if isinstance(event.get("thread_id"), str):
-            facts["thread_id"] = event["thread_id"]
-        if event_type == "stderr":
-            text = str(event.get("text") or event.get("message") or "").strip()
-            if text:
-                facts["error_count"] += 1
-                facts["last_error"] = text[-2000:]
-            continue
-        item = event.get("item")
-        if isinstance(item, dict):
-            item_type = str(item.get("type") or "")
-            item_status = str(item.get("status") or "")
-            if item_type:
-                facts["last_item_type"] = item_type
-            if item_status:
-                facts["last_item_status"] = item_status
-            if item_type == "error":
-                message = str(item.get("message") or item.get("text") or "").strip()
-                if message:
-                    facts["error_count"] += 1
-                    facts["last_error"] = message[-2000:]
-            output = str(
-                item.get("aggregated_output")
-                or item.get("output")
-                or item.get("text")
-                or item.get("message")
-                or ""
-            ).strip()
-            if output:
-                facts["last_output"] = output[-2000:]
-    return facts
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        facts["last_output"] = line[-2000:]
+        return
+    if isinstance(event, dict):
+        _record_transcript_event(facts, event)
+
+
+def _record_transcript_event(facts: dict[str, Any], event: dict[str, Any]) -> None:
+    event_type = str(event.get("type") or "")
+    if event_type:
+        facts["last_event_type"] = event_type
+    if isinstance(event.get("thread_id"), str):
+        facts["thread_id"] = event["thread_id"]
+    if event_type == "stderr":
+        _record_stderr_event(facts, event)
+        return
+    item = event.get("item")
+    if isinstance(item, dict):
+        _record_transcript_item(facts, item)
+
+
+def _record_stderr_event(facts: dict[str, Any], event: dict[str, Any]) -> None:
+    text = _first_text(event, ("text", "message"))
+    if text:
+        _record_transcript_error(facts, text)
+
+
+def _record_transcript_item(facts: dict[str, Any], item: dict[str, Any]) -> None:
+    item_type = str(item.get("type") or "")
+    item_status = str(item.get("status") or "")
+    if item_type:
+        facts["last_item_type"] = item_type
+    if item_status:
+        facts["last_item_status"] = item_status
+    if item_type == "error":
+        message = _first_text(item, ("message", "text"))
+        if message:
+            _record_transcript_error(facts, message)
+    output = _first_text(item, ("aggregated_output", "output", "text", "message"))
+    if output:
+        facts["last_output"] = output[-2000:]
+
+
+def _first_text(values: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = values.get(key)
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def _record_transcript_error(facts: dict[str, Any], message: str) -> None:
+    facts["error_count"] += 1
+    facts["last_error"] = message[-2000:]
 
 
 def _status_for_failure(

@@ -10,6 +10,7 @@ coverage/
 !site/next/app/coverage/
 .rag/
 .remote-ci/
+.coquic-steward/
 vibe-references/
 .fuzz/
 .envrc.local
@@ -21,6 +22,15 @@ rag/.pytest_cache/
 rag/.venv/
 rag/**/__pycache__/
 rag/**/*.egg-info/
+steward/.pytest_cache/
+steward/.venv/
+steward/**/__pycache__/
+steward/**/*.egg-info/
+steward/*.egg-info/
+steward/src/*.egg-info/
+steward/web-ui/.next/
+steward/web-ui/node_modules/
+steward/web-ui/tsconfig.tsbuildinfo
 compile_commands.json
 .bench-results/
 bench/*/target/

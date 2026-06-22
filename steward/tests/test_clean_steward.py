@@ -1585,8 +1585,6 @@ def test_codex_planner_persists_thread_id_on_failed_turn(
 
 
 def test_planner_schema_file_matches_expected_shape(config: StewardConfig) -> None:
-    import json
-
     path = planner_schema_path(config)
     schema = json.loads(path.read_text(encoding="utf-8"))
 
@@ -1609,16 +1607,12 @@ def test_planner_schema_file_matches_expected_shape(config: StewardConfig) -> No
 def test_planner_schema_matches_openai_structured_output_subset(
     config: StewardConfig,
 ) -> None:
-    import json
-
     schema = json.loads(planner_schema_path(config).read_text(encoding="utf-8"))
 
     assert_openai_structured_output_schema(schema)
 
 
 def test_review_schema_file_matches_expected_shape(config: StewardConfig) -> None:
-    import json
-
     path = review_schema_path(config)
     schema = json.loads(path.read_text(encoding="utf-8"))
 
@@ -1640,8 +1634,6 @@ def test_review_schema_file_matches_expected_shape(config: StewardConfig) -> Non
 def test_review_schema_matches_openai_structured_output_subset(
     config: StewardConfig,
 ) -> None:
-    import json
-
     schema = json.loads(review_schema_path(config).read_text(encoding="utf-8"))
 
     assert_openai_structured_output_schema(schema)
@@ -1650,8 +1642,6 @@ def test_review_schema_matches_openai_structured_output_subset(
 def test_commit_message_schema_matches_openai_structured_output_subset(
     config: StewardConfig,
 ) -> None:
-    import json
-
     schema = json.loads(commit_message_schema_path(config).read_text(encoding="utf-8"))
 
     assert schema["type"] == "object"

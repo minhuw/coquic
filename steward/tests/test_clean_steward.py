@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy.orm import Session
+from typer.testing import CliRunner
 
+from coquic_steward.cli import app
 from coquic_steward.agents import CodexRunner, render_worker_prompt
 from coquic_steward.agents.diagnostics import diagnostics_for_paths
 from coquic_steward.core.config import StewardConfig, StewardLimits, load_config
@@ -16,6 +18,7 @@ from coquic_steward.core.lifecycle import InvalidTaskTransition
 from coquic_steward.core.models import (
     IntegrationMode,
     Priority,
+    ProjectSignals,
     Risk,
     SignalItem,
     SignalItemStatus,
@@ -41,6 +44,28 @@ from coquic_steward.execution.review import (
     parse_review,
     review_approved,
     review_schema_path,
+)
+from coquic_steward.orchestration import (
+    DaemonAlreadyRunning,
+    StewardDaemon,
+    acquire_daemon_lock,
+)
+from coquic_steward.orchestration.daemon import DAEMON_EVENT_TASK_ID
+from coquic_steward.orchestration.daemon import status_stale_minutes
+from coquic_steward.planning import (
+    CodexPlanner,
+    PLANNER_SYSTEM_PROMPT,
+    PlannerRun,
+    PlanVerifier,
+    planner_schema_path,
+    planner_thread_path,
+    summarize_active_tasks,
+)
+from coquic_steward.planning.verifier import ActiveTaskSummary
+from coquic_steward.signals import (
+    CodacyProvider,
+    collect_signal_messages,
+    gather_signals,
 )
 from coquic_steward.storage import TaskStore
 from coquic_steward.storage.schema import (
@@ -2653,3 +2678,959 @@ def test_executor_uses_shared_revision_counter_for_validation_and_review(
     assert "worker-revision-1" not in call_log
 
 
+def test_daemon_tick_recovers_stale_task_before_planning(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.code_quality,
+            worker=WorkerKind.code_quality_janitor,
+            title="old",
+            prompt="old",
+        ),
+        dedupe_key="code-quality:current",
+    )
+    store.update_status(task.id, TaskStatus.running, "started")
+    make_task_stale(store, task.id)
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_messages",
+        lambda _config: [],
+    )
+    store.add_signal_item(
+        SignalItem(
+            id="wi-codeql-1",
+            provider="code-scanning",
+            kind="codeql-alert",
+            fingerprint="wi-codeql-1",
+            title="Open CodeQL findings",
+            evidence_id="codeql:open",
+        )
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        lambda _config, _signals, _active: PlannerRun(
+            planned=[
+                (
+                    TaskSpec(
+                        kind=TaskKind.code_quality,
+                        worker=WorkerKind.code_quality_janitor,
+                        title="new",
+                        prompt="new",
+                    ),
+                    "code-quality:current",
+                )
+            ],
+            accepted_count=1,
+            proposed_count=1,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=_config.transcripts_dir / "planner" / "codex.jsonl",
+            thread_id=None,
+        ),
+    )
+
+    result = StewardDaemon(config, store).tick(dispatch=False)
+
+    assert result.recovered == 1
+    assert result.enqueued == 1
+    assert store.get(task.id).status == TaskStatus.failed
+
+
+def test_daemon_recovers_stale_reviewing_task_with_review_timeout(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "limits": StewardLimits(
+                worker_timeout_minutes=120,
+                review_timeout_minutes=20,
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    reviewing, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="R", prompt="R")
+    )
+    running, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="W", prompt="W")
+    )
+    store.start_worker(reviewing.id, "worker started")
+    store.start_review(reviewing.id, "review started")
+    store.start_worker(running.id, "worker started")
+    make_task_stale(store, reviewing.id)
+    make_task_stale(store, running.id)
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_messages",
+        lambda _config: [],
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        lambda _config, _signals, _active: PlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=_config.transcripts_dir / "planner" / "codex.jsonl",
+            thread_id=None,
+        ),
+    )
+
+    result = StewardDaemon(config, store).tick(dispatch=False)
+
+    assert result.recovered == 1
+    assert store.get(reviewing.id).status == TaskStatus.failed
+    assert store.get(reviewing.id).summary == "stale active task recovered after 25 minutes"
+    assert store.get(running.id).status == TaskStatus.running
+    recovered = next(
+        event for event in store.events(reviewing.id) if event.kind == "task.recovered_stale"
+    )
+    assert recovered.data["previous_status"] == "reviewing"
+    assert recovered.data["stale_after_minutes"] == 25
+def test_status_stale_minutes_respects_explicit_stale_limit(config: StewardConfig) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "limits": StewardLimits(
+                worker_timeout_minutes=120,
+                review_timeout_minutes=20,
+                stale_task_minutes=7,
+            ),
+        }
+    )
+
+    assert status_stale_minutes(config) == {}
+
+
+def test_daemon_lock_rejects_second_owner(config: StewardConfig) -> None:
+    lock_path = config.state_dir / "daemon.lock"
+
+    with acquire_daemon_lock(config):
+        with pytest.raises(DaemonAlreadyRunning) as exc_info:
+            with acquire_daemon_lock(config):
+                raise AssertionError("second lock should not be acquired")
+
+    assert exc_info.value.lock_path == lock_path
+    assert "pid=" in exc_info.value.owner
+    with acquire_daemon_lock(config):
+        pass
+
+def test_daemon_logs_planner_lifecycle_event(
+    config: StewardConfig, monkeypatch, tmp_path: Path
+) -> None:
+    store = TaskStore(config.db_path)
+    inbox_item, _ = store.add_signal_item(
+        SignalItem(
+            id="wi-codeql-1",
+            provider="code-scanning",
+            kind="codeql-alert",
+            fingerprint="wi-codeql-1",
+            title="Open CodeQL findings",
+            evidence_id="codeql:open",
+            payload={"id": "wi-codeql-1", "provider": "code-scanning", "kind": "codeql-alert"},
+        )
+    )
+
+    def fake_run_planner(_config, _signals, _active):
+        assert [item.id for item in _signals.inbox_items] == [inbox_item.id]
+        return PlannerRun(
+            planned=[
+                (
+                    TaskSpec(
+                        kind=TaskKind.code_quality,
+                        worker=WorkerKind.code_quality_janitor,
+                        title="CodeQL",
+                        prompt="Fix current CodeQL alerts.",
+                        metadata={"selected_work_item_ids": [inbox_item.id]},
+                    ),
+                    "codeql:open",
+                )
+            ],
+            accepted_count=1,
+            proposed_count=2,
+            completed=True,
+            exit_code=0,
+            prompt_path=tmp_path / "planner.md",
+            transcript_path=tmp_path / "codex.jsonl",
+            thread_id="planner-thread-1",
+            consumed_item_ids=[inbox_item.id],
+            run_id="planner-run-1",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_messages",
+        lambda _config: [],
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        fake_run_planner,
+    )
+
+    result = StewardDaemon(config, store).tick(dispatch=False)
+
+    assert result.enqueued == 1
+    events = store.events(DAEMON_EVENT_TASK_ID)
+    assert [event.kind for event in events] == ["planner.started", "planner.finished"]
+    assert events[0].message == "planner turn started"
+    assert events[0].data["active_task_count"] == 0
+    assert events[0].data["inbox_item_ids"] == [inbox_item.id]
+    assert events[0].data["has_code_quality_findings"] is True
+    assert events[1].message == "accepted 1 of 2 proposed task(s)"
+    assert events[1].data["accepted_count"] == 1
+    assert events[1].data["proposed_count"] == 2
+    assert events[1].data["completed"] is True
+    assert events[1].data["exit_code"] == 0
+    assert events[1].data["prompt_path"].endswith("planner.md")
+    assert events[1].data["transcript_path"].endswith("codex.jsonl")
+    assert events[1].data["thread_id"] == "planner-thread-1"
+    assert events[1].data["consumed_item_ids"] == [inbox_item.id]
+    assert events[1].data["consumed_item_count"] == 1
+    assert store.list_signal_items()[0].status == SignalItemStatus.planned
+
+
+def test_daemon_streams_debug_lines_to_logger(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    lines: list[str] = []
+    store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy-issue",
+            fingerprint="wi-codacy-1",
+            title="Open Codacy findings",
+            evidence_id="codacy:open",
+        )
+    )
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_messages",
+        lambda _config: [],
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        lambda _config, _signals, _active: PlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=_config.transcripts_dir / "planner" / "codex.jsonl",
+            thread_id="planner-thread-1",
+        ),
+    )
+
+    result = StewardDaemon(config, store, logger=lines.append).tick(dispatch=False)
+
+    assert result.enqueued == 0
+    assert any("tick start" in line for line in lines)
+    assert any("planner start" in line for line in lines)
+    assert any("planner finish" in line for line in lines)
+    assert any("verifier=0/0" in line for line in lines)
+    assert any("transcript=" in line for line in lines)
+    assert any("tick finish" in line for line in lines)
+
+
+def test_daemon_replans_after_successful_dispatch(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    queued, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    planned_specs = [
+        [],
+        [
+            (
+                TaskSpec(
+                    kind=TaskKind.custom,
+                    worker=WorkerKind.custom,
+                    title="follow-up",
+                    prompt="follow-up",
+                ),
+                "follow-up",
+            )
+        ],
+    ]
+
+    def fake_plan(_config, _signals, _active):
+        planned = planned_specs.pop(0)
+        return PlannerRun(
+            planned=planned,
+            accepted_count=len(planned),
+            proposed_count=len(planned),
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=_config.transcripts_dir / "planner" / "codex.jsonl",
+            thread_id=None,
+        )
+
+    def fake_run(task_id: str) -> bool:
+        store.update_status(task_id, TaskStatus.succeeded, "done")
+        return True
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_messages",
+        lambda _config: [],
+    )
+    store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy-issue",
+            fingerprint="wi-codacy-1",
+            title="Open Codacy findings",
+            evidence_id="codacy:open",
+        )
+    )
+    monkeypatch.setattr("coquic_steward.orchestration.daemon.run_planner", fake_plan)
+    daemon = StewardDaemon(config, store)
+    monkeypatch.setattr(daemon.executor, "run_task", fake_run)
+
+    result = daemon.tick(plan=True, dispatch=True, max_dispatch=1)
+
+    assert result.dispatched == 1
+    assert result.planned == 1
+    assert result.enqueued == 1
+    assert store.get(queued.id).status == TaskStatus.succeeded
+
+
+def test_daemon_skips_signal_fetch_when_active_capacity_is_full(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "limits": StewardLimits(max_active_tasks=1, worker_timeout_minutes=1),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    active, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.update_status(active.id, TaskStatus.running, "started")
+    called = False
+
+    def fake_collect(_config):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_messages",
+        fake_collect,
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        lambda *_args: pytest.fail("planner should not run at capacity"),
+    )
+
+    result = StewardDaemon(config, store).tick(dispatch=False)
+
+    assert called is False
+    assert result.signal_fetches == 0
+    assert result.enqueued == 0
+
+
+def test_daemon_plans_bounded_signal_item_inbox(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "limits": StewardLimits(max_active_tasks=2, worker_timeout_minutes=1),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    for index in range(5):
+        store.add_signal_item(
+            SignalItem(
+                id=f"wi-codacy-{index}",
+                provider="codacy",
+                kind="codacy-issue",
+                fingerprint=f"wi-codacy-{index}",
+                title=f"Codacy finding {index}",
+                evidence_id="codacy:open",
+                payload={"id": f"wi-codacy-{index}", "kind": "codacy-issue"},
+            )
+        )
+    seen_batches: list[list[str]] = []
+
+    def fake_plan(_config, signals, _active):
+        batch = [item.id for item in signals.inbox_items]
+        seen_batches.append(batch)
+        selected = batch[0]
+        return PlannerRun(
+            planned=[
+                (
+                    TaskSpec(
+                        kind=TaskKind.code_quality,
+                        worker=WorkerKind.code_quality_janitor,
+                        title=f"Fix {selected}",
+                        prompt=f"Fix {selected}",
+                        metadata={"selected_work_item_ids": [selected]},
+                    ),
+                    f"codacy:{selected}",
+                )
+            ],
+            accepted_count=1,
+            proposed_count=1,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=_config.transcripts_dir / "planner" / "codex.jsonl",
+            thread_id=None,
+            consumed_item_ids=[selected],
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_messages",
+        lambda _config: [],
+    )
+    monkeypatch.setattr("coquic_steward.orchestration.daemon.run_planner", fake_plan)
+
+    result = StewardDaemon(config, store).tick(dispatch=False)
+
+    assert result.enqueued == 2
+    assert seen_batches == [
+        ["wi-codacy-0", "wi-codacy-1"],
+        ["wi-codacy-1", "wi-codacy-2"],
+    ]
+    planned = {
+        item.id for item in store.list_signal_items(status=SignalItemStatus.planned)
+    }
+    pending = {item.id for item in store.pending_signal_items()}
+    assert planned == {"wi-codacy-0", "wi-codacy-1"}
+    assert pending == {"wi-codacy-2", "wi-codacy-3", "wi-codacy-4"}
+
+def test_plan_verifier_rejects_broken_and_duplicate_specs() -> None:
+    signals = ProjectSignals(
+        github_repository="minhuw/coquic",
+        has_codeql_findings=True,
+        has_code_quality_findings=True,
+    )
+    active = [
+        ActiveTaskSummary(
+            id="task-1",
+            kind="code-quality",
+            worker="code-quality-janitor",
+            title="Active CodeQL fix",
+            status="running",
+            dedupe_key="codeql:open",
+        )
+    ]
+
+    planned = PlanVerifier().verify(
+        """
+        {
+          "tasks": [
+            {
+              "dedupe_key": "codeql:open",
+              "kind": "code-quality",
+              "worker": "code-quality-janitor",
+              "title": "Duplicate",
+              "prompt": "Fix the current CodeQL alerts.",
+              "priority": "high",
+              "risk": "medium",
+              "evidence": ["codeql:open"]
+            },
+            {
+              "dedupe_key": "bad",
+              "kind": "code-quality",
+              "worker": "code-quality-janitor",
+              "title": "Bad evidence",
+              "prompt": "Fix a made-up alert.",
+              "priority": "high",
+              "risk": "medium",
+              "evidence": ["codeql:missing"]
+            }
+          ]
+        }
+        """,
+        signals,
+        active,
+    )
+
+    assert planned == []
+
+
+def test_plan_verifier_accepts_valid_llm_proposal() -> None:
+    message = SignalMessage(
+        id="sig-codeql-1",
+        provider="code-scanning",
+        kind="codeql-open",
+        fingerprint="codeql:open",
+        title="Open CodeQL findings",
+        summary="CodeQL sampled 1 open finding(s)",
+        evidence_id="codeql:open",
+        payload={
+            "work_items": [
+                {
+                    "id": "wi-codeql-1",
+                    "provider": "code-scanning",
+                    "kind": "codeql-alert",
+                    "rule_id": "cpp/use-after-free",
+                    "file": "src/main.cpp",
+                    "line": 12,
+                }
+            ]
+        },
+    )
+    signals = ProjectSignals(
+        github_repository="minhuw/coquic",
+        has_codeql_findings=True,
+        has_code_quality_findings=True,
+        inbox_messages=[message],
+        work_items=message.payload["work_items"],
+    )
+
+    planned = PlanVerifier().verify(
+        """
+        {
+          "tasks": [
+            {
+              "dedupe_key": "codeql:open",
+              "kind": "code-quality",
+              "worker": "code-quality-janitor",
+              "title": "Fix current CodeQL alerts",
+              "prompt": "Fetch current CodeQL alerts, fix source issues, and validate locally.",
+              "priority": "high",
+              "risk": "medium",
+              "evidence": ["sig-codeql-1", "codeql:open"],
+              "metadata": {
+                "source_message_ids": ["sig-codeql-1"],
+                "selected_work_item_ids": ["wi-codeql-1"]
+              }
+            }
+          ]
+        }
+        """,
+        signals,
+        [],
+    )
+
+    assert len(planned) == 1
+    spec, dedupe_key = planned[0]
+    assert spec.kind == TaskKind.code_quality
+    assert dedupe_key == "codeql:open"
+    assert spec.metadata["evidence"] == ["sig-codeql-1", "codeql:open"]
+    assert spec.metadata["source_context"]["source_message_ids"] == ["sig-codeql-1"]
+    assert spec.metadata["source_context"]["selected_work_items"] == [
+        {
+            "id": "wi-codeql-1",
+            "provider": "code-scanning",
+            "kind": "codeql-alert",
+            "rule_id": "cpp/use-after-free",
+            "file": "src/main.cpp",
+            "line": 12,
+        }
+    ]
+
+
+def test_plan_verifier_accepts_item_backed_llm_proposal() -> None:
+    item = SignalItem(
+        id="wi-codeql-1",
+        provider="code-scanning",
+        kind="codeql-alert",
+        fingerprint="wi-codeql-1",
+        title="cpp/use-after-free in src/main.cpp:12",
+        summary="CodeQL sampled 1 open finding(s)",
+        evidence_id="codeql:open",
+        payload={
+            "id": "wi-codeql-1",
+            "provider": "code-scanning",
+            "kind": "codeql-alert",
+            "rule_id": "cpp/use-after-free",
+            "file": "src/main.cpp",
+            "line": 12,
+        },
+    )
+    message = SignalMessage(
+        id=item.id,
+        provider=item.provider,
+        kind="codeql-open",
+        fingerprint=item.fingerprint,
+        title=item.title,
+        summary=item.summary,
+        evidence_id=item.evidence_id,
+        payload={"work_items": [item.payload]},
+    )
+    signals = ProjectSignals(
+        github_repository="minhuw/coquic",
+        has_codeql_findings=True,
+        has_code_quality_findings=True,
+        inbox_messages=[message],
+        inbox_items=[item],
+        work_items=[item.payload],
+    )
+
+    verified = PlanVerifier().verify_plan(
+        """
+        {
+          "consumed_item_ids": ["wi-codeql-1"],
+          "tasks": [
+            {
+              "dedupe_key": "codeql:wi-codeql-1",
+              "kind": "code-quality",
+              "worker": "code-quality-janitor",
+              "title": "Fix cpp/use-after-free in src/main.cpp",
+              "prompt": "Fix the selected CodeQL finding and validate locally.",
+              "priority": "high",
+              "risk": "medium",
+              "evidence": ["wi-codeql-1", "codeql:open"],
+              "metadata": {
+                "source_message_ids": ["wi-codeql-1"],
+                "selected_work_item_ids": ["wi-codeql-1"]
+              }
+            }
+          ]
+        }
+        """,
+        signals,
+        [],
+    )
+
+    assert verified.consumed_item_ids == ["wi-codeql-1"]
+    assert len(verified.planned) == 1
+    spec, dedupe_key = verified.planned[0]
+    assert dedupe_key == "codeql:wi-codeql-1"
+    assert spec.metadata["source_context"]["selected_work_items"] == [item.payload]
+
+
+def test_plan_verifier_ignores_proposed_main_write_flags() -> None:
+    signals = ProjectSignals(
+        github_repository="minhuw/coquic",
+        has_codacy_findings=True,
+        has_code_quality_findings=True,
+    )
+
+    planned = PlanVerifier().verify(
+        """
+        {
+          "tasks": [
+            {
+              "dedupe_key": "codacy:open",
+              "kind": "code-quality",
+              "worker": "code-quality-janitor",
+              "title": "Fix current Codacy findings",
+              "prompt": "Fix the selected Codacy source-context findings and validate locally.",
+              "priority": "high",
+              "risk": "medium",
+              "evidence": ["codacy:open"],
+              "metadata": {},
+              "allow_main_write": true
+            }
+          ]
+        }
+        """,
+        signals,
+        [],
+    )
+
+    assert len(planned) == 1
+    assert planned[0][0].allow_main_write is False
+
+
+def test_codex_planner_prompt_includes_active_tasks(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    captured_prompt = tmp_path / "prompt.txt"
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" >> {tmp_path / 'args.txt'}\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        f"cat > {captured_prompt}\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        'printf \'{"tasks":[]}\\n\' > "$last"\n'
+        'printf \'{"type":"thread.started","thread_id":"planner-thread-1"}\\n\'\n'
+        'printf \'{"message":"{\\"tasks\\":[] }"}\\n\'\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    active, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.interop,
+            worker=WorkerKind.interop_doctor,
+            title="Debug failed interop run 100",
+            prompt="fix interop",
+        ),
+        dedupe_key="interop:100",
+    )
+
+    planned = CodexPlanner(config).plan(
+        ProjectSignals(
+            github_repository="minhuw/coquic",
+            failed_interop_run_id="100",
+            failed_workflow_run_id="100",
+            failed_workflow_name="Interop",
+        ),
+        [active],
+    )
+
+    assert planned == []
+    prompt = captured_prompt.read_text(encoding="utf-8")
+    assert PLANNER_SYSTEM_PROMPT.strip() in prompt
+    assert "active_tasks" in prompt
+    assert "Debug failed interop run 100" in prompt
+    assert "interop:100" in prompt
+    args = (tmp_path / "args.txt").read_text(encoding="utf-8")
+    assert "resume" not in args
+    assert "--output-schema" in args
+    assert str(planner_schema_path(config)) in args
+    assert (
+        planner_thread_path(config).read_text(encoding="utf-8")
+        == "planner-thread-1"
+    )
+
+    planned = CodexPlanner(config).plan(
+        ProjectSignals(github_repository="minhuw/coquic"),
+        [],
+    )
+
+    assert planned == []
+    args = (tmp_path / "args.txt").read_text(encoding="utf-8").splitlines()
+    resume_index = args.index("resume")
+    session_index = args.index("planner-thread-1")
+    assert resume_index < session_index
+    assert args[session_index + 1] == "-"
+
+
+def test_codex_planner_persists_thread_id_on_failed_turn(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        "printf 'broken planner turn\\n' > \"$last\"\n"
+        'printf \'{"type":"thread.started","thread_id":"planner-thread-failed"}\\n\'\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+
+    planned = CodexPlanner(config).plan(
+        ProjectSignals(github_repository="minhuw/coquic"),
+        [],
+    )
+
+    assert planned == []
+    assert (
+        planner_thread_path(config).read_text(encoding="utf-8")
+        == "planner-thread-failed"
+    )
+
+
+def test_planner_schema_file_matches_expected_shape(config: StewardConfig) -> None:
+    import json
+
+    path = planner_schema_path(config)
+    schema = json.loads(path.read_text(encoding="utf-8"))
+
+    assert schema["type"] == "object"
+    assert schema["required"] == ["consumed_item_ids", "tasks"]
+    assert schema["properties"]["consumed_item_ids"]["type"] == "array"
+    item = schema["properties"]["tasks"]["items"]
+    assert "code-quality" in item["properties"]["kind"]["enum"]
+    assert schema["additionalProperties"] is False
+    assert item["additionalProperties"] is False
+    assert item["properties"]["metadata"]["additionalProperties"] is False
+    assert item["properties"]["metadata"]["required"] == ["selected_work_item_ids"]
+    assert set(item["properties"]["metadata"]["properties"]) == {
+        "selected_work_item_ids",
+    }
+    selected_ids = item["properties"]["metadata"]["properties"]["selected_work_item_ids"]
+    assert selected_ids["items"]["type"] == "string"
+
+
+def test_planner_schema_matches_openai_structured_output_subset(
+    config: StewardConfig,
+) -> None:
+    import json
+
+    schema = json.loads(planner_schema_path(config).read_text(encoding="utf-8"))
+
+    assert_openai_structured_output_schema(schema)
+def test_signal_collector_accepts_providers(config: StewardConfig) -> None:
+    class FakeProvider:
+        name = "fake"
+
+        def collect(self, _config: StewardConfig, signals: ProjectSignals) -> None:
+            signals.failed_workflow_run_id = "200"
+            signals.failed_workflow_name = "CI"
+            signals.summary = "fake signal"
+
+    signals = gather_signals(config, providers=[FakeProvider()])
+
+    assert signals.github_repository == config.github_repository
+    assert signals.failed_workflow_run_id == "200"
+    assert signals.failed_workflow_name == "CI"
+    assert signals.summary == "fake signal"
+    assert signals.enabled_signals == ["fake"]
+
+
+def test_signal_fetch_errors_are_not_inbox_messages(
+    config: StewardConfig,
+) -> None:
+    class FailingProvider:
+        name = "codacy"
+
+        def collect(self, _config: StewardConfig, _signals: ProjectSignals) -> None:
+            raise OSError("dns failed")
+
+    collection = collect_signal_messages(config, providers=[FailingProvider()])[0]
+
+    assert collection.error == "dns failed"
+    assert collection.messages == []
+
+
+def test_codacy_signal_uses_public_analysis_without_token(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.delenv("CODACY_API_TOKEN", raising=False)
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+        def read(self) -> bytes:
+            return b'{"data":{"issuesCount":2}}'
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.urlopen",
+        lambda request, timeout: FakeResponse(),
+    )
+
+    signals = gather_signals(config, providers=[CodacyProvider()])
+
+    assert signals.has_codacy_findings
+    assert signals.has_code_quality_findings
+    assert signals.signal_errors == {}
+    assert signals.summary == "Codacy issuesCount=2"
+
+
+def test_codacy_signal_uses_tokened_issue_search(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODACY_API_TOKEN", "token")
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+        def read(self) -> bytes:
+            return (
+                b'{"data":[{"patternInfo":{"id":"shellcheck_SC2034",'
+                b'"level":"Warning"},"toolInfo":{"name":"ShellCheck"},'
+                b'"filePath":"scripts/fuzz-targets.sh","lineNumber":9}]}'
+            )
+
+    def fake_urlopen(request, timeout):
+        captured["method"] = request.get_method()
+        captured["api-token"] = request.headers.get("Api-token")
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.urlopen",
+        fake_urlopen,
+    )
+
+    signals = gather_signals(config, providers=[CodacyProvider()])
+
+    assert captured["method"] == "POST"
+    assert captured["api-token"] == "token"
+    assert signals.has_codacy_findings
+    assert signals.has_code_quality_findings
+    assert len(signals.work_items) == 1
+    item = signals.work_items[0]
+    assert str(item["id"]).startswith("wi-codacy-codacy-issue-")
+    assert item | {"id": "<stable>"} == {
+        "id": "<stable>",
+        "provider": "codacy",
+        "kind": "codacy-issue",
+        "rule_id": "shellcheck_SC2034",
+        "severity": "Warning",
+        "tool": "ShellCheck",
+        "file": "scripts/fuzz-targets.sh",
+        "line": 9,
+    }
+
+
+def test_collect_signal_messages_persists_work_items(config: StewardConfig) -> None:
+    class WorkItemProvider:
+        name = "codacy"
+
+        def collect(self, _config: StewardConfig, signals: ProjectSignals) -> None:
+            signals.has_codacy_findings = True
+            signals.has_code_quality_findings = True
+            signals.summary = "Codacy sampled 1 open finding(s)"
+            signals.work_items = [
+                {
+                    "provider": "codacy",
+                    "kind": "codacy-issue",
+                    "rule_id": "shellcheck_SC2034",
+                    "file": "scripts/fuzz-targets.sh",
+                    "line": 9,
+                }
+            ]
+
+    collection = collect_signal_messages(config, providers=[WorkItemProvider()])[0]
+
+    assert len(collection.messages) == 1
+    message = collection.messages[0]
+    assert len(message.payload["work_items"]) == 1
+    item = message.payload["work_items"][0]
+    assert str(item["id"]).startswith("wi-codacy-codacy-issue-")
+    assert item | {"id": "<stable>"} == {
+        "id": "<stable>",
+        "provider": "codacy",
+        "kind": "codacy-issue",
+        "rule_id": "shellcheck_SC2034",
+        "file": "scripts/fuzz-targets.sh",
+        "line": 9,
+    }
+
+def test_cli_enqueue_and_status(repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(repo)
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["enqueue", "custom", "demo", "--prompt", "hello"])
+    assert result.exit_code == 0
+    task_id = result.output.strip().split()[-1]
+
+    status = runner.invoke(app, ["status"])
+    assert status.exit_code == 0
+    assert task_id in status.output

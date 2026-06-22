@@ -35,6 +35,7 @@ from ..storage import TaskStore
 TEXT_TAIL_BYTES = 256 * 1024
 STREAM_POLL_SECONDS = 1.0
 IMAGE_MIME_PREFIX = "image/"
+LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 
 def create_app() -> FastAPI:
@@ -42,23 +43,38 @@ def create_app() -> FastAPI:
     store = TaskStore(config.db_path)
     app = FastAPI(title="CoQUIC Steward API")
 
-    def require_loopback(request: Request) -> None:
-        if request.client is None or request.client.host not in {
-            "127.0.0.1",
-            "::1",
-            "localhost",
-            "testclient",
-        }:
-            raise HTTPException(status_code=403, detail="loopback only")
+    _register_state_routes(app, config, store)
+    _register_tick_route(app, config, store)
+    _register_create_task_route(app, store)
+    _register_run_task_route(app, config, store)
+    _register_task_detail_routes(app, config, store)
+    _register_task_file_route(app, config, store)
+    _register_iteration_patch_route(app, config, store)
+    _register_run_transcript_route(app, config, store)
+    _register_validation_file_route(app, config, store)
+    _register_task_asset_routes(app, config, store)
+    _register_runtime_routes(app)
+    _register_planner_routes(app, config)
+    _register_ui_routes(app)
+
+    return app
+
+
+def _require_loopback(request: Request) -> None:
+    if request.client is None or request.client.host not in LOOPBACK_HOSTS:
+        raise HTTPException(status_code=403, detail="loopback only")
+
+
+def _register_state_routes(app: FastAPI, config, store: TaskStore) -> None:
 
     @app.get("/api/state")
     def state(request: Request) -> JSONResponse:
-        require_loopback(request)
+        _require_loopback(request)
         return JSONResponse(_state_payload(config, store))
 
     @app.get("/api/stream")
     async def stream(request: Request) -> StreamingResponse:
-        require_loopback(request)
+        _require_loopback(request)
 
         async def events():
             last = ""
@@ -74,9 +90,12 @@ def create_app() -> FastAPI:
 
         return StreamingResponse(events(), media_type="text/event-stream")
 
+
+def _register_tick_route(app: FastAPI, config, store: TaskStore) -> None:
+
     @app.post("/api/actions/tick")
     async def tick(request: Request) -> JSONResponse:
-        require_loopback(request)
+        _require_loopback(request)
         body = await _body(request)
         try:
             with acquire_daemon_lock(config):
@@ -97,9 +116,12 @@ def create_app() -> FastAPI:
             }
         )
 
+
+def _register_create_task_route(app: FastAPI, store: TaskStore) -> None:
+
     @app.post("/api/tasks")
     async def create_task(request: Request) -> JSONResponse:
-        require_loopback(request)
+        _require_loopback(request)
         body = await _body(request)
         title = str(body.get("title", "")).strip()
         prompt = str(body.get("prompt", "")).strip()
@@ -118,9 +140,12 @@ def create_app() -> FastAPI:
             {"ok": True, "created": created, "task": task.model_dump(mode="json")}
         )
 
+
+def _register_run_task_route(app: FastAPI, config, store: TaskStore) -> None:
+
     @app.post("/api/tasks/{task_id}/run")
     def run_task(request: Request, task_id: str) -> JSONResponse:
-        require_loopback(request)
+        _require_loopback(request)
         try:
             with acquire_daemon_lock(config):
                 ok = StewardExecutor(config, store).run_task(task_id)
@@ -130,9 +155,12 @@ def create_app() -> FastAPI:
             {"ok": ok, "task": store.get(task_id).model_dump(mode="json")}
         )
 
+
+def _register_task_detail_routes(app: FastAPI, config, store: TaskStore) -> None:
+
     @app.get("/api/tasks/{task_id}")
     def task(request: Request, task_id: str) -> JSONResponse:
-        require_loopback(request)
+        _require_loopback(request)
         try:
             record = store.get(task_id)
         except KeyError as exc:
@@ -151,7 +179,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/integrations/{integration_id}")
     def integration(request: Request, integration_id: str) -> JSONResponse:
-        require_loopback(request)
+        _require_loopback(request)
         try:
             record = store.get(integration_id)
         except KeyError as exc:
@@ -160,9 +188,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="integration not found")
         return JSONResponse(_integration_detail_payload(config, store, record))
 
+
+def _register_task_file_route(app: FastAPI, config, store: TaskStore) -> None:
+
     @app.get("/api/tasks/{task_id}/files/{name}", response_class=PlainTextResponse)
     def task_file(request: Request, task_id: str, name: str) -> str:
-        require_loopback(request)
+        _require_loopback(request)
         try:
             record = store.get(task_id)
         except KeyError as exc:
@@ -183,12 +214,15 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="file outside steward state")
         return tail_text(path, max_bytes=TEXT_TAIL_BYTES, line_aligned=True)
 
+
+def _register_iteration_patch_route(app: FastAPI, config, store: TaskStore) -> None:
+
     @app.get(
         "/api/tasks/{task_id}/iterations/{iteration}/patch",
         response_class=PlainTextResponse,
     )
     def iteration_patch(request: Request, task_id: str, iteration: int) -> str:
-        require_loopback(request)
+        _require_loopback(request)
         try:
             item = store.get_iteration(task_id, iteration)
         except KeyError as exc:
@@ -200,12 +234,15 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="file outside steward state")
         return tail_text(path, max_bytes=TEXT_TAIL_BYTES, line_aligned=True)
 
+
+def _register_run_transcript_route(app: FastAPI, config, store: TaskStore) -> None:
+
     @app.get(
         "/api/tasks/{task_id}/runs/{run_name}/transcript",
         response_class=PlainTextResponse,
     )
     def run_transcript(request: Request, task_id: str, run_name: str) -> str:
-        require_loopback(request)
+        _require_loopback(request)
         try:
             store.get(task_id)
         except KeyError as exc:
@@ -219,11 +256,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="file outside steward state")
         return tail_text(path, max_bytes=TEXT_TAIL_BYTES, line_aligned=True)
 
+
+def _register_validation_file_route(app: FastAPI, config, store: TaskStore) -> None:
+
     @app.get(
         "/api/tasks/{task_id}/validations/{index}", response_class=PlainTextResponse
     )
     def validation_file(request: Request, task_id: str, index: int) -> str:
-        require_loopback(request)
+        _require_loopback(request)
         try:
             record = store.get(task_id)
             validation = record.validations[index]
@@ -237,9 +277,12 @@ def create_app() -> FastAPI:
             )
         return tail_text(validation.output_path, max_bytes=TEXT_TAIL_BYTES)
 
+
+def _register_task_asset_routes(app: FastAPI, config, store: TaskStore) -> None:
+
     @app.get("/api/tasks/{task_id}/assets")
     def task_asset(request: Request, task_id: str, path: str) -> FileResponse:
-        require_loopback(request)
+        _require_loopback(request)
         try:
             record = store.get(task_id)
         except KeyError as exc:
@@ -258,25 +301,31 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=415, detail="asset is not an image")
         return FileResponse(asset_path, media_type=media_type)
 
+
+def _register_runtime_routes(app: FastAPI) -> None:
+
     @app.get("/healthz", response_class=PlainTextResponse)
     def healthz() -> str:
         return "ok"
 
     @app.get("/api/runtime")
     def runtime(request: Request) -> JSONResponse:
-        require_loopback(request)
+        _require_loopback(request)
         return JSONResponse(
             {"api": "coquic-steward", "features": ["line-tail", "signal-inbox"]}
         )
 
+
+def _register_planner_routes(app: FastAPI, config) -> None:
+
     @app.get("/api/planner/runs")
     def planner_runs(request: Request) -> JSONResponse:
-        require_loopback(request)
+        _require_loopback(request)
         return JSONResponse({"runs": _planner_runs_payload(config, limit=40)})
 
     @app.get("/api/planner/runs/{run_id}")
     def planner_run(request: Request, run_id: str) -> JSONResponse:
-        require_loopback(request)
+        _require_loopback(request)
         if not _safe_planner_run_id(run_id):
             raise HTTPException(status_code=400, detail="invalid planner run id")
         artifact = _planner_run_artifact_payload(config, run_id)
@@ -284,12 +333,13 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="planner run not found")
         return JSONResponse(artifact)
 
+
+def _register_ui_routes(app: FastAPI) -> None:
+
     @app.get("/")
     def ui_redirect(request: Request) -> RedirectResponse:
-        require_loopback(request)
+        _require_loopback(request)
         return RedirectResponse("http://127.0.0.1:3000", status_code=307)
-
-    return app
 
 
 def _state_payload(config, store: TaskStore) -> dict[str, object]:

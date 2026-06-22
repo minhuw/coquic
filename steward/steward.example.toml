@@ -1,0 +1,17 @@
+[steward]
+daemon_poll_interval_sec = 300
+codex_bin = "codex"
+codex_sandbox = "workspace-write"
+integration_mode = "local-only"
+local_only = false
+git_remote = "origin"
+main_branch = "main"
+github_repository = "minhuw/coquic"
+
+[steward.signals]
+enabled = ["github-actions", "code-scanning", "codacy"]
+
+[steward.limits]
+max_active_tasks = 4
+max_main_pushes_per_day = 10
+worker_timeout_minutes = 120

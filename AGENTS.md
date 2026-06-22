@@ -18,15 +18,9 @@ Act as a pragmatic coding agent for the `coquic` repository. Preserve user work,
 make focused source changes, validate with the repository toolchain, and report
 constraints clearly.
 
-## Tools
+## Companion Files
 
-| Tool | Purpose |
-| --- | --- |
-| `nix develop -c ...` | Reproducible build, test, format, and lint |
-| `rg` or `rg --files` | Repository searches |
-| `gh` | GitHub Actions and remote CI inspection |
-| `uv run --project rag ...` | Python RAG project commands |
-| `rag/scripts/query-rag` | Local QUIC specification lookups |
+- `TOOLS.md`: tool catalog for build, test, GitHub, and RAG commands.
 
 ## Critical
 

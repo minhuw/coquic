@@ -655,7 +655,9 @@ class ScopedHttp3Process {
         if (!wait_for_http3_server_ready(pid_, runtime_config)) {
             ADD_FAILURE() << "timed out waiting for HTTP/3 runtime to bind loopback listeners";
             terminate();
+            return;
         }
+        ready_ = true;
     }
 
     ~ScopedHttp3Process() {
@@ -664,6 +666,10 @@ class ScopedHttp3Process {
 
     ScopedHttp3Process(const ScopedHttp3Process &) = delete;
     ScopedHttp3Process &operator=(const ScopedHttp3Process &) = delete;
+
+    bool ready() const {
+        return ready_;
+    }
 
     std::optional<int> wait_for_exit(std::chrono::milliseconds timeout) {
         if (pid_ <= 0) {
@@ -721,6 +727,7 @@ class ScopedHttp3Process {
   private:
     ScopedEnvVar fixture_cert_trust_;
     pid_t pid_ = -1;
+    bool ready_ = false;
 };
 
 struct SimpleHttpsResponse {
@@ -1910,12 +1917,14 @@ TEST(QuicHttp3RuntimeTest, ServesStaticFileOverLoopback) {
         .mode = coquic::http3::Http3RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
+        .enable_bootstrap = false,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
     ScopedHttp3Process server_process(server);
+    ASSERT_TRUE(server_process.ready());
 
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
@@ -1939,12 +1948,14 @@ TEST(QuicHttp3RuntimeTest, EchoesPostedBodyOverLoopback) {
         .mode = coquic::http3::Http3RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
+        .enable_bootstrap = false,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
     ScopedHttp3Process server_process(server);
+    ASSERT_TRUE(server_process.ready());
 
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
@@ -1976,12 +1987,14 @@ TEST(QuicHttp3RuntimeTest, SpeedPingRouteReturnsNoBodyOverLoopback) {
         .mode = coquic::http3::Http3RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
+        .enable_bootstrap = false,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
     ScopedHttp3Process server_process(server);
+    ASSERT_TRUE(server_process.ready());
 
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
@@ -2005,12 +2018,14 @@ TEST(QuicHttp3RuntimeTest, SpeedDownloadRouteWritesSizedBodyOverLoopback) {
         .mode = coquic::http3::Http3RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
+        .enable_bootstrap = false,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
     ScopedHttp3Process server_process(server);
+    ASSERT_TRUE(server_process.ready());
 
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
@@ -2036,12 +2051,14 @@ TEST(QuicHttp3RuntimeTest, SpeedUploadRouteReturnsReceivedByteSummaryOverLoopbac
         .mode = coquic::http3::Http3RuntimeMode::server,
         .host = "127.0.0.1",
         .port = port,
+        .enable_bootstrap = false,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
     ScopedHttp3Process server_process(server);
+    ASSERT_TRUE(server_process.ready());
 
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
@@ -2081,6 +2098,7 @@ TEST(QuicHttp3RuntimeTest, ServesBootstrapAndHttp3FromOneServerProcess) {
     };
 
     ScopedHttp3Process server_process(server_config);
+    ASSERT_TRUE(server_process.ready());
 
     auto bootstrap_response = https_request("127.0.0.1", bootstrap_port, "GET", "/hello.txt");
     ASSERT_TRUE(bootstrap_response.has_value());
@@ -2123,6 +2141,7 @@ TEST(QuicHttp3RuntimeTest, ServerModeCanDisableBootstrapListener) {
     };
 
     ScopedHttp3Process server_process(server);
+    ASSERT_TRUE(server_process.ready());
 
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
@@ -2166,6 +2185,7 @@ TEST(QuicHttp3RuntimeTest, RunHttp3ServerFailsWhenIdentityOrUdpBootstrapSetupIsI
             .mode = coquic::http3::Http3RuntimeMode::server,
             .host = "127.0.0.1",
             .port = h3_port,
+            .enable_bootstrap = false,
             .document_root = document_root.path(),
             .certificate_chain_path = "tests/fixtures/does-not-exist-cert.pem",
             .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -2195,6 +2215,7 @@ TEST(QuicHttp3RuntimeTest, RunHttp3ServerFailsWhenIdentityOrUdpBootstrapSetupIsI
             .mode = coquic::http3::Http3RuntimeMode::server,
             .host = "127.0.0.1",
             .port = h3_port,
+            .enable_bootstrap = false,
             .document_root = document_root.path(),
             .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
             .private_key_path = "tests/fixtures/quic-server-key.pem",
@@ -2342,12 +2363,14 @@ TEST(QuicHttp3RuntimeTest, ClientWithoutOutputWritesBodyToStdout) {
         .mode = coquic::http3::Http3RuntimeMode::server,
         .host = "127.0.0.1",
         .port = h3_port,
+        .enable_bootstrap = false,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
     ScopedHttp3Process server_process(server);
+    ASSERT_TRUE(server_process.ready());
 
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
@@ -2378,6 +2401,7 @@ TEST(QuicHttp3RuntimeTest, HeadClientWithoutOutputReturnsSuccessWithEmptyStdout)
     };
 
     ScopedHttp3Process server_process(server);
+    ASSERT_TRUE(server_process.ready());
 
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
@@ -2403,12 +2427,14 @@ TEST(QuicHttp3RuntimeTest, ClientReturnsFailureWhenOutputPathIsDirectory) {
         .mode = coquic::http3::Http3RuntimeMode::server,
         .host = "127.0.0.1",
         .port = h3_port,
+        .enable_bootstrap = false,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
     ScopedHttp3Process server_process(server);
+    ASSERT_TRUE(server_process.ready());
 
     const auto client = coquic::http3::Http3RuntimeConfig{
         .mode = coquic::http3::Http3RuntimeMode::client,
@@ -2432,12 +2458,14 @@ TEST(QuicHttp3RuntimeTest, ClientReturnsFailureWhenTemporaryOutputDisappearsBefo
         .mode = coquic::http3::Http3RuntimeMode::server,
         .host = "127.0.0.1",
         .port = h3_port,
+        .enable_bootstrap = false,
         .document_root = document_root.path(),
         .certificate_chain_path = "tests/fixtures/quic-server-cert.pem",
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
 
     ScopedHttp3Process server_process(server);
+    ASSERT_TRUE(server_process.ready());
     ScopedEnvVar tmpdir("TMPDIR", temp_root.path().string());
 
     std::atomic<bool> stop_requested = false;
@@ -3016,6 +3044,7 @@ TEST(QuicHttp3RuntimeTest, RuntimeInspectRouteSupportsPost) {
         .private_key_path = "tests/fixtures/quic-server-key.pem",
     };
     ScopedHttp3Process server_process(server);
+    ASSERT_TRUE(server_process.ready());
 
     {
         const auto inspect_client = coquic::http3::Http3RuntimeConfig{

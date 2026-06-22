@@ -61,7 +61,6 @@ from coquic_steward.planning import (
     PlanVerifier,
     planner_schema_path,
     planner_thread_path,
-    summarize_active_tasks,
 )
 from coquic_steward.planning.verifier import ActiveTaskSummary
 from coquic_steward.signals import (
@@ -731,14 +730,12 @@ def test_status_stale_minutes_respects_explicit_stale_limit(config: StewardConfi
 
 
 def test_daemon_lock_rejects_second_owner(config: StewardConfig) -> None:
-    lock_path = config.state_dir / "daemon.lock"
-
     with acquire_daemon_lock(config):
         with pytest.raises(DaemonAlreadyRunning) as exc_info:
             with acquire_daemon_lock(config):
                 raise AssertionError("second lock should not be acquired")
 
-    assert exc_info.value.lock_path == lock_path
+    assert exc_info.value.lock_path == config.state_dir / "daemon.lock"
     assert "pid=" in exc_info.value.owner
     with acquire_daemon_lock(config):
         pass
@@ -1410,9 +1407,6 @@ def test_codex_runner_places_resume_options_before_session(
     config: StewardConfig, tmp_path: Path
 ) -> None:
     runner = CodexRunner(config)
-    task = TaskStore(config.db_path).add_task(
-        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
-    )[0]
     schema = tmp_path / "schema.json"
     schema.write_text('{"type":"object"}', encoding="utf-8")
     last_message = tmp_path / "last.md"
@@ -1434,7 +1428,6 @@ def test_codex_runner_places_resume_options_before_session(
 def test_codex_runner_review_uses_structured_exec(
     config: StewardConfig, tmp_path: Path
 ) -> None:
-    runner = CodexRunner(config)
     fake = tmp_path / "codex"
     fake.write_text(
         "#!/bin/sh\n"

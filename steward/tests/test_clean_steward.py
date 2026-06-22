@@ -3095,6 +3095,139 @@ def test_integration_conflict_returns_to_worker_then_queues_retry(
     assert "exec resume --json" in calls.read_text(encoding="utf-8")
 
 
+def test_integration_validation_failure_returns_to_worker_then_queues_retry(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
+    )
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "git_remote": "origin",
+            "integration_mode": IntegrationMode.push_main.value,
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    fake = tmp_path / "codex"
+    calls = tmp_path / "calls.txt"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
+        "mode=worker\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "resume" ]; then mode=revision; fi\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        '  case "$last" in */reviewer-*) mode=review;; esac\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        'if [ "$mode" = "review" ]; then\n'
+        "  printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
+        'elif [ "$mode" = "revision" ]; then\n'
+        "  printf 'validation repaired\\n' > README.md\n"
+        "  printf 'integration validation repair done\\n' > \"$last\"\n"
+        "else\n"
+        "  printf 'needs integration validation repair\\n' > README.md\n"
+        "  printf 'done\\n' > \"$last\"\n"
+        '  printf \'{"type":"thread.started","thread_id":"worker-thread-1"}\\n\'\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worktree, branch = Worktrees(config).create(source)
+    (worktree / "README.md").write_text(
+        "needs integration validation repair\n", encoding="utf-8"
+    )
+    source.worktree_path = worktree
+    source.branch_name = branch
+    source.patch_path = config.patches_dir / source.id / "iteration-0.patch"
+    source.spec.metadata["worker_thread_id"] = "worker-thread-1"
+    Worktrees(config).save_patch(worktree, source.patch_path)
+    store.save(source)
+    source = store.start_integration(source.id, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate T",
+            prompt="Integrate",
+            metadata={
+                "source_task_id": source.id,
+                "source_patch_path": str(source.patch_path),
+                "dedupe_key": f"integration:{source.id}",
+            },
+        ),
+        dedupe_key=f"integration:{source.id}",
+    )
+    gate_runs = 0
+
+    def fake_gates(_config, task_id, cwd, *, label=None):
+        nonlocal gate_runs
+
+        gate_runs += 1
+        output = _config.logs_dir / task_id / (label or "integration") / "fake.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if label is None:
+            output.write_text("failed\n", encoding="utf-8")
+            return [
+                ValidationResult(
+                    command=["fake"],
+                    cwd=cwd,
+                    passed=False,
+                    exit_code=1,
+                    output_path=output,
+                    summary="integration gate failed",
+                )
+            ]
+        output.write_text("ok\n", encoding="utf-8")
+        return [
+            ValidationResult(
+                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
+            )
+        ]
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+
+    assert StewardExecutor(config, store).run_task(integration.id)
+
+    saved_source = store.get(source.id)
+    saved_integration = store.get(integration.id)
+    integration_tasks = [
+        item
+        for item in store.list_tasks()
+        if item.spec.worker == WorkerKind.integration_manager
+    ]
+    events = store.events(source.id)
+
+    assert saved_integration.status == TaskStatus.blocked
+    assert saved_integration.summary == "validation failed after rebase"
+    assert saved_source.status == TaskStatus.integrating
+    assert saved_source.patch_path is not None
+    assert "validation repaired" in saved_source.patch_path.read_text(encoding="utf-8")
+    assert len(integration_tasks) == 2
+    assert any(item.status == TaskStatus.queued for item in integration_tasks)
+    assert any(event.kind == "integration.validation_failed" for event in events)
+    assert any(event.kind == "worker.validation_revision_requested" for event in events)
+    assert any(event.kind == "integration.retry_requested" for event in events)
+    assert "exec resume --json" in calls.read_text(encoding="utf-8")
+    assert gate_runs == 2
+
+
 def test_integration_manager_records_commit_failure_without_crashing(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:

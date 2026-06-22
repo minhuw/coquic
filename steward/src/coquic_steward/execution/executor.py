@@ -626,6 +626,61 @@ class StewardExecutor:
         )
         return self._queue_or_finish_integration(source.id)
 
+    def _repair_integration_validation_failure(
+        self,
+        source_task_id: str,
+        failed_validations: list[ValidationResult],
+        rebased_patch: str,
+        integration_task_id: str,
+    ) -> bool:
+        revisions = _next_revision(self.store, source_task_id)
+        if revisions > MAX_TASK_REVISIONS:
+            self.store.finish_task(
+                source_task_id,
+                TaskStatus.blocked,
+                f"revision budget exhausted after {MAX_TASK_REVISIONS} revision(s)",
+            )
+            return False
+        source = self.store.get(source_task_id)
+        if source.worktree_path is None:
+            self.store.finish_task(
+                source_task_id,
+                TaskStatus.failed,
+                "integration validation repair requested without worktree",
+            )
+            return False
+        self.worktrees.reset_to_main(source.worktree_path)
+        self.worktrees.apply_patch(source.worktree_path, rebased_patch)
+        self._latest_failed_validations[source_task_id] = failed_validations
+        if not self._revise_from_validation(
+            source_task_id, failed_validations, revisions
+        ):
+            return False
+        prepared, revisions = self._prepare_patch_with_validation_revisions(
+            source_task_id,
+            f"integration validation revision {revisions}",
+            revisions,
+            iteration=revisions,
+            no_changes_status=TaskStatus.failed,
+        )
+        if not prepared:
+            return False
+        approved_revision = self._review_and_revise_until_approved(
+            source_task_id, revisions
+        )
+        if approved_revision is None:
+            return False
+        self.store.add_event(
+            source_task_id,
+            "integration.retry_requested",
+            integration_task_id,
+            {
+                "failed_integration_task_id": integration_task_id,
+                "revision": approved_revision,
+            },
+        )
+        return self._queue_or_finish_integration(source_task_id)
+
     def _run_with_heartbeat(
         self, task_id: str, run: Callable[[], WorkerResult]
     ) -> WorkerResult:
@@ -835,12 +890,35 @@ class StewardExecutor:
         if any(not validation.passed for validation in validations):
             transcript.write("error", "validation failed after rebase")
             self.store.finish_task(
-                task.id, TaskStatus.failed, "validation failed after rebase"
+                task.id, TaskStatus.blocked, "validation failed after rebase"
             )
-            self.store.finish_task(
-                source.id, TaskStatus.failed, "validation failed after rebase"
+            failed_validations = [
+                validation for validation in validations if not validation.passed
+            ]
+            self.store.add_event(
+                source.id,
+                "integration.validation_failed",
+                _summarize_validations(validations),
+                {
+                    "integration_task_id": task.id,
+                    "failed": [
+                        {
+                            "command": validation.command,
+                            "exit_code": validation.exit_code,
+                            "summary": validation.summary,
+                            "output_path": str(validation.output_path),
+                        }
+                        for validation in failed_validations
+                    ],
+                },
             )
-            return False
+            rebased_patch = self.worktrees.diff(worktree)
+            transcript.write(
+                "repair", "requesting source worker integration validation repair"
+            )
+            return self._repair_integration_validation_failure(
+                source.id, failed_validations, rebased_patch, task.id
+            )
         try:
             commit_subject, commit_body = self._commit_message_for_integration(
                 task, source, patch_text, validations, transcript

@@ -48,6 +48,7 @@ from coquic_steward.execution.review import (
 from coquic_steward.orchestration import (
     DaemonAlreadyRunning,
     StewardDaemon,
+    StewardPreflightError,
     acquire_daemon_lock,
 )
 from coquic_steward.orchestration.daemon import DAEMON_EVENT_TASK_ID
@@ -3634,3 +3635,94 @@ def test_cli_enqueue_and_status(repo: Path, monkeypatch) -> None:
     status = runner.invoke(app, ["status"])
     assert status.exit_code == 0
     assert task_id in status.output
+def test_daemon_preflights_push_main_remote(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
+    )
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "git_remote": "origin",
+            "integration_mode": IntegrationMode.push_main.value,
+        }
+    )
+    config.ensure_dirs()
+    logs: list[str] = []
+
+    StewardDaemon(config, TaskStore(config.db_path), logger=logs.append)
+
+    assert logs == ["[steward] remote push preflight ok remote=origin branch=main"]
+
+
+def test_daemon_preflight_fails_before_tick_for_push_main(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "git_remote": "origin",
+            "integration_mode": IntegrationMode.push_main.value,
+        }
+    )
+    config.ensure_dirs()
+
+    with pytest.raises(StewardPreflightError) as exc_info:
+        StewardDaemon(config, TaskStore(config.db_path))
+
+    assert "remote push preflight failed" in str(exc_info.value)
+    assert "fetch remote main" in str(exc_info.value)
+
+
+def test_daemon_preflight_skips_when_external_writes_disabled(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "integration_mode": IntegrationMode.push_main.value,
+            "local_only": True,
+        }
+    )
+    config.ensure_dirs()
+
+    def fail_run_command(*_args, **_kwargs):
+        raise AssertionError("preflight should not run in local_only mode")
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.preflight.run_command", fail_run_command
+    )
+
+    StewardDaemon(config, TaskStore(config.db_path))
+
+def test_cli_daemon_exits_when_push_preflight_fails(
+    repo: Path, coquic_home: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(repo)
+    coquic_home.mkdir(parents=True, exist_ok=True)
+    (coquic_home / "steward.toml").write_text(
+        """
+[steward]
+integration_mode = "push-main"
+git_remote = "origin"
+main_branch = "main"
+github_repository = "minhuw/coquic"
+""",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, ["daemon", "--once", "--no-plan", "--no-dispatch"])
+
+    assert result.exit_code == 1
+    assert "remote push preflight failed" in result.output
+    assert "TickResult" not in result.output
+
+

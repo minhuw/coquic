@@ -17,6 +17,7 @@ from ..execution.executor import StewardExecutor
 from ..planning import run_planner
 from ..signals import collect_signal_messages, project_signals_from_items
 from ..storage import TaskStore
+from .preflight import preflight_remote_push
 
 DAEMON_EVENT_TASK_ID = "daemon"
 
@@ -46,6 +47,11 @@ class StewardDaemon:
         self.config = config
         self.store = store
         self.logger = logger
+        if preflight_remote_push(config):
+            self._log(
+                "remote push preflight ok "
+                f"remote={config.git_remote} branch={config.main_branch}"
+            )
         self.executor = StewardExecutor(config, store)
 
     def tick(

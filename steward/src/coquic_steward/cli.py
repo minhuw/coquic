@@ -10,6 +10,7 @@ from .core.config import load_config
 from .orchestration import (
     DaemonAlreadyRunning,
     StewardDaemon,
+    StewardPreflightError,
     acquire_daemon_lock,
 )
 from .execution.executor import StewardExecutor, default_worker_for_kind
@@ -94,6 +95,9 @@ def daemon(
         typer.echo(f"Steward daemon already running: {exc.lock_path}", err=True)
         if exc.owner:
             typer.echo(exc.owner, err=True)
+        raise typer.Exit(1) from exc
+    except StewardPreflightError as exc:
+        typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
 
 

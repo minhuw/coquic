@@ -3653,6 +3653,103 @@ def test_web_runtime_reports_incompatible_running_api(tmp_path: Path, monkeypatc
         runtime.StewardWebRuntime(web_ui_dir=tmp_path).start()
 
 
+def test_web_runtime_resolves_executable_before_spawn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from coquic_steward.web import runtime
+
+    executable = tmp_path / "steward-test-command"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 123
+
+        def poll(self) -> int | None:
+            return None
+
+    def fake_process(command: runtime._ResolvedCommand, **kwargs: object) -> FakeProcess:
+        captured["args"] = list(command.args)
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(runtime, "_TrustedProcess", fake_process)
+
+    process = runtime._popen(
+        ["steward-test-command", "run", "dev"],
+        env={"PATH": str(tmp_path)},
+    )
+
+    assert isinstance(process, FakeProcess)
+    assert captured["args"] == [str(executable), "run", "dev"]
+    assert captured["kwargs"] is not None
+    assert captured["kwargs"]["env"] == {"PATH": str(tmp_path)}
+
+
+def test_web_runtime_resolves_relative_path_entries_from_child_cwd(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from coquic_steward.web import runtime
+
+    parent_executable = tmp_path / "steward-test-command"
+    parent_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    parent_executable.chmod(0o755)
+    child_cwd = tmp_path / "web-ui"
+    child_cwd.mkdir()
+    cwd_executable = child_cwd / "steward-test-command"
+    cwd_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    cwd_executable.chmod(0o755)
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 123
+
+        def poll(self) -> int | None:
+            return None
+
+    def fake_process(command: runtime._ResolvedCommand, **kwargs: object) -> FakeProcess:
+        captured["args"] = list(command.args)
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runtime, "_TrustedProcess", fake_process)
+
+    process = runtime._popen(
+        ["steward-test-command", "run", "dev"],
+        cwd=child_cwd,
+        env={"PATH": "."},
+    )
+
+    assert isinstance(process, FakeProcess)
+    assert captured["args"] == [str(cwd_executable), "run", "dev"]
+    assert captured["args"] != [str(parent_executable), "run", "dev"]
+    assert captured["kwargs"] is not None
+    assert captured["kwargs"]["cwd"] == child_cwd
+
+
+def test_web_runtime_preserves_symlinked_executable_path(tmp_path: Path) -> None:
+    from coquic_steward.web import runtime
+
+    target = tmp_path / "python-target"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o755)
+    executable = tmp_path / "python-link"
+    executable.symlink_to(target)
+
+    command = runtime._resolve_command([str(executable), "-m", "uvicorn"])
+
+    assert command.args == (str(executable), "-m", "uvicorn")
+
+
+def test_web_runtime_rejects_empty_command_argument() -> None:
+    from coquic_steward.web import runtime
+
+    with pytest.raises(RuntimeError, match="non-empty strings"):
+        runtime._resolve_command(["npm", ""])
+
+
 def test_cli_daemon_refuses_second_instance(
     config: StewardConfig, monkeypatch
 ) -> None:

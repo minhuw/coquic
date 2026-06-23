@@ -5,11 +5,13 @@ import http.client
 import ipaddress
 import json
 import signal
+import shutil
 import subprocess
 import sys
 import time
 from collections.abc import Callable
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -18,6 +20,32 @@ DEFAULT_API_HOST = "127.0.0.1"
 DEFAULT_API_PORT = 8765
 DEFAULT_UI_HOST = "127.0.0.1"
 DEFAULT_UI_PORT = 3000
+
+
+@dataclass(frozen=True)
+class _ResolvedCommand:
+    args: tuple[str, ...]
+
+
+class _TrustedProcess(subprocess.Popen[str]):
+    def __init__(
+        self,
+        command: _ResolvedCommand,
+        *,
+        cwd: Path | None,
+        env: dict[str, str] | None,
+        output: object,
+    ):
+        super().__init__(
+            list(command.args),
+            cwd=cwd,
+            env=env,
+            shell=False,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=os.name != "nt",
+        )
 
 
 class StewardWebRuntime:
@@ -126,6 +154,7 @@ def _popen(
     env: dict[str, str] | None = None,
     log_path: Path | None = None,
 ) -> subprocess.Popen[str]:
+    safe_command = _resolve_command(command, cwd=cwd, env=env)
     try:
         with ExitStack() as stack:
             output = (
@@ -133,17 +162,78 @@ def _popen(
                 if log_path is not None
                 else subprocess.DEVNULL
             )
-            return subprocess.Popen(
-                command,
+            return _TrustedProcess(
+                safe_command,
                 cwd=cwd,
                 env=env,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                text=True,
-                start_new_session=os.name != "nt",
+                output=output,
             )
     except FileNotFoundError as exc:
         raise RuntimeError(f"unable to start {command[0]!r}: command not found") from exc
+
+
+def _resolve_command(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> _ResolvedCommand:
+    if not command:
+        raise RuntimeError("unable to start process: command is empty")
+    if not all(isinstance(part, str) and part for part in command):
+        raise RuntimeError(
+            "unable to start process: command arguments must be non-empty strings"
+        )
+    executable = command[0]
+    path = Path(executable)
+    if path.parent != Path("."):
+        if not path.is_absolute() and cwd is not None:
+            path = cwd / path
+        trusted_path = _validated_executable_path(path, executable)
+    else:
+        trusted_path = _resolve_bare_executable(executable, cwd=cwd, env=env)
+    return _ResolvedCommand((trusted_path, *command[1:]))
+
+
+def _resolve_bare_executable(
+    executable: str,
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> str:
+    resolved_text = shutil.which(
+        executable,
+        path=os.pathsep.join(_path_entries_for_child_cwd(cwd=cwd, env=env)),
+    )
+    if resolved_text is None:
+        raise RuntimeError(f"unable to start {executable!r}: command not found")
+    return _validated_executable_path(Path(resolved_text), executable)
+
+
+def _path_entries_for_child_cwd(
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> list[str]:
+    child_cwd = cwd if cwd is not None else Path.cwd()
+    if not child_cwd.is_absolute():
+        child_cwd = Path.cwd() / child_cwd
+    entries: list[str] = []
+    for entry in os.get_exec_path(env):
+        search_dir = Path(entry) if entry else Path(".")
+        if not search_dir.is_absolute():
+            search_dir = child_cwd / search_dir
+        entries.append(str(search_dir))
+    return entries
+
+
+def _validated_executable_path(path: Path, executable: str) -> str:
+    absolute_path = path if path.is_absolute() else Path.cwd() / path
+    if not absolute_path.exists():
+        raise RuntimeError(f"unable to start {executable!r}: command not found")
+    if not absolute_path.is_file() or not os.access(absolute_path, os.X_OK):
+        raise RuntimeError(f"unable to start {executable!r}: command is not executable")
+    return str(absolute_path)
 
 
 def _wait_until_ready(

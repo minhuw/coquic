@@ -91,56 +91,19 @@ class PlanVerifier:
         for item in proposals:
             if len(accepted) >= self.max_tasks:
                 break
-            try:
-                proposed = ProposedTask.model_validate(item)
-            except ValidationError:
+            proposed = _verified_proposal(
+                item,
+                seen=seen,
+                active_dedupes=active_dedupes,
+                active_kinds=active_kinds,
+                evidence_ids=evidence_ids,
+            )
+            if proposed is None:
                 rejected = True
                 continue
-            if proposed.worker not in PLANNABLE_WORKERS:
-                rejected = True
-                continue
-            if not _valid_text(proposed.dedupe_key, 160):
-                rejected = True
-                continue
-            if proposed.dedupe_key in seen or proposed.dedupe_key in active_dedupes:
-                rejected = True
-                continue
-            if proposed.kind.value in active_kinds:
-                rejected = True
-                continue
-            if not _valid_text(proposed.title, 200):
-                rejected = True
-                continue
-            if not _valid_text(proposed.prompt, 10_000):
-                rejected = True
-                continue
-            if not proposed.evidence:
-                rejected = True
-                continue
-            if any(evidence not in evidence_ids for evidence in proposed.evidence):
-                rejected = True
-                continue
-            if not _metadata_is_bounded(proposed.metadata):
-                rejected = True
-                continue
-            metadata = dict(proposed.metadata)
-            metadata["dedupe_key"] = proposed.dedupe_key
-            metadata["evidence"] = list(proposed.evidence)
-            source_context = _source_context(signals.inbox_messages, proposed)
-            if source_context:
-                metadata["source_context"] = source_context
             accepted.append(
                 (
-                    TaskSpec(
-                        kind=proposed.kind,
-                        worker=proposed.worker,
-                        title=proposed.title.strip(),
-                        prompt=proposed.prompt.strip(),
-                        priority=proposed.priority,
-                        risk=proposed.risk,
-                        source="planner",
-                        metadata=metadata,
-                    ),
+                    _task_spec_from_proposal(proposed, signals.inbox_messages),
                     proposed.dedupe_key,
                 )
             )
@@ -221,6 +184,74 @@ def _consumed_item_ids(
 def _valid_text(value: str, max_length: int) -> bool:
     stripped = value.strip()
     return bool(stripped) and len(stripped) <= max_length
+
+
+def _verified_proposal(
+    item: object,
+    *,
+    seen: set[str],
+    active_dedupes: set[str],
+    active_kinds: set[str],
+    evidence_ids: set[str],
+) -> ProposedTask | None:
+    try:
+        proposed = ProposedTask.model_validate(item)
+    except ValidationError:
+        return None
+    if not _proposal_is_acceptable(
+        proposed,
+        seen=seen,
+        active_dedupes=active_dedupes,
+        active_kinds=active_kinds,
+        evidence_ids=evidence_ids,
+    ):
+        return None
+    return proposed
+
+
+def _proposal_is_acceptable(
+    proposed: ProposedTask,
+    *,
+    seen: set[str],
+    active_dedupes: set[str],
+    active_kinds: set[str],
+    evidence_ids: set[str],
+) -> bool:
+    return not any(
+        (
+            proposed.worker not in PLANNABLE_WORKERS,
+            not _valid_text(proposed.dedupe_key, 160),
+            proposed.dedupe_key in seen,
+            proposed.dedupe_key in active_dedupes,
+            proposed.kind.value in active_kinds,
+            not _valid_text(proposed.title, 200),
+            not _valid_text(proposed.prompt, 10_000),
+            not proposed.evidence,
+            any(evidence not in evidence_ids for evidence in proposed.evidence),
+            not _metadata_is_bounded(proposed.metadata),
+        )
+    )
+
+
+def _task_spec_from_proposal(
+    proposed: ProposedTask, inbox_messages: list[SignalMessage]
+) -> TaskSpec:
+    metadata = dict(proposed.metadata)
+    metadata["dedupe_key"] = proposed.dedupe_key
+    metadata["evidence"] = list(proposed.evidence)
+    source_context = _source_context(inbox_messages, proposed)
+    if source_context:
+        metadata["source_context"] = source_context
+    return TaskSpec(
+        kind=proposed.kind,
+        worker=proposed.worker,
+        title=proposed.title.strip(),
+        prompt=proposed.prompt.strip(),
+        priority=proposed.priority,
+        risk=proposed.risk,
+        source="planner",
+        metadata=metadata,
+    )
 
 
 def _metadata_is_bounded(metadata: dict[str, Any]) -> bool:

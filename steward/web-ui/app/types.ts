@@ -220,6 +220,17 @@ export type IntegrationDetail = {
     commit: string | null;
     commit_url: string | null;
   };
+  commit_message?: {
+    transcript_path: string | null;
+    last_message_path: string | null;
+    transcript: string;
+    last_message: string;
+    diagnostics?: CodexRunDiagnostics | null;
+  } | null;
+  push_log?: {
+    path: string;
+    text: string;
+  } | null;
 };
 
 export type StewardState = {
@@ -246,6 +257,7 @@ export type StewardState = {
   integration: {
     queue: IntegrationRun[];
     active: IntegrationRun[];
+    runs?: IntegrationRun[];
     commits: IntegrationCommit[];
   };
   config: {

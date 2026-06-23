@@ -32,6 +32,7 @@ import {
   getValidationLog,
   runTask,
 } from "./api";
+import { CodeBlock } from "./code-block";
 import { TimelineEvent } from "./timeline";
 import { TranscriptView } from "./transcript";
 import type { CodexRunDiagnostics, EventRecord, TaskAttempt, TaskDetail, TaskRecord, TaskRunArtifact, TaskStatus } from "./types";
@@ -733,7 +734,9 @@ function AttemptValidations({
           <StatusPill status={validation.passed ? "succeeded" : "failed"} />
         </button>
       ))}
-      {log && validations.some((validation) => validation.index === logIndex) && <pre className="code-pane compact">{log}</pre>}
+      {log && validations.some((validation) => validation.index === logIndex) && (
+        <CodeBlock compact text={log} title="Validation log" />
+      )}
     </div>
   );
 }
@@ -792,21 +795,7 @@ function ReviewCard({ review }: { review: ReviewRecord }) {
 
 function DiffView({ text }: { text: string }) {
   if (!text) return <div className="empty-state">No saved patch for the selected task.</div>;
-  return (
-    <pre className="code-pane">
-      {text.split("\n").map((line, index) => (
-        <Line line={line} key={index} />
-      ))}
-    </pre>
-  );
-}
-
-function Line({ line }: { line: string }) {
-  let className = "diff-line";
-  if (line.startsWith("+")) className += " added";
-  if (line.startsWith("-")) className += " removed";
-  if (line.startsWith("@@")) className += " hunk";
-  return <span className={className}>{line}{"\n"}</span>;
+  return <CodeBlock language="diff" text={text} title="Patch" />;
 }
 
 function KeyValue({ label, value }: { label: string; value: string }) {

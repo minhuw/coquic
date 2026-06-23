@@ -6,6 +6,8 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Circle,
   Clock3,
   ExternalLink,
@@ -19,20 +21,27 @@ import {
   RefreshCw,
   Route,
   X,
+  XCircle,
 } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
+import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import {
   createTask,
+  getIntegration,
   getTaskFile,
+  getValidationLog,
   getPlannerRun,
   getPlannerRuns,
   getState,
   requestSchedulerTick,
   requestSignalFetch,
+  type PlannerRunsPage,
 } from "./api";
+import { CodeBlock } from "./code-block";
 import { TimelineEvent } from "./timeline";
 import { TranscriptView } from "./transcript";
 import type {
+  EventRecord,
+  IntegrationDetail,
   IntegrationRun,
   PlannerRunArtifact,
   PlannerRunSummary,
@@ -42,6 +51,7 @@ import type {
   StewardState,
   TaskRecord,
   TaskStatus,
+  ValidationResult,
 } from "./types";
 
 type ViewKey = "control" | "tasks" | "integration" | "settings";
@@ -50,6 +60,23 @@ type CodacySignal = {
   count: number;
   url: string | null;
 };
+
+type IntegrationTab = "patch" | "validation" | "commit" | "push";
+
+const LIST_PAGE_SIZE = 10;
+
+const TASK_GRAPH_LANES: Array<{
+  empty: string;
+  key: string;
+  label: string;
+  statuses: TaskStatus[];
+}> = [
+  { key: "queued", label: "Queued", statuses: ["queued"], empty: "No queued tasks" },
+  { key: "active", label: "In Progress", statuses: ["running", "reviewing", "integrating"], empty: "No active work" },
+  { key: "attention", label: "Needs Attention", statuses: ["blocked", "failed"], empty: "No blocked or failed tasks" },
+  { key: "completed", label: "Completed", statuses: ["succeeded", "pushed", "no_changes"], empty: "No completed tasks" },
+  { key: "archived", label: "Archived", statuses: ["cancelled"], empty: "No cancelled tasks" },
+];
 
 const EMPTY_STATE: StewardState = {
   tasks: [],
@@ -101,7 +128,12 @@ const EMPTY_STATE: StewardState = {
 export default function Dashboard() {
   const [state, setState] = useState<StewardState>(EMPTY_STATE);
   const [selectedId, setSelectedId] = useState<string>("");
-  const [plannerRuns, setPlannerRuns] = useState<PlannerRunSummary[]>([]);
+  const [plannerRunsPage, setPlannerRunsPage] = useState<PlannerRunsPage>({
+    runs: [],
+    total: 0,
+    limit: LIST_PAGE_SIZE,
+    offset: 0,
+  });
   const [busy, setBusy] = useState(false);
   const [streamState, setStreamState] = useState("connecting");
   const [loadError, setLoadError] = useState("");
@@ -115,7 +147,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     void refresh();
-    getPlannerRuns().then(setPlannerRuns);
+    getPlannerRuns({ limit: LIST_PAGE_SIZE, offset: 0 }).then(setPlannerRunsPage);
   }, []);
 
   useEffect(() => {
@@ -151,6 +183,11 @@ export default function Dashboard() {
       setLoadError(errorMessage(error, "Unable to load Steward state."));
       setStreamState("reconnecting");
     }
+  }
+
+  async function loadPlannerRunsPage(page: number) {
+    const offset = (page - 1) * LIST_PAGE_SIZE;
+    setPlannerRunsPage(await getPlannerRuns({ limit: LIST_PAGE_SIZE, offset }));
   }
 
   async function handleCreateTask(event: FormEvent<HTMLFormElement>) {
@@ -235,7 +272,8 @@ export default function Dashboard() {
           onRefresh={refresh}
           onRequestFetch={handleFetchSignals}
           onWakeScheduler={handleWakeScheduler}
-          plannerRuns={plannerRuns}
+          onPlannerPageChange={loadPlannerRunsPage}
+          plannerRunsPage={plannerRunsPage}
           selectedTask={selectedTask}
           state={state}
           view={view}
@@ -359,10 +397,11 @@ function DashboardView({
   busy,
   counts,
   loadError,
+  onPlannerPageChange,
   onRequestFetch,
   onRefresh,
   onWakeScheduler,
-  plannerRuns,
+  plannerRunsPage,
   selectedTask,
   state,
   view,
@@ -370,10 +409,11 @@ function DashboardView({
   busy: boolean;
   counts: ReturnType<typeof countTasks>;
   loadError: string;
+  onPlannerPageChange: (page: number) => Promise<void>;
   onRequestFetch: (providers: string[]) => Promise<void>;
   onRefresh: () => Promise<void>;
   onWakeScheduler: () => Promise<void>;
-  plannerRuns: PlannerRunSummary[];
+  plannerRunsPage: PlannerRunsPage;
   selectedTask?: TaskRecord;
   state: StewardState;
   view: ViewKey;
@@ -400,7 +440,7 @@ function DashboardView({
       <>
         {alert}
         <IntegrationPanel
-          items={state.integration ?? { queue: [], active: [], commits: [] }}
+          items={state.integration ?? { queue: [], active: [], runs: [], commits: [] }}
           state={state}
         />
       </>
@@ -436,7 +476,7 @@ function DashboardView({
             onWakeScheduler={onWakeScheduler}
             state={state}
           />
-          <PlannerTranscriptPanel runs={plannerRuns} />
+          <PlannerTranscriptPanel onPageChange={onPlannerPageChange} page={plannerRunsPage} />
         </div>
       </section>
     </>
@@ -457,6 +497,132 @@ function StateLoadAlert({
         Retry
       </button>
     </div>
+  );
+}
+
+function usePagination<T>(items: T[], pageSize: number = LIST_PAGE_SIZE) {
+  const [page, setPage] = useState(1);
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const start = (safePage - 1) * pageSize;
+  const pageItems = useMemo(() => items.slice(start, start + pageSize), [items, pageSize, start]);
+  const setSafePage = useCallback((nextPage: number) => {
+    setPage(Math.max(1, Math.min(nextPage, pageCount)));
+  }, [pageCount]);
+  return {
+    page: safePage,
+    pageCount,
+    pageItems,
+    pageSize,
+    setPage: setSafePage,
+    start,
+  };
+}
+
+function PaginationControls({
+  fetchedTotal,
+  itemLabel,
+  page,
+  pageCount,
+  pageSize,
+  total,
+  onPageChange,
+}: {
+  fetchedTotal?: number;
+  itemLabel: string;
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  total: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (total <= pageSize && (fetchedTotal ?? total) <= pageSize) return null;
+  const start = total ? (page - 1) * pageSize + 1 : 0;
+  const end = Math.min(page * pageSize, total);
+  const fetchedSuffix = fetchedTotal !== undefined && fetchedTotal > total ? ` (${fetchedTotal} total)` : "";
+  return (
+    <nav className="pagination-bar" aria-label={`${itemLabel} pagination`}>
+      <span className="pagination-range">
+        {start}-{end} of {total}{fetchedSuffix}
+      </span>
+      <div className="pagination-actions">
+        <button
+          aria-label={`Previous ${itemLabel} page`}
+          className="secondary"
+          disabled={page <= 1}
+          onClick={() => onPageChange(page - 1)}
+          title="Previous page"
+          type="button"
+        >
+          <ChevronLeft size={14} />
+        </button>
+        <PaginationJump
+          key={page}
+          itemLabel={itemLabel}
+          onPageChange={onPageChange}
+          page={page}
+          pageCount={pageCount}
+        />
+        <button
+          aria-label={`Next ${itemLabel} page`}
+          className="secondary"
+          disabled={page >= pageCount}
+          onClick={() => onPageChange(page + 1)}
+          title="Next page"
+          type="button"
+        >
+          <ChevronRight size={14} />
+        </button>
+      </div>
+    </nav>
+  );
+}
+
+function PaginationJump({
+  itemLabel,
+  onPageChange,
+  page,
+  pageCount,
+}: {
+  itemLabel: string;
+  onPageChange: (page: number) => void;
+  page: number;
+  pageCount: number;
+}) {
+  const [draftPage, setDraftPage] = useState(String(page));
+  function submitPage() {
+    const parsed = Number.parseInt(draftPage, 10);
+    if (Number.isNaN(parsed)) {
+      setDraftPage(String(page));
+      return;
+    }
+    const nextPage = Math.max(1, Math.min(parsed, pageCount));
+    setDraftPage(String(nextPage));
+    if (nextPage !== page) onPageChange(nextPage);
+  }
+  return (
+    <form
+      className="pagination-jump"
+      onSubmit={(event) => {
+        event.preventDefault();
+        submitPage();
+      }}
+    >
+      <span>Page</span>
+      <input
+        aria-label={`Go to ${itemLabel} page`}
+        className="mono"
+        inputMode="numeric"
+        max={pageCount}
+        min={1}
+        onBlur={submitPage}
+        onChange={(event) => setDraftPage(event.target.value)}
+        pattern="[0-9]*"
+        type="number"
+        value={draftPage}
+      />
+      <span>/ {pageCount}</span>
+    </form>
   );
 }
 
@@ -492,21 +658,43 @@ function TaskGraphPanel({
   );
 }
 
-function PlannerTranscriptPanel({ runs }: { runs: PlannerRunSummary[] }) {
+function PlannerTranscriptPanel({
+  onPageChange,
+  page,
+}: {
+  onPageChange: (page: number) => Promise<void>;
+  page: PlannerRunsPage;
+}) {
+  const currentPage = Math.floor(page.offset / page.limit) + 1;
+  const pageCount = Math.max(1, Math.ceil(page.total / page.limit));
+  const total = page.total;
   return (
     <section className="panel">
       <PanelTitle icon={<FileText size={17} />} title="Planner Iterations" />
-      {runs.length ? (
-        <div className="planner-run-list">
-          {runs.map((run, index) => (
-            <PlannerRunCard
-              index={index}
-              key={run.run_id}
-              run={run}
-              turn={runs.length - index}
-            />
-          ))}
-        </div>
+      {page.runs.length ? (
+        <>
+          <div className="planner-run-list">
+            {page.runs.map((run, index) => {
+              const globalIndex = page.offset + index;
+              return (
+                <PlannerRunCard
+                  index={globalIndex}
+                  key={run.run_id}
+                  run={run}
+                  turn={total - globalIndex}
+                />
+              );
+            })}
+          </div>
+          <PaginationControls
+            itemLabel="planner iterations"
+            onPageChange={(nextPage) => void onPageChange(nextPage)}
+            page={currentPage}
+            pageCount={pageCount}
+            pageSize={page.limit}
+            total={total}
+          />
+        </>
       ) : (
         <div className="empty-state">No planner run has been captured yet.</div>
       )}
@@ -770,17 +958,31 @@ function WakeupList({ wakeups }: { wakeups: SchedulerWakeup[] }) {
     <div className="wakeup-list">
       {wakeups.slice(0, 8).map((wakeup) => (
         <article className={`wakeup-row ${wakeup.status}`} key={wakeup.id}>
-          <div>
-            <div className="signal-card-head">
-              <StatusTextPill status={wakeup.status} />
+          <div className="wakeup-main">
+            <div className="wakeup-head">
+              <h3>{wakeup.reason}</h3>
               <time className="mono muted" dateTime={wakeup.created_at}>{compactDate(wakeup.created_at)}</time>
             </div>
-            <h3>{wakeup.reason}</h3>
-            <p>{wakeupDataSummary(wakeup)}</p>
+            <WakeupDetails wakeup={wakeup} />
           </div>
         </article>
       ))}
     </div>
+  );
+}
+
+function WakeupDetails({ wakeup }: { wakeup: SchedulerWakeup }) {
+  const details = wakeupDetailEntries(wakeup);
+  if (!details.length) return <p className="muted">No payload.</p>;
+  return (
+    <dl className="wakeup-details">
+      {details.map((detail) => (
+        <div key={detail.label}>
+          <dt>{detail.label}</dt>
+          <dd className={detail.mono ? "mono" : ""}>{detail.value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
@@ -800,14 +1002,14 @@ function SignalsPanel({
   const repository = state.config.github_repository || state.signals.repository;
   const [detailId, setDetailId] = useState("");
   const selected = items.find((item) => item.id === detailId) ?? null;
-  const pending = items.filter((item) => item.status === "pending").length;
-  const planned = items.filter((item) => item.status === "planned").length;
+  const pendingItems = items.filter((item) => item.status === "pending");
+  const consumedItems = items.filter((item) => item.status !== "pending");
   return (
     <div className="signals-page">
       <section className="metrics">
         <Metric icon={<Inbox size={18} />} label="Signal Items" value={items.length} />
-        <Metric icon={<Clock3 size={18} />} label="Pending" value={pending} />
-        <Metric icon={<CheckCircle2 size={18} />} label="Planned" value={planned} />
+        <Metric icon={<Clock3 size={18} />} label="Pending" value={pendingItems.length} />
+        <Metric icon={<CheckCircle2 size={18} />} label="Consumed" value={consumedItems.length} />
         <Metric icon={<AlertTriangle size={18} />} label="Fetch Errors" value={fetchRuns.filter((run) => run.status === "error").length} />
       </section>
       <section className="signals-stack">
@@ -818,9 +1020,21 @@ function SignalsPanel({
             providers={schedulerState(state).providers}
           />
         </FoldablePanel>
-        <FoldablePanel defaultOpen icon={<Inbox size={17} />} meta={items.length} title="Signal Inbox">
+        <FoldablePanel defaultOpen icon={<Inbox size={17} />} meta={pendingItems.length} title="Pending Signals">
           <SignalInboxList
-            items={items}
+            emptyText="No pending signals."
+            itemLabel="pending signals"
+            items={pendingItems}
+            onSelect={setDetailId}
+            repository={repository}
+            selectedId={selected?.id || ""}
+          />
+        </FoldablePanel>
+        <FoldablePanel defaultOpen={false} icon={<CheckCircle2 size={17} />} meta={consumedItems.length} title="Consumed Signals">
+          <SignalInboxList
+            emptyText="No consumed signals."
+            itemLabel="consumed signals"
+            items={consumedItems}
             onSelect={setDetailId}
             repository={repository}
             selectedId={selected?.id || ""}
@@ -843,44 +1057,59 @@ function SignalsPanel({
 }
 
 function SignalInboxList({
+  emptyText,
+  itemLabel,
   items,
   onSelect,
   repository,
   selectedId,
 }: {
+  emptyText: string;
+  itemLabel: string;
   items: SignalItem[];
   onSelect: (id: string) => void;
   repository: string;
   selectedId: string;
 }) {
-  if (!items.length) return <div className="empty-state">No signal items have been recorded yet.</div>;
+  const pagination = usePagination(items);
+  if (!items.length) return <div className="empty-state">{emptyText}</div>;
   return (
-    <div className="signal-list">
-      {items.map((item) => {
-        const codacy = codacySignal(item.summary || "", repository || repositoryFromPayload(item.payload || {}));
-        const link = primarySignalLink(item) || (codacy?.url ? { label: "Open Codacy", url: codacy.url } : null);
-        return (
-          <article className={`signal-card ${item.status} ${item.id === selectedId ? "active" : ""}`} key={item.id}>
-            <button
-              className="signal-card-select"
-              onClick={() => onSelect(item.id)}
-              type="button"
-            >
-              <SignalCardContent item={item} />
-            </button>
-            <div className="signal-card-actions">
-              <code>{item.id}</code>
-              {link?.url && (
-                <a className="button-link signal-link" href={link.url} rel="noreferrer" target="_blank">
-                  <ExternalLink size={13} />
-                  <span>{link.label}</span>
-                </a>
-              )}
-            </div>
-          </article>
-        );
-      })}
-    </div>
+    <>
+      <div className="signal-list">
+        {pagination.pageItems.map((item) => {
+          const codacy = codacySignal(item.summary || "", repository || repositoryFromPayload(item.payload || {}));
+          const link = primarySignalLink(item) || (codacy?.url ? { label: "Open Codacy", url: codacy.url } : null);
+          return (
+            <article className={`signal-card ${item.status} ${item.id === selectedId ? "active" : ""}`} key={item.id}>
+              <button
+                className="signal-card-select"
+                onClick={() => onSelect(item.id)}
+                type="button"
+              >
+                <SignalCardContent item={item} />
+              </button>
+              <div className="signal-card-actions">
+                <code>{item.id}</code>
+                {link?.url && (
+                  <a className="button-link signal-link" href={link.url} rel="noreferrer" target="_blank">
+                    <ExternalLink size={13} />
+                    <span>{link.label}</span>
+                  </a>
+                )}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+      <PaginationControls
+        itemLabel={itemLabel}
+        onPageChange={pagination.setPage}
+        page={pagination.page}
+        pageCount={pagination.pageCount}
+        pageSize={pagination.pageSize}
+        total={items.length}
+      />
+    </>
   );
 }
 
@@ -1035,7 +1264,7 @@ function SignalItemDetail({
         )}
       </div>
       <h3 className="section-subtitle">Payload</h3>
-      <pre className="code-pane compact">{JSON.stringify(item.payload, null, 2)}</pre>
+      <CodeBlock compact language="json" text={JSON.stringify(item.payload, null, 2)} title="Payload JSON" />
     </div>
   );
 }
@@ -1093,6 +1322,11 @@ function IntegrationPanel({
   items: StewardState["integration"];
   state: StewardState;
 }) {
+  const runs = integrationRuns(items, state.tasks);
+  const [selectedRunId, setSelectedRunId] = useState("");
+  function toggleRun(runId: string) {
+    setSelectedRunId((current) => current === runId ? "" : runId);
+  }
   return (
     <div className="integration-page">
       <section className="metrics">
@@ -1103,12 +1337,12 @@ function IntegrationPanel({
       </section>
       <section className="integration-stack">
         <section className="panel">
-          <PanelTitle icon={<ListChecks size={17} />} title="Submission Queue" />
-          <IntegrationQueue items={items.queue} />
-        </section>
-        <section className="panel">
-          <PanelTitle icon={<Activity size={17} />} title="Integration Session" />
-          <IntegrationSession items={items.active} />
+          <PanelTitle icon={<ListChecks size={17} />} title="Recent Runs" />
+          <IntegrationQueue
+            items={runs}
+            onSelect={toggleRun}
+            selectedRunId={selectedRunId}
+          />
         </section>
         <section className="panel">
           <PanelTitle icon={<GitBranch size={17} />} title="Pushed Commits" />
@@ -1121,80 +1355,102 @@ function IntegrationPanel({
 
 function IntegrationQueue({
   items,
+  onSelect,
+  selectedRunId,
 }: {
   items: IntegrationRun[];
+  onSelect: (runId: string) => void;
+  selectedRunId: string;
 }) {
-  if (!items.length) return <div className="empty-state">No patches are waiting for Integration.</div>;
+  const pagination = usePagination(items);
+  const { pageSize, setPage } = pagination;
+  const selectedIndex = selectedRunId
+    ? items.findIndex((item) => item.run_id === selectedRunId)
+    : -1;
+  useEffect(() => {
+    if (selectedIndex >= 0) {
+      setPage(Math.floor(selectedIndex / pageSize) + 1);
+    }
+  }, [pageSize, selectedIndex, setPage]);
+  if (!items.length) return <div className="empty-state">No Integration runs have been recorded yet.</div>;
   return (
-    <div className="integration-list">
-      {items.map((item) => (
-        <article className="integration-card" key={`${item.run_id || item.task_id || item.source_task_id}-${item.updated_at}`}>
-          <div className="integration-card-main">
-            <div className="integration-card-head">
-              <StatusTextPill status={item.status} />
-              <time className="mono muted" dateTime={item.updated_at}>{shortDate(item.updated_at)}</time>
-            </div>
-            <h3>{item.source_title || item.title}</h3>
-            <div className="integration-meta-row">
-              <span>{integrationStageText(item)}</span>
-              {item.source_task_id && <Link className="commit-link" href={taskHref(item.source_task_id)}>Source task</Link>}
-              {item.remote.commit && item.remote.commit_url && <GithubCommitLink commit={item.remote.commit} url={item.remote.commit_url} />}
-            </div>
-            {item.summary && <p>{item.summary}</p>}
-          </div>
-          <div className="integration-actions">
-            {item.run_id ? (
-              <Link className="button-link secondary" href={integrationHref(item.run_id)}>
-                Open Run
-              </Link>
-            ) : (
-              <span className="muted">Run pending</span>
-            )}
-          </div>
-        </article>
-      ))}
-    </div>
+    <>
+      <div className="integration-list">
+        {pagination.pageItems.map((item) => {
+          const title = item.source_title || item.title;
+          const commitSummary = item.remote.commit ? `pushed ${item.remote.commit}` : "";
+          const summary = item.summary && item.summary !== commitSummary ? item.summary : "";
+          const expanded = Boolean(item.run_id && item.run_id === selectedRunId);
+          return (
+            <article
+              className={`integration-card ${expanded ? "active expanded" : ""}`}
+              key={`${item.run_id || item.task_id || item.source_task_id}-${item.updated_at}`}
+            >
+              <div className="integration-card-summary">
+                <div className="integration-card-main">
+                  <div className="integration-card-head">
+                    <StatusTextPill status={item.status} />
+                    <time className="mono muted" dateTime={item.updated_at}>{shortDate(item.updated_at)}</time>
+                  </div>
+                  <h3>{title}</h3>
+                  <div className="integration-meta-row compact">
+                    <span className="integration-meta-chip">
+                      <b>Stage</b>
+                      <span>{integrationStageText(item)}</span>
+                    </span>
+                    {item.source_task_id && (
+                      <Link className="integration-meta-chip link" href={taskHref(item.source_task_id)}>
+                        <b>Source</b>
+                        <span>Task</span>
+                      </Link>
+                    )}
+                    {item.remote.commit && item.remote.commit_url && (
+                      <a className="integration-meta-chip link" href={item.remote.commit_url} rel="noreferrer" target="_blank">
+                        <b>Commit</b>
+                        <span className="mono">{shortSha(item.remote.commit)}</span>
+                        <ExternalLink size={13} />
+                      </a>
+                    )}
+                  </div>
+                  {summary && <p>{summary}</p>}
+                </div>
+                <div className="integration-actions">
+                  {item.run_id ? (
+                    <button
+                      aria-expanded={expanded}
+                      className="secondary"
+                      onClick={() => onSelect(item.run_id)}
+                      type="button"
+                    >
+                      {expanded ? "Hide Details" : "View Details"}
+                    </button>
+                  ) : (
+                    <span className="muted">Run pending</span>
+                  )}
+                </div>
+              </div>
+              {expanded && <IntegrationSession run={item} />}
+            </article>
+          );
+        })}
+      </div>
+      <PaginationControls
+        itemLabel="integration runs"
+        onPageChange={pagination.setPage}
+        page={pagination.page}
+        pageCount={pagination.pageCount}
+        pageSize={pagination.pageSize}
+        total={items.length}
+      />
+    </>
   );
 }
 
-function IntegrationSession({
-  items,
-}: {
-  items: IntegrationRun[];
-}) {
-  const active = items[0];
-  if (!active) return <div className="empty-state">No Integration session is currently running.</div>;
-  const timelineEvents = active.events.slice().reverse();
+function IntegrationSession({ run }: { run?: IntegrationRun }) {
+  if (!run) return <div className="empty-state">No Integration run is selected.</div>;
   return (
     <div className="integration-session">
-      <div className="session-head">
-        <div>
-          <StatusTextPill status={active.status} />
-          <h3>{active.title}</h3>
-          <p>{active.summary || "Integration is preparing, validating, or pushing the reviewed patch."}</p>
-        </div>
-        {active.run_id && <Link className="button-link secondary" href={integrationHref(active.run_id)}>Open Run</Link>}
-      </div>
-      <div className="session-summary-grid">
-        <div>
-          <span>Current Stage</span>
-          <b>{integrationStageText(active)}</b>
-        </div>
-        <div>
-          <span>Source</span>
-          {active.source_task_id ? <Link className="link-button" href={taskHref(active.source_task_id)}>Source task</Link> : <b>-</b>}
-        </div>
-        <div>
-          <span>Remote</span>
-          {active.remote.commit && active.remote.commit_url ? <GithubCommitLink commit={active.remote.commit} url={active.remote.commit_url} /> : <b>-</b>}
-        </div>
-      </div>
-      <IntegrationTranscriptPanel key={`${active.run_id}-${active.transcript_path || ""}-${active.updated_at}`} run={active} />
-      <h3 className="section-subtitle">Execution Timeline</h3>
-      <ol className="timeline compact">
-        {timelineEvents.map((event) => <TimelineEvent event={event} key={`${event.created_at}-${event.kind}`} />)}
-        {!active.events.length && <li className="muted">No Integration events recorded yet.</li>}
-      </ol>
+      <IntegrationInlineDetail key={`${run.run_id}-${run.updated_at}`} run={run} />
     </div>
   );
 }
@@ -1216,7 +1472,7 @@ function IntegrationTranscriptPanel({ run }: { run: IntegrationRun }) {
     <>
       <h3 className="section-subtitle">Integration Transcript</h3>
       {transcript ? (
-        <pre className="integration-transcript code-pane compact">{transcript}</pre>
+        <CodeBlock className="integration-transcript" compact text={transcript} title="Transcript" />
       ) : (
         <div className="empty-state compact">No integration transcript has been captured yet.</div>
       )}
@@ -1224,41 +1480,314 @@ function IntegrationTranscriptPanel({ run }: { run: IntegrationRun }) {
   );
 }
 
+function IntegrationInlineDetail({ run }: { run: IntegrationRun }) {
+  const [detail, setDetail] = useState<IntegrationDetail | null>(null);
+  const [patch, setPatch] = useState("");
+  const [transcript, setTranscript] = useState("");
+  const [validationLog, setValidationLog] = useState<{ index: number; text: string } | null>(null);
+  const [activeTab, setActiveTab] = useState<IntegrationTab>("patch");
+  const [loadError, setLoadError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    if (!run.run_id) return;
+    async function load() {
+      try {
+        const [next, nextTranscript] = await Promise.all([
+          getIntegration(run.run_id),
+          getTaskFile(run.run_id, "transcript"),
+        ]);
+        let nextPatch = await getTaskFile(run.run_id, "patch");
+        if (!nextPatch && next.run.source_task_id) {
+          nextPatch = await getTaskFile(next.run.source_task_id, "patch");
+        }
+        if (!cancelled) {
+          setDetail(next);
+          setPatch(nextPatch);
+          setTranscript(nextTranscript);
+        }
+      } catch (error) {
+        if (!cancelled) setLoadError(errorMessage(error, "Unable to load integration detail."));
+      }
+    }
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [run.run_id, run.updated_at]);
+
+  async function showValidation(index: number) {
+    if (!run.run_id) return;
+    try {
+      setValidationLog({ index, text: await getValidationLog(run.run_id, index) });
+    } catch (error) {
+      setLoadError(errorMessage(error, "Unable to load validation log."));
+    }
+  }
+
+  if (loadError) return <div className="inline-alert">{loadError}</div>;
+  if (!detail) {
+    return (
+      <>
+        <IntegrationTranscriptPanel run={run} />
+        <IntegrationTimeline events={run.events} />
+      </>
+    );
+  }
+
+  const timelineEvents = [...detail.events, ...detail.source_events]
+    .sort((left, right) => left.created_at.localeCompare(right.created_at));
+  const tabs = integrationTabs(detail, patch);
+  return (
+    <div className="integration-inline-detail">
+      <div className="integration-detail-layout">
+        <main className="integration-detail-main">
+          <div className="attempt-tabs integration-tabs" role="tablist" aria-label="Integration run views">
+            {tabs.map((tab) => (
+              <button
+                aria-selected={activeTab === tab.key}
+                className={activeTab === tab.key ? "active" : ""}
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                role="tab"
+                type="button"
+              >
+                <span>{tab.label}</span>
+                {tab.meta !== undefined && <b>{tab.meta}</b>}
+              </button>
+            ))}
+          </div>
+          <div className="attempt-panel integration-tab-panel">
+            {activeTab === "patch" && <IntegrationPatchPanel patch={patch} />}
+            {activeTab === "validation" && (
+              <IntegrationValidations
+                log={validationLog?.text || ""}
+                logIndex={validationLog?.index ?? null}
+                onShow={showValidation}
+                validations={detail.validations}
+              />
+            )}
+            {activeTab === "commit" && (
+              <IntegrationCommitPanel
+                detail={detail}
+                transcript={transcript}
+              />
+            )}
+            {activeTab === "push" && (
+              <IntegrationPushPanel
+                detail={detail}
+                transcript={transcript}
+              />
+            )}
+          </div>
+        </main>
+        <aside className="integration-detail-aside">
+          <IntegrationTimeline events={timelineEvents} />
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+function IntegrationTimeline({ events }: { events: IntegrationRun["events"] }) {
+  const timelineEvents = events.slice().reverse();
+  return (
+    <section className="panel task-timeline-panel integration-timeline-panel">
+      <PanelTitle icon={<ListChecks size={17} />} title="Timeline" />
+      <ol className="timeline compact">
+        {timelineEvents.map((event) => <TimelineEvent event={event} key={`${event.task_id}-${event.created_at}-${event.kind}`} />)}
+        {!timelineEvents.length && <li className="muted">No Integration events recorded yet.</li>}
+      </ol>
+    </section>
+  );
+}
+
+function IntegrationPatchPanel({ patch }: { patch: string }) {
+  return (
+    <section className="integration-subsection">
+      <h3 className="section-subtitle">Patch</h3>
+      {patch ? <DiffView text={patch} /> : <div className="empty-state compact">No integration patch artifact is available.</div>}
+    </section>
+  );
+}
+
+function IntegrationCommitPanel({
+  detail,
+  transcript,
+}: {
+  detail: IntegrationDetail;
+  transcript: string;
+}) {
+  const commitMessage = parseCommitMessageArtifact(detail.commit_message?.last_message || "");
+  const commitEvents = integrationEventsMatching(detail, [
+    "integration.commit_message_generated",
+    "integration.commit_message_failed",
+    "integration.commit_failed",
+    "integration.local_only",
+  ]);
+  const commitLines = filterIntegrationTranscript(transcript, ["commit_message", "commit", "commit_failed", "local_only"]);
+  return (
+    <section className="integration-subsection integration-artifact-panel">
+      <h3 className="section-subtitle">Commit</h3>
+      {commitMessage ? (
+        <article className="commit-message-card">
+          <span>Commit message</span>
+          <h4>{commitMessage.subject}</h4>
+          {commitMessage.body && <CodeBlock compact language="markdown" text={commitMessage.body} title="Body" />}
+        </article>
+      ) : (
+        <div className="empty-state compact">No structured commit message has been captured yet.</div>
+      )}
+      {detail.commit_message?.transcript && (
+        <TranscriptView
+          diagnostics={detail.commit_message.diagnostics}
+          prompt=""
+          taskId={`${detail.run.run_id}-commit-message`}
+          text={detail.commit_message.transcript}
+        />
+      )}
+      <IntegrationEventList events={commitEvents} emptyText="No commit events recorded yet." />
+      {commitLines && <CodeBlock compact text={commitLines} title="Commit transcript" />}
+    </section>
+  );
+}
+
+function IntegrationPushPanel({
+  detail,
+  transcript,
+}: {
+  detail: IntegrationDetail;
+  transcript: string;
+}) {
+  const pushEvents = integrationEventsMatching(detail, ["main.pushed", "integration.push_failed"]);
+  const pushLines = filterIntegrationTranscript(transcript, ["push", "push_failed", "pushed", "finish"]);
+  const pushLog = detail.push_log?.text || "";
+  return (
+    <section className="integration-subsection integration-artifact-panel">
+      <h3 className="section-subtitle">Push</h3>
+      {detail.remote.commit && detail.remote.commit_url && (
+        <div className="push-summary">
+          <span>Remote commit</span>
+          <GithubCommitLink commit={detail.remote.commit} url={detail.remote.commit_url} />
+        </div>
+      )}
+      <IntegrationEventList events={pushEvents} emptyText="No push events recorded yet." />
+      {pushLog ? (
+        <CodeBlock compact text={pushLog} title="Push log" />
+      ) : pushLines ? (
+        <CodeBlock compact text={pushLines} title="Push transcript" />
+      ) : (
+        <div className="empty-state compact">No push transcript has been captured yet.</div>
+      )}
+    </section>
+  );
+}
+
+function IntegrationValidations({
+  log,
+  logIndex,
+  onShow,
+  validations,
+}: {
+  log: string;
+  logIndex: number | null;
+  onShow: (index: number) => void;
+  validations: Array<ValidationResult & { index: number }>;
+}) {
+  if (!validations.length) return <div className="empty-state compact">No integration validation has run yet.</div>;
+  return (
+    <div className="attempt-validation-list integration-validations">
+      {validations.map((validation) => (
+        <button
+          className={`validation-row ${logIndex === validation.index ? "active" : ""}`}
+          key={`${validation.output_path}-${validation.index}`}
+          onClick={() => onShow(validation.index)}
+          type="button"
+        >
+          {validation.passed ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
+          <span className="mono">{validation.command.join(" ")}</span>
+          <StatusPill status={validation.passed ? "succeeded" : "failed"} />
+        </button>
+      ))}
+      {log && validations.some((validation) => validation.index === logIndex) && (
+        <CodeBlock compact text={log} title="Validation log" />
+      )}
+    </div>
+  );
+}
+
+function IntegrationEventList({
+  emptyText,
+  events,
+}: {
+  emptyText: string;
+  events: EventRecord[];
+}) {
+  if (!events.length) return <div className="empty-state compact">{emptyText}</div>;
+  return (
+    <div className="integration-event-list">
+      {events.map((event) => (
+        <article key={`${event.task_id}-${event.created_at}-${event.kind}`}>
+          <div>
+            <b className="mono">{event.kind}</b>
+            <time className="mono muted" dateTime={event.created_at}>{shortDate(event.created_at)}</time>
+          </div>
+          <p>{event.message}</p>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function DiffView({ text }: { text: string }) {
+  return <CodeBlock compact language="diff" text={text} title="Patch" />;
+}
+
 function IntegrationCommits({
   commits,
 }: {
   commits: StewardState["integration"]["commits"];
 }) {
+  const pagination = usePagination(commits);
   if (!commits.length) return <div className="empty-state">No pushed commits have been recorded yet.</div>;
   return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Source Task</th>
-            <th>Commit</th>
-            <th>Status</th>
-            <th>Updated</th>
-          </tr>
-        </thead>
-        <tbody>
-          {commits.map((commit) => (
-            <tr key={`${commit.task_id}-${commit.commit}`}>
-              <td>
-                <Link className="link-button" href={taskHref(commit.task_id)}>
-                  {commit.title}
-                </Link>
-                <div className="task-meta mono">{commit.task_id}</div>
-                {commit.summary && <div className="task-meta">{commit.summary}</div>}
-              </td>
-              <td><GithubCommitLink commit={commit.commit} url={commit.commit_url} /></td>
-              <td><StatusTextPill status={commit.status} /></td>
-              <td className="mono">{shortDate(commit.updated_at)}</td>
+    <>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Source Task</th>
+              <th>Commit</th>
+              <th>Status</th>
+              <th>Updated</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody>
+            {pagination.pageItems.map((commit) => (
+              <tr key={`${commit.task_id}-${commit.commit}`}>
+                <td>
+                  <Link className="link-button" href={taskHref(commit.task_id)}>
+                    {commit.title}
+                  </Link>
+                  <div className="task-meta mono">{commit.task_id}</div>
+                  {commit.summary && <div className="task-meta">{commit.summary}</div>}
+                </td>
+                <td><GithubCommitLink commit={commit.commit} url={commit.commit_url} /></td>
+                <td><StatusTextPill status={commit.status} /></td>
+                <td className="mono">{shortDate(commit.updated_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <PaginationControls
+        itemLabel="pushed commits"
+        onPageChange={pagination.setPage}
+        page={pagination.page}
+        pageCount={pagination.pageCount}
+        pageSize={pagination.pageSize}
+        total={commits.length}
+      />
+    </>
   );
 }
 
@@ -1267,48 +1796,68 @@ function TaskTable({ githubRepository, tasks, selectedId }: {
   tasks: TaskRecord[];
   selectedId: string;
 }) {
+  const pagination = usePagination(tasks);
+  const { pageSize, setPage } = pagination;
+  const selectedIndex = selectedId
+    ? tasks.findIndex((task) => task.spec.id === selectedId)
+    : -1;
+  useEffect(() => {
+    if (selectedIndex >= 0) {
+      setPage(Math.floor(selectedIndex / pageSize) + 1);
+    }
+  }, [pageSize, selectedIndex, setPage]);
   if (!tasks.length) return <div className="empty-state">No tasks yet. Create one or run a planning tick.</div>;
   return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Task</th>
-            <th>Status</th>
-            <th>Kind</th>
-            <th>Priority</th>
-            <th>Risk</th>
-            <th>Updated</th>
-            <th>Remote</th>
-          </tr>
-        </thead>
-        <tbody>
-          {tasks.map((task) => {
-            const remote = taskRemoteFromSummary(task, githubRepository);
-            const display = taskDisplay(task);
-            return (
-              <tr className={selectedId === task.spec.id ? "selected-row" : ""} key={task.spec.id}>
-                <td>
-                  <Link className="link-button" href={taskHref(task.spec.id)}>
-                    {display.title}
-                  </Link>
-                </td>
-                <td><StatusPill status={task.status} /></td>
-                <td><TaskSpecChip value={display.kind} /></td>
-                <td><TaskSpecChip tone={`priority-${task.spec.priority}`} value={task.spec.priority} /></td>
-                <td><TaskSpecChip tone={`risk-${task.spec.risk}`} value={task.spec.risk} /></td>
-                <td>
-                  <time className="compact-time mono" dateTime={task.updated_at} title={shortDate(task.updated_at)}>
-                    {compactDate(task.updated_at)}
-                  </time>
-                </td>
-                <td>{remote ? <GithubCommitLink commit={remote.commit} url={remote.url} /> : <span className="muted">-</span>}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+    <>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Task</th>
+              <th>Status</th>
+              <th>Kind</th>
+              <th>Priority</th>
+              <th>Risk</th>
+              <th>Updated</th>
+              <th>Remote</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pagination.pageItems.map((task) => {
+              const remote = taskRemoteFromSummary(task, githubRepository);
+              const display = taskDisplay(task);
+              return (
+                <tr className={selectedId === task.spec.id ? "selected-row" : ""} key={task.spec.id}>
+                  <td>
+                    <Link className="link-button" href={taskHref(task.spec.id)}>
+                      {display.title}
+                    </Link>
+                  </td>
+                  <td><StatusPill status={task.status} /></td>
+                  <td><TaskSpecChip value={display.kind} /></td>
+                  <td><TaskSpecChip tone={`priority-${task.spec.priority}`} value={task.spec.priority} /></td>
+                  <td><TaskSpecChip tone={`risk-${task.spec.risk}`} value={task.spec.risk} /></td>
+                  <td>
+                    <time className="compact-time mono" dateTime={task.updated_at} title={shortDate(task.updated_at)}>
+                      {compactDate(task.updated_at)}
+                    </time>
+                  </td>
+                  <td>{remote ? <GithubCommitLink commit={remote.commit} url={remote.url} /> : <span className="muted">-</span>}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <PaginationControls
+        itemLabel="tasks"
+        onPageChange={pagination.setPage}
+        page={pagination.page}
+        pageCount={pagination.pageCount}
+        pageSize={pagination.pageSize}
+        total={tasks.length}
+      />
+    </>
   );
 }
 
@@ -1319,28 +1868,22 @@ function TaskGraph({
   tasks: TaskRecord[];
   selectedId: string;
 }) {
-  const lanes: TaskStatus[] = [
-    "queued",
-    "running",
-    "reviewing",
-    "integrating",
-    "succeeded",
-    "pushed",
-    "no_changes",
-    "blocked",
-    "failed",
-    "cancelled",
-  ];
   return (
     <div className="graph">
-      {lanes.map((lane) => {
-        const laneTasks = tasks.filter((task) => task.status === lane);
+      {TASK_GRAPH_LANES.map((lane) => {
+        const laneTasks = tasks
+          .filter((task) => lane.statuses.includes(task.status))
+          .sort((left, right) => taskUpdatedAtMs(right) - taskUpdatedAtMs(left));
         return (
-          <div className="graph-lane" key={lane}>
-            <div className="lane-title">{lane}</div>
+          <div className={`graph-lane lane-${lane.key}`} key={lane.key}>
+            <div className="lane-title">
+              <span>{lane.label}</span>
+              <b>{laneTasks.length}</b>
+            </div>
             <div className="lane-items">
               {laneTasks.map((task) => {
                 const display = taskDisplay(task);
+                const titleParts = taskTitleParts(display.title);
                 return (
                   <Link
                     className={`graph-node ${selectedId === task.spec.id ? "active" : ""}`}
@@ -1348,17 +1891,43 @@ function TaskGraph({
                     key={task.spec.id}
                     title={display.title}
                   >
-                    <Circle size={10} />
-                    <span>{display.title}</span>
+                    <div className="graph-node-head">
+                      <Circle size={10} />
+                      <span>
+                        <b>{titleParts.summary}</b>
+                        {titleParts.location && <small>{titleParts.location}</small>}
+                      </span>
+                    </div>
+                    <div className="graph-node-meta">
+                      <StatusPill status={task.status} />
+                      <TaskSpecChip value={display.kind} />
+                      <TaskSpecChip tone={`priority-${task.spec.priority}`} value={task.spec.priority} />
+                      <TaskSpecChip tone={`risk-${task.spec.risk}`} value={task.spec.risk} />
+                    </div>
+                    <time className="graph-node-time mono" dateTime={task.updated_at} title={shortDate(task.updated_at)}>
+                      Updated {compactDate(task.updated_at)}
+                    </time>
                   </Link>
                 );
               })}
+              {!laneTasks.length && <div className="lane-empty">{lane.empty}</div>}
             </div>
           </div>
         );
       })}
     </div>
   );
+}
+
+function taskUpdatedAtMs(task: TaskRecord) {
+  const value = Date.parse(task.updated_at);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function taskTitleParts(title: string) {
+  const match = /^(.*?)\s+in\s+(.+)$/.exec(title);
+  if (!match) return { summary: title, location: "" };
+  return { summary: match[1], location: match[2] };
 }
 
 function GithubCommitLink({ commit, url }: { commit: string; url: string }) {
@@ -1507,10 +2076,6 @@ function taskHref(taskId: string) {
   return `/tasks/${encodeURIComponent(taskId)}`;
 }
 
-function integrationHref(integrationId: string) {
-  return integrationId ? `/integrations/${encodeURIComponent(integrationId)}` : "#";
-}
-
 function codacySignal(summary: string, repository = ""): CodacySignal | null {
   const match = /(?:^|\b)Codacy\s+issuesCount=(\d+)/i.exec(summary);
   if (!match) return null;
@@ -1538,22 +2103,130 @@ function integrationStageText(item: IntegrationRun) {
   return item.summary || item.status || "-";
 }
 
+function integrationRuns(items: StewardState["integration"], tasks: TaskRecord[]) {
+  const byId = new Map<string, IntegrationRun>();
+  for (const run of [...integrationTaskRuns(items, tasks), ...(items.runs ?? []), ...items.active, ...items.queue]) {
+    const key = run.run_id || run.task_id;
+    if (key) byId.set(key, run);
+  }
+  return Array.from(byId.values()).sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+}
+
+function integrationTaskRuns(items: StewardState["integration"], tasks: TaskRecord[]): IntegrationRun[] {
+  const byTaskId = new Map(tasks.map((task) => [task.spec.id, task]));
+  const commitsByTaskId = new Map(items.commits.map((commit) => [commit.task_id, commit]));
+  return tasks
+    .filter(isIntegrationTask)
+    .map((task) => {
+      const sourceTaskId = typeof task.spec.metadata.source_task_id === "string" ? task.spec.metadata.source_task_id : "";
+      const source = sourceTaskId ? byTaskId.get(sourceTaskId) : undefined;
+      const sourcePatchPath = typeof task.spec.metadata.source_patch_path === "string" ? task.spec.metadata.source_patch_path : null;
+      const commit = commitsByTaskId.get(task.spec.id) ?? (sourceTaskId ? commitsByTaskId.get(sourceTaskId) : undefined);
+      return {
+        run_id: task.spec.id,
+        task_id: task.spec.id,
+        title: task.spec.title,
+        status: task.status,
+        summary: task.summary,
+        source_task_id: sourceTaskId || null,
+        source_title: source?.spec.title || "",
+        source_status: source?.status || "",
+        source_patch_path: source?.patch_path || sourcePatchPath,
+        patch_path: task.patch_path || source?.patch_path || sourcePatchPath,
+        transcript_path: task.transcript_path,
+        worktree_path: task.worktree_path,
+        updated_at: task.updated_at,
+        remote: {
+          commit: commit?.commit || null,
+          commit_url: commit?.commit_url || null,
+        },
+        events: [],
+      };
+    })
+    .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+}
+
+function integrationTabs(detail: IntegrationDetail, patch: string): Array<{ key: IntegrationTab; label: string; meta?: string | number }> {
+  const commitReady = Boolean(detail.commit_message?.last_message || integrationEventsMatching(detail, ["integration.commit_message_generated"]).length);
+  const pushEvents = integrationEventsMatching(detail, ["main.pushed", "integration.push_failed"]);
+  return [
+    { key: "patch", label: "Patch", meta: patch ? "saved" : undefined },
+    { key: "validation", label: "Validation", meta: detail.validations.length },
+    { key: "commit", label: "Commit", meta: commitReady ? "ready" : undefined },
+    { key: "push", label: "Push", meta: detail.remote.commit ? "pushed" : pushEvents.length || undefined },
+  ];
+}
+
+function integrationEventsMatching(detail: IntegrationDetail, kinds: string[]) {
+  const wanted = new Set(kinds);
+  return [...detail.events, ...detail.source_events]
+    .filter((event) => wanted.has(event.kind))
+    .sort((left, right) => left.created_at.localeCompare(right.created_at));
+}
+
+function filterIntegrationTranscript(transcript: string, stages: string[]) {
+  if (!transcript.trim()) return "";
+  const wanted = new Set(stages);
+  return transcript
+    .split("\n")
+    .filter((line) => {
+      const match = /^\[[^\]]+\]\s+([^:]+):/.exec(line);
+      return match ? wanted.has(match[1]) : false;
+    })
+      .join("\n");
+}
+
+function parseCommitMessageArtifact(text: string): { subject: string; body: string } | null {
+  if (!text.trim()) return null;
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const subject = parsed.subject;
+    const body = parsed.body;
+    if (typeof subject === "string" && typeof body === "string") {
+      return { subject, body };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function providerStatusText(provider: SchedulerProviderState) {
   const interval = provider.last_status === "error" ? provider.error_retry_minutes : provider.poll_interval_minutes;
   if (provider.due) return `Due now · ${provider.max_items} item limit`;
   return `Next ${compactFuture(provider.next_due_at)} · every ${formatMinutes(interval)}`;
 }
 
-function wakeupDataSummary(wakeup: SchedulerWakeup) {
-  const providers = wakeup.data.providers;
-  if (Array.isArray(providers) && providers.length) {
-    return providers.filter((provider) => typeof provider === "string").join(", ");
+function wakeupDetailEntries(wakeup: SchedulerWakeup) {
+  const entries: Array<{ label: string; value: string; mono?: boolean }> = [];
+  const consumedKeys = new Set<string>();
+  const add = (label: string, value: unknown, mono = false, keys: string[] = []) => {
+    if (value === null || value === undefined || value === "") return;
+    const text = Array.isArray(value)
+      ? value.filter((item) => item !== null && item !== undefined && item !== "").join(", ")
+      : typeof value === "object"
+        ? JSON.stringify(value)
+        : String(value);
+    if (!text) return;
+    keys.forEach((key) => consumedKeys.add(key));
+    entries.push({ label, value: text, mono });
+  };
+
+  add("wakeup", wakeup.id, true);
+  add("state", wakeup.status);
+  add("providers", wakeup.data.providers, false, ["providers"]);
+  add("provider", wakeup.data.provider, false, ["provider"]);
+  add("task", wakeup.data.task_id, true, ["task_id"]);
+  add("signal", wakeup.data.signal_item_id, true, ["signal_item_id"]);
+  add("status", wakeup.data.status, false, ["status"]);
+  add("phase", wakeup.data.phase, false, ["phase"]);
+  add("dispatch", wakeup.data.dispatch, false, ["dispatch"]);
+  add("plan", wakeup.data.plan, false, ["plan"]);
+  add("max dispatch", wakeup.data.max_dispatch, false, ["max_dispatch"]);
+  for (const [key, value] of Object.entries(wakeup.data)) {
+    if (!consumedKeys.has(key)) add(key.replaceAll("_", " "), value, false, [key]);
   }
-  const taskId = wakeup.data.task_id;
-  if (typeof taskId === "string") return taskId;
-  const signalId = wakeup.data.signal_item_id;
-  if (typeof signalId === "string") return signalId;
-  return Object.keys(wakeup.data).length ? JSON.stringify(wakeup.data) : "-";
+  return entries;
 }
 
 function taskRemoteFromSummary(task: TaskRecord, githubRepository: string) {

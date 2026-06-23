@@ -1,5 +1,12 @@
 import type { IntegrationDetail, PlannerRunArtifact, PlannerRunSummary, StewardState, TaskDetail } from "./types";
 
+export type PlannerRunsPage = {
+  runs: PlannerRunSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
 export async function getState(): Promise<StewardState> {
   const response = await fetch("/api/state", { cache: "no-store" });
   if (!response.ok) throw new Error(`state request failed: ${response.status}`);
@@ -52,11 +59,28 @@ export async function getIterationPatch(taskId: string, iteration: number): Prom
   return response.text();
 }
 
-export async function getPlannerRuns(): Promise<PlannerRunSummary[]> {
-  const response = await fetch("/api/planner/runs", { cache: "no-store" });
-  if (!response.ok) return [];
-  const payload = (await response.json()) as { runs?: PlannerRunSummary[] };
-  return payload.runs ?? [];
+export async function getPlannerRuns(options: { limit?: number; offset?: number } = {}): Promise<PlannerRunsPage> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined) params.set("offset", String(options.offset));
+  const query = params.toString();
+  const response = await fetch(`/api/planner/runs${query ? `?${query}` : ""}`, { cache: "no-store" });
+  if (!response.ok) {
+    return { runs: [], total: 0, limit: options.limit ?? 0, offset: options.offset ?? 0 };
+  }
+  const payload = (await response.json()) as {
+    runs?: PlannerRunSummary[];
+    total?: number;
+    limit?: number;
+    offset?: number;
+  };
+  const runs = payload.runs ?? [];
+  return {
+    runs,
+    total: typeof payload.total === "number" ? payload.total : runs.length,
+    limit: typeof payload.limit === "number" ? payload.limit : options.limit ?? runs.length,
+    offset: typeof payload.offset === "number" ? payload.offset : options.offset ?? 0,
+  };
 }
 
 export async function getPlannerRun(runId: string): Promise<PlannerRunArtifact | null> {

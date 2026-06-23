@@ -21,6 +21,7 @@ import {
   Wrench,
   XCircle,
 } from "lucide-react";
+import { CodeBlock } from "./code-block";
 import type { CodexRunDiagnostics } from "./types";
 
 type TranscriptItem =
@@ -101,6 +102,12 @@ type GenericItem = {
   id: string;
   kind: "generic";
   label: string;
+  text: string;
+};
+
+type TextBlock = {
+  kind: "code" | "diff" | "image" | "text";
+  language?: string;
   text: string;
 };
 
@@ -258,8 +265,10 @@ function SessionDiagnostics({
           />
           {diagnostics.thread_id && <DiagFact label="Thread" value={diagnostics.thread_id} />}
         </dl>
-        {diagnostics.last_error && <pre>{diagnostics.last_error}</pre>}
-        {!diagnostics.last_error && diagnostics.last_output && <pre>{diagnostics.last_output}</pre>}
+        {diagnostics.last_error && <CodeBlock compact text={diagnostics.last_error} title="Last error" />}
+        {!diagnostics.last_error && diagnostics.last_output && (
+          <CodeBlock compact text={diagnostics.last_output} title="Last output" />
+        )}
       </div>
     </ToolCard>
   );
@@ -347,9 +356,14 @@ function TranscriptCard({ item, taskId }: { item: TranscriptItem; taskId: string
         title={shortCommand(item.command)}
         tone={failed ? "danger" : item.status === "in_progress" ? "pending" : "ok"}
       >
-        <pre className="tool-command">
-          <EscapedText text={item.command} />
-        </pre>
+        <CodeBlock
+          className="tool-command"
+          compact
+          language="bash"
+          showLineNumbers={false}
+          text={item.command}
+          title="Command"
+        />
         {item.output ? (
           <TextBlocks mode="tool" taskId={taskId} text={item.output} />
         ) : (
@@ -508,16 +522,24 @@ function TextBlocks({ mode = "message", taskId, text }: { mode?: "message" | "to
         if (block.kind === "image") return <ImageBlock key={index} path={block.text} taskId={taskId} />;
         if (block.kind === "code") {
           return (
-            <pre className="chat-code" key={index}>
-              <EscapedText text={block.text} />
-            </pre>
+            <CodeBlock
+              className="chat-code"
+              compact
+              key={index}
+              language={block.language}
+              text={block.text}
+            />
           );
         }
         if (mode === "tool") {
           return (
-            <pre className="tool-output" key={index}>
-              <EscapedText text={block.text} />
-            </pre>
+            <CodeBlock
+              className="tool-output"
+              compact
+              key={index}
+              text={block.text}
+              title="Output"
+            />
           );
         }
         const plannerInput = parsePlannerInput(block.text);
@@ -725,16 +747,7 @@ function shortDate(value: string) {
 }
 
 function DiffBlock({ text }: { text: string }) {
-  return (
-    <pre className="chat-diff">
-      {text.split("\n").map((line, index) => (
-        <span className={diffClass(line)} key={index}>
-          <EscapedText text={line} />
-          {"\n"}
-        </span>
-      ))}
-    </pre>
-  );
+  return <CodeBlock className="chat-diff" compact language="diff" text={text} title="Diff" />;
 }
 
 function ImageBlock({ path, taskId }: { path: string; taskId: string }) {
@@ -885,25 +898,26 @@ function parseTopLevel(event: CodexEvent | null, raw: string, index: number): Tr
   };
 }
 
-function splitTextBlocks(text: string): Array<{ kind: "code" | "diff" | "image" | "text"; text: string }> {
-  const blocks: Array<{ kind: "code" | "diff" | "image" | "text"; text: string }> = [];
+function splitTextBlocks(text: string): TextBlock[] {
+  const blocks: TextBlock[] = [];
   const fence = /```([^\n]*)\n([\s\S]*?)```/g;
   let cursor = 0;
   for (const match of text.matchAll(fence)) {
     if (match.index > cursor) appendTextLike(blocks, text.slice(cursor, match.index));
     const language = match[1].trim().toLowerCase();
     const content = match[2].replace(/\n$/, "");
-    blocks.push({ kind: language.includes("diff") || looksLikeDiff(content) ? "diff" : "code", text: content });
+    blocks.push({
+      kind: language.includes("diff") || looksLikeDiff(content) ? "diff" : "code",
+      language,
+      text: content,
+    });
     cursor = match.index + match[0].length;
   }
   appendTextLike(blocks, text.slice(cursor));
   return blocks;
 }
 
-function appendTextLike(
-  blocks: Array<{ kind: "code" | "diff" | "image" | "text"; text: string }>,
-  text: string,
-) {
+function appendTextLike(blocks: TextBlock[], text: string) {
   for (const paragraph of text.split(/\n{2,}/)) {
     const trimmed = paragraph.trim();
     if (!trimmed) continue;
@@ -1004,14 +1018,6 @@ function looksLikeDiff(text: string) {
 
 function isImageReference(text: string) {
   return /^(https?:\/\/\S+|[./~\w-][^\s]*)\.(png|jpe?g|gif|webp|svg)$/i.test(text);
-}
-
-function diffClass(line: string) {
-  let className = "diff-line";
-  if (line.startsWith("+") && !line.startsWith("+++")) className += " added";
-  if (line.startsWith("-") && !line.startsWith("---")) className += " removed";
-  if (line.startsWith("@@")) className += " hunk";
-  return className;
 }
 
 function shortCommand(command: string) {

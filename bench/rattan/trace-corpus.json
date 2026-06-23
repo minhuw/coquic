@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "default_subset": "smoke",
+  "corpora": {
+    "mahimahi": {
+      "description": "Classic Mahimahi cellular traces from Sprout/Pantheon-style mobile experiments.",
+      "license": "See upstream repository.",
+      "source_url": "https://github.com/ravinet/mahimahi/tree/master/traces"
+    },
+    "real_world_bandwidth": {
+      "description": "Normalized real-world bandwidth traces used by MERINA(+), including Norway 3G/HSDPA, Oboe, FCC/Puffer-derived sets.",
+      "license": "See upstream repository.",
+      "source_url": "https://github.com/confiwent/Real-world-bandwidth-traces"
+    },
+    "nyu_mets": {
+      "description": "NYU-METS LTE mobility sample traces from NYC transit routes.",
+      "license": "See upstream repository.",
+      "source_url": "https://github.com/NYU-METS/Main/tree/master/Sample_Traces"
+    },
+    "ucc_5g": {
+      "description": "UCC/MISL 5G production dataset archive. Large archive, opt-in only.",
+      "license": "See upstream repository.",
+      "source_url": "https://github.com/uccmisl/5Gdataset"
+    },
+    "pensieve": {
+      "description": "Pensieve trace README points to FCC, Norway HSDPA, and Belgium LTE sources plus conversion scripts. Large third-party downloads are opt-in placeholders here.",
+      "license": "See source datasets.",
+      "source_url": "https://github.com/hongzimao/pensieve/blob/master/traces/README.md"
+    },
+    "pantheon": {
+      "description": "Pantheon raw logs and summaries for CC evaluation. Requires separate selection from Pantheon's measurement UI or archive.",
+      "license": "See Pantheon data terms.",
+      "source_url": "https://pantheon.stanford.edu/measurements/node/?direction=any&flows=1&link=any&month=any&node=any&year=any"
+    },
+    "fcc_mba": {
+      "description": "FCC Measuring Broadband America raw data. Large fixed-broadband corpus requiring source-specific preprocessing.",
+      "license": "See FCC terms.",
+      "source_url": "https://www.fcc.gov/oet/mba/raw-data-releases"
+    },
+    "puffer": {
+      "description": "Stanford Puffer public data. Useful for real deployment stress but application-shaped.",
+      "license": "See Puffer data terms.",
+      "source_url": "https://puffer.stanford.edu/data-description/"
+    }
+  },
+  "traces": [
+    {
+      "id": "mahimahi-verizon-lte-driving",
+      "corpus": "mahimahi",
+      "subset": ["smoke", "wireless", "full"],
+      "network": "lte",
+      "mobility": "driving",
+      "base_rtt_ms": 50,
+      "format": "mahimahi-pair",
+      "download": {
+        "down": "https://raw.githubusercontent.com/ravinet/mahimahi/master/traces/Verizon-LTE-driving.down",
+        "up": "https://raw.githubusercontent.com/ravinet/mahimahi/master/traces/Verizon-LTE-driving.up"
+      }
+    },
+    {
+      "id": "mahimahi-tmobile-lte-driving",
+      "corpus": "mahimahi",
+      "subset": ["smoke", "wireless", "full"],
+      "network": "lte",
+      "mobility": "driving",
+      "base_rtt_ms": 50,
+      "format": "mahimahi-pair",
+      "download": {
+        "down": "https://raw.githubusercontent.com/ravinet/mahimahi/master/traces/TMobile-LTE-driving.down",
+        "up": "https://raw.githubusercontent.com/ravinet/mahimahi/master/traces/TMobile-LTE-driving.up"
+      }
+    },
+    {
+      "id": "mahimahi-att-lte-driving-2016",
+      "corpus": "mahimahi",
+      "subset": ["wireless", "full"],
+      "network": "lte",
+      "mobility": "driving",
+      "base_rtt_ms": 50,
+      "format": "mahimahi-pair",
+      "download": {
+        "down": "https://raw.githubusercontent.com/ravinet/mahimahi/master/traces/ATT-LTE-driving-2016.down",
+        "up": "https://raw.githubusercontent.com/ravinet/mahimahi/master/traces/ATT-LTE-driving-2016.up"
+      }
+    },
+    {
+      "id": "realworld-norway-bus-1",
+      "corpus": "real_world_bandwidth",
+      "subset": ["smoke", "wireless", "full"],
+      "network": "3g-hsdpa",
+      "mobility": "bus",
+      "base_rtt_ms": 80,
+      "format": "time-throughput-mbps",
+      "download": {
+        "down": "https://raw.githubusercontent.com/confiwent/Real-world-bandwidth-traces/master/cooked_3gp/norway_bus_1"
+      }
+    },
+    {
+      "id": "realworld-norway-train-1",
+      "corpus": "real_world_bandwidth",
+      "subset": ["wireless", "full"],
+      "network": "3g-hsdpa",
+      "mobility": "train",
+      "base_rtt_ms": 90,
+      "format": "time-throughput-mbps",
+      "download": {
+        "down": "https://raw.githubusercontent.com/confiwent/Real-world-bandwidth-traces/master/cooked_3gp/norway_train_1"
+      }
+    },
+    {
+      "id": "nyu-mets-bus57",
+      "corpus": "nyu_mets",
+      "subset": ["wireless", "full"],
+      "network": "lte",
+      "mobility": "bus",
+      "base_rtt_ms": 50,
+      "format": "throughput-mbps-csv",
+      "download": {
+        "down": "https://raw.githubusercontent.com/NYU-METS/Main/master/Sample_Traces/bus57.csv"
+      }
+    },
+    {
+      "id": "nyu-mets-7train1",
+      "corpus": "nyu_mets",
+      "subset": ["wireless", "full"],
+      "network": "lte",
+      "mobility": "subway",
+      "base_rtt_ms": 60,
+      "format": "throughput-mbps-csv",
+      "download": {
+        "down": "https://raw.githubusercontent.com/NYU-METS/Main/master/Sample_Traces/7Train1.csv"
+      }
+    },
+    {
+      "id": "realworld-oboe-0",
+      "corpus": "real_world_bandwidth",
+      "subset": ["wired", "full"],
+      "network": "wired-wan",
+      "mobility": "fixed",
+      "base_rtt_ms": 35,
+      "format": "time-throughput-mbps",
+      "download": {
+        "down": "https://raw.githubusercontent.com/confiwent/Real-world-bandwidth-traces/master/traces_oboe/oboe_trace_0.txt"
+      }
+    },
+    {
+      "id": "ucc-5g-production",
+      "corpus": "ucc_5g",
+      "subset": ["manual", "full-large"],
+      "network": "5g",
+      "mobility": "mixed",
+      "base_rtt_ms": 25,
+      "format": "zip-manual",
+      "download": {
+        "archive": "https://raw.githubusercontent.com/uccmisl/5Gdataset/master/5G-production-dataset.zip"
+      }
+    }
+  ]
+}

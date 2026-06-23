@@ -18,6 +18,9 @@ vibe-references/
 .github/perf-runner/.env.*
 .interop-logs/
 result
+.papers/
+.bench-traces/
+__pycache__/
 rag/.pytest_cache/
 rag/.venv/
 rag/**/__pycache__/

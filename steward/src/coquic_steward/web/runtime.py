@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import http.client
+import ipaddress
 import json
 import signal
 import subprocess
@@ -9,8 +11,7 @@ import time
 from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
-from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.parse import urlsplit
 
 
 DEFAULT_API_HOST = "127.0.0.1"
@@ -200,12 +201,39 @@ def _ui_ready(ui_url: str) -> bool:
 
 def _read_url(url: str) -> str | None:
     try:
-        with urlopen(url, timeout=1) as response:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname is None
+        or not _is_loopback_host(parsed.hostname)
+    ):
+        return None
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    try:
+        connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=1)
+        try:
+            connection.request("GET", path)
+            response = connection.getresponse()
             if response.status >= 500:
                 return None
             return response.read(4096).decode("utf-8", errors="replace")
-    except (OSError, URLError):
+        finally:
+            connection.close()
+    except (OSError, ValueError, http.client.HTTPException):
         return None
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    if hostname.casefold().rstrip(".") == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _read_json(url: str) -> object:

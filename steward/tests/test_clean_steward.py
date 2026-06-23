@@ -3594,6 +3594,55 @@ def test_web_runtime_rejects_api_without_signal_inbox(monkeypatch) -> None:
     assert runtime._api_ready("http://127.0.0.1:8765") is False
 
 
+def test_web_runtime_read_url_rejects_non_loopback_urls(monkeypatch) -> None:
+    from coquic_steward.web import runtime
+
+    def fail_connection(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("remote URL should not be opened")
+
+    monkeypatch.setattr(runtime.http.client, "HTTPConnection", fail_connection)
+
+    assert runtime._read_url("file:///etc/passwd") is None
+    assert runtime._read_url("https://127.0.0.1:8765/healthz") is None
+    assert runtime._read_url("http://example.com/healthz") is None
+
+
+def test_web_runtime_read_url_opens_loopback_http(monkeypatch) -> None:
+    from coquic_steward.web import runtime
+
+    requests: list[tuple[str, int | None, str]] = []
+
+    class FakeResponse:
+        status = 200
+
+        def read(self, _size: int) -> bytes:
+            return b"ok"
+
+    class FakeConnection:
+        def __init__(
+            self, host: str, port: int | None = None, *, timeout: int | None = None
+        ) -> None:
+            self.host = host
+            self.port = port
+            self.timeout = timeout
+
+        def request(self, method: str, path: str) -> None:
+            assert method == "GET"
+            assert self.timeout == 1
+            requests.append((self.host, self.port, path))
+
+        def getresponse(self) -> FakeResponse:
+            return FakeResponse()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(runtime.http.client, "HTTPConnection", FakeConnection)
+
+    assert runtime._read_url("http://127.0.0.1:8765/healthz?ready=1") == "ok"
+    assert requests == [("127.0.0.1", 8765, "/healthz?ready=1")]
+
+
 def test_web_runtime_reports_incompatible_running_api(tmp_path: Path, monkeypatch) -> None:
     from coquic_steward.web import runtime
 

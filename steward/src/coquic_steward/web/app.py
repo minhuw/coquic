@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
+import os
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -287,15 +288,13 @@ def _register_task_asset_routes(app: FastAPI, config, store: TaskStore) -> None:
             record = store.get(task_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="task not found") from exc
-        asset_path = Path(path)
-        if not asset_path.is_absolute():
-            if record.worktree_path is None:
-                raise HTTPException(status_code=404, detail="asset not found")
-            asset_path = record.worktree_path / asset_path
+        if not os.path.isabs(path) and record.worktree_path is None:
+            raise HTTPException(status_code=404, detail="asset not found")
+        asset_path = _resolve_task_asset(path, record, config.state_dir)
+        if asset_path is None:
+            raise HTTPException(status_code=403, detail="asset outside task scope")
         if not asset_path.exists() or not asset_path.is_file():
             raise HTTPException(status_code=404, detail="asset not found")
-        if not _allowed_task_asset(asset_path, record, config.state_dir):
-            raise HTTPException(status_code=403, detail="asset outside task scope")
         media_type = mimetypes.guess_type(asset_path.name)[0]
         if media_type is None or not media_type.startswith(IMAGE_MIME_PREFIX):
             raise HTTPException(status_code=415, detail="asset is not an image")
@@ -1077,8 +1076,24 @@ def _allowed_debug_file(path: Path, root: Path) -> bool:
     return resolved == resolved_root or resolved_root in resolved.parents
 
 
-def _allowed_task_asset(path: Path, record, state_dir: Path) -> bool:
-    roots = [state_dir]
-    if record.worktree_path is not None:
-        roots.append(record.worktree_path)
-    return any(_allowed_debug_file(path, root) for root in roots)
+def _resolve_task_asset(value: str, record, state_dir: Path) -> Path | None:
+    try:
+        if os.path.isabs(value):
+            candidate = value
+            roots = [state_dir]
+            if record.worktree_path is not None:
+                roots.append(record.worktree_path)
+        else:
+            candidate = os.path.join(os.fspath(record.worktree_path), value)
+            roots = [record.worktree_path]
+        resolved_text = os.path.realpath(candidate)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    for root in roots:
+        try:
+            root_text = os.path.realpath(os.fspath(root))
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+        if resolved_text.startswith(root_text + os.sep):
+            return Path(resolved_text)
+    return None

@@ -4319,6 +4319,53 @@ def test_web_task_asset_serves_task_image(config: StewardConfig, monkeypatch) ->
     assert response.content == b"\x89PNG\r\n\x1a\n"
 
 
+def test_web_task_asset_serves_absolute_task_image(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    task.worktree_path = config.worktrees_dir / task.id
+    task.worktree_path.mkdir(parents=True)
+    image = task.worktree_path / "plot.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    store.save(task)
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    response = TestClient(app).get(
+        f"/api/tasks/{task.id}/assets", params={"path": str(image)}
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+
+
+def test_web_task_asset_rejects_relative_escape(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    task.worktree_path = config.worktrees_dir / task.id
+    task.worktree_path.mkdir(parents=True)
+    outside = config.worktrees_dir / "outside.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\n")
+    store.save(task)
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    response = TestClient(app).get(
+        f"/api/tasks/{task.id}/assets", params={"path": "../outside.png"}
+    )
+
+    assert response.status_code == 403
+
+
 def test_web_task_asset_rejects_non_image(config: StewardConfig, monkeypatch) -> None:
     monkeypatch.chdir(config.repo_root)
     store = TaskStore(config.db_path)

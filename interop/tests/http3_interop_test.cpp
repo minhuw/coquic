@@ -213,7 +213,7 @@ TEST(QuicHttp3InteropTest, ParsesServerInvocationFromEnvironment) {
     ASSERT_TRUE(parsed.has_value());
     const auto &config = optional_ref_or_terminate(parsed);
     EXPECT_EQ(config.mode, coquic::http3::Http3InteropMode::server);
-    EXPECT_EQ(config.testcase, "http3");
+    EXPECT_TRUE(config.testcase_supported);
     EXPECT_EQ(config.host, "0.0.0.0");
     EXPECT_EQ(config.port, 443);
     EXPECT_EQ(config.document_root, std::filesystem::path("/www"));
@@ -224,7 +224,6 @@ TEST(QuicHttp3InteropTest, ParsesServerInvocationFromEnvironment) {
 TEST(QuicHttp3InteropTest, UnsupportedTestcaseReturnsRunnerSkipExitCode) {
     const auto config = coquic::http3::Http3InteropConfig{
         .mode = coquic::http3::Http3InteropMode::server,
-        .testcase = "transfer",
     };
 
     EXPECT_EQ(coquic::http3::run_http3_interop(config), 127);
@@ -233,7 +232,7 @@ TEST(QuicHttp3InteropTest, UnsupportedTestcaseReturnsRunnerSkipExitCode) {
 TEST(QuicHttp3InteropTest, ServerRuntimeConfigDisablesPeerVerificationForInterop) {
     const auto interop_config = coquic::http3::Http3InteropConfig{
         .mode = coquic::http3::Http3InteropMode::server,
-        .testcase = "http3",
+        .testcase_supported = true,
         .host = "0.0.0.0",
         .port = 443,
         .document_root = "/www",
@@ -271,7 +270,7 @@ TEST(QuicHttp3InteropTest, ParsesClientInvocationWithRequestsFromEnvironment) {
     ASSERT_TRUE(parsed.has_value());
     const auto &config = optional_ref_or_terminate(parsed);
     EXPECT_EQ(config.mode, coquic::http3::Http3InteropMode::client);
-    EXPECT_EQ(config.testcase, "http3");
+    EXPECT_TRUE(config.testcase_supported);
     EXPECT_EQ(config.host, "127.0.0.1");
     EXPECT_EQ(config.port, 443);
     EXPECT_EQ(config.download_root, std::filesystem::path("/downloads"));
@@ -466,7 +465,7 @@ TEST(QuicHttp3InteropTest, RejectsServerInvocationWhenRequiredEnvironmentIsMissi
 TEST(QuicHttp3InteropTest, RejectsClientRequestsThatCannotProduceOutputPaths) {
     const auto base_config = coquic::http3::Http3InteropConfig{
         .mode = coquic::http3::Http3InteropMode::client,
-        .testcase = "http3",
+        .testcase_supported = true,
         .download_root = "/downloads",
     };
 
@@ -506,7 +505,7 @@ TEST(QuicHttp3InteropTest, ClientDownloadsMultipleFilesOverLoopback) {
 
     const auto config = coquic::http3::Http3InteropConfig{
         .mode = coquic::http3::Http3InteropMode::client,
-        .testcase = "http3",
+        .testcase_supported = true,
         .download_root = download_root.path(),
         .requests =
             {
@@ -543,7 +542,7 @@ TEST(QuicHttp3InteropTest, ClientDownloadsFilesWithQueryAndFragmentSuffixes) {
 
     const auto config = coquic::http3::Http3InteropConfig{
         .mode = coquic::http3::Http3InteropMode::client,
-        .testcase = "http3",
+        .testcase_supported = true,
         .download_root = download_root.path(),
         .requests =
             {
@@ -566,7 +565,7 @@ TEST(QuicHttp3InteropTest, ServerModeStartsHttp3Runtime) {
 
     const auto interop_config = coquic::http3::Http3InteropConfig{
         .mode = coquic::http3::Http3InteropMode::server,
-        .testcase = "http3",
+        .testcase_supported = true,
         .host = "127.0.0.1",
         .port = port,
         .document_root = document_root.path(),
@@ -607,7 +606,7 @@ TEST(QuicHttp3InteropTest, ServerModeReturnsFailureWhenRuntimeCannotLoadIdentity
 
     const auto config = coquic::http3::Http3InteropConfig{
         .mode = coquic::http3::Http3InteropMode::server,
-        .testcase = "http3",
+        .testcase_supported = true,
         .host = "127.0.0.1",
         .port = 443,
         .document_root = document_root.path(),

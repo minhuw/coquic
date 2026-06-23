@@ -99,6 +99,7 @@ std::optional<Http3InteropConfig> parse_http3_interop_args(int argc, char **argv
     }
 
     bool testcase_present = false;
+    bool testcase_empty = true;
     bool host_present = false;
     bool port_present = false;
     bool document_root_present = false;
@@ -107,8 +108,9 @@ std::optional<Http3InteropConfig> parse_http3_interop_args(int argc, char **argv
     bool requests_present = false;
 
     if (const auto testcase = getenv_string("TESTCASE"); testcase.has_value()) {
-        config.testcase = *testcase;
         testcase_present = true;
+        testcase_empty = testcase->empty();
+        config.testcase_supported = *testcase == "http3";
     }
     if (const auto host = getenv_string("HOST"); host.has_value()) {
         config.host = *host;
@@ -152,7 +154,7 @@ std::optional<Http3InteropConfig> parse_http3_interop_args(int argc, char **argv
 
     if (config.mode == Http3InteropMode::server) {
         if (!testcase_present || !host_present || !port_present || !document_root_present ||
-            !certificate_chain_present || !private_key_present || config.testcase.empty() ||
+            !certificate_chain_present || !private_key_present || testcase_empty ||
             config.host.empty() || config.document_root.empty() ||
             config.certificate_chain_path.empty() || config.private_key_path.empty()) {
             return std::nullopt;
@@ -165,7 +167,7 @@ std::optional<Http3InteropConfig> parse_http3_interop_args(int argc, char **argv
 }
 
 int run_http3_interop(const Http3InteropConfig &config) {
-    if (config.testcase != "http3") {
+    if (!config.testcase_supported) {
         return 127;
     }
 

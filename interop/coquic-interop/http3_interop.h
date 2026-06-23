@@ -15,7 +15,7 @@ enum class Http3InteropMode : std::uint8_t { server, client };
 
 struct Http3InteropConfig {
     Http3InteropMode mode = Http3InteropMode::server;
-    std::string testcase;
+    bool testcase_supported = false;
     std::string host = "127.0.0.1";
     std::uint16_t port = 443;
     std::filesystem::path document_root;

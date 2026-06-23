@@ -121,7 +121,7 @@ class StewardExecutor:
             if review_approved(review):
                 return revisions
             if revisions >= MAX_TASK_REVISIONS:
-                self.store.finish_task(
+                self._finish_task(
                     task_id,
                     TaskStatus.blocked,
                     f"revision budget exhausted after {MAX_TASK_REVISIONS} revision(s): "
@@ -154,10 +154,26 @@ class StewardExecutor:
         self.store.save(task)
         if result.completed:
             return True
-        self.store.finish_task(
+        self._finish_task(
             task.id, TaskStatus.failed, result.final_message or failure_summary
         )
         return False
+
+    def _finish_task(
+        self, task_id: str, status: TaskStatus, summary: str = ""
+    ) -> TaskRecord:
+        task = self.store.finish_task(task_id, status, summary)
+        if task.worktree_path is None:
+            return task
+        if _is_steward_owned_worktree(self.config, task.worktree_path):
+            self.worktrees.remove(task.worktree_path)
+            self.store.add_event(
+                task.id,
+                "worktree.cleaned",
+                str(task.worktree_path),
+                {"status": str(status)},
+            )
+        return task
 
     def _prepare_patch(
         self,
@@ -169,19 +185,19 @@ class StewardExecutor:
     ) -> PatchPreparationResult:
         task = self.store.get(task_id)
         if task.worktree_path is None:
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.failed, "patch preparation requested without worktree"
             )
             return PatchPreparationResult.terminal_failure
         if not self.worktrees.has_changes(task.worktree_path):
-            self.store.finish_task(
+            self._finish_task(
                 task.id, no_changes_status, "worker produced no source changes"
             )
             return PatchPreparationResult.no_changes
 
         forbidden = self.worktrees.forbidden_paths(task.worktree_path)
         if forbidden:
-            self.store.finish_task(
+            self._finish_task(
                 task.id,
                 TaskStatus.failed,
                 "generated state changed: " + ", ".join(forbidden),
@@ -269,7 +285,7 @@ class StewardExecutor:
                 return True, revisions
             if prepared != PatchPreparationResult.validation_failed:
                 return False, revisions
-        self.store.finish_task(
+        self._finish_task(
             task_id,
             TaskStatus.blocked,
             f"revision budget exhausted after {MAX_TASK_REVISIONS} revision(s)",
@@ -279,7 +295,7 @@ class StewardExecutor:
     def _review(self, task_id: str, *, attempt: int) -> dict[str, Any] | None:
         task = self.store.get(task_id)
         if task.patch_path is None or task.worktree_path is None:
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.failed, "review requested without patch/worktree"
             )
             return None
@@ -340,7 +356,7 @@ class StewardExecutor:
                 )
                 if retryable:
                     continue
-                self.store.finish_task(
+                self._finish_task(
                     task.id, TaskStatus.failed, result.final_message or "review failed"
                 )
                 return None
@@ -368,7 +384,7 @@ class StewardExecutor:
                 )
                 if retryable:
                     continue
-                self.store.finish_task(
+                self._finish_task(
                     task.id, TaskStatus.failed, "review invalid output"
                 )
                 return None
@@ -401,7 +417,7 @@ class StewardExecutor:
     ) -> bool:
         task = self.store.get(task_id)
         if task.worktree_path is None:
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.failed, "revision requested without worktree"
             )
             return False
@@ -459,7 +475,7 @@ class StewardExecutor:
     ) -> bool:
         task = self.store.get(task_id)
         if task.worktree_path is None:
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.failed, "validation revision requested without worktree"
             )
             return False
@@ -530,7 +546,7 @@ class StewardExecutor:
     ) -> bool:
         task = self.store.get(task_id)
         if task.worktree_path is None:
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.failed, "integration repair requested without worktree"
             )
             return False
@@ -590,7 +606,7 @@ class StewardExecutor:
     ) -> bool:
         revisions = _next_revision(self.store, source_task_id)
         if revisions > MAX_TASK_REVISIONS:
-            self.store.finish_task(
+            self._finish_task(
                 source_task_id,
                 TaskStatus.blocked,
                 f"revision budget exhausted after {MAX_TASK_REVISIONS} revision(s)",
@@ -635,7 +651,7 @@ class StewardExecutor:
     ) -> bool:
         revisions = _next_revision(self.store, source_task_id)
         if revisions > MAX_TASK_REVISIONS:
-            self.store.finish_task(
+            self._finish_task(
                 source_task_id,
                 TaskStatus.blocked,
                 f"revision budget exhausted after {MAX_TASK_REVISIONS} revision(s)",
@@ -643,7 +659,7 @@ class StewardExecutor:
             return False
         source = self.store.get(source_task_id)
         if source.worktree_path is None:
-            self.store.finish_task(
+            self._finish_task(
                 source_task_id,
                 TaskStatus.failed,
                 "integration validation repair requested without worktree",
@@ -704,14 +720,14 @@ class StewardExecutor:
     def _queue_or_finish_integration(self, task_id: str) -> bool:
         task = self.store.get(task_id)
         if task.patch_path is None or task.worktree_path is None:
-            self.store.finish_task(
+            self._finish_task(
                 task.id,
                 TaskStatus.failed,
                 "integration requested without patch/worktree",
             )
             return False
         if self.config.integration_mode == IntegrationMode.local_only.value:
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.succeeded, "validated patch ready"
             )
             return True
@@ -773,7 +789,7 @@ class StewardExecutor:
             source = self._source_task_for_integration(task)
             if source is None:
                 transcript.write("error", "integration source task missing")
-                self.store.finish_task(
+                self._finish_task(
                     task.id, TaskStatus.failed, "integration source task missing"
                 )
                 return False
@@ -782,7 +798,7 @@ class StewardExecutor:
                     "skip",
                     f"integration source already terminal: {source.status}",
                 )
-                self.store.finish_task(
+                self._finish_task(
                     task.id,
                     TaskStatus.no_changes,
                     f"integration source already {source.status}",
@@ -824,10 +840,10 @@ class StewardExecutor:
         source = self.store.get(source_task_id)
         if source.patch_path is None:
             transcript.write("error", "source task has no patch")
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.failed, "source task has no patch"
             )
-            self.store.finish_task(
+            self._finish_task(
                 source.id, TaskStatus.failed, "integration failed: no patch"
             )
             return False
@@ -837,10 +853,10 @@ class StewardExecutor:
                 "skip",
                 "remote integration disabled; leaving source patch validated and ready",
             )
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.no_changes, "remote integration disabled"
             )
-            self.store.finish_task(
+            self._finish_task(
                 source.id, TaskStatus.succeeded, "validated patch ready"
             )
             return True
@@ -849,10 +865,10 @@ class StewardExecutor:
             >= self.config.limits.max_main_pushes_per_day
         ):
             transcript.write("blocked", "main push budget reached")
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.blocked, "main push budget reached"
             )
-            self.store.finish_task(
+            self._finish_task(
                 source.id, TaskStatus.blocked, "main push budget reached"
             )
             return False
@@ -883,7 +899,7 @@ class StewardExecutor:
         except (OSError, RuntimeError) as exc:
             conflict = str(exc)[-4000:]
             transcript.write("conflict", conflict[-2000:])
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.blocked, "patch conflict on latest main"
             )
             self.store.add_event(
@@ -909,7 +925,8 @@ class StewardExecutor:
         self.store.save(task)
         if any(not validation.passed for validation in validations):
             transcript.write("error", "validation failed after rebase")
-            self.store.finish_task(
+            rebased_patch = self.worktrees.diff(worktree)
+            self._finish_task(
                 task.id, TaskStatus.blocked, "validation failed after rebase"
             )
             failed_validations = [
@@ -932,7 +949,6 @@ class StewardExecutor:
                     ],
                 },
             )
-            rebased_patch = self.worktrees.diff(worktree)
             transcript.write(
                 "repair", "requesting source worker integration validation repair"
             )
@@ -946,10 +962,10 @@ class StewardExecutor:
         except CommitMessageGenerationError as exc:
             message = str(exc)[-2000:]
             transcript.write("commit_message_failed", message)
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.failed, "commit message generation failed"
             )
-            self.store.finish_task(
+            self._finish_task(
                 source.id, TaskStatus.failed, "commit message generation failed"
             )
             self.store.add_event(
@@ -969,8 +985,8 @@ class StewardExecutor:
         except RuntimeError as exc:
             message = str(exc)[-2000:]
             transcript.write("commit_failed", message)
-            self.store.finish_task(task.id, TaskStatus.failed, "commit failed")
-            self.store.finish_task(source.id, TaskStatus.failed, "commit failed")
+            self._finish_task(task.id, TaskStatus.failed, "commit failed")
+            self._finish_task(source.id, TaskStatus.failed, "commit failed")
             self.store.add_event(
                 source.id,
                 "integration.commit_failed",
@@ -980,10 +996,10 @@ class StewardExecutor:
             return False
         if sha is None:
             transcript.write("no_changes", "patch already present on main")
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.no_changes, "patch already present on main"
             )
-            self.store.finish_task(
+            self._finish_task(
                 source.id, TaskStatus.no_changes, "patch already present on main"
             )
             return True
@@ -993,10 +1009,10 @@ class StewardExecutor:
                 "local_only",
                 f"external writes disabled; keeping local integration commit {sha}",
             )
-            self.store.finish_task(
+            self._finish_task(
                 task.id, TaskStatus.succeeded, f"local-only integration commit {sha}"
             )
-            self.store.finish_task(
+            self._finish_task(
                 source.id, TaskStatus.succeeded, f"local-only integration commit {sha}"
             )
             self.store.add_event(
@@ -1016,8 +1032,8 @@ class StewardExecutor:
                 self.config, task.id, "git-push.txt", message
             )
             transcript.write("push_failed", message)
-            self.store.finish_task(task.id, TaskStatus.failed, "push failed")
-            self.store.finish_task(source.id, TaskStatus.failed, "push failed")
+            self._finish_task(task.id, TaskStatus.failed, "push failed")
+            self._finish_task(source.id, TaskStatus.failed, "push failed")
             self.store.add_event(
                 source.id,
                 "integration.push_failed",
@@ -1043,8 +1059,8 @@ class StewardExecutor:
             sha,
             {"integration_task_id": task.id, "output_path": str(push_log_path)},
         )
-        self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {sha}")
-        self.store.finish_task(source.id, TaskStatus.pushed, f"pushed {sha}")
+        self._finish_task(task.id, TaskStatus.pushed, f"pushed {sha}")
+        self._finish_task(source.id, TaskStatus.pushed, f"pushed {sha}")
         return True
 
     def _commit_message_for_integration(
@@ -1307,6 +1323,15 @@ def _is_integration_task(task) -> bool:
         TaskKind(task.spec.kind) == TaskKind.integration
         or WorkerKind(task.spec.worker) == WorkerKind.integration_manager
     )
+
+
+def _is_steward_owned_worktree(config: StewardConfig, path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+        root = config.worktrees_dir.resolve()
+    except OSError:
+        return False
+    return root in resolved.parents
 
 
 def _commit_source_task_context(source: TaskRecord) -> dict[str, object]:

@@ -2463,7 +2463,11 @@ def test_executor_no_changes_reaches_terminal_status(
     )
 
     assert StewardExecutor(config, store).run_task(task.id)
-    assert store.get(task.id).status == TaskStatus.no_changes
+    saved = store.get(task.id)
+    assert saved.status == TaskStatus.no_changes
+    assert saved.worktree_path is not None
+    assert not saved.worktree_path.exists()
+    assert any(event.kind == "worktree.cleaned" for event in store.events(task.id))
 
 
 def test_executor_heartbeats_active_worker(
@@ -2545,6 +2549,28 @@ def test_executor_patch_happy_path(
     assert saved.status == TaskStatus.succeeded
     assert saved.patch_path is not None
     assert "changed by steward" in saved.patch_path.read_text(encoding="utf-8")
+    assert saved.worktree_path is not None
+    assert not saved.worktree_path.exists()
+    assert any(event.kind == "worktree.cleaned" for event in store.events(task.id))
+
+
+def test_executor_does_not_clean_external_finished_worktree(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    external = tmp_path / "external-worktree"
+    external.mkdir()
+    task.worktree_path = external
+    store.save(task)
+    store.update_status(task.id, TaskStatus.running, "started")
+
+    StewardExecutor(config, store)._finish_task(task.id, TaskStatus.failed, "failed")
+
+    assert external.exists()
+    assert not any(event.kind == "worktree.cleaned" for event in store.events(task.id))
 
 
 def test_executor_marks_task_validation_running_before_gates(
@@ -3132,6 +3158,8 @@ def test_integration_manager_serializes_push_to_main(
 
     assert pushed_source.status == TaskStatus.pushed
     assert pushed_integration.status == TaskStatus.pushed
+    assert pushed_integration.worktree_path is not None
+    assert not pushed_integration.worktree_path.exists()
     assert remote_text == "integrated\n"
     assert remote_commit_message.startswith("fix(docs): describe integration output\n")
     assert "Source task: source-task" in remote_commit_message

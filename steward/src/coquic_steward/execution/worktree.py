@@ -116,6 +116,7 @@ class Worktrees:
             )
             if not result.ok and path.exists():
                 shutil.rmtree(path)
+        run_command(["git", "worktree", "prune"], cwd=self.config.repo_root)
         if branch:
             run_command(["git", "branch", "-D", branch], cwd=self.config.repo_root)
 

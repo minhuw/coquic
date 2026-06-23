@@ -29,7 +29,7 @@ def new_signal_fetch_id() -> str:
 
 
 def new_scheduler_wakeup_id() -> str:
-    return f"wakeup-{utc_now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    return f"wakeup-{_new_id_timestamp()}-{uuid4().hex[:8]}"
 
 
 def new_signal_item_id() -> str:

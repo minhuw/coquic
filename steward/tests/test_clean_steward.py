@@ -272,16 +272,16 @@ def test_timestamped_model_ids_use_compact_utc_timestamp(monkeypatch) -> None:
 
     ids = [
         core_models.new_task_id(),
-        core_models.new_signal_id(),
         core_models.new_signal_fetch_id(),
+        core_models.new_scheduler_wakeup_id(),
     ]
 
     parts = [value.rsplit("-", 2) for value in ids]
 
     assert [(prefix, timestamp) for prefix, timestamp, _ in parts] == [
         ("task", "20260623123456"),
-        ("sig", "20260623123456"),
         ("signal-fetch", "20260623123456"),
+        ("wakeup", "20260623123456"),
     ]
     assert all(len(random_suffix) == 8 for _, _, random_suffix in parts)
 
@@ -2229,7 +2229,9 @@ def test_codacy_signal_records_error_after_non_2xx_issue_search(
 
     signals = gather_signals(config, providers=[CodacyProvider()])
 
-    assert signals.fetches[0].error == "HTTP Error 403: Forbidden"
+    assert signals.fetches[0].error == (
+        "HTTP Error 403: Forbidden; fallback: HTTP Error 403: Forbidden"
+    )
     assert signals.items == []
 
 

@@ -709,9 +709,14 @@ def test_store_recovers_unfinished_review_revision_with_worker_timeout(
     recovered_event = next(
         event for event in store.events(task.id) if event.kind == "task.recovered_stale"
     )
-    assert recovered_event.data["previous_status"] == "reviewing"
-    assert recovered_event.data["effective_status"] == "running"
-    assert recovered_event.data["stale_after_minutes"] == 125
+    assert {
+        key: recovered_event.data[key]
+        for key in ("previous_status", "effective_status", "stale_after_minutes")
+    } == {
+        "previous_status": "reviewing",
+        "effective_status": "running",
+        "stale_after_minutes": 125,
+    }
 
 
 def test_status_stale_minutes_respects_explicit_stale_limit(config: StewardConfig) -> None:

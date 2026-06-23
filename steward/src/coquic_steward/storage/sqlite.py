@@ -717,6 +717,10 @@ class SQLiteTaskStore:
                 _task_query().where(TaskRow.status.in_(active_statuses))
             ).all()
             for row in rows:
+                if row.status == TaskStatus.integrating.value and (
+                    _has_active_integration_for_source(session, row.id)
+                ):
+                    continue
                 events = session.scalars(
                     select(EventRow)
                     .where(EventRow.task_id == row.id)
@@ -970,6 +974,24 @@ def _signal_row_suppressed(row: SignalItemRow, session: Session) -> bool:
             return True
     cutoff = utc_now() - timedelta(hours=24)
     return datetime.fromisoformat(row.updated_at) >= cutoff
+
+
+def _has_active_integration_for_source(session: Session, source_task_id: str) -> bool:
+    active_statuses = {status.value for status in ACTIVE_STATUSES}
+    rows = session.scalars(
+        select(TaskRow).where(
+            TaskRow.worker == WorkerKind.integration_manager.value,
+            TaskRow.status.in_(active_statuses),
+        )
+    ).all()
+    for row in rows:
+        try:
+            metadata = json.loads(row.metadata_json or "{}")
+        except json.JSONDecodeError:
+            continue
+        if metadata.get("source_task_id") == source_task_id:
+            return True
+    return False
 
 
 def _transition_for_status(status: TaskStatus, summary: str) -> TaskTransition:

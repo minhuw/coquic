@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ..core.config import StewardConfig
 from ..core.models import TaskRecord
-from ..core.subprocesses import run_command
+from ..core.subprocesses import CommandResult, run_command
 
 
 FORBIDDEN_PATH_PARTS = {
@@ -87,8 +87,8 @@ class Worktrees:
             ["git", "rev-parse", "HEAD"], cwd=path, check=True
         ).stdout.strip()
 
-    def push_head_to_main(self, path: Path) -> None:
-        run_command(
+    def push_head_to_main(self, path: Path) -> CommandResult:
+        return run_command(
             ["git", "push", self.config.git_remote, f"HEAD:{self.config.main_branch}"],
             cwd=path,
             check=True,

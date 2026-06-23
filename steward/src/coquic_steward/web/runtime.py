@@ -110,6 +110,7 @@ class StewardWebRuntime:
                     lambda: _api_ready(self.api_url),
                 )
             if not _ui_ready(self.ui_url):
+                _clear_next_cache(self.web_ui_dir)
                 self._ui_process = _popen(
                     ["npm", "run", "dev"],
                     cwd=self.web_ui_dir,
@@ -145,6 +146,12 @@ class StewardWebRuntime:
 
 def default_web_ui_dir() -> Path:
     return Path(__file__).resolve().parents[3] / "web-ui"
+
+
+def _clear_next_cache(web_ui_dir: Path) -> None:
+    cache_dir = web_ui_dir / ".next"
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
 
 
 def _popen(

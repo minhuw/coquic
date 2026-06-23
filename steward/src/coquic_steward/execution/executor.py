@@ -777,6 +777,26 @@ class StewardExecutor:
                     task.id, TaskStatus.failed, "integration source task missing"
                 )
                 return False
+            if TaskStatus(source.status).terminal:
+                transcript.write(
+                    "skip",
+                    f"integration source already terminal: {source.status}",
+                )
+                self.store.finish_task(
+                    task.id,
+                    TaskStatus.no_changes,
+                    f"integration source already {source.status}",
+                )
+                self.store.add_event(
+                    source.id,
+                    "integration.skipped",
+                    f"stale integration task {task.id} skipped",
+                    {
+                        "integration_task_id": task.id,
+                        "source_status": str(source.status),
+                    },
+                )
+                return True
             transcript.write("source", f"{source.id} - {source.spec.title}")
             ok = self._integrate_source_task(task.id, source.id, transcript)
             transcript.write(
@@ -989,25 +1009,39 @@ class StewardExecutor:
         self.store.start_integration(task.id, "pushing to main")
         transcript.write("push", f"pushing {sha} to {self.config.git_remote}/{self.config.main_branch}")
         try:
-            self.worktrees.push_head_to_main(worktree)
+            push_result = self.worktrees.push_head_to_main(worktree)
         except RuntimeError as exc:
-            transcript.write("push_failed", str(exc)[-2000:])
+            message = str(exc)[-2000:]
+            log_path = _write_integration_command_log(
+                self.config, task.id, "git-push.txt", message
+            )
+            transcript.write("push_failed", message)
             self.store.finish_task(task.id, TaskStatus.failed, "push failed")
             self.store.finish_task(source.id, TaskStatus.failed, "push failed")
             self.store.add_event(
                 source.id,
                 "integration.push_failed",
-                str(exc)[-2000:],
-                {"integration_task_id": task.id, "commit": sha},
+                message,
+                {
+                    "integration_task_id": task.id,
+                    "commit": sha,
+                    "output_path": str(log_path),
+                },
             )
             return False
+        push_log_path = _write_integration_command_log(
+            self.config,
+            task.id,
+            "git-push.txt",
+            _command_result_text(push_result),
+        )
         self.store.add_event(task.id, "main.pushed", sha)
         transcript.write("pushed", sha)
         self.store.add_event(
             source.id,
             "main.pushed",
             sha,
-            {"integration_task_id": task.id},
+            {"integration_task_id": task.id, "output_path": str(push_log_path)},
         )
         self.store.finish_task(task.id, TaskStatus.pushed, f"pushed {sha}")
         self.store.finish_task(source.id, TaskStatus.pushed, f"pushed {sha}")
@@ -1305,6 +1339,32 @@ def _validation_context(validation: ValidationResult) -> dict[str, object]:
         "summary": validation.summary,
         "output_path": str(validation.output_path),
     }
+
+
+def _write_integration_command_log(
+    config: StewardConfig, task_id: str, filename: str, text: str
+) -> Path:
+    path = config.logs_dir / task_id / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _command_result_text(result) -> str:
+    return "\n".join(
+        [
+            f"$ {' '.join(result.args)}",
+            f"cwd: {result.cwd}",
+            f"exit: {result.returncode}",
+            "",
+            "stdout:",
+            result.stdout.rstrip(),
+            "",
+            "stderr:",
+            result.stderr.rstrip(),
+            "",
+        ]
+    )
 
 
 def _patch_paths(patch_text: str) -> list[str]:

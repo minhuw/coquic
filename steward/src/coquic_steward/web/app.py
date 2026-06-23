@@ -115,7 +115,7 @@ def _register_tick_route(app: FastAPI, config, store: TaskStore) -> None:
 
     @app.post("/api/actions/fetch-signals")
     async def fetch_signals(request: Request) -> JSONResponse:
-        require_loopback(request)
+        _require_loopback(request)
         body = await _body(request)
         providers = _provider_list(body.get("providers"), config.enabled_signals)
         wakeup = store.request_wakeup("signal.fetch", {"providers": providers})
@@ -338,7 +338,10 @@ def _register_planner_routes(app: FastAPI, config) -> None:
     @app.get("/api/planner/runs")
     def planner_runs(request: Request) -> JSONResponse:
         _require_loopback(request)
-        return JSONResponse({"runs": _planner_runs_payload(config, limit=40)})
+        limit = _bounded_query_int(request, "limit", default=40, minimum=1, maximum=200)
+        offset = _bounded_query_int(request, "offset", default=0, minimum=0, maximum=10_000)
+        page = _planner_runs_payload(config, limit=limit, offset=offset)
+        return JSONResponse(page)
 
     @app.get("/api/planner/runs/{run_id}")
     def planner_run(request: Request, run_id: str) -> JSONResponse:
@@ -441,10 +444,12 @@ def _integration_payload(config, store: TaskStore, tasks) -> dict[str, object]:
     queue_statuses = {"queued", "running", "integrating"}
     queue = []
     active = []
+    runs = []
     for task in integration_tasks:
         source_task_id = task.spec.metadata.get("source_task_id")
         source = by_id.get(source_task_id) if isinstance(source_task_id, str) else None
         item = _integration_item(config, store, task, source)
+        runs.append(item)
         if task.status in queue_statuses:
             queue.append(item)
         if task.status in {"running", "integrating"}:
@@ -462,7 +467,14 @@ def _integration_payload(config, store: TaskStore, tasks) -> dict[str, object]:
     for task in source_integrating:
         if task.id in queued_sources:
             continue
-        queue.append(_source_integration_item(config, store, task))
+        source_item = _source_integration_item(config, store, task)
+        integration_task_id = source_item.get("task_id")
+        integration_task = (
+            by_id.get(integration_task_id) if isinstance(integration_task_id, str) else None
+        )
+        if integration_task is not None and integration_task.status not in queue_statuses:
+            continue
+        queue.append(source_item)
     commits_by_sha = {}
     for task in tasks:
         remote = _task_remote(config, store, task.id)
@@ -487,7 +499,8 @@ def _integration_payload(config, store: TaskStore, tasks) -> dict[str, object]:
     commits = sorted(
         commits_by_sha.values(), key=lambda item: str(item["updated_at"]), reverse=True
     )
-    return {"queue": queue, "active": active, "commits": commits}
+    runs = sorted(runs, key=lambda item: str(item["updated_at"]), reverse=True)
+    return {"queue": queue, "active": active, "runs": runs, "commits": commits}
 
 
 def _is_integration_task(task) -> bool:
@@ -566,6 +579,7 @@ def _integration_detail_payload(config, store: TaskStore, record) -> dict[str, o
     source_events = store.events(source.id) if source is not None else []
     item = _integration_item(config, store, record, source)
     item["events"] = [event.model_dump(mode="json") for event in events]
+    commit_message_artifact = _integration_commit_message_artifact(config, record.id)
     return {
         "run": item,
         "source_task": source.model_dump(mode="json") if source is not None else None,
@@ -580,6 +594,8 @@ def _integration_detail_payload(config, store: TaskStore, record) -> dict[str, o
             for index, validation in enumerate(record.validations)
         ],
         "remote": _task_remote(config, store, record.id),
+        "commit_message": commit_message_artifact,
+        "push_log": _integration_push_log(config, record.id),
     }
 
 
@@ -591,6 +607,46 @@ def _source_task_for_integration(store: TaskStore, record):
         return store.get(source_task_id)
     except KeyError:
         return None
+
+
+def _integration_commit_message_artifact(
+    config, integration_task_id: str
+) -> dict[str, object] | None:
+    run_dir = config.transcripts_dir / integration_task_id / "commit-message"
+    transcript_path = run_dir / "codex.jsonl"
+    last_message_path = run_dir / "last-message.md"
+    if not transcript_path.exists() and not last_message_path.exists():
+        return None
+    transcript = ""
+    last_message = ""
+    if transcript_path.exists() and _allowed_debug_file(transcript_path, config.state_dir):
+        transcript = tail_text(
+            transcript_path, max_bytes=TEXT_TAIL_BYTES, line_aligned=True
+        )
+    if last_message_path.exists() and _allowed_debug_file(last_message_path, config.state_dir):
+        last_message = tail_text(last_message_path, max_bytes=TEXT_TAIL_BYTES)
+    return {
+        "transcript_path": str(transcript_path) if transcript_path.exists() else None,
+        "last_message_path": (
+            str(last_message_path) if last_message_path.exists() else None
+        ),
+        "transcript": transcript,
+        "last_message": last_message,
+        "diagnostics": diagnostics_for_paths(
+            transcript_path=transcript_path if transcript_path.exists() else None,
+            last_message_path=last_message_path if last_message_path.exists() else None,
+        ).model_dump(mode="json"),
+    }
+
+
+def _integration_push_log(config, integration_task_id: str) -> dict[str, object] | None:
+    path = config.logs_dir / integration_task_id / "git-push.txt"
+    if not path.exists() or not _allowed_debug_file(path, config.logs_dir):
+        return None
+    return {
+        "path": str(path),
+        "text": tail_text(path, max_bytes=TEXT_TAIL_BYTES, line_aligned=True),
+    }
 
 
 def _stored_task_count(db_path: Path) -> int:
@@ -960,7 +1016,7 @@ def _latest_task_run_file(task_dir: Path, run_glob: str, file_name: str) -> Path
     return paths[0] if paths else None
 
 
-def _planner_runs_payload(config, *, limit: int) -> list[dict[str, object]]:
+def _planner_runs_payload(config, *, limit: int, offset: int = 0) -> dict[str, object]:
     run_ids = {
         path.parent.name for path in config.prompts_dir.glob("planner-task-*/planner.md")
     }
@@ -1009,10 +1065,16 @@ def _planner_runs_payload(config, *, limit: int) -> list[dict[str, object]]:
             }
         )
     runs.sort(key=lambda item: str(item["_sort_key"]), reverse=True)
-    return [
+    page_runs = [
         {key: value for key, value in run.items() if key != "_sort_key"}
-        for run in runs[:limit]
+        for run in runs[offset : offset + limit]
     ]
+    return {
+        "runs": page_runs,
+        "total": len(runs),
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 def _planner_run_sort_key(run_id: str, updated_at: float) -> str:
@@ -1078,6 +1140,22 @@ def _positive_int(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _bounded_query_int(
+    request: Request,
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = request.query_params.get(name)
+    try:
+        parsed = int(raw) if raw is not None else default
+    except ValueError:
+        parsed = default
+    return max(minimum, min(maximum, parsed))
 
 
 def tail_text(path: Path, *, max_bytes: int, line_aligned: bool = False) -> str:

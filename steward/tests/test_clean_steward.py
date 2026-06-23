@@ -324,6 +324,33 @@ def test_store_recovers_stale_active_tasks(config: StewardConfig) -> None:
     assert replacement.id != task.id
 
 
+def test_store_keeps_integrating_source_with_queued_integration(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.start_integration(source.id, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate T",
+            prompt="Integrate",
+            metadata={"source_task_id": source.id},
+        )
+    )
+    make_task_stale(store, source.id)
+    make_task_stale(store, integration.id)
+
+    recovered = store.recover_stale_active_tasks(stale_after_minutes=10)
+
+    assert recovered == []
+    assert store.get(source.id).status == TaskStatus.integrating
+    assert store.get(integration.id).status == TaskStatus.queued
+
+
 def test_store_touches_only_active_tasks(config: StewardConfig) -> None:
     store = TaskStore(config.db_path)
     task, _ = store.add_task(
@@ -3112,12 +3139,44 @@ def test_integration_manager_serializes_push_to_main(
         pushed_integration.worktree_path
     )
     assert "--skip-git-repo-check" not in commit_args
+    push_log = config.logs_dir / integration.id / "git-push.txt"
+    assert push_log.exists()
+    assert "$ git push origin HEAD:main" in push_log.read_text(encoding="utf-8")
     assert any(event.kind == "integration.started" for event in store.events(source.id))
     assert any(
         event.kind == "integration.commit_message_generated"
         for event in store.events(source.id)
     )
     assert any(event.kind == "main.pushed" for event in store.events(source.id))
+
+
+def test_integration_manager_skips_terminal_source_task(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.finish_task(source.id, TaskStatus.failed, "stale active task recovered")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate T",
+            prompt="Integrate",
+            metadata={"source_task_id": source.id},
+        )
+    )
+
+    assert StewardExecutor(config, store).run_task(integration.id)
+
+    saved_source = store.get(source.id)
+    saved_integration = store.get(integration.id)
+    assert saved_source.status == TaskStatus.failed
+    assert saved_source.summary == "stale active task recovered"
+    assert saved_integration.status == TaskStatus.no_changes
+    assert "integration source already failed" in saved_integration.summary
+    assert any(event.kind == "integration.skipped" for event in store.events(source.id))
 
 
 def test_integration_manager_fails_on_invalid_commit_message(
@@ -4208,6 +4267,36 @@ def test_web_runtime_rejects_empty_command_argument() -> None:
         runtime._resolve_command(["npm", ""])
 
 
+def test_web_runtime_clears_stale_next_cache_before_starting_ui(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from coquic_steward.web import runtime
+
+    web_ui_dir = tmp_path / "web-ui"
+    stale_file = web_ui_dir / ".next" / "dev" / "cache" / "turbopack" / "stale.sst"
+    stale_file.parent.mkdir(parents=True)
+    stale_file.write_text("stale", encoding="utf-8")
+    started: list[bool] = []
+
+    class FakeProcess:
+        def poll(self) -> int | None:
+            return None
+
+    def fake_popen(*_args, **_kwargs):
+        started.append(True)
+        assert not (web_ui_dir / ".next").exists()
+        return FakeProcess()
+
+    monkeypatch.setattr(runtime, "_api_ready", lambda _url: True)
+    monkeypatch.setattr(runtime, "_ui_ready", lambda _url: bool(started))
+    monkeypatch.setattr(runtime, "_popen", fake_popen)
+
+    runtime.StewardWebRuntime(web_ui_dir=web_ui_dir).start()
+
+    assert started == [True]
+    assert not stale_file.exists()
+
+
 def test_cli_daemon_refuses_second_instance(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -4341,12 +4430,20 @@ def test_web_serves_planner_run_list_and_lazy_artifact(
     assert response.status_code == 200
     payload = response.json()
     assert [run["run_id"] for run in payload["runs"]] == [latest_id, older_id]
+    assert payload["total"] == 2
+    assert payload["limit"] == 40
+    assert payload["offset"] == 0
     assert "prompt" not in payload["runs"][0]
     assert "transcript" not in payload["runs"][0]
     assert payload["runs"][0]["prompt_path"].endswith("/planner.md")
     assert payload["runs"][0]["transcript_path"].endswith("/codex.jsonl")
     assert payload["runs"][0]["prompt_bytes"] == len("planner prompt\n")
     assert payload["runs"][0]["transcript_bytes"] == len('{"message":"planner result"}\n')
+    paged = client.get("/api/planner/runs?limit=1&offset=1").json()
+    assert [run["run_id"] for run in paged["runs"]] == [older_id]
+    assert paged["total"] == 2
+    assert paged["limit"] == 1
+    assert paged["offset"] == 1
 
     artifact = client.get(f"/api/planner/runs/{latest_id}").json()
 
@@ -4872,6 +4969,8 @@ def test_web_state_returns_integration_summary(
     assert payload["integration"]["queue"][0]["task_id"] == integration.id
     assert payload["integration"]["queue"][0]["source_task_id"] == source.id
     assert payload["integration"]["queue"][0]["source_patch_path"] == str(patch)
+    assert payload["integration"]["runs"][0]["task_id"] == integration.id
+    assert payload["integration"]["runs"][0]["source_task_id"] == source.id
     assert len(payload["integration"]["commits"]) == 1
     assert payload["integration"]["commits"][0]["task_id"] == source.id
     assert payload["integration"]["commits"][0]["commit"] == "0123456789abcdef"
@@ -4879,6 +4978,12 @@ def test_web_state_returns_integration_summary(
         payload["integration"]["commits"][0]["commit_url"]
         == "https://github.com/minhuw/coquic/commit/0123456789abcdef"
     )
+
+    store.finish_task(integration.id, TaskStatus.pushed, "pushed 0123456789abcdef")
+    payload = TestClient(app).get("/api/state").json()
+    assert payload["integration"]["queue"] == []
+    assert payload["integration"]["runs"][0]["task_id"] == integration.id
+    assert payload["integration"]["runs"][0]["status"] == "pushed"
 
 
 def test_web_integration_detail_returns_run_abstraction(
@@ -4921,6 +5026,19 @@ def test_web_integration_detail_returns_run_abstraction(
         integration.id,
         {"integration_task_id": integration.id},
     )
+    commit_dir = config.transcripts_dir / integration.id / "commit-message"
+    commit_dir.mkdir(parents=True)
+    (commit_dir / "last-message.md").write_text(
+        '{"subject":"fix: test integration","body":"Body"}',
+        encoding="utf-8",
+    )
+    (commit_dir / "codex.jsonl").write_text(
+        '{"type":"turn.completed"}\n',
+        encoding="utf-8",
+    )
+    push_log = config.logs_dir / integration.id / "git-push.txt"
+    push_log.parent.mkdir(parents=True)
+    push_log.write_text("$ git push origin HEAD:main\nexit: 0\n", encoding="utf-8")
     store.add_event(integration.id, "main.pushed", "0123456789abcdef")
     app = create_app()
     from fastapi.testclient import TestClient
@@ -4950,6 +5068,14 @@ def test_web_integration_detail_returns_run_abstraction(
         payload["remote"]["commit_url"]
         == "https://github.com/minhuw/coquic/commit/0123456789abcdef"
     )
+    assert payload["commit_message"]["last_message_path"] == str(
+        commit_dir / "last-message.md"
+    )
+    assert payload["commit_message"]["last_message"].startswith(
+        '{"subject":"fix: test integration"'
+    )
+    assert payload["push_log"]["path"] == str(push_log)
+    assert "$ git push origin HEAD:main" in payload["push_log"]["text"]
     assert client.get(f"/api/integrations/{source.id}").status_code == 404
 
 

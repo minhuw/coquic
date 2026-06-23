@@ -4,7 +4,8 @@ import json
 import os
 import selectors
 import signal
-import subprocess
+# subprocess is required to stream Codex stdio; launches use explicit argv and shell=False.
+import subprocess  # nosec B404
 import time
 from pathlib import Path
 
@@ -170,9 +171,11 @@ class CodexRunner:
         last_message_path: Path,
         timeout_seconds: int,
     ) -> WorkerResult:
-        proc = subprocess.Popen(
+        # CodexRunner builds args as an argv list and never enables a shell.
+        proc = subprocess.Popen(  # nosec B603
             args,
             cwd=cwd,
+            shell=False,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -233,9 +236,8 @@ def _communicate_streaming(
     *,
     timeout_seconds: int,
 ) -> str:
-    assert proc.stdin is not None
-    assert proc.stdout is not None
-    assert proc.stderr is not None
+    if proc.stdin is None or proc.stdout is None or proc.stderr is None:
+        raise RuntimeError("codex process pipes were not initialized")
     proc.stdin.write(input_text)
     proc.stdin.close()
 

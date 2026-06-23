@@ -6,6 +6,12 @@ import subprocess
 import time
 from datetime import timedelta
 from pathlib import Path
+from urllib.request import (
+    BaseHandler,
+    HTTPDefaultErrorHandler,
+    HTTPErrorProcessor,
+    OpenerDirector,
+)
 
 import pytest
 from sqlalchemy.orm import Session
@@ -1809,8 +1815,8 @@ def test_codacy_signal_uses_public_analysis_without_token(
             return b'{"data":{"issuesCount":2}}'
 
     monkeypatch.setattr(
-        "coquic_steward.signals.providers.urlopen",
-        lambda request, timeout: FakeResponse(),
+        "coquic_steward.signals.providers._open_codacy_request",
+        lambda request, *, timeout: FakeResponse(),
     )
 
     signals = gather_signals(config, providers=[CodacyProvider()])
@@ -1841,14 +1847,14 @@ def test_codacy_signal_uses_tokened_issue_search(
                 b'"filePath":"scripts/fuzz-targets.sh","lineNumber":9}]}'
             )
 
-    def fake_urlopen(request, timeout):
+    def fake_open_codacy_request(request, *, timeout):
         captured["method"] = request.get_method()
         captured["api-token"] = request.headers.get("Api-token")
         return FakeResponse()
 
     monkeypatch.setattr(
-        "coquic_steward.signals.providers.urlopen",
-        fake_urlopen,
+        "coquic_steward.signals.providers._open_codacy_request",
+        fake_open_codacy_request,
     )
 
     signals = gather_signals(config, providers=[CodacyProvider()])
@@ -1870,6 +1876,44 @@ def test_codacy_signal_uses_tokened_issue_search(
         "file": "scripts/fuzz-targets.sh",
         "line": 9,
     }
+
+
+def test_codacy_signal_records_error_after_non_2xx_issue_search(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.setenv("CODACY_API_TOKEN", "token")
+
+    class ErrorResponse:
+        code = 403
+        msg = "Forbidden"
+        headers = {}
+
+        def info(self):
+            return self.headers
+
+        def close(self) -> None:
+            return None
+
+    class FakeHTTPSHandler(BaseHandler):
+        def https_open(self, _request):
+            return ErrorResponse()
+
+    def fake_codacy_opener() -> OpenerDirector:
+        opener = OpenerDirector()
+        opener.add_handler(FakeHTTPSHandler())
+        opener.add_handler(HTTPDefaultErrorHandler())
+        opener.add_handler(HTTPErrorProcessor())
+        return opener
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers._codacy_opener",
+        fake_codacy_opener,
+    )
+
+    signals = gather_signals(config, providers=[CodacyProvider()])
+
+    assert signals.signal_errors["codacy"] == "HTTP Error 403: Forbidden"
+    assert not signals.has_codacy_findings
 
 
 def test_collect_signal_messages_persists_work_items(config: StewardConfig) -> None:

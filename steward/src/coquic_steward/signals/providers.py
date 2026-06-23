@@ -6,8 +6,14 @@ from collections import Counter
 from hashlib import sha256
 from typing import Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlparse
+from urllib.request import (
+    HTTPDefaultErrorHandler,
+    HTTPErrorProcessor,
+    HTTPSHandler,
+    OpenerDirector,
+    Request,
+)
 
 from ..core.config import StewardConfig
 from ..core.models import ProjectSignals
@@ -15,6 +21,7 @@ from ..core.subprocesses import run_command
 
 SIGNAL_TIMEOUT_SECONDS = 15.0
 MAX_SIGNAL_WORK_ITEMS = 12
+CODACY_API_HOST = "app.codacy.com"
 
 
 class SignalProvider(Protocol):
@@ -118,7 +125,7 @@ class CodacyProvider:
         token: str,
     ) -> None:
         url = (
-            "https://app.codacy.com/api/v3/analysis/organizations/gh/"
+            f"https://{CODACY_API_HOST}/api/v3/analysis/organizations/gh/"
             f"{quote(owner, safe='')}/repositories/{quote(repository, safe='')}/issues/search"
         )
         request = Request(
@@ -131,7 +138,9 @@ class CodacyProvider:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=SIGNAL_TIMEOUT_SECONDS) as response:
+            with _open_codacy_request(
+                request, timeout=SIGNAL_TIMEOUT_SECONDS
+            ) as response:
                 payload = json.loads(
                     response.read().decode("utf-8", errors="replace") or "{}"
                 )
@@ -162,13 +171,15 @@ class CodacyProvider:
         signals: ProjectSignals,
     ) -> None:
         url = (
-            "https://app.codacy.com/api/v3/analysis/organizations/gh/"
+            f"https://{CODACY_API_HOST}/api/v3/analysis/organizations/gh/"
             f"{quote(owner, safe='')}/repositories/{quote(repository, safe='')}"
             f"?branch={quote(config.main_branch, safe='')}"
         )
         request = Request(url, method="GET")
         try:
-            with urlopen(request, timeout=SIGNAL_TIMEOUT_SECONDS) as response:
+            with _open_codacy_request(
+                request, timeout=SIGNAL_TIMEOUT_SECONDS
+            ) as response:
                 payload = json.loads(
                     response.read().decode("utf-8", errors="replace") or "{}"
                 )
@@ -203,6 +214,21 @@ class CodacyProvider:
                 }
             )
         ]
+
+
+def _open_codacy_request(request: Request, *, timeout: float):
+    parsed = urlparse(request.full_url)
+    if parsed.scheme != "https" or parsed.netloc != CODACY_API_HOST:
+        raise URLError("refusing non-Codacy HTTPS request")
+    return _codacy_opener().open(request, timeout=timeout)
+
+
+def _codacy_opener() -> OpenerDirector:
+    opener = OpenerDirector()
+    opener.add_handler(HTTPSHandler())
+    opener.add_handler(HTTPDefaultErrorHandler())
+    opener.add_handler(HTTPErrorProcessor())
+    return opener
 
 
 def _code_scanning_item(item: object) -> dict[str, object]:

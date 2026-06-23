@@ -324,6 +324,49 @@ def test_store_recovers_stale_active_tasks(config: StewardConfig) -> None:
     assert replacement.id != task.id
 
 
+def test_daemon_cleans_recovered_stale_task_worktree(config: StewardConfig) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worktree = config.worktrees_dir / task.id
+    worktree.mkdir(parents=True)
+    (worktree / "README.md").write_text("stale\n", encoding="utf-8")
+    task.worktree_path = worktree
+    store.save(task)
+    store.start_worker(task.id, "worker started")
+    make_task_stale(store, task.id)
+
+    result = StewardDaemon(config, store).tick(plan=False, dispatch=False)
+
+    assert result.recovered == 1
+    assert store.get(task.id).status == TaskStatus.failed
+    assert not worktree.exists()
+    assert any(event.kind == "worktree.cleaned" for event in store.events(task.id))
+
+
+def test_daemon_does_not_clean_external_recovered_stale_worktree(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    external = tmp_path / "external-worktree"
+    external.mkdir()
+    task.worktree_path = external
+    store.save(task)
+    store.start_worker(task.id, "worker started")
+    make_task_stale(store, task.id)
+
+    result = StewardDaemon(config, store).tick(plan=False, dispatch=False)
+
+    assert result.recovered == 1
+    assert store.get(task.id).status == TaskStatus.failed
+    assert external.exists()
+    assert not any(event.kind == "worktree.cleaned" for event in store.events(task.id))
+
+
 def test_store_keeps_integrating_source_with_queued_integration(
     config: StewardConfig,
 ) -> None:

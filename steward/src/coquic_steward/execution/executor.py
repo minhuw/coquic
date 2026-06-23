@@ -163,17 +163,22 @@ class StewardExecutor:
         self, task_id: str, status: TaskStatus, summary: str = ""
     ) -> TaskRecord:
         task = self.store.finish_task(task_id, status, summary)
+        self.clean_finished_task_worktree(task)
+        return task
+
+    def clean_finished_task_worktree(self, task: TaskRecord) -> bool:
         if task.worktree_path is None:
-            return task
+            return False
         if _is_steward_owned_worktree(self.config, task.worktree_path):
             self.worktrees.remove(task.worktree_path)
             self.store.add_event(
                 task.id,
                 "worktree.cleaned",
                 str(task.worktree_path),
-                {"status": str(status)},
+                {"status": str(task.status)},
             )
-        return task
+            return True
+        return False
 
     def _prepare_patch(
         self,

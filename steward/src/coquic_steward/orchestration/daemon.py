@@ -105,6 +105,7 @@ class StewardDaemon:
             status_stale_after_minutes=status_stale_minutes(self.config),
         ):
             result.recovered += 1
+            self.executor.clean_finished_task_worktree(self.store.get(task_id))
             self.store.add_event(
                 task_id, "daemon.recovered_stale", "released stale active task"
             )

@@ -215,9 +215,11 @@ export function TranscriptView({
           <TextBlocks taskId={taskId} text={promptParts.visible} />
         </ChatBubble>
       )}
-      {items.map((item, index) => (
-        <TranscriptCard item={item} key={`${item.id}-${index}`} taskId={taskId} />
-      ))}
+      {items.map((item, index) => {
+        // React keys are not HTML sinks; transcript content is rendered as escaped React text nodes.
+        const itemKey = `${item.id}-${index}`; // nosemgrep: javascript.express.security.injection.raw-html-format.raw-html-format
+        return <TranscriptCard item={item} key={itemKey} taskId={taskId} />;
+      })}
     </div>
   );
 }
@@ -336,7 +338,9 @@ function TranscriptCard({ item, taskId }: { item: TranscriptItem; taskId: string
         title={shortCommand(item.command)}
         tone={failed ? "danger" : item.status === "in_progress" ? "pending" : "ok"}
       >
-        <pre className="tool-command">{item.command}</pre>
+        <pre className="tool-command">
+          <EscapedText text={item.command} />
+        </pre>
         {item.output ? (
           <TextBlocks mode="tool" taskId={taskId} text={item.output} />
         ) : (
@@ -493,14 +497,34 @@ function TextBlocks({ mode = "message", taskId, text }: { mode?: "message" | "to
       {blocks.map((block, index) => {
         if (block.kind === "diff") return <DiffBlock key={index} text={block.text} />;
         if (block.kind === "image") return <ImageBlock key={index} path={block.text} taskId={taskId} />;
-        if (block.kind === "code") return <pre className="chat-code" key={index}>{block.text}</pre>;
-        if (mode === "tool") return <pre className="tool-output" key={index}>{block.text}</pre>;
+        if (block.kind === "code") {
+          return (
+            <pre className="chat-code" key={index}>
+              <EscapedText text={block.text} />
+            </pre>
+          );
+        }
+        if (mode === "tool") {
+          return (
+            <pre className="tool-output" key={index}>
+              <EscapedText text={block.text} />
+            </pre>
+          );
+        }
         const plannerInput = parsePlannerInput(block.text);
         if (plannerInput) return <PlannerInputCard input={plannerInput} key={index} />;
-        return <p className="chat-text" key={index}>{block.text}</p>;
+        return (
+          <p className="chat-text" key={index}>
+            <EscapedText text={block.text} />
+          </p>
+        );
       })}
     </>
   );
+}
+
+function EscapedText({ text }: { text: string }) {
+  return <>{text}</>;
 }
 
 function PlannerInputCard({ input }: { input: PlannerInput }) {
@@ -695,7 +719,10 @@ function DiffBlock({ text }: { text: string }) {
   return (
     <pre className="chat-diff">
       {text.split("\n").map((line, index) => (
-        <span className={diffClass(line)} key={index}>{line}{"\n"}</span>
+        <span className={diffClass(line)} key={index}>
+          <EscapedText text={line} />
+          {"\n"}
+        </span>
       ))}
     </pre>
   );

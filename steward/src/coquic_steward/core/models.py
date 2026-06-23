@@ -8,21 +8,28 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+_ID_TIMESTAMP_TRANSLATION = str.maketrans("", "", "-:T")
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _new_id_timestamp() -> str:
+    timestamp = utc_now().astimezone(timezone.utc).replace(tzinfo=None, microsecond=0)
+    return timestamp.isoformat(timespec="seconds").translate(_ID_TIMESTAMP_TRANSLATION)
+
+
 def new_task_id() -> str:
-    return f"task-{utc_now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    return f"task-{_new_id_timestamp()}-{uuid4().hex[:8]}"
 
 
 def new_signal_id() -> str:
-    return f"sig-{utc_now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    return f"sig-{_new_id_timestamp()}-{uuid4().hex[:8]}"
 
 
 def new_signal_fetch_id() -> str:
-    return f"signal-fetch-{utc_now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    return f"signal-fetch-{_new_id_timestamp()}-{uuid4().hex[:8]}"
 
 
 def new_signal_item_id() -> str:

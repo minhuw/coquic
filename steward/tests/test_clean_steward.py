@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.request import (
     BaseHandler,
@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
+import coquic_steward.core.models as core_models
 from coquic_steward.cli import app
 from coquic_steward.agents import CodexRunner, render_worker_prompt
 from coquic_steward.agents.diagnostics import diagnostics_for_paths
@@ -205,6 +206,29 @@ github_repository = "minhuw/coquic"
     assert config.codex_sandbox == "read-only"
     assert config.github_repository == "minhuw/global"
     assert config.enabled_signals == ("codacy",)
+
+
+def test_timestamped_model_ids_use_compact_utc_timestamp(monkeypatch) -> None:
+    monkeypatch.setattr(
+        core_models,
+        "utc_now",
+        lambda: datetime(2026, 6, 23, 12, 34, 56, 789, tzinfo=timezone.utc),
+    )
+
+    ids = [
+        core_models.new_task_id(),
+        core_models.new_signal_id(),
+        core_models.new_signal_fetch_id(),
+    ]
+
+    parts = [value.rsplit("-", 2) for value in ids]
+
+    assert [(prefix, timestamp) for prefix, timestamp, _ in parts] == [
+        ("task", "20260623123456"),
+        ("sig", "20260623123456"),
+        ("signal-fetch", "20260623123456"),
+    ]
+    assert all(len(random_suffix) == 8 for _, _, random_suffix in parts)
 
 
 def test_store_dedupes_active_tasks(config: StewardConfig) -> None:

@@ -30,11 +30,22 @@
     --line: #e0e0e0;
     --line-strong: #c6c6c6;
     --primary-soft: #edf5ff;
+    --focus-ring: rgb(15 98 254 / 48%);
+    --link-decoration: rgb(15 98 254 / 32%);
+    --primary-border-subtle: rgb(15 98 254 / 30%);
+    --primary-border-muted: rgb(15 98 254 / 26%);
+    --primary-border-faint: rgb(15 98 254 / 24%);
+    --primary-line-border: #91b0eb;
+    --primary-line-border-strong: #82a7ee;
     --success-soft: #edf8f4;
     --warning-soft: #fcf4d6;
+    --warning-border-subtle: rgb(141 109 0 / 32%);
     --warning-tooltip: #fffaf0;
     --danger-soft: #fff1f1;
     --code-bg: #f6f8fa;
+    --section-border-subtle: rgb(224 224 224 / 72%);
+    --flamegraph-control-border: #9a9a9a;
+    --flamegraph-control-bg: #fff;
     --pipe-border: rgb(22 22 22 / 14%);
     --pipe-border-soft: rgb(22 22 22 / 12%);
     --pipe-front: rgb(255 255 255 / 18%);
@@ -81,11 +92,22 @@
     --line: #273241;
     --line-strong: #3b4656;
     --primary-soft: rgb(120 169 255 / 16%);
+    --focus-ring: rgb(120 169 255 / 48%);
+    --link-decoration: rgb(120 169 255 / 32%);
+    --primary-border-subtle: rgb(120 169 255 / 30%);
+    --primary-border-muted: rgb(120 169 255 / 26%);
+    --primary-border-faint: rgb(120 169 255 / 24%);
+    --primary-line-border: #465f89;
+    --primary-line-border-strong: #4b6897;
     --success-soft: rgb(66 190 101 / 14%);
     --warning-soft: rgb(241 194 27 / 16%);
+    --warning-border-subtle: rgb(241 194 27 / 32%);
     --warning-tooltip: #241d0b;
     --danger-soft: rgb(255 126 182 / 14%);
     --code-bg: #0d1117;
+    --section-border-subtle: rgb(39 50 65 / 72%);
+    --flamegraph-control-border: #2e3743;
+    --flamegraph-control-bg: #e7e8e9;
     --pipe-border: rgb(166 200 255 / 20%);
     --pipe-border-soft: rgb(166 200 255 / 16%);
     --pipe-front: rgb(255 255 255 / 4%);
@@ -156,7 +178,7 @@
   a:focus-visible,
   summary:focus-visible,
   [tabindex]:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--primary) 48%, transparent);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 3px;
   }
 
@@ -174,6 +196,7 @@
     --surface: var(--bg);
     --surface-2: var(--bg);
     --workbench-field: transparent;
+    --focus-ring: rgb(15 98 254 / 48%);
     --workbench-hover: rgb(15 98 254 / 6%);
     --workbench-selected: rgb(15 98 254 / 10%);
     --workbench-danger: rgb(207 45 86 / 8%);
@@ -193,6 +216,7 @@
     --primary-hover: #b6d2ff;
     --primary-active: #d8e7ff;
     --primary-soft: rgb(138 180 255 / 12%);
+    --focus-ring: rgb(138 180 255 / 48%);
     --danger-soft: rgb(255 126 182 / 10%);
     --warning-soft: rgb(241 194 27 / 10%);
     --ink: #f7f9fc;
@@ -413,7 +437,7 @@
   }
 
   .themed-link {
-    text-decoration-color: color-mix(in srgb, var(--primary) 32%, transparent);
+    text-decoration-color: var(--link-decoration);
   }
 
   .eyebrow {
@@ -657,7 +681,7 @@
   .docs-markdown a {
     @apply font-medium text-[var(--primary)] underline underline-offset-4 transition-colors duration-200 hover:text-[var(--primary-hover)] hover:decoration-[var(--primary-hover)];
 
-    text-decoration-color: color-mix(in srgb, var(--primary) 32%, transparent);
+    text-decoration-color: var(--link-decoration);
   }
 
   .docs-markdown code {
@@ -1955,7 +1979,7 @@
   }
 
   .filter-choice[aria-pressed="true"] {
-    border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+    border-color: var(--primary-border-subtle);
     color: var(--ink);
     background: var(--primary-soft);
   }
@@ -1988,7 +2012,7 @@
   }
 
   .filter-choice[aria-pressed="true"] small {
-    border-color: color-mix(in srgb, var(--primary) 26%, transparent);
+    border-color: var(--primary-border-muted);
     color: var(--primary-active);
     background: var(--surface);
   }
@@ -2039,7 +2063,7 @@
   }
 
   .plot-tab[aria-selected="true"] {
-    border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+    border-color: var(--primary-border-subtle);
     background: var(--primary-soft);
   }
 
@@ -2121,25 +2145,17 @@
 
   .bar-row.own-impl,
   tbody tr.own-impl {
-    border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+    border-color: var(--primary-border-subtle);
     background: var(--primary-soft);
     box-shadow: none;
   }
 
   .bar-row.coquic-family {
-    border-color: color-mix(
-      in srgb,
-      var(--family-color, var(--primary)) 34%,
-      transparent
-    );
+    border-color: rgb(from var(--family-color, var(--primary)) r g b / 34%);
     background:
       linear-gradient(
         90deg,
-        color-mix(
-          in srgb,
-          var(--family-color, var(--primary)) 14%,
-          transparent
-        ),
+        rgb(from var(--family-color, var(--primary)) r g b / 14%),
         transparent 54%
       ),
       var(--primary-soft);
@@ -2184,7 +2200,7 @@
   }
 
   .rank-1 {
-    border-color: color-mix(in srgb, var(--warning) 32%, transparent);
+    border-color: var(--warning-border-subtle);
     color: var(--warning);
     background: var(--warning-soft);
   }
@@ -2196,7 +2212,7 @@
   }
 
   .rank-3 {
-    border-color: color-mix(in srgb, var(--primary) 24%, transparent);
+    border-color: var(--primary-border-faint);
     color: var(--primary-active);
     background: var(--primary-soft);
   }
@@ -2266,7 +2282,7 @@
 
   .bar-detail-button:hover,
   .bar-detail-button:focus-visible {
-    border-color: color-mix(in srgb, var(--primary) 38%, var(--line));
+    border-color: var(--primary-line-border);
     color: var(--primary-active);
     background: var(--primary-soft);
     outline: none;
@@ -2356,7 +2372,7 @@
     align-items: center;
     justify-content: center;
     min-width: 0;
-    border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+    border: 1px solid var(--primary-border-subtle);
     border-radius: 999px;
     background: var(--surface);
     color: var(--primary-active);
@@ -2597,11 +2613,7 @@
   }
 
   .trend-legend span.coquic-family {
-    border-color: color-mix(
-      in srgb,
-      var(--family-color, var(--primary)) 34%,
-      transparent
-    );
+    border-color: rgb(from var(--family-color, var(--primary)) r g b / 34%);
     background: var(--primary-soft);
   }
 
@@ -2694,7 +2706,7 @@
 
   .perf-detail-close:hover,
   .perf-detail-close:focus-visible {
-    border-color: color-mix(in srgb, var(--primary) 38%, var(--line));
+    border-color: var(--primary-line-border);
     color: var(--primary-active);
     outline: none;
   }
@@ -2729,7 +2741,7 @@
     gap: 10px;
     min-width: 0;
     padding-top: 14px;
-    border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+    border-top: 1px solid var(--section-border-subtle);
   }
 
   .perf-detail-section h3 {
@@ -2892,10 +2904,10 @@
     justify-content: center;
     width: 34px;
     height: 34px;
-    border: 1px solid color-mix(in srgb, var(--line-strong) 78%, #000);
+    border: 1px solid var(--flamegraph-control-border);
     border-radius: 7px;
     color: var(--ink);
-    background: color-mix(in srgb, #fff 90%, var(--surface));
+    background: var(--flamegraph-control-bg);
     box-shadow: 0 10px 28px rgb(2 6 23 / 18%);
     cursor: pointer;
     transition:
@@ -2907,7 +2919,7 @@
 
   .detail-flamegraph-fullscreen-button:hover,
   .detail-flamegraph-fullscreen-button:focus-visible {
-    border-color: color-mix(in srgb, var(--primary) 45%, var(--line));
+    border-color: var(--primary-line-border-strong);
     color: var(--primary-active);
     background: #fff;
     outline: none;

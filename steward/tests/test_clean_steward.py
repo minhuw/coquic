@@ -862,9 +862,9 @@ def test_status_stale_minutes_respects_explicit_stale_limit(config: StewardConfi
 
 def test_daemon_lock_rejects_second_owner(config: StewardConfig) -> None:
     with acquire_daemon_lock(config):
+        second_lock = acquire_daemon_lock(config)
         with pytest.raises(DaemonAlreadyRunning) as exc_info:
-            with acquire_daemon_lock(config):
-                raise AssertionError("second lock should not be acquired")
+            second_lock.__enter__()
 
     assert exc_info.value.lock_path == config.state_dir / "daemon.lock"
     assert "pid=" in exc_info.value.owner

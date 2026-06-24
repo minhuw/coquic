@@ -17,7 +17,6 @@ import pytest
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
-import coquic_steward.core.models as core_models
 from coquic_steward.cli import app
 from coquic_steward.agents import CodexRunner, render_worker_prompt
 from coquic_steward.agents.diagnostics import diagnostics_for_paths
@@ -40,6 +39,9 @@ from coquic_steward.core.models import (
     ValidationResult,
     WorkerKind,
     WorkerResult,
+    new_scheduler_wakeup_id,
+    new_signal_fetch_id,
+    new_task_id,
     utc_now,
 )
 from coquic_steward.execution import StewardExecutor, Worktrees
@@ -265,15 +267,14 @@ github_repository = "minhuw/coquic"
 
 def test_timestamped_model_ids_use_compact_utc_timestamp(monkeypatch) -> None:
     monkeypatch.setattr(
-        core_models,
-        "utc_now",
+        "coquic_steward.core.models.utc_now",
         lambda: datetime(2026, 6, 23, 12, 34, 56, 789, tzinfo=timezone.utc),
     )
 
     ids = [
-        core_models.new_task_id(),
-        core_models.new_signal_fetch_id(),
-        core_models.new_scheduler_wakeup_id(),
+        new_task_id(),
+        new_signal_fetch_id(),
+        new_scheduler_wakeup_id(),
     ]
 
     parts = [value.rsplit("-", 2) for value in ids]

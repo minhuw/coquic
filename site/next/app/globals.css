@@ -1193,11 +1193,11 @@
   }
 
   .module-state.ready {
-    @apply border-[rgba(15,98,254,0.28)] bg-transparent text-[var(--primary)];
+    @apply border-[rgb(15_98_254_/_28%)] bg-transparent text-[var(--primary)];
   }
 
   .module-state.failed {
-    @apply border-[rgba(207,45,86,0.28)] bg-transparent text-[var(--danger)];
+    @apply border-[rgb(207_45_86_/_28%)] bg-transparent text-[var(--danger)];
   }
 
   .control-button {
@@ -1217,11 +1217,11 @@
   }
 
   .scenario-select {
-    @apply min-h-9 w-full cursor-pointer rounded-[var(--radius)] border border-[var(--line)] bg-transparent px-2 font-mono text-[11px] font-semibold text-[var(--ink)] outline-none transition-colors duration-200 hover:bg-[var(--workbench-hover)] focus-visible:border-[var(--primary)] focus-visible:ring-2 focus-visible:ring-[rgba(15,98,254,0.18)];
+    @apply min-h-9 w-full cursor-pointer rounded-[var(--radius)] border border-[var(--line)] bg-transparent px-2 font-mono text-[11px] font-semibold text-[var(--ink)] outline-none transition-colors duration-200 hover:bg-[var(--workbench-hover)] focus-visible:border-[var(--primary)] focus-visible:ring-2 focus-visible:ring-[rgb(15_98_254_/_18%)];
   }
 
   .scenario-info {
-    @apply relative grid size-9 cursor-pointer place-items-center rounded-[var(--radius)] border border-[var(--line)] bg-transparent text-[var(--muted)] transition-colors duration-200 hover:border-[var(--primary)] hover:bg-[var(--workbench-hover)] hover:text-[var(--primary)] focus-visible:border-[var(--primary)] focus-visible:text-[var(--primary)] focus-visible:ring-2 focus-visible:ring-[rgba(15,98,254,0.18)];
+    @apply relative grid size-9 cursor-pointer place-items-center rounded-[var(--radius)] border border-[var(--line)] bg-transparent text-[var(--muted)] transition-colors duration-200 hover:border-[var(--primary)] hover:bg-[var(--workbench-hover)] hover:text-[var(--primary)] focus-visible:border-[var(--primary)] focus-visible:text-[var(--primary)] focus-visible:ring-2 focus-visible:ring-[rgb(15_98_254_/_18%)];
   }
 
   .scenario-info svg {
@@ -1324,11 +1324,11 @@
   }
 
   #start {
-    @apply border-[rgba(15,98,254,0.68)] text-[var(--client-ink)] hover:border-[var(--primary)];
+    @apply border-[rgb(15_98_254_/_68%)] text-[var(--client-ink)] hover:border-[var(--primary)];
   }
 
   #stop {
-    @apply border-[rgba(207,45,86,0.48)] text-[var(--danger)] hover:border-[var(--danger)];
+    @apply border-[rgb(207_45_86_/_48%)] text-[var(--danger)] hover:border-[var(--danger)];
   }
 
   #step {
@@ -1344,7 +1344,7 @@
   }
 
   .datagram {
-    @apply pointer-events-none absolute z-[2] min-h-10 min-w-[120px] rounded-md border border-dashed border-[rgba(15,98,254,0.32)] shadow-none transition-[border-color,opacity,transform] duration-200;
+    @apply pointer-events-none absolute z-[2] min-h-10 min-w-[120px] rounded-md border border-dashed border-[rgb(15_98_254_/_32%)] shadow-none transition-[border-color,opacity,transform] duration-200;
 
     background: transparent;
   }
@@ -1354,7 +1354,7 @@
   }
 
   .packet {
-    @apply pointer-events-auto absolute z-[3] grid min-h-8 w-[120px] cursor-pointer grid-cols-[6px_minmax(0,1fr)_auto] items-center gap-1.5 rounded-md border border-[rgba(15,98,254,0.48)] bg-[var(--bg)] px-2 py-1 font-mono text-[10px] leading-tight text-[var(--ink)] shadow-[inset_3px_0_0_var(--primary)] transition-[background,border-color,box-shadow,opacity,transform] duration-200;
+    @apply pointer-events-auto absolute z-[3] grid min-h-8 w-[120px] cursor-pointer grid-cols-[6px_minmax(0,1fr)_auto] items-center gap-1.5 rounded-md border border-[rgb(15_98_254_/_48%)] bg-[var(--bg)] px-2 py-1 font-mono text-[10px] leading-tight text-[var(--ink)] shadow-[inset_3px_0_0_var(--primary)] transition-[background,border-color,box-shadow,opacity,transform] duration-200;
   }
 
   .packet::before {
@@ -1364,7 +1364,7 @@
   }
 
   .packet.from-server {
-    @apply border-[rgba(0,67,206,0.36)] bg-[var(--bg)] text-[var(--ink)] shadow-[inset_4px_0_0_var(--server-ink)];
+    @apply border-[rgb(0_67_206_/_36%)] bg-[var(--bg)] text-[var(--ink)] shadow-[inset_4px_0_0_var(--server-ink)];
   }
 
   .packet.from-server::before {
@@ -1384,7 +1384,7 @@
   }
 
   .packet[data-phase="received"] {
-    @apply border-[rgba(15,98,254,0.72)];
+    @apply border-[rgb(15_98_254_/_72%)];
   }
 
   .packet[data-phase="accepted"] {
@@ -1392,23 +1392,23 @@
   }
 
   .packet[data-phase="lost"] {
-    @apply border-[rgba(207,45,86,0.72)] bg-[var(--workbench-danger)] text-[var(--danger)] shadow-[inset_4px_0_0_var(--danger)];
+    @apply border-[rgb(207_45_86_/_72%)] bg-[var(--workbench-danger)] text-[var(--danger)] shadow-[inset_4px_0_0_var(--danger)];
   }
 
   .packet[data-phase="corrupted"] {
-    @apply border-[rgba(207,45,86,0.72)] bg-[var(--workbench-danger)] text-[var(--danger)] shadow-[inset_4px_0_0_var(--danger)];
+    @apply border-[rgb(207_45_86_/_72%)] bg-[var(--workbench-danger)] text-[var(--danger)] shadow-[inset_4px_0_0_var(--danger)];
   }
 
   .datagram[data-phase="in-flight"] {
-    @apply border-[rgba(15,98,254,0.58)];
+    @apply border-[rgb(15_98_254_/_58%)];
   }
 
   .datagram[data-phase="arrived"] {
-    @apply border-[rgba(15,98,254,0.62)];
+    @apply border-[rgb(15_98_254_/_62%)];
   }
 
   .datagram[data-phase="received"] {
-    @apply border-[rgba(15,98,254,0.86)];
+    @apply border-[rgb(15_98_254_/_86%)];
 
     background: var(--workbench-selected);
   }
@@ -1418,11 +1418,11 @@
   }
 
   .datagram[data-phase="lost"] {
-    @apply border-[rgba(207,45,86,0.7)] bg-[var(--workbench-danger)] opacity-80;
+    @apply border-[rgb(207_45_86_/_70%)] bg-[var(--workbench-danger)] opacity-80;
   }
 
   .datagram[data-phase="corrupted"] {
-    @apply border-[rgba(207,45,86,0.7)] bg-[var(--workbench-danger)] opacity-80;
+    @apply border-[rgb(207_45_86_/_70%)] bg-[var(--workbench-danger)] opacity-80;
   }
 
   .packet strong,
@@ -1462,13 +1462,13 @@
   .client .endpoint-chip,
   .client .diag-flag.on dd,
   .diag-pill.on {
-    @apply border-[rgba(15,98,254,0.28)] bg-transparent text-[var(--primary)];
+    @apply border-[rgb(15_98_254_/_28%)] bg-transparent text-[var(--primary)];
   }
 
   .server .endpoint-chip,
   .server .diag-flag.on dd,
   .server .diag-pill.on {
-    @apply border-[rgba(0,67,206,0.22)] bg-transparent text-[var(--server-ink)];
+    @apply border-[rgb(0_67_206_/_22%)] bg-transparent text-[var(--server-ink)];
   }
 
   .state-machine,
@@ -1755,7 +1755,7 @@
   }
 
   .frame-note {
-    @apply rounded-[var(--radius)] border border-[rgba(141,109,0,0.3)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--warning)];
+    @apply rounded-[var(--radius)] border border-[rgb(141_109_0_/_30%)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--warning)];
   }
 
   .hex-dump {
@@ -3106,11 +3106,11 @@
   }
 
   .test-cell.succeeded {
-    @apply border-[rgba(31,138,101,0.28)] bg-[var(--success-soft)] text-[var(--ok)];
+    @apply border-[rgb(31_138_101_/_28%)] bg-[var(--success-soft)] text-[var(--ok)];
   }
 
   .test-cell.unsupported {
-    @apply border-[rgba(141,109,0,0.3)] bg-[var(--warning-soft)] text-[var(--warning)];
+    @apply border-[rgb(141_109_0_/_30%)] bg-[var(--warning-soft)] text-[var(--warning)];
   }
 
   .test-cell.peer-broken {
@@ -3118,7 +3118,7 @@
   }
 
   .test-cell.known-peer-broken {
-    @apply border-[rgba(105,41,196,0.32)] bg-[var(--known-peer-broken-soft)] text-[var(--known-peer-broken)];
+    @apply border-[rgb(105_41_196_/_32%)] bg-[var(--known-peer-broken-soft)] text-[var(--known-peer-broken)];
   }
 
   .test-cell.unknown {
@@ -3126,7 +3126,7 @@
   }
 
   .test-cell.failed {
-    @apply border-[rgba(207,45,86,0.28)] bg-[var(--danger-soft)] text-[var(--danger)];
+    @apply border-[rgb(207_45_86_/_28%)] bg-[var(--danger-soft)] text-[var(--danger)];
   }
 
   .test-cell:hover,

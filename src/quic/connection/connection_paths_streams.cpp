@@ -3434,8 +3434,8 @@ bool QuicConnection::should_keep_current_send_path_for_inbound_non_probing(
 
 bool QuicConnection::should_drop_inbound_packet_on_old_path_after_preferred_success(
     QuicPathId inbound_path_id, std::optional<std::uint64_t> packet_number) const {
-    if (!current_send_path_id_.has_value() || inbound_path_id == *current_send_path_id_ ||
-        !packet_number.has_value()) {
+    if (config_.role != EndpointRole::server || !current_send_path_id_.has_value() ||
+        inbound_path_id == *current_send_path_id_ || !packet_number.has_value()) {
         return false;
     }
 

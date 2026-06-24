@@ -1766,7 +1766,7 @@ TEST(QuicCoreTest, PreferredAddressValidationFailureContinuesOnOriginalPath) {
 }
 
 TEST(QuicCoreTest, PreferredAddressSuccessDropsNewerPacketsOnOldPath) {
-    auto connection = make_connected_client_connection();
+    auto connection = make_connected_server_connection();
     connection.paths_.clear();
     connection.last_validated_path_id_ = 3;
     connection.current_send_path_id_ = 7;
@@ -1801,8 +1801,45 @@ TEST(QuicCoreTest, PreferredAddressSuccessDropsNewerPacketsOnOldPath) {
     EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 100u);
 }
 
-TEST(QuicCoreTest, PreferredAddressSuccessDropsNewerReceivedStreamPacketOnOldPath) {
+TEST(QuicCoreTest, PreferredAddressClientProcessesDelayedOldPathPacketsAfterSuccess) {
     auto connection = make_connected_client_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 7;
+    auto &old_path = connection.ensure_path_state(3);
+    old_path.validated = true;
+    old_path.largest_inbound_application_packet_number = 100;
+    auto &preferred_path = connection.ensure_path_state(7);
+    preferred_path.validated = true;
+    preferred_path.is_current_send_path = true;
+    preferred_path.preferred_address_path = true;
+    connection.streams_.clear();
+
+    auto processed = connection.process_inbound_application(
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::StreamFrame{
+                .has_offset = true,
+                .has_length = true,
+                .stream_id = 0,
+                .offset = 0,
+                .stream_data = coquic::quic::test::bytes_from_string("old-path"),
+            },
+        },
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/3,
+        /*used_previous_application_read_secret=*/false, /*packet_number=*/101);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_TRUE(connection.streams_.contains(0));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.1
+    // # As soon as path validation succeeds, the client SHOULD begin sending
+    // # all future packets to the new server address using the new connection
+    // # ID and discontinue use of the old server address.
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 101u);
+}
+
+TEST(QuicCoreTest, PreferredAddressSuccessDropsNewerReceivedStreamPacketOnOldPath) {
+    auto connection = make_connected_server_connection();
     connection.paths_.clear();
     connection.last_inbound_path_id_ = 3;
     connection.last_validated_path_id_ = 3;

@@ -30,6 +30,7 @@ def run_command(
     env: dict[str, str] | None = None,
     replace_env: bool = False,
 ) -> CommandResult:
+    _validate_argv(args)
     proc: subprocess.Popen[str] | None = None
     try:
         process_env = None
@@ -39,7 +40,7 @@ def run_command(
             else:
                 process_env = os.environ.copy()
                 process_env.update(env)
-        proc = subprocess.Popen(
+        proc = _TrustedProcess(
             args,
             cwd=cwd,
             env=process_env,
@@ -101,6 +102,39 @@ def run_command(
     if check and not result.ok:
         raise RuntimeError(_failure_message(result))
     return result
+
+
+def _validate_argv(args: list[str]) -> None:
+    if not args:
+        raise ValueError("command arguments must not be empty")
+    if not all(isinstance(arg, str) and arg for arg in args):
+        raise ValueError("command arguments must be non-empty strings")
+
+
+class _TrustedProcess(subprocess.Popen[str]):
+    def __init__(
+        self,
+        args: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        text: bool,
+        stdout: int,
+        stderr: int,
+        stdin: int | None,
+        start_new_session: bool,
+    ) -> None:
+        super().__init__(
+            args,
+            cwd=cwd,
+            env=env,
+            shell=False,
+            text=text,
+            stdout=stdout,
+            stderr=stderr,
+            stdin=stdin,
+            start_new_session=start_new_session,
+        )
 
 
 def _timeout_text(value: str | bytes | None) -> str:

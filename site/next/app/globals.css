@@ -2151,11 +2151,19 @@
   }
 
   .bar-row.coquic-family {
-    border-color: rgb(from var(--family-color, var(--primary)) r g b / 34%);
+    border-color: color-mix(
+      in srgb,
+      var(--family-color, var(--primary)) 34%,
+      transparent
+    );
     background:
       linear-gradient(
         90deg,
-        rgb(from var(--family-color, var(--primary)) r g b / 14%),
+        color-mix(
+          in srgb,
+          var(--family-color, var(--primary)) 14%,
+          transparent
+        ),
         transparent 54%
       ),
       var(--primary-soft);
@@ -2613,7 +2621,11 @@
   }
 
   .trend-legend span.coquic-family {
-    border-color: rgb(from var(--family-color, var(--primary)) r g b / 34%);
+    border-color: color-mix(
+      in srgb,
+      var(--family-color, var(--primary)) 34%,
+      transparent
+    );
     background: var(--primary-soft);
   }
 

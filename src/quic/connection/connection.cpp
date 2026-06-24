@@ -323,20 +323,26 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         std::string_view deserialize;
         std::string_view process;
     };
+    struct PacketProcessResult {
+        bool ok = true;
+        bool processed = false;
+        bool completed = false;
+    };
     const auto process_packet_bytes_with =
         [&](std::span<const std::byte> packet_bytes, bool allow_defer, QuicPathId packet_path_id,
             QuicEcnCodepoint packet_ecn, std::optional<std::uint32_t> datagram_id,
             bool packet_replay_trigger, QuicCoreTimePoint packet_received_at,
             auto deserialize_packets, auto process_packet, auto emit_qlog_event,
-            PacketProcessingLabels labels) -> bool {
+            PacketProcessingLabels labels) -> PacketProcessResult {
         if (send_profile_enabled()) {
             ++send_profile_counters().packet_bytes_calls;
         }
         COQUIC_SEND_PROFILE_TIMER(packet_bytes_timer, packet_bytes_ns);
-        const auto fail_with_codec_error = [&](std::string_view label, const auto &error) -> bool {
+        const auto fail_with_codec_error = [&](std::string_view label,
+                                               const auto &error) -> PacketProcessResult {
             log_codec_failure(label, error);
             queue_transport_close_for_error(now, error);
-            return false;
+            return PacketProcessResult{.ok = false};
         };
         const bool short_header_packet =
             (std::to_integer<std::uint8_t>(packet_bytes.front()) & 0x80u) == 0;
@@ -358,7 +364,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 allow_defer, short_header_packet, config_.role, status_,
                 deferred_protected_packets_, packet_bytes, packet_path_id, datagram_id, packet_ecn,
                 packet_received_at)) {
-            return true;
+            return PacketProcessResult{.completed = true};
         }
 
         const auto current_context = short_header_packet
@@ -388,7 +394,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 if (!previous_context.has_value()) {
                     log_codec_failure("expand_traffic_secret", previous_context.error());
                     queue_transport_close_for_error(now, previous_context.error());
-                    return false;
+                    return PacketProcessResult{.ok = false};
                 }
 
                 auto previous_packets = timed_deserialize(previous_context.value());
@@ -417,7 +423,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                     if (!next_write_secret.has_value()) {
                         log_codec_failure("derive_next_traffic_secret", next_write_secret.error());
                         queue_transport_close_for_error(now, next_write_secret.error());
-                        return false;
+                        return PacketProcessResult{.ok = false};
                     }
 
                     //= https://www.rfc-editor.org/rfc/rfc9001#section-6.1
@@ -438,7 +444,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                         log_codec_failure("derive_next_traffic_secret",
                                           following_read_secret.error());
                         queue_transport_close_for_error(now, following_read_secret.error());
-                        return false;
+                        return PacketProcessResult{.ok = false};
                     }
                     application_space_.write_secret = next_write_secret.value();
                     application_write_key_phase_ = !application_write_key_phase_;
@@ -454,11 +460,11 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         }
         if (!packets.has_value()) {
             if (!note_packet_authentication_failure(packets.error(), now)) {
-                return false;
+                return PacketProcessResult{.ok = false};
             }
             if (packets.error().code == CodecErrorCode::missing_crypto_context) {
                 if (packet_targets_discarded_long_header_space(packet_bytes)) {
-                    return true;
+                    return PacketProcessResult{.completed = true};
                 }
                 //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.4
                 // # While waiting for TLS processing to complete, an endpoint
@@ -476,7 +482,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 // # anticipation of later packets that allow it to compute the key.
                 defer_packet(packet_bytes, packet_path_id, datagram_id, packet_ecn,
                              packet_received_at);
-                return true;
+                return PacketProcessResult{.completed = true};
             }
 
             bool should_discard_packet = false;
@@ -506,10 +512,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                               << " size=" << packet_bytes.size()
                               << " code=" << static_cast<int>(packets.error().code) << '\n';
                 }
-                return true;
+                return PacketProcessResult{.completed = true};
             }
             if (processed_any_packet) {
-                return true;
+                return PacketProcessResult{.completed = true};
             }
             log_codec_failure(labels.deserialize, packets.error());
             //= https://www.rfc-editor.org/rfc/rfc9000#section-5.2
@@ -517,10 +523,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
             // # of these packets prior to discovering an error, or fully revert any
             // # changes made during that processing.
             queue_transport_close_for_error(now, packets.error());
-            return false;
+            return PacketProcessResult{.ok = false};
         }
 
-        const auto process_decoded_packet = [&](const auto &packet) -> bool {
+        const auto process_decoded_packet = [&](const auto &packet) -> PacketProcessResult {
             if (send_profile_enabled()) {
                 ++send_profile_counters().process_decoded_packet_calls;
             }
@@ -537,7 +543,7 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
             if (defer_protected_app_packet) {
                 defer_packet(packet_bytes, packet_path_id, datagram_id, packet_ecn,
                              packet_received_at);
-                return true;
+                return PacketProcessResult{.processed = true, .completed = true};
             }
 
             {
@@ -554,9 +560,9 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 const auto previous_progress_generation = inbound_progress_generation();
                 processed = process_packet(packet, packet_received_at, packet_ecn,
                                            used_previous_application_read_secret);
-                if (processed.has_value() &&
+                if (processed.has_value() && processed.value() &&
                     !note_packet_productivity(previous_progress_generation, packet_received_at)) {
-                    return false;
+                    return PacketProcessResult{.ok = false};
                 }
             }
             if (!processed.has_value()) {
@@ -569,11 +575,14 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                               << " code=" << static_cast<int>(processed.error().code) << '\n';
                 }
                 if (processed_any_packet) {
-                    return true;
+                    return PacketProcessResult{.processed = true, .completed = true};
                 }
                 log_codec_failure(labels.process, processed.error());
                 queue_transport_close_for_error(now, processed.error());
-                return false;
+                return PacketProcessResult{.ok = false};
+            }
+            if (!processed.value()) {
+                return PacketProcessResult{};
             }
             if (packet_can_advance_tls_state(packet)) {
                 if (send_profile_enabled()) {
@@ -587,35 +596,49 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
             if (!synced.has_value()) {
                 log_codec_failure("sync_tls_state", synced.error());
                 queue_transport_close_for_error(now, synced.error());
-                return false;
+                return PacketProcessResult{.ok = false};
             }
-            return true;
+            return PacketProcessResult{.processed = true, .completed = true};
         };
 
+        bool processed_any_decoded_packet = false;
+        bool completed_any_decoded_packet = false;
         if constexpr (requires { packets.value().begin(); }) {
             for (const auto &packet : packets.value()) {
-                if (!process_decoded_packet(packet)) {
-                    return false;
+                const auto packet_result = process_decoded_packet(packet);
+                if (!packet_result.ok) {
+                    return packet_result;
                 }
-                if (!packet_replay_trigger) {
-                    result.processed_any_packet = true;
+                if (packet_result.completed) {
+                    completed_any_decoded_packet = true;
+                }
+                if (packet_result.processed) {
+                    processed_any_decoded_packet = true;
+                    if (!packet_replay_trigger) {
+                        result.processed_any_packet = true;
+                    }
                 }
             }
         } else {
-            if (!process_decoded_packet(packets.value())) {
-                return false;
+            const auto packet_result = process_decoded_packet(packets.value());
+            if (!packet_result.ok) {
+                return packet_result;
             }
-            if (!packet_replay_trigger) {
+            processed_any_decoded_packet = packet_result.processed;
+            completed_any_decoded_packet = packet_result.completed;
+            if (packet_result.processed && !packet_replay_trigger) {
                 result.processed_any_packet = true;
             }
         }
 
-        return true;
+        return PacketProcessResult{.processed = processed_any_decoded_packet,
+                                   .completed = completed_any_decoded_packet};
     };
     const auto process_packet_bytes =
         [&](std::span<const std::byte> packet_bytes, bool allow_defer, QuicPathId packet_path_id,
             QuicEcnCodepoint packet_ecn, std::optional<std::uint32_t> datagram_id,
-            bool packet_replay_trigger, QuicCoreTimePoint packet_received_at) -> bool {
+            bool packet_replay_trigger,
+            QuicCoreTimePoint packet_received_at) -> PacketProcessResult {
         if (qlog_session_ != nullptr) {
             const auto emit_qlog_event = [&](const ProtectedPacket &packet) {
                 if (!datagram_id.has_value()) {
@@ -702,15 +725,16 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 .process = "process_inbound_received_packet",
             });
     };
-    const auto process_single_short_header_packet_fast_path = [&]() -> bool {
+    const auto process_single_short_header_packet_fast_path = [&]() -> PacketProcessResult {
         if (send_profile_enabled()) {
             ++send_profile_counters().packet_bytes_calls;
         }
         COQUIC_SEND_PROFILE_TIMER(packet_bytes_timer, packet_bytes_ns);
-        const auto fail_with_codec_error = [&](std::string_view label, const auto &error) -> bool {
+        const auto fail_with_codec_error = [&](std::string_view label,
+                                               const auto &error) -> PacketProcessResult {
             log_codec_failure(label, error);
             queue_transport_close_for_error(now, error);
-            return false;
+            return PacketProcessResult{.ok = false};
         };
 
         //= https://www.rfc-editor.org/rfc/rfc9001#section-6.3
@@ -795,10 +819,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         }
         if (!packet.has_value()) {
             if (!note_packet_authentication_failure(packet.error(), now)) {
-                return false;
+                return PacketProcessResult{.ok = false};
             }
             if (is_discardable_short_header_packet_error(packet.error().code)) {
-                return true;
+                return PacketProcessResult{.completed = true};
             }
             return fail_with_codec_error("deserialize_received_protected_datagram", packet.error());
         }
@@ -826,24 +850,27 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                     processed = process_inbound_received_application_ack_only(
                         ack_only->packet_number, ack_only->spin_bit, ack_only->ack, now, ecn,
                         last_inbound_path_id_, /*used_previous_application_read_secret=*/false);
-                    if (processed.has_value()) {
+                    if (processed.has_value() && processed.value()) {
                         note_local_connection_id_used_by_peer(ack_only->destination_connection_id);
                     }
                 }
-                if (processed.has_value() &&
+                if (processed.has_value() && processed.value() &&
                     !note_packet_productivity(previous_progress_generation, now)) {
-                    return false;
+                    return PacketProcessResult{.ok = false};
                 }
             }
             if (!processed.has_value()) {
                 log_codec_failure("process_inbound_received_packet", processed.error());
                 queue_transport_close_for_error(now, processed.error());
-                return false;
+                return PacketProcessResult{.ok = false};
+            }
+            if (!processed.value()) {
+                return PacketProcessResult{};
             }
             if (!replay_trigger) {
                 result.processed_any_packet = true;
             }
-            return true;
+            return PacketProcessResult{.processed = true, .completed = true};
         }
 
         const auto *received_packet = std::get_if<ReceivedProtectedPacket>(&packet.value());
@@ -861,15 +888,18 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
             COQUIC_SEND_PROFILE_TIMER(process_timer, process_packet_ns);
             const auto previous_progress_generation = inbound_progress_generation();
             processed = process_inbound_received_packet(*received_packet, now, ecn);
-            if (processed.has_value() &&
+            if (processed.has_value() && processed.value() &&
                 !note_packet_productivity(previous_progress_generation, now)) {
-                return false;
+                return PacketProcessResult{.ok = false};
             }
         }
         if (!processed.has_value()) {
             log_codec_failure("process_inbound_received_packet", processed.error());
             queue_transport_close_for_error(now, processed.error());
-            return false;
+            return PacketProcessResult{.ok = false};
+        }
+        if (!processed.value()) {
+            return PacketProcessResult{};
         }
         if (packet_can_advance_tls_state(*received_packet)) {
             if (send_profile_enabled()) {
@@ -883,12 +913,12 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         if (!synced.has_value()) {
             log_codec_failure("sync_tls_state", synced.error());
             queue_transport_close_for_error(now, synced.error());
-            return false;
+            return PacketProcessResult{.ok = false};
         }
         if (!replay_trigger) {
             result.processed_any_packet = true;
         }
-        return true;
+        return PacketProcessResult{.processed = true, .completed = true};
     };
     const auto replay_deferred_packets = [&]() -> bool {
         if (send_profile_enabled()) {
@@ -906,10 +936,11 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
             // # However, endpoints SHOULD include buffering delays caused by
             // # unavailability of decryption keys, since these delays can be large
             // # and are likely to be non-repeating.
-            if (!process_packet_bytes(
-                    deferred_packet.bytes, /*allow_defer=*/true, deferred_packet.path_id,
-                    deferred_packet.ecn, deferred_packet.datagram_id,
-                    /*packet_replay_trigger=*/true, deferred_packet.received_at.value_or(now))) {
+            const auto packet_result = process_packet_bytes(
+                deferred_packet.bytes, /*allow_defer=*/true, deferred_packet.path_id,
+                deferred_packet.ecn, deferred_packet.datagram_id,
+                /*packet_replay_trigger=*/true, deferred_packet.received_at.value_or(now));
+            if (!packet_result.ok) {
                 return false;
             }
         }
@@ -979,11 +1010,15 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         // # The receiver of coalesced QUIC packets MUST individually process
         // # each QUIC packet and separately acknowledge them, as if they were
         // # received as the payload of different UDP datagrams.
-        if (!process_packet_bytes(packet_bytes, /*allow_defer=*/true, path_id, ecn,
-                                  inbound_datagram_id, replay_trigger, now)) {
+        const auto packet_result =
+            process_packet_bytes(packet_bytes, /*allow_defer=*/true, path_id, ecn,
+                                 inbound_datagram_id, replay_trigger, now);
+        if (!packet_result.ok) {
             return result;
         }
-        processed_any_packet = true;
+        if (packet_result.completed) {
+            processed_any_packet = true;
+        }
         if (!replay_deferred_packets()) {
             return result;
         }

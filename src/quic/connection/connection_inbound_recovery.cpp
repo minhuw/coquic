@@ -473,7 +473,7 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                     protected_packet.frames, now, true, last_inbound_path_id_,
                     /*used_previous_application_read_secret=*/false,
                     protected_packet.packet_number);
-                if (processed.has_value()) {
+                if (processed.has_value() && processed.value()) {
                     processed_peer_packet_ = true;
                     note_local_connection_id_used_by_peer(
                         protected_packet.destination_connection_id);
@@ -520,7 +520,7 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                 const auto processed = process_inbound_application(
                     protected_packet.frames, now, has_crypto_frame, last_inbound_path_id_,
                     used_previous_application_read_secret, protected_packet.packet_number);
-                if (processed.has_value()) {
+                if (processed.has_value() && processed.value()) {
                     processed_peer_packet_ = true;
                     note_local_connection_id_used_by_peer(
                         protected_packet.destination_connection_id);
@@ -750,7 +750,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                     protected_packet.frames, now, true, last_inbound_path_id_,
                     /*used_previous_application_read_secret=*/false,
                     protected_packet.packet_number);
-                if (processed.has_value()) {
+                if (processed.has_value() && processed.value()) {
                     processed_peer_packet_ = true;
                     note_local_connection_id_used_by_peer(
                         protected_packet.destination_connection_id);
@@ -796,7 +796,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 auto processed = process_inbound_received_application_ack_only(
                     protected_packet.packet_number, protected_packet.spin_bit, protected_packet.ack,
                     now, ecn, last_inbound_path_id_, used_previous_application_read_secret);
-                if (processed.has_value()) {
+                if (processed.has_value() && processed.value()) {
                     note_local_connection_id_used_by_peer(
                         protected_packet.destination_connection_id);
                 }
@@ -815,7 +815,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 auto processed = process_inbound_received_application_stream_packet(
                     protected_packet.packet_number, protected_packet.spin_bit,
                     protected_packet.stream, now, ecn);
-                if (processed.has_value()) {
+                if (processed.has_value() && processed.value()) {
                     note_local_connection_id_used_by_peer(
                         protected_packet.destination_connection_id);
                 }
@@ -839,7 +839,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                     auto processed = process_inbound_received_application_ack_only(
                         protected_packet.packet_number, protected_packet.spin_bit, *ack_frame, now,
                         ecn, last_inbound_path_id_, used_previous_application_read_secret);
-                    if (processed.has_value()) {
+                    if (processed.has_value() && processed.value()) {
                         note_local_connection_id_used_by_peer(
                             protected_packet.destination_connection_id);
                     }
@@ -852,7 +852,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                     auto processed = process_inbound_received_application_stream_packet(
                         protected_packet.packet_number, protected_packet.spin_bit, *stream_frame,
                         now, ecn);
-                    if (processed.has_value()) {
+                    if (processed.has_value() && processed.value()) {
                         note_local_connection_id_used_by_peer(
                             protected_packet.destination_connection_id);
                     }
@@ -865,7 +865,7 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 auto processed = process_inbound_received_application(
                     protected_packet.frames, now, has_crypto_frame, last_inbound_path_id_,
                     used_previous_application_read_secret, protected_packet.packet_number);
-                if (processed.has_value()) {
+                if (processed.has_value() && processed.value()) {
                     processed_peer_packet_ = true;
                     note_local_connection_id_used_by_peer(
                         protected_packet.destination_connection_id);
@@ -2901,7 +2901,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
         // # The server SHOULD drop newer packets for this connection that are
         // # received on the old IP address.
-        return CodecResult<bool>::success(true);
+        return CodecResult<bool>::success(false);
     }
     if (path_id != current_send_path_id_.value_or(path_id) && !is_probing_only(frames) &&
         !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
@@ -3433,7 +3433,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
         // # The server SHOULD drop newer packets for this connection that are
         // # received on the old IP address.
-        return CodecResult<bool>::success(true);
+        return CodecResult<bool>::success(false);
     }
     if (path_id != current_send_path_id_.value_or(path_id) && !probing_only &&
         !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
@@ -4114,7 +4114,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_stream_pa
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
         // # The server SHOULD drop newer packets for this connection that are
         // # received on the old IP address.
-        return CodecResult<bool>::success(true);
+        return CodecResult<bool>::success(false);
     }
     if (last_inbound_path_id_ != current_send_path_id_.value_or(last_inbound_path_id_) &&
         !should_keep_current_send_path_for_inbound_non_probing(last_inbound_path_id_,
@@ -4142,7 +4142,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_stream_pa
 
     const auto processed =
         process_inbound_received_application_stream(stream_frame, /*require_connected=*/true);
-    if (processed.has_value()) {
+    if (processed.has_value() && processed.value()) {
         processed_peer_packet_ = true;
         if (config_.role == EndpointRole::server && status_ != HandshakeStatus::connected) {
             mark_peer_address_validated();
@@ -4187,7 +4187,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_ack_only(
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
         // # The server SHOULD drop newer packets for this connection that are
         // # received on the old IP address.
-        return CodecResult<bool>::success(true);
+        return CodecResult<bool>::success(false);
     }
     if (path_id != current_send_path_id_.value_or(path_id) &&
         !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {

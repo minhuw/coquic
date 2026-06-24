@@ -1793,12 +1793,15 @@ TEST(QuicCoreTest, PreferredAddressSuccessDropsNewerPacketsOnOldPath) {
         /*used_previous_application_read_secret=*/false, /*packet_number=*/101);
 
     ASSERT_TRUE(dropped.has_value());
+    EXPECT_FALSE(dropped.value());
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
     // # The server SHOULD drop newer packets for this connection that are
     // # received on the old IP address.
     EXPECT_FALSE(connection.streams_.contains(0));
     EXPECT_EQ(connection.current_send_path_id_, 7u);
     EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 100u);
+    EXPECT_FALSE(connection.application_space_.received_packets.contains(101));
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
 }
 
 TEST(QuicCoreTest, PreferredAddressClientProcessesDelayedOldPathPacketsAfterSuccess) {
@@ -1838,6 +1841,172 @@ TEST(QuicCoreTest, PreferredAddressClientProcessesDelayedOldPathPacketsAfterSucc
     EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 101u);
 }
 
+TEST(QuicCoreTest, PreferredAddressSuccessDoesNotAckDroppedOldPathPacket) {
+    auto connection = make_connected_server_connection();
+    connection.paths_.clear();
+    connection.last_inbound_path_id_ = 3;
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 7;
+    auto &old_path = connection.ensure_path_state(3);
+    old_path.validated = true;
+    old_path.largest_inbound_application_packet_number = 100;
+    auto &preferred_path = connection.ensure_path_state(7);
+    preferred_path.validated = true;
+    preferred_path.is_current_send_path = true;
+    preferred_path.preferred_address_path = true;
+    connection.streams_.clear();
+
+    auto dropped = connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number = 101,
+            .frames =
+                {
+                    coquic::quic::RetireConnectionIdFrame{.sequence_number = 2},
+                    coquic::quic::StreamFrame{
+                        .has_offset = true,
+                        .has_length = true,
+                        .stream_id = 0,
+                        .offset = 0,
+                        .stream_data = coquic::quic::test::bytes_from_string("old-path"),
+                    },
+                },
+        },
+        coquic::quic::test::test_time(1), coquic::quic::QuicEcnCodepoint::not_ect);
+
+    ASSERT_TRUE(dropped.has_value());
+    EXPECT_FALSE(dropped.value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+    // # A packet MUST NOT be acknowledged until packet protection has been
+    // # successfully removed and all frames contained in the packet have been
+    // # processed.
+    EXPECT_FALSE(connection.streams_.contains(0));
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 100u);
+    EXPECT_FALSE(connection.application_space_.received_packets.contains(101));
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+}
+
+TEST(QuicCoreTest, PreferredAddressSuccessDatagramDropDoesNotCountAsProcessed) {
+    const auto exercise_datagram_drop = [](bool owned_datagram) {
+        SCOPED_TRACE(owned_datagram ? "owned datagram fast path" : "span datagram path");
+        auto connection = make_connected_server_connection();
+        connection.paths_.clear();
+        connection.last_inbound_path_id_ = 3;
+        connection.last_validated_path_id_ = 3;
+        connection.current_send_path_id_ = 7;
+        auto &old_path = connection.ensure_path_state(3);
+        old_path.validated = true;
+        old_path.largest_inbound_application_packet_number = 100;
+        auto &preferred_path = connection.ensure_path_state(7);
+        preferred_path.validated = true;
+        preferred_path.is_current_send_path = true;
+        preferred_path.preferred_address_path = true;
+        connection.streams_.clear();
+        const auto nonproductive_packets_before = connection.consecutive_nonproductive_packets_;
+
+        auto datagram = coquic::quic::serialize_protected_datagram(
+            std::array<coquic::quic::ProtectedPacket, 1>{
+                coquic::quic::ProtectedOneRttPacket{
+                    .destination_connection_id = connection.config_.source_connection_id,
+                    .packet_number_length = 2,
+                    .packet_number = 101,
+                    .frames =
+                        {
+                            coquic::quic::StreamFrame{
+                                .has_offset = true,
+                                .has_length = true,
+                                .stream_id = 0,
+                                .offset = 0,
+                                .stream_data = coquic::quic::test::bytes_from_string("old-path"),
+                            },
+                        },
+                },
+            },
+            coquic::quic::SerializeProtectionContext{
+                .local_role = coquic::quic::EndpointRole::client,
+                .client_initial_destination_connection_id =
+                    connection.client_initial_destination_connection_id(),
+                .one_rtt_secret = connection.application_space_.read_secret,
+            });
+        ASSERT_TRUE(datagram.has_value()) << static_cast<int>(datagram.error().code);
+
+        coquic::quic::QuicInboundDatagramResult result;
+        if (owned_datagram) {
+            result = connection.process_inbound_datagram_owned(
+                std::move(datagram.value()), coquic::quic::test::test_time(1), /*path_id=*/3,
+                coquic::quic::QuicEcnCodepoint::not_ect);
+        } else {
+            result = connection.process_inbound_datagram(
+                datagram.value(), coquic::quic::test::test_time(1), /*path_id=*/3);
+        }
+
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+        // # The server SHOULD drop newer packets for this connection that are
+        // # received on the old IP address.
+        EXPECT_FALSE(result.processed_any_packet);
+        EXPECT_FALSE(connection.streams_.contains(0));
+        EXPECT_EQ(connection.current_send_path_id_, 7u);
+        EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 100u);
+        EXPECT_FALSE(connection.application_space_.received_packets.contains(101));
+        EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+        EXPECT_EQ(connection.consecutive_nonproductive_packets_, nonproductive_packets_before);
+    };
+
+    exercise_datagram_drop(/*owned_datagram=*/false);
+    exercise_datagram_drop(/*owned_datagram=*/true);
+}
+
+TEST(QuicCoreTest, PreferredAddressSuccessDoesNotAckDroppedOldPathZeroRttPacket) {
+    auto connection = make_connected_server_connection();
+    connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+    connection.paths_.clear();
+    connection.last_inbound_path_id_ = 3;
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 7;
+    auto &old_path = connection.ensure_path_state(3);
+    old_path.validated = true;
+    old_path.largest_inbound_application_packet_number = 100;
+    auto &preferred_path = connection.ensure_path_state(7);
+    preferred_path.validated = true;
+    preferred_path.is_current_send_path = true;
+    preferred_path.preferred_address_path = true;
+    connection.streams_.clear();
+
+    auto dropped = connection.process_inbound_packet(
+        coquic::quic::ProtectedZeroRttPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id =
+                optional_value_or_terminate(connection.peer_source_connection_id_),
+            .packet_number = 101,
+            .frames =
+                {
+                    coquic::quic::StreamFrame{
+                        .has_offset = true,
+                        .has_length = true,
+                        .stream_id = 0,
+                        .offset = 0,
+                        .stream_data = coquic::quic::test::bytes_from_string("old-path"),
+                    },
+                },
+        },
+        coquic::quic::test::test_time(1), coquic::quic::QuicEcnCodepoint::not_ect);
+
+    ASSERT_TRUE(dropped.has_value());
+    EXPECT_FALSE(dropped.value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
+    // # A packet MUST NOT be acknowledged until packet protection has been
+    // # successfully removed and all frames contained in the packet have been
+    // # processed.
+    EXPECT_FALSE(connection.streams_.contains(0));
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 100u);
+    EXPECT_FALSE(connection.application_space_.received_packets.contains(101));
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+}
+
 TEST(QuicCoreTest, PreferredAddressSuccessDropsNewerReceivedStreamPacketOnOldPath) {
     auto connection = make_connected_server_connection();
     connection.paths_.clear();
@@ -1866,12 +2035,15 @@ TEST(QuicCoreTest, PreferredAddressSuccessDropsNewerReceivedStreamPacketOnOldPat
         coquic::quic::test::test_time(1), coquic::quic::QuicEcnCodepoint::not_ect);
 
     ASSERT_TRUE(dropped.has_value());
+    EXPECT_FALSE(dropped.value());
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
     // # The server SHOULD drop newer packets for this connection that are
     // # received on the old IP address.
     EXPECT_FALSE(connection.streams_.contains(0));
     EXPECT_EQ(connection.current_send_path_id_, 7u);
     EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 100u);
+    EXPECT_FALSE(connection.application_space_.received_packets.contains(101));
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
 }
 
 TEST(QuicCoreTest, PreferredAddressOldPathChallengeResponseIsProbingOnly) {

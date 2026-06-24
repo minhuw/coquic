@@ -843,6 +843,49 @@ class StewardExecutor:
     ) -> bool:
         task = self.store.get(integration_task_id)
         source = self.store.get(source_task_id)
+        preflight_result = self._integration_preflight(task, source, transcript)
+        if preflight_result is not None:
+            return preflight_result
+
+        worktree = self._start_integration_worktree(task, source, transcript)
+        patch_text, patch_result = self._apply_source_patch_for_integration(
+            task, source, worktree, transcript
+        )
+        if patch_result is not None:
+            return patch_result
+
+        task, validations = self._run_integration_validations(
+            task, worktree, transcript
+        )
+        validation_result = self._handle_integration_validation_failure(
+            task, source, validations, worktree, transcript
+        )
+        if validation_result is not None:
+            return validation_result
+
+        commit_message = self._integration_commit_message(
+            task, source, patch_text, validations, transcript
+        )
+        if commit_message is None:
+            return False
+
+        sha, commit_result = self._commit_integration_patch(
+            task, source, worktree, commit_message, transcript
+        )
+        if commit_result is not None:
+            return commit_result
+
+        assert sha is not None
+        return self._finish_or_push_integration_commit(
+            task, source, worktree, sha, transcript
+        )
+
+    def _integration_preflight(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        transcript: "IntegrationTranscript",
+    ) -> bool | None:
         if source.patch_path is None:
             transcript.write("error", "source task has no patch")
             self._finish_task(
@@ -877,6 +920,14 @@ class StewardExecutor:
                 source.id, TaskStatus.blocked, "main push budget reached"
             )
             return False
+        return None
+
+    def _start_integration_worktree(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        transcript: "IntegrationTranscript",
+    ) -> Path:
         worktree, branch = self.worktrees.create(task)
         transcript.write("worktree", f"{worktree} on {branch}")
         task.worktree_path = worktree
@@ -895,9 +946,22 @@ class StewardExecutor:
             task.id,
             {"integration_task_id": task.id},
         )
+        return worktree
+
+    def _apply_source_patch_for_integration(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        worktree: Path,
+        transcript: "IntegrationTranscript",
+    ) -> tuple[str, bool | None]:
+        patch_text = ""
         try:
             patch_text = source.patch_path.read_text(encoding="utf-8")
-            transcript.write("reset", f"resetting worktree to {self.config.git_remote}/{self.config.main_branch}")
+            transcript.write(
+                "reset",
+                f"resetting worktree to {self.config.git_remote}/{self.config.main_branch}",
+            )
             self.worktrees.reset_to_main(worktree)
             transcript.write("apply", "applying reviewed patch")
             self.worktrees.apply_patch(worktree, patch_text)
@@ -913,10 +977,20 @@ class StewardExecutor:
                 conflict,
                 {"integration_task_id": task.id},
             )
-            transcript.write("repair", "requesting source worker integration conflict repair")
-            return self._repair_integration_conflict(
+            transcript.write(
+                "repair", "requesting source worker integration conflict repair"
+            )
+            return patch_text, self._repair_integration_conflict(
                 source.id, conflict, patch_text, task.id
             )
+        return patch_text, None
+
+    def _run_integration_validations(
+        self,
+        task: TaskRecord,
+        worktree: Path,
+        transcript: "IntegrationTranscript",
+    ) -> tuple[TaskRecord, list[ValidationResult]]:
         transcript.write("validate", "running integration validation gates")
         validations = run_gates(self.config, task.id, worktree)
         for validation in validations:
@@ -928,40 +1002,60 @@ class StewardExecutor:
         task = self.store.get(task.id)
         task.validations.extend(validations)
         self.store.save(task)
-        if any(not validation.passed for validation in validations):
-            transcript.write("error", "validation failed after rebase")
-            rebased_patch = self.worktrees.diff(worktree)
-            self._finish_task(
-                task.id, TaskStatus.blocked, "validation failed after rebase"
-            )
-            failed_validations = [
-                validation for validation in validations if not validation.passed
-            ]
-            self.store.add_event(
-                source.id,
-                "integration.validation_failed",
-                _summarize_validations(validations),
-                {
-                    "integration_task_id": task.id,
-                    "failed": [
-                        {
-                            "command": validation.command,
-                            "exit_code": validation.exit_code,
-                            "summary": validation.summary,
-                            "output_path": str(validation.output_path),
-                        }
-                        for validation in failed_validations
-                    ],
-                },
-            )
-            transcript.write(
-                "repair", "requesting source worker integration validation repair"
-            )
-            return self._repair_integration_validation_failure(
-                source.id, failed_validations, rebased_patch, task.id
-            )
+        return task, validations
+
+    def _handle_integration_validation_failure(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        validations: list[ValidationResult],
+        worktree: Path,
+        transcript: "IntegrationTranscript",
+    ) -> bool | None:
+        failed_validations = [
+            validation for validation in validations if not validation.passed
+        ]
+        if not failed_validations:
+            return None
+        transcript.write("error", "validation failed after rebase")
+        rebased_patch = self.worktrees.diff(worktree)
+        self._finish_task(
+            task.id, TaskStatus.blocked, "validation failed after rebase"
+        )
+        self.store.add_event(
+            source.id,
+            "integration.validation_failed",
+            _summarize_validations(validations),
+            {
+                "integration_task_id": task.id,
+                "failed": [
+                    {
+                        "command": validation.command,
+                        "exit_code": validation.exit_code,
+                        "summary": validation.summary,
+                        "output_path": str(validation.output_path),
+                    }
+                    for validation in failed_validations
+                ],
+            },
+        )
+        transcript.write(
+            "repair", "requesting source worker integration validation repair"
+        )
+        return self._repair_integration_validation_failure(
+            source.id, failed_validations, rebased_patch, task.id
+        )
+
+    def _integration_commit_message(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        patch_text: str,
+        validations: list[ValidationResult],
+        transcript: "IntegrationTranscript",
+    ) -> tuple[str, str] | None:
         try:
-            commit_subject, commit_body = self._commit_message_for_integration(
+            return self._commit_message_for_integration(
                 task, source, patch_text, validations, transcript
             )
         except CommitMessageGenerationError as exc:
@@ -979,7 +1073,17 @@ class StewardExecutor:
                 message,
                 {"integration_task_id": task.id, **exc.data},
             )
-            return False
+            return None
+
+    def _commit_integration_patch(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        worktree: Path,
+        commit_message: tuple[str, str],
+        transcript: "IntegrationTranscript",
+    ) -> tuple[str | None, bool | None]:
+        commit_subject, commit_body = commit_message
         transcript.write("commit", f"creating commit: {commit_subject}")
         try:
             sha = self.worktrees.commit_all(
@@ -998,7 +1102,7 @@ class StewardExecutor:
                 message,
                 {"integration_task_id": task.id},
             )
-            return False
+            return None, False
         if sha is None:
             transcript.write("no_changes", "patch already present on main")
             self._finish_task(
@@ -1007,28 +1111,62 @@ class StewardExecutor:
             self._finish_task(
                 source.id, TaskStatus.no_changes, "patch already present on main"
             )
-            return True
+            return None, True
         transcript.write("commit", f"created {sha}")
+        return sha, None
+
+    def _finish_or_push_integration_commit(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        worktree: Path,
+        sha: str,
+        transcript: "IntegrationTranscript",
+    ) -> bool:
         if self.config.local_only:
-            transcript.write(
-                "local_only",
-                f"external writes disabled; keeping local integration commit {sha}",
+            return self._finish_local_integration_commit(
+                task, source, sha, transcript
             )
-            self._finish_task(
-                task.id, TaskStatus.succeeded, f"local-only integration commit {sha}"
-            )
-            self._finish_task(
-                source.id, TaskStatus.succeeded, f"local-only integration commit {sha}"
-            )
-            self.store.add_event(
-                source.id,
-                "integration.local_only",
-                "external writes disabled by local_only",
-                {"integration_task_id": task.id, "commit": sha},
-            )
-            return True
+        return self._push_integration_commit(task, source, worktree, sha, transcript)
+
+    def _finish_local_integration_commit(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        sha: str,
+        transcript: "IntegrationTranscript",
+    ) -> bool:
+        transcript.write(
+            "local_only",
+            f"external writes disabled; keeping local integration commit {sha}",
+        )
+        self._finish_task(
+            task.id, TaskStatus.succeeded, f"local-only integration commit {sha}"
+        )
+        self._finish_task(
+            source.id, TaskStatus.succeeded, f"local-only integration commit {sha}"
+        )
+        self.store.add_event(
+            source.id,
+            "integration.local_only",
+            "external writes disabled by local_only",
+            {"integration_task_id": task.id, "commit": sha},
+        )
+        return True
+
+    def _push_integration_commit(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        worktree: Path,
+        sha: str,
+        transcript: "IntegrationTranscript",
+    ) -> bool:
         self.store.start_integration(task.id, "pushing to main")
-        transcript.write("push", f"pushing {sha} to {self.config.git_remote}/{self.config.main_branch}")
+        transcript.write(
+            "push",
+            f"pushing {sha} to {self.config.git_remote}/{self.config.main_branch}",
+        )
         try:
             push_result = self.worktrees.push_head_to_main(worktree)
         except RuntimeError as exc:

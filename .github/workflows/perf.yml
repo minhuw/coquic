@@ -188,6 +188,20 @@ jobs:
             image_tag: coquic-perf-neqo:quictls-musl
 
     steps:
+      - name: Reclaim Perf Runner State
+        run: |
+          set -euo pipefail
+          df -h
+          rm -rf .bench-results result
+          if docker info >/dev/null 2>&1; then
+            docker system prune -af --volumes || true
+            docker builder prune -af || true
+          fi
+          if command -v nix >/dev/null 2>&1; then
+            nix store gc || nix-collect-garbage -d || true
+          fi
+          df -h
+
       - name: Checkout
         uses: actions/checkout@v6
         with:

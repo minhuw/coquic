@@ -4370,6 +4370,19 @@ button.code-copy-button:hover:not(:disabled) {
   font-size: 13px;
 }
 
+.review-note {
+  border-bottom: 1px solid var(--border);
+}
+
+.review-note p {
+  margin: 0;
+  padding: 0 12px 12px;
+  color: #22262d;
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
 .review-findings {
   display: flex;
   flex-direction: column;

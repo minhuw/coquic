@@ -638,15 +638,17 @@ function PaginationJump({
   page: number;
   pageCount: number;
 }) {
-  const [draftPage, setDraftPage] = useState(String(page));
+  const [draft, setDraft] = useState({ page, value: String(page) });
+  const draftPage = draft.page === page ? draft.value : String(page);
+
   function submitPage() {
     const parsed = Number.parseInt(draftPage, 10);
     if (Number.isNaN(parsed)) {
-      setDraftPage(String(page));
+      setDraft({ page, value: String(page) });
       return;
     }
     const nextPage = Math.max(1, Math.min(parsed, pageCount));
-    setDraftPage(String(nextPage));
+    setDraft({ page: nextPage, value: String(nextPage) });
     if (nextPage !== page) onPageChange(nextPage);
   }
   return (
@@ -665,7 +667,7 @@ function PaginationJump({
         max={pageCount}
         min={1}
         onBlur={submitPage}
-        onChange={(event) => setDraftPage(event.target.value)}
+        onChange={(event) => setDraft({ page, value: event.target.value })}
         pattern="[0-9]*"
         type="number"
         value={draftPage}

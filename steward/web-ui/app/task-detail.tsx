@@ -867,9 +867,19 @@ function ReviewCard({ review }: { review: ReviewRecord }) {
         {review.exit_code !== null && <KeyValue label="Exit" value={String(review.exit_code)} />}
         <KeyValue label="Findings" value={String(review.findings.length)} />
         <KeyValue label="Validation gaps" value={String(review.validation_gaps.length)} />
-        <KeyValue label="Remaining risk" value={review.remaining_risk || "-"} />
-        {review.command && <KeyValue label="Command" value={review.command} />}
       </div>
+      {review.remaining_risk && (
+        <section className="review-note">
+          <h4>Remaining Risk</h4>
+          <p>{review.remaining_risk}</p>
+        </section>
+      )}
+      {review.command && (
+        <section className="review-note">
+          <h4>Command</h4>
+          <p className="mono">{review.command}</p>
+        </section>
+      )}
       {review.findings.length > 0 && (
         <>
           <h4>Findings</h4>

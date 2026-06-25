@@ -25,6 +25,7 @@ runtime_public_entries=(
   "coverage-results.json"
   "coverage"
   "duvet"
+  "steward"
 )
 
 if [[ ! -f "${server_js}" ]]; then

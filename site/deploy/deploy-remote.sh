@@ -583,6 +583,7 @@ preserve_runtime_public_dir "perf-artifacts"
 preserve_runtime_public_file "interop-results.json"
 preserve_runtime_public_file "coverage-results.json"
 preserve_runtime_public_dir "duvet"
+preserve_runtime_public_dir "steward"
 if sudo test -d "${previous_app_public_dir}/coverage" &&
    ! sudo test -d "${remote_release_dir}/app/public/coverage"; then
   sudo cp -a "${previous_app_public_dir}/coverage" "${remote_release_dir}/app/public/coverage"

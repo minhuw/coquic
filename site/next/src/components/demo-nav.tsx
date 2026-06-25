@@ -8,7 +8,7 @@ import { CoquicLogoIcon, GitHubIcon } from './icons';
 import { SiteSearch } from './site-search';
 import { ThemeToggle } from './theme-toggle';
 
-export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'blog' | 'interop' | 'coverage' | 'duvet' | 'qa';
+export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'blog' | 'interop' | 'coverage' | 'duvet' | 'steward' | 'qa';
 
 const views: { href: string; label: string; route: DemoRoute }[] = [
   { href: '/qa', label: 'Ask', route: 'qa' },
@@ -19,13 +19,16 @@ const views: { href: string; label: string; route: DemoRoute }[] = [
   { href: '/interop', label: 'Interop', route: 'interop' },
   { href: '/coverage', label: 'Coverage', route: 'coverage' },
   { href: '/duvet', label: 'Duvet', route: 'duvet' },
+  { href: '/steward', label: 'Steward', route: 'steward' },
 ];
 
 const primaryViews = views.filter(
   (view) => view.route === 'docs' || view.route === 'blog' || view.route === 'workbench' || view.route === 'qa',
 );
 const benchmarkViews = views.filter((view) => view.route === 'performance');
-const developmentViews = views.filter((view) => view.route === 'interop' || view.route === 'coverage' || view.route === 'duvet');
+const developmentViews = views.filter(
+  (view) => view.route === 'interop' || view.route === 'coverage' || view.route === 'duvet' || view.route === 'steward',
+);
 type NavMenuId = 'benchmark' | 'development';
 
 interface DemoNavProps {

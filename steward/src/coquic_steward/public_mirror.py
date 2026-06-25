@@ -32,6 +32,7 @@ PUBLIC_TASK_DETAIL_SCHEMA_VERSION = 1
 DEFAULT_MIRROR_TASK_LIMIT = 80
 DEFAULT_MIRROR_SIGNAL_LIMIT = 80
 DEFAULT_MIRROR_FETCH_LIMIT = 40
+PUBLIC_TASK_DATA_PREFIX = "/steward/data/tasks"
 MIRROR_PATCH_BYTES = 128 * 1024
 MIRROR_TRANSCRIPT_BYTES = 64 * 1024
 MIRROR_LOG_BYTES = 64 * 1024
@@ -91,7 +92,7 @@ def public_mirror_payload(
             {
                 **_public_task(config, task),
                 "detail_url": f"/steward/tasks/{task.id}",
-                "detail_json": f"/steward/tasks/{task.id}.json",
+                "detail_json": _public_task_detail_url(task.id),
             }
             for task in tasks
         ],
@@ -118,7 +119,7 @@ def write_public_mirror(
     payload = public_mirror_payload(config, store)
     tasks = store.list_tasks(limit=DEFAULT_MIRROR_TASK_LIMIT)
     mirror_dir = path.parent
-    tasks_dir = mirror_dir / "tasks"
+    tasks_dir = mirror_dir / "data" / "tasks"
     raw_task_ids = (
         {_safe_public_segment(task.id, fallback="task") for task in tasks}
         if config.public_mirror.transcript_mode == "raw"
@@ -150,7 +151,7 @@ def write_public_mirror(
                 "title": _public_text(config, task.spec.title),
                 "status": str(task.status),
                 "updated_at": task.updated_at.isoformat(),
-                "detail_json": f"/steward/tasks/{task.id}.json",
+                "detail_json": _public_task_detail_url(task.id),
             }
         )
     (tasks_dir / "index.json").write_text(
@@ -750,9 +751,13 @@ def _copy_public_raw_transcript(
 
 def _public_raw_transcript_url(task_id: str, run_name: str) -> str:
     return (
-        f"/steward/tasks/{_safe_public_segment(task_id, fallback='task')}/runs/"
+        f"{PUBLIC_TASK_DATA_PREFIX}/{_safe_public_segment(task_id, fallback='task')}/runs/"
         f"{_safe_public_segment(run_name)}/codex.jsonl"
     )
+
+
+def _public_task_detail_url(task_id: str) -> str:
+    return f"{PUBLIC_TASK_DATA_PREFIX}/{_safe_public_segment(task_id, fallback='task')}.json"
 
 
 def _safe_public_segment(value: object, *, fallback: str = "run") -> str:

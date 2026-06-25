@@ -390,9 +390,9 @@ export async function loadPublicStewardState(): Promise<PublicStewardState | nul
   }
 }
 
-export async function loadPublicStewardTaskDetail(taskId: string): Promise<PublicStewardTaskDetail | null> {
+export async function loadPublicStewardTaskDetail(taskId: string, detailJson?: string): Promise<PublicStewardTaskDetail | null> {
   try {
-    const response = await fetch(`/steward/tasks/${encodeURIComponent(taskId)}.json`, {
+    const response = await fetch(detailJson ?? publicTaskDetailJsonPath(taskId), {
       cache: 'no-store',
     });
     if (!response.ok) return null;
@@ -417,7 +417,9 @@ export function StewardDashboardLive() {
 }
 
 export function StewardTaskDetailLive({ taskId }: { taskId: string }) {
-  const { detail, loaded } = usePublicStewardTaskDetail(taskId);
+  const state = usePublicStewardState();
+  const task = state?.tasks.find((item) => item.id === taskId) ?? null;
+  const { detail, loaded } = usePublicStewardTaskDetail(taskId, task?.detail_json);
   return <StewardTaskDetail detail={detail} loaded={loaded} taskId={taskId} />;
 }
 
@@ -439,13 +441,13 @@ function usePublicStewardState() {
   return state;
 }
 
-function usePublicStewardTaskDetail(taskId: string) {
+function usePublicStewardTaskDetail(taskId: string, detailJson?: string) {
   const [detail, setDetail] = useState<PublicStewardTaskDetail | null>(null);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     let cancelled = false;
     async function refresh() {
-      const next = await loadPublicStewardTaskDetail(taskId);
+      const next = await loadPublicStewardTaskDetail(taskId, detailJson);
       if (!cancelled) {
         setDetail(next);
         setLoaded(true);
@@ -458,7 +460,7 @@ function usePublicStewardTaskDetail(taskId: string) {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [taskId]);
+  }, [detailJson, taskId]);
   return { detail, loaded };
 }
 
@@ -2307,6 +2309,10 @@ function durationText(ms: number) {
 
 function shortSha(value: string) {
   return value.length > 12 ? value.slice(0, 12) : value;
+}
+
+function publicTaskDetailJsonPath(taskId: string) {
+  return `/steward/data/tasks/${encodeURIComponent(taskId)}.json`;
 }
 
 function formatBytes(value: number) {

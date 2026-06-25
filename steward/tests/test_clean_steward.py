@@ -1354,7 +1354,8 @@ def test_public_mirror_payload_redacts_internal_state(config: StewardConfig) -> 
     assert "transcript_path" not in encoded
     assert "patch_path" not in encoded
     assert "payload" not in encoded
-    assert "detail_json" in encoded
+    assert payload["tasks"][0]["detail_url"] == f"/steward/tasks/{task.id}"
+    assert payload["tasks"][0]["detail_json"] == f"/steward/data/tasks/{task.id}.json"
     assert payload["counts"]["queued"] == 1
     assert payload["counts"]["active"] == 0
     signal = payload["signals"]["items"][0]
@@ -1512,11 +1513,15 @@ def test_write_public_mirror_writes_task_details(config: StewardConfig) -> None:
     path = write_public_mirror(config, store)
 
     assert path.exists()
-    assert (path.parent / "tasks" / "index.json").exists()
-    detail_path = path.parent / "tasks" / f"{task.id}.json"
+    assert (path.parent / "data" / "tasks" / "index.json").exists()
+    detail_path = path.parent / "data" / "tasks" / f"{task.id}.json"
     assert detail_path.exists()
     detail = json.loads(detail_path.read_text(encoding="utf-8"))
     assert detail["task"]["id"] == task.id
+    index = json.loads(
+        (path.parent / "data" / "tasks" / "index.json").read_text(encoding="utf-8")
+    )
+    assert index["tasks"][0]["detail_json"] == f"/steward/data/tasks/{task.id}.json"
 
 
 def test_write_public_mirror_raw_transcript_mode_publishes_original_transcript(
@@ -1579,7 +1584,7 @@ def test_write_public_mirror_raw_transcript_mode_publishes_original_transcript(
     store.save(task)
 
     path = write_public_mirror(config, store)
-    detail_path = path.parent / "tasks" / f"{task.id}.json"
+    detail_path = path.parent / "data" / "tasks" / f"{task.id}.json"
     detail = json.loads(detail_path.read_text(encoding="utf-8"))
     artifact = detail["attempts"][0]["worker"]["transcript"]
     raw_path = path.parent / artifact["url"].removeprefix("/steward/")

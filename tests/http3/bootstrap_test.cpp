@@ -1342,9 +1342,14 @@ TEST(QuicHttp3BootstrapTest, StopRequestedWakeupExitsCleanly) {
     ASSERT_TRUE(listener_ready.load(std::memory_order_acquire));
 
     stop_requested.store(true);
-    ASSERT_TRUE(wake_bootstrap_listener("127.0.0.1", bootstrap_port));
+    const auto stop_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+    while (future.wait_for(std::chrono::milliseconds{0}) != std::future_status::ready &&
+           !wake_bootstrap_listener("127.0.0.1", bootstrap_port)) {
+        ASSERT_LT(std::chrono::steady_clock::now(), stop_deadline);
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
 
-    ASSERT_EQ(future.wait_for(std::chrono::seconds{5}), std::future_status::ready);
+    ASSERT_EQ(future.wait_until(stop_deadline), std::future_status::ready);
     EXPECT_EQ(future.get(), 0);
 }
 

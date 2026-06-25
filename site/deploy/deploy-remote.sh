@@ -84,6 +84,7 @@ ssh_opts=(
   -i "${ssh_key_path}"
   -o BatchMode=yes
   -o ConnectTimeout=10
+  -o ConnectionAttempts=3
   -o ServerAliveInterval=10
   -o ServerAliveCountMax=3
   -o StrictHostKeyChecking=yes
@@ -94,6 +95,7 @@ scp_opts=(
   -i "${ssh_key_path}"
   -o BatchMode=yes
   -o ConnectTimeout=10
+  -o ConnectionAttempts=3
   -o ServerAliveInterval=10
   -o ServerAliveCountMax=3
   -o StrictHostKeyChecking=yes

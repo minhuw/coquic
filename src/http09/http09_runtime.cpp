@@ -1713,7 +1713,16 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
 
     auto &backend = *io_context.backend;
     bool saw_peer_input = false;
+    const auto peer_progress_deadline =
+        now() + std::chrono::milliseconds(client_receive_timeout_ms(config));
     std::optional<QuicCoreTimePoint> terminal_success_deadline;
+    const auto fail_if_peer_progress_deadline_expired = [&](QuicCoreTimePoint current) {
+        if (saw_peer_input || current < peer_progress_deadline) {
+            return false;
+        }
+        std::cerr << "http09-client failed: timed out waiting for progress\n";
+        return true;
+    };
     const auto ensure_terminal_success_deadline = [&](QuicCoreTimePoint current) {
         if (!saw_peer_input || terminal_success_deadline.has_value()) {
             return;
@@ -1809,6 +1818,9 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
     };
 
     for (;;) {
+        if (fail_if_peer_progress_deadline_expired(now())) {
+            return 1;
+        }
         if (state.terminal_success && should_exit_after_terminal_success(now())) {
             return 0;
         }
@@ -1871,11 +1883,18 @@ int run_http09_client_connection_backend_loop(const Http09RuntimeConfig &config,
             wait_next_wakeup = std::min(wait_next_wakeup.value_or(*terminal_success_deadline),
                                         *terminal_success_deadline);
         }
+        if (!saw_peer_input) {
+            wait_next_wakeup =
+                std::min(wait_next_wakeup.value_or(peer_progress_deadline), peer_progress_deadline);
+        }
         const auto event = backend.wait(wait_next_wakeup);
         if (!event.has_value()) {
             return 1;
         }
         immediate_timer_pumps = 0;
+        if (fail_if_peer_progress_deadline_expired(event->now)) {
+            return 1;
+        }
 
         if (event->kind == QuicIoEvent::Kind::idle_timeout) {
             if (state.terminal_success) {

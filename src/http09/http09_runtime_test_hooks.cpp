@@ -949,6 +949,14 @@ run_client_connection_backend_loop_case_for_tests(ClientConnectionBackendLoopCas
             .terminal_success = true,
         });
         break;
+    case ClientConnectionBackendLoopCaseForTests::repeated_timer_wakeups_without_peer_input_timeout:
+        start_result.next_wakeup = event_time + std::chrono::seconds(60);
+        endpoint.on_core_result_updates.push_back(QuicHttp09EndpointUpdate{});
+        backend_ptr->wait_results.push_back(QuicIoEvent{
+            .kind = QuicIoEvent::Kind::timer_expired,
+            .now = event_time + std::chrono::milliseconds(kDefaultClientReceiveTimeoutMs + 1),
+        });
+        break;
     }
 
     const int exit_code = run_http09_client_connection_backend_loop(

@@ -663,6 +663,19 @@ TEST(QuicHttp09RuntimeTest, RuntimeHelperHooksDriveClientConnectionBackendLoopCa
     EXPECT_TRUE(pending_work_followup_timer_continue_then_terminal_success.terminal_success);
     EXPECT_FALSE(pending_work_followup_timer_continue_then_terminal_success.terminal_failure);
     EXPECT_EQ(pending_work_followup_timer_continue_then_terminal_success.wait_calls, 0U);
+
+    const auto repeated_timer_wakeups_without_peer_input_timeout =
+        coquic::http09::test::run_client_connection_backend_loop_case_for_tests(
+            coquic::http09::test::ClientConnectionBackendLoopCaseForTests::
+                repeated_timer_wakeups_without_peer_input_timeout);
+    EXPECT_EQ(repeated_timer_wakeups_without_peer_input_timeout.exit_code, 1);
+    EXPECT_FALSE(repeated_timer_wakeups_without_peer_input_timeout.terminal_success);
+    EXPECT_FALSE(repeated_timer_wakeups_without_peer_input_timeout.terminal_failure);
+    EXPECT_EQ(repeated_timer_wakeups_without_peer_input_timeout.wait_calls, 1U);
+    ASSERT_EQ(repeated_timer_wakeups_without_peer_input_timeout.wait_requests.size(), 1U);
+    ASSERT_TRUE(repeated_timer_wakeups_without_peer_input_timeout.wait_requests[0].has_value());
+    EXPECT_LT(repeated_timer_wakeups_without_peer_input_timeout.wait_requests[0],
+              runtime_now() + std::chrono::seconds(45));
 }
 
 TEST(QuicHttp09RuntimeTest, ServerBackendLoopProcessesDueTimersBeforeReadyDatagrams) {

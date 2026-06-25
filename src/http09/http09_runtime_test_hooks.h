@@ -100,6 +100,7 @@ enum class ClientConnectionBackendLoopCaseForTests : std::uint8_t {
     pending_work_no_send_core_inputs_yield_to_wait,
     pending_work_followup_timer_drive_failure,
     pending_work_followup_timer_continue_then_terminal_success,
+    repeated_timer_wakeups_without_peer_input_timeout,
 };
 
 struct ClientConnectionLoopResultForTests {

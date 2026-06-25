@@ -460,6 +460,57 @@ def test_daemon_does_not_clean_external_recovered_stale_worktree(
     assert not any(event.kind == "worktree.cleaned" for event in store.events(task.id))
 
 
+def test_daemon_marks_dispatch_exception_failed(config: StewardConfig, monkeypatch) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worktree = config.worktrees_dir / task.id
+    worktree.mkdir(parents=True)
+    task.worktree_path = worktree
+    store.save(task)
+
+    def fail_after_start(self, task_id: str) -> bool:
+        self.store.start_worker(task_id, "worker started")
+        raise RuntimeError("codex stream crashed")
+
+    monkeypatch.setattr(StewardExecutor, "run_task", fail_after_start)
+
+    result = StewardDaemon(config, store).tick(plan=False, max_dispatch=1)
+
+    saved = store.get(task.id)
+    assert result.dispatched == 0
+    assert result.skipped == 1
+    assert saved.status == TaskStatus.failed
+    assert saved.summary == "dispatch failed: codex stream crashed"
+    assert not worktree.exists()
+    events = store.events(task.id)
+    assert any(event.kind == "dispatch.failed" for event in events)
+    assert any(event.kind == "worktree.cleaned" for event in events)
+
+
+def test_daemon_marks_early_dispatch_exception_failed(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+
+    def fail_before_start(self, _task_id: str) -> bool:
+        raise RuntimeError("codex failed before start")
+
+    monkeypatch.setattr(StewardExecutor, "run_task", fail_before_start)
+
+    result = StewardDaemon(config, store).tick(plan=False, max_dispatch=1)
+
+    saved = store.get(task.id)
+    assert result.skipped == 1
+    assert saved.status == TaskStatus.failed
+    assert saved.summary == "dispatch failed: codex failed before start"
+    assert any(event.kind == "dispatch.failed" for event in store.events(task.id))
+
+
 def test_store_keeps_integrating_source_with_queued_integration(
     config: StewardConfig,
 ) -> None:

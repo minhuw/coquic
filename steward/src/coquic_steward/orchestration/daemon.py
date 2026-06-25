@@ -178,7 +178,19 @@ class StewardDaemon:
                 source_attempts += 1
             seen.add(task.id)
             self._log(f"dispatch start {task.id} {_task_label(task)}")
-            if self.executor.run_task(task.id):
+            try:
+                task_ok = self.executor.run_task(task.id)
+            except Exception as exc:  # pragma: no cover - daemon boundary guard.
+                result.skipped += 1
+                message = str(exc)[-2000:] or exc.__class__.__name__
+                finished = self._fail_dispatch_exception(task.id, message)
+                self._log(
+                    f"dispatch finish {task.id} status={finished.status} ok=false "
+                    f"error={exc.__class__.__name__}"
+                )
+                self._publish_public_mirror_if_changed()
+                continue
+            if task_ok:
                 result.dispatched += 1
                 finished = self.store.get(task.id)
                 self._log(
@@ -194,6 +206,23 @@ class StewardDaemon:
                     f"dispatch finish {task.id} status={finished.status} ok=false"
                 )
                 self._publish_public_mirror_if_changed()
+
+    def _fail_dispatch_exception(self, task_id: str, message: str) -> TaskRecord:
+        summary = f"dispatch failed: {message}"
+        current = self.store.get(task_id)
+        if TaskStatus(current.status) == TaskStatus.queued:
+            task = self.store.update_status(task_id, TaskStatus.failed, summary)
+        else:
+            task = self.store.finish_task(task_id, TaskStatus.failed, summary)
+        self.store.add_event(
+            task_id,
+            "dispatch.failed",
+            message,
+            {"summary": summary},
+        )
+        if self.executor.clean_finished_task_worktree(task):
+            task = self.store.get(task_id)
+        return task
 
     def _next_dispatchable_task(self, seen: set[str]) -> TaskRecord | None:
         for task in self.store.queued_tasks():

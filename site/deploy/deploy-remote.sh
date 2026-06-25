@@ -39,6 +39,8 @@ public_host="coquic.minhuw.dev"
 public_port="443"
 public_alt_svc_max_age="86400"
 ssh_key_path="${COQUIC_DEMO_REMOTE_SSH_KEY_PATH:-${RUNNER_TEMP:-/tmp}/coquic-demo.key}"
+ssh_preflight_attempts=6
+ssh_preflight_sleep_seconds=10
 release_id_source="${GITHUB_SHA:-$(git -C "${repo_root}" rev-parse --short=12 HEAD)}"
 release_id="${release_id_source:0:12}"
 if [[ -z "${release_id}" ]]; then
@@ -101,6 +103,28 @@ scp_opts=(
   -o StrictHostKeyChecking=yes
   -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"
 )
+
+check_remote_ssh() {
+  local attempt=1
+  local status=1
+
+  while [[ "${attempt}" -le "${ssh_preflight_attempts}" ]]; do
+    if ssh "${ssh_opts[@]}" "${remote_target}" true; then
+      return 0
+    else
+      status=$?
+    fi
+
+    if [[ "${attempt}" -eq "${ssh_preflight_attempts}" ]]; then
+      echo "remote SSH preflight failed after ${ssh_preflight_attempts} attempts: ${remote_target}:${ssh_port}" >&2
+      return "${status}"
+    fi
+
+    echo "remote SSH preflight attempt ${attempt}/${ssh_preflight_attempts} failed; retrying in ${ssh_preflight_sleep_seconds}s" >&2
+    sleep "${ssh_preflight_sleep_seconds}"
+    attempt=$((attempt + 1))
+  done
+}
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 staging_dir="$(mktemp -d)"
@@ -326,6 +350,8 @@ on_exit() {
 trap on_exit EXIT
 trap 'deployment_interrupted=1; deployment_interrupt_status=130; exit 130' INT
 trap 'deployment_interrupted=1; deployment_interrupt_status=143; exit 143' TERM
+
+check_remote_ssh
 
 install -m 755 "${binary_path}" "${staging_dir}/h3-server"
 tar -C "${app_dir}" -cf "${staging_dir}/app.tar" .

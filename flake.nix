@@ -570,10 +570,10 @@
               pkgs.pkg-config
             ]
             ++ extraPackages
-            ++ lib.optionals includePreCommit pre-commit-check.enabledPackages;
+            ++ lib.optionals includePreCommit pre-commit-shell.enabledPackages;
 
           shellHook =
-            (if includePreCommit then pre-commit-check.shellHook else "")
+            (if includePreCommit then pre-commit-shell.shellHook else "")
             + mkCoquicEnv profile
             + ''
               export LD_LIBRARY_PATH="${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -1844,7 +1844,6 @@ EOF
         extraPackages = [
           pkgs.aflplusplus
           llvmPkgs.clang
-          llvmPkgs.clang-tools
           pkgs.lldb
           pkgs.mkcert
           pkgs.nodejs
@@ -1869,19 +1868,77 @@ EOF
             pkgs.pre-commit
             pkgs.python3
           ]
-          ++ pre-commit-check.enabledPackages;
+          ++ pre-commit-shell.enabledPackages;
       };
-      pre-commit-check = git-hooks.lib.${system}.run {
+      clangFormatPath = builtins.unsafeDiscardStringContext "${llvmPkgs.clang-tools}/bin/clang-format";
+      clangTidyPath = builtins.unsafeDiscardStringContext "${llvmPkgs.clang-tools}/bin/clang-tidy";
+      clangToolsWrappers = pkgs.runCommand "coquic-clang-tools-wrappers" { } ''
+        mkdir -p "$out/bin"
+
+        cat > "$out/bin/clang-format" <<'EOF'
+#!${pkgs.bash}/bin/bash
+set -euo pipefail
+
+if [ -n "''${COQUIC_CLANG_TOOLS_IN_LINT:-}" ]; then
+  echo "clang-format wrapper re-entered unexpectedly" >&2
+  exit 1
+fi
+
+command -v nix >/dev/null || {
+  echo "clang-format requires nix develop .#lint or nix on PATH" >&2
+  exit 1
+}
+exec nix develop .#lint -c env COQUIC_CLANG_TOOLS_IN_LINT=1 ${clangFormatPath} "$@"
+EOF
+
+        cat > "$out/bin/clang-tidy" <<'EOF'
+#!${pkgs.bash}/bin/bash
+set -euo pipefail
+
+if [ -n "''${COQUIC_CLANG_TOOLS_IN_LINT:-}" ]; then
+  echo "clang-tidy wrapper re-entered unexpectedly" >&2
+  exit 1
+fi
+
+command -v nix >/dev/null || {
+  echo "clang-tidy requires nix develop .#lint or nix on PATH" >&2
+  exit 1
+}
+exec nix develop .#lint -c env COQUIC_CLANG_TOOLS_IN_LINT=1 ${clangTidyPath} "$@"
+EOF
+
+        chmod +x "$out/bin/clang-format" "$out/bin/clang-tidy"
+      '';
+      clangTidyCheckHook = pkgs.writeShellScriptBin "coquic-clang-tidy-check" ''
+        set -euo pipefail
+
+        ${mkCoquicEnv quictlsProfile}
+        export COQUIC_CLANG_TIDY_IN_NIX=1
+        exec ${pkgs.bash}/bin/bash ./scripts/run-clang-tidy.sh "$@"
+      '';
+      mkPreCommitCheck =
+        {
+          clangFormatEntry,
+          clangFormatExtraPackages,
+          clangTidyEntry,
+          clangTidyExtraPackages,
+        }:
+        git-hooks.lib.${system}.run {
         src = ./.;
         hooks = {
           clang-format = {
             enable = true;
+            entry = clangFormatEntry;
+            extraPackages = clangFormatExtraPackages;
+            language = "system";
+            package = null;
             types_or = lib.mkForce [ "c" "c++" ];
           };
           coquic-clang-tidy = {
             enable = true;
             name = "clang-tidy";
-            entry = "${pkgs.bash}/bin/bash ./scripts/run-clang-tidy.sh";
+            entry = clangTidyEntry;
+            extraPackages = clangTidyExtraPackages;
             files = "\\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$";
             language = "system";
             types_or = [ "c" "c++" ];
@@ -1900,6 +1957,26 @@ EOF
             pass_filenames = false;
           };
         };
+      };
+      pre-commit-shell = mkPreCommitCheck {
+        clangFormatEntry = "${clangToolsWrappers}/bin/clang-format -style=file -i";
+        clangFormatExtraPackages = [ clangToolsWrappers ];
+        clangTidyEntry = "${pkgs.bash}/bin/bash ./scripts/run-clang-tidy.sh";
+        clangTidyExtraPackages = [ clangToolsWrappers ];
+      };
+      pre-commit-check = mkPreCommitCheck {
+        clangFormatEntry = "${llvmPkgs.clang-tools}/bin/clang-format -style=file -i";
+        clangFormatExtraPackages = [ llvmPkgs.clang-tools ];
+        clangTidyEntry = "${clangTidyCheckHook}/bin/coquic-clang-tidy-check";
+        clangTidyExtraPackages = [
+          llvmPkgs.clang-tools
+          zig
+          pkgs.bash
+          pkgs.git
+          pkgs.pkg-config
+          pkgs.python3
+          pkgs.util-linux
+        ];
       };
       qdrant-dev-app = pkgs.writeShellApplication {
         name = "qdrant-dev";

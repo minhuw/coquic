@@ -282,11 +282,33 @@ fail_with_rollback() {
   exit 1
 }
 
+is_interrupt_status() {
+  local status="$1"
+  [[ "${status}" == "130" || "${status}" == "143" ]]
+}
+
+fail_or_interrupt_with_rollback() {
+  local status="$1"
+  local message="$2"
+
+  if is_interrupt_status "${status}"; then
+    deployment_interrupted=1
+    deployment_interrupt_status="${status}"
+    exit "${status}"
+  fi
+
+  fail_with_rollback "${message}"
+}
+
 on_exit() {
   local status=$?
   set +e
 
   if [[ ${rollback_armed} -eq 1 && ${deploy_succeeded} -eq 0 ]]; then
+    if [[ ${deployment_interrupted} -eq 0 ]] && is_interrupt_status "${status}"; then
+      deployment_interrupted=1
+      deployment_interrupt_status="${status}"
+    fi
     if [[ ${deployment_interrupted} -eq 1 ]]; then
       echo "deployment interrupted; running rollback" >&2
       status="${deployment_interrupt_status}"
@@ -446,7 +468,8 @@ fi
 
 rollback_armed=1
 
-if ! ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_release_dir}" "${remote_upload_dir}" "${remote_current_link}" "${same_release_repair_mode}" <<'EOF'
+remote_install_status=0
+ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_release_dir}" "${remote_upload_dir}" "${remote_current_link}" "${same_release_repair_mode}" <<'EOF' || remote_install_status=$?
 set -euo pipefail
 
 remote_release_dir="$1"
@@ -609,14 +632,16 @@ sudo systemctl enable coquic-demo.service
 sudo systemctl is-enabled --quiet coquic-demo.service
 sudo systemctl is-active --quiet coquic-demo.service
 EOF
-then
-  fail_with_rollback "deployment failed during remote install"
+if [[ ${remote_install_status} -ne 0 ]]; then
+  fail_or_interrupt_with_rollback "${remote_install_status}" "deployment failed during remote install"
 fi
 
 url="https://${public_host}/"
 curl_http3_out_paths_file="${staging_dir}/curl-http3-out-paths"
-if ! nix build --no-link --print-out-paths .#curl-http3 >"${curl_http3_out_paths_file}"; then
-  fail_with_rollback "deployment verification failed: failed to build curl-http3"
+nix_build_status=0
+nix build --no-link --print-out-paths .#curl-http3 >"${curl_http3_out_paths_file}" || nix_build_status=$?
+if [[ ${nix_build_status} -ne 0 ]]; then
+  fail_or_interrupt_with_rollback "${nix_build_status}" "deployment verification failed: failed to build curl-http3"
 fi
 mapfile -t curl_http3_out_paths <"${curl_http3_out_paths_file}"
 curl_http3_bin=""

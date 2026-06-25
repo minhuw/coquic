@@ -1088,6 +1088,7 @@ class StewardExecutor:
         transcript: "IntegrationTranscript",
     ) -> tuple[str | None, bool | None]:
         commit_subject, commit_body = commit_message
+        commit_body = _append_steward_task_trailer(self.config, commit_body, source.id)
         transcript.write("commit", f"creating commit: {commit_subject}")
         try:
             sha = self.worktrees.commit_all(
@@ -1439,6 +1440,28 @@ def parse_commit_message(message: str) -> dict[str, str] | None:
     if not re.match(r"^[a-z]+(?:\([A-Za-z0-9._/-]+\))?: .+", subject):
         return None
     return {"subject": subject, "body": body}
+
+
+def _append_steward_task_trailer(
+    config: StewardConfig, body: str, source_task_id: str
+) -> str:
+    trailer = f"Steward-Task: {_public_task_url(config, source_task_id)}"
+    body = body.strip()
+    if trailer in body.splitlines():
+        return body
+    if not body:
+        return trailer
+    return f"{body}\n\n{trailer}"
+
+
+def _public_task_url(config: StewardConfig, task_id: str) -> str:
+    host = config.public_mirror.remote_host.strip().rstrip("/")
+    if host.startswith(("http://", "https://")):
+        base_url = host
+    else:
+        scheme = "http" if host.startswith(("localhost", "127.0.0.1")) else "https"
+        base_url = f"{scheme}://{host}"
+    return f"{base_url}/steward/tasks/{task_id}"
 
 
 COMMIT_MESSAGE_OUTPUT_SCHEMA = {

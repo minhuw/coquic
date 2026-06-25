@@ -4460,6 +4460,10 @@ def test_integration_manager_serializes_push_to_main(
     assert remote_text == "integrated\n"
     assert remote_commit_message.startswith("fix(docs): describe integration output\n")
     assert "Source task: source-task" in remote_commit_message
+    assert (
+        f"Steward-Task: https://coquic.minhuw.dev/steward/tasks/{source.id}"
+        in remote_commit_message
+    )
     assert "Changed files:\n- README.md" in remote_commit_message
     commit_args = args_path.read_text(encoding="utf-8").splitlines()
     assert commit_args[commit_args.index("--cd") + 1] == str(

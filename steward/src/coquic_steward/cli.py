@@ -16,6 +16,7 @@ from .orchestration import (
 from .execution.executor import StewardExecutor, default_worker_for_kind
 from .core.models import Priority, Risk, TaskKind, TaskSpec, TaskStatus, WorkerKind
 from .planning import run_planner
+from .public_mirror import publish_public_mirror, write_public_mirror
 from .signals import (
     collect_signal_items,
     project_signals_from_items,
@@ -172,6 +173,32 @@ def fetch_signals(
     selected = _selected_providers(provider, config.enabled_signals)
     wakeup = store.request_wakeup("signal.fetch", {"providers": selected})
     typer.echo(f"requested {wakeup.id} providers={','.join(selected)}")
+
+
+@app.command("publish-public-state")
+def publish_public_state(
+    publish: bool = typer.Option(
+        False,
+        "--publish",
+        help="Upload the public mirror using [steward.public_mirror] SSH settings.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Write the public mirror to this path instead of the configured output.",
+    ),
+) -> None:
+    store, config = _context()
+    if publish:
+        path, result = publish_public_mirror(config, store, force=True)
+        if result is not None and not result.ok:
+            typer.echo(result.stderr or result.stdout, err=True)
+            raise typer.Exit(result.returncode)
+        typer.echo(f"published {path}")
+        return
+    path = write_public_mirror(config, store, output_path=output)
+    typer.echo(str(path))
 
 
 @app.command("audit-invariants")

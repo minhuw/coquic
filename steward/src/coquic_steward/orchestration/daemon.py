@@ -17,6 +17,7 @@ from ..core.models import (
 )
 from ..execution.executor import StewardExecutor
 from ..planning import run_planner
+from ..public_mirror import public_mirror_digest, publish_public_mirror
 from ..signals import collect_signal_items, project_signals_from_items
 from ..storage import TaskStore
 from .preflight import preflight_remote_push
@@ -59,6 +60,11 @@ class StewardDaemon:
                 f"remote={config.git_remote} branch={config.main_branch}"
             )
         self.executor = StewardExecutor(config, store)
+        self._public_mirror_local_digest: str | None = None
+        self._public_mirror_remote_digest: str | None = None
+        self._public_mirror_publishing = False
+        if config.public_mirror.enabled and hasattr(store, "on_change"):
+            store.on_change = self._write_public_mirror_if_changed
 
     def tick(
         self,
@@ -135,6 +141,7 @@ class StewardDaemon:
             f"dispatched={result.dispatched} "
             f"skipped={result.skipped}"
         )
+        self._publish_public_mirror_if_changed()
         return result
 
     def _dispatch_queued(
@@ -179,12 +186,14 @@ class StewardDaemon:
                 )
                 if plan:
                     self._plan_until_idle(result)
+                self._publish_public_mirror_if_changed()
             else:
                 result.skipped += 1
                 finished = self.store.get(task.id)
                 self._log(
                     f"dispatch finish {task.id} status={finished.status} ok=false"
                 )
+                self._publish_public_mirror_if_changed()
 
     def _next_dispatchable_task(self, seen: set[str]) -> TaskRecord | None:
         for task in self.store.queued_tasks():
@@ -381,6 +390,48 @@ class StewardDaemon:
     def _log(self, message: str) -> None:
         if self.logger is not None:
             self.logger(f"[steward] {message}")
+
+    def _publish_public_mirror_if_changed(self) -> None:
+        self._update_public_mirror_if_changed(publish=True)
+
+    def _write_public_mirror_if_changed(self) -> None:
+        self._update_public_mirror_if_changed(publish=False)
+
+    def _update_public_mirror_if_changed(self, *, publish: bool) -> None:
+        if not self.config.public_mirror.enabled:
+            return
+        try:
+            if self._public_mirror_publishing:
+                return
+            self._public_mirror_publishing = True
+            digest = public_mirror_digest(self.config, self.store)
+            current_digest = (
+                self._public_mirror_remote_digest
+                if publish and self.config.public_mirror.publish
+                else self._public_mirror_local_digest
+            )
+            if digest == current_digest:
+                return
+            should_publish = publish and self.config.public_mirror.publish
+            path, result = publish_public_mirror(
+                self.config,
+                self.store,
+                publish=should_publish,
+            )
+            if result is not None and not result.ok:
+                self._log(
+                    "public mirror publish failed "
+                    f"code={result.returncode} error={result.stderr.strip()}"
+                )
+                return
+            self._public_mirror_local_digest = digest
+            if result is not None:
+                self._public_mirror_remote_digest = digest
+            self._log(f"public mirror published path={path}")
+        except Exception as exc:  # pragma: no cover - daemon boundary guard.
+            self._log(f"public mirror publish failed error={exc}")
+        finally:
+            self._public_mirror_publishing = False
 
 
 def stale_task_minutes(config: StewardConfig) -> int:

@@ -437,8 +437,7 @@ class CodacyProvider:
         summary = f"Codacy issuesCount={issues_count}"
         if issues_count <= 0:
             return ProviderSignalResult(summary=summary)
-        item = _codacy_summary_item(owner, repository, issues_count)
-        return ProviderSignalResult(items=[item], summary=summary, has_more=True)
+        return ProviderSignalResult(summary=summary, has_more=True)
 
 
 def _open_codacy_request(request: Request, *, timeout: float):
@@ -556,23 +555,6 @@ def _codacy_item(item: object) -> SignalItem:
         location=_location(path, line),
         links=_links("Open Codacy", data.get("url") or data.get("htmlUrl")),
         payload=payload,
-    )
-
-
-def _codacy_summary_item(owner: str, repository: str, issues_count: int) -> SignalItem:
-    return _signal_item(
-        provider="codacy",
-        kind="codacy.summary",
-        title="Open Codacy findings",
-        summary=f"Codacy issuesCount={issues_count}",
-        severity=None,
-        links=[
-            {
-                "label": "Open Codacy",
-                "url": f"https://app.codacy.com/gh/{owner}/{repository}/issues/current",
-            }
-        ],
-        payload={"issues_count": issues_count},
     )
 
 

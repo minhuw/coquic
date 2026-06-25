@@ -5,6 +5,7 @@ import os
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from pathlib import Path
 from urllib.request import (
     BaseHandler,
@@ -77,6 +78,13 @@ from coquic_steward.planning import (
     PlanVerifier,
     planner_schema_path,
     planner_thread_path,
+)
+from coquic_steward.public_mirror import (
+    PublicMirrorPublisher,
+    public_mirror_payload,
+    public_task_detail_payload,
+    publish_public_mirror,
+    write_public_mirror,
 )
 from coquic_steward.planning.verifier import ActiveTaskSummary
 from coquic_steward.signals import (
@@ -180,6 +188,45 @@ max_items = 25
     assert provider.idle_poll_interval_minutes == 5
     assert provider.suppression_hours == 12
     assert provider.max_items == 25
+
+
+def test_config_reads_public_mirror(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.public_mirror]
+enabled = true
+output_path = "public/steward/status.json"
+publish = true
+transcript_mode = "raw"
+remote_user = "deploy"
+remote_host = "example.test"
+remote_port = 2222
+remote_path = "/srv/site/public/steward/status.json"
+ssh_key_path = "~/.ssh/steward"
+known_hosts_path = "~/.ssh/known_hosts"
+connect_timeout_seconds = 7
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(repo_root=repo, config_path=config_path)
+
+    mirror = config.public_mirror
+    assert mirror.enabled is True
+    assert mirror.output_path == Path("public/steward/status.json")
+    assert mirror.publish is True
+    assert mirror.transcript_mode == "raw"
+    assert mirror.remote_user == "deploy"
+    assert mirror.remote_host == "example.test"
+    assert mirror.remote_port == 2222
+    assert mirror.remote_path == "/srv/site/public/steward/status.json"
+    assert mirror.ssh_key_path == Path("~/.ssh/steward").expanduser()
+    assert mirror.known_hosts_path == Path("~/.ssh/known_hosts").expanduser()
+    assert mirror.connect_timeout_seconds == 7
 
 
 def test_config_reads_review_timeout_limit(repo: Path) -> None:
@@ -349,6 +396,25 @@ def test_store_recovers_stale_active_tasks(config: StewardConfig) -> None:
     )
     assert created
     assert replacement.id != task.id
+
+
+def test_store_notifies_after_task_state_change(config: StewardConfig) -> None:
+    changes = 0
+
+    def on_change() -> None:
+        nonlocal changes
+        changes += 1
+
+    store = TaskStore(config.db_path, on_change=on_change)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    before = changes
+
+    store.start_worker(task.id, "worker started")
+
+    assert changes > before
+    assert store.get(task.id).status == TaskStatus.running
 
 
 def test_daemon_cleans_recovered_stale_task_worktree(config: StewardConfig) -> None:
@@ -606,7 +672,7 @@ def test_store_suppresses_recent_duplicate_signal_fingerprints(
     assert len(store.pending_signal_items()) == 1
 
 
-def test_store_keeps_planned_signal_deduped_after_recent_fetch_refresh(
+def test_store_requeues_planned_signal_after_recent_fetch_refresh(
     config: StewardConfig,
 ) -> None:
     store = TaskStore(config.db_path)
@@ -645,14 +711,14 @@ def test_store_keeps_planned_signal_deduped_after_recent_fetch_refresh(
         )
     )
 
-    assert not duplicate_created
-    assert second.id == first.id
-    assert store.pending_signal_items() == []
+    assert duplicate_created
+    assert second.id != first.id
+    assert [item.id for item in store.pending_signal_items()] == [second.id]
     refreshed = store.list_signal_items(status=SignalItemStatus.planned)[0]
     assert refreshed.id == first.id
 
 
-def test_store_keeps_planned_signal_deduped_after_configured_suppression(
+def test_store_requeues_planned_signal_after_configured_suppression(
     config: StewardConfig,
 ) -> None:
     store = TaskStore(config.db_path)
@@ -691,9 +757,9 @@ def test_store_keeps_planned_signal_deduped_after_configured_suppression(
         suppression_hours=1,
     )
 
-    assert not duplicate_created
-    assert second.id == first.id
-    assert store.pending_signal_items() == []
+    assert duplicate_created
+    assert second.id != first.id
+    assert [item.id for item in store.pending_signal_items()] == [second.id]
     refreshed = store.list_signal_items(status=SignalItemStatus.planned)[0]
     assert refreshed.id == first.id
 
@@ -1222,6 +1288,516 @@ def test_daemon_streams_debug_lines_to_logger(
     assert any("verifier=0/0" in line for line in lines)
     assert any("transcript=" in line for line in lines)
     assert any("cycle finish" in line for line in lines)
+
+
+def test_public_mirror_payload_redacts_internal_state(config: StewardConfig) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title=f"Fix issue in {config.repo_root}/src/main.zig",
+            prompt=f"private prompt {config.coquic_home}",
+            metadata={
+                "local_path": str(config.worktrees_dir / "task"),
+                "secret": "do-not-publish",
+            },
+        )
+    )
+    task.summary = f"worked in {config.state_dir}/worktrees/{task.id}"
+    task.transcript_path = config.transcripts_dir / task.id / "codex.jsonl"
+    task.patch_path = config.patches_dir / task.id / "patch.diff"
+    task.validations.append(
+        ValidationResult(
+            command=["test"],
+            cwd=config.repo_root,
+            passed=False,
+            exit_code=1,
+            output_path=config.logs_dir / task.id / "validation.txt",
+            summary=f"see {config.logs_dir}/private.log",
+        )
+    )
+    store.save(task)
+    store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="codacy-1",
+            title=f"Open finding at {config.repo_root}/secret.py",
+            summary=f"raw {config.coquic_home}",
+            payload={"token": "secret"},
+            links=[
+                {"label": "GitHub", "url": "https://github.com/minhuw/coquic/issues/1"},
+                {"label": "internal", "url": "file:///tmp/private"},
+            ],
+        )
+    )
+    store.add_signal_fetch_run(
+        SignalFetchRun(
+            provider="codacy",
+            status=SignalFetchStatus.error,
+            item_count=1,
+            error="<urlopen error _ssl.c:1011: The handshake operation timed out>",
+        )
+    )
+
+    payload = public_mirror_payload(config, store)
+    encoded = json.dumps(payload, sort_keys=True)
+
+    assert str(config.repo_root) not in encoded
+    assert str(config.coquic_home) not in encoded
+    assert str(config.state_dir) not in encoded
+    assert "private prompt" not in encoded
+    assert "do-not-publish" not in encoded
+    assert '"token"' not in encoded
+    assert "transcript_path" not in encoded
+    assert "patch_path" not in encoded
+    assert "payload" not in encoded
+    assert "detail_json" in encoded
+    assert payload["counts"]["queued"] == 1
+    assert payload["counts"]["active"] == 0
+    signal = payload["signals"]["items"][0]
+    assert signal["links"] == [
+        {"label": "GitHub", "url": "https://github.com/minhuw/coquic/issues/1"}
+    ]
+    assert payload["signals"]["fetches"][0]["error"] == "request timed out"
+    codacy_provider = next(
+        provider
+        for provider in payload["scheduler"]["providers"]
+        if provider["provider"] == "codacy"
+    )
+    assert codacy_provider["last_error"] == "request timed out"
+
+
+def test_public_task_detail_exports_sanitized_artifacts(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title=f"Fix {config.repo_root}/src/main.zig",
+            prompt="private prompt must not publish",
+            metadata={
+                "selected_signal_item_ids": ["wi-1"],
+                "source_context": {"payload": {"token": "secret"}},
+                "source_patch_path": str(config.patches_dir / "private.patch"),
+                "workflow_name": "CI",
+            },
+        )
+    )
+    transcript = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(
+        "\n".join(
+            [
+                '{"type":"thread.started","thread_id":"private-thread"}',
+                '{"type":"turn.started"}',
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "agent-1",
+                            "type": "agent_message",
+                            "text": f"edited {config.repo_root}/src/main.zig and /home/minhu/private",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "cmd-1",
+                            "type": "command_execution",
+                            "command": "pytest",
+                            "status": "completed",
+                            "exit_code": 0,
+                            "aggregated_output": f"ok {config.state_dir}",
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    last_message = transcript.parent / "last-message.md"
+    last_message.write_text(f"done {config.coquic_home}\n", encoding="utf-8")
+    patch = config.patches_dir / task.id / "iteration-0.patch"
+    patch.parent.mkdir(parents=True, exist_ok=True)
+    patch.write_text(
+        f"diff --git a/src/main.zig b/src/main.zig\n+// {config.repo_root}\n",
+        encoding="utf-8",
+    )
+    validation_log = config.logs_dir / task.id / "validation.txt"
+    validation_log.parent.mkdir(parents=True, exist_ok=True)
+    validation_log.write_text(f"validated {config.state_dir}\n", encoding="utf-8")
+    store.begin_iteration(
+        task.id,
+        0,
+        "Initial attempt",
+        worker_name="worker",
+        worker_prompt_path=config.prompts_dir / task.id / "worker.md",
+        worker_transcript_path=transcript,
+        worker_last_message_path=last_message,
+    )
+    store.finish_iteration_worker(
+        task.id,
+        0,
+        WorkerResult(
+            completed=True,
+            command=["codex"],
+            cwd=config.repo_root,
+            exit_code=0,
+            prompt_path=config.prompts_dir / task.id / "worker.md",
+            transcript_path=transcript,
+            last_message_path=last_message,
+            final_message="done",
+        ),
+    )
+    store.record_iteration_patch(task.id, 0, patch)
+    task = store.get(task.id)
+    task.patch_path = patch
+    task.transcript_path = transcript
+    task.last_message_path = last_message
+    task.validations.append(
+        ValidationResult(
+            command=["pytest", str(config.repo_root / "secret.py")],
+            cwd=config.repo_root,
+            passed=True,
+            exit_code=0,
+            output_path=validation_log,
+            summary=f"checked {config.logs_dir}",
+            iteration=0,
+        )
+    )
+    store.save(task)
+    store.add_event(
+        task.id,
+        "patch.saved",
+        f"saved {patch}",
+        {"patch_path": str(patch), "summary": f"patch in {config.repo_root}"},
+    )
+
+    detail = public_task_detail_payload(config, store, task.id)
+    encoded = json.dumps(detail, sort_keys=True)
+
+    assert "private prompt" not in encoded
+    assert detail["task"]["spec"]["prompt"] == ""
+    assert "private-thread" not in encoded
+    assert "prompt_path" not in encoded
+    assert "patch_path" not in encoded
+    assert "source_patch_path" not in encoded
+    assert "transcript_path" not in encoded
+    assert str(config.repo_root) not in encoded
+    assert str(config.coquic_home) not in encoded
+    assert str(config.state_dir) not in encoded
+    assert "/home/minhu" not in encoded
+    assert "[repo]/src/main.zig" in encoded
+    assert "[local-path]" in encoded
+    assert "[steward-state]" in encoded
+    assert detail["attempts"][0]["patch"]["text"].startswith("diff --git")
+    assert "thread.started" not in detail["attempts"][0]["worker"]["transcript"]["text"]
+    assert detail["attempts"][0]["validations"][0]["log"]["text"].strip()
+
+
+def test_write_public_mirror_writes_task_details(config: StewardConfig) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+
+    path = write_public_mirror(config, store)
+
+    assert path.exists()
+    assert (path.parent / "tasks" / "index.json").exists()
+    detail_path = path.parent / "tasks" / f"{task.id}.json"
+    assert detail_path.exists()
+    detail = json.loads(detail_path.read_text(encoding="utf-8"))
+    assert detail["task"]["id"] == task.id
+
+
+def test_write_public_mirror_raw_transcript_mode_publishes_original_transcript(
+    config: StewardConfig,
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "public_mirror": config.public_mirror.__class__(
+                output_path=Path("public/steward/status.json"),
+                transcript_mode="raw",
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom,
+            worker=WorkerKind.custom,
+            title="Publish transcript",
+            prompt="private prompt must not publish",
+        )
+    )
+    transcript = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript_text = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "private-thread"}),
+            json.dumps({"type": "turn.started"}),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": (
+                            f"edited {config.repo_root}/src/main.zig "
+                            "and /home/minhu/private"
+                        ),
+                    },
+                }
+            ),
+        ]
+    ) + "\n"
+    transcript.write_text(transcript_text, encoding="utf-8")
+    prompt = config.prompts_dir / task.id / "worker.md"
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    prompt.write_text("do not publish prompt\n", encoding="utf-8")
+    store.begin_iteration(
+        task.id,
+        0,
+        "Initial attempt",
+        worker_name="worker",
+        worker_prompt_path=prompt,
+        worker_transcript_path=transcript,
+        worker_last_message_path=None,
+    )
+    task = store.get(task.id)
+    task.transcript_path = transcript
+    store.save(task)
+
+    path = write_public_mirror(config, store)
+    detail_path = path.parent / "tasks" / f"{task.id}.json"
+    detail = json.loads(detail_path.read_text(encoding="utf-8"))
+    artifact = detail["attempts"][0]["worker"]["transcript"]
+    raw_path = path.parent / artifact["url"].removeprefix("/steward/")
+    encoded_detail = json.dumps(detail, sort_keys=True)
+    mirror_files = list(path.parent.rglob("*"))
+
+    assert artifact["mode"] == "raw"
+    assert artifact["text"] == ""
+    assert artifact["size"] == len(transcript_text.encode("utf-8"))
+    assert raw_path.exists()
+    assert raw_path.read_text(encoding="utf-8") == transcript_text
+    assert artifact["sha256"] == sha256(transcript_text.encode("utf-8")).hexdigest()
+    assert detail["task"]["spec"]["prompt"] == "private prompt must not publish"
+    assert "private-thread" in raw_path.read_text(encoding="utf-8")
+    assert "/home/minhu/private" in raw_path.read_text(encoding="utf-8")
+    assert "private-thread" not in encoded_detail
+    assert "prompt_path" not in encoded_detail
+    assert all(file.name != "worker.md" for file in mirror_files)
+
+
+def test_public_mirror_force_publish_ignores_disabled_upload(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    calls: list[Path] = []
+
+    def fake_publish(
+        self: PublicMirrorPublisher, local_path: Path, *, cwd: Path
+    ) -> CommandResult:
+        calls.append(local_path)
+        return CommandResult(
+            args=["fake-publish"],
+            cwd=cwd,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(PublicMirrorPublisher, "publish", fake_publish)
+
+    path, result = publish_public_mirror(config, store, force=True)
+
+    assert calls == [path]
+    assert result is not None
+    assert result.ok
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["tasks"][0]["id"] == task.id
+
+
+def test_public_mirror_publish_flag_can_skip_configured_upload(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "public_mirror": config.public_mirror.__class__(
+                publish=True,
+                output_path=Path("public/steward/status.json"),
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    calls = 0
+
+    def fake_publish(
+        self: PublicMirrorPublisher, local_path: Path, *, cwd: Path
+    ) -> CommandResult:
+        nonlocal calls
+        calls += 1
+        return CommandResult(
+            args=["fake-publish"],
+            cwd=cwd,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(PublicMirrorPublisher, "publish", fake_publish)
+
+    path, result = publish_public_mirror(config, store, publish=False)
+
+    assert path.exists()
+    assert result is None
+    assert calls == 0
+
+
+def test_daemon_public_mirror_writes_on_state_change(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "public_mirror": config.public_mirror.__class__(
+                enabled=True,
+                output_path=Path("public/steward/status.json"),
+                publish=False,
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    daemon = StewardDaemon(config, store)
+
+    def fake_run(task_id: str) -> bool:
+        store.start_worker(task_id, "worker started")
+        path = config.state_dir / "public" / "steward" / "status.json"
+        assert path.exists()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["state"] == "working"
+        assert payload["counts"]["active"] == 1
+        store.finish_task(task_id, TaskStatus.succeeded, "done")
+        return True
+
+    monkeypatch.setattr(daemon.executor, "run_task", fake_run)
+
+    result = daemon.tick(plan=False, dispatch=True)
+
+    path = config.state_dir / "public" / "steward" / "status.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert result.dispatched == 1
+    assert payload["state"] == "idle"
+    assert payload["counts"]["completed"] == 1
+    assert payload["tasks"][0]["id"] == task.id
+
+
+def test_daemon_store_change_mirror_update_skips_remote_publish(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "public_mirror": config.public_mirror.__class__(
+                enabled=True,
+                publish=True,
+                output_path=Path("public/steward/status.json"),
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    calls = 0
+
+    def fake_publish(
+        self: PublicMirrorPublisher, local_path: Path, *, cwd: Path
+    ) -> CommandResult:
+        nonlocal calls
+        calls += 1
+        return CommandResult(
+            args=["fake-publish"],
+            cwd=cwd,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(PublicMirrorPublisher, "publish", fake_publish)
+    StewardDaemon(config, store)
+
+    store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+
+    path = config.state_dir / "public" / "steward" / "status.json"
+    assert path.exists()
+    assert calls == 0
+
+
+def test_daemon_cycle_mirror_update_respects_disabled_publish(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "public_mirror": config.public_mirror.__class__(
+                enabled=True,
+                publish=False,
+                output_path=Path("public/steward/status.json"),
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    calls = 0
+
+    def fake_publish(
+        self: PublicMirrorPublisher, local_path: Path, *, cwd: Path
+    ) -> CommandResult:
+        nonlocal calls
+        calls += 1
+        return CommandResult(
+            args=["fake-publish"],
+            cwd=cwd,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(PublicMirrorPublisher, "publish", fake_publish)
+
+    result = StewardDaemon(config, store).tick(plan=False, dispatch=False)
+
+    path = config.state_dir / "public" / "steward" / "status.json"
+    assert result.dispatched == 0
+    assert path.exists()
+    assert calls == 0
 
 
 def test_daemon_replans_after_successful_dispatch(
@@ -2796,7 +3372,8 @@ def test_codacy_signal_falls_back_to_public_analysis(
 
     assert len(urls) == 2
     assert signals.summary == "Codacy issuesCount=2"
-    assert signals.items[0].kind == "codacy.summary"
+    assert signals.items == []
+    assert signals.fetches[0].has_more is True
 
 
 def test_codacy_signal_uses_tokened_issue_search(
@@ -4852,6 +5429,24 @@ def test_cli_enqueue_and_status(repo: Path, monkeypatch) -> None:
     assert task_id in status.output
 
 
+def test_cli_publish_public_state_writes_output(repo: Path, monkeypatch) -> None:
+    monkeypatch.chdir(repo)
+    store = TaskStore(load_config().db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    output = repo / "status.json"
+
+    result = CliRunner().invoke(
+        app,
+        ["publish-public-state", "--output", str(output)],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["tasks"][0]["id"] == task.id
+
+
 def test_cli_daemon_starts_web_runtime_for_forever_mode(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
     started = []
@@ -5453,6 +6048,8 @@ def test_web_tick_action_requests_scheduler_wakeup(
     payload = response.json()
     assert payload["ok"] is True
     assert payload["wakeup"]["reason"] == "scheduler.manual"
+    assert "state" not in payload
+    assert "scheduler" in payload
     wakeup = store.pending_wakeups()[0]
     assert wakeup.reason == "scheduler.manual"
     assert wakeup.data["plan"] is False
@@ -5473,6 +6070,8 @@ def test_web_force_signal_fetch_requests_provider_wakeup(
     assert response.status_code == 200
     payload = response.json()
     assert payload["wakeup"]["reason"] == "signal.fetch"
+    assert "state" not in payload
+    assert "scheduler" in payload
     wakeup = store.pending_wakeups()[0]
     assert wakeup.reason == "signal.fetch"
     assert wakeup.data["providers"] == ["codacy"]

@@ -47,6 +47,11 @@ DEFAULT_SIGNAL_ERROR_RETRY_MINUTES = 30
 DEFAULT_SIGNAL_IDLE_POLL_INTERVAL_MINUTES = 30
 DEFAULT_SIGNAL_SUPPRESSION_HOURS = 24
 DEFAULT_SIGNAL_MAX_ITEMS = 12
+DEFAULT_PUBLIC_MIRROR_OUTPUT = "public/steward/status.json"
+DEFAULT_PUBLIC_MIRROR_REMOTE_PATH = (
+    "/opt/coquic-demo/current/app/public/steward/status.json"
+)
+VALID_PUBLIC_MIRROR_TRANSCRIPT_MODES = {"none", "redacted", "raw"}
 
 
 @dataclass(frozen=True)
@@ -57,6 +62,21 @@ class StewardLimits:
     review_timeout_minutes: int = 20
     validation_timeout_minutes: int = 30
     stale_task_minutes: int | None = None
+
+
+@dataclass(frozen=True)
+class PublicMirrorConfig:
+    enabled: bool = False
+    output_path: Path | None = None
+    publish: bool = False
+    transcript_mode: str = "redacted"
+    remote_user: str = "minhuw"
+    remote_host: str = "coquic.minhuw.dev"
+    remote_port: int = 22
+    remote_path: str = DEFAULT_PUBLIC_MIRROR_REMOTE_PATH
+    ssh_key_path: Path | None = None
+    known_hosts_path: Path | None = None
+    connect_timeout_seconds: int = 10
 
 
 @dataclass(frozen=True)
@@ -84,6 +104,7 @@ class StewardConfig:
     signal_providers: dict[str, SignalProviderConfig] = field(default_factory=dict)
     scheduler_wait_interval_sec: float = 1.0
     limits: StewardLimits = field(default_factory=StewardLimits)
+    public_mirror: PublicMirrorConfig = field(default_factory=PublicMirrorConfig)
 
     def __post_init__(self) -> None:
         if self.integration_mode not in VALID_INTEGRATION_MODES:
@@ -159,6 +180,7 @@ def load_config(
     steward = data.get("steward", data)
     limits_data = steward.get("limits", {})
     signals_data = steward.get("signals", {})
+    mirror_data = steward.get("public_mirror", {})
     enabled_signals = _string_tuple(
         signals_data.get(
             "enabled", steward.get("enabled_signals", DEFAULT_ENABLED_SIGNALS)
@@ -200,6 +222,7 @@ def load_config(
                 else None
             ),
         ),
+        public_mirror=_public_mirror_config(mirror_data),
     )
     config.ensure_dirs()
     return config
@@ -275,6 +298,43 @@ def _signal_provider_configs(
             max_items=int(raw.get("max_items", default.max_items)),
         )
     return providers
+
+
+def _public_mirror_config(raw: object) -> PublicMirrorConfig:
+    data = raw if isinstance(raw, dict) else {}
+    output = _optional_path(data.get("output_path", DEFAULT_PUBLIC_MIRROR_OUTPUT))
+    ssh_key = _optional_path(
+        data.get("ssh_key_path") or os.getenv("COQUIC_DEMO_REMOTE_SSH_KEY_PATH")
+    )
+    known_hosts = _optional_path(data.get("known_hosts_path"))
+    transcript_mode = str(data.get("transcript_mode", "redacted")).strip().lower()
+    if transcript_mode not in VALID_PUBLIC_MIRROR_TRANSCRIPT_MODES:
+        choices = ", ".join(sorted(VALID_PUBLIC_MIRROR_TRANSCRIPT_MODES))
+        raise ValueError(
+            f"invalid public_mirror.transcript_mode {transcript_mode!r}; "
+            f"expected {choices}"
+        )
+    return PublicMirrorConfig(
+        enabled=bool(data.get("enabled", False)),
+        output_path=output,
+        publish=bool(data.get("publish", False)),
+        transcript_mode=transcript_mode,
+        remote_user=str(data.get("remote_user", "minhuw")),
+        remote_host=str(data.get("remote_host", "coquic.minhuw.dev")),
+        remote_port=int(data.get("remote_port", 22)),
+        remote_path=str(
+            data.get("remote_path", DEFAULT_PUBLIC_MIRROR_REMOTE_PATH)
+        ),
+        ssh_key_path=ssh_key,
+        known_hosts_path=known_hosts,
+        connect_timeout_seconds=int(data.get("connect_timeout_seconds", 10)),
+    )
+
+
+def _optional_path(value: object) -> Path | None:
+    if value in (None, ""):
+        return None
+    return Path(str(value)).expanduser()
 
 
 def default_signal_provider_config(name: str) -> SignalProviderConfig:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -85,8 +86,9 @@ REVIEW_FINISHED_EVENTS = {
 class SQLiteTaskStore:
     """SQLite-backed store hidden behind Steward's TaskStore API."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, on_change: Callable[[], None] | None = None):
         self.path = path
+        self.on_change = on_change
         self.path_codec = PathCodec(path.parent)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.engine = create_engine(f"sqlite:///{path}", future=True)
@@ -147,6 +149,7 @@ class SQLiteTaskStore:
             row.validations.clear()
             session.flush()
             update_task_row(row, record, path_codec=self.path_codec)
+        self._notify_change()
 
     def update_status(
         self, task_id: str, status: TaskStatus, summary: str = ""
@@ -217,7 +220,8 @@ class SQLiteTaskStore:
             if row is None or row.status not in active_statuses:
                 return False
             row.updated_at = utc_now().isoformat()
-            return True
+        self._notify_change()
+        return True
 
     def add_event(
         self,
@@ -233,10 +237,12 @@ class SQLiteTaskStore:
                     path_codec=self.path_codec,
                 )
             )
+        self._notify_change()
 
     def add_signal_fetch_run(self, run: SignalFetchRun) -> None:
         with Session(self.engine) as session, session.begin():
             session.add(signal_fetch_run_to_row(run))
+        self._notify_change()
 
     def list_signal_fetch_runs(
         self, *, limit: int | None = None
@@ -269,6 +275,8 @@ class SQLiteTaskStore:
         item = item.model_copy(
             update={"created_at": item.created_at, "updated_at": now}
         )
+        saved_item: SignalItem | None = None
+        was_created = False
         with Session(self.engine) as session, session.begin():
             existing = session.scalar(
                 select(SignalItemRow)
@@ -281,23 +289,29 @@ class SQLiteTaskStore:
             )
             if existing is not None:
                 if _signal_row_suppressed(
+                    session,
                     existing,
                     suppression_hours=suppression_hours,
                 ):
                     existing.updated_at = now.isoformat()
                     if item.source_fetch_id:
                         existing.source_fetch_id = item.source_fetch_id
-                    return (
-                        row_to_signal_item(existing, path_codec=self.path_codec),
-                        False,
-                    )
-                item = item.model_copy(update={"id": new_signal_item_id()})
-            session.add(signal_item_to_row(item, path_codec=self.path_codec))
-        self.request_wakeup(
-            "signal.pending",
-            {"signal_item_id": item.id, "provider": item.provider},
-        )
-        return item, True
+                    saved_item = row_to_signal_item(existing, path_codec=self.path_codec)
+                else:
+                    item = item.model_copy(update={"id": new_signal_item_id()})
+            if saved_item is None:
+                session.add(signal_item_to_row(item, path_codec=self.path_codec))
+                saved_item = item
+                was_created = True
+        if was_created:
+            self.request_wakeup(
+                "signal.pending",
+                {"signal_item_id": item.id, "provider": item.provider},
+            )
+            return item, True
+        self._notify_change()
+        assert saved_item is not None
+        return saved_item, False
 
     def add_signal_items(
         self, items: list[SignalItem], *, suppression_hours: int = 24
@@ -357,6 +371,7 @@ class SQLiteTaskStore:
         wakeup = SchedulerWakeup(reason=reason, data=data or {})
         with Session(self.engine) as session, session.begin():
             session.add(scheduler_wakeup_to_row(wakeup, path_codec=self.path_codec))
+        self._notify_change()
         return wakeup
 
     def pending_wakeups(self, *, limit: int | None = None) -> list[SchedulerWakeup]:
@@ -399,7 +414,10 @@ class SQLiteTaskStore:
             for row in rows:
                 row.status = SchedulerWakeupStatus.consumed.value
                 row.consumed_at = now
-            return len(rows)
+            consumed = len(rows)
+        if consumed:
+            self._notify_change()
+        return consumed
 
     def prune_consumed_wakeups(self, *, older_than_days: int = 7) -> int:
         cutoff = (utc_now() - timedelta(days=older_than_days)).isoformat()
@@ -412,7 +430,10 @@ class SQLiteTaskStore:
             ).all()
             for row in rows:
                 session.delete(row)
-            return len(rows)
+            deleted = len(rows)
+        if deleted:
+            self._notify_change()
+        return deleted
 
     def mark_signal_items_planned(
         self,
@@ -437,7 +458,10 @@ class SQLiteTaskStore:
                 row.updated_at = now
                 row.planner_run_id = planner_run_id
                 row.planned_task_id = task_id
-            return len(rows)
+            planned = len(rows)
+        if planned:
+            self._notify_change()
+        return planned
 
     def supersede_signal_items(
         self, ids: list[str], *, planner_run_id: str | None
@@ -456,7 +480,10 @@ class SQLiteTaskStore:
                 row.status = SignalItemStatus.superseded.value
                 row.updated_at = now
                 row.planner_run_id = planner_run_id
-            return len(rows)
+            superseded = len(rows)
+        if superseded:
+            self._notify_change()
+        return superseded
 
     def begin_iteration(
         self,
@@ -538,6 +565,7 @@ class SQLiteTaskStore:
             task = session.get(TaskRow, task_id)
             if task is not None:
                 task.updated_at = now
+        self._notify_change()
 
     def record_iteration_patch(
         self, task_id: str, iteration: int, patch_path: Path
@@ -766,6 +794,8 @@ class SQLiteTaskStore:
                     )
                 )
                 recovered.append(row.id)
+        if recovered:
+            self._notify_change()
         return recovered
 
     def audit(self) -> list[str]:
@@ -858,6 +888,11 @@ class SQLiteTaskStore:
                         )
                     )
                 task.updated_at = item.updated_at.isoformat()
+        self._notify_change()
+
+    def _notify_change(self) -> None:
+        if self.on_change is not None:
+            self.on_change()
 
     def _migrate_schema(self) -> None:
         with self.engine.begin() as connection:
@@ -970,13 +1005,19 @@ def _count_tasks(
     return session.scalar(statement) or 0
 
 
-def _signal_row_suppressed(row: SignalItemRow, *, suppression_hours: int) -> bool:
+def _signal_row_suppressed(
+    session: Session, row: SignalItemRow, *, suppression_hours: int
+) -> bool:
     if row.status == SignalItemStatus.pending.value:
-        return True
-    if row.status == SignalItemStatus.planned.value and row.planned_task_id:
         return True
     if row.status != SignalItemStatus.planned.value:
         return False
+    if row.planned_task_id:
+        task = session.get(TaskRow, row.planned_task_id)
+        if task is not None and task.status in {
+            status.value for status in ACTIVE_STATUSES
+        }:
+            return True
     cutoff = utc_now() - timedelta(hours=suppression_hours)
     planned_at = row.planned_at or row.updated_at
     return datetime.fromisoformat(planned_at) >= cutoff

@@ -110,7 +110,7 @@ def _register_tick_route(app: FastAPI, config, store: TaskStore) -> None:
             {
                 "ok": True,
                 "wakeup": wakeup.model_dump(mode="json"),
-                "state": _state_payload(config, store),
+                "scheduler": _state_payload(config, store)["scheduler"],
             }
         )
 
@@ -124,7 +124,7 @@ def _register_tick_route(app: FastAPI, config, store: TaskStore) -> None:
             {
                 "ok": True,
                 "wakeup": wakeup.model_dump(mode="json"),
-                "state": _state_payload(config, store),
+                "scheduler": _state_payload(config, store)["scheduler"],
             }
         )
 

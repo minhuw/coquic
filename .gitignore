@@ -10,6 +10,7 @@ coverage/
 !site/next/app/coverage/
 .rag/
 .remote-ci/
+.coquic/
 .coquic-steward/
 vibe-references/
 .fuzz/
@@ -52,6 +53,8 @@ site/next/public/perf-results.json
 site/next/public/perf-history.json
 site/next/public/perf-history/
 site/next/public/perf-artifacts/
+site/next/public/duvet/
+site/next/public/steward/
 site/next/public/coverage-results.json
 site/next/public/interop-results.json
 site/next/public/coquic-wasm-quic.wasm

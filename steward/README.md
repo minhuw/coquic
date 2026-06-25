@@ -59,12 +59,11 @@ Generated Steward state is stored under `$COQUIC_HOME/steward`, where
 `COQUIC_HOME` defaults to `~/.coquic`:
 
 ```text
-~/.coquic/steward/repos/<repo-id>/
+~/.coquic/steward/
 ```
 
 The task store is `steward.sqlite`. Transcripts, validation logs, prompts,
-patches, and Steward-owned worktrees live under the same repo-specific state
-directory.
+patches, and Steward-owned worktrees live under the same state directory.
 
 ## Steward Agents
 
@@ -84,8 +83,8 @@ Steward agents are internal worker definitions. They embed repo skill
 ## Integration
 
 Default `integration_mode` is `local-only`: Steward leaves a validated patch in
-the repo-specific state directory under `$COQUIC_HOME/steward` and does not
-queue an Integration task.
+the state directory under `$COQUIC_HOME/steward` and does not queue an
+Integration task.
 
 `integration_mode = "push-main"` makes Steward queue an Integration task after
 a worker patch passes validation and review. Integration rebases the patch onto

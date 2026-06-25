@@ -5,7 +5,7 @@ import json
 import mimetypes
 import os
 import re
-import sqlite3
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -33,6 +33,7 @@ from ..storage import TaskStore
 
 
 TEXT_TAIL_BYTES = 256 * 1024
+TRANSCRIPT_WINDOW_BYTES = 256 * 1024
 STREAM_POLL_SECONDS = 1.0
 IMAGE_MIME_PREFIX = "image/"
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
@@ -53,7 +54,7 @@ def create_app() -> FastAPI:
     _register_run_transcript_route(app, config, store)
     _register_validation_file_route(app, config, store)
     _register_task_asset_routes(app, config, store)
-    _register_runtime_routes(app)
+    _register_runtime_routes(app, config)
     _register_planner_routes(app, config)
     _register_ui_routes(app)
 
@@ -250,9 +251,8 @@ def _register_run_transcript_route(app: FastAPI, config, store: TaskStore) -> No
 
     @app.get(
         "/api/tasks/{task_id}/runs/{run_name}/transcript",
-        response_class=PlainTextResponse,
     )
-    def run_transcript(request: Request, task_id: str, run_name: str) -> str:
+    def run_transcript(request: Request, task_id: str, run_name: str):
         _require_loopback(request)
         try:
             store.get(task_id)
@@ -265,7 +265,27 @@ def _register_run_transcript_route(app: FastAPI, config, store: TaskStore) -> No
             raise HTTPException(status_code=404, detail="run transcript not found")
         if not _allowed_debug_file(path, config.state_dir):
             raise HTTPException(status_code=403, detail="file outside steward state")
-        return tail_text(path, max_bytes=TEXT_TAIL_BYTES, line_aligned=True)
+        if _query_flag(request, "full"):
+            return PlainTextResponse(path.read_text(encoding="utf-8", errors="replace"))
+        if _query_flag(request, "window"):
+            offset = _bounded_query_int(
+                request,
+                "offset",
+                default=-1,
+                minimum=-1,
+                maximum=max(0, path.stat().st_size),
+            )
+            limit = _bounded_query_int(
+                request,
+                "limit",
+                default=TRANSCRIPT_WINDOW_BYTES,
+                minimum=1,
+                maximum=TRANSCRIPT_WINDOW_BYTES,
+            )
+            return JSONResponse(transcript_window(path, offset=offset, limit=limit))
+        return PlainTextResponse(
+            tail_text(path, max_bytes=TEXT_TAIL_BYTES, line_aligned=True)
+        )
 
 
 def _register_validation_file_route(app: FastAPI, config, store: TaskStore) -> None:
@@ -311,7 +331,7 @@ def _register_task_asset_routes(app: FastAPI, config, store: TaskStore) -> None:
         return FileResponse(asset_path, media_type=media_type)
 
 
-def _register_runtime_routes(app: FastAPI) -> None:
+def _register_runtime_routes(app: FastAPI, config) -> None:
 
     @app.get("/healthz", response_class=PlainTextResponse)
     def healthz() -> str:
@@ -323,6 +343,7 @@ def _register_runtime_routes(app: FastAPI) -> None:
         return JSONResponse(
             {
                 "api": "coquic-steward",
+                "state_dir": str(config.state_dir),
                 "features": [
                     "line-tail",
                     "signal-inbox",
@@ -383,17 +404,66 @@ def _state_payload(config, store: TaskStore) -> dict[str, object]:
         "workers": [worker.value for worker in WorkerKind],
         "projects": _project_payload(config, tasks),
         "integration": _integration_payload(config, store, tasks),
-        "config": {
-            "repo_root": str(config.repo_root),
-            "state_dir": str(config.state_dir),
-            "worktrees_dir": str(config.worktrees_dir),
-            "integration_mode": config.integration_mode,
-            "local_only": config.local_only,
-            "main_branch": config.main_branch,
-            "github_repository": config.github_repository,
-            "enabled_signals": list(config.enabled_signals),
+        "config": _config_payload(config),
+    }
+
+
+def _config_payload(config) -> dict[str, object]:
+    codex_resolved = _runtime_executable_path(config.codex_bin)
+    return {
+        "repo_root": str(config.repo_root),
+        "coquic_home": str(config.coquic_home),
+        "steward_home": str(config.steward_home),
+        "state_dir": str(config.state_dir),
+        "worktrees_dir": str(config.worktrees_dir),
+        "transcripts_dir": str(config.transcripts_dir),
+        "logs_dir": str(config.logs_dir),
+        "prompts_dir": str(config.prompts_dir),
+        "patches_dir": str(config.patches_dir),
+        "db_path": str(config.db_path),
+        "config_path": str(config.coquic_home / "steward.toml"),
+        "codex_bin": config.codex_bin,
+        "codex_bin_resolved": codex_resolved,
+        "codex_bin_available": bool(codex_resolved),
+        "codex_model": config.codex_model,
+        "codex_profile": config.codex_profile,
+        "codex_sandbox": config.codex_sandbox,
+        "integration_mode": config.integration_mode,
+        "local_only": config.local_only,
+        "git_remote": config.git_remote,
+        "main_branch": config.main_branch,
+        "github_repository": config.github_repository,
+        "enabled_signals": list(config.enabled_signals),
+        "scheduler_wait_interval_sec": config.scheduler_wait_interval_sec,
+        "limits": {
+            "max_active_tasks": config.limits.max_active_tasks,
+            "max_main_pushes_per_day": config.limits.max_main_pushes_per_day,
+            "worker_timeout_minutes": config.limits.worker_timeout_minutes,
+            "review_timeout_minutes": config.limits.review_timeout_minutes,
+            "validation_timeout_minutes": config.limits.validation_timeout_minutes,
+            "stale_task_minutes": config.limits.stale_task_minutes,
+        },
+        "signal_providers": {
+            name: {
+                "poll_interval_minutes": provider.poll_interval_minutes,
+                "error_retry_minutes": provider.error_retry_minutes,
+                "idle_poll_interval_minutes": provider.idle_poll_interval_minutes,
+                "suppression_hours": provider.suppression_hours,
+                "max_items": provider.max_items,
+            }
+            for name, provider in sorted(config.signal_providers.items())
         },
     }
+
+
+def _runtime_executable_path(value: str) -> str | None:
+    path = Path(value).expanduser()
+    if path.is_absolute() or os.sep in value:
+        absolute = path if path.is_absolute() else Path.cwd() / path
+        if absolute.is_file() and os.access(absolute, os.X_OK):
+            return str(absolute)
+        return None
+    return shutil.which(value)
 
 
 def _provider_list(value: object, enabled: tuple[str, ...]) -> list[str]:
@@ -412,25 +482,15 @@ def _provider_list(value: object, enabled: tuple[str, ...]) -> list[str]:
 
 
 def _project_payload(config, current_tasks) -> list[dict[str, object]]:
-    repos_dir = config.steward_home / "repos"
-    state_dirs = sorted(path for path in repos_dir.iterdir() if path.is_dir()) if repos_dir.exists() else []
-    if config.state_dir not in state_dirs:
-        state_dirs.insert(0, config.state_dir)
-    projects: list[dict[str, object]] = []
-    for state_dir in state_dirs:
-        active = state_dir == config.state_dir
-        db_path = state_dir / "steward.sqlite"
-        task_count = len(current_tasks) if active else _stored_task_count(db_path)
-        projects.append(
-            {
-                "id": state_dir.name,
-                "label": config.github_repository if active else state_dir.name,
-                "state_dir": str(state_dir),
-                "active": active,
-                "task_count": task_count,
-            }
-        )
-    return projects
+    return [
+        {
+            "id": config.state_dir.name,
+            "label": config.github_repository,
+            "state_dir": str(config.state_dir),
+            "active": True,
+            "task_count": len(current_tasks),
+        }
+    ]
 
 
 def _integration_payload(config, store: TaskStore, tasks) -> dict[str, object]:
@@ -647,17 +707,6 @@ def _integration_push_log(config, integration_task_id: str) -> dict[str, object]
         "path": str(path),
         "text": tail_text(path, max_bytes=TEXT_TAIL_BYTES, line_aligned=True),
     }
-
-
-def _stored_task_count(db_path: Path) -> int:
-    if not db_path.exists():
-        return 0
-    try:
-        with sqlite3.connect(db_path) as connection:
-            row = connection.execute("select count(*) from tasks").fetchone()
-    except sqlite3.Error:
-        return 0
-    return int(row[0]) if row else 0
 
 
 def _task_files(config, store: TaskStore, record) -> dict[str, str | None]:
@@ -892,6 +941,14 @@ def _parse_task_run_name(name: str) -> dict[str, object] | None:
             "role": "worker",
             "attempt": revision,
             "label": f"Validation revision {revision}",
+        }
+    integration_match = re.fullmatch(r"worker-integration-revision-(\d+)", name)
+    if integration_match:
+        revision = int(integration_match.group(1))
+        return {
+            "role": "worker",
+            "attempt": revision,
+            "label": f"Integration conflict revision {revision}",
         }
     reviewer_match = re.fullmatch(r"reviewer-(\d+)", name)
     if reviewer_match:
@@ -1156,6 +1213,34 @@ def _bounded_query_int(
     except ValueError:
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def _query_flag(request: Request, name: str) -> bool:
+    return request.query_params.get(name, "").lower() in {"1", "true", "yes", "on"}
+
+
+def transcript_window(path: Path, *, offset: int, limit: int) -> dict[str, object]:
+    size = path.stat().st_size
+    start = max(0, size - limit) if offset < 0 else max(0, min(offset, size))
+    read_limit = min(limit, max(0, size - start))
+    with path.open("rb") as handle:
+        handle.seek(start)
+        data = handle.read(read_limit)
+    actual_start = start
+    if start > 0:
+        newline = data.find(b"\n")
+        if newline >= 0:
+            data = data[newline + 1 :]
+            actual_start = start + newline + 1
+    end = actual_start + len(data)
+    return {
+        "text": data.decode("utf-8", errors="replace"),
+        "start": actual_start,
+        "end": end,
+        "size": size,
+        "has_before": actual_start > 0,
+        "has_after": end < size,
+    }
 
 
 def tail_text(path: Path, *, max_bytes: int, line_aligned: bool = False) -> str:

@@ -11,14 +11,40 @@ from .models import IntegrationMode
 
 
 VALID_INTEGRATION_MODES = {mode.value for mode in IntegrationMode}
-DEFAULT_ENABLED_SIGNALS = ("github-actions", "code-scanning", "codacy")
+DEFAULT_ENABLED_SIGNALS = (
+    "github-actions:ci",
+    "github-actions:test",
+    "github-actions:duvet",
+    "github-actions:nightly-ci",
+    "github-actions:deploy-demo",
+    "github-actions:interop",
+    "github-actions:perf",
+    "code-scanning",
+    "codacy",
+)
 DEFAULT_COQUIC_HOME = "~/.coquic"
 DEFAULT_SIGNAL_POLL_INTERVAL_MINUTES = {
-    "github-actions": 30,
+    "github-actions:ci": 30,
+    "github-actions:test": 30,
+    "github-actions:duvet": 1440,
+    "github-actions:nightly-ci": 1440,
+    "github-actions:deploy-demo": 30,
+    "github-actions:interop": 1440,
+    "github-actions:perf": 1440,
     "code-scanning": 360,
     "codacy": 360,
 }
+DEFAULT_SIGNAL_IDLE_POLL_INTERVAL_MINUTES_BY_PROVIDER = {
+    "github-actions:ci": 30,
+    "github-actions:test": 30,
+    "github-actions:duvet": 1440,
+    "github-actions:nightly-ci": 1440,
+    "github-actions:deploy-demo": 30,
+    "github-actions:interop": 1440,
+    "github-actions:perf": 1440,
+}
 DEFAULT_SIGNAL_ERROR_RETRY_MINUTES = 30
+DEFAULT_SIGNAL_IDLE_POLL_INTERVAL_MINUTES = 30
 DEFAULT_SIGNAL_SUPPRESSION_HOURS = 24
 DEFAULT_SIGNAL_MAX_ITEMS = 12
 
@@ -37,6 +63,7 @@ class StewardLimits:
 class SignalProviderConfig:
     poll_interval_minutes: int
     error_retry_minutes: int = DEFAULT_SIGNAL_ERROR_RETRY_MINUTES
+    idle_poll_interval_minutes: int = DEFAULT_SIGNAL_IDLE_POLL_INTERVAL_MINUTES
     suppression_hours: int = DEFAULT_SIGNAL_SUPPRESSION_HOURS
     max_items: int = DEFAULT_SIGNAL_MAX_ITEMS
 
@@ -82,7 +109,7 @@ class StewardConfig:
 
     @property
     def state_dir(self) -> Path:
-        return self.steward_home / "repos" / _repo_state_id(self.repo_root)
+        return self.steward_home
 
     @property
     def worktrees_dir(self) -> Path:
@@ -238,6 +265,12 @@ def _signal_provider_configs(
             error_retry_minutes=int(
                 raw.get("error_retry_minutes", default.error_retry_minutes)
             ),
+            idle_poll_interval_minutes=int(
+                raw.get(
+                    "idle_poll_interval_minutes",
+                    default.idle_poll_interval_minutes,
+                )
+            ),
             suppression_hours=int(raw.get("suppression_hours", default.suppression_hours)),
             max_items=int(raw.get("max_items", default.max_items)),
         )
@@ -247,6 +280,11 @@ def _signal_provider_configs(
 def default_signal_provider_config(name: str) -> SignalProviderConfig:
     return SignalProviderConfig(
         poll_interval_minutes=DEFAULT_SIGNAL_POLL_INTERVAL_MINUTES.get(name, 360),
+        idle_poll_interval_minutes=(
+            DEFAULT_SIGNAL_IDLE_POLL_INTERVAL_MINUTES_BY_PROVIDER.get(
+                name, DEFAULT_SIGNAL_IDLE_POLL_INTERVAL_MINUTES
+            )
+        ),
     )
 
 
@@ -256,12 +294,3 @@ def _validate_github_repository(value: str) -> None:
     if len(parts) == 2 and all(parts) and all(set(part) <= allowed for part in parts):
         return
     raise ValueError(f"invalid github_repository {value!r}; expected owner/repo")
-
-
-def _repo_state_id(repo_root: Path) -> str:
-    resolved = repo_root.resolve()
-    slug = "-".join(part for part in resolved.parts if part and part != "/")[-80:]
-    digest = (
-        __import__("hashlib").sha256(str(resolved).encode("utf-8")).hexdigest()[:12]
-    )
-    return f"{slug}-{digest}"

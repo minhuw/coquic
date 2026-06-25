@@ -44,33 +44,50 @@ class SignalProvider(Protocol):
 
 class GitHubActionsProvider:
     name = "github-actions"
+    workflow_file: str | None = None
+    signal_kind = "github-actions.workflow-failure"
+    recommended_task_kind = "ci"
+    recommended_worker = "ci-doctor"
+    workflow_purpose = "Investigate the selected GitHub Actions workflow run."
+    investigation_steps: tuple[str, ...] = (
+        "Inspect the selected workflow run, failed jobs, failed steps, and log excerpts.",
+        "Reproduce the closest failing command locally before changing code.",
+        "Keep the fix scoped to the selected workflow run and its failure mode.",
+    )
+    local_validation: tuple[str, ...] = ()
+    scope_limits: tuple[str, ...] = (
+        "Do not rerun broad workflow lists to choose different work.",
+        "Do not change GitHub workflow settings, secrets, or remote state.",
+        "Commit and push remain Steward integration responsibilities.",
+    )
+    artifact_paths: tuple[str, ...] = ()
 
     def collect(
         self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS
     ) -> ProviderSignalResult:
-        runs = run_command(
-            [
-                "gh",
-                "run",
-                "list",
-                "-R",
-                config.github_repository,
-                "--branch",
-                config.main_branch,
-                "--limit",
-                str(max_items),
-                "--json",
-                "databaseId,workflowName,conclusion",
-            ],
-            cwd=config.repo_root,
-            timeout=SIGNAL_TIMEOUT_SECONDS,
-        )
+        command = [
+            "gh",
+            "run",
+            "list",
+            "-R",
+            config.github_repository,
+            "--branch",
+            config.main_branch,
+            "--limit",
+            str(max_items),
+            "--json",
+            "databaseId,workflowName,conclusion",
+        ]
+        if self.workflow_file:
+            command.extend(["--workflow", self.workflow_file, "--status", "failure"])
+        runs = run_command(command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS)
         if not runs.ok:
             return ProviderSignalResult(error=runs.stderr, summary=runs.stderr)
         try:
             decoded = json.loads(runs.stdout)
         except json.JSONDecodeError:
             decoded = []
+        items: list[SignalItem] = []
         for run in decoded:
             if run.get("conclusion") != "failure":
                 continue
@@ -78,18 +95,216 @@ class GitHubActionsProvider:
             run_id = str(run.get("databaseId") or "")
             if not run_id:
                 continue
-            item = _workflow_item(
-                repository=config.github_repository,
-                workflow_name=workflow_name,
-                run_id=run_id,
-                is_interop=workflow_name == "Interop",
+            items.append(
+                _workflow_item(
+                    provider=self.name,
+                    repository=config.github_repository,
+                    workflow_name=workflow_name,
+                    run_id=run_id,
+                    kind=self._signal_kind(workflow_name),
+                    workflow_file=self.workflow_file,
+                    worker_context=self._worker_context(),
+                )
             )
-            return ProviderSignalResult(
-                items=[item],
-                summary=item.summary,
-                has_more=False,
-            )
-        return ProviderSignalResult(summary="No failed workflow runs found")
+        if not items:
+            return ProviderSignalResult(summary=f"No failed {self._label()} runs found")
+        return ProviderSignalResult(
+            items=items,
+            summary=_summary_from_workflow_items(self._label(), items),
+            has_more=len(decoded) > len(items),
+        )
+
+    def _signal_kind(self, workflow_name: str) -> str:
+        return self.signal_kind
+
+    def _label(self) -> str:
+        return self.workflow_file or "GitHub Actions workflow"
+
+    def _worker_context(self) -> dict[str, Any]:
+        return _compact_dict(
+            {
+                "workflow_file": self.workflow_file,
+                "recommended_task_kind": self.recommended_task_kind,
+                "recommended_worker": self.recommended_worker,
+                "workflow_purpose": self.workflow_purpose,
+                "investigation_steps": list(self.investigation_steps),
+                "local_validation": list(self.local_validation),
+                "scope_limits": list(self.scope_limits),
+                "artifact_paths": list(self.artifact_paths),
+            }
+        )
+
+
+class GitHubActionsCiProvider(GitHubActionsProvider):
+    name = "github-actions:ci"
+    workflow_file = "ci.yml"
+    signal_kind = "github-actions.ci-failure"
+    workflow_purpose = (
+        "Per-commit CI covers formatting, clang-tidy diff lint, and RFC compliance "
+        "checks for push and pull_request events."
+    )
+    investigation_steps = (
+        "Use the selected run id to inspect the failed job and failed step logs.",
+        "Map failures to the workflow jobs: Format, Lint, or RFC Compliance.",
+        "Fix source, formatting, lint findings, or RFC annotations only for the reported failure.",
+    )
+    local_validation = (
+        "nix develop -c pre-commit run clang-format --all-files --show-diff-on-failure",
+        "nix develop .#lint -c ./scripts/run-clang-tidy.sh --diff",
+        "nix develop -c ./scripts/compliance --ci",
+    )
+
+
+class GitHubActionsTestProvider(GitHubActionsProvider):
+    name = "github-actions:test"
+    workflow_file = "test.yml"
+    signal_kind = "github-actions.test-failure"
+    workflow_purpose = "Build and unit-test CoQUIC on push, pull_request, and manual dispatch."
+    investigation_steps = (
+        "Inspect the selected run id for the Build or Test step that failed.",
+        "Prefer a local reproduction with the same Zig/Nix command before editing.",
+        "Fix implementation or test expectations for the selected failure only.",
+    )
+    local_validation = (
+        "nix develop -c zig build",
+        "nix develop -c zig build test",
+    )
+
+
+class GitHubActionsDuvetProvider(GitHubActionsProvider):
+    name = "github-actions:duvet"
+    workflow_file = "duvet.yml"
+    signal_kind = "github-actions.duvet-failure"
+    recommended_task_kind = "rfc-audit"
+    recommended_worker = "rfc-auditor"
+    workflow_purpose = (
+        "Daily Duvet workflow generates RFC compliance reports and publishes the "
+        "report artifacts for the demo site."
+    )
+    investigation_steps = (
+        "Inspect the selected run id for compliance generation, artifact upload, or demo upload failure.",
+        "Use grounded QUIC/RFC context when changing annotations or protocol behavior.",
+        "Fix source annotations, compliance scripts, or report packaging for the selected failure.",
+    )
+    local_validation = ("nix develop -c ./scripts/compliance --ci",)
+    scope_limits = (
+        "Do not commit generated .duvet report output unless it is already tracked source.",
+        "Do not use or expose deployment secrets.",
+        "Do not change remote demo state manually.",
+    )
+    artifact_paths = (
+        ".duvet/reports/report.html",
+        ".duvet/reports/report.json",
+        ".duvet/snapshot.txt",
+    )
+
+
+class GitHubActionsNightlyCiProvider(GitHubActionsProvider):
+    name = "github-actions:nightly-ci"
+    workflow_file = "nightly-ci.yml"
+    signal_kind = "github-actions.nightly-ci-failure"
+    workflow_purpose = (
+        "Daily Nightly CI covers full clang-tidy lint, coverage, CodeQL analysis, "
+        "and coverage publication."
+    )
+    investigation_steps = (
+        "Inspect the selected run id and identify whether full-lint, coverage, CodeQL, or publishing failed.",
+        "Treat generated coverage output and downloaded CI logs as local state, not source changes.",
+        "Fix source, scripts, or workflow wiring only for the selected nightly failure.",
+    )
+    local_validation = (
+        "nix develop .#lint -c ./scripts/run-clang-tidy.sh --full",
+        "nix develop -c zig build coverage",
+    )
+    artifact_paths = (
+        "coverage/lcov.info",
+        "coverage/coverage-results.json",
+        "coverage/html",
+    )
+
+
+class GitHubActionsDeployDemoProvider(GitHubActionsProvider):
+    name = "github-actions:deploy-demo"
+    workflow_file = "deploy-demo.yml"
+    signal_kind = "github-actions.deploy-demo-failure"
+    workflow_purpose = (
+        "Deploy Demo builds the h3-server and Next.js demo, packages the demo app, "
+        "and deploys it to the public demo host on main."
+    )
+    investigation_steps = (
+        "Inspect the selected run id to separate build, package, SSH, and deploy-script failures.",
+        "Reproduce local build/package steps when the failure does not require secrets.",
+        "Fix site, build, packaging, or deployment scripts for the selected failure only.",
+    )
+    local_validation = (
+        "nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false",
+        "cd site/next && npm install && npm run build:demo",
+        "cd site/next && npm run package:demo -- /tmp/coquic-demo-app",
+    )
+    scope_limits = (
+        "Do not read, print, or replace deployment secrets.",
+        "Do not manually deploy to the public host from the worker.",
+        "Do not change remote service state outside the repository patch.",
+    )
+
+
+class GitHubActionsInteropProvider(GitHubActionsProvider):
+    name = "github-actions:interop"
+    workflow_file = "interop.yml"
+    signal_kind = "github-actions.interop-failure"
+    recommended_task_kind = "interop"
+    recommended_worker = "interop-doctor"
+    workflow_purpose = (
+        "Daily Interop runs CoQUIC against official QUIC interop peers and publishes "
+        "per-peer result artifacts."
+    )
+    investigation_steps = (
+        "Inspect the selected run id, failed matrix job, peer, direction, testcase, and log artifact.",
+        "Download failed CI logs/artifacts under .remote-ci/ when needed.",
+        "Reproduce with interop/run-official.sh for the same peer/testcase/direction before editing.",
+    )
+    local_validation = (
+        "bash interop/run-official.sh",
+        "nix develop -c zig build test",
+    )
+    scope_limits = (
+        "Skip goodput and crosstraffic during daily local validation unless the selected failure requires them.",
+        "Do not commit .remote-ci/ or .interop-logs/ output.",
+        "Commit and push remain Steward integration responsibilities.",
+    )
+    artifact_paths = (
+        ".interop-logs/official",
+        ".interop-logs/interop-results-<peer>.json",
+    )
+
+
+class GitHubActionsPerfProvider(GitHubActionsProvider):
+    name = "github-actions:perf"
+    workflow_file = "perf.yml"
+    signal_kind = "github-actions.perf-failure"
+    workflow_purpose = (
+        "Daily Perf checks benchmark configuration and runs performance matrices on "
+        "the self-hosted coquic-perf runner."
+    )
+    investigation_steps = (
+        "Inspect the selected run id to distinguish perf-config failures, runner infrastructure failures, and benchmark regressions.",
+        "Use failed job logs before changing benchmark code or workflow cleanup steps.",
+        "Fix benchmark scripts, implementation behavior, or workflow runner hygiene for the selected failure.",
+    )
+    local_validation = (
+        "python3 scripts/check-bench-implementations.py",
+        "nix develop -c zig build",
+    )
+    scope_limits = (
+        "Do not manually delete remote runner state as part of the worker task.",
+        "Do not commit benchmark result directories or generated profiling output.",
+        "Commit and push remain Steward integration responsibilities.",
+    )
+    artifact_paths = (
+        ".bench-results",
+        "result",
+        "coverage",
+    )
 
 
 class CodeScanningProvider:
@@ -243,12 +458,14 @@ def _codacy_opener() -> OpenerDirector:
 
 def _workflow_item(
     *,
+    provider: str,
     repository: str,
     workflow_name: str,
     run_id: str,
-    is_interop: bool,
+    kind: str,
+    workflow_file: str | None = None,
+    worker_context: dict[str, Any] | None = None,
 ) -> SignalItem:
-    kind = "github-actions.interop-failure" if is_interop else "github-actions.workflow-failure"
     title = f"{workflow_name} workflow failed"
     summary = f"{workflow_name} run {run_id} failed"
     payload = {
@@ -256,8 +473,12 @@ def _workflow_item(
         "workflow_name": workflow_name,
         "conclusion": "failure",
     }
+    if workflow_file:
+        payload["workflow_file"] = workflow_file
+    if worker_context:
+        payload["worker_context"] = worker_context
     return _signal_item(
-        provider="github-actions",
+        provider=provider,
         kind=kind,
         title=title,
         summary=summary,
@@ -270,6 +491,13 @@ def _workflow_item(
         ],
         payload=payload,
     )
+
+
+def _summary_from_workflow_items(label: str, items: list[SignalItem]) -> str:
+    if not items:
+        return f"No failed {label} runs found"
+    runs = ", ".join(str(item.payload.get("run_id")) for item in items[:3])
+    return f"{label} sampled {len(items)} failed run(s): {runs}"
 
 
 def _code_scanning_item(item: object) -> SignalItem:
@@ -374,8 +602,9 @@ def _signal_item(
     digest = sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:12]
+    provider_id = provider.replace(":", "-")
     return SignalItem(
-        id=f"wi-{provider}-{kind.split('.')[-1]}-{digest}",
+        id=f"wi-{provider_id}-{kind.split('.')[-1]}-{digest}",
         provider=provider,
         kind=kind,
         fingerprint=json.dumps(identity, sort_keys=True, separators=(",", ":")),

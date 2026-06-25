@@ -209,6 +209,9 @@ class StewardExecutor:
             )
             return PatchPreparationResult.terminal_failure
 
+        patch_path = self.config.patches_dir / task.id / f"{_iteration_log_label(iteration)}.patch"
+        self.worktrees.save_patch(task.worktree_path, patch_path)
+        self.store.record_iteration_patch(task.id, iteration, patch_path)
         self.store.start_validation(task.id, f"validation running: {label}")
         validations = _run_gates_for_iteration(
             self.config, task.id, task.worktree_path, iteration
@@ -220,7 +223,6 @@ class StewardExecutor:
         self.store.record_iteration_validations(task.id, iteration, validations)
         task = self.store.get(task.id)
         if any(not validation.passed for validation in validations):
-            patch_path = self.config.patches_dir / task.id / f"{_iteration_log_label(iteration)}.patch"
             self.worktrees.save_patch(task.worktree_path, patch_path)
             self.store.record_iteration_patch(task.id, iteration, patch_path)
             failed = [validation for validation in validations if not validation.passed]
@@ -246,7 +248,6 @@ class StewardExecutor:
             return PatchPreparationResult.validation_failed
 
         self._latest_failed_validations.pop(task.id, None)
-        patch_path = self.config.patches_dir / task.id / f"{_iteration_log_label(iteration)}.patch"
         self.worktrees.save_patch(task.worktree_path, patch_path)
         task = self.store.get(task.id)
         task.patch_path = patch_path
@@ -626,10 +627,13 @@ class StewardExecutor:
             f"integration conflict revision {revisions}",
             revisions,
             iteration=revisions,
-            no_changes_status=TaskStatus.failed,
+            no_changes_status=TaskStatus.no_changes,
         )
         if not prepared:
-            return False
+            return (
+                TaskStatus(self.store.get(source_task_id).status)
+                == TaskStatus.no_changes
+            )
         approved_revision = self._review_and_revise_until_approved(
             source_task_id, revisions
         )

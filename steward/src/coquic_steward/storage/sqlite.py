@@ -262,7 +262,9 @@ class SQLiteTaskStore:
             )
             return row_to_signal_fetch_run(row) if row is not None else None
 
-    def add_signal_item(self, item: SignalItem) -> tuple[SignalItem, bool]:
+    def add_signal_item(
+        self, item: SignalItem, *, suppression_hours: int = 24
+    ) -> tuple[SignalItem, bool]:
         now = utc_now()
         item = item.model_copy(
             update={"created_at": item.created_at, "updated_at": now}
@@ -278,7 +280,10 @@ class SQLiteTaskStore:
                 .limit(1)
             )
             if existing is not None:
-                if _signal_row_suppressed(existing, session):
+                if _signal_row_suppressed(
+                    existing,
+                    suppression_hours=suppression_hours,
+                ):
                     existing.updated_at = now.isoformat()
                     if item.source_fetch_id:
                         existing.source_fetch_id = item.source_fetch_id
@@ -294,11 +299,15 @@ class SQLiteTaskStore:
         )
         return item, True
 
-    def add_signal_items(self, items: list[SignalItem]) -> tuple[list[SignalItem], int]:
+    def add_signal_items(
+        self, items: list[SignalItem], *, suppression_hours: int = 24
+    ) -> tuple[list[SignalItem], int]:
         saved: list[SignalItem] = []
         created = 0
         for item in items:
-            saved_item, was_created = self.add_signal_item(item)
+            saved_item, was_created = self.add_signal_item(
+                item, suppression_hours=suppression_hours
+            )
             saved.append(saved_item)
             if was_created:
                 created += 1
@@ -961,19 +970,16 @@ def _count_tasks(
     return session.scalar(statement) or 0
 
 
-def _signal_row_suppressed(row: SignalItemRow, session: Session) -> bool:
+def _signal_row_suppressed(row: SignalItemRow, *, suppression_hours: int) -> bool:
     if row.status == SignalItemStatus.pending.value:
+        return True
+    if row.status == SignalItemStatus.planned.value and row.planned_task_id:
         return True
     if row.status != SignalItemStatus.planned.value:
         return False
-    if row.planned_task_id:
-        task = session.get(TaskRow, row.planned_task_id)
-        if task is not None and task.status in {
-            status.value for status in ACTIVE_STATUSES
-        }:
-            return True
-    cutoff = utc_now() - timedelta(hours=24)
-    return datetime.fromisoformat(row.updated_at) >= cutoff
+    cutoff = utc_now() - timedelta(hours=suppression_hours)
+    planned_at = row.planned_at or row.updated_at
+    return datetime.fromisoformat(planned_at) >= cutoff
 
 
 def _has_active_integration_for_source(session: Session, source_task_id: str) -> bool:

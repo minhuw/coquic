@@ -110,6 +110,9 @@ def render_worker_prompt(task: TaskRecord, config: StewardConfig) -> str:
     ]
     source_context = _render_source_context(task)
     if source_context:
+        worker_context = _render_worker_source_guidance(task)
+        if worker_context:
+            sections.extend(["", "Selected source guidance:", worker_context])
         sections.extend(
             [
                 "",
@@ -145,6 +148,55 @@ def _render_source_context(task: TaskRecord) -> str:
     if not isinstance(context, dict):
         return ""
     return json.dumps(context, indent=2, sort_keys=True)
+
+
+def _render_worker_source_guidance(task: TaskRecord) -> str:
+    context = task.spec.metadata.get("source_context")
+    if not isinstance(context, dict):
+        return ""
+    selected = context.get("selected_signal_items")
+    if not isinstance(selected, list):
+        return ""
+    blocks = []
+    for item in selected:
+        if not isinstance(item, dict):
+            continue
+        payload = item.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        worker_context = payload.get("worker_context")
+        if isinstance(worker_context, dict):
+            blocks.append(_render_context_block(item, worker_context))
+    return "\n\n".join(block for block in blocks if block)
+
+
+def _render_context_block(item: dict[str, object], context: dict[str, object]) -> str:
+    lines = [
+        f"- signal: {item.get('id', 'unknown')} ({item.get('provider', 'unknown')})",
+    ]
+    for key in (
+        "workflow_file",
+        "recommended_task_kind",
+        "recommended_worker",
+        "workflow_purpose",
+    ):
+        value = context.get(key)
+        if isinstance(value, str) and value:
+            lines.append(f"- {key}: {value}")
+    for key in (
+        "investigation_steps",
+        "local_validation",
+        "scope_limits",
+        "artifact_paths",
+    ):
+        values = context.get(key)
+        if not isinstance(values, list) or not values:
+            continue
+        clean = [str(value) for value in values if str(value)]
+        if clean:
+            lines.append(f"- {key}:")
+            lines.extend(f"  - {value}" for value in clean)
+    return "\n".join(lines)
 
 
 def _render_skills(config: StewardConfig, skill_names: tuple[str, ...]) -> str:

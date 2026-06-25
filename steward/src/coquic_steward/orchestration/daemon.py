@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from ..core.config import StewardConfig
+from ..core.config import SignalProviderConfig, StewardConfig
 from ..core.models import (
     SchedulerProviderState,
     SchedulerState,
@@ -113,6 +113,14 @@ class StewardDaemon:
         if plan:
             if fetch_providers:
                 self._fetch_signals(result, fetch_providers)
+            else:
+                idle_providers = self._idle_fetch_provider_names()
+                if idle_providers:
+                    self._log(
+                        "signals idle fetch providers="
+                        + ",".join(idle_providers)
+                    )
+                    self._fetch_signals(result, idle_providers)
             self._plan_until_idle(result)
         if dispatch:
             self._dispatch_queued(result, plan=plan, max_dispatch=max_dispatch)
@@ -137,10 +145,13 @@ class StewardDaemon:
         max_dispatch: int | None,
     ) -> None:
         source_limit = max_dispatch or self.config.limits.max_active_tasks
+        total_limit = max_dispatch
         source_attempts = 0
         integration_attempted = False
         seen: set[str] = set()
         while True:
+            if total_limit is not None and result.dispatched + result.skipped >= total_limit:
+                return
             task = self._next_dispatchable_task(seen)
             if task is None:
                 return
@@ -182,6 +193,16 @@ class StewardDaemon:
             return task
         return None
 
+    def _should_fetch_signals_when_idle(self) -> bool:
+        return _store_is_idle_for_signal_fetch(self.store)
+
+    def _idle_fetch_provider_names(self) -> list[str]:
+        if not self._should_fetch_signals_when_idle():
+            return []
+        return _idle_fetch_provider_names(
+            scheduler_state(self.config, self.store)
+        )
+
     def _fetch_signals(self, result: TickResult, providers: list[str]) -> None:
         try:
             collections = collect_signal_items(self.config, provider_names=providers)
@@ -202,7 +223,13 @@ class StewardDaemon:
                     "new_item_count": 0,
                 }
             )
-            saved_items, created_items = self.store.add_signal_items(collection.items)
+            provider_config = self.config.signal_providers.get(collection.provider)
+            saved_items, created_items = self.store.add_signal_items(
+                collection.items,
+                suppression_hours=(
+                    provider_config.suppression_hours if provider_config else 24
+                ),
+            )
             fetch_run = fetch_run.model_copy(update={"new_item_count": created_items})
             self.store.add_signal_fetch_run(fetch_run)
             result.signal_items += len(saved_items)
@@ -347,6 +374,7 @@ class StewardDaemon:
             trigger = wait_for_scheduler_event(self.config, self.store)
             self.run_cycle(
                 fetch_providers=trigger.providers,
+                max_dispatch=1,
                 reason=trigger.reason,
             )
 
@@ -377,7 +405,24 @@ def wait_for_scheduler_event(config: StewardConfig, store: TaskStore) -> Schedul
         due_providers = [provider.provider for provider in state.providers if provider.due]
         if due_providers:
             return SchedulerTrigger(reason="provider-due", providers=due_providers)
+        if _store_is_idle_for_signal_fetch(store):
+            idle_providers = _idle_fetch_provider_names(
+                state,
+                coalesce_window=timedelta(
+                    seconds=config.scheduler_wait_interval_sec
+                ),
+            )
+            if idle_providers:
+                return SchedulerTrigger(reason="idle-fetch", providers=idle_providers)
         next_due = min((provider.next_due_at for provider in state.providers), default=None)
+        if _store_is_idle_for_signal_fetch(store):
+            idle_due_at = [
+                provider.idle_next_due_at
+                for provider in state.providers
+                if provider.idle_next_due_at is not None
+            ]
+            if idle_due_at:
+                next_due = min([due for due in (next_due, min(idle_due_at)) if due is not None])
         sleep_for = config.scheduler_wait_interval_sec
         if next_due is not None:
             sleep_for = min(
@@ -421,10 +466,13 @@ def _provider_state(
             provider=provider,
             poll_interval_minutes=provider_config.poll_interval_minutes,
             error_retry_minutes=provider_config.error_retry_minutes,
+            idle_poll_interval_minutes=provider_config.idle_poll_interval_minutes,
             suppression_hours=provider_config.suppression_hours,
             max_items=provider_config.max_items,
             next_due_at=next_due,
+            idle_next_due_at=next_due,
             due=True,
+            idle_due=True,
         )
     interval = (
         provider_config.error_retry_minutes
@@ -433,17 +481,23 @@ def _provider_state(
     )
     next_due = latest.completed_at + timedelta(minutes=interval)
     next_due = next_due + _provider_jitter(config, provider)
+    idle_next_due = _provider_idle_fetch_due_at(
+        provider_config, latest.completed_at, latest.status
+    )
     return SchedulerProviderState(
         provider=provider,
         poll_interval_minutes=provider_config.poll_interval_minutes,
         error_retry_minutes=provider_config.error_retry_minutes,
+        idle_poll_interval_minutes=provider_config.idle_poll_interval_minutes,
         suppression_hours=provider_config.suppression_hours,
         max_items=provider_config.max_items,
         last_fetch_at=latest.completed_at,
         last_status=latest.status,
         last_error=latest.error,
         next_due_at=next_due,
+        idle_next_due_at=idle_next_due,
         due=next_due <= now,
+        idle_due=idle_next_due <= now,
     )
 
 
@@ -454,6 +508,48 @@ def _provider_jitter(config: StewardConfig, provider: str) -> timedelta:
     value = int(hashlib.sha256(seed).hexdigest()[:8], 16)
     minutes = value % 17
     return timedelta(minutes=minutes)
+
+
+def _store_is_idle_for_signal_fetch(store: TaskStore) -> bool:
+    return (
+        store.source_active_count() == 0
+        and store.source_queued_count() == 0
+        and not store.pending_signal_items(limit=1)
+    )
+
+
+def _provider_idle_fetch_due_at(
+    provider: SignalProviderConfig | SchedulerProviderState,
+    last_fetch_at: datetime | None = None,
+    last_status: SignalFetchStatus | None = None,
+) -> datetime | None:
+    completed_at = last_fetch_at
+    if completed_at is None and isinstance(provider, SchedulerProviderState):
+        completed_at = provider.last_fetch_at
+    status = last_status
+    if status is None and isinstance(provider, SchedulerProviderState):
+        status = provider.last_status
+    if completed_at is None:
+        return None
+    interval = (
+        provider.error_retry_minutes
+        if status == SignalFetchStatus.error
+        else min(provider.poll_interval_minutes, provider.idle_poll_interval_minutes)
+    )
+    return completed_at + timedelta(minutes=interval)
+
+
+def _idle_fetch_provider_names(
+    state: SchedulerState, *, coalesce_window: timedelta = timedelta(0)
+) -> list[str]:
+    now = _now()
+    cutoff = now + coalesce_window
+    return [
+        provider.provider
+        for provider in state.providers
+        if provider.idle_next_due_at is not None
+        and provider.idle_next_due_at <= cutoff
+    ]
 
 
 def _now() -> datetime:

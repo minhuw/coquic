@@ -84,7 +84,10 @@ def daemon(
                 )
                 typer.echo(result)
             elif web_ui:
-                with StewardWebRuntime(log_dir=config.logs_dir) as runtime:
+                with StewardWebRuntime(
+                    log_dir=config.logs_dir,
+                    expected_state_dir=config.state_dir,
+                ) as runtime:
                     typer.echo(f"Steward API: {runtime.api_url}")
                     typer.echo(f"Steward Web UI: {runtime.ui_url}")
                     _run_until_stopped(daemon_)
@@ -104,7 +107,13 @@ def daemon(
 def plan(enqueue: bool = False) -> None:
     store, config = _context()
     for collection in collect_signal_items(config):
-        saved, created = store.add_signal_items(collection.items)
+        provider_config = config.signal_providers.get(collection.provider)
+        saved, created = store.add_signal_items(
+            collection.items,
+            suppression_hours=(
+                provider_config.suppression_hours if provider_config else 24
+            ),
+        )
         store.add_signal_fetch_run(
             collection.fetch.model_copy(
                 update={"item_count": len(saved), "new_item_count": created}

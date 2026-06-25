@@ -52,6 +52,11 @@ ask workers to fetch an unknown issue list to decide scope. They may only use
 remote APIs to verify that the provided signal items are still current or to
 collect extra details for the same selected items.
 
+For GitHub Actions signal items, plan one task per selected workflow run/provider.
+Use payload.worker_context to choose the task kind, worker, validation scope, and
+worker prompt. Do not create a generic "GitHub Actions" task that combines
+different workflow files.
+
 Return only JSON matching the requested schema. Do not include markdown,
 commentary, code fences, or prose outside the JSON object.
 """

@@ -252,13 +252,16 @@ class SchedulerProviderState(BaseModel):
     provider: str
     poll_interval_minutes: int
     error_retry_minutes: int
+    idle_poll_interval_minutes: int
     suppression_hours: int
     max_items: int
     last_fetch_at: datetime | None = None
     last_status: SignalFetchStatus | None = None
     last_error: str | None = None
     next_due_at: datetime
+    idle_next_due_at: datetime | None = None
     due: bool = False
+    idle_due: bool = False
 
 
 class SchedulerState(BaseModel):

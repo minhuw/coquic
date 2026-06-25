@@ -44,6 +44,7 @@ from coquic_steward.core.models import (
     new_task_id,
     utc_now,
 )
+from coquic_steward.core.subprocesses import CommandResult
 from coquic_steward.execution import StewardExecutor, Worktrees
 from coquic_steward.execution.executor import (
     commit_message_schema_path,
@@ -63,6 +64,7 @@ from coquic_steward.orchestration import (
 )
 from coquic_steward.orchestration.daemon import (
     DAEMON_EVENT_TASK_ID,
+    SchedulerTrigger,
     due_provider_names,
     scheduler_state,
     status_stale_minutes,
@@ -79,33 +81,55 @@ from coquic_steward.planning import (
 from coquic_steward.planning.verifier import ActiveTaskSummary
 from coquic_steward.signals import (
     CodacyProvider,
+    GitHubActionsCiProvider,
+    GitHubActionsInteropProvider,
+    GitHubActionsPerfProvider,
     ProviderSignalResult,
     collect_signal_items,
     gather_signals,
 )
+from coquic_steward.signals.collector import PROVIDER_TYPES
 from coquic_steward.storage import TaskStore
 from coquic_steward.storage.schema import (
     EventRow,
+    SignalItemRow,
     TaskIterationRow,
     TaskRow,
     ValidationRow,
 )
-from coquic_steward.web.app import create_app
+from coquic_steward.web.app import TEXT_TAIL_BYTES, create_app
 
 
 def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
     config = load_config(repo_root=repo)
     assert config.repo_root == repo
     assert config.steward_home == coquic_home / "steward"
-    assert config.db_path.parent.parent == coquic_home / "steward" / "repos"
+    assert config.state_dir == coquic_home / "steward"
+    assert config.db_path == coquic_home / "steward" / "steward.sqlite"
     assert config.db_path.name == "steward.sqlite"
     assert config.legacy_json_path == config.state_dir / "steward.json"
     assert config.worktrees_dir == config.state_dir / "worktrees"
     assert config.transcripts_dir == config.state_dir / "transcripts"
     assert config.integration_mode == "local-only"
     assert config.local_only is False
-    assert config.enabled_signals == ("github-actions", "code-scanning", "codacy")
-    assert config.signal_providers["github-actions"].poll_interval_minutes == 30
+    assert config.enabled_signals == (
+        "github-actions:ci",
+        "github-actions:test",
+        "github-actions:duvet",
+        "github-actions:nightly-ci",
+        "github-actions:deploy-demo",
+        "github-actions:interop",
+        "github-actions:perf",
+        "code-scanning",
+        "codacy",
+    )
+    assert config.signal_providers["github-actions:ci"].poll_interval_minutes == 30
+    assert config.signal_providers["github-actions:test"].poll_interval_minutes == 30
+    assert config.signal_providers["github-actions:duvet"].poll_interval_minutes == 1440
+    assert (
+        config.signal_providers["github-actions:nightly-ci"].idle_poll_interval_minutes
+        == 1440
+    )
     assert config.signal_providers["code-scanning"].poll_interval_minutes == 360
     assert config.signal_providers["codacy"].poll_interval_minutes == 360
 
@@ -141,6 +165,7 @@ enabled = ["codacy"]
 [steward.signals.codacy]
 poll_interval_minutes = 720
 error_retry_minutes = 45
+idle_poll_interval_minutes = 5
 suppression_hours = 12
 max_items = 25
 """,
@@ -152,6 +177,7 @@ max_items = 25
 
     assert provider.poll_interval_minutes == 720
     assert provider.error_retry_minutes == 45
+    assert provider.idle_poll_interval_minutes == 5
     assert provider.suppression_hours == 12
     assert provider.max_items == 25
 
@@ -578,6 +604,141 @@ def test_store_suppresses_recent_duplicate_signal_fingerprints(
     assert not duplicate_created
     assert second.id == first.id
     assert len(store.pending_signal_items()) == 1
+
+
+def test_store_keeps_planned_signal_deduped_after_recent_fetch_refresh(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.finish_task(task.id, TaskStatus.pushed, "pushed")
+    first, created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        )
+    )
+    assert created
+    store.mark_signal_items_planned(
+        [first.id], planner_run_id="planner-1", task_id=task.id
+    )
+    old = utc_now() - timedelta(hours=25)
+    recent = utc_now() - timedelta(minutes=5)
+    with Session(store.engine) as session, session.begin():
+        row = session.get(SignalItemRow, first.id)
+        assert row is not None
+        row.planned_at = old.isoformat()
+        row.updated_at = recent.isoformat()
+
+    second, duplicate_created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-2",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        )
+    )
+
+    assert not duplicate_created
+    assert second.id == first.id
+    assert store.pending_signal_items() == []
+    refreshed = store.list_signal_items(status=SignalItemStatus.planned)[0]
+    assert refreshed.id == first.id
+
+
+def test_store_keeps_planned_signal_deduped_after_configured_suppression(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.finish_task(task.id, TaskStatus.failed, "failed")
+    first, created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        )
+    )
+    assert created
+    store.mark_signal_items_planned(
+        [first.id], planner_run_id="planner-1", task_id=task.id
+    )
+    old = utc_now() - timedelta(hours=2)
+    with Session(store.engine) as session, session.begin():
+        row = session.get(SignalItemRow, first.id)
+        assert row is not None
+        row.planned_at = old.isoformat()
+        row.updated_at = old.isoformat()
+
+    second, duplicate_created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-2",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        ),
+        suppression_hours=1,
+    )
+
+    assert not duplicate_created
+    assert second.id == first.id
+    assert store.pending_signal_items() == []
+    refreshed = store.list_signal_items(status=SignalItemStatus.planned)[0]
+    assert refreshed.id == first.id
+
+
+def test_store_suppresses_planned_signal_while_task_is_active(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    first, created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        )
+    )
+    assert created
+    store.mark_signal_items_planned(
+        [first.id], planner_run_id="planner-1", task_id=task.id
+    )
+    old = utc_now() - timedelta(hours=2)
+    with Session(store.engine) as session, session.begin():
+        row = session.get(SignalItemRow, first.id)
+        assert row is not None
+        row.planned_at = old.isoformat()
+        row.updated_at = old.isoformat()
+
+    second, duplicate_created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-2",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        ),
+        suppression_hours=1,
+    )
+
+    assert not duplicate_created
+    assert second.id == first.id
+    assert store.pending_signal_items() == []
 
 
 def test_store_marks_signal_items_planned(config: StewardConfig) -> None:
@@ -1225,6 +1386,30 @@ def test_daemon_dispatch_skips_full_integration_lane_for_source_capacity(
     assert store.get(queued_integration.id).status == TaskStatus.queued
 
 
+def test_daemon_forever_dispatches_one_task_per_cycle(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    daemon = StewardDaemon(config, store)
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.wait_for_scheduler_event",
+        lambda *_args: SchedulerTrigger(reason="wakeup", providers=[]),
+    )
+
+    def fake_run_cycle(**kwargs) -> None:
+        calls.append(kwargs)
+        raise StopIteration
+
+    monkeypatch.setattr(daemon, "run_cycle", fake_run_cycle)
+
+    with pytest.raises(StopIteration):
+        daemon.run_forever()
+
+    assert calls == [{"fetch_providers": [], "max_dispatch": 1, "reason": "wakeup"}]
+
+
 def test_daemon_skips_signal_fetch_when_active_capacity_is_full(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -1263,16 +1448,45 @@ def test_daemon_skips_signal_fetch_when_active_capacity_is_full(
     assert result.enqueued == 0
 
 
-def test_daemon_local_wakeup_does_not_fetch_due_providers(
+def test_daemon_local_wakeup_fetches_idle_due_signals_when_idle(
     config: StewardConfig, monkeypatch
 ) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "enabled_signals": ("code-scanning", "codacy"),
+            "signal_providers": {
+                "code-scanning": config.signal_providers["code-scanning"].__class__(
+                    poll_interval_minutes=360,
+                    idle_poll_interval_minutes=1,
+                ),
+                "codacy": config.signal_providers["codacy"].__class__(
+                    poll_interval_minutes=360,
+                    idle_poll_interval_minutes=30,
+                ),
+            },
+        }
+    )
+    config.ensure_dirs()
     store = TaskStore(config.db_path)
+    fetched_at = utc_now() - timedelta(minutes=2)
+    for provider in config.enabled_signals:
+        store.add_signal_fetch_run(
+            SignalFetchRun(
+                provider=provider,
+                status=SignalFetchStatus.ok,
+                started_at=fetched_at,
+                completed_at=fetched_at,
+                item_count=0,
+                new_item_count=0,
+                summary="none",
+            )
+        )
     store.request_wakeup("task.status", {"task_id": "task-1"})
-    called = False
+    fetched: list[list[str]] = []
 
-    def fake_collect(*_args, **_kwargs):
-        nonlocal called
-        called = True
+    def fake_collect(_config, *, provider_names=None):
+        fetched.append(list(provider_names or []))
         return []
 
     monkeypatch.setattr(
@@ -1294,8 +1508,85 @@ def test_daemon_local_wakeup_does_not_fetch_due_providers(
 
     result = StewardDaemon(config, store).run_cycle(dispatch=False, reason="wakeup")
 
-    assert called is False
+    assert fetched == [["code-scanning"]]
     assert result.signal_fetches == 0
+    assert store.pending_wakeups() == []
+
+
+def test_daemon_idle_signal_fetch_waits_for_existing_local_work(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    store.request_wakeup("task.status", {"task_id": "task-1"})
+    store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    fetched: list[list[str]] = []
+
+    def fake_collect(_config, *, provider_names=None):
+        fetched.append(list(provider_names or []))
+        return []
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_items",
+        fake_collect,
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        lambda *_args: pytest.fail("planner should not run before queued work"),
+    )
+
+    result = StewardDaemon(config, store).run_cycle(plan=True, dispatch=False, reason="wakeup")
+
+    assert fetched == []
+    assert result.signal_fetches == 0
+    assert store.pending_wakeups() == []
+
+
+def test_daemon_idle_signal_fetch_waits_for_pending_signal_items(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    store.request_wakeup("task.status", {"task_id": "task-1"})
+    store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="pending",
+            title="Pending finding",
+        )
+    )
+    fetched: list[list[str]] = []
+
+    def fake_collect(_config, *, provider_names=None):
+        fetched.append(list(provider_names or []))
+        return []
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_items",
+        fake_collect,
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        lambda *_args: PlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=config.transcripts_dir / "planner" / "codex.jsonl",
+            thread_id=None,
+            consumed_item_ids=[],
+        ),
+    )
+
+    result = StewardDaemon(config, store).run_cycle(plan=True, dispatch=False, reason="wakeup")
+
+    assert fetched == []
+    assert result.signal_fetches == 0
+    assert result.planned == 0
     assert store.pending_wakeups() == []
 
 
@@ -1344,7 +1635,10 @@ def test_scheduler_state_tracks_provider_due_times(config: StewardConfig) -> Non
 
     assert codacy.due is False
     assert codacy.poll_interval_minutes == 360
+    assert codacy.idle_poll_interval_minutes == 30
     assert codacy.next_due_at > codacy.last_fetch_at
+    assert codacy.idle_next_due_at == codacy.last_fetch_at + timedelta(minutes=30)
+    assert codacy.idle_due is False
 
 
 def test_wait_for_scheduler_event_returns_due_providers(config: StewardConfig) -> None:
@@ -1366,6 +1660,152 @@ def test_wait_for_scheduler_event_prioritizes_pending_wakeup(
 
     assert trigger.reason == "wakeup"
     assert trigger.providers == []
+
+
+def test_wait_for_scheduler_event_fetches_signals_when_idle(
+    config: StewardConfig,
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "enabled_signals": ("code-scanning", "codacy"),
+            "signal_providers": {},
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    fetched_at = utc_now() - timedelta(minutes=31)
+    for provider in config.enabled_signals:
+        store.add_signal_fetch_run(
+            SignalFetchRun(
+                provider=provider,
+                status=SignalFetchStatus.ok,
+                started_at=fetched_at,
+                completed_at=fetched_at,
+                item_count=0,
+                new_item_count=0,
+                summary="none",
+            )
+        )
+
+    trigger = wait_for_scheduler_event(config, store)
+
+    assert trigger.reason == "idle-fetch"
+    assert trigger.providers == list(config.enabled_signals)
+
+
+def test_wait_for_scheduler_event_uses_configured_idle_poll_interval(
+    config: StewardConfig,
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "enabled_signals": ("codacy",),
+            "signal_providers": {
+                "codacy": config.signal_providers["codacy"].__class__(
+                    poll_interval_minutes=360,
+                    idle_poll_interval_minutes=1,
+                )
+            },
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    fetched_at = utc_now() - timedelta(minutes=2)
+    store.add_signal_fetch_run(
+        SignalFetchRun(
+            provider="codacy",
+            status=SignalFetchStatus.ok,
+            started_at=fetched_at,
+            completed_at=fetched_at,
+            item_count=0,
+            new_item_count=0,
+            summary="none",
+        )
+    )
+
+    trigger = wait_for_scheduler_event(config, store)
+
+    assert trigger.reason == "idle-fetch"
+    assert trigger.providers == ["codacy"]
+
+
+def test_wait_for_scheduler_event_coalesces_near_idle_fetches(
+    config: StewardConfig,
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "enabled_signals": ("code-scanning", "codacy"),
+            "signal_providers": {},
+            "scheduler_wait_interval_sec": 2.0,
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    first_due = utc_now() - timedelta(minutes=31)
+    second_due_soon = utc_now() - timedelta(minutes=30) + timedelta(seconds=1)
+    for provider, fetched_at in [
+        ("code-scanning", first_due),
+        ("codacy", second_due_soon),
+    ]:
+        store.add_signal_fetch_run(
+            SignalFetchRun(
+                provider=provider,
+                status=SignalFetchStatus.ok,
+                started_at=fetched_at,
+                completed_at=fetched_at,
+                item_count=0,
+                new_item_count=0,
+                summary="none",
+            )
+        )
+
+    trigger = wait_for_scheduler_event(config, store)
+
+    assert trigger.reason == "idle-fetch"
+    assert trigger.providers == ["code-scanning", "codacy"]
+
+
+def test_wait_for_scheduler_event_does_not_idle_fetch_with_queued_work(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "enabled_signals": ("codacy",),
+            "signal_providers": {},
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    store.add_signal_fetch_run(
+        SignalFetchRun(
+            provider="codacy",
+            status=SignalFetchStatus.ok,
+            started_at=utc_now() - timedelta(minutes=31),
+            completed_at=utc_now() - timedelta(minutes=31),
+            item_count=0,
+            new_item_count=0,
+            summary="none",
+        )
+    )
+    store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.consume_wakeups([wakeup.id for wakeup in store.pending_wakeups()])
+    sleep_calls: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        raise StopIteration
+
+    monkeypatch.setattr("coquic_steward.orchestration.daemon.time.sleep", fake_sleep)
+
+    with pytest.raises(StopIteration):
+        wait_for_scheduler_event(config, store)
+
+    assert sleep_calls == [pytest.approx(config.scheduler_wait_interval_sec)]
 
 
 def test_daemon_plans_bounded_signal_item_inbox(
@@ -1677,11 +2117,15 @@ def test_codex_planner_prompt_includes_active_tasks(
             items=[
                 SignalItem(
                     id="wi-interop-100",
-                    provider="github-actions",
+                    provider="github-actions:interop",
                     kind="github-actions.interop-failure",
                     fingerprint="wi-interop-100",
                     title="Interop workflow failed",
-                    payload={"run_id": "100", "workflow_name": "Interop"},
+                    payload={
+                        "run_id": "100",
+                        "workflow_name": "Interop",
+                        "workflow_file": "interop.yml",
+                    },
                 )
             ],
         ),
@@ -2110,6 +2554,160 @@ def test_signal_fetch_errors_are_not_signal_items(
     assert collection.items == []
 
 
+def test_signal_registry_exposes_only_concrete_github_actions_providers() -> None:
+    assert "github-actions" not in PROVIDER_TYPES
+    assert {
+        "github-actions:ci",
+        "github-actions:test",
+        "github-actions:duvet",
+        "github-actions:nightly-ci",
+        "github-actions:deploy-demo",
+        "github-actions:interop",
+        "github-actions:perf",
+    }.issubset(PROVIDER_TYPES)
+
+
+def test_github_actions_interop_signal_filters_workflow(
+    config: StewardConfig, monkeypatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        captured["args"] = args
+        captured["cwd"] = cwd
+        captured["timeout"] = timeout
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 123,
+                        "workflowName": "Interop",
+                        "conclusion": "failure",
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command",
+        fake_run_command,
+    )
+
+    signals = gather_signals(config, providers=[GitHubActionsInteropProvider()])
+
+    args = captured["args"]
+    assert isinstance(args, list)
+    assert args[args.index("--workflow") + 1] == "interop.yml"
+    assert args[args.index("--status") + 1] == "failure"
+    assert captured["cwd"] == config.repo_root
+    assert len(signals.items) == 1
+    item = signals.items[0]
+    assert item.provider == "github-actions:interop"
+    assert item.id.startswith("wi-github-actions-interop-interop-failure-")
+    assert item.kind == "github-actions.interop-failure"
+    assert item.payload["run_id"] == "123"
+    assert item.payload["workflow_name"] == "Interop"
+    assert item.payload["conclusion"] == "failure"
+    assert item.payload["workflow_file"] == "interop.yml"
+    assert item.payload["worker_context"]["recommended_worker"] == "interop-doctor"
+    assert item.payload["worker_context"]["recommended_task_kind"] == "interop"
+    assert "interop/run-official.sh" in " ".join(
+        item.payload["worker_context"]["investigation_steps"]
+    )
+
+
+def test_github_actions_ci_signal_includes_worker_context(
+    config: StewardConfig, monkeypatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        captured["args"] = args
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 789,
+                        "workflowName": "Per-Commit CI",
+                        "conclusion": "failure",
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command",
+        fake_run_command,
+    )
+
+    signals = gather_signals(config, providers=[GitHubActionsCiProvider()])
+
+    args = captured["args"]
+    assert isinstance(args, list)
+    assert args[args.index("--workflow") + 1] == "ci.yml"
+    item = signals.items[0]
+    assert item.provider == "github-actions:ci"
+    assert item.kind == "github-actions.ci-failure"
+    assert item.payload["workflow_file"] == "ci.yml"
+    context = item.payload["worker_context"]
+    assert context["recommended_task_kind"] == "ci"
+    assert context["recommended_worker"] == "ci-doctor"
+    assert "RFC compliance" in context["workflow_purpose"]
+    assert "nix develop -c ./scripts/compliance --ci" in context["local_validation"]
+
+
+def test_github_actions_perf_signal_is_separate_provider(
+    config: StewardConfig, monkeypatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        captured["args"] = args
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 456,
+                        "workflowName": "Perf",
+                        "conclusion": "failure",
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command",
+        fake_run_command,
+    )
+
+    signals = gather_signals(config, providers=[GitHubActionsPerfProvider()])
+
+    args = captured["args"]
+    assert isinstance(args, list)
+    assert args[args.index("--workflow") + 1] == "perf.yml"
+    assert signals.enabled_signals == ["github-actions:perf"]
+    assert signals.items[0].provider == "github-actions:perf"
+    assert signals.items[0].id.startswith("wi-github-actions-perf-perf-failure-")
+    assert signals.items[0].kind == "github-actions.perf-failure"
+    assert signals.items[0].payload["run_id"] == "456"
+    assert (
+        signals.items[0].payload["worker_context"]["workflow_file"]
+        == "perf.yml"
+    )
+
+
 def test_codacy_signal_uses_public_issue_search_without_token(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -2348,6 +2946,59 @@ def test_code_quality_prompt_keeps_worker_inside_patch_boundary(
     assert "src/main.cpp" in prompt
     assert "single source of truth" in prompt
     assert "Do not fetch a broad or unknown issue list" in prompt
+
+
+def test_worker_prompt_highlights_workflow_signal_guidance(
+    config: StewardConfig,
+) -> None:
+    task = TaskStore(config.db_path).add_task(
+        TaskSpec(
+            kind=TaskKind.ci,
+            worker=WorkerKind.ci_doctor,
+            title="Debug failed Test run 100",
+            prompt="Debug the selected Test workflow run.",
+            metadata={
+                "source_context": {
+                    "selected_signal_item_ids": ["wi-github-actions-test-1"],
+                    "selected_signal_items": [
+                        {
+                            "id": "wi-github-actions-test-1",
+                            "provider": "github-actions:test",
+                            "kind": "github-actions.test-failure",
+                            "payload": {
+                                "run_id": "100",
+                                "workflow_file": "test.yml",
+                                "worker_context": {
+                                    "workflow_file": "test.yml",
+                                    "recommended_task_kind": "ci",
+                                    "recommended_worker": "ci-doctor",
+                                    "workflow_purpose": "Build and unit-test CoQUIC.",
+                                    "investigation_steps": [
+                                        "Inspect the selected run id for the Build or Test step that failed."
+                                    ],
+                                    "local_validation": [
+                                        "nix develop -c zig build test"
+                                    ],
+                                    "scope_limits": [
+                                        "Commit and push remain Steward integration responsibilities."
+                                    ],
+                                },
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+    )[0]
+    task.worktree_path = config.repo_root
+
+    prompt = render_worker_prompt(task, config)
+
+    assert "Selected source guidance:" in prompt
+    assert "recommended_worker: ci-doctor" in prompt
+    assert "workflow_file: test.yml" in prompt
+    assert "nix develop -c zig build test" in prompt
+    assert "Authoritative source context:" in prompt
 
 
 def test_review_verdict_uses_structured_output() -> None:
@@ -2659,9 +3310,20 @@ def test_executor_marks_task_validation_running_before_gates(
         from coquic_steward.core.models import ValidationResult
 
         current = store.get(task_id)
+        iteration = store.get_iteration(task_id, 0)
         validation_event = store.events(task_id)[-1]
         observed["status"] = current.status
         observed["summary"] = current.summary
+        observed["task_patch_path"] = current.patch_path
+        iteration_patch_text = (
+            iteration.patch_path.read_text(encoding="utf-8")
+            if iteration.patch_path
+            else ""
+        )
+        observed["iteration_patch_saved"] = bool(iteration.patch_path)
+        observed["iteration_patch_has_worker_change"] = (
+            "-hello\n+changed by steward\n" in iteration_patch_text
+        )
         observed["event_kind"] = validation_event.kind
         observed["event_phase"] = validation_event.data["phase"]
 
@@ -2680,6 +3342,9 @@ def test_executor_marks_task_validation_running_before_gates(
     assert observed == {
         "status": TaskStatus.running,
         "summary": "validation running: initial",
+        "task_patch_path": None,
+        "iteration_patch_saved": True,
+        "iteration_patch_has_worker_change": True,
         "event_kind": "task.status",
         "event_phase": "validation",
     }
@@ -3488,6 +4153,111 @@ def test_integration_conflict_returns_to_worker_then_queues_retry(
     assert "exec resume --json" in calls.read_text(encoding="utf-8")
 
 
+def test_integration_conflict_no_changes_marks_source_no_changes(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True)
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "git_remote": "origin",
+            "integration_mode": IntegrationMode.push_main.value,
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    fake = tmp_path / "codex"
+    calls = tmp_path / "calls.txt"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        "printf 'already on main\\n' > \"$last\"\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    old_base = Worktrees(config).create(source)[0]
+    (old_base / "README.md").write_text("old base\nworker change\n", encoding="utf-8")
+    source = store.get(source.id)
+    source.worktree_path = old_base
+    source.patch_path = config.patches_dir / source.id / "iteration-0.patch"
+    source.spec.metadata["worker_thread_id"] = "worker-thread-1"
+    Worktrees(config).save_patch(old_base, source.patch_path)
+    store.save(source)
+    source = store.start_integration(source.id, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate T",
+            prompt="Integrate",
+            metadata={
+                "source_task_id": source.id,
+                "source_patch_path": str(source.patch_path),
+                "dedupe_key": f"integration:{source.id}",
+            },
+        ),
+        dedupe_key=f"integration:{source.id}",
+    )
+    subprocess.run(
+        ["git", "checkout", "main"],
+        cwd=config.repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (config.repo_root / "README.md").write_text(
+        "old base\nworker change\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "README.md"], cwd=config.repo_root, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "test: apply equivalent change"],
+        cwd=config.repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(["git", "push", "origin", "main"], cwd=config.repo_root, check=True)
+
+    assert StewardExecutor(config, store).run_task(integration.id)
+
+    saved_source = store.get(source.id)
+    saved_integration = store.get(integration.id)
+    integration_tasks = [
+        item
+        for item in store.list_tasks()
+        if item.spec.worker == WorkerKind.integration_manager
+    ]
+    events = store.events(source.id)
+
+    assert saved_integration.status == TaskStatus.blocked
+    assert saved_source.status == TaskStatus.no_changes
+    assert saved_source.summary == "worker produced no source changes"
+    assert len(integration_tasks) == 1
+    assert any(event.kind == "integration.conflict" for event in events)
+    assert any(event.kind == "worker.integration_revision_requested" for event in events)
+    assert not any(event.kind == "integration.retry_requested" for event in events)
+    assert "exec resume --json" in calls.read_text(encoding="utf-8")
+
+
 def test_integration_validation_failure_returns_to_worker_then_queues_retry(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
@@ -4085,13 +4855,20 @@ def test_cli_enqueue_and_status(repo: Path, monkeypatch) -> None:
 def test_cli_daemon_starts_web_runtime_for_forever_mode(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
     started = []
+    captured = {}
 
     class FakeRuntime:
         api_url = "http://127.0.0.1:8765"
         ui_url = "http://127.0.0.1:3000"
 
-        def __init__(self, *, log_dir: Path | None = None):
+        def __init__(
+            self,
+            *,
+            log_dir: Path | None = None,
+            expected_state_dir: Path | None = None,
+        ):
             started.append(f"log_dir={log_dir.name if log_dir else '-'}")
+            captured["expected_state_dir"] = expected_state_dir
 
         def __enter__(self):
             started.append("enter")
@@ -4112,6 +4889,7 @@ def test_cli_daemon_starts_web_runtime_for_forever_mode(repo: Path, monkeypatch)
 
     assert result.exit_code == 0
     assert started == ["log_dir=logs", "enter", "daemon", "exit"]
+    assert captured["expected_state_dir"] == load_config().state_dir
     assert "Steward Web UI: http://127.0.0.1:3000" in result.output
 
 
@@ -4191,6 +4969,39 @@ def test_web_runtime_rejects_api_without_signal_items_v2(monkeypatch) -> None:
     assert runtime._api_ready("http://127.0.0.1:8765") is False
 
 
+def test_web_runtime_rejects_api_with_different_state_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from coquic_steward.web import runtime
+
+    expected = tmp_path / "expected" / "steward"
+    actual = tmp_path / "actual" / "steward"
+
+    def fake_read_url(url: str) -> str | None:
+        return "ok" if url.endswith("/healthz") else None
+
+    def fake_read_json(url: str) -> object:
+        assert url.endswith("/api/runtime")
+        return {
+            "api": "coquic-steward",
+            "state_dir": str(actual),
+            "features": ["line-tail", "signal-inbox", "signal-items-v2"],
+        }
+
+    monkeypatch.setattr(runtime, "_read_url", fake_read_url)
+    monkeypatch.setattr(runtime, "_read_json", fake_read_json)
+
+    assert (
+        runtime._api_ready(
+            "http://127.0.0.1:8765", expected_state_dir=expected
+        )
+        is False
+    )
+    assert "running state_dir=" in runtime._api_state_detail(
+        "http://127.0.0.1:8765", expected_state_dir=expected
+    )
+
+
 def test_web_runtime_read_url_rejects_non_loopback_urls(monkeypatch) -> None:
     from coquic_steward.web import runtime
 
@@ -4243,7 +5054,7 @@ def test_web_runtime_read_url_opens_loopback_http(monkeypatch) -> None:
 def test_web_runtime_reports_incompatible_running_api(tmp_path: Path, monkeypatch) -> None:
     from coquic_steward.web import runtime
 
-    monkeypatch.setattr(runtime, "_api_ready", lambda _url: False)
+    monkeypatch.setattr(runtime, "_api_ready", lambda _url, **_kwargs: False)
     monkeypatch.setattr(runtime, "_api_responding", lambda _url: True)
 
     with pytest.raises(RuntimeError, match="incompatible Steward API"):
@@ -4367,7 +5178,7 @@ def test_web_runtime_clears_stale_next_cache_before_starting_ui(
         assert not (web_ui_dir / ".next").exists()
         return FakeProcess()
 
-    monkeypatch.setattr(runtime, "_api_ready", lambda _url: True)
+    monkeypatch.setattr(runtime, "_api_ready", lambda _url, **_kwargs: True)
     monkeypatch.setattr(runtime, "_ui_ready", lambda _url: bool(started))
     monkeypatch.setattr(runtime, "_popen", fake_popen)
 
@@ -4417,10 +5228,20 @@ def test_web_health_and_dashboard(config: StewardConfig, monkeypatch) -> None:
     assert payload["scheduler"]["source_queued"] == 1
     assert payload["scheduler"]["source_capacity"] == config.limits.max_active_tasks
     assert [provider["provider"] for provider in payload["scheduler"]["providers"]] == [
-        "github-actions",
+        "github-actions:ci",
+        "github-actions:test",
+        "github-actions:duvet",
+        "github-actions:nightly-ci",
+        "github-actions:deploy-demo",
+        "github-actions:interop",
+        "github-actions:perf",
         "code-scanning",
         "codacy",
     ]
+    assert payload["config"]["coquic_home"] == str(config.coquic_home)
+    assert payload["config"]["codex_sandbox"] == config.codex_sandbox
+    assert payload["config"]["limits"]["max_active_tasks"] == config.limits.max_active_tasks
+    assert payload["config"]["signal_providers"]["codacy"]["max_items"] == 12
 
 
 def test_web_state_returns_signal_inbox_without_fetching(
@@ -4726,6 +5547,12 @@ def test_web_task_detail_returns_attempt_stack(
     worker = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
     reviewer = config.transcripts_dir / task.id / "reviewer-0" / "codex.jsonl"
     revision = config.transcripts_dir / task.id / "worker-revision-1" / "codex.jsonl"
+    integration_revision = (
+        config.transcripts_dir
+        / task.id
+        / "worker-integration-revision-2"
+        / "codex.jsonl"
+    )
     for path, text in [(worker, '{"message":"worker"}\n')]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
@@ -4745,6 +5572,7 @@ def test_web_task_detail_returns_attempt_stack(
     for path, text in [
         (reviewer, '{"message":"reviewer"}\n'),
         (revision, '{"message":"revision"}\n'),
+        (integration_revision, '{"message":"integration revision"}\n'),
     ]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
@@ -4754,16 +5582,87 @@ def test_web_task_detail_returns_attempt_stack(
     client = TestClient(app)
     detail = client.get(f"/api/tasks/{task.id}").json()
     response = client.get(f"/api/tasks/{task.id}/runs/worker-revision-1/transcript")
+    integration_response = client.get(
+        f"/api/tasks/{task.id}/runs/worker-integration-revision-2/transcript"
+    )
     unsafe = client.get(f"/api/tasks/{task.id}/runs/../worker/transcript")
 
-    assert [attempt["attempt"] for attempt in detail["attempts"]] == [0, 1]
+    assert [attempt["attempt"] for attempt in detail["attempts"]] == [0, 1, 2]
     assert detail["attempts"][0]["worker"]["name"] == "worker"
     assert detail["attempts"][0]["reviewer"]["name"] == "reviewer-0"
     assert detail["attempts"][1]["worker"]["name"] == "worker-revision-1"
+    assert detail["attempts"][2]["worker"]["name"] == "worker-integration-revision-2"
     assert detail["attempts"][0]["validations"][0]["index"] == 0
     assert response.status_code == 200
     assert response.text == '{"message":"revision"}\n'
+    assert integration_response.status_code == 200
+    assert integration_response.text == '{"message":"integration revision"}\n'
     assert unsafe.status_code in {400, 404}
+
+
+def test_web_run_transcript_can_return_full_text(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    transcript = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(
+        '{"type":"thread.started","thread_id":"t"}\n'
+        + '{"type":"item.completed","item":{"id":"big","type":"command_execution","aggregated_output":"'
+        + ("x" * (TEXT_TAIL_BYTES + 1024))
+        + '"}}\n',
+        encoding="utf-8",
+    )
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    tail_response = client.get(f"/api/tasks/{task.id}/runs/worker/transcript")
+    full_response = client.get(f"/api/tasks/{task.id}/runs/worker/transcript?full=1")
+
+    assert tail_response.status_code == 200
+    assert full_response.status_code == 200
+    assert len(tail_response.text) < len(full_response.text)
+    assert full_response.text == transcript.read_text(encoding="utf-8")
+
+
+def test_web_run_transcript_window_returns_metadata(
+    config: StewardConfig, monkeypatch
+) -> None:
+    monkeypatch.chdir(config.repo_root)
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    transcript = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text("one\n" + ("two\n" * 100) + "three\n", encoding="utf-8")
+    app = create_app()
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    latest = client.get(f"/api/tasks/{task.id}/runs/worker/transcript?window=1&limit=20")
+    latest_payload = latest.json()
+    earlier = client.get(
+        f"/api/tasks/{task.id}/runs/worker/transcript"
+        f"?window=1&offset={max(0, latest_payload['start'] - 20)}&limit=20"
+    )
+    earlier_payload = earlier.json()
+
+    assert latest.status_code == 200
+    assert latest_payload["size"] == transcript.stat().st_size
+    assert latest_payload["end"] == latest_payload["size"]
+    assert latest_payload["has_before"] is True
+    assert latest_payload["has_after"] is False
+    assert latest_payload["text"].endswith("three\n")
+    assert earlier.status_code == 200
+    assert earlier_payload["end"] <= latest_payload["start"]
+    assert earlier_payload["has_before"] is True
+    assert earlier_payload["has_after"] is True
 
 
 def test_web_task_detail_prefers_database_iterations(

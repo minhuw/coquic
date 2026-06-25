@@ -8,12 +8,24 @@ from ..core.models import ProjectSignals, SignalFetchRun, SignalFetchStatus, Sig
 from .providers import (
     CodacyProvider,
     CodeScanningProvider,
-    GitHubActionsProvider,
+    GitHubActionsCiProvider,
+    GitHubActionsDeployDemoProvider,
+    GitHubActionsDuvetProvider,
+    GitHubActionsInteropProvider,
+    GitHubActionsNightlyCiProvider,
+    GitHubActionsPerfProvider,
+    GitHubActionsTestProvider,
     SignalProvider,
 )
 
 PROVIDER_TYPES: dict[str, type[SignalProvider]] = {
-    GitHubActionsProvider.name: GitHubActionsProvider,
+    GitHubActionsCiProvider.name: GitHubActionsCiProvider,
+    GitHubActionsTestProvider.name: GitHubActionsTestProvider,
+    GitHubActionsDuvetProvider.name: GitHubActionsDuvetProvider,
+    GitHubActionsNightlyCiProvider.name: GitHubActionsNightlyCiProvider,
+    GitHubActionsDeployDemoProvider.name: GitHubActionsDeployDemoProvider,
+    GitHubActionsInteropProvider.name: GitHubActionsInteropProvider,
+    GitHubActionsPerfProvider.name: GitHubActionsPerfProvider,
     CodeScanningProvider.name: CodeScanningProvider,
     CodacyProvider.name: CodacyProvider,
 }

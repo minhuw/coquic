@@ -56,11 +56,15 @@ class StewardWebRuntime:
         api_port: int = DEFAULT_API_PORT,
         web_ui_dir: Path | None = None,
         log_dir: Path | None = None,
+        expected_state_dir: Path | None = None,
     ):
         self.api_host = api_host
         self.api_port = api_port
         self.web_ui_dir = web_ui_dir or default_web_ui_dir()
         self.log_dir = log_dir
+        self.expected_state_dir = (
+            expected_state_dir.resolve() if expected_state_dir else None
+        )
         self._api_process: subprocess.Popen[str] | None = None
         self._ui_process: subprocess.Popen[str] | None = None
 
@@ -83,12 +87,17 @@ class StewardWebRuntime:
         if not self.web_ui_dir.exists():
             raise RuntimeError(f"web UI directory does not exist: {self.web_ui_dir}")
         try:
-            if not _api_ready(self.api_url):
+            if not _api_ready(
+                self.api_url, expected_state_dir=self.expected_state_dir
+            ):
                 if _api_responding(self.api_url):
+                    state_detail = _api_state_detail(
+                        self.api_url, expected_state_dir=self.expected_state_dir
+                    )
                     raise RuntimeError(
                         "incompatible Steward API is already running at "
                         f"{self.api_url}; stop the stale API process and restart "
-                        "the daemon"
+                        f"the daemon{state_detail}"
                     )
                 self._api_process = _popen(
                     [
@@ -107,7 +116,9 @@ class StewardWebRuntime:
                 _wait_until_ready(
                     self._api_process,
                     "Steward API",
-                    lambda: _api_ready(self.api_url),
+                    lambda: _api_ready(
+                        self.api_url, expected_state_dir=self.expected_state_dir
+                    ),
                 )
             if not _ui_ready(self.ui_url):
                 _clear_next_cache(self.web_ui_dir)
@@ -282,13 +293,36 @@ def _api_responding(api_url: str) -> bool:
     return _read_url(f"{api_url}/healthz") is not None
 
 
-def _api_ready(api_url: str) -> bool:
+def _api_ready(api_url: str, *, expected_state_dir: Path | None = None) -> bool:
     if _read_url(f"{api_url}/healthz") != "ok":
         return False
     runtime = _read_json(f"{api_url}/api/runtime")
     features = runtime.get("features") if isinstance(runtime, dict) else None
     required = {"line-tail", "signal-inbox", "signal-items-v2"}
-    return isinstance(features, list) and required.issubset(set(features))
+    if not isinstance(features, list) or not required.issubset(set(features)):
+        return False
+    if expected_state_dir is None:
+        return True
+    return _runtime_state_dir(runtime) == expected_state_dir.resolve()
+
+
+def _api_state_detail(api_url: str, *, expected_state_dir: Path | None) -> str:
+    if expected_state_dir is None:
+        return ""
+    runtime = _read_json(f"{api_url}/api/runtime")
+    actual = _runtime_state_dir(runtime)
+    if actual is None:
+        return f" (expected state_dir={expected_state_dir.resolve()})"
+    return f" (running state_dir={actual}, expected state_dir={expected_state_dir.resolve()})"
+
+
+def _runtime_state_dir(runtime: object) -> Path | None:
+    if not isinstance(runtime, dict):
+        return None
+    value = runtime.get("state_dir")
+    if not isinstance(value, str) or not value:
+        return None
+    return Path(value).expanduser().resolve()
 
 
 def _ui_ready(ui_url: str) -> bool:

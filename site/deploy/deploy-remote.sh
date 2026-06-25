@@ -109,6 +109,8 @@ previous_release_target=""
 rollback_armed=0
 rollback_performed=0
 deploy_succeeded=0
+deployment_interrupted=0
+deployment_interrupt_status=1
 verification_attempts=30
 verification_sleep_seconds=2
 same_release_repair_mode=0
@@ -285,9 +287,14 @@ on_exit() {
   set +e
 
   if [[ ${rollback_armed} -eq 1 && ${deploy_succeeded} -eq 0 ]]; then
-    echo "deployment failed; running rollback" >&2
+    if [[ ${deployment_interrupted} -eq 1 ]]; then
+      echo "deployment interrupted; running rollback" >&2
+      status="${deployment_interrupt_status}"
+    else
+      echo "deployment failed; running rollback" >&2
+      status=1
+    fi
     rollback_remote || echo "rollback failed" >&2
-    status=1
   fi
 
   remote_cleanup
@@ -295,6 +302,8 @@ on_exit() {
   exit "${status}"
 }
 trap on_exit EXIT
+trap 'deployment_interrupted=1; deployment_interrupt_status=130; exit 130' INT
+trap 'deployment_interrupted=1; deployment_interrupt_status=143; exit 143' TERM
 
 install -m 755 "${binary_path}" "${staging_dir}/h3-server"
 tar -C "${app_dir}" -cf "${staging_dir}/app.tar" .
@@ -604,7 +613,11 @@ then
 fi
 
 url="https://${public_host}/"
-mapfile -t curl_http3_out_paths < <(nix build --no-link --print-out-paths .#curl-http3)
+curl_http3_out_paths_file="${staging_dir}/curl-http3-out-paths"
+if ! nix build --no-link --print-out-paths .#curl-http3 >"${curl_http3_out_paths_file}"; then
+  fail_with_rollback "deployment verification failed: failed to build curl-http3"
+fi
+mapfile -t curl_http3_out_paths <"${curl_http3_out_paths_file}"
 curl_http3_bin=""
 for curl_http3_out in "${curl_http3_out_paths[@]}"; do
   for candidate in "${curl_http3_out}/bin/curl-http3" "${curl_http3_out}/bin/curl"; do

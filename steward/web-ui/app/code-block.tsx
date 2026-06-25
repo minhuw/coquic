@@ -1,7 +1,7 @@
 "use client";
 
-import { Check, Copy } from "lucide-react";
-import { type CSSProperties, useEffect, useMemo, useState } from "react";
+import { Check, Copy, Maximize2, X } from "lucide-react";
+import { Fragment, type CSSProperties, useEffect, useMemo, useState } from "react";
 import type { HighlighterCore, LanguageRegistration, ThemedToken, ThemeRegistrationRaw } from "shiki";
 
 type HighlightLanguage =
@@ -23,10 +23,12 @@ type DiffMetaVariant = "file" | "hunk" | "plain";
 type DiffSplitRow =
   | { kind: "content"; oldCell: DiffCell; newCell: DiffCell }
   | { kind: "meta"; text: string; variant: DiffMetaVariant };
+type DiffDisplay = "split" | "unified" | "unified-with-split-modal";
 
 type CodeBlockProps = {
   className?: string;
   compact?: boolean;
+  diffDisplay?: DiffDisplay;
   language?: string;
   showLineNumbers?: boolean;
   text: string;
@@ -42,12 +44,14 @@ let highlighterPromise: Promise<HighlighterCore> | null = null;
 export function CodeBlock({
   className = "",
   compact = false,
+  diffDisplay = "split",
   language,
   showLineNumbers = true,
   text,
   title,
 }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
+  const [expandedDiff, setExpandedDiff] = useState(false);
   const [tokens, setTokens] = useState<{ key: string; tokens: CodeToken[][] } | null>(null);
   const normalizedLanguage = normalizeLanguage(language);
   const highlightKey = `${normalizedLanguage || "text"}\n${text}`;
@@ -61,6 +65,8 @@ export function CodeBlock({
   const renderedTokens = highlightedTokens ?? fallbackTokens;
   const lineCount = Math.max(sourceLines.length, renderedTokens.length, 1);
   const label = title || languageLabel(normalizedLanguage || language || "text");
+  const expandableDiff = normalizedLanguage === "diff" && diffDisplay === "unified-with-split-modal";
+  const inlineDiffDisplay = diffDisplay === "split" ? "split" : "unified";
 
   useEffect(() => {
     let cancelled = false;
@@ -85,6 +91,15 @@ export function CodeBlock({
     };
   }, [highlightKey, normalizedLanguage, text]);
 
+  useEffect(() => {
+    if (!expandedDiff) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setExpandedDiff(false);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [expandedDiff]);
+
   async function copyCode() {
     try {
       if (navigator.clipboard) await navigator.clipboard.writeText(text);
@@ -102,18 +117,35 @@ export function CodeBlock({
     <div className={`code-block ${compact ? "compact" : ""} ${className}`.trim()}>
       <div className="code-block-toolbar">
         <span className="code-block-title">{label}</span>
-        <button
-          aria-label={copied ? "Code copied" : "Copy code"}
-          className="code-copy-button"
-          onClick={copyCode}
-          title={copied ? "Copied" : "Copy code"}
-          type="button"
-        >
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-        </button>
+        <div className="code-block-actions">
+          {expandableDiff && (
+            <button
+              aria-label="Open side-by-side diff"
+              className="code-copy-button"
+              onClick={() => setExpandedDiff(true)}
+              title="Open side-by-side diff"
+              type="button"
+            >
+              <Maximize2 size={14} />
+            </button>
+          )}
+          <button
+            aria-label={copied ? "Code copied" : "Copy code"}
+            className="code-copy-button"
+            onClick={copyCode}
+            title={copied ? "Copied" : "Copy code"}
+            type="button"
+          >
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+          </button>
+        </div>
       </div>
       {normalizedLanguage === "diff" ? (
-        <SplitDiffView rows={splitDiffRows} showLineNumbers={showLineNumbers} />
+        inlineDiffDisplay === "split" ? (
+          <SplitDiffView rows={splitDiffRows} showLineNumbers={showLineNumbers} />
+        ) : (
+          <UnifiedDiffView rows={splitDiffRows} showLineNumbers={showLineNumbers} />
+        )
       ) : (
         <pre className="code-block-pre">
           <code className={`code-block-code ${codeNumberMode(showLineNumbers)}`}>
@@ -138,6 +170,14 @@ export function CodeBlock({
             })}
           </code>
         </pre>
+      )}
+      {expandableDiff && expandedDiff && (
+        <DiffSplitModal
+          label={label}
+          onClose={() => setExpandedDiff(false)}
+          rows={splitDiffRows}
+          showLineNumbers={showLineNumbers}
+        />
       )}
     </div>
   );
@@ -180,6 +220,120 @@ function DiffSplitCell({ cell, showLineNumbers }: { cell: DiffCell; showLineNumb
       <span className="diff-split-line-number">{showLineNumbers ? cell.lineNumber || " " : " "}</span>
       <span className="diff-split-marker">{diffMarker(cell.kind)}</span>
       <span className="diff-split-content">{cell.text || " "}</span>
+    </div>
+  );
+}
+
+function UnifiedDiffView({ rows, showLineNumbers }: { rows: DiffSplitRow[]; showLineNumbers: boolean }) {
+  return (
+    <div className={`diff-unified ${showLineNumbers ? "" : "no-line-numbers"}`.trim()} role="table" aria-label="Unified diff">
+      {rows.map((row, index) => {
+        if (row.kind === "meta") {
+          return (
+            <div className={`diff-unified-meta ${row.variant}`} key={index} role="row">
+              {row.text.split("\n").map((line, lineIndex) => (
+                <span key={lineIndex}>{line || " "}</span>
+              ))}
+            </div>
+          );
+        }
+        if (row.oldCell.kind === "context" && row.newCell.kind === "context") {
+          return (
+            <UnifiedDiffLine
+              cell={row.oldCell}
+              key={index}
+              newLineNumber={row.newCell.lineNumber}
+              oldLineNumber={row.oldCell.lineNumber}
+              showLineNumbers={showLineNumbers}
+            />
+          );
+        }
+        return (
+          <Fragment key={index}>
+            {row.oldCell.kind !== "empty" && (
+              <UnifiedDiffLine
+                cell={row.oldCell}
+                newLineNumber=""
+                oldLineNumber={row.oldCell.lineNumber}
+                showLineNumbers={showLineNumbers}
+              />
+            )}
+            {row.newCell.kind !== "empty" && (
+              <UnifiedDiffLine
+                cell={row.newCell}
+                newLineNumber={row.newCell.lineNumber}
+                oldLineNumber=""
+                showLineNumbers={showLineNumbers}
+              />
+            )}
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+function UnifiedDiffLine({
+  cell,
+  newLineNumber,
+  oldLineNumber,
+  showLineNumbers,
+}: {
+  cell: DiffCell;
+  newLineNumber: string;
+  oldLineNumber: string;
+  showLineNumbers: boolean;
+}) {
+  return (
+    <div className={`diff-unified-line ${cell.kind}`} role="row">
+      {showLineNumbers && (
+        <>
+          <span className="diff-unified-line-number old">{oldLineNumber || " "}</span>
+          <span className="diff-unified-line-number new">{newLineNumber || " "}</span>
+        </>
+      )}
+      <span className="diff-unified-marker">{diffMarker(cell.kind)}</span>
+      <span className="diff-unified-content">{cell.text || " "}</span>
+    </div>
+  );
+}
+
+function DiffSplitModal({
+  label,
+  onClose,
+  rows,
+  showLineNumbers,
+}: {
+  label: string;
+  onClose: () => void;
+  rows: DiffSplitRow[];
+  showLineNumbers: boolean;
+}) {
+  return (
+    <div className="diff-modal-backdrop" onClick={onClose}>
+      <div
+        aria-label={`${label} side-by-side diff`}
+        aria-modal="true"
+        className="diff-modal"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <div className="diff-modal-toolbar">
+          <span className="diff-modal-title">{label} side-by-side</span>
+          <button
+            aria-label="Close side-by-side diff"
+            className="code-copy-button"
+            onClick={onClose}
+            title="Close"
+            type="button"
+          >
+            <X size={14} />
+          </button>
+        </div>
+        <div className="diff-modal-body">
+          <SplitDiffView rows={rows} showLineNumbers={showLineNumbers} />
+        </div>
+      </div>
     </div>
   );
 }

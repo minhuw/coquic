@@ -1,4 +1,4 @@
-import type { IntegrationDetail, PlannerRunArtifact, PlannerRunSummary, StewardState, TaskDetail } from "./types";
+import type { IntegrationDetail, PlannerRunArtifact, PlannerRunSummary, StewardState, TaskDetail, TranscriptWindow } from "./types";
 
 export type PlannerRunsPage = {
   runs: PlannerRunSummary[];
@@ -40,6 +40,33 @@ export async function getRunTranscript(taskId: string, runName: string): Promise
   );
   if (!response.ok) return "";
   return response.text();
+}
+
+export async function getRunTranscriptWindow(
+  taskId: string,
+  runName: string,
+  options: { limit?: number; offset?: number } = {},
+): Promise<TranscriptWindow> {
+  const params = new URLSearchParams({ window: "1" });
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined) params.set("offset", String(options.offset));
+  const response = await fetch(
+    `/api/tasks/${encodeURIComponent(taskId)}/runs/${encodeURIComponent(runName)}/transcript?${params.toString()}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) return emptyTranscriptWindow();
+  return response.json();
+}
+
+function emptyTranscriptWindow(): TranscriptWindow {
+  return {
+    end: 0,
+    has_after: false,
+    has_before: false,
+    size: 0,
+    start: 0,
+    text: "",
+  };
 }
 
 export async function getValidationLog(taskId: string, index: number): Promise<string> {

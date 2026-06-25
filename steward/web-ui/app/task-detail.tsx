@@ -27,7 +27,7 @@ import {
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import {
   getIterationPatch,
-  getRunTranscript,
+  getRunTranscriptWindow,
   getTask,
   getValidationLog,
   runTask,
@@ -35,7 +35,7 @@ import {
 import { CodeBlock } from "./code-block";
 import { TimelineEvent } from "./timeline";
 import { TranscriptView } from "./transcript";
-import type { CodexRunDiagnostics, EventRecord, TaskAttempt, TaskDetail, TaskRecord, TaskRunArtifact, TaskStatus } from "./types";
+import type { CodexRunDiagnostics, EventRecord, TaskAttempt, TaskDetail, TaskRecord, TaskRunArtifact, TaskStatus, TranscriptWindow } from "./types";
 
 type ReviewFinding = {
   severity: string;
@@ -85,7 +85,7 @@ type ActiveStageInfo = {
 type LoadedTask = {
   detail: TaskDetail;
   iterationPatches: Record<number, string>;
-  runTranscripts: Record<string, string>;
+  runTranscripts: Record<string, TranscriptWindow>;
 };
 
 export function TaskDetailRoute({ taskId }: { taskId: string }) {
@@ -112,14 +112,17 @@ export function TaskDetailRoute({ taskId }: { taskId: string }) {
         patchAttempts.map(async (attempt) => [attempt.attempt, await getIterationPatch(taskId, attempt.attempt)] as const),
       ),
       Promise.all(
-        runNames.map(async (name) => [name, await getRunTranscript(taskId, name)] as const),
+        runNames.map(async (name) => [name, await getRunTranscriptWindow(taskId, name)] as const),
       ),
     ]);
-    setLoaded({
+    setLoaded((current) => ({
       detail: nextDetail,
       iterationPatches: Object.fromEntries(iterationPatchEntries),
-      runTranscripts: Object.fromEntries(runEntries),
-    });
+      runTranscripts: mergeTranscriptMaps(
+        current?.runTranscripts ?? {},
+        Object.fromEntries(runEntries),
+      ),
+    }));
     setLoadError("");
   }, [taskId]);
 
@@ -162,6 +165,25 @@ export function TaskDetailRoute({ taskId }: { taskId: string }) {
       setValidationLog({ index, text: await getValidationLog(taskId, index) });
     } catch (error) {
       setLoadError(errorMessage(error, "Unable to load validation log."));
+    }
+  }
+
+  async function loadEarlierTranscript(runName: string) {
+    const current = loaded?.runTranscripts[runName];
+    if (!loaded || !current || !current.has_before || current.start <= 0) return;
+    try {
+      const previous = await getRunTranscriptWindow(taskId, runName, {
+        offset: Math.max(0, current.start - transcriptWindowLimit(current)),
+      });
+      setLoaded({
+        ...loaded,
+        runTranscripts: {
+          ...loaded.runTranscripts,
+          [runName]: mergeTranscriptWindows(previous, current),
+        },
+      });
+    } catch (error) {
+      setLoadError(errorMessage(error, "Unable to load earlier transcript."));
     }
   }
 
@@ -216,6 +238,7 @@ export function TaskDetailRoute({ taskId }: { taskId: string }) {
               attempts={attempts}
               iterationPatches={loaded.iterationPatches}
               onShowValidation={showValidation}
+              onLoadEarlierTranscript={loadEarlierTranscript}
               reviews={reviews}
               runTranscripts={loaded.runTranscripts}
               task={task}
@@ -266,14 +289,23 @@ function TaskOverviewFacts({ detail, task }: { detail: TaskDetail | null; task: 
         </div>
         <p>{task.summary || "No task summary has been recorded yet."}</p>
         <div className="task-overview-meta" aria-label="Task facts">
-          <span className="mono">{task.spec.id}</span>
-          <b>{display.kind}</b>
-          <b>{display.worker}</b>
-          <time className="mono" dateTime={task.updated_at}>{shortDate(task.updated_at)}</time>
+          <FactPill label="Task" mono value={task.spec.id} />
+          <FactPill label="Type" value={display.kind} />
+          <FactPill label={isIntegrationTask(task) ? "Source" : "Agent"} value={display.worker} />
+          <FactPill label="Updated" mono value={shortDate(task.updated_at)} />
           {remote?.commit && remote.commit_url && <GithubCommitLink commit={remote.commit} url={remote.commit_url} />}
         </div>
       </div>
     </section>
+  );
+}
+
+function FactPill({ label, mono, value }: { label: string; mono?: boolean; value: string }) {
+  return (
+    <span className="fact-pill">
+      <b>{label}</b>
+      <span className={mono ? "mono" : ""}>{value}</span>
+    </span>
   );
 }
 
@@ -284,24 +316,28 @@ function TaskFlowPanel({ flow }: { flow: TaskFlow }) {
       <PanelTitle icon={<RouteIcon />} title="Current Iteration" />
       <div className="pipeline-graph" aria-label="Task pipeline graph">
         <ReactFlow
-          nodes={graph.nodes}
+          defaultViewport={{ x: 34, y: 18, zoom: 1 }}
           edges={graph.edges}
-          nodeTypes={pipelineNodeTypes}
-          fitView
-          fitViewOptions={{ padding: 0.12, nodes: graph.fitNodes }}
-          nodesDraggable={false}
-          nodesConnectable={false}
-          nodesFocusable={false}
           edgesFocusable={false}
           elementsSelectable={false}
+          fitView={false}
+          maxZoom={1}
+          minZoom={1}
+          nodeTypes={pipelineNodeTypes}
+          nodes={graph.nodes}
+          nodesConnectable={false}
+          nodesDraggable={false}
+          nodesFocusable={false}
           panOnDrag={false}
           panOnScroll={false}
+          preventScrolling={false}
+          proOptions={{ hideAttribution: true }}
+          style={{ width: "760px", height: "206px" }}
           zoomOnDoubleClick={false}
           zoomOnPinch={false}
           zoomOnScroll={false}
-          preventScrolling={false}
         >
-          <Background color="#e1e6ed" gap={18} size={1} />
+          <Background color="#e0e0e0" gap={18} size={1} />
         </ReactFlow>
       </div>
     </section>
@@ -315,6 +351,10 @@ type PipelineNode = Node<PipelineNodeData, "pipeline">;
 type PipelineEdge = Edge<Record<string, never>, "smoothstep"> & {
   pathOptions?: SmoothStepPathOptions;
 };
+
+const PIPELINE_NODE_WIDTH = 150;
+const PIPELINE_NODE_HEIGHT = 76;
+const PIPELINE_BOUND_SIZE = 1;
 
 const pipelineNodeTypes = {
   pipeline: PipelineNodeCard,
@@ -337,11 +377,14 @@ function PipelineNodeCard({ data }: NodeProps<PipelineNode>) {
         <span className="pipeline-node-dot">{stage.state === "active" ? <Spinner /> : stageIcon(stage.state)}</span>
         <b>{stage.label}</b>
       </div>
+      <p>{stage.detail}</p>
     </article>
   );
 }
 
-function pipelineGraph(flow: TaskFlow): { nodes: PipelineNode[]; edges: PipelineEdge[]; fitNodes: { id: string }[] } {
+type FeedbackEdgeKind = "validation" | "review" | "integration";
+
+function pipelineGraph(flow: TaskFlow): { nodes: PipelineNode[]; edges: PipelineEdge[] } {
   const fitBoundIds = ["fit-top-left", "fit-top-right", "fit-bottom-left", "fit-bottom-right"];
   const positions: Record<TaskStageKey, { x: number; y: number }> = {
     code: { x: 0, y: 52 },
@@ -356,6 +399,14 @@ function pipelineGraph(flow: TaskFlow): { nodes: PipelineNode[]; edges: Pipeline
       type: "pipeline" as const,
       position: { x: index % 2 === 0 ? -8 : 684, y: index < 2 ? -8 : 176 },
       data: {},
+      width: PIPELINE_BOUND_SIZE,
+      height: PIPELINE_BOUND_SIZE,
+      initialWidth: PIPELINE_BOUND_SIZE,
+      initialHeight: PIPELINE_BOUND_SIZE,
+      measured: {
+        width: PIPELINE_BOUND_SIZE,
+        height: PIPELINE_BOUND_SIZE,
+      },
       draggable: false,
       selectable: false,
       focusable: false,
@@ -368,6 +419,14 @@ function pipelineGraph(flow: TaskFlow): { nodes: PipelineNode[]; edges: Pipeline
       type: "pipeline" as const,
       position: positions[stage.key],
       data: { stage },
+      width: PIPELINE_NODE_WIDTH,
+      height: PIPELINE_NODE_HEIGHT,
+      initialWidth: PIPELINE_NODE_WIDTH,
+      initialHeight: PIPELINE_NODE_HEIGHT,
+      measured: {
+        width: PIPELINE_NODE_WIDTH,
+        height: PIPELINE_NODE_HEIGHT,
+      },
       draggable: false,
       selectable: false,
       focusable: false,
@@ -403,7 +462,7 @@ function pipelineGraph(flow: TaskFlow): { nodes: PipelineNode[]; edges: Pipeline
       "integration",
     ),
   ];
-  return { nodes, edges, fitNodes: nodes.map((node) => ({ id: node.id })) };
+  return { nodes, edges };
 }
 
 function forwardEdge(id: string, source: TaskStageKey, target: TaskStageKey, state: TaskStageState): PipelineEdge {
@@ -415,12 +474,10 @@ function forwardEdge(id: string, source: TaskStageKey, target: TaskStageKey, sta
     targetHandle: "left",
     type: "smoothstep",
     className: `pipeline-edge ${state}`,
-    markerEnd: { type: MarkerType.ArrowClosed, color: state === "complete" || state === "active" ? "#116149" : "#bac2cc" },
+    markerEnd: { type: MarkerType.ArrowClosed, color: state === "complete" || state === "active" ? "#0f62fe" : "#c6c6c6" },
     selectable: false,
   };
 }
-
-type FeedbackEdgeKind = "validation" | "review" | "integration";
 
 function feedbackEdge(
   id: string,
@@ -443,10 +500,14 @@ function feedbackEdge(
     className: `pipeline-edge feedback ${kind} ${active ? "active" : "muted"}`,
     pathOptions: { borderRadius: 18, offset },
     labelBgPadding: [6, 3],
-    labelBgBorderRadius: 999,
-    labelBgStyle: { fill: active ? "#e4edff" : "#f5f7fa" },
-    labelStyle: { fill: active ? "#225cc7" : "#5d6673", fontSize: 11, fontWeight: 800 },
-    markerEnd: { type: MarkerType.ArrowClosed, color: active ? "#225cc7" : "#bac2cc" },
+    labelBgBorderRadius: 4,
+    labelBgStyle: { fill: active ? "#edf5ff" : "#f4f4f4" },
+    labelStyle: {
+      fill: active ? "#002d9c" : "#6f6f6f",
+      fontSize: 11,
+      fontWeight: 700,
+    },
+    markerEnd: { type: MarkerType.ArrowClosed, color: active ? "#0f62fe" : "#c6c6c6" },
     selectable: false,
   };
 }
@@ -470,6 +531,7 @@ function AttemptStack({
   activeStage,
   attempts,
   iterationPatches,
+  onLoadEarlierTranscript,
   onShowValidation,
   reviews,
   runTranscripts,
@@ -480,9 +542,10 @@ function AttemptStack({
   activeStage: ActiveStageInfo;
   attempts: TaskAttempt[];
   iterationPatches: Record<number, string>;
+  onLoadEarlierTranscript: (runName: string) => void;
   onShowValidation: (index: number) => void;
   reviews: ReviewRecord[];
-  runTranscripts: Record<string, string>;
+  runTranscripts: Record<string, TranscriptWindow>;
   task: TaskRecord;
   validationLog: string;
   validationLogIndex: number | null;
@@ -498,6 +561,7 @@ function AttemptStack({
           attempt={attempt}
           key={`${attempt.attempt}-${attempt.label}`}
           iterationPatch={iterationPatches[attempt.attempt] || ""}
+          onLoadEarlierTranscript={onLoadEarlierTranscript}
           onShowValidation={onShowValidation}
           review={reviewForAttempt(attempt, reviews)}
           runTranscripts={runTranscripts}
@@ -515,6 +579,7 @@ function AttemptCard({
   attempt,
   iterationPatch,
   onShowValidation,
+  onLoadEarlierTranscript,
   review,
   runTranscripts,
   task,
@@ -525,8 +590,9 @@ function AttemptCard({
   attempt: TaskAttempt;
   iterationPatch: string;
   onShowValidation: (index: number) => void;
+  onLoadEarlierTranscript: (runName: string) => void;
   review?: ReviewRecord;
-  runTranscripts: Record<string, string>;
+  runTranscripts: Record<string, TranscriptWindow>;
   task: TaskRecord;
   validationLog: string;
   validationLogIndex: number | null;
@@ -540,8 +606,10 @@ function AttemptCard({
   const [userSelectedTab, setUserSelectedTab] = useState(false);
   const visibleOpen = open || (isActiveAttempt && !userCollapsed);
   const active = isActiveAttempt && !userSelectedTab ? stageTab : selectedTab;
-  const workerText = attempt.worker ? runTranscripts[attempt.worker.name] || "" : "";
-  const reviewerText = attempt.reviewer ? runTranscripts[attempt.reviewer.name] || "" : "";
+  const workerWindow = attempt.worker ? runTranscripts[attempt.worker.name] : undefined;
+  const reviewerWindow = attempt.reviewer ? runTranscripts[attempt.reviewer.name] : undefined;
+  const workerText = workerWindow?.text || "";
+  const reviewerText = reviewerWindow?.text || "";
   const hasReview = Boolean(review || reviewerText);
   const visiblePatch = iterationPatch;
   const tabs: Array<{ key: AttemptTab; label: string; meta?: string | number; spinning?: boolean }> = [
@@ -604,10 +672,12 @@ function AttemptCard({
                 emptyText="No worker transcript for this attempt."
                 isLiveRun={activeStage.tab === "transcript" && runArtifactIsLive(isLiveAttempt, attempt.worker)}
                 label="Worker transcript"
+                onLoadEarlier={onLoadEarlierTranscript}
                 prompt={attempt.attempt === 0 ? task.spec.prompt : ""}
                 runName={attempt.worker?.name}
                 taskId={`${task.spec.id}-${attempt.worker?.name || "worker"}`}
                 text={workerText}
+                transcriptWindow={workerWindow}
               />
             )}
             {active === "patch" && <RunPatchCard patch={visiblePatch} />}
@@ -618,7 +688,9 @@ function AttemptCard({
               <AttemptReview
                 diagnostics={attempt.reviewer?.diagnostics}
                 isLiveRun={activeStage.tab === "review" && runArtifactIsLive(isLiveAttempt, attempt.reviewer)}
+                onLoadEarlier={onLoadEarlierTranscript}
                 reviewerText={reviewerText}
+                reviewerWindow={reviewerWindow}
                 review={review}
                 runName={attempt.reviewer?.name}
                 taskId={`${task.spec.id}-${attempt.reviewer?.name || "reviewer"}`}
@@ -642,14 +714,18 @@ function RunPatchCard({ patch }: { patch: string }) {
 function AttemptReview({
   diagnostics,
   isLiveRun,
+  onLoadEarlier,
   reviewerText,
+  reviewerWindow,
   review,
   runName,
   taskId,
 }: {
   diagnostics?: CodexRunDiagnostics | null;
   isLiveRun: boolean;
+  onLoadEarlier: (runName: string) => void;
   reviewerText: string;
+  reviewerWindow?: TranscriptWindow;
   review?: ReviewRecord;
   runName?: string;
   taskId: string;
@@ -662,10 +738,12 @@ function AttemptReview({
         emptyText="No reviewer transcript for this attempt."
         isLiveRun={isLiveRun}
         label="Reviewer transcript"
+        onLoadEarlier={onLoadEarlier}
         prompt=""
         runName={runName}
         taskId={taskId}
         text={reviewerText}
+        transcriptWindow={reviewerWindow}
       />
     </div>
   );
@@ -676,19 +754,23 @@ function RunSection({
   emptyText,
   isLiveRun = false,
   label,
+  onLoadEarlier,
   prompt,
   runName,
   taskId,
   text,
+  transcriptWindow,
 }: {
   diagnostics?: CodexRunDiagnostics | null;
   emptyText: string;
   isLiveRun?: boolean;
   label: string;
+  onLoadEarlier: (runName: string) => void;
   prompt: string;
   runName?: string;
   taskId: string;
   text: string;
+  transcriptWindow?: TranscriptWindow;
 }) {
   return (
     <>
@@ -699,12 +781,39 @@ function RunSection({
       </div>
       {text ? (
         <div className="attempt-transcript">
+          {transcriptWindow && (
+            <TranscriptWindowToolbar
+              onLoadEarlier={() => runName && onLoadEarlier(runName)}
+              window={transcriptWindow}
+            />
+          )}
           <TranscriptView diagnostics={diagnostics} isLiveRun={isLiveRun} prompt={prompt} taskId={taskId} text={text} />
         </div>
       ) : (
         <div className="empty-state compact">{emptyText}</div>
       )}
     </>
+  );
+}
+
+function TranscriptWindowToolbar({
+  onLoadEarlier,
+  window,
+}: {
+  onLoadEarlier: () => void;
+  window: TranscriptWindow;
+}) {
+  return (
+    <div className="transcript-window-toolbar">
+      <span>
+        Showing {formatBytes(window.end - window.start)} of {formatBytes(window.size)}
+      </span>
+      {window.has_before && (
+        <button className="button-inline" onClick={onLoadEarlier} type="button">
+          Load Earlier
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -795,7 +904,7 @@ function ReviewCard({ review }: { review: ReviewRecord }) {
 
 function DiffView({ text }: { text: string }) {
   if (!text) return <div className="empty-state">No saved patch for the selected task.</div>;
-  return <CodeBlock language="diff" text={text} title="Patch" />;
+  return <CodeBlock diffDisplay="unified-with-split-modal" language="diff" text={text} title="Patch" />;
 }
 
 function KeyValue({ label, value }: { label: string; value: string }) {
@@ -825,7 +934,7 @@ function Spinner() {
 }
 
 function taskDisplay(task: TaskRecord) {
-  if (task.spec.kind === "integration" || task.spec.worker === "integration-manager") {
+  if (isIntegrationTask(task)) {
     const source = typeof task.spec.metadata.source_task_id === "string" ? task.spec.metadata.source_task_id : "";
     return {
       title: task.spec.title.replace(/^Integrate\b/, "Integration"),
@@ -838,6 +947,10 @@ function taskDisplay(task: TaskRecord) {
     kind: task.spec.kind,
     worker: task.spec.worker,
   };
+}
+
+function isIntegrationTask(task: TaskRecord) {
+  return task.spec.kind === "integration" || task.spec.worker === "integration-manager";
 }
 
 function taskFlow(task: TaskRecord, attempts: TaskAttempt[], events: EventRecord[]) {
@@ -1104,4 +1217,75 @@ function shortDate(value: string) {
 
 function shortSha(value: string) {
   return value.length > 12 ? value.slice(0, 12) : value;
+}
+
+function mergeTranscriptMaps(
+  previous: Record<string, TranscriptWindow>,
+  next: Record<string, TranscriptWindow>,
+): Record<string, TranscriptWindow> {
+  const merged = { ...previous };
+  for (const [name, window] of Object.entries(next)) {
+    merged[name] = mergeTranscriptWindows(previous[name], window);
+  }
+  return merged;
+}
+
+function mergeTranscriptWindows(
+  previous: TranscriptWindow | undefined,
+  next: TranscriptWindow,
+): TranscriptWindow {
+  if (!previous || !previous.text) return next;
+  if (!next.text) return previous;
+  if (next.start <= previous.start && next.end >= previous.end) return next;
+  if (previous.start <= next.start && previous.end >= next.end) {
+    return { ...previous, size: next.size, has_after: previous.end < next.size };
+  }
+  if (next.end <= previous.start) {
+    return {
+      text: next.text + previous.text,
+      start: next.start,
+      end: previous.end,
+      size: Math.max(previous.size, next.size),
+      has_before: next.has_before,
+      has_after: previous.has_after,
+    };
+  }
+  if (previous.end <= next.start) {
+    return {
+      text: previous.text + next.text,
+      start: previous.start,
+      end: next.end,
+      size: Math.max(previous.size, next.size),
+      has_before: previous.has_before,
+      has_after: next.has_after,
+    };
+  }
+  if (next.start < previous.start) {
+    return {
+      text: next.text + previous.text.slice(next.end - previous.start),
+      start: next.start,
+      end: previous.end,
+      size: Math.max(previous.size, next.size),
+      has_before: next.has_before,
+      has_after: previous.has_after,
+    };
+  }
+  return {
+    text: previous.text + next.text.slice(previous.end - next.start),
+    start: previous.start,
+    end: next.end,
+    size: Math.max(previous.size, next.size),
+    has_before: previous.has_before,
+    has_after: next.has_after,
+  };
+}
+
+function transcriptWindowLimit(window: TranscriptWindow) {
+  return Math.max(1, window.end - window.start);
+}
+
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }

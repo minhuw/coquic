@@ -82,6 +82,15 @@ export type TaskRunArtifact = {
   diagnostics?: CodexRunDiagnostics | null;
 };
 
+export type TranscriptWindow = {
+  text: string;
+  start: number;
+  end: number;
+  size: number;
+  has_before: boolean;
+  has_after: boolean;
+};
+
 export type TaskAttempt = {
   attempt: number;
   label: string;
@@ -159,13 +168,16 @@ export type SchedulerProviderState = {
   provider: string;
   poll_interval_minutes: number;
   error_retry_minutes: number;
+  idle_poll_interval_minutes: number;
   suppression_hours: number;
   max_items: number;
   last_fetch_at: string | null;
   last_status: "ok" | "error" | null;
   last_error: string | null;
   next_due_at: string;
+  idle_next_due_at?: string | null;
   due: boolean;
+  idle_due?: boolean;
 };
 
 export type SchedulerState = {
@@ -262,13 +274,43 @@ export type StewardState = {
   };
   config: {
     repo_root: string;
+    coquic_home?: string;
+    steward_home?: string;
     state_dir: string;
     worktrees_dir: string;
+    transcripts_dir?: string;
+    logs_dir?: string;
+    prompts_dir?: string;
+    patches_dir?: string;
+    db_path?: string;
+    config_path?: string;
+    codex_bin?: string;
+    codex_bin_resolved?: string | null;
+    codex_bin_available?: boolean;
+    codex_model?: string | null;
+    codex_profile?: string | null;
+    codex_sandbox?: string;
     integration_mode: string;
     local_only: boolean;
+    git_remote?: string;
     main_branch: string;
     github_repository: string;
     enabled_signals: string[];
+    scheduler_wait_interval_sec?: number;
+    limits?: {
+      max_active_tasks: number;
+      max_main_pushes_per_day: number;
+      worker_timeout_minutes: number;
+      review_timeout_minutes: number;
+      validation_timeout_minutes: number;
+      stale_task_minutes: number | null;
+    };
+    signal_providers?: Record<string, {
+      poll_interval_minutes: number;
+      error_retry_minutes: number;
+      suppression_hours: number;
+      max_items: number;
+    }>;
   };
 };
 

@@ -8,7 +8,6 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  Circle,
   Clock3,
   ExternalLink,
   FileText,
@@ -20,6 +19,9 @@ import {
   Plus,
   RefreshCw,
   Route,
+  Settings,
+  ShieldCheck,
+  SlidersHorizontal,
   X,
   XCircle,
 } from "lucide-react";
@@ -54,7 +56,8 @@ import type {
   ValidationResult,
 } from "./types";
 
-type ViewKey = "control" | "tasks" | "integration" | "settings";
+type ViewKey = "control" | "tasks" | "integration" | "signals" | "configuration";
+type StreamState = "connecting" | "live" | "reconnecting";
 
 type CodacySignal = {
   count: number;
@@ -73,9 +76,8 @@ const TASK_GRAPH_LANES: Array<{
 }> = [
   { key: "queued", label: "Queued", statuses: ["queued"], empty: "No queued tasks" },
   { key: "active", label: "In Progress", statuses: ["running", "reviewing", "integrating"], empty: "No active work" },
-  { key: "attention", label: "Needs Attention", statuses: ["blocked", "failed"], empty: "No blocked or failed tasks" },
+  { key: "attention", label: "Needs Attention", statuses: ["blocked", "failed", "cancelled"], empty: "No blocked, failed, or cancelled tasks" },
   { key: "completed", label: "Completed", statuses: ["succeeded", "pushed", "no_changes"], empty: "No completed tasks" },
-  { key: "archived", label: "Archived", statuses: ["cancelled"], empty: "No cancelled tasks" },
 ];
 
 const EMPTY_STATE: StewardState = {
@@ -115,13 +117,38 @@ const EMPTY_STATE: StewardState = {
   },
   config: {
     repo_root: "",
+    coquic_home: "",
+    steward_home: "",
     state_dir: "",
     worktrees_dir: "",
+    transcripts_dir: "",
+    logs_dir: "",
+    prompts_dir: "",
+    patches_dir: "",
+    db_path: "",
+    config_path: "",
+    codex_bin: "",
+    codex_bin_resolved: null,
+    codex_bin_available: false,
+    codex_model: null,
+    codex_profile: null,
+    codex_sandbox: "",
     integration_mode: "",
     local_only: false,
+    git_remote: "",
     main_branch: "",
     github_repository: "",
     enabled_signals: [],
+    scheduler_wait_interval_sec: 0,
+    limits: {
+      max_active_tasks: 0,
+      max_main_pushes_per_day: 0,
+      worker_timeout_minutes: 0,
+      review_timeout_minutes: 0,
+      validation_timeout_minutes: 0,
+      stale_task_minutes: null,
+    },
+    signal_providers: {},
   },
 };
 
@@ -135,7 +162,7 @@ export default function Dashboard() {
     offset: 0,
   });
   const [busy, setBusy] = useState(false);
-  const [streamState, setStreamState] = useState("connecting");
+  const [streamState, setStreamState] = useState<StreamState>("connecting");
   const [loadError, setLoadError] = useState("");
   const [view, setView] = useState<ViewKey>("control");
   const [createOpen, setCreateOpen] = useState(false);
@@ -239,32 +266,32 @@ export default function Dashboard() {
     <main className="app-frame">
       <aside className="sidebar">
         <div className="sidebar-brand">
-          <div className="brand-mark">CS</div>
+          <div className="brand-mark">CQ</div>
           <div className="brand-copy">
-            <h1>CoQUIC Steward</h1>
-            <ProjectSelector counts={counts} state={state} />
+            <div className="brand-title">
+              <h1>CoQUIC Steward</h1>
+            </div>
+            <ProjectSelector counts={counts} state={state} streamState={streamState} />
           </div>
         </div>
         <SectionNav active={view} counts={counts} onSelect={setView} />
+        <div className="sidebar-actions">
+          <div>
+            <button className="icon-button secondary" onClick={refresh} type="button" title="Refresh state" aria-label="Refresh state">
+              <RefreshCw size={16} />
+            </button>
+            <button className="icon-button" onClick={() => setCreateOpen(true)} type="button" title="Create task" aria-label="Create task">
+              <Plus size={16} />
+            </button>
+          </div>
+        </div>
       </aside>
-
       <section className="app-shell">
-        {view === "control" && (
-          <header className="topbar">
-            <div className="top-title">
-              <h1>{viewTitle(view)}</h1>
-              <span className={`stream-pill ${streamState}`}>{streamState}</span>
-            </div>
-            <div className="top-actions">
-              <button className="icon-button" onClick={refresh} type="button" title="Refresh state">
-                <RefreshCw size={16} />
-              </button>
-              <button className="icon-button" onClick={() => setCreateOpen(true)} type="button" title="Create task" aria-label="Create task">
-                <Plus size={16} />
-              </button>
-            </div>
-          </header>
-        )}
+        <header className="topbar">
+          <div className="top-title">
+            <h1>{viewTitle(view)}</h1>
+          </div>
+        </header>
 
         <DashboardView
           counts={counts}
@@ -314,7 +341,15 @@ function PanelTitle({ icon, title }: { icon: ReactNode; title: string }) {
   );
 }
 
-function ProjectSelector({ counts, state }: { counts: ReturnType<typeof countTasks>; state: StewardState }) {
+function ProjectSelector({
+  counts,
+  state,
+  streamState,
+}: {
+  counts: ReturnType<typeof countTasks>;
+  state: StewardState;
+  streamState: StreamState;
+}) {
   const activeLabel = state.config.github_repository || state.signals.repository || "Loading project";
   const stateProjects = state.projects ?? [];
   const projects = stateProjects.length
@@ -345,6 +380,11 @@ function ProjectSelector({ counts, state }: { counts: ReturnType<typeof countTas
           ))}
         </div>
       </details>
+      <span
+        className={`stream-dot ${streamState}`}
+        aria-label={`Stream ${streamState}`}
+        title={`Stream ${streamState}`}
+      />
       <div className="project-info" tabIndex={0} aria-label="Project information">
         <Info size={14} />
         <div className="project-info-popover" role="tooltip">
@@ -373,7 +413,8 @@ function SectionNav({
     { icon: <LayoutDashboard size={17} />, key: "control", label: "Control Loop" },
     { icon: <ListChecks size={17} />, key: "tasks", label: "Tasks", meta: counts.total },
     { icon: <GitBranch size={17} />, key: "integration", label: "Integration", meta: counts.integration },
-    { icon: <Inbox size={17} />, key: "settings", label: "Signals", meta: counts.signals },
+    { icon: <Inbox size={17} />, key: "signals", label: "Signals", meta: counts.signals },
+    { icon: <Settings size={17} />, key: "configuration", label: "Configuration" },
   ];
   return (
     <nav className="sidebar-nav" aria-label="Steward sections">
@@ -446,7 +487,7 @@ function DashboardView({
       </>
     );
   }
-  if (view === "settings") {
+  if (view === "signals") {
     return (
       <>
         {alert}
@@ -456,6 +497,14 @@ function DashboardView({
           state={state}
           tasks={userTasks}
         />
+      </>
+    );
+  }
+  if (view === "configuration") {
+    return (
+      <>
+        {alert}
+        <ConfigurationPanel state={state} />
       </>
     );
   }
@@ -1056,6 +1105,112 @@ function SignalsPanel({
   );
 }
 
+function ConfigurationPanel({ state }: { state: StewardState }) {
+  const config = state.config;
+  const limits = config.limits;
+  const providers = Object.entries(config.signal_providers ?? {}).sort(([left], [right]) => left.localeCompare(right));
+  const codexStatus = config.codex_bin_available ? "ok" : "error";
+  const codexLabel = config.codex_bin_available ? "available" : "missing";
+  return (
+    <div className="configuration-page">
+      <section className="metrics">
+        <Metric icon={<ShieldCheck size={18} />} label="Codex" value={codexLabel} />
+        <Metric icon={<SlidersHorizontal size={18} />} label="Sandbox" value={config.codex_sandbox || "-"} />
+        <Metric icon={<Inbox size={18} />} label="Providers" value={config.enabled_signals.length} />
+        <Metric icon={<ListChecks size={18} />} label="Task Capacity" value={limits?.max_active_tasks ?? "-"} />
+      </section>
+      <section className="configuration-grid">
+        <section className="panel config-panel">
+          <PanelTitle icon={<ShieldCheck size={17} />} title="Execution" />
+          <div className="config-summary-row">
+            <div>
+              <span className="section-subtitle">Codex executable</span>
+              <h3>{config.codex_bin || "codex"}</h3>
+            </div>
+            <StatusTextPill status={codexStatus} />
+          </div>
+          {!config.codex_bin_available && (
+            <div className="inline-alert compact">
+              <span>Codex is not available to the daemon process. Set an absolute codex_bin in steward.toml or launch with a PATH that contains codex.</span>
+            </div>
+          )}
+          <div className="config-kv-list">
+            <KeyValue label="Resolved" value={config.codex_bin_resolved || "-"} />
+            <KeyValue label="Sandbox" value={config.codex_sandbox || "-"} />
+            <KeyValue label="Model" value={config.codex_model || "default"} />
+            <KeyValue label="Profile" value={config.codex_profile || "default"} />
+            <KeyValue label="Steward runner" value="host process" />
+          </div>
+        </section>
+
+        <section className="panel config-panel">
+          <PanelTitle icon={<GitBranch size={17} />} title="Project" />
+          <div className="config-kv-list">
+            <KeyValue label="Repository" value={config.github_repository || "-"} />
+            <KeyValue label="Root" value={config.repo_root || "-"} />
+            <KeyValue label="Main branch" value={config.main_branch || "-"} />
+            <KeyValue label="Remote" value={config.git_remote || "-"} />
+            <KeyValue label="Integration" value={integrationLabel(state)} />
+          </div>
+        </section>
+
+        <section className="panel config-panel wide">
+          <PanelTitle icon={<FileText size={17} />} title="State Paths" />
+          <div className="config-path-grid">
+            <KeyValue label="Config file" value={config.config_path || "-"} />
+            <KeyValue label="COQUIC_HOME" value={config.coquic_home || "-"} />
+            <KeyValue label="Steward home" value={config.steward_home || "-"} />
+            <KeyValue label="State" value={config.state_dir || "-"} />
+            <KeyValue label="Database" value={config.db_path || "-"} />
+            <KeyValue label="Worktrees" value={config.worktrees_dir || "-"} />
+            <KeyValue label="Transcripts" value={config.transcripts_dir || "-"} />
+            <KeyValue label="Logs" value={config.logs_dir || "-"} />
+            <KeyValue label="Prompts" value={config.prompts_dir || "-"} />
+            <KeyValue label="Patches" value={config.patches_dir || "-"} />
+          </div>
+        </section>
+
+        <section className="panel config-panel">
+          <PanelTitle icon={<Activity size={17} />} title="Scheduler Limits" />
+          <div className="config-kv-list">
+            <KeyValue label="Wait interval" value={`${config.scheduler_wait_interval_sec ?? 0}s`} />
+            <KeyValue label="Active tasks" value={String(limits?.max_active_tasks ?? "-")} />
+            <KeyValue label="Main pushes/day" value={String(limits?.max_main_pushes_per_day ?? "-")} />
+            <KeyValue label="Worker timeout" value={formatOptionalMinutes(limits?.worker_timeout_minutes)} />
+            <KeyValue label="Review timeout" value={formatOptionalMinutes(limits?.review_timeout_minutes)} />
+            <KeyValue label="Validation timeout" value={formatOptionalMinutes(limits?.validation_timeout_minutes)} />
+            <KeyValue label="Stale task" value={limits?.stale_task_minutes == null ? "derived" : formatMinutes(limits.stale_task_minutes)} />
+          </div>
+        </section>
+
+        <section className="panel config-panel">
+          <PanelTitle icon={<Inbox size={17} />} title="Signal Providers" />
+          {providers.length ? (
+            <div className="config-provider-list">
+              {providers.map(([name, provider]) => (
+                <article className="config-provider-row" key={name}>
+                  <div className="signal-card-head">
+                    <span className="provider-pill">{name}</span>
+                    <StatusTextPill status={config.enabled_signals.includes(name) ? "ok" : "disabled"} />
+                  </div>
+                  <dl>
+                    <div><dt>poll</dt><dd>{formatMinutes(provider.poll_interval_minutes)}</dd></div>
+                    <div><dt>retry</dt><dd>{formatMinutes(provider.error_retry_minutes)}</dd></div>
+                    <div><dt>suppress</dt><dd>{provider.suppression_hours}h</dd></div>
+                    <div><dt>max</dt><dd>{provider.max_items}</dd></div>
+                  </dl>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state compact">No signal providers are configured.</div>
+          )}
+        </section>
+      </section>
+    </div>
+  );
+}
+
 function SignalInboxList({
   emptyText,
   itemLabel,
@@ -1254,7 +1409,7 @@ function SignalItemDetail({
                 <Link className="signal-related-task" href={taskHref(task.spec.id)} key={task.spec.id}>
                   <StatusTextPill status={task.status} />
                   <span>{display.title}</span>
-                  <TaskSpecChip value={display.kind} />
+                  <TaskSpecChip label="Type" value={display.kind} />
                 </Link>
               );
             })}
@@ -1739,7 +1894,7 @@ function IntegrationEventList({
 }
 
 function DiffView({ text }: { text: string }) {
-  return <CodeBlock compact language="diff" text={text} title="Patch" />;
+  return <CodeBlock compact diffDisplay="unified-with-split-modal" language="diff" text={text} title="Patch" />;
 }
 
 function IntegrationCommits({
@@ -1883,7 +2038,6 @@ function TaskGraph({
             <div className="lane-items">
               {laneTasks.map((task) => {
                 const display = taskDisplay(task);
-                const titleParts = taskTitleParts(display.title);
                 return (
                   <Link
                     className={`graph-node ${selectedId === task.spec.id ? "active" : ""}`}
@@ -1891,22 +2045,24 @@ function TaskGraph({
                     key={task.spec.id}
                     title={display.title}
                   >
-                    <div className="graph-node-head">
-                      <Circle size={10} />
-                      <span>
-                        <b>{titleParts.summary}</b>
-                        {titleParts.location && <small>{titleParts.location}</small>}
-                      </span>
+                    <div className="graph-node-top">
+                      <StatusPill status={task.status} />
+                      <time className="graph-node-time mono" dateTime={task.updated_at} title={shortDate(task.updated_at)}>
+                        Updated {compactDate(task.updated_at)}
+                      </time>
+                    </div>
+                    <div className="graph-node-title">
+                      <b>{display.title}</b>
+                    </div>
+                    <div className="graph-node-context">
+                      <span>{isIntegrationTask(task) ? "Source" : "Agent"}</span>
+                      <b>{display.worker}</b>
                     </div>
                     <div className="graph-node-meta">
-                      <StatusPill status={task.status} />
-                      <TaskSpecChip value={display.kind} />
-                      <TaskSpecChip tone={`priority-${task.spec.priority}`} value={task.spec.priority} />
-                      <TaskSpecChip tone={`risk-${task.spec.risk}`} value={task.spec.risk} />
+                      <TaskSpecChip label="Type" value={display.kind} />
+                      <TaskSpecChip label="Priority" tone={`priority-${task.spec.priority}`} value={task.spec.priority} />
+                      <TaskSpecChip label="Risk" tone={`risk-${task.spec.risk}`} value={task.spec.risk} />
                     </div>
-                    <time className="graph-node-time mono" dateTime={task.updated_at} title={shortDate(task.updated_at)}>
-                      Updated {compactDate(task.updated_at)}
-                    </time>
                   </Link>
                 );
               })}
@@ -1922,12 +2078,6 @@ function TaskGraph({
 function taskUpdatedAtMs(task: TaskRecord) {
   const value = Date.parse(task.updated_at);
   return Number.isFinite(value) ? value : 0;
-}
-
-function taskTitleParts(title: string) {
-  const match = /^(.*?)\s+in\s+(.+)$/.exec(title);
-  if (!match) return { summary: title, location: "" };
-  return { summary: match[1], location: match[2] };
 }
 
 function GithubCommitLink({ commit, url }: { commit: string; url: string }) {
@@ -1948,14 +2098,17 @@ function StatusTextPill({ status }: { status: string }) {
 }
 
 function TaskSpecChip({
+  label,
   tone,
   value,
 }: {
+  label?: string;
   tone?: string;
   value: string;
 }) {
   return (
     <span className={`task-spec-chip ${tone || ""}`}>
+      {label && <b>{label}</b>}
       <span>{value}</span>
     </span>
   );
@@ -2067,7 +2220,8 @@ function viewTitle(view: ViewKey) {
     control: "Control Loop",
     tasks: "Tasks",
     integration: "Integration",
-    settings: "Signals",
+    signals: "Signals",
+    configuration: "Configuration",
   };
   return titles[view];
 }
@@ -2194,7 +2348,15 @@ function parseCommitMessageArtifact(text: string): { subject: string; body: stri
 function providerStatusText(provider: SchedulerProviderState) {
   const interval = provider.last_status === "error" ? provider.error_retry_minutes : provider.poll_interval_minutes;
   if (provider.due) return `Due now · ${provider.max_items} item limit`;
+  if (provider.idle_due) return `Idle fetch due now · ${provider.max_items} item limit`;
+  if (provider.idle_next_due_at && isBefore(provider.idle_next_due_at, provider.next_due_at)) {
+    return `Idle fetch ${compactFuture(provider.idle_next_due_at)} · idle every ${formatMinutes(provider.idle_poll_interval_minutes)}`;
+  }
   return `Next ${compactFuture(provider.next_due_at)} · every ${formatMinutes(interval)}`;
+}
+
+function isBefore(left: string, right: string) {
+  return new Date(left).getTime() < new Date(right).getTime();
 }
 
 function wakeupDetailEntries(wakeup: SchedulerWakeup) {
@@ -2291,6 +2453,10 @@ function formatMinutes(value: number) {
   if (value < 60) return `${value}m`;
   const hours = value / 60;
   return Number.isInteger(hours) ? `${hours}h` : `${hours.toFixed(1)}h`;
+}
+
+function formatOptionalMinutes(value: number | null | undefined) {
+  return typeof value === "number" ? formatMinutes(value) : "-";
 }
 
 function formatBytes(value: number) {

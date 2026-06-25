@@ -207,9 +207,13 @@ export function TranscriptView({
             <TextBlocks taskId={taskId} text={promptParts.visible} />
           </ChatBubble>
         )}
-        <ChatBubble label="Transcript text" role="assistant">
-          <TextBlocks taskId={taskId} text={text} />
-        </ChatBubble>
+        {metadataOnlyTranscript(text) ? (
+          <div className="empty-state">No displayable agent output has been captured yet.</div>
+        ) : (
+          <ChatBubble label="Transcript text" role="assistant">
+            <TextBlocks taskId={taskId} text={text} />
+          </ChatBubble>
+        )}
       </div>
     );
   }
@@ -770,30 +774,11 @@ function ImageBlock({ path, taskId }: { path: string; taskId: string }) {
 function parseTranscript(text: string): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   const latestById = new Map<string, number>();
-  let turn = 0;
   for (const [index, line] of text.split("\n").entries()) {
     if (!line.trim()) continue;
     const event = parseJson(line);
-    if (event?.type === "thread.started") {
-      const marker = {
-        id: `thread-${index}`,
-        kind: "session",
-        label: "Worker session",
-        value: event.thread_id || "",
-      } satisfies SessionMarkerItem;
-      items.push(marker);
-      continue;
-    }
-    if (event?.type === "turn.started") {
-      turn += 1;
-      items.push({
-        id: `turn-${index}`,
-        kind: "session",
-        label: `Turn ${turn}`,
-        value: "",
-      });
-      continue;
-    }
+    if (event?.type === "thread.started") continue;
+    if (event?.type === "turn.started") continue;
     const item = event?.item;
     const parsed = item ? parseItem(item, index) : parseTopLevel(event, line, index);
     if (!parsed) continue;
@@ -805,16 +790,23 @@ function parseTranscript(text: string): TranscriptItem[] {
       items[existing] = parsed;
     }
   }
-  return trimSingleTurnDividers(items);
+  return items;
 }
 
-function trimSingleTurnDividers(items: TranscriptItem[]) {
-  const sessionItems = items.filter((item) => item.kind === "session");
-  const hasOnlyOneWorkerSession =
-    sessionItems.filter((item) => item.label === "Worker session").length === 1;
-  const hasOnlyOneTurn = sessionItems.filter((item) => item.label.startsWith("Turn ")).length === 1;
-  if (sessionItems.length !== 2 || !hasOnlyOneWorkerSession || !hasOnlyOneTurn) return items;
-  return items.filter((item) => item.kind !== "session");
+function metadataOnlyTranscript(text: string) {
+  const metadataTypes = new Set([
+    "thread.started",
+    "turn.started",
+    "turn.completed",
+  ]);
+  let sawLine = false;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    sawLine = true;
+    const event = parseJson(line);
+    if (!event?.type || !metadataTypes.has(event.type)) return false;
+  }
+  return sawLine;
 }
 
 function parseItem(item: CodexItem, index: number): TranscriptItem | null {

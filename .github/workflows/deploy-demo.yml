@@ -42,6 +42,22 @@ jobs:
         with:
           summarize: false
 
+      - name: Preflight demo SSH port
+        run: |
+          remote_host="coquic.minhuw.dev"
+          remote_port="22"
+          for attempt in $(seq 1 6); do
+            if timeout 10s bash -c ":</dev/tcp/${remote_host}/${remote_port}"; then
+              exit 0
+            fi
+            if [[ "${attempt}" == "6" ]]; then
+              echo "remote SSH port preflight failed after 6 attempts: ${remote_host}:${remote_port}" >&2
+              exit 1
+            fi
+            echo "remote SSH port preflight attempt ${attempt}/6 failed; retrying in 10s" >&2
+            sleep 10
+          done
+
       - name: Build h3-server
         run: nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false
 
@@ -67,6 +83,32 @@ jobs:
           coquic.minhuw.dev ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILi5VjtrGcYlzyYEXd4/PzQJXBjZ028DA6nJ7Xu50CJh
           EOF
           chmod 600 "${RUNNER_TEMP}/coquic-demo.key" "${HOME}/.ssh/known_hosts"
+
+      - name: Preflight demo SSH
+        run: |
+          remote_target="minhuw@coquic.minhuw.dev"
+          ssh_opts=(
+            -p 22
+            -i "${RUNNER_TEMP}/coquic-demo.key"
+            -o BatchMode=yes
+            -o ConnectTimeout=10
+            -o ConnectionAttempts=3
+            -o ServerAliveInterval=10
+            -o ServerAliveCountMax=3
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"
+          )
+          for attempt in $(seq 1 6); do
+            if ssh "${ssh_opts[@]}" "${remote_target}" true; then
+              exit 0
+            fi
+            if [[ "${attempt}" == "6" ]]; then
+              echo "remote SSH preflight failed after 6 attempts: ${remote_target}:22" >&2
+              exit 1
+            fi
+            echo "remote SSH preflight attempt ${attempt}/6 failed; retrying in 10s" >&2
+            sleep 10
+          done
 
       - name: Deploy demo
         env:

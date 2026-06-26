@@ -33,6 +33,9 @@ DEFAULT_MIRROR_TASK_LIMIT = 80
 DEFAULT_MIRROR_SIGNAL_LIMIT = 80
 DEFAULT_MIRROR_FETCH_LIMIT = 40
 PUBLIC_TASK_DATA_PREFIX = "/steward/data/tasks"
+REMOTE_MIRROR_TMP_DIR = "/" + "tmp"
+REMOTE_MIRROR_ARCHIVE_PREFIX = "coquic-steward-mirror."
+REMOTE_MIRROR_ARCHIVE_SUFFIX = ".tar.gz"
 MIRROR_PATCH_BYTES = 128 * 1024
 MIRROR_TRANSCRIPT_BYTES = 64 * 1024
 MIRROR_LOG_BYTES = 64 * 1024
@@ -262,15 +265,30 @@ class PublicMirrorPublisher:
         remote_target = f"{self.config.remote_user}@{self.config.remote_host}"
         remote_path = self.config.remote_path
         local_dir = local_path.parent
+        tmp_remote_result = self._remote_temp_archive(remote_target, cwd=cwd)
+        if not tmp_remote_result.ok:
+            return tmp_remote_result
+        tmp_remote = tmp_remote_result.stdout.strip()
+        if not tmp_remote:
+            return CommandResult(
+                args=tmp_remote_result.args,
+                cwd=cwd,
+                returncode=1,
+                stdout=tmp_remote_result.stdout,
+                stderr="remote mktemp did not return a path",
+            )
+        if not _safe_remote_archive_path(tmp_remote):
+            return CommandResult(
+                args=tmp_remote_result.args,
+                cwd=cwd,
+                returncode=1,
+                stdout=tmp_remote_result.stdout,
+                stderr="remote mktemp returned an unsafe path",
+            )
         with TemporaryDirectory(prefix="steward-mirror-") as temp_dir:
             archive_path = Path(temp_dir) / "steward-public.tar.gz"
             with tarfile.open(archive_path, "w:gz") as archive:
                 archive.add(local_dir, arcname="steward")
-            tmp_remote = (
-                "/tmp/coquic-steward-mirror-"
-                + sha256(str(local_path).encode("utf-8")).hexdigest()[:12]
-                + ".tar.gz"
-            )
             scp_result = run_command(
                 [
                     "scp",
@@ -282,6 +300,7 @@ class PublicMirrorPublisher:
                 timeout=max(10, self.config.connect_timeout_seconds + 10),
             )
             if not scp_result.ok:
+                self._remove_remote_file(remote_target, tmp_remote, cwd=cwd)
                 return scp_result
         install_result = run_command(
             [
@@ -313,6 +332,43 @@ class PublicMirrorPublisher:
         )
         return install_result
 
+    def _remote_temp_archive(self, remote_target: str, *, cwd: Path) -> CommandResult:
+        return run_command(
+            [
+                "ssh",
+                *self._ssh_options(),
+                remote_target,
+                "sh",
+                "-s",
+            ],
+            cwd=cwd,
+            input_text=(
+                "set -eu\n"
+                f"tmp_dir={REMOTE_MIRROR_TMP_DIR!r}\n"
+                "mktemp "
+                f"\"${{tmp_dir}}/{REMOTE_MIRROR_ARCHIVE_PREFIX}"
+                f"XXXXXX{REMOTE_MIRROR_ARCHIVE_SUFFIX}\"\n"
+            ),
+            timeout=max(10, self.config.connect_timeout_seconds + 10),
+        )
+
+    def _remove_remote_file(
+        self, remote_target: str, remote_file: str, *, cwd: Path
+    ) -> None:
+        run_command(
+            [
+                "ssh",
+                *self._ssh_options(),
+                remote_target,
+                "rm",
+                "-f",
+                "--",
+                remote_file,
+            ],
+            cwd=cwd,
+            timeout=max(10, self.config.connect_timeout_seconds + 10),
+        )
+
     def _ssh_options(self) -> list[str]:
         options = [
             "-p",
@@ -340,6 +396,22 @@ class PublicMirrorPublisher:
         port_index = scp_options.index("-p")
         scp_options[port_index] = "-P"
         return scp_options
+
+
+def _safe_remote_archive_path(remote_path: str) -> bool:
+    expected_prefix = (
+        REMOTE_MIRROR_TMP_DIR + "/" + REMOTE_MIRROR_ARCHIVE_PREFIX
+    )
+    if not remote_path.startswith(expected_prefix):
+        return False
+    if not remote_path.endswith(REMOTE_MIRROR_ARCHIVE_SUFFIX):
+        return False
+    random_part = remote_path[
+        len(expected_prefix) : -len(REMOTE_MIRROR_ARCHIVE_SUFFIX)
+    ]
+    return bool(random_part) and all(
+        char.isalnum() or char in "._-" for char in random_part
+    )
 
 
 def _mirror_output_path(config: StewardConfig, output_path: Path | None) -> Path:
@@ -794,55 +866,99 @@ def _public_transcript_text(text: str) -> str:
 def _render_transcript_event(event: dict[str, Any]) -> str:
     item = event.get("item")
     if isinstance(item, dict):
-        item_type = str(item.get("type") or "item")
-        if item_type == "agent_message":
-            return str(item.get("text") or "")
-        if item_type == "reasoning":
-            return _labeled_text("reasoning", item.get("text") or item.get("message"))
-        if item_type == "command_execution":
-            command = str(item.get("command") or "").strip()
-            output = str(item.get("aggregated_output") or "").strip()
-            status = str(item.get("status") or "unknown")
-            exit_code = item.get("exit_code")
-            header = f"command {status}"
-            if exit_code is not None:
-                header += f" exit={exit_code}"
-            if command:
-                header += f": {command}"
-            return "\n".join(part for part in (header, output) if part)
-        if item_type == "file_change":
-            changes = item.get("changes")
-            if isinstance(changes, list):
-                rendered = []
-                for change in changes:
-                    if isinstance(change, dict):
-                        rendered.append(
-                            f"{change.get('kind', 'change')}: {change.get('path', '')}"
-                        )
-                if rendered:
-                    return "file changes\n" + "\n".join(rendered)
-        if item_type == "todo_list":
-            todos = item.get("items")
-            if isinstance(todos, list):
-                rendered = []
-                for todo in todos:
-                    if isinstance(todo, dict):
-                        mark = "x" if todo.get("completed") else " "
-                        rendered.append(f"[{mark}] {todo.get('text', '')}")
-                if rendered:
-                    return "todo list\n" + "\n".join(rendered)
-        if item_type in {"tool_call", "function_call", "mcp_tool_call"}:
-            return _labeled_text(
-                str(item.get("name") or item.get("tool_name") or item_type),
-                item.get("status") or item.get("text") or item.get("message"),
-            )
-        if item_type == "error":
-            return _labeled_text("error", item.get("message"))
-        return _labeled_text(item_type, item.get("text") or item.get("message"))
+        return _render_transcript_item(item)
     event_type = str(event.get("type") or "")
     if event_type == "stderr":
         return _labeled_text("stderr", event.get("text") or event.get("message"))
     return _labeled_text(event_type or "event", event.get("text") or event.get("message"))
+
+
+def _render_transcript_item(item: dict[str, Any]) -> str:
+    item_type = str(item.get("type") or "item")
+    renderer = _TRANSCRIPT_ITEM_RENDERERS.get(item_type)
+    if renderer is not None:
+        return renderer(item)
+    if item_type in _TRANSCRIPT_TOOL_CALL_TYPES:
+        return _render_transcript_tool_call(item, item_type)
+    return _render_default_transcript_item(item, item_type)
+
+
+def _render_agent_message_item(item: dict[str, Any]) -> str:
+    return str(item.get("text") or "")
+
+
+def _render_reasoning_item(item: dict[str, Any]) -> str:
+    return _labeled_text("reasoning", item.get("text") or item.get("message"))
+
+
+def _render_command_execution_item(item: dict[str, Any]) -> str:
+    command = str(item.get("command") or "").strip()
+    output = str(item.get("aggregated_output") or "").strip()
+    status = str(item.get("status") or "unknown")
+    exit_code = item.get("exit_code")
+    header = f"command {status}"
+    if exit_code is not None:
+        header += f" exit={exit_code}"
+    if command:
+        header += f": {command}"
+    return "\n".join(part for part in (header, output) if part)
+
+
+def _render_file_change_item(item: dict[str, Any]) -> str:
+    changes = item.get("changes")
+    if not isinstance(changes, list):
+        return _render_default_transcript_item(item, "file_change")
+    rendered = [
+        _render_file_change(change) for change in changes if isinstance(change, dict)
+    ]
+    if not rendered:
+        return _render_default_transcript_item(item, "file_change")
+    return "file changes\n" + "\n".join(rendered)
+
+
+def _render_file_change(change: dict[str, Any]) -> str:
+    return f"{change.get('kind', 'change')}: {change.get('path', '')}"
+
+
+def _render_todo_list_item(item: dict[str, Any]) -> str:
+    todos = item.get("items")
+    if not isinstance(todos, list):
+        return _render_default_transcript_item(item, "todo_list")
+    rendered = [_render_todo(todo) for todo in todos if isinstance(todo, dict)]
+    if not rendered:
+        return _render_default_transcript_item(item, "todo_list")
+    return "todo list\n" + "\n".join(rendered)
+
+
+def _render_todo(todo: dict[str, Any]) -> str:
+    mark = "x" if todo.get("completed") else " "
+    return f"[{mark}] {todo.get('text', '')}"
+
+
+def _render_transcript_tool_call(item: dict[str, Any], item_type: str) -> str:
+    return _labeled_text(
+        str(item.get("name") or item.get("tool_name") or item_type),
+        item.get("status") or item.get("text") or item.get("message"),
+    )
+
+
+def _render_error_item(item: dict[str, Any]) -> str:
+    return _labeled_text("error", item.get("message"))
+
+
+def _render_default_transcript_item(item: dict[str, Any], item_type: str) -> str:
+    return _labeled_text(item_type, item.get("text") or item.get("message"))
+
+
+_TRANSCRIPT_TOOL_CALL_TYPES = {"tool_call", "function_call", "mcp_tool_call"}
+_TRANSCRIPT_ITEM_RENDERERS = {
+    "agent_message": _render_agent_message_item,
+    "reasoning": _render_reasoning_item,
+    "command_execution": _render_command_execution_item,
+    "file_change": _render_file_change_item,
+    "todo_list": _render_todo_list_item,
+    "error": _render_error_item,
+}
 
 
 def _labeled_text(label: str, value: object) -> str:

@@ -3279,7 +3279,7 @@ button.code-copy-button:hover:not(:disabled) {
   align-items: stretch;
   justify-content: center;
   padding: 24px;
-  background: rgba(15, 20, 28, 0.58);
+  background: rgb(15 20 28 / 0.58);
 }
 
 .diff-modal {
@@ -3292,7 +3292,7 @@ button.code-copy-button:hover:not(:disabled) {
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: #ffffff;
-  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.3);
+  box-shadow: 0 24px 80px rgb(15 23 42 / 0.3);
 }
 
 .diff-modal-toolbar {

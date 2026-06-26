@@ -35,7 +35,7 @@
   --code-ink: #161616;
   --mono: "JetBrains Mono", "Fira Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, ui-monospace, monospace;
   --radius: 4px;
-  --focus-ring: rgb(15 98 254 / 48%);
+  --focus-ring: #0f62fe7a;
   --shadow: none;
 }
 

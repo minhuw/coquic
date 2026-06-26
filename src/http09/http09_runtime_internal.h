@@ -628,33 +628,35 @@ QuicCoreResult slice_result_for_connection(const QuicCoreResult &result,
                                            QuicConnectionHandle connection);
 void ensure_server_connection_endpoints_for_accepts(ServerConnectionEndpointMap &endpoints,
                                                     const QuicCoreResult &result,
-                                                    const std::filesystem::path &document_root);
+                                                    const std::filesystem::path &document_root,
+                                                    bool defer_responses_until_handshake_ready);
 void erase_closed_server_connection_endpoints(ServerConnectionEndpointMap &endpoints,
                                               const QuicCoreResult &result);
 std::optional<QuicCoreConnectionInput> to_connection_command_input(const QuicCoreInput &input);
 QuicCoreResult advance_endpoint_connection_inputs(QuicCore &core, QuicConnectionHandle connection,
                                                   std::span<const QuicCoreInput> inputs,
                                                   QuicCoreTimePoint step_time);
-bool process_server_endpoint_core_result(QuicCore &core, EndpointDriveState &transport_state,
-                                         ServerConnectionEndpointMap &endpoints,
-                                         const std::filesystem::path &document_root,
-                                         QuicCoreResult initial_result, int fallback_socket_fd,
-                                         const sockaddr_storage *fallback_peer,
-                                         socklen_t fallback_peer_len,
-                                         bool *observed_send_effects = nullptr);
+bool process_server_endpoint_core_result(
+    QuicCore &core, EndpointDriveState &transport_state, ServerConnectionEndpointMap &endpoints,
+    const std::filesystem::path &document_root, QuicCoreResult initial_result,
+    int fallback_socket_fd, const sockaddr_storage *fallback_peer, socklen_t fallback_peer_len,
+    bool defer_responses_until_handshake_ready, bool *observed_send_effects = nullptr);
 bool process_server_endpoint_core_result_with_backend(
     QuicCore &core, EndpointDriveState &transport_state, ServerConnectionEndpointMap &endpoints,
     const std::filesystem::path &document_root, QuicCoreResult initial_result,
     const std::optional<QuicRouteHandle> &fallback_route_handle, QuicIoBackend &backend,
-    bool *observed_send_effects = nullptr, std::vector<QuicIoTxDatagram> *deferred_output = nullptr,
+    bool defer_responses_until_handshake_ready, bool *observed_send_effects = nullptr,
+    std::vector<QuicIoTxDatagram> *deferred_output = nullptr,
     bool *observed_early_stream_data = nullptr);
 bool pump_shared_server_endpoint_work(QuicCore &core, EndpointDriveState &transport_state,
                                       ServerConnectionEndpointMap &endpoints,
                                       const std::filesystem::path &document_root,
+                                      bool defer_responses_until_handshake_ready,
                                       bool &made_progress);
 bool pump_shared_server_endpoint_work_with_backend(
     QuicCore &core, EndpointDriveState &transport_state, ServerConnectionEndpointMap &endpoints,
-    const std::filesystem::path &document_root, QuicIoBackend &backend, bool &made_progress,
+    const std::filesystem::path &document_root, QuicIoBackend &backend,
+    bool defer_responses_until_handshake_ready, bool &made_progress,
     std::vector<QuicIoTxDatagram> *deferred_output = nullptr,
     bool *observed_early_stream_data = nullptr);
 bool has_pending_shared_server_endpoint_work(const ServerConnectionEndpointMap &endpoints);

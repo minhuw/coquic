@@ -721,6 +721,11 @@ TEST(QuicHttp09RuntimeTest, RuntimeUsesRouteHandleForServerSendEffects) {
     EXPECT_TRUE(coquic::http09::test::runtime_server_send_effect_uses_route_handle_for_tests());
 }
 
+TEST(QuicHttp09RuntimeTest, RuntimeServerZeroRttAcceptsDoNotDeferResponses) {
+    EXPECT_TRUE(
+        coquic::http09::test::runtime_server_zero_rtt_accepts_do_not_defer_responses_for_tests());
+}
+
 TEST(QuicHttp09RuntimeTest, SocketBackendWaitRetriesAfterSpuriousReadablePoll) {
     EXPECT_TRUE(
         coquic::io::test::socket_io_backend_wait_retries_after_spurious_readable_poll_for_tests());

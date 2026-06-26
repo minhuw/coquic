@@ -168,6 +168,7 @@ bool runtime_recvmsg_maps_ecn_to_core_input_for_tests();
 bool runtime_registers_all_server_core_connection_ids_for_tests();
 bool runtime_server_route_handles_are_stable_per_peer_tuple_for_tests();
 bool runtime_server_send_effect_uses_route_handle_for_tests();
+bool runtime_server_zero_rtt_accepts_do_not_defer_responses_for_tests();
 bool runtime_restart_failure_paths_for_tests();
 bool runtime_server_backend_loop_prioritizes_due_timer_for_tests();
 

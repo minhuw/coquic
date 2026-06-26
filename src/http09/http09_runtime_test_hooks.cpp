@@ -1,4 +1,5 @@
 #include "src/http09/http09_runtime_test_support.h"
+#include "tests/support/quic_test_utils.h"
 
 #include <algorithm>
 #include <cstring>
@@ -1732,6 +1733,45 @@ bool runtime_server_send_effect_uses_route_handle_for_tests() {
                    (g_recorded_sendto_for_tests.socket_fd == route_socket_fd) &&
                    (g_recorded_sendto_for_tests.peer_port == 10443);
         });
+}
+
+bool runtime_server_zero_rtt_accepts_do_not_defer_responses_for_tests() {
+    const auto emits_response_before_handshake_ready =
+        [](bool defer_responses_until_handshake_ready) {
+            quic::test::ScopedTempDir document_root;
+            document_root.write_file("hello.txt", "hello");
+
+            ServerConnectionEndpointMap endpoints;
+            QuicCoreResult accept;
+            accept.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+                .connection = 7,
+                .event = QuicCoreConnectionLifecycle::accepted,
+            });
+            ensure_server_connection_endpoints_for_accepts(endpoints, accept, document_root.path(),
+                                                           defer_responses_until_handshake_ready);
+            if (!endpoints.contains(7)) {
+                return false;
+            }
+
+            QuicCoreResult request;
+            request.effects.emplace_back(QuicCoreReceiveStreamData{
+                .connection = 7,
+                .stream_id = 0,
+                .bytes = bytes_from_string_for_runtime_tests("GET /hello.txt\r\n"),
+                .fin = true,
+            });
+            auto update = endpoints.at(7).endpoint.on_core_result(request, now());
+            return std::ranges::any_of(update.core_inputs, [](const QuicCoreInput &input) {
+                const auto *send = std::get_if<QuicCoreSendStreamData>(&input);
+                return send != nullptr && send->stream_id == 0 &&
+                       send->bytes == bytes_from_string_for_runtime_tests("hello") && send->fin;
+            });
+        };
+
+    return !emits_response_before_handshake_ready(
+               /*defer_responses_until_handshake_ready=*/true) &&
+           emits_response_before_handshake_ready(
+               /*defer_responses_until_handshake_ready=*/false);
 }
 
 bool runtime_policy_core_inputs_advance_before_terminal_success_for_tests() {

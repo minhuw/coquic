@@ -2587,7 +2587,8 @@ QuicCoreResult slice_result_for_connection(const QuicCoreResult &result,
 
 void ensure_server_connection_endpoints_for_accepts(ServerConnectionEndpointMap &endpoints,
                                                     const QuicCoreResult &result,
-                                                    const std::filesystem::path &document_root) {
+                                                    const std::filesystem::path &document_root,
+                                                    bool defer_responses_until_handshake_ready) {
     for (const auto &effect : result.effects) {
         const auto *event = std::get_if<QuicCoreConnectionLifecycleEvent>(&effect);
         if (event == nullptr || event->event != QuicCoreConnectionLifecycle::accepted ||
@@ -2595,13 +2596,14 @@ void ensure_server_connection_endpoints_for_accepts(ServerConnectionEndpointMap 
             continue;
         }
 
-        endpoints.emplace(event->connection,
-                          ServerConnectionEndpointState{
-                              .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
-                                  .document_root = document_root,
-                                  .defer_responses_until_handshake_ready = true,
-                              }),
-                          });
+        endpoints.emplace(
+            event->connection,
+            ServerConnectionEndpointState{
+                .endpoint = QuicHttp09ServerEndpoint(QuicHttp09ServerConfig{
+                    .document_root = document_root,
+                    .defer_responses_until_handshake_ready = defer_responses_until_handshake_ready,
+                }),
+            });
     }
 }
 
@@ -2675,12 +2677,11 @@ COQUIC_NO_PROFILE QuicCoreResult advance_endpoint_connection_inputs(
     return combined;
 }
 
-bool process_server_endpoint_core_result(QuicCore &core, EndpointDriveState &transport_state,
-                                         ServerConnectionEndpointMap &endpoints,
-                                         const std::filesystem::path &document_root,
-                                         QuicCoreResult initial_result, int fallback_socket_fd,
-                                         const sockaddr_storage *fallback_peer,
-                                         socklen_t fallback_peer_len, bool *observed_send_effects) {
+bool process_server_endpoint_core_result(
+    QuicCore &core, EndpointDriveState &transport_state, ServerConnectionEndpointMap &endpoints,
+    const std::filesystem::path &document_root, QuicCoreResult initial_result,
+    int fallback_socket_fd, const sockaddr_storage *fallback_peer, socklen_t fallback_peer_len,
+    bool defer_responses_until_handshake_ready, bool *observed_send_effects) {
     std::deque<QuicCoreResult> pending_results;
     pending_results.push_back(std::move(initial_result));
     if (observed_send_effects != nullptr) {
@@ -2705,7 +2706,8 @@ bool process_server_endpoint_core_result(QuicCore &core, EndpointDriveState &tra
             return false;
         }
 
-        ensure_server_connection_endpoints_for_accepts(endpoints, current_result, document_root);
+        ensure_server_connection_endpoints_for_accepts(endpoints, current_result, document_root,
+                                                       defer_responses_until_handshake_ready);
         for (const auto connection : result_connection_handles(current_result)) {
             auto endpoint_it = endpoints.find(connection);
             if (endpoint_it == endpoints.end()) {
@@ -2757,8 +2759,8 @@ bool process_server_endpoint_core_result_with_backend(
     QuicCore &core, EndpointDriveState &transport_state, ServerConnectionEndpointMap &endpoints,
     const std::filesystem::path &document_root, QuicCoreResult initial_result,
     const std::optional<QuicRouteHandle> &fallback_route_handle, QuicIoBackend &backend,
-    bool *observed_send_effects, std::vector<QuicIoTxDatagram> *deferred_output,
-    bool *observed_early_stream_data) {
+    bool defer_responses_until_handshake_ready, bool *observed_send_effects,
+    std::vector<QuicIoTxDatagram> *deferred_output, bool *observed_early_stream_data) {
     std::deque<QuicCoreResult> pending_results;
     pending_results.push_back(std::move(initial_result));
     if (observed_send_effects != nullptr) {
@@ -2791,7 +2793,8 @@ bool process_server_endpoint_core_result_with_backend(
             return false;
         }
 
-        ensure_server_connection_endpoints_for_accepts(endpoints, current_result, document_root);
+        ensure_server_connection_endpoints_for_accepts(endpoints, current_result, document_root,
+                                                       defer_responses_until_handshake_ready);
         for (const auto connection : result_connection_handles(current_result)) {
             auto endpoint_it = endpoints.find(connection);
             if (endpoint_it == endpoints.end()) {
@@ -2842,6 +2845,7 @@ bool process_server_endpoint_core_result_with_backend(
 bool pump_shared_server_endpoint_work(QuicCore &core, EndpointDriveState &transport_state,
                                       ServerConnectionEndpointMap &endpoints,
                                       const std::filesystem::path &document_root,
+                                      bool defer_responses_until_handshake_ready,
                                       bool &made_progress) {
     made_progress = false;
     std::vector<QuicConnectionHandle> pending_connections;
@@ -2871,7 +2875,8 @@ bool pump_shared_server_endpoint_work(QuicCore &core, EndpointDriveState &transp
                     core, transport_state, endpoints, document_root, close_result,
                     /*fallback_socket_fd=*/-1,
                     /*fallback_peer=*/nullptr,
-                    /*fallback_peer_len=*/0, &observed_send_effects)) {
+                    /*fallback_peer_len=*/0, defer_responses_until_handshake_ready,
+                    &observed_send_effects)) {
                 return false;
             }
             made_progress = made_progress | observed_send_effects;
@@ -2886,7 +2891,7 @@ bool pump_shared_server_endpoint_work(QuicCore &core, EndpointDriveState &transp
                 core, transport_state, endpoints, document_root,
                 advance_endpoint_connection_inputs(core, connection, update.core_inputs, now()),
                 /*fallback_socket_fd=*/-1, /*fallback_peer=*/nullptr, /*fallback_peer_len=*/0,
-                &observed_send_effects)) {
+                defer_responses_until_handshake_ready, &observed_send_effects)) {
             return false;
         }
         made_progress = made_progress | observed_send_effects;
@@ -2897,7 +2902,8 @@ bool pump_shared_server_endpoint_work(QuicCore &core, EndpointDriveState &transp
 
 bool pump_shared_server_endpoint_work_with_backend(
     QuicCore &core, EndpointDriveState &transport_state, ServerConnectionEndpointMap &endpoints,
-    const std::filesystem::path &document_root, QuicIoBackend &backend, bool &made_progress,
+    const std::filesystem::path &document_root, QuicIoBackend &backend,
+    bool defer_responses_until_handshake_ready, bool &made_progress,
     std::vector<QuicIoTxDatagram> *deferred_output, bool *observed_early_stream_data) {
     made_progress = false;
     std::vector<QuicConnectionHandle> pending_connections;
@@ -2925,7 +2931,8 @@ bool pump_shared_server_endpoint_work_with_backend(
             bool observed_send_effects = false;
             if (!process_server_endpoint_core_result_with_backend(
                     core, transport_state, endpoints, document_root, close_result, std::nullopt,
-                    backend, &observed_send_effects, deferred_output, observed_early_stream_data)) {
+                    backend, defer_responses_until_handshake_ready, &observed_send_effects,
+                    deferred_output, observed_early_stream_data)) {
                 return false;
             }
             made_progress = made_progress | observed_send_effects;
@@ -2939,8 +2946,8 @@ bool pump_shared_server_endpoint_work_with_backend(
         if (!process_server_endpoint_core_result_with_backend(
                 core, transport_state, endpoints, document_root,
                 advance_endpoint_connection_inputs(core, connection, update.core_inputs, now()),
-                std::nullopt, backend, &observed_send_effects, deferred_output,
-                observed_early_stream_data)) {
+                std::nullopt, backend, defer_responses_until_handshake_ready,
+                &observed_send_effects, deferred_output, observed_early_stream_data)) {
             return false;
         }
         made_progress = made_progress | observed_send_effects;
@@ -2959,7 +2966,8 @@ bool process_server_path_mtu_update_with_backend(
     const std::filesystem::path &document_root, QuicIoBackend &backend,
     std::vector<QuicIoTxDatagram> &deferred_output,
     std::optional<QuicCoreTimePoint> &defer_output_until,
-    const QuicIoPathMtuUpdate &path_mtu_update, QuicCoreTimePoint input_time) {
+    const QuicIoPathMtuUpdate &path_mtu_update, QuicCoreTimePoint input_time,
+    bool defer_responses_until_handshake_ready) {
     auto result = core.advance_endpoint(
         QuicCorePathMtuUpdate{
             .route_handle = path_mtu_update.route_handle,
@@ -2970,8 +2978,8 @@ bool process_server_path_mtu_update_with_backend(
     bool observed_early_stream_data = false;
     const bool ok = process_server_endpoint_core_result_with_backend(
         core, transport_state, endpoints, document_root, std::move(result),
-        path_mtu_update.route_handle, backend, nullptr, &deferred_output,
-        &observed_early_stream_data);
+        path_mtu_update.route_handle, backend, defer_responses_until_handshake_ready, nullptr,
+        &deferred_output, &observed_early_stream_data);
     maybe_note_server_early_stream_data_deferral(ok, observed_early_stream_data, defer_output_until,
                                                  input_time);
     return ok;
@@ -3323,6 +3331,7 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
                                    ServerConnectionEndpointMap &endpoints, QuicIoBackend &backend) {
     std::vector<QuicIoTxDatagram> deferred_output;
     std::optional<QuicCoreTimePoint> defer_output_until;
+    const bool defer_responses_until_handshake_ready = !config.server_zero_rtt.allow;
     const auto flush_deferred_output = [&]() -> bool {
         if (deferred_output.empty()) {
             defer_output_until.reset();
@@ -3340,7 +3349,8 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
         bool observed_early_stream_data = false;
         const bool ok = process_server_endpoint_core_result_with_backend(
             core, transport_state, endpoints, config.document_root, std::move(result),
-            datagram.route_handle, backend, nullptr, &deferred_output, &observed_early_stream_data);
+            datagram.route_handle, backend, defer_responses_until_handshake_ready, nullptr,
+            &deferred_output, &observed_early_stream_data);
         maybe_note_server_early_stream_data_deferral(ok, observed_early_stream_data,
                                                      defer_output_until, input_time);
         return ok;
@@ -3351,8 +3361,8 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
         .pump_endpoint_work =
             [&](bool &made_progress) {
                 return pump_shared_server_endpoint_work_with_backend(
-                    core, transport_state, endpoints, config.document_root, backend, made_progress,
-                    &deferred_output);
+                    core, transport_state, endpoints, config.document_root, backend,
+                    defer_responses_until_handshake_ready, made_progress, &deferred_output);
             },
         .has_pending_endpoint_work =
             [&] { return has_pending_shared_server_endpoint_work(endpoints); },
@@ -3366,7 +3376,8 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
                 const bool ok = process_server_endpoint_core_result_with_backend(
                     core, transport_state, endpoints, config.document_root,
                     core.advance_endpoint(QuicCoreTimerExpired{}, current), std::nullopt, backend,
-                    nullptr, &deferred_output, &observed_early_stream_data);
+                    defer_responses_until_handshake_ready, nullptr, &deferred_output,
+                    &observed_early_stream_data);
                 maybe_note_server_early_stream_data_deferral(ok, observed_early_stream_data,
                                                              defer_output_until, current);
                 return ok;
@@ -3376,7 +3387,8 @@ int run_http09_server_backend_loop(const Http09RuntimeConfig &config, QuicCore &
             [&](const QuicIoPathMtuUpdate &path_mtu_update, QuicCoreTimePoint input_time) {
                 return process_server_path_mtu_update_with_backend(
                     core, transport_state, endpoints, config.document_root, backend,
-                    deferred_output, defer_output_until, path_mtu_update, input_time);
+                    deferred_output, defer_output_until, path_mtu_update, input_time,
+                    defer_responses_until_handshake_ready);
             },
         .flush_deferred_output = flush_deferred_output,
         .defer_output_until = [&] { return defer_output_until; },

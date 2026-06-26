@@ -301,7 +301,6 @@ class SQLiteTaskStore:
                     item = item.model_copy(update={"id": new_signal_item_id()})
             if saved_item is None:
                 session.add(signal_item_to_row(item, path_codec=self.path_codec))
-                saved_item = item
                 was_created = True
         if was_created:
             self.request_wakeup(

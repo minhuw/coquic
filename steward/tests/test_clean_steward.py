@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -1420,6 +1421,28 @@ def test_public_mirror_payload_redacts_internal_state(config: StewardConfig) -> 
         if provider["provider"] == "codacy"
     )
     assert codacy_provider["last_error"] == "request timed out"
+
+
+def test_public_mirror_import_does_not_import_daemon(
+    repo: Path, coquic_home: Path
+) -> None:
+    steward_src = Path(__file__).resolve().parents[1] / "src"
+    pythonpath = str(steward_src)
+    if os.environ.get("PYTHONPATH"):
+        pythonpath += os.pathsep + os.environ["PYTHONPATH"]
+    script = (
+        "import os, sys\n"
+        f"os.environ['COQUIC_HOME'] = {str(coquic_home)!r}\n"
+        f"os.chdir({str(repo)!r})\n"
+        "import coquic_steward.public_mirror\n"
+        "assert 'coquic_steward.orchestration.daemon' not in sys.modules\n"
+    )
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo,
+        env={**os.environ, "PYTHONPATH": pythonpath},
+        check=True,
+    )
 
 
 def test_public_task_detail_exports_sanitized_artifacts(

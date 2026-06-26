@@ -25,7 +25,7 @@ from .core.models import (
 )
 from .core.subprocesses import CommandResult, run_command
 from .signals import project_signals_from_items
-from .storage import TaskStore
+from .storage import TaskStore, scheduler_state
 
 PUBLIC_MIRROR_SCHEMA_VERSION = 1
 PUBLIC_TASK_DETAIL_SCHEMA_VERSION = 1
@@ -76,8 +76,6 @@ def public_mirror_payload(
     signal_limit: int = DEFAULT_MIRROR_SIGNAL_LIMIT,
     fetch_limit: int = DEFAULT_MIRROR_FETCH_LIMIT,
 ) -> dict[str, object]:
-    from .orchestration.daemon import scheduler_state
-
     tasks = store.list_tasks(limit=task_limit)
     signal_items = store.list_signal_items(limit=signal_limit)
     fetch_runs = store.list_signal_fetch_runs(limit=fetch_limit)

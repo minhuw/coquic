@@ -6,15 +6,15 @@ export const runtime = 'nodejs';
 
 type RouteContext = {
   params: Promise<{
-    taskFile: string;
+    taskId: string;
   }>;
 };
 
 const taskDetailFilePattern = /^task-\d{14}-[a-f0-9]{8}\.json$/;
 
 export async function GET(_request: Request, context: RouteContext) {
-  const { taskFile } = await context.params;
-  if (taskFile !== 'index.json' && !taskDetailFilePattern.test(taskFile)) {
+  const { taskId } = await context.params;
+  if (taskId !== 'index.json' && !taskDetailFilePattern.test(taskId)) {
     return Response.json({ detail: 'not found' }, { status: 404 });
   }
 
@@ -24,7 +24,7 @@ export async function GET(_request: Request, context: RouteContext) {
     'steward',
     'data',
     'tasks',
-    taskFile,
+    taskId,
   );
 
   try {

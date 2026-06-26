@@ -598,7 +598,7 @@ pre {
 
 .stream-dot.live {
   background: #67c587;
-  box-shadow: 0 0 0 3px color-mix(in srgb, #67c587 22%, transparent);
+  box-shadow: 0 0 0 3px rgb(103 197 135 / 0.22);
 }
 
 .stream-dot.connecting,
@@ -663,14 +663,14 @@ pre {
 
 .stream-pill.live {
   color: var(--green);
-  border-color: color-mix(in srgb, var(--green) 28%, transparent);
+  border-color: rgb(31 138 101 / 0.28);
   background: var(--green-soft);
 }
 
 .stream-pill.connecting,
 .stream-pill.reconnecting {
   color: var(--amber);
-  border-color: color-mix(in srgb, var(--amber) 30%, transparent);
+  border-color: rgb(141 109 0 / 0.3);
   background: var(--amber-soft);
 }
 
@@ -4142,7 +4142,7 @@ button.code-copy-button:hover:not(:disabled) {
   width: 14px;
   height: 14px;
   flex: 0 0 auto;
-  border: 2px solid color-mix(in srgb, var(--primary) 22%, transparent);
+  border: 2px solid rgb(15 98 254 / 0.22);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: steward-spin 820ms linear infinite;
@@ -4436,28 +4436,33 @@ button.code-copy-button:hover:not(:disabled) {
 
 .status-queued {
   color: var(--amber);
+  --status-border: #8d6d0042;
   background: var(--amber-soft);
 }
 
 .status-pending {
   color: var(--amber);
+  --status-border: #8d6d0042;
   background: var(--amber-soft);
 }
 
 .status-consumed,
 .status-ok {
   color: var(--green);
+  --status-border: #1f8a6542;
   background: var(--green-soft);
 }
 
 .status-disabled {
   color: var(--muted);
+  --status-border: #6f6f6f42;
   background: var(--surface-alt);
 }
 
 .status-errored,
 .status-error {
   color: var(--red);
+  --status-border: #cf2d5642;
   background: var(--red-soft);
 }
 
@@ -4465,6 +4470,7 @@ button.code-copy-button:hover:not(:disabled) {
 .status-reviewing,
 .status-integrating {
   color: var(--blue);
+  --status-border: #0f62fe42;
   background: var(--blue-soft);
 }
 
@@ -4472,17 +4478,20 @@ button.code-copy-button:hover:not(:disabled) {
 .status-pushed,
 .status-no_changes {
   color: var(--green);
+  --status-border: #1f8a6542;
   background: var(--green-soft);
 }
 
 .status-blocked {
   color: var(--purple);
+  --status-border: #002d9c42;
   background: var(--purple-soft);
 }
 
 .status-failed,
 .status-cancelled {
   color: var(--red);
+  --status-border: #cf2d5642;
   background: var(--red-soft);
 }
 
@@ -4689,7 +4698,7 @@ button.code-copy-button:hover:not(:disabled) {
 .planner-decision-counts span,
 .integration-meta-chip.link:hover {
   color: var(--primary-active);
-  border-color: color-mix(in srgb, var(--primary) 28%, transparent);
+  border-color: rgb(15 98 254 / 0.28);
   background: var(--accent-soft);
 }
 
@@ -4703,7 +4712,7 @@ button.code-copy-button:hover:not(:disabled) {
 .timeline-verdict.block,
 .timeline-verdict.failed,
 .timeline-verdict.invalid {
-  border-color: color-mix(in srgb, var(--red) 28%, transparent);
+  border-color: rgb(207 45 86 / 0.28);
   background: var(--red-soft);
 }
 
@@ -4714,7 +4723,7 @@ button.code-copy-button:hover:not(:disabled) {
 .timeline-item.success .timeline-kind,
 .timeline-chip.success,
 .timeline-verdict.approve {
-  border-color: color-mix(in srgb, var(--green) 28%, transparent);
+  border-color: rgb(31 138 101 / 0.28);
   background: var(--green-soft);
 }
 
@@ -4724,7 +4733,7 @@ button.code-copy-button:hover:not(:disabled) {
 .tool-card.pending,
 .planner-task-chips .priority,
 .severity-medium {
-  border-color: color-mix(in srgb, var(--amber) 30%, transparent);
+  border-color: rgb(141 109 0 / 0.3);
   background: var(--amber-soft);
 }
 
@@ -4769,7 +4778,7 @@ a.commit-link:hover,
 }
 
 .status {
-  border-color: color-mix(in srgb, currentColor 26%, transparent);
+  border-color: var(--status-border, #6f6f6f42);
 }
 
 .status-blocked {
@@ -4777,7 +4786,7 @@ a.commit-link:hover,
 }
 
 .live-spinner {
-  border-color: color-mix(in srgb, var(--primary) 22%, transparent);
+  border-color: rgb(15 98 254 / 0.22);
   border-top-color: var(--primary);
 }
 

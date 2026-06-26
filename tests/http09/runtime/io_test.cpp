@@ -107,6 +107,21 @@ TEST(QuicHttp09RuntimeTest, ClientFailsWhenRecvfromFailsAfterReadablePoll) {
     EXPECT_EQ(coquic::http09::run_http09_runtime(client), 1);
 }
 
+TEST(QuicHttp09RuntimeTest, ClientFailsWhenPeerNeverResponds) {
+    const auto port = allocate_udp_loopback_port();
+    ASSERT_NE(port, 0);
+
+    const auto client = coquic::http09::Http09RuntimeConfig{
+        .mode = coquic::http09::Http09RuntimeMode::client,
+        .host = "127.0.0.1",
+        .port = port,
+        .client_receive_timeout_ms = 50,
+        .requests_env = "https://localhost/hello.txt",
+    };
+
+    EXPECT_EQ(coquic::http09::run_http09_runtime(client), 1);
+}
+
 TEST(QuicHttp09RuntimeTest, ServerContinuesAfterIdlePollTimeoutThenFailsOnPollError) {
     const auto port = allocate_udp_loopback_port();
     ASSERT_NE(port, 0);

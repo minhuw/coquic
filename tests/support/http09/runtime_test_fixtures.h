@@ -928,6 +928,41 @@ inline std::uint16_t allocate_udp_loopback_port() {
     return ntohs(bound.sin_port);
 }
 
+inline bool ipv4_udp_endpoint_is_bound(std::string_view host, std::uint16_t port) {
+    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return false;
+    }
+    ScopedFd socket_guard(fd);
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    if (::inet_pton(AF_INET, std::string(host).c_str(), &address.sin_addr) != 1) {
+        return false;
+    }
+
+    if (::bind(fd, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) == 0) {
+        return false;
+    }
+    return errno == EADDRINUSE;
+}
+
+inline bool wait_for_runtime_server_bound(ScopedChildProcess &server_process, std::string_view host,
+                                          std::uint16_t port, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (server_process.wait_for_exit(std::chrono::milliseconds(0)).has_value()) {
+            return false;
+        }
+        if (ipv4_udp_endpoint_is_bound(host, port)) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return ipv4_udp_endpoint_is_bound(host, port);
+}
+
 inline std::string read_file_bytes(const std::filesystem::path &path) {
     std::ifstream input(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());

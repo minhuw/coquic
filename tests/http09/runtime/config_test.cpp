@@ -31,7 +31,8 @@ TEST(QuicHttp09RuntimeTest, ClientDerivesPeerAddressAndServerNameFromRequests) {
     };
 
     auto server_process = launch_runtime_server_process(server);
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    ASSERT_TRUE(wait_for_runtime_server_bound(server_process, server.host, server.port,
+                                              std::chrono::seconds(5)));
 
     EXPECT_EQ(coquic::http09::run_http09_runtime(client), 0);
     EXPECT_FALSE(server_process.wait_for_exit(std::chrono::milliseconds(250)).has_value());

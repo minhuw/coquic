@@ -1844,7 +1844,6 @@ EOF
           pkgs.cmake
           pkgs.git
           pkgs.ninja
-          pkgs.nodejs
         ];
         shellHook = ''
           export GTEST_INCLUDE_DIR="${pkgs.gtest.dev}/include"

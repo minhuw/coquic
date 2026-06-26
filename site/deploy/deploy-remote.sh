@@ -135,6 +135,7 @@ rollback_performed=0
 deploy_succeeded=0
 deployment_interrupted=0
 deployment_interrupt_status=1
+deploy_phase="initialization"
 verification_attempts=30
 verification_sleep_seconds=2
 same_release_repair_mode=0
@@ -334,10 +335,10 @@ on_exit() {
       deployment_interrupt_status="${status}"
     fi
     if [[ ${deployment_interrupted} -eq 1 ]]; then
-      echo "deployment interrupted; running rollback" >&2
+      echo "deployment interrupted during ${deploy_phase}; running rollback" >&2
       status="${deployment_interrupt_status}"
     else
-      echo "deployment failed; running rollback" >&2
+      echo "deployment failed during ${deploy_phase}; running rollback" >&2
       status=1
     fi
     rollback_remote || echo "rollback failed" >&2
@@ -351,8 +352,10 @@ trap on_exit EXIT
 trap 'deployment_interrupted=1; deployment_interrupt_status=130; exit 130' INT
 trap 'deployment_interrupted=1; deployment_interrupt_status=143; exit 143' TERM
 
+deploy_phase="remote SSH preflight"
 check_remote_ssh
 
+deploy_phase="local staging"
 install -m 755 "${binary_path}" "${staging_dir}/h3-server"
 tar -C "${app_dir}" -cf "${staging_dir}/app.tar" .
 install -m 755 "${script_dir}/run-demo.sh" "${staging_dir}/run-demo.sh"
@@ -368,6 +371,7 @@ if [[ ${rag_env_configured} -eq 1 ]]; then
   } > "${staging_dir}/rag.env"
 fi
 
+deploy_phase="remote current preflight"
 previous_release_target="$(
   ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_current_link}" "${remote_releases_root}" <<'EOF'
 set -euo pipefail
@@ -404,6 +408,7 @@ printf '%s\n' "${canonical_target}"
 EOF
 )"
 
+deploy_phase="remote release retention preflight"
 ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_releases_root}" "${previous_release_target}" "${remote_release_retention}" <<'EOF'
 set -euo pipefail
 remote_releases_root="$1"
@@ -446,6 +451,7 @@ for release_path in "${release_paths[@]}"; do
 done
 EOF
 
+deploy_phase="remote runtime preflight"
 ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${rag_env_configured}" <<'EOF'
 set -euo pipefail
 rag_env_configured="$1"
@@ -476,12 +482,14 @@ if [[ "${previous_release_target}" == "${remote_release_dir}" ]]; then
   same_release_repair_mode=1
 fi
 
+deploy_phase="remote upload directory creation"
 remote_upload_dir="$(
   # shellcheck disable=SC2029
   ssh "${ssh_opts[@]}" "${remote_target}" \
     "umask 077 && mktemp -d /tmp/coquic-demo-release-${release_id}-XXXXXX"
 )"
 
+deploy_phase="artifact upload"
 scp "${scp_opts[@]}" "${staging_dir}/h3-server" "${remote_target}:${remote_upload_dir}/h3-server"
 scp "${scp_opts[@]}" "${staging_dir}/app.tar" "${remote_target}:${remote_upload_dir}/app.tar"
 scp "${scp_opts[@]}" "${staging_dir}/run-demo.sh" "${remote_target}:${remote_upload_dir}/run-demo.sh"
@@ -494,6 +502,7 @@ fi
 
 rollback_armed=1
 
+deploy_phase="remote install"
 remote_install_status=0
 ssh "${ssh_opts[@]}" "${remote_target}" bash -s -- "${remote_release_dir}" "${remote_upload_dir}" "${remote_current_link}" "${same_release_repair_mode}" <<'EOF' || remote_install_status=$?
 set -euo pipefail
@@ -664,6 +673,7 @@ fi
 
 url="https://${public_host}/"
 curl_http3_out_paths_file="${staging_dir}/curl-http3-out-paths"
+deploy_phase="curl-http3 build"
 nix_build_status=0
 nix build --no-link --print-out-paths .#curl-http3 >"${curl_http3_out_paths_file}" || nix_build_status=$?
 if [[ ${nix_build_status} -ne 0 ]]; then
@@ -686,6 +696,7 @@ fi
 headers_verified=0
 last_headers=""
 last_headers_error=""
+deploy_phase="header verification"
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: headers
   headers=""
@@ -720,6 +731,7 @@ fi
 
 http3_verified=0
 last_http3_error=""
+deploy_phase="HTTP/3 verification"
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: http3-version
   http3_version=""
@@ -746,6 +758,7 @@ fi
 
 page_verified=0
 last_page_error=""
+deploy_phase="page marker verification"
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: page-markers
   page=""
@@ -774,6 +787,7 @@ fi
 wasm_mime_verified=0
 last_wasm_headers=""
 last_wasm_error=""
+deploy_phase="WASM MIME verification"
 for attempt in $(seq 1 "${verification_attempts}"); do
   # verification retry loop: wasm MIME
   wasm_headers=""
@@ -810,6 +824,7 @@ if [[ ${rag_env_configured} -eq 1 ]]; then
   qa_verified=0
   last_qa_health=""
   last_qa_error=""
+  deploy_phase="RAG QA verification"
   for attempt in $(seq 1 "${verification_attempts}"); do
     # verification retry loop: RAG QA health through Next rewrite
     qa_health=""
@@ -841,6 +856,7 @@ if [[ ${rag_env_configured} -eq 1 ]]; then
   fi
 fi
 
+deploy_phase="complete"
 rollback_armed=0
 deploy_succeeded=1
 echo "remote demo deploy verified"

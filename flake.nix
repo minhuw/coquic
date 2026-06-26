@@ -1837,6 +1837,34 @@ EOF
         profile = boringsslMuslProfile;
         banner = "coquic boringssl musl shell ready. Run: zig build -Dtls_backend=boringssl -Dtarget=x86_64-linux-musl -Dspdlog_shared=false";
       };
+      wasmShell = pkgs.mkShell {
+        packages = [
+          zig
+          llvmPkgs.llvm
+          pkgs.cmake
+          pkgs.git
+          pkgs.ninja
+          pkgs.nodejs
+        ];
+        shellHook = ''
+          export GTEST_INCLUDE_DIR="${pkgs.gtest.dev}/include"
+          export GTEST_SOURCE_DIR="${pkgs.gtest.src}"
+          export GTEST_LIB_DIR="${pkgs.gtest}/lib"
+          export COQUIC_TLS_BACKEND="${quictlsProfile.tlsBackend}"
+          export COQUIC_TLS_LINKAGE="${quictlsProfile.tlsLinkage}"
+          export QUICTLS_INCLUDE_DIR="${quictlsProfile.tlsPackage.dev}/include"
+          export QUICTLS_LIB_DIR="${quictlsProfile.tlsPackage.out}/lib"
+          export OPENSSL_INCLUDE_DIR="${quictlsProfile.tlsPackage.dev}/include"
+          export SPDLOG_INCLUDE_DIR="${quictlsProfile.spdlogPackage.dev}/include"
+          export FMT_INCLUDE_DIR="${quictlsProfile.fmtPackage.dev}/include"
+          export LIBURING_INCLUDE_DIR="${quictlsProfile.ioUringPackage.dev}/include"
+          export NIX_CFLAGS_COMPILE="-isystem ${quictlsProfile.tlsPackage.dev}/include ''${NIX_CFLAGS_COMPILE:-}"
+          export PKG_CONFIG_PATH="${quictlsProfile.pkgConfigPath}''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          export PKG_CONFIG_ALL_STATIC=1
+          export LLVM_PROFILE_RT="${coverageLlvmPkgs.compiler-rt}/lib/linux/libclang_rt.profile-x86_64.a"
+          echo "coquic wasm shell ready. Run: zig build wasm-quic"
+        '';
+      };
       defaultShell = mkCoquicShell {
         profile = quictlsProfile;
         includePreCommit = true;
@@ -2131,6 +2159,7 @@ EOF
         interop-image = quictlsMuslShell;
         boringssl = boringsslShell;
         boringssl-musl = boringsslMuslShell;
+        wasm = wasmShell;
         lint = lintShell;
       };
     };

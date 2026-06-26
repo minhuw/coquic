@@ -43,6 +43,7 @@ readonly interop_retry_failed_testcases="${INTEROP_RETRY_FAILED_TESTCASES:-0}"
 readonly interop_retry_testcases="${INTEROP_RETRY_TESTCASES:-amplificationlimit,multiplexing,handshakeloss,handshakecorruption,rebind-addr,rebind-port,connectionmigration,http3}"
 readonly interop_nix_build_attempts="${INTEROP_NIX_BUILD_ATTEMPTS:-3}"
 readonly interop_nix_build_retry_delay_seconds="${INTEROP_NIX_BUILD_RETRY_DELAY_SECONDS:-10}"
+readonly interop_use_host_analysis_tools="${INTEROP_USE_HOST_ANALYSIS_TOOLS:-0}"
 known_broken_result_input="${INTEROP_KNOWN_BROKEN_RESULT:-${INTEROP_UPSTREAM_RESULT:-}}"
 if [ -n "${known_broken_result_input}" ] && [[ "${known_broken_result_input}" != /* ]]; then
   known_broken_result_input="${repo_root}/${known_broken_result_input}"
@@ -69,6 +70,10 @@ export COQUIC_INTEROP_PRESERVE_TESTCASE_LOGS="${interop_preserve_testcase_logs}"
 
 have_interop_analysis_tools() {
   command -v tshark >/dev/null 2>&1 && command -v editcap >/dev/null 2>&1
+}
+
+use_host_interop_analysis_tools() {
+  [ "${interop_use_host_analysis_tools}" = "1" ] && have_interop_analysis_tools
 }
 
 show_runner_output_tail() {
@@ -830,6 +835,10 @@ if [[ ! "${interop_preserve_testcase_logs}" =~ ^[01]$ ]]; then
   echo "INTEROP_PRESERVE_TESTCASE_LOGS must be 0 or 1" >&2
   exit 1
 fi
+if [[ ! "${interop_use_host_analysis_tools}" =~ ^[01]$ ]]; then
+  echo "INTEROP_USE_HOST_ANALYSIS_TOOLS must be 0 or 1" >&2
+  exit 1
+fi
 
 echo "Using pinned official runner ref: ${interop_runner_ref}"
 echo "Using pinned simulator repo ref: ${network_simulator_ref}"
@@ -844,10 +853,13 @@ fi
 if [ "${interop_coquic_client_testcases}" != "${interop_testcases}" ]; then
   echo "Running coquic-client testcases: ${interop_coquic_client_testcases}"
 fi
-if have_interop_analysis_tools; then
+if use_host_interop_analysis_tools; then
   echo "Using host packet analysis tools: tshark=$(command -v tshark) editcap=$(command -v editcap)"
 else
-  echo "Packet analysis tools missing on host; using ${interop_analysis_shell_package} via nix shell"
+  echo "Using ${interop_analysis_shell_package} via nix shell for packet analysis"
+  if have_interop_analysis_tools; then
+    echo "Host packet analysis tools ignored; set INTEROP_USE_HOST_ANALYSIS_TOOLS=1 to use them"
+  fi
 fi
 
 mkdir -p "${log_root}"
@@ -997,7 +1009,7 @@ run_direction() {
 
   echo "== official interop: server=${server} client=${client} testcases=${requested_testcases} =="
   set +e
-  if have_interop_analysis_tools; then
+  if use_host_interop_analysis_tools; then
     (
       cd "${runner_dir}"
       python3 run.py \
@@ -1070,7 +1082,7 @@ run_direction() {
       mkdir -p "${retry_dir}"
 
       set +e
-      if have_interop_analysis_tools; then
+      if use_host_interop_analysis_tools; then
         (
           cd "${runner_dir}"
           python3 run.py \

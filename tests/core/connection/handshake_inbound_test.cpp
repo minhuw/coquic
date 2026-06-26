@@ -4049,6 +4049,43 @@ TEST(QuicCoreTest, DrainOutboundDatagramReplaysDeferredProtectedPacketsBeforeFlu
     EXPECT_TRUE(saw_ack);
 }
 
+TEST(QuicCoreTest, DeferredReplayDoesNotIncreaseAmplificationReceivedBytes) {
+    auto connection = make_connected_server_connection();
+    connection.handshake_confirmed_ = false;
+    connection.peer_address_validated_ = false;
+    connection.anti_amplification_received_bytes_ = 1252;
+    connection.anti_amplification_sent_bytes_ = 0;
+    const auto received_before_replay = connection.anti_amplification_received_bytes_;
+    const auto deferred_packet = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 7,
+                .frames = {coquic::quic::PingFrame{}},
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::client,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(deferred_packet.has_value());
+    if (!deferred_packet.has_value()) {
+        return;
+    }
+    connection.deferred_protected_packets_.push_back(coquic::quic::DeferredProtectedDatagram(
+        deferred_packet.value(), /*id=*/0, /*qlog_datagram_id=*/std::nullopt,
+        coquic::quic::QuicEcnCodepoint::not_ect, coquic::quic::test::test_time(1)));
+
+    static_cast<void>(connection.drain_outbound_datagram(coquic::quic::test::test_time(2)));
+
+    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, 7u);
+    EXPECT_EQ(connection.anti_amplification_received_bytes_, received_before_replay);
+}
+
 TEST(QuicCoreTest, DrainOutboundDatagramFailsWhenDeferredReplayFails) {
     auto connection = make_connected_client_connection();
     connection.deferred_protected_packets_.push_back(coquic::quic::DeferredProtectedDatagram(

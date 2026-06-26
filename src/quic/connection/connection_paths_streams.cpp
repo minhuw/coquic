@@ -307,7 +307,7 @@ void QuicConnection::replay_deferred_protected_packets(QuicCoreTimePoint now) {
                                  deferred_packet.path_id, deferred_packet.ecn,
                                  deferred_packet.datagram_id,
                                  /*replay_trigger=*/true,
-                                 /*count_inbound_bytes=*/true);
+                                 /*count_inbound_bytes=*/false);
         if (status_ == HandshakeStatus::failed) {
             return;
         }

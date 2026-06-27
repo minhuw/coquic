@@ -15,9 +15,9 @@
   --border-strong: #c6c6c6;
   --line: #e0e0e0;
   --line-strong: #c6c6c6;
-  --accent: var(--primary);
+  --accent: #0f62fe;
   --accent-soft: #edf5ff;
-  --blue: var(--primary);
+  --blue: #0f62fe;
   --blue-soft: #edf5ff;
   --amber: #8d6d00;
   --amber-soft: #fcf4d6;
@@ -25,7 +25,7 @@
   --red-soft: #fff1f1;
   --green: #1f8a65;
   --green-soft: #edf8f4;
-  --purple: var(--primary-active);
+  --purple: #002d9c;
   --purple-soft: #edf5ff;
   --server: #78a9ff;
   --server-ink: #0043ce;

@@ -27,9 +27,8 @@ from ..orchestration import (
     DaemonAlreadyRunning,
     acquire_daemon_lock,
 )
-from ..orchestration.daemon import scheduler_state
 from ..signals import project_signals_from_items
-from ..storage import TaskStore
+from ..storage import TaskStore, scheduler_state
 
 
 TEXT_TAIL_BYTES = 256 * 1024

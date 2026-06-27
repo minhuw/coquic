@@ -67,8 +67,6 @@ from coquic_steward.orchestration import (
 from coquic_steward.orchestration.daemon import (
     DAEMON_EVENT_TASK_ID,
     SchedulerTrigger,
-    due_provider_names,
-    scheduler_state,
     status_stale_minutes,
     wait_for_scheduler_event,
 )
@@ -98,7 +96,7 @@ from coquic_steward.signals import (
     gather_signals,
 )
 from coquic_steward.signals.collector import PROVIDER_TYPES
-from coquic_steward.storage import TaskStore
+from coquic_steward.storage import TaskStore, due_provider_names, scheduler_state
 from coquic_steward.storage.schema import (
     EventRow,
     SignalItemRow,

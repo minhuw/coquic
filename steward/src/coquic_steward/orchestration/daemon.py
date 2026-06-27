@@ -18,7 +18,6 @@ from ..planning import run_planner
 from ..public_mirror import public_mirror_digest, publish_public_mirror
 from ..storage import (
     TaskStore,
-    due_provider_names,
     idle_fetch_provider_names,
     scheduler_state,
     store_is_idle_for_signal_fetch,

@@ -391,7 +391,8 @@ pre {
   top: calc(100% + 6px);
   left: 0;
   display: flex;
-  width: min(320px, calc(100vw - 24px));
+  width: 320px;
+  max-width: calc(100vw - 24px);
   max-height: 280px;
   flex-direction: column;
   gap: 4px;
@@ -482,7 +483,8 @@ pre {
   left: auto;
   right: auto;
   display: none;
-  width: min(360px, calc(100vw - 24px));
+  width: 360px;
+  max-width: calc(100vw - 24px);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: #ffffff;
@@ -2096,7 +2098,8 @@ pre {
 .create-modal {
   position: relative;
   z-index: 1;
-  width: min(560px, 100%);
+  width: 560px;
+  max-width: 100%;
   max-height: calc(100vh - 32px);
   overflow: auto;
   border: 1px solid var(--border-strong);
@@ -2109,7 +2112,8 @@ pre {
   position: relative;
   z-index: 1;
   display: flex;
-  width: min(880px, 100%);
+  width: 880px;
+  max-width: 100%;
   max-height: calc(100vh - 32px);
   min-height: 0;
   flex-direction: column;
@@ -2192,7 +2196,8 @@ pre {
 
 .task-page-shell {
   display: flex;
-  width: min(1440px, 100%);
+  width: 100%;
+  max-width: 1440px;
   min-width: 0;
   margin: 0 auto;
   flex-direction: column;
@@ -3284,7 +3289,8 @@ button.code-copy-button:hover:not(:disabled) {
 
 .diff-modal {
   display: flex;
-  width: min(1480px, 100%);
+  width: 1480px;
+  max-width: 100%;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
@@ -3338,7 +3344,7 @@ button.code-copy-button:hover:not(:disabled) {
   gap: 18px;
   overflow: auto;
   border-radius: 0 0 8px 8px;
-  padding: 18px max(18px, calc((100% - 920px) / 2));
+  padding: 18px clamp(18px, calc((100% - 920px) / 2), 100%);
   background:
     linear-gradient(180deg, #fbfcfe 0%, #f5f7fa 100%);
   scroll-behavior: smooth;
@@ -3354,7 +3360,8 @@ button.code-copy-button:hover:not(:disabled) {
 .chat-bubble.user {
   grid-template-columns: minmax(0, 1fr) 34px;
   align-self: flex-end;
-  width: min(82%, 760px);
+  width: 82%;
+  max-width: 760px;
 }
 
 .chat-bubble.user .chat-avatar {
@@ -3368,7 +3375,8 @@ button.code-copy-button:hover:not(:disabled) {
 }
 
 .chat-bubble.assistant {
-  width: min(100%, 920px);
+  width: 100%;
+  max-width: 920px;
 }
 
 .transcript-divider {
@@ -3403,7 +3411,8 @@ button.code-copy-button:hover:not(:disabled) {
 }
 
 .collapsed-prompt {
-  width: min(100%, 860px);
+  width: 100%;
+  max-width: 860px;
   margin-left: 46px;
   border: 1px solid #dfe4eb;
   border-radius: 8px;
@@ -3696,7 +3705,8 @@ button.code-copy-button:hover:not(:disabled) {
 
 .tool-card {
   display: block;
-  width: min(100%, 860px);
+  width: 100%;
+  max-width: 860px;
   margin-left: 46px;
   overflow: visible;
   border: 1px solid #dfe4eb;
@@ -3960,11 +3970,13 @@ button.code-copy-button:hover:not(:disabled) {
 
 .chat-image {
   margin: 0;
+  max-width: 720px;
 }
 
 .chat-image img {
   display: block;
-  max-width: min(100%, 720px);
+  width: auto;
+  max-width: 100%;
   max-height: 420px;
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -4239,6 +4251,7 @@ button.code-copy-button:hover:not(:disabled) {
 .attempt-transcript .chat-bubble.user,
 .attempt-transcript .tool-card {
   width: 100%;
+  max-width: none;
   margin-left: 0;
 }
 
@@ -4604,7 +4617,7 @@ button.code-copy-button:hover:not(:disabled) {
 }
 
 .task-page-shell {
-  width: min(1340px, 100%);
+  max-width: 1340px;
 }
 
 .task-page-topbar {
@@ -4951,10 +4964,12 @@ a.commit-link:hover,
   .chat-bubble,
   .chat-bubble.user {
     width: 100%;
+    max-width: none;
   }
 
   .tool-card {
     width: 100%;
+    max-width: none;
     margin-left: 0;
   }
 

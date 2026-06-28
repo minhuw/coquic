@@ -401,7 +401,7 @@ pre {
   border-radius: var(--radius);
   padding: 6px;
   background: #ffffff;
-  box-shadow: 0 12px 32px rgb(22 22 22 / 0.14);
+  box-shadow: 0 12px 32px #16161624;
 }
 
 .project-menu-popover button {
@@ -488,7 +488,7 @@ pre {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: #ffffff;
-  box-shadow: 0 12px 32px rgb(22 22 22 / 0.14);
+  box-shadow: 0 12px 32px #16161624;
 }
 
 .project-info:hover .project-info-popover,
@@ -600,7 +600,7 @@ pre {
 
 .stream-dot.live {
   background: #67c587;
-  box-shadow: 0 0 0 3px rgb(103 197 135 / 0.22);
+  box-shadow: 0 0 0 3px #67c58738;
 }
 
 .stream-dot.connecting,
@@ -665,14 +665,14 @@ pre {
 
 .stream-pill.live {
   color: var(--green);
-  border-color: rgb(31 138 101 / 0.28);
+  border-color: #1f8a6547;
   background: var(--green-soft);
 }
 
 .stream-pill.connecting,
 .stream-pill.reconnecting {
   color: var(--amber);
-  border-color: rgb(141 109 0 / 0.3);
+  border-color: #8d6d004d;
   background: var(--amber-soft);
 }
 
@@ -2088,11 +2088,11 @@ pre {
   border: 0;
   border-radius: 0;
   padding: 0;
-  background: rgb(23 26 31 / 0.34);
+  background: #171a1f57;
 }
 
 .modal-backdrop:hover:not(:disabled) {
-  background: rgb(23 26 31 / 0.4);
+  background: #171a1f66;
 }
 
 .create-modal {
@@ -2105,7 +2105,7 @@ pre {
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: var(--surface);
-  box-shadow: 0 18px 56px rgb(15 23 42 / 0.22);
+  box-shadow: 0 18px 56px #0f172a38;
 }
 
 .signal-detail-modal {
@@ -2121,7 +2121,7 @@ pre {
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: var(--surface);
-  box-shadow: 0 18px 56px rgb(15 23 42 / 0.22);
+  box-shadow: 0 18px 56px #0f172a38;
 }
 
 .signal-detail-modal .signal-detail {
@@ -2221,7 +2221,7 @@ pre {
   border-radius: 7px;
   padding: 6px 10px;
   color: var(--ink);
-  background: rgb(255 255 255 / 0.78);
+  background: #ffffffc7;
   font-weight: 750;
   text-decoration: none;
   transition:
@@ -2247,8 +2247,8 @@ pre {
 
 .task-overview-card {
   overflow: hidden;
-  background: rgb(255 255 255 / 0.92);
-  box-shadow: 0 12px 34px rgb(15 23 42 / 0.07);
+  background: #ffffffeb;
+  box-shadow: 0 12px 34px #0f172a12;
 }
 
 .task-overview-head {
@@ -2409,7 +2409,7 @@ pre {
   padding: 9px 10px;
   color: var(--ink);
   background: #fbfcfd;
-  box-shadow: 0 8px 20px rgb(15 23 42 / 0.07);
+  box-shadow: 0 8px 20px #0f172a12;
 }
 
 .pipeline-node.active {
@@ -3284,7 +3284,7 @@ button.code-copy-button:hover:not(:disabled) {
   align-items: stretch;
   justify-content: center;
   padding: 24px;
-  background: rgb(15 20 28 / 0.58);
+  background: #0f141c94;
 }
 
 .diff-modal {
@@ -3298,7 +3298,7 @@ button.code-copy-button:hover:not(:disabled) {
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   background: #ffffff;
-  box-shadow: 0 24px 80px rgb(15 23 42 / 0.3);
+  box-shadow: 0 24px 80px #0f172a4d;
 }
 
 .diff-modal-toolbar {
@@ -3464,8 +3464,8 @@ button.code-copy-button:hover:not(:disabled) {
   border: 1px solid #dfe4eb;
   border-radius: 8px;
   padding: 13px 15px;
-  background: rgb(255 255 255 / 0.96);
-  box-shadow: 0 1px 2px rgb(15 23 42 / 0.05);
+  background: #fffffff5;
+  box-shadow: 0 1px 2px #0f172a0d;
 }
 
 .chat-label {
@@ -3712,8 +3712,8 @@ button.code-copy-button:hover:not(:disabled) {
   border: 1px solid #dfe4eb;
   border-left-width: 5px;
   border-radius: 8px;
-  background: rgb(255 255 255 / 0.92);
-  box-shadow: 0 1px 2px rgb(15 23 42 / 0.04);
+  background: #ffffffeb;
+  box-shadow: 0 1px 2px #0f172a0a;
 }
 
 .tool-card.open {
@@ -4154,7 +4154,7 @@ button.code-copy-button:hover:not(:disabled) {
   width: 14px;
   height: 14px;
   flex: 0 0 auto;
-  border: 2px solid rgb(15 98 254 / 0.22);
+  border: 2px solid #0f62fe38;
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: steward-spin 820ms linear infinite;
@@ -4626,7 +4626,7 @@ button.code-copy-button:hover:not(:disabled) {
   z-index: 30;
   min-height: 64px;
   border-bottom: 1px solid var(--line);
-  background: rgb(255 255 255 / 0.94);
+  background: #fffffff0;
   backdrop-filter: blur(10px);
 }
 
@@ -4711,7 +4711,7 @@ button.code-copy-button:hover:not(:disabled) {
 .planner-decision-counts span,
 .integration-meta-chip.link:hover {
   color: var(--primary-active);
-  border-color: rgb(15 98 254 / 0.28);
+  border-color: #0f62fe47;
   background: var(--accent-soft);
 }
 
@@ -4725,7 +4725,7 @@ button.code-copy-button:hover:not(:disabled) {
 .timeline-verdict.block,
 .timeline-verdict.failed,
 .timeline-verdict.invalid {
-  border-color: rgb(207 45 86 / 0.28);
+  border-color: #cf2d5647;
   background: var(--red-soft);
 }
 
@@ -4736,7 +4736,7 @@ button.code-copy-button:hover:not(:disabled) {
 .timeline-item.success .timeline-kind,
 .timeline-chip.success,
 .timeline-verdict.approve {
-  border-color: rgb(31 138 101 / 0.28);
+  border-color: #1f8a6547;
   background: var(--green-soft);
 }
 
@@ -4746,7 +4746,7 @@ button.code-copy-button:hover:not(:disabled) {
 .tool-card.pending,
 .planner-task-chips .priority,
 .severity-medium {
-  border-color: rgb(141 109 0 / 0.3);
+  border-color: #8d6d004d;
   background: var(--amber-soft);
 }
 
@@ -4767,7 +4767,7 @@ button.code-copy-button:hover:not(:disabled) {
 
 .diff-modal-backdrop,
 .modal-backdrop {
-  background: rgb(22 22 22 / 0.46);
+  background: #16161675;
 }
 
 .diff-modal,
@@ -4775,7 +4775,7 @@ button.code-copy-button:hover:not(:disabled) {
 .signal-detail-modal,
 .project-menu-popover,
 .project-info-popover {
-  box-shadow: 0 18px 48px rgb(22 22 22 / 0.18);
+  box-shadow: 0 18px 48px #1616162e;
 }
 
 .link-button,
@@ -4799,7 +4799,7 @@ a.commit-link:hover,
 }
 
 .live-spinner {
-  border-color: rgb(15 98 254 / 0.22);
+  border-color: #0f62fe38;
   border-top-color: var(--primary);
 }
 

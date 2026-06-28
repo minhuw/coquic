@@ -552,6 +552,7 @@
           banner,
           extraPackages ? [ ],
           includePreCommit ? false,
+          includePreCommitPackages ? includePreCommit,
         }:
         pkgs.mkShell {
           packages =
@@ -570,7 +571,7 @@
               pkgs.pkg-config
             ]
             ++ extraPackages
-            ++ lib.optionals includePreCommit pre-commit-shell.enabledPackages;
+            ++ lib.optionals includePreCommitPackages pre-commit-shell.enabledPackages;
 
           shellHook =
             (if includePreCommit then pre-commit-shell.shellHook else "")
@@ -1867,7 +1868,14 @@ EOF
       defaultShell = mkCoquicShell {
         profile = quictlsProfile;
         includePreCommit = true;
+        includePreCommitPackages = false;
         banner = "coquic dev shell ready. Run: zig build";
+        extraPackages = [ pkgs.pre-commit ];
+      };
+      toolsShell = mkCoquicShell {
+        profile = quictlsProfile;
+        includePreCommit = true;
+        banner = "coquic tools shell ready. Run: zig build";
         extraPackages = [
           pkgs.aflplusplus
           llvmPkgs.clang
@@ -2160,6 +2168,7 @@ EOF
         boringssl-musl = boringsslMuslShell;
         wasm = wasmShell;
         lint = lintShell;
+        tools = toolsShell;
       };
     };
 }

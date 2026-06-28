@@ -138,6 +138,35 @@ path.write_text(text.replace(needle, replacement, 1))
 PY
 }
 
+prepare_official_runner_compose_defaults() {
+  local defaults_dir="${runner_dir}/.coquic-compose-defaults"
+
+  # The official runner invokes `docker compose down` after per-test timeouts
+  # without the inline environment used for `docker compose up`. Provide only
+  # defaults for fields that become invalid specs when empty, so cleanup can
+  # remove stale containers between tests without changing testcase settings.
+  mkdir -p \
+    "${defaults_dir}/certs" \
+    "${defaults_dir}/client-downloads" \
+    "${defaults_dir}/client-logs" \
+    "${defaults_dir}/client-www" \
+    "${defaults_dir}/server-downloads" \
+    "${defaults_dir}/server-logs" \
+    "${defaults_dir}/server-www"
+
+  export CERTS="${CERTS:-${defaults_dir}/certs}"
+  export CLIENT_WWW="${CLIENT_WWW:-${defaults_dir}/client-www}"
+  export CLIENT_DOWNLOADS="${CLIENT_DOWNLOADS:-${defaults_dir}/client-downloads}"
+  export SERVER_WWW="${SERVER_WWW:-${defaults_dir}/server-www}"
+  export SERVER_DOWNLOADS="${SERVER_DOWNLOADS:-${defaults_dir}/server-downloads}"
+  export SERVER_LOGS="${SERVER_LOGS:-${defaults_dir}/server-logs}"
+  export CLIENT_LOGS="${CLIENT_LOGS:-${defaults_dir}/client-logs}"
+  export CLIENT="${CLIENT:-${coquic_image}}"
+  export SERVER="${SERVER:-${coquic_image}}"
+  export REQUESTS_CLIENT="${REQUESTS_CLIENT-}"
+  export REQUESTS_SERVER="${REQUESTS_SERVER-}"
+}
+
 validate_official_results() {
   local results_json=$1
   local server=$2
@@ -636,6 +665,7 @@ known_broken_path = pathlib.Path(sys.argv[5]) if sys.argv[5] else None
 
 data = json.loads(results_path.read_text())
 adjustments = list(data.get("coquic_compat_adjustments", []))
+runner_output_path = results_path.parent / "runner-output.txt"
 
 def known_broken_testcases(path, server, client):
     if path is None or not path.is_file() or not server or not client:
@@ -726,6 +756,21 @@ def adjust_failed_result(testcase, public_reason, evidence):
 def adjust_failed_measurement(testcase, public_reason, evidence):
     adjust_failed_entry("measurements", testcase, public_reason, evidence)
 
+def output_contains_all(path, patterns):
+    if not path.is_file():
+        return False
+    text = path.read_text(errors="replace")
+    return all(pattern in text for pattern in patterns)
+
+def runner_output_contains_all(patterns):
+    return output_contains_all(runner_output_path, patterns)
+
+def retry_output_contains_all(testcase, patterns):
+    return output_contains_all(
+        results_path.parent / f"retry-{testcase}" / "runner-output.txt",
+        patterns,
+    )
+
 if server == "coquic" and client == "xquic" and "crosstraffic" in requested_tests:
     adjust_failed_measurement(
         "crosstraffic",
@@ -734,6 +779,53 @@ if server == "coquic" and client == "xquic" and "crosstraffic" in requested_test
             "xquic official client stops the crosstraffic response after its "
             "30-second request deadline before the 25 MiB transfer completes "
             "under TCP competition"
+        ),
+    )
+
+if (
+    server == "coquic"
+    and client == "xquic"
+    and "handshakeloss" in requested_tests
+    and retry_output_contains_all(
+        "handshakeloss",
+        [
+            "start requesty[37]",
+            "Test failed: took longer than 300s.",
+            "Test: handshakeloss took",
+        ],
+    )
+):
+    adjust_failed_result(
+        "handshakeloss",
+        "peer exceeds official handshakeloss timeout",
+        (
+            "xquic official client runs handshakeloss requests serially; the "
+            "selected run's isolated retry still timed out after 300 seconds "
+            "with 37 of 50 one-kilobyte transfers complete"
+        ),
+    )
+
+if (
+    server == "coquic"
+    and client == "msquic"
+    and "zerortt" in requested_tests
+    and runner_output_contains_all(
+        [
+            "Check of downloaded files succeeded.",
+            "0-RTT size: 10694",
+            "1-RTT size: 5122",
+            "Client sent too much data in 1-RTT packets.",
+            "Test: zerortt took",
+        ]
+    )
+):
+    adjust_failed_result(
+        "zerortt",
+        "peer sends too much request data after 0-RTT",
+        (
+            "msquic official client completes all zerortt downloads, but the "
+            "official checker measured 10694 bytes in 0-RTT packets and 5122 "
+            "bytes in 1-RTT packets in the selected run"
         ),
     )
 
@@ -962,6 +1054,8 @@ if "COQUIC_IO_PROFILE" not in text:
 path.write_text(text)
 PY
 
+prepare_official_runner_compose_defaults
+
 python3 -m venv "${runner_dir}/.venv"
 source "${runner_dir}/.venv/bin/activate"
 python3 -m pip install --quiet --upgrade pip
@@ -1122,6 +1216,14 @@ run_direction() {
         show_runner_output_tail "${retry_runner_output_log}"
       fi
     done
+    if [ "${#retry_testcases[@]}" -ne 0 ]; then
+      apply_official_result_compatibility_adjustments \
+        "${results_json}" "${server}" "${client}" "${requested_testcases}" \
+        "${interop_known_broken_result}"
+      validate_official_results \
+        "${results_json}" "${server}" "${client}" "${requested_testcases}" \
+        "succeeded,unsupported,peer_broken,failed"
+    fi
     if [ "${#recovered_testcases[@]}" -ne 0 ]; then
       mark_official_testcases_recovered "${results_json}" "${recovered_testcases[@]}"
       apply_official_result_compatibility_adjustments \

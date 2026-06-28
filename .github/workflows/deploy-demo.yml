@@ -37,11 +37,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@92148bb48b9a0c5458c53dd0b368fbfbfbaa3210
-        with:
-          summarize: false
-
       - name: Preflight demo SSH port
         run: |
           remote_host="coquic.minhuw.dev"
@@ -57,6 +52,11 @@ jobs:
             echo "remote SSH port preflight attempt ${attempt}/6 failed; retrying in 10s" >&2
             sleep 10
           done
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@92148bb48b9a0c5458c53dd0b368fbfbfbaa3210
+        with:
+          summarize: false
 
       - name: Build h3-server
         run: nix develop .#quictls-musl -c zig build -Dtls_backend=quictls -Dtarget=x86_64-linux-musl -Dspdlog_shared=false

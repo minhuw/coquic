@@ -184,6 +184,10 @@ do
     exit 1
   fi
 done
+if [ "${CLIENT}" != "${coquic_image}" ] || [ "${SERVER}" != "${coquic_image}" ]; then
+  echo "expected compose cleanup image defaults to use the CoQUIC image" >&2
+  exit 1
+fi
 for env_name in \
   WAITFORSERVER TESTCASE_SERVER TESTCASE_CLIENT SCENARIO \
   PROTOCOLS_CLIENT PROTOCOLS_SERVER

@@ -565,7 +565,20 @@ class StewardExecutor:
             "patch conflict on latest main",
             {"revision": revision, "conflict": conflict[-4000:]},
         )
-        self.worktrees.reset_to_main(task.worktree_path)
+        try:
+            self.worktrees.reset_to_main(task.worktree_path)
+        except (OSError, RuntimeError) as exc:
+            message = str(exc)[-4000:]
+            self.store.add_event(
+                task.id,
+                "integration.repair_reset_failed",
+                message,
+                {"revision": revision},
+            )
+            self._finish_task(
+                task.id, TaskStatus.blocked, "integration repair reset failed"
+            )
+            return False
         task = self.store.get(task.id)
         name = f"worker-integration-revision-{revision}"
         transcript_path, last_message_path = self.runner.paths(task, name=name)
@@ -967,6 +980,23 @@ class StewardExecutor:
                 f"resetting worktree to {self.config.git_remote}/{self.config.main_branch}",
             )
             self.worktrees.reset_to_main(worktree)
+        except (OSError, RuntimeError) as exc:
+            message = str(exc)[-4000:]
+            transcript.write("reset_failed", message[-2000:])
+            self._finish_task(
+                task.id, TaskStatus.blocked, "integration reset failed"
+            )
+            self._finish_task(
+                source.id, TaskStatus.blocked, "integration reset failed"
+            )
+            self.store.add_event(
+                source.id,
+                "integration.reset_failed",
+                message,
+                {"integration_task_id": task.id},
+            )
+            return patch_text, False
+        try:
             transcript.write("apply", "applying reviewed patch")
             self.worktrees.apply_patch(worktree, patch_text)
         except (OSError, RuntimeError) as exc:

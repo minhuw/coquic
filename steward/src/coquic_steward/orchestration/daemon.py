@@ -213,7 +213,10 @@ class StewardDaemon:
     def _fail_dispatch_exception(self, task_id: str, message: str) -> TaskRecord:
         summary = f"dispatch failed: {message}"
         current = self.store.get(task_id)
-        if TaskStatus(current.status) == TaskStatus.queued:
+        current_status = TaskStatus(current.status)
+        if current_status.terminal:
+            task = current
+        elif current_status == TaskStatus.queued:
             task = self.store.update_status(task_id, TaskStatus.failed, summary)
         else:
             task = self.store.finish_task(task_id, TaskStatus.failed, summary)

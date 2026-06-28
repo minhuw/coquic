@@ -1991,6 +1991,30 @@ def test_daemon_dispatches_newly_queued_integration_continuation(
     assert store.get(source.id).status == TaskStatus.succeeded
 
 
+def test_daemon_dispatch_exception_preserves_terminal_task_status(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+
+    def fake_run(task_id: str) -> bool:
+        store.finish_task(task_id, TaskStatus.blocked, "blocked before crash")
+        raise RuntimeError("after terminal update")
+
+    daemon = StewardDaemon(config, store)
+    monkeypatch.setattr(daemon.executor, "run_task", fake_run)
+
+    result = daemon.tick(plan=False, dispatch=True)
+    saved = store.get(task.id)
+
+    assert result.skipped == 1
+    assert saved.status == TaskStatus.blocked
+    assert saved.summary == "blocked before crash"
+    assert any(event.kind == "dispatch.failed" for event in store.events(task.id))
+
+
 def test_daemon_dispatch_skips_full_integration_lane_for_source_capacity(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -4854,6 +4878,76 @@ def test_integration_conflict_returns_to_worker_then_queues_retry(
     assert any(event.kind == "worker.integration_revision_requested" for event in events)
     assert any(event.kind == "integration.retry_requested" for event in events)
     assert "exec resume --json" in calls.read_text(encoding="utf-8")
+
+
+def test_integration_reset_failure_blocks_without_conflict_repair(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True)
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "git_remote": "origin",
+            "integration_mode": IntegrationMode.push_main.value,
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worktree, _ = Worktrees(config).create(source)
+    (worktree / "README.md").write_text("reset failure change\n", encoding="utf-8")
+    source = store.get(source.id)
+    source.worktree_path = worktree
+    source.patch_path = config.patches_dir / source.id / "iteration-0.patch"
+    Worktrees(config).save_patch(worktree, source.patch_path)
+    store.save(source)
+    source = store.start_integration(source.id, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate T",
+            prompt="Integrate",
+            metadata={
+                "source_task_id": source.id,
+                "source_patch_path": str(source.patch_path),
+                "dedupe_key": f"integration:{source.id}",
+            },
+        ),
+        dedupe_key=f"integration:{source.id}",
+    )
+
+    def fail_reset(_self, _path):
+        raise RuntimeError("git fetch origin main failed")
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.worktree.Worktrees.reset_to_main",
+        fail_reset,
+    )
+
+    assert not StewardExecutor(config, store).run_task(integration.id)
+    saved_source = store.get(source.id)
+    saved_integration = store.get(integration.id)
+    events = store.events(source.id)
+
+    assert saved_source.status == TaskStatus.blocked
+    assert saved_source.summary == "integration reset failed"
+    assert saved_integration.status == TaskStatus.blocked
+    assert saved_integration.summary == "integration reset failed"
+    assert any(event.kind == "integration.reset_failed" for event in events)
+    assert not any(event.kind == "integration.conflict" for event in events)
+    assert not any(
+        event.kind == "worker.integration_revision_requested" for event in events
+    )
 
 
 def test_integration_conflict_no_changes_marks_source_no_changes(

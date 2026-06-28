@@ -3220,6 +3220,51 @@ def test_signal_registry_exposes_only_concrete_github_actions_providers() -> Non
     }.issubset(PROVIDER_TYPES)
 
 
+def test_collect_signal_items_fetches_github_actions_alias_by_name(
+    config: StewardConfig, monkeypatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        captured["args"] = args
+        captured["cwd"] = cwd
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 789,
+                        "workflowName": "Per-Commit CI",
+                        "conclusion": "failure",
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command",
+        fake_run_command,
+    )
+
+    collection = collect_signal_items(
+        config, provider_names=["github-actions:ci"]
+    )[0]
+
+    args = captured["args"]
+    assert isinstance(args, list)
+    assert args[args.index("--workflow") + 1] == "ci.yml"
+    assert args[args.index("--status") + 1] == "failure"
+    assert captured["cwd"] == config.repo_root
+    assert collection.provider == "github-actions:ci"
+    assert collection.fetch.provider == "github-actions:ci"
+    assert collection.fetch.item_count == 1
+    assert collection.items[0].provider == "github-actions:ci"
+    assert collection.items[0].kind == "github-actions.ci-failure"
+
+
 def test_github_actions_interop_signal_filters_workflow(
     config: StewardConfig, monkeypatch
 ) -> None:

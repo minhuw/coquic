@@ -35,6 +35,11 @@ eval "$(
     interop/run-official.sh |
     sed '$d'
 )"
+eval "$(
+  sed -n '/^have_interop_analysis_tools()/,/^show_runner_output_tail()/p' \
+    interop/run-official.sh |
+    sed '$d'
+)"
 
 complete_results="${tmpdir}/complete-results.json"
 cat >"${complete_results}" <<'JSON'
@@ -110,6 +115,42 @@ SH
 }
 
 test_build_coquic_image_tar_retries
+
+test_packet_analysis_tool_selection_defaults_to_nix_shell() {
+  local fake_bin="${tmpdir}/fake-analysis-bin"
+  mkdir -p "${fake_bin}"
+
+  cat >"${fake_bin}/tshark" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat >"${fake_bin}/editcap" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "${fake_bin}/tshark" "${fake_bin}/editcap"
+
+  if ! PATH="${fake_bin}:${PATH}" have_interop_analysis_tools; then
+    echo "expected fake host packet analysis tools to be detected" >&2
+    exit 1
+  fi
+  if PATH="${fake_bin}:${PATH}" \
+    interop_use_host_analysis_tools=0 \
+    use_host_interop_analysis_tools
+  then
+    echo "expected host packet analysis tools to be ignored by default" >&2
+    exit 1
+  fi
+  if ! PATH="${fake_bin}:${PATH}" \
+    interop_use_host_analysis_tools=1 \
+    use_host_interop_analysis_tools
+  then
+    echo "expected explicit opt-in to use host packet analysis tools" >&2
+    exit 1
+  fi
+}
+
+test_packet_analysis_tool_selection_defaults_to_nix_shell
 
 patched_runner="${tmpdir}/interop.py"
 cat >"${patched_runner}" <<'PY'

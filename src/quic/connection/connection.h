@@ -433,11 +433,10 @@ struct DeferredProtectedPacket {
     }
 
     operator DeferredProtectedDatagram() const {
-        return DeferredProtectedDatagram{
-            bytes,
-            /*id=*/0,
-            datagram_id == 0 ? std::nullopt : std::optional<std::uint32_t>(datagram_id),
-        };
+        DeferredProtectedDatagram datagram(bytes);
+        datagram.datagram_id =
+            datagram_id == 0 ? std::nullopt : std::optional<std::uint32_t>(datagram_id);
+        return datagram;
     }
 
     bool operator==(const DeferredProtectedPacket &) const = default;

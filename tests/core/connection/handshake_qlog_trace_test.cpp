@@ -898,6 +898,9 @@ TEST(QuicCoreTest, ConnectionDeferredProtectedPacketEqualityDependsOnDatagramId)
     const auto datagram = static_cast<coquic::quic::DeferredProtectedDatagram>(
         coquic::quic::DeferredProtectedPacket(bytes));
     EXPECT_FALSE(datagram.datagram_id.has_value());
+    const auto datagram_with_id = static_cast<coquic::quic::DeferredProtectedDatagram>(
+        coquic::quic::DeferredProtectedPacket(bytes, 7));
+    EXPECT_EQ(datagram_with_id.datagram_id, 7u);
     EXPECT_TRUE(coquic::quic::DeferredProtectedPacket(bytes) == bytes);
     EXPECT_TRUE(bytes == coquic::quic::DeferredProtectedPacket(bytes));
     EXPECT_FALSE(coquic::quic::DeferredProtectedPacket(bytes, 7) == bytes);

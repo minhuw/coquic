@@ -803,10 +803,7 @@ client_initial_datagram_token(std::span<const std::byte> datagram) {
         (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(version_bytes.value()[2])) << 8) |
         static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(version_bytes.value()[3]));
 
-    const auto long_header_packet_type = static_cast<std::uint8_t>((header_byte >> 4) & 0x03u);
-    const bool is_initial_packet = version == kQuicVersion2 ? long_header_packet_type == 0x01u
-                                                            : long_header_packet_type == 0x00u;
-    if (!is_initial_packet) {
+    if (((header_byte >> 4) & 0x03u) != (version == kQuicVersion2 ? 0x01u : 0x00u)) {
         return std::nullopt;
     }
 

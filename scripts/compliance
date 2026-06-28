@@ -10,6 +10,8 @@ if [ -z "${DUVET_BIN}" ]; then
     DUVET_BIN="$(command -v duvet)"
   elif [ -x "${DUVET_HOME}/bin/duvet" ]; then
     DUVET_BIN="${DUVET_HOME}/bin/duvet"
+  elif command -v nix >/dev/null 2>&1 && [ -f flake.nix ]; then
+    DUVET_BIN="$(nix build --no-link --print-out-paths .#duvet)/bin/duvet"
   else
     mkdir -p "${DUVET_HOME}"
     CARGO_HOME="${DUVET_HOME}/cargo" cargo install duvet \

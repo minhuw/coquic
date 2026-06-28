@@ -438,6 +438,24 @@
         export CARGO_HOME="$TMPDIR/cargo-home"
         mkdir -p "$HOME" "$CARGO_HOME"
       '';
+      duvetTool = pkgs.rustPlatform.buildRustPackage {
+        pname = "duvet";
+        version = "0.4.2";
+        src = pkgs.fetchCrate {
+          pname = "duvet";
+          version = "0.4.2";
+          hash = "sha256-ey5eGuJv65ARtv+q+LDYMRunfOliNGHCTJ24tMgXbjs=";
+        };
+        cargoHash = "sha256-HgQuCWtDulGz9JfRcgaCcjIKt5u09oFIBGbL/hDuFsI=";
+        prePatch = rustBuildHome;
+        nativeBuildInputs = [
+          pkgs.pkg-config
+        ];
+        buildInputs = [
+          pkgs.openssl
+        ];
+        doCheck = false;
+      };
       goBuildHome = ''
         export HOME="$TMPDIR/home"
         export GOCACHE="$TMPDIR/go-cache"
@@ -2053,6 +2071,7 @@ EOF
         coquic-boringssl = boringsslPackage;
         coquic-boringssl-musl = boringsslMuslPackage;
         curl-http3 = pkgs.curl;
+        duvet = duvetTool;
         interop-image-quictls-musl = quictlsMuslImage;
         interop-image-boringssl-musl = boringsslMuslImage;
         perf-image-quictls-musl = quictlsMuslPerfImage;

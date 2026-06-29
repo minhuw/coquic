@@ -737,6 +737,18 @@ class SQLiteTaskStore:
                 or 0
             )
 
+    def count_events_since(self, kind: str, since: datetime) -> int:
+        with Session(self.engine) as session:
+            return (
+                session.scalar(
+                    select(func.count())
+                    .select_from(EventRow)
+                    .where(EventRow.kind == kind)
+                    .where(EventRow.created_at >= since.isoformat())
+                )
+                or 0
+            )
+
     def recover_stale_active_tasks(
         self,
         *,

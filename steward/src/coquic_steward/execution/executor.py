@@ -6,6 +6,7 @@ import re
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
+from datetime import timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from ..core.models import (
     ValidationResult,
     WorkerKind,
     WorkerResult,
+    utc_now,
 )
 from ..storage import TaskStore
 from .review import (
@@ -925,10 +927,12 @@ class StewardExecutor:
                 source.id, TaskStatus.succeeded, "validated patch ready"
             )
             return True
-        if (
-            self.store.count_events("main.pushed")
-            >= self.config.limits.max_main_pushes_per_day
-        ):
+        today = utc_now().astimezone(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        if self.store.count_events_since(
+            "main.pushed", today
+        ) >= self.config.limits.max_main_pushes_per_day:
             transcript.write("blocked", "main push budget reached")
             self._finish_task(
                 task.id, TaskStatus.blocked, "main push budget reached"

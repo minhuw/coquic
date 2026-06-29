@@ -4427,6 +4427,71 @@ def test_integration_manager_local_only_commits_without_push(
     assert not any(event.kind == "main.pushed" for event in store.events(source.id))
 
 
+def test_integration_manager_counts_main_push_budget_per_utc_day(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "integration_mode": IntegrationMode.push_main.value,
+            "limits": StewardLimits(
+                max_active_tasks=config.limits.max_active_tasks,
+                max_main_pushes_per_day=1,
+                worker_timeout_minutes=config.limits.worker_timeout_minutes,
+                review_timeout_minutes=config.limits.review_timeout_minutes,
+                validation_timeout_minutes=config.limits.validation_timeout_minutes,
+                stale_task_minutes=config.limits.stale_task_minutes,
+            ),
+        }
+    )
+    store = TaskStore(config.db_path)
+    old_push_time = utc_now().astimezone(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ) - timedelta(seconds=1)
+    with Session(store.engine) as session, session.begin():
+        session.add(
+            EventRow(
+                task_id="old-integration",
+                kind="main.pushed",
+                message="old-sha",
+                created_at=old_push_time.isoformat(),
+                data_json="{}",
+            )
+        )
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    patch_path = tmp_path / "source.patch"
+    patch_path.write_text("", encoding="utf-8")
+    source.patch_path = patch_path
+    store.save(source)
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate T",
+            prompt="Integrate",
+            metadata={"source_task_id": source.id},
+        )
+    )
+    transcript_messages: list[tuple[str, str]] = []
+
+    class Transcript:
+        def write(self, stage: str, message: str) -> None:
+            transcript_messages.append((stage, message))
+
+    executor = StewardExecutor(config, store)
+
+    assert executor._integration_preflight(integration, source, Transcript()) is None
+    assert ("patch", f"source patch: {patch_path}") in transcript_messages
+
+    store.add_event("today-integration", "main.pushed", "today-sha")
+
+    assert executor._integration_preflight(integration, source, Transcript()) is False
+    assert store.get(integration.id).status == TaskStatus.blocked
+    assert store.get(source.id).status == TaskStatus.blocked
+
+
 def test_commit_message_prompt_includes_patch_context(config: StewardConfig) -> None:
     source = TaskRecord(
         spec=TaskSpec(

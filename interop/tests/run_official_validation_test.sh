@@ -695,6 +695,186 @@ if data.get("coquic_compat_adjustments"):
     raise SystemExit("expected no msquic missing-evidence compatibility audit trail")
 PY
 
+quiche_client_dir="${tmpdir}/quiche-client"
+mkdir -p "${quiche_client_dir}/retry-handshakecorruption"
+quiche_client_results="${quiche_client_dir}/results.json"
+cat >"${quiche_client_results}" <<'JSON'
+{
+  "servers": ["coquic"],
+  "clients": ["quiche"],
+  "results": [[
+    {"name": "handshakecorruption", "result": "failed"},
+    {"name": "connectionmigration", "result": "failed"}
+  ]],
+  "measurements": [[]]
+}
+JSON
+cat >"${quiche_client_dir}/runner-output.txt" <<'TXT'
+Check of downloaded files succeeded.
+Server saw these paths used: {(('fd00:cafe:cafe:100::100', 443), ('fd00:cafe:cafe::100', 56213))}
+Server saw only a single path in use; test broken?
+Test: connectionmigration took 50.324154s, status: TestResult.FAILED
+TXT
+cat >"${quiche_client_dir}/retry-handshakecorruption/runner-output.txt" <<'TXT'
+Test failed: took longer than 300s.
+Test: handshakecorruption took 310.933708s, status: TestResult.FAILED
+TXT
+
+apply_official_result_compatibility_adjustments \
+  "${quiche_client_results}" coquic quiche handshakecorruption,connectionmigration
+
+python3 - "${quiche_client_results}" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+results = {
+    entry["name"]: entry
+    for entry in data["results"][0]
+}
+if results["handshakecorruption"]["result"] != "peer_broken":
+    raise SystemExit("expected quiche handshakecorruption to be marked peer_broken")
+if results["handshakecorruption"].get("details") != "peer exceeds official handshakecorruption timeout":
+    raise SystemExit("expected quiche handshakecorruption public reason")
+if "isolated handshakecorruption retry" not in results["handshakecorruption"].get("evidence", ""):
+    raise SystemExit("expected quiche handshakecorruption evidence")
+if results["connectionmigration"]["result"] != "peer_broken":
+    raise SystemExit("expected quiche connectionmigration to be marked peer_broken")
+if results["connectionmigration"].get("details") != "peer does not perform active migration":
+    raise SystemExit("expected quiche connectionmigration public reason")
+if "official checker saw only one server-side path" not in results["connectionmigration"].get("evidence", ""):
+    raise SystemExit("expected quiche connectionmigration evidence")
+adjustments = data.get("coquic_compat_adjustments", [])
+adjusted_names = {entry.get("name") for entry in adjustments}
+if adjusted_names != {"handshakecorruption", "connectionmigration"}:
+    raise SystemExit("expected quiche client compatibility adjustment audit trail")
+if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
+    raise SystemExit("expected quiche client audit trail to include reason and evidence")
+PY
+
+quiche_client_missing_evidence_dir="${tmpdir}/quiche-client-missing-evidence"
+mkdir -p "${quiche_client_missing_evidence_dir}"
+quiche_client_missing_evidence_results="${quiche_client_missing_evidence_dir}/results.json"
+cat >"${quiche_client_missing_evidence_results}" <<'JSON'
+{
+  "servers": ["coquic"],
+  "clients": ["quiche"],
+  "results": [[
+    {"name": "handshakecorruption", "result": "failed"},
+    {"name": "connectionmigration", "result": "failed"}
+  ]],
+  "measurements": [[]]
+}
+JSON
+
+apply_official_result_compatibility_adjustments \
+  "${quiche_client_missing_evidence_results}" coquic quiche handshakecorruption,connectionmigration
+
+python3 - "${quiche_client_missing_evidence_results}" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+for entry in data["results"][0]:
+    if entry["result"] != "failed":
+        raise SystemExit(f"expected quiche {entry['name']} without evidence to remain failed")
+    if "details" in entry or "evidence" in entry:
+        raise SystemExit(f"expected quiche {entry['name']} without evidence to avoid metadata")
+if data.get("coquic_compat_adjustments"):
+    raise SystemExit("expected no quiche client missing-evidence compatibility audit trail")
+PY
+
+quiche_server_dir="${tmpdir}/quiche-server"
+mkdir -p "${quiche_server_dir}"
+quiche_server_results="${quiche_server_dir}/results.json"
+cat >"${quiche_server_results}" <<'JSON'
+{
+  "servers": ["quiche"],
+  "clients": ["coquic"],
+  "results": [[
+    {"name": "rebind-port", "result": "failed"},
+    {"name": "rebind-addr", "result": "failed"}
+  ]],
+  "measurements": [[]]
+}
+JSON
+cat >"${quiche_server_dir}/runner-output.txt" <<'TXT'
+sim     | 1.00028s: unknown binding for destination 193.167.0.100:36457, dropping packet
+Test failed: took longer than 60s.
+Test: rebind-port took 71.196155s, status: TestResult.FAILED
+sim     | 6.00103s: unknown binding for destination 193.167.0.224:59022, dropping packet
+Test failed: took longer than 60s.
+Test: rebind-addr took 71.190549s, status: TestResult.FAILED
+TXT
+
+apply_official_result_compatibility_adjustments \
+  "${quiche_server_results}" quiche coquic rebind-port,rebind-addr
+
+python3 - "${quiche_server_results}" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+results = {
+    entry["name"]: entry
+    for entry in data["results"][0]
+}
+if results["rebind-port"]["result"] != "peer_broken":
+    raise SystemExit("expected quiche rebind-port to be marked peer_broken")
+if results["rebind-port"].get("details") != "peer does not follow client port rebinding":
+    raise SystemExit("expected quiche rebind-port public reason")
+if "stale client bindings" not in results["rebind-port"].get("evidence", ""):
+    raise SystemExit("expected quiche rebind-port evidence")
+if results["rebind-addr"]["result"] != "peer_broken":
+    raise SystemExit("expected quiche rebind-addr to be marked peer_broken")
+if results["rebind-addr"].get("details") != "peer does not follow client address rebinding":
+    raise SystemExit("expected quiche rebind-addr public reason")
+if "stale client bindings" not in results["rebind-addr"].get("evidence", ""):
+    raise SystemExit("expected quiche rebind-addr evidence")
+adjustments = data.get("coquic_compat_adjustments", [])
+adjusted_names = {entry.get("name") for entry in adjustments}
+if adjusted_names != {"rebind-port", "rebind-addr"}:
+    raise SystemExit("expected quiche server compatibility adjustment audit trail")
+if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
+    raise SystemExit("expected quiche server audit trail to include reason and evidence")
+PY
+
+quiche_server_missing_evidence_dir="${tmpdir}/quiche-server-missing-evidence"
+mkdir -p "${quiche_server_missing_evidence_dir}"
+quiche_server_missing_evidence_results="${quiche_server_missing_evidence_dir}/results.json"
+cat >"${quiche_server_missing_evidence_results}" <<'JSON'
+{
+  "servers": ["quiche"],
+  "clients": ["coquic"],
+  "results": [[
+    {"name": "rebind-port", "result": "failed"},
+    {"name": "rebind-addr", "result": "failed"}
+  ]],
+  "measurements": [[]]
+}
+JSON
+
+apply_official_result_compatibility_adjustments \
+  "${quiche_server_missing_evidence_results}" quiche coquic rebind-port,rebind-addr
+
+python3 - "${quiche_server_missing_evidence_results}" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+for entry in data["results"][0]:
+    if entry["result"] != "failed":
+        raise SystemExit(f"expected quiche {entry['name']} without evidence to remain failed")
+    if "details" in entry or "evidence" in entry:
+        raise SystemExit(f"expected quiche {entry['name']} without evidence to avoid metadata")
+if data.get("coquic_compat_adjustments"):
+    raise SystemExit("expected no quiche server missing-evidence compatibility audit trail")
+PY
+
 xquic_server_results="${tmpdir}/xquic-server-results.json"
 cat >"${xquic_server_results}" <<'JSON'
 {

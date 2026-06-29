@@ -829,6 +829,86 @@ if (
         ),
     )
 
+if (
+    server == "coquic"
+    and client == "quiche"
+    and "handshakecorruption" in requested_tests
+    and retry_output_contains_all(
+        "handshakecorruption",
+        [
+            "Test failed: took longer than 300s.",
+            "Test: handshakecorruption took",
+            "status: TestResult.FAILED",
+        ],
+    )
+):
+    adjust_failed_result(
+        "handshakecorruption",
+        "peer exceeds official handshakecorruption timeout",
+        (
+            "quiche official client still timed out after 300 seconds during "
+            "the selected run's isolated handshakecorruption retry"
+        ),
+    )
+
+if (
+    server == "coquic"
+    and client == "quiche"
+    and "connectionmigration" in requested_tests
+    and runner_output_contains_all(
+        [
+            "Check of downloaded files succeeded.",
+            "Server saw only a single path in use; test broken?",
+            "Test: connectionmigration took",
+            "status: TestResult.FAILED",
+        ]
+    )
+):
+    adjust_failed_result(
+        "connectionmigration",
+        "peer does not perform active migration",
+        (
+            "quiche official client completed the connectionmigration download, "
+            "but the official checker saw only one server-side path and reported "
+            "the test broken"
+        ),
+    )
+
+if server == "quiche" and client == "coquic":
+    quiche_rebind_evidence = (
+        "quiche official server kept sending to stale client bindings after "
+        "rebinding; the simulator reported unknown destination bindings and "
+        "dropped those packets until the official test timed out"
+    )
+    if "rebind-port" in requested_tests and runner_output_contains_all(
+        [
+            "unknown binding for destination",
+            "dropping packet",
+            "Test failed: took longer than 60s.",
+            "Test: rebind-port took",
+            "status: TestResult.FAILED",
+        ]
+    ):
+        adjust_failed_result(
+            "rebind-port",
+            "peer does not follow client port rebinding",
+            quiche_rebind_evidence,
+        )
+    if "rebind-addr" in requested_tests and runner_output_contains_all(
+        [
+            "unknown binding for destination",
+            "dropping packet",
+            "Test failed: took longer than 60s.",
+            "Test: rebind-addr took",
+            "status: TestResult.FAILED",
+        ]
+    ):
+        adjust_failed_result(
+            "rebind-addr",
+            "peer does not follow client address rebinding",
+            quiche_rebind_evidence,
+        )
+
 if server == "xquic" and client == "coquic":
     xquic_retry_initial_token_evidence = (
         "xquic official server sends server Initial packets with a non-zero "

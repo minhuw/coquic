@@ -1888,7 +1888,10 @@ EOF
         includePreCommit = true;
         includePreCommitPackages = false;
         banner = "coquic dev shell ready. Run: zig build";
-        extraPackages = [ pkgs.pre-commit ];
+        extraPackages = [
+          pkgs.pre-commit
+          duvetTool
+        ];
       };
       toolsShell = mkCoquicShell {
         profile = quictlsProfile;

@@ -257,10 +257,10 @@ inline bool inject_inbound_application_frames_on_path(QuicConnection &connection
 }
 
 inline QuicCoreResult relay_send_datagrams_to_peer(const QuicCoreResult &result, QuicCore &peer,
-                                                   QuicCoreTimePoint delivered_at) {
+                                                   QuicCoreTimePoint now) {
     QuicCoreResult combined;
     for (auto datagram : send_datagrams_from(result)) {
-        auto step = peer.advance(QuicCoreInboundDatagram{std::move(datagram)}, delivered_at);
+        auto step = peer.advance(QuicCoreInboundDatagram{std::move(datagram)}, now);
         combined.effects.insert(combined.effects.end(),
                                 std::make_move_iterator(step.effects.begin()),
                                 std::make_move_iterator(step.effects.end()));

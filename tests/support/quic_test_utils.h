@@ -280,7 +280,7 @@ last_resumption_state_from(std::span<const QuicCoreResult> results);
 
 inline QuicCoreResult relay_datagrams_to_peer(std::span<const std::vector<std::byte>> datagrams,
                                               std::span<const std::size_t> delivery_order,
-                                              QuicCore &peer, QuicCoreTimePoint now);
+                                              QuicCore &peer, QuicCoreTimePoint receive_time);
 
 inline QuicCoreResult relay_send_datagrams_to_peer_except(const QuicCoreResult &result,
                                                           std::span<const std::size_t> dropped,
@@ -339,10 +339,10 @@ drive_earliest_next_wakeup(QuicCore &core,
 
 inline QuicCoreResult relay_datagrams_to_peer(std::span<const std::vector<std::byte>> datagrams,
                                               std::span<const std::size_t> delivery_order,
-                                              QuicCore &peer, QuicCoreTimePoint now) {
+                                              QuicCore &peer, QuicCoreTimePoint receive_time) {
     QuicCoreResult combined;
     for (const auto index : delivery_order) {
-        auto step = peer.advance(QuicCoreInboundDatagram{datagrams[index]}, now);
+        auto step = peer.advance(QuicCoreInboundDatagram{datagrams[index]}, receive_time);
         combined.effects.insert(combined.effects.end(),
                                 std::make_move_iterator(step.effects.begin()),
                                 std::make_move_iterator(step.effects.end()));

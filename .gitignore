@@ -48,6 +48,7 @@ site/next/.next/
 site/next/out/
 site/next/node_modules/
 site/next/tsconfig.tsbuildinfo
+site/next/.generated/
 demo/next/.next/
 site/next/public/perf-results.json
 site/next/public/perf-history.json
@@ -58,3 +59,5 @@ site/next/public/steward/
 site/next/public/coverage-results.json
 site/next/public/interop-results.json
 site/next/public/coquic-wasm-quic.wasm
+site/next/public/dataset/
+codex-history-coquic-transcripts-only-20260630.zip

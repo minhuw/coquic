@@ -12,7 +12,12 @@ wasm_module="$(realpath -m -- "${requested_wasm_module}")"
 standalone_dir="${next_dir}/.next/standalone"
 static_dir="${next_dir}/.next/static"
 public_dir="${next_dir}/public"
+generated_dir="${next_dir}/.generated"
 next_runtime_router_utils_dir="${next_dir}/node_modules/next/dist/server/lib/router-utils"
+server_dependency_entries=(
+  "pend"
+  "yauzl"
+)
 rag_dir="${repo_root}/rag"
 rag_artifacts_dir="${repo_root}/.rag/artifacts"
 server_js="${standalone_dir}/server.js"
@@ -68,12 +73,27 @@ fi
 rm -rf -- "${output_dir}"
 install -d -m 755 -- "${output_dir}"
 cp -R -- "${standalone_dir}/." "${output_dir}/"
+if [[ -d "${generated_dir}" && ! -d "${output_dir}/.generated" ]]; then
+  cp -R -- "${generated_dir}" "${output_dir}/.generated"
+fi
+rm -rf -- "${output_dir}/.generated/transcripts"
+for entry in "${server_dependency_entries[@]}"; do
+  if [[ ! -d "${next_dir}/node_modules/${entry}" ]]; then
+    echo "missing server dependency: ${entry}" >&2
+    exit 1
+  fi
+  rm -rf -- "${output_dir}/node_modules/${entry}"
+  install -d -m 755 -- "$(dirname "${output_dir}/node_modules/${entry}")"
+  cp -R -- "${next_dir}/node_modules/${entry}" "${output_dir}/node_modules/${entry}"
+done
 install -d -m 755 -- "${output_dir}/node_modules/next/dist/server/lib"
 rm -rf -- "${output_dir}/node_modules/next/dist/server/lib/router-utils"
 cp -R -- "${next_runtime_router_utils_dir}" "${output_dir}/node_modules/next/dist/server/lib/router-utils"
 install -d -m 755 -- "${output_dir}/.next"
 cp -R -- "${static_dir}" "${output_dir}/.next/static"
+rm -rf -- "${output_dir}/public"
 cp -R -- "${public_dir}" "${output_dir}/public"
+rm -rf -- "${output_dir}/public/dataset"
 for entry in "${runtime_public_entries[@]}"; do
   rm -rf -- "${output_dir}/public/${entry}"
 done

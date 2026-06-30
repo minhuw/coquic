@@ -4,23 +4,18 @@ import { type ReactNode, useId, useState } from "react";
 import type { KeyboardEvent } from "react";
 import {
   Activity,
-  Bot,
-  CheckCircle2,
   ChevronRight,
-  Code2,
-  FilePenLine,
   Inbox,
   ImageIcon,
   ListChecks,
   MessageSquareText,
   ExternalLink,
   Send,
-  Search,
-  TerminalSquare,
   UserRound,
-  Wrench,
   XCircle,
 } from "lucide-react";
+import { CodexTranscriptThread } from "./codex-transcript-thread";
+import { parseCodexTranscriptText } from "@/lib/codex-transcript";
 import { CodeBlock } from "./steward-code-block";
 
 export type PublicCodexRunDiagnostics = {
@@ -39,119 +34,10 @@ export type PublicCodexRunDiagnostics = {
   thread_id?: string;
 };
 
-type TranscriptItem =
-  | SessionMarkerItem
-  | AgentMessageItem
-  | ReasoningItem
-  | CommandItem
-  | FileChangeItem
-  | TodoListItem
-  | WebSearchItem
-  | ToolCallItem
-  | ErrorItem
-  | GenericItem;
-
-type SessionMarkerItem = {
-  id: string;
-  kind: "session";
-  label: string;
-  value: string;
-};
-
-type AgentMessageItem = {
-  id: string;
-  kind: "agent";
-  text: string;
-};
-
-type ReasoningItem = {
-  id: string;
-  kind: "reasoning";
-  text: string;
-};
-
-type CommandItem = {
-  id: string;
-  kind: "command";
-  command: string;
-  output: string;
-  status: string;
-  exitCode: number | null;
-};
-
-type FileChangeItem = {
-  id: string;
-  kind: "file_change";
-  status: string;
-  changes: Array<{ path: string; kind: string }>;
-};
-
-type TodoListItem = {
-  id: string;
-  kind: "todo_list";
-  items: Array<{ text: string; completed: boolean }>;
-};
-
-type WebSearchItem = {
-  id: string;
-  kind: "web_search";
-  query: string;
-  action: string;
-};
-
-type ToolCallItem = {
-  id: string;
-  kind: "tool_call";
-  label: string;
-  text: string;
-  status: string;
-};
-
-type ErrorItem = {
-  id: string;
-  kind: "error";
-  message: string;
-};
-
-type GenericItem = {
-  id: string;
-  kind: "generic";
-  label: string;
-  text: string;
-};
-
 type TextBlock = {
   kind: "code" | "diff" | "image" | "text";
   language?: string;
   text: string;
-};
-
-type CodexEvent = {
-  type?: string;
-  thread_id?: string;
-  text?: string;
-  message?: string;
-  item?: CodexItem;
-};
-
-type CodexItem = {
-  id?: string;
-  type?: string;
-  text?: string;
-  command?: string;
-  aggregated_output?: string;
-  status?: string;
-  exit_code?: number | null;
-  message?: string;
-  query?: string;
-  action?: { type?: string };
-  name?: string;
-  tool_name?: string;
-  arguments?: unknown;
-  result?: unknown;
-  output?: string;
-  changes?: Array<{ path?: string; kind?: string }>;
-  items?: Array<{ text?: string; completed?: boolean }>;
 };
 
 type PlannerDecision = {
@@ -211,8 +97,8 @@ export function TranscriptView({
     );
   }
   const promptParts = displayPromptParts(prompt);
-  const items = parseTranscript(text);
-  if (!items.length) {
+  const records = parseCodexTranscriptText(text);
+  if (!records.length) {
     return (
       <div className="chat-transcript" aria-label="Agent transcript">
         <SessionDiagnostics diagnostics={diagnostics} isLiveRun={isLiveRun} />
@@ -241,11 +127,7 @@ export function TranscriptView({
           <TextBlocks taskId={taskId} text={promptParts.visible} />
         </ChatBubble>
       )}
-      {items.map((item, index) => {
-        // React keys are not HTML sinks; transcript content is rendered as escaped React text nodes.
-        const itemKey = `${item.id}-${index}`; // nosemgrep: javascript.express.security.injection.raw-html-format.raw-html-format
-        return <TranscriptCard item={item} key={itemKey} taskId={taskId} />;
-      })}
+      <CodexTranscriptThread records={records} />
     </div>
   );
 }
@@ -342,121 +224,6 @@ function CollapsedPrompt({ text }: { text: string }) {
       <summary>Planner instructions</summary>
       <TextBlocks taskId="" text={text} />
     </details>
-  );
-}
-
-function TranscriptCard({ item, taskId }: { item: TranscriptItem; taskId: string }) {
-  if (item.kind === "session") return <TranscriptDivider label={item.label} value={item.value} />;
-  if (item.kind === "agent") {
-    return (
-      <ChatBubble label="Assistant" role="assistant">
-        <TextBlocks taskId={taskId} text={item.text} />
-      </ChatBubble>
-    );
-  }
-  if (item.kind === "reasoning") {
-    return (
-      <ToolCard
-        icon={<Bot size={16} />}
-        meta="reasoning"
-        title="Reasoning"
-        tone="neutral"
-      >
-        <TextBlocks taskId={taskId} text={item.text || "No reasoning text captured."} />
-      </ToolCard>
-    );
-  }
-  if (item.kind === "command") {
-    const failed = item.status === "failed" || (item.exitCode ?? 0) !== 0;
-    return (
-      <ToolCard
-        icon={<TerminalSquare size={16} />}
-        meta={item.exitCode === null ? item.status : `exit ${item.exitCode} · ${item.status}`}
-        title={shortCommand(item.command)}
-        tone={failed ? "danger" : item.status === "in_progress" ? "pending" : "ok"}
-      >
-        <CodeBlock
-          className="tool-command"
-          compact
-          language="bash"
-          showLineNumbers={false}
-          text={item.command}
-          title="Command"
-        />
-        {item.output ? (
-          <TextBlocks mode="tool" taskId={taskId} text={item.output} />
-        ) : (
-          <div className="tool-empty">No output.</div>
-        )}
-      </ToolCard>
-    );
-  }
-  if (item.kind === "file_change") {
-    return (
-      <ToolCard icon={<FilePenLine size={16} />} meta={item.status} title="File change" tone="pending">
-        {item.changes.length ? (
-          <ul className="file-list">
-            {item.changes.map((change, index) => (
-              <li key={`${change.path}-${index}`}>
-                <span>{change.kind}</span>
-                <code>{displayPath(change.path)}</code>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <div className="tool-empty">No file paths captured.</div>
-        )}
-      </ToolCard>
-    );
-  }
-  if (item.kind === "todo_list") {
-    return (
-      <ToolCard icon={<ListChecks size={16} />} meta={`${item.items.length} items`} title="Task plan" tone="neutral">
-        <ul className="todo-list">
-          {item.items.map((todo, index) => (
-            <li className={todo.completed ? "done" : ""} key={`${todo.text}-${index}`}>
-              {todo.completed ? <CheckCircle2 size={15} /> : <span className="todo-dot" />}
-              <span>{todo.text}</span>
-            </li>
-          ))}
-        </ul>
-      </ToolCard>
-    );
-  }
-  if (item.kind === "web_search") {
-    return (
-      <ToolCard icon={<Search size={16} />} meta={item.action || "search"} title="Web search" tone="neutral">
-        <code>{item.query || "(empty query)"}</code>
-      </ToolCard>
-    );
-  }
-  if (item.kind === "tool_call") {
-    return (
-      <ToolCard icon={<Wrench size={16} />} meta={item.status || "tool"} title={item.label} tone="neutral">
-        <TextBlocks mode="tool" taskId={taskId} text={item.text || "No tool payload captured."} />
-      </ToolCard>
-    );
-  }
-  if (item.kind === "error") {
-    return (
-      <ToolCard icon={<XCircle size={16} />} meta="error" title="Runtime notice" tone="danger">
-        <TextBlocks taskId={taskId} text={item.message} />
-      </ToolCard>
-    );
-  }
-  return (
-    <ToolCard icon={<Code2 size={16} />} meta={item.label} title="Transcript event" tone="neutral">
-      <TextBlocks taskId={taskId} text={item.text} />
-    </ToolCard>
-  );
-}
-
-function TranscriptDivider({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="transcript-divider">
-      <span>{label}</span>
-      {value && <code>{value}</code>}
-    </div>
   );
 }
 
@@ -786,125 +553,6 @@ function ImageBlock({ path, taskId }: { path: string; taskId: string }) {
   );
 }
 
-function parseTranscript(text: string): TranscriptItem[] {
-  const items: TranscriptItem[] = [];
-  const latestById = new Map<string, number>();
-  for (const [index, line] of text.split("\n").entries()) {
-    if (!line.trim()) continue;
-    const event = parseJson(line);
-    if (event?.type === "thread.started") continue;
-    if (event?.type === "turn.started") continue;
-    const item = event?.item;
-    const parsed = item ? parseItem(item, index) : parseTopLevel(event, line, index);
-    if (!parsed) continue;
-    const existing = latestById.get(parsed.id);
-    if (existing === undefined) {
-      latestById.set(parsed.id, items.length);
-      items.push(parsed);
-    } else {
-      items[existing] = parsed;
-    }
-  }
-  return items;
-}
-
-function metadataOnlyTranscript(text: string) {
-  const metadataTypes = new Set([
-    "thread.started",
-    "turn.started",
-    "turn.completed",
-  ]);
-  let sawLine = false;
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    sawLine = true;
-    const event = parseJson(line);
-    if (!event?.type || !metadataTypes.has(event.type)) return false;
-  }
-  return sawLine;
-}
-
-function parseItem(item: CodexItem, index: number): TranscriptItem | null {
-  const id = item.id || `item-${index}`;
-  if (item.type === "agent_message") return { id, kind: "agent", text: item.text || "" };
-  if (item.type === "reasoning") {
-    return {
-      id,
-      kind: "reasoning",
-      text: item.text || item.message || "",
-    };
-  }
-  if (item.type === "command_execution") {
-    return {
-      id,
-      kind: "command",
-      command: item.command || "",
-      output: item.aggregated_output || "",
-      status: item.status || "unknown",
-      exitCode: item.exit_code ?? null,
-    };
-  }
-  if (item.type === "file_change") {
-    return {
-      id,
-      kind: "file_change",
-      status: item.status || "unknown",
-      changes: (item.changes || []).map((change) => ({
-        path: change.path || "",
-        kind: change.kind || "change",
-      })),
-    };
-  }
-  if (item.type === "todo_list") {
-    return {
-      id,
-      kind: "todo_list",
-      items: (item.items || []).map((todo) => ({
-        text: todo.text || "",
-        completed: Boolean(todo.completed),
-      })),
-    };
-  }
-  if (item.type === "web_search") {
-    return {
-      id,
-      kind: "web_search",
-      query: item.query || "",
-      action: item.action?.type || "",
-    };
-  }
-  if (item.type === "mcp_tool_call" || item.type === "tool_call" || item.type === "function_call") {
-    return {
-      id,
-      kind: "tool_call",
-      label: item.name || item.tool_name || item.type,
-      status: item.status || "completed",
-      text: toolPayloadText(item),
-    };
-  }
-  if (item.type === "error") return { id, kind: "error", message: item.message || "" };
-  return {
-    id,
-    kind: "generic",
-    label: item.type || "item",
-    text: JSON.stringify(item, null, 2),
-  };
-}
-
-function parseTopLevel(event: CodexEvent | null, raw: string, index: number): TranscriptItem | null {
-  if (!event) return { id: `raw-${index}`, kind: "generic", label: "text", text: raw };
-  if (event.type === "stderr") {
-    return { id: `stderr-${index}`, kind: "error", message: event.text || event.message || raw };
-  }
-  if (event.type === "thread.started" || event.type === "turn.started" || event.type === "turn.completed") return null;
-  return {
-    id: `event-${index}`,
-    kind: "generic",
-    label: event.type || "event",
-    text: event.message || event.text || JSON.stringify(event, null, 2),
-  };
-}
-
 function splitTextBlocks(text: string): TextBlock[] {
   const blocks: TextBlock[] = [];
   const fence = /```([^\n]*)\n([\s\S]*?)```/g;
@@ -939,10 +587,26 @@ function appendTextLike(blocks: TextBlock[], text: string) {
   }
 }
 
-function parseJson(line: string): CodexEvent | null {
+function metadataOnlyTranscript(text: string) {
+  const metadataTypes = new Set([
+    "thread.started",
+    "turn.started",
+    "turn.completed",
+  ]);
+  let sawLine = false;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    sawLine = true;
+    const event = parseJson(line);
+    if (!event?.type || !metadataTypes.has(event.type)) return false;
+  }
+  return sawLine;
+}
+
+function parseJson(line: string): { type?: string } | null {
   try {
     const value = JSON.parse(line) as unknown;
-    return value && typeof value === "object" ? (value as CodexEvent) : null;
+    return value && typeof value === "object" ? (value as { type?: string }) : null;
   } catch {
     return null;
   }
@@ -1027,27 +691,8 @@ function isImageReference(text: string) {
   return /^(https?:\/\/\S+|[./~\w-][^\s]*)\.(png|jpe?g|gif|webp|svg)$/i.test(text);
 }
 
-function shortCommand(command: string) {
-  if (!command) return "Command";
-  return command.length > 110 ? `${command.slice(0, 107)}...` : command;
-}
-
 function displayPath(path: string) {
   const home = "/home/minhu/";
   if (path.startsWith(home)) return `~/${path.slice(home.length)}`;
   return path;
-}
-
-function toolPayloadText(item: CodexItem) {
-  const payload = {
-    arguments: item.arguments,
-    result: item.result,
-    output: item.output,
-    text: item.text,
-    message: item.message,
-  };
-  const compact = Object.fromEntries(
-    Object.entries(payload).filter(([, value]) => value !== undefined && value !== ""),
-  );
-  return Object.keys(compact).length ? JSON.stringify(compact, null, 2) : "";
 }

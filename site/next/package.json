@@ -2,7 +2,7 @@
   "name": "coquic-demo",
   "private": true,
   "scripts": {
-    "prepare:site": "node scripts/prepare-public-assets.mjs && node scripts/build-search-index.mjs",
+    "prepare:site": "node scripts/prepare-public-assets.mjs && node scripts/build-transcript-dataset.mjs && node scripts/build-search-index.mjs",
     "predev": "npm run prepare:site",
     "dev": "next dev --hostname 127.0.0.1 --port 3001",
     "prebuild": "npm run prepare:site",
@@ -22,6 +22,7 @@
     "@radix-ui/react-slot": "^1.2.4",
     "@tailwindcss/postcss": "^4.3.0",
     "@types/mdx": "^2.0.14",
+    "@types/yauzl": "^3.4.0",
     "@xyflow/react": "^12.11.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -35,7 +36,8 @@
     "remark-gfm": "^4.0.1",
     "shiki": "^4.1.0",
     "tailwind-merge": "^3.6.0",
-    "tailwindcss": "^4.3.0"
+    "tailwindcss": "^4.3.0",
+    "yauzl": "^3.4.0"
   },
   "devDependencies": {
     "@types/node": "25.9.1",

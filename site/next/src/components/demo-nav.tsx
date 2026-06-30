@@ -8,12 +8,24 @@ import { CoquicLogoIcon, GitHubIcon } from './icons';
 import { SiteSearch } from './site-search';
 import { ThemeToggle } from './theme-toggle';
 
-export type DemoRoute = 'home' | 'workbench' | 'performance' | 'docs' | 'blog' | 'interop' | 'coverage' | 'duvet' | 'steward' | 'qa';
+export type DemoRoute =
+  | 'home'
+  | 'workbench'
+  | 'performance'
+  | 'docs'
+  | 'blog'
+  | 'dataset'
+  | 'interop'
+  | 'coverage'
+  | 'duvet'
+  | 'steward'
+  | 'qa';
 
 const views: { href: string; label: string; route: DemoRoute }[] = [
   { href: '/qa', label: 'Ask', route: 'qa' },
   { href: '/docs', label: 'Docs', route: 'docs' },
   { href: '/blog', label: 'Blog', route: 'blog' },
+  { href: '/transcript', label: 'Dataset', route: 'dataset' },
   { href: '/workbench', label: 'Workbench', route: 'workbench' },
   { href: '/performance', label: 'LAN', route: 'performance' },
   { href: '/interop', label: 'Interop', route: 'interop' },
@@ -23,7 +35,7 @@ const views: { href: string; label: string; route: DemoRoute }[] = [
 ];
 
 const primaryViews = views.filter(
-  (view) => view.route === 'docs' || view.route === 'blog' || view.route === 'workbench' || view.route === 'qa',
+  (view) => view.route === 'docs' || view.route === 'blog' || view.route === 'dataset' || view.route === 'workbench' || view.route === 'qa',
 );
 const benchmarkViews = views.filter((view) => view.route === 'performance');
 const developmentViews = views.filter(

@@ -20,6 +20,11 @@ qa_port="${COQUIC_QA_PORT:-8787}"
 qa_enabled="${COQUIC_DEMO_QA_ENABLED:-auto}"
 cert_chain="${COQUIC_DEMO_CERTIFICATE_CHAIN:-/etc/coquic-demo/tls/fullchain.pem}"
 private_key="${COQUIC_DEMO_PRIVATE_KEY:-/etc/coquic-demo/tls/privkey.pem}"
+transcript_dataset_dir="${COQUIC_TRANSCRIPT_DATASET_DIR:-/opt/coquic-demo/dataset}"
+transcript_archive_name="codex-history-coquic-transcripts-only-20260630.zip"
+transcript_archive_path="${COQUIC_TRANSCRIPT_ARCHIVE_PATH:-${transcript_dataset_dir}/${transcript_archive_name}}"
+transcript_sqlite_path="${COQUIC_TRANSCRIPT_SQLITE_PATH:-${transcript_dataset_dir}/transcripts.sqlite}"
+transcript_archive_url="${COQUIC_TRANSCRIPT_ARCHIVE_URL:-/dataset/${transcript_archive_name}}"
 
 next_root="${release_dir}/app"
 rag_root="${COQUIC_DEMO_RAG_ROOT:-${next_root}/rag}"
@@ -148,6 +153,9 @@ fi
 (
   cd "${next_root}"
   COQUIC_RAG_API_BASE="http://${qa_host}:${qa_port}" \
+  COQUIC_TRANSCRIPT_ARCHIVE_PATH="${transcript_archive_path}" \
+  COQUIC_TRANSCRIPT_ARCHIVE_URL="${transcript_archive_url}" \
+  COQUIC_TRANSCRIPT_SQLITE_PATH="${transcript_sqlite_path}" \
   HOSTNAME="${next_host}" \
   PORT="${next_port}" \
   NODE_ENV=production \

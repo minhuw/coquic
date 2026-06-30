@@ -256,6 +256,17 @@ jobs:
           "${tools_path}/bin/stackcollapse-perf.pl" --help >/dev/null 2>&1 || true
           "${tools_path}/bin/flamegraph.pl" --help >/dev/null 2>&1 || true
           echo "flamegraph: ${tools_path}/bin/flamegraph.pl"
+          profile_image_path="$(nix build --no-link --print-out-paths .#perf-profile-image)"
+          profile_image_tar="${profile_image_path}"
+          if [ -d "${profile_image_path}" ]; then
+            profile_image_tar="${profile_image_path}/image.tar.gz"
+          fi
+          docker load -i "${profile_image_tar}" >/dev/null
+          profile_image="coquic-perf-profile-recorder:latest"
+          docker image inspect "${profile_image}" >/dev/null
+          docker run --rm --privileged --pid=host "${profile_image}" --version
+          printf "PERF_PROFILE_DOCKER_IMAGE=%s\n" "${profile_image}" >> "${GITHUB_ENV}"
+          echo "perf profile image: ${profile_image}"
 
       - name: Run ${{ matrix.display_name }} Perf CI Matrix
         id: run_perf

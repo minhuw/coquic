@@ -245,10 +245,11 @@ inline std::vector<QuicCorePeerStopSending> peer_stops_from(const QuicCoreResult
 }
 
 inline bool inject_inbound_application_frames_on_path(QuicConnection &connection,
-                                                      QuicPathId path_id, std::vector<Frame> frames,
+                                                      QuicPathId path_id,
+                                                      std::vector<Frame> inbound_frames,
                                                       bool allow_preconnected_frames = false) {
     const auto processed = connection.process_inbound_application(
-        frames, test_time(), allow_preconnected_frames, path_id);
+        inbound_frames, test_time(), allow_preconnected_frames, path_id);
     if (!processed.has_value()) {
         connection.status_ = HandshakeStatus::failed;
         return false;

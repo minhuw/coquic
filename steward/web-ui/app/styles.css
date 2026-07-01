@@ -2629,7 +2629,7 @@ pre {
   left: 13px;
   width: 2px;
   border-radius: 999px;
-  background: linear-gradient(180deg, #c9d3de, #e4e9ef);
+  background: #d7dee7;
   content: "";
 }
 
@@ -3119,14 +3119,7 @@ button.code-copy-button:hover:not(:disabled) {
 }
 
 .diff-split-cell.empty {
-  background:
-    repeating-linear-gradient(
-      -45deg,
-      #f6f7f9,
-      #f6f7f9 6px,
-      #eef1f4 6px,
-      #eef1f4 12px
-    );
+  background: #f2f4f7;
 }
 
 .diff-split-cell.empty .diff-split-line-number,
@@ -3345,8 +3338,7 @@ button.code-copy-button:hover:not(:disabled) {
   overflow: auto;
   border-radius: 0 0 8px 8px;
   padding: 18px clamp(18px, calc((100% - 920px) / 2), 100%);
-  background:
-    linear-gradient(180deg, #fbfcfe 0%, #f5f7fa 100%);
+  background: #f8fafc;
   scroll-behavior: smooth;
 }
 

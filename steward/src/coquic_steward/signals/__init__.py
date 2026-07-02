@@ -13,6 +13,7 @@ from .providers import (
     GitHubActionsNightlyCiProvider,
     GitHubActionsPerfProvider,
     GitHubActionsTestProvider,
+    GitHubFeatureIssuesProvider,
     ProviderSignalResult,
     SignalProvider,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "GitHubActionsNightlyCiProvider",
     "GitHubActionsPerfProvider",
     "GitHubActionsTestProvider",
+    "GitHubFeatureIssuesProvider",
     "ProviderSignalResult",
     "SignalProvider",
     "collect_signal_items",

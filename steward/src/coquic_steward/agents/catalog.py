@@ -48,6 +48,12 @@ AGENTS: dict[WorkerKind, StewardAgent] = {
         "Audit QUIC behavior and Duvet annotations against grounded RFC context.",
         ("quic-rag",),
     ),
+    WorkerKind.feature_implementer: StewardAgent(
+        WorkerKind.feature_implementer,
+        "Feature Implementer",
+        "Implement a scoped Steward feature signal locally without mutating GitHub issues.",
+        ("quic-rag",),
+    ),
     WorkerKind.issue_implementer: StewardAgent(
         WorkerKind.issue_implementer,
         "Issue Implementer",

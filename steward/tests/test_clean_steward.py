@@ -92,6 +92,7 @@ from coquic_steward.signals import (
     GitHubActionsInteropProvider,
     GitHubActionsPerfProvider,
     ProviderSignalResult,
+    GitHubFeatureIssuesProvider,
     collect_signal_items,
     gather_signals,
 )
@@ -127,6 +128,7 @@ def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
         "github-actions:deploy-demo",
         "github-actions:interop",
         "github-actions:perf",
+        "github-issues:features",
         "code-scanning",
         "codacy",
     )
@@ -137,6 +139,7 @@ def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
         config.signal_providers["github-actions:nightly-ci"].idle_poll_interval_minutes
         == 1440
     )
+    assert config.signal_providers["github-issues:features"].poll_interval_minutes == 360
     assert config.signal_providers["code-scanning"].poll_interval_minutes == 360
     assert config.signal_providers["codacy"].poll_interval_minutes == 360
 
@@ -3242,6 +3245,7 @@ def test_signal_registry_exposes_only_concrete_github_actions_providers() -> Non
         "github-actions:interop",
         "github-actions:perf",
     }.issubset(PROVIDER_TYPES)
+    assert "github-issues:features" in PROVIDER_TYPES
 
 
 def test_collect_signal_items_fetches_github_actions_alias_by_name(
@@ -3428,6 +3432,178 @@ def test_github_actions_perf_signal_is_separate_provider(
         signals.items[0].payload["worker_context"]["workflow_file"]
         == "perf.yml"
     )
+
+
+def test_github_feature_issue_signal_fetches_open_feature_issues(
+    config: StewardConfig, monkeypatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        calls.append(args)
+        label = args[args.index("--label") + 1]
+        payload = []
+        if label == "steward:enhancement":
+            payload = [
+                {
+                    "number": 42,
+                    "title": "Add QUIC DATAGRAM send API",
+                    "url": "https://github.com/minhuw/coquic/issues/42",
+                    "body": "Expose an application-facing datagram sender.",
+                    "labels": [{"name": "steward:enhancement"}, {"name": "api"}],
+                    "author": {"login": "alice"},
+                    "createdAt": "2026-06-01T00:00:00Z",
+                    "updatedAt": "2026-06-02T00:00:00Z",
+                    "state": "open",
+                }
+            ]
+        if label == "steward:feature":
+            payload = [
+                {
+                    "number": 42,
+                    "title": "Add QUIC DATAGRAM send API",
+                    "url": "https://github.com/minhuw/coquic/issues/42",
+                    "body": "Duplicate through steward feature label.",
+                    "labels": [{"name": "steward:feature"}],
+                    "author": {"login": "alice"},
+                    "createdAt": "2026-06-01T00:00:00Z",
+                    "updatedAt": "2026-06-03T00:00:00Z",
+                    "state": "open",
+                }
+            ]
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command",
+        fake_run_command,
+    )
+
+    signals = gather_signals(config, providers=[GitHubFeatureIssuesProvider()])
+
+    assert [call[:3] for call in calls] == [
+        ["gh", "search", "issues"],
+        ["gh", "search", "issues"],
+    ]
+    for call in calls:
+        assert call[call.index("--repo") + 1] == "minhuw/coquic"
+        assert call[call.index("--state") + 1] == "open"
+        assert call[call.index("--limit") + 1] == "13"
+        assert call[call.index("--json") + 1] == (
+            "number,title,url,body,labels,author,createdAt,updatedAt,state"
+        )
+    assert [call[call.index("--label") + 1] for call in calls] == [
+        "steward:enhancement",
+        "steward:feature",
+    ]
+    assert signals.enabled_signals == ["github-issues:features"]
+    assert signals.summary == "GitHub issues sampled 1 open feature request(s): #42"
+    assert len(signals.items) == 1
+    item = signals.items[0]
+    assert item.id.startswith("wi-github-issues-features-feature-request-")
+    assert item.provider == "github-issues:features"
+    assert item.kind == "github-issues.feature-request"
+    assert item.title == "Implement #42: Add QUIC DATAGRAM send API"
+    assert item.summary == (
+        "GitHub issue #42 requests feature work: Add QUIC DATAGRAM send API "
+        "labels=steward:enhancement, api"
+    )
+    assert item.links == [
+        {
+            "label": "Open GitHub issue",
+            "url": "https://github.com/minhuw/coquic/issues/42",
+        }
+    ]
+    assert item.payload["issue_number"] == 42
+    assert item.payload["issue_url"] == "https://github.com/minhuw/coquic/issues/42"
+    assert item.payload["labels"] == ["steward:enhancement", "api"]
+    assert item.payload["author"] == "alice"
+    assert item.payload["body_excerpt"] == "Expose an application-facing datagram sender."
+    assert item.payload["worker_context"]["recommended_task_kind"] == "feature"
+    assert item.payload["worker_context"]["recommended_worker"] == "feature-implementer"
+    assert "selected issue" in " ".join(
+        item.payload["worker_context"]["implementation_steps"]
+    )
+
+
+def test_github_feature_issue_signal_reports_truncated_samples(
+    config: StewardConfig, monkeypatch
+) -> None:
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        label = args[args.index("--label") + 1]
+        payload = []
+        if label == "steward:enhancement":
+            payload = [
+                {
+                    "number": number,
+                    "title": f"Feature {number}",
+                    "url": f"https://github.com/minhuw/coquic/issues/{number}",
+                    "labels": [{"name": "steward:enhancement"}],
+                }
+                for number in range(1, 4)
+            ]
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command",
+        fake_run_command,
+    )
+
+    result = GitHubFeatureIssuesProvider().collect(config, max_items=2)
+
+    assert len(result.items) == 2
+    assert result.has_more is True
+
+
+def test_github_feature_issue_signal_fingerprint_survives_title_edits(
+    config: StewardConfig, monkeypatch
+) -> None:
+    titles = ["Initial title", "Edited title"]
+
+    def fake_run_command(args, cwd, *, timeout=None, **_kwargs):
+        label = args[args.index("--label") + 1]
+        payload = []
+        if label == "steward:enhancement":
+            payload = [
+                {
+                    "number": 42,
+                    "title": titles.pop(0),
+                    "url": "https://github.com/minhuw/coquic/issues/42",
+                    "labels": [{"name": "steward:enhancement"}],
+                }
+            ]
+        return CommandResult(
+            args=args,
+            cwd=cwd,
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.signals.providers.run_command",
+        fake_run_command,
+    )
+    provider = GitHubFeatureIssuesProvider()
+
+    first = provider.collect(config, max_items=1).items[0]
+    second = provider.collect(config, max_items=1).items[0]
+
+    assert first.title == "Implement #42: Initial title"
+    assert second.title == "Implement #42: Edited title"
+    assert first.id == second.id
+    assert first.fingerprint == second.fingerprint
 
 
 def test_codacy_signal_uses_public_issue_search_without_token(
@@ -6115,6 +6291,7 @@ def test_web_health_and_dashboard(config: StewardConfig, monkeypatch) -> None:
         "github-actions:deploy-demo",
         "github-actions:interop",
         "github-actions:perf",
+        "github-issues:features",
         "code-scanning",
         "codacy",
     ]

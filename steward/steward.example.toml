@@ -9,7 +9,18 @@ main_branch = "main"
 github_repository = "minhuw/coquic"
 
 [steward.signals]
-enabled = ["github-actions", "code-scanning", "codacy"]
+enabled = [
+  "github-actions:ci",
+  "github-actions:test",
+  "github-actions:duvet",
+  "github-actions:nightly-ci",
+  "github-actions:deploy-demo",
+  "github-actions:interop",
+  "github-actions:perf",
+  "github-issues:features",
+  "code-scanning",
+  "codacy",
+]
 
 [steward.limits]
 max_active_tasks = 4

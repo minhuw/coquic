@@ -38,6 +38,7 @@ def new_signal_item_id() -> str:
 
 class TaskKind(StrEnum):
     code_quality = "code-quality"
+    feature = "feature"
     interop = "interop"
     ci = "ci"
     rfc_audit = "rfc-audit"
@@ -70,6 +71,7 @@ class WorkerKind(StrEnum):
     code_quality_janitor = "code-quality-janitor"
     ci_doctor = "ci-doctor"
     rfc_auditor = "rfc-auditor"
+    feature_implementer = "feature-implementer"
     issue_implementer = "issue-implementer"
     work_item_creator = "work-item-creator"
     reviewer = "reviewer"

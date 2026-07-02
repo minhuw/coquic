@@ -1312,6 +1312,7 @@ class CommitMessageGenerationError(RuntimeError):
 def default_worker_for_kind(kind: str) -> WorkerKind:
     mapping = {
         "code-quality": WorkerKind.code_quality_janitor,
+        "feature": WorkerKind.feature_implementer,
         "integration": WorkerKind.integration_manager,
         "interop": WorkerKind.interop_doctor,
         "ci": WorkerKind.ci_doctor,

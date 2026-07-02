@@ -23,6 +23,7 @@ from ..core.subprocesses import run_command
 SIGNAL_TIMEOUT_SECONDS = 15.0
 DEFAULT_SIGNAL_WORK_ITEMS = 12
 CODACY_API_HOST = "app.codacy.com"
+GITHUB_FEATURE_ISSUE_LABELS = ("steward:enhancement", "steward:feature")
 
 
 @dataclass(frozen=True)
@@ -307,6 +308,109 @@ class GitHubActionsPerfProvider(GitHubActionsProvider):
     )
 
 
+class GitHubFeatureIssuesProvider:
+    name = "github-issues:features"
+    signal_kind = "github-issues.feature-request"
+    recommended_task_kind = "feature"
+    recommended_worker = "feature-implementer"
+    issue_purpose = "Implement a scoped feature request described by a GitHub issue."
+    implementation_steps: tuple[str, ...] = (
+        "Open or fetch only the selected issue to confirm it is still open and labeled as feature work.",
+        "Use the issue title, body excerpt, labels, and URL as the implementation scope.",
+        "Make a focused local patch, update or add tests appropriate to the feature, and report proposed issue completion text.",
+        "Steward comments on and closes the selected issue only after the reviewed patch is pushed to main.",
+    )
+    local_validation: tuple[str, ...] = (
+        "nix develop -c zig build",
+        "nix develop -c zig build test",
+    )
+    scope_limits: tuple[str, ...] = (
+        "Do not fetch a broad issue list to choose alternate work.",
+        "Do not close, label, comment on, or otherwise mutate GitHub issues from the worker.",
+        "Commit and push remain Steward integration responsibilities.",
+    )
+
+    def collect(
+        self, config: StewardConfig, *, max_items: int = DEFAULT_SIGNAL_WORK_ITEMS
+    ) -> ProviderSignalResult:
+        decoded: list[dict[str, Any]] = []
+        seen_numbers: set[int] = set()
+        has_more = False
+        query_limit = max_items + 1
+        for label in GITHUB_FEATURE_ISSUE_LABELS:
+            command = [
+                "gh",
+                "search",
+                "issues",
+                "--repo",
+                config.github_repository,
+                "--state",
+                "open",
+                "--label",
+                label,
+                "--sort",
+                "created",
+                "--order",
+                "asc",
+                "--limit",
+                str(query_limit),
+                "--json",
+                "number,title,url,body,labels,author,createdAt,updatedAt,state",
+            ]
+            issues = run_command(
+                command, cwd=config.repo_root, timeout=SIGNAL_TIMEOUT_SECONDS
+            )
+            if not issues.ok:
+                return ProviderSignalResult(error=issues.stderr, summary=issues.stderr)
+            try:
+                payload = json.loads(issues.stdout)
+            except json.JSONDecodeError:
+                payload = []
+            if not isinstance(payload, list):
+                continue
+            if len(payload) > max_items:
+                has_more = True
+            for issue in payload:
+                if not isinstance(issue, dict):
+                    continue
+                number = _int_or_none(issue.get("number"))
+                if number is not None:
+                    if number in seen_numbers:
+                        continue
+                    seen_numbers.add(number)
+                if len(decoded) >= max_items:
+                    has_more = True
+                    continue
+                decoded.append(issue)
+        items = [
+            _github_feature_issue_item(
+                item,
+                provider=self.name,
+                kind=self.signal_kind,
+                worker_context=self._worker_context(),
+            )
+            for item in decoded[:max_items]
+            if isinstance(item, dict)
+        ]
+        return ProviderSignalResult(
+            items=items,
+            summary=_summary_from_feature_issue_items(items),
+            has_more=has_more,
+        )
+
+    def _worker_context(self) -> dict[str, Any]:
+        return _compact_dict(
+            {
+                "recommended_task_kind": self.recommended_task_kind,
+                "recommended_worker": self.recommended_worker,
+                "issue_purpose": self.issue_purpose,
+                "implementation_steps": list(self.implementation_steps),
+                "local_validation": list(self.local_validation),
+                "scope_limits": list(self.scope_limits),
+            }
+        )
+
+
 class CodeScanningProvider:
     name = "code-scanning"
 
@@ -492,11 +596,65 @@ def _workflow_item(
     )
 
 
+def _github_feature_issue_item(
+    item: dict[str, Any],
+    *,
+    provider: str,
+    kind: str,
+    worker_context: dict[str, Any],
+) -> SignalItem:
+    number = _int_or_none(item.get("number"))
+    title = _str_or_none(item.get("title")) or "GitHub feature issue"
+    url = _str_or_none(item.get("url"))
+    labels = _label_names(item.get("labels"))
+    author = item.get("author") if isinstance(item.get("author"), dict) else {}
+    author_login = _str_or_none(author.get("login"))
+    body_excerpt = _body_excerpt(_str_or_none(item.get("body")))
+    issue_ref = f"#{number}" if number is not None else "GitHub issue"
+    payload = {
+        "issue_number": number,
+        "issue_url": url,
+        "issue_title": title,
+        "state": _str_or_none(item.get("state")),
+        "labels": labels,
+        "author": author_login,
+        "created_at": _str_or_none(item.get("createdAt")),
+        "updated_at": _str_or_none(item.get("updatedAt")),
+        "body_excerpt": body_excerpt,
+        "worker_context": worker_context,
+    }
+    return _signal_item(
+        provider=provider,
+        kind=kind,
+        title=f"Implement {issue_ref}: {title}",
+        summary=_feature_issue_summary(number, title, labels),
+        severity="medium",
+        links=_links("Open GitHub issue", url),
+        payload=payload,
+        identity_payload={
+            "issue_number": number,
+            "issue_url": url,
+        },
+    )
+
+
 def _summary_from_workflow_items(label: str, items: list[SignalItem]) -> str:
     if not items:
         return f"No failed {label} runs found"
     runs = ", ".join(str(item.payload.get("run_id")) for item in items[:3])
     return f"{label} sampled {len(items)} failed run(s): {runs}"
+
+
+def _summary_from_feature_issue_items(items: list[SignalItem]) -> str:
+    if not items:
+        return "GitHub issues report no sampled open feature requests"
+    issues = ", ".join(
+        f"#{item.payload.get('issue_number')}"
+        for item in items[:3]
+        if item.payload.get("issue_number") is not None
+    )
+    suffix = f": {issues}" if issues else ""
+    return f"GitHub issues sampled {len(items)} open feature request(s){suffix}"
 
 
 def _code_scanning_item(item: object) -> SignalItem:
@@ -568,18 +726,27 @@ def _signal_item(
     location: dict[str, Any] | None = None,
     links: list[dict[str, str]] | None = None,
     payload: dict[str, Any] | None = None,
+    identity_payload: dict[str, Any] | None = None,
 ) -> SignalItem:
     compact_payload = _compact_dict(payload or {})
-    identity = _compact_dict(
+    identity = (
         {
             "provider": provider,
             "kind": kind,
-            "title": title,
-            "severity": severity,
-            "location": location,
-            "links": links or [],
-            "payload": compact_payload,
+            "payload": _compact_dict(identity_payload),
         }
+        if identity_payload is not None
+        else _compact_dict(
+            {
+                "provider": provider,
+                "kind": kind,
+                "title": title,
+                "severity": severity,
+                "location": location,
+                "links": links or [],
+                "payload": compact_payload,
+            }
+        )
     )
     digest = sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -650,6 +817,40 @@ def _location(path: str | None, line: int | None) -> dict[str, Any] | None:
 def _links(label: str, url: object) -> list[dict[str, str]]:
     value = _str_or_none(url)
     return [{"label": label, "url": value}] if value else []
+
+
+def _label_names(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        name = None
+        if isinstance(item, dict):
+            name = _str_or_none(item.get("name"))
+        else:
+            name = _str_or_none(item)
+        if name and name not in seen:
+            names.append(name)
+            seen.add(name)
+    return names
+
+
+def _body_excerpt(value: str | None, *, max_length: int = 1200) -> str | None:
+    if not value:
+        return None
+    normalized = " ".join(value.split())
+    if len(normalized) <= max_length:
+        return normalized
+    return normalized[: max_length - 3].rstrip() + "..."
+
+
+def _feature_issue_summary(
+    number: int | None, title: str, labels: list[str]
+) -> str:
+    issue = f"#{number}" if number is not None else "an open issue"
+    label_text = f" labels={', '.join(labels)}" if labels else ""
+    return f"GitHub issue {issue} requests feature work: {title}{label_text}"
 
 
 def _compact_dict(value: dict[str, Any]) -> dict[str, Any]:

@@ -19,6 +19,7 @@ DEFAULT_ENABLED_SIGNALS = (
     "github-actions:deploy-demo",
     "github-actions:interop",
     "github-actions:perf",
+    "github-issues:features",
     "code-scanning",
     "codacy",
 )
@@ -31,6 +32,7 @@ DEFAULT_SIGNAL_POLL_INTERVAL_MINUTES = {
     "github-actions:deploy-demo": 30,
     "github-actions:interop": 1440,
     "github-actions:perf": 1440,
+    "github-issues:features": 360,
     "code-scanning": 360,
     "codacy": 360,
 }
@@ -42,6 +44,7 @@ DEFAULT_SIGNAL_IDLE_POLL_INTERVAL_MINUTES_BY_PROVIDER = {
     "github-actions:deploy-demo": 30,
     "github-actions:interop": 1440,
     "github-actions:perf": 1440,
+    "github-issues:features": 360,
 }
 DEFAULT_SIGNAL_ERROR_RETRY_MINUTES = 30
 DEFAULT_SIGNAL_IDLE_POLL_INTERVAL_MINUTES = 30

@@ -15,6 +15,7 @@ from .providers import (
     GitHubActionsNightlyCiProvider,
     GitHubActionsPerfProvider,
     GitHubActionsTestProvider,
+    GitHubFeatureIssuesProvider,
     SignalProvider,
 )
 
@@ -26,6 +27,7 @@ PROVIDER_TYPES: dict[str, type[SignalProvider]] = {
     GitHubActionsDeployDemoProvider.name: GitHubActionsDeployDemoProvider,
     GitHubActionsInteropProvider.name: GitHubActionsInteropProvider,
     GitHubActionsPerfProvider.name: GitHubActionsPerfProvider,
+    GitHubFeatureIssuesProvider.name: GitHubFeatureIssuesProvider,
     CodeScanningProvider.name: CodeScanningProvider,
     CodacyProvider.name: CodacyProvider,
 }

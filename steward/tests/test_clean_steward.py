@@ -2717,6 +2717,256 @@ def test_plan_verifier_accepts_item_backed_llm_proposal() -> None:
     assert spec.metadata["source_context"]["selected_signal_items"][0]["id"] == item.id
 
 
+def test_plan_verifier_accepts_feature_issue_proposal() -> None:
+    item = SignalItem(
+        id="wi-feature-42",
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="wi-feature-42",
+        title="Implement #42: Add QUIC DATAGRAM send API",
+        summary="GitHub issue #42 requests feature work",
+        links=[
+            {
+                "label": "Open GitHub issue",
+                "url": "https://github.com/minhuw/coquic/issues/42",
+            }
+        ],
+        payload={
+            "issue_number": 42,
+            "issue_url": "https://github.com/minhuw/coquic/issues/42",
+            "issue_title": "Add QUIC DATAGRAM send API",
+            "labels": ["steward:enhancement"],
+            "worker_context": {
+                "recommended_task_kind": "feature",
+                "recommended_worker": "feature-implementer",
+            },
+        },
+    )
+    signals = ProjectSignals(repository="minhuw/coquic", items=[item])
+
+    verified = PlanVerifier().verify_plan(
+        """
+        {
+          "consumed_item_ids": ["wi-feature-42"],
+          "tasks": [
+            {
+              "dedupe_key": "github-issue:42",
+              "kind": "feature",
+              "worker": "feature-implementer",
+              "title": "Implement #42 Add QUIC DATAGRAM send API",
+              "prompt": "Implement GitHub issue #42 only: https://github.com/minhuw/coquic/issues/42. Add focused validation and do not mutate the issue remotely.",
+              "priority": "medium",
+              "risk": "medium",
+              "evidence": ["wi-feature-42"],
+              "metadata": {
+                "selected_signal_item_ids": ["wi-feature-42"]
+              }
+            }
+          ]
+        }
+        """,
+        signals,
+        [],
+    )
+
+    assert verified.consumed_item_ids == ["wi-feature-42"]
+    assert len(verified.planned) == 1
+    spec, dedupe_key = verified.planned[0]
+    assert dedupe_key == "github-issue:42"
+    assert spec.kind == TaskKind.feature
+    assert spec.worker == WorkerKind.feature_implementer
+    selected = spec.metadata["source_context"]["selected_signal_items"][0]
+    assert selected["payload"]["issue_number"] == 42
+    assert selected["payload"]["worker_context"]["recommended_worker"] == "feature-implementer"
+
+
+def test_plan_verifier_rejects_mutating_worker_for_feature_issue() -> None:
+    item = SignalItem(
+        id="wi-feature-42",
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="wi-feature-42",
+        title="Implement #42",
+        summary="GitHub issue #42 requests feature work",
+        payload={"issue_number": 42},
+    )
+    signals = ProjectSignals(repository="minhuw/coquic", items=[item])
+
+    verified = PlanVerifier().verify_plan(
+        """
+        {
+          "consumed_item_ids": ["wi-feature-42"],
+          "tasks": [
+            {
+              "dedupe_key": "github-issue:42",
+              "kind": "feature",
+              "worker": "issue-implementer",
+              "title": "Implement #42",
+              "prompt": "Implement GitHub issue #42 locally.",
+              "priority": "medium",
+              "risk": "medium",
+              "evidence": ["wi-feature-42"],
+              "metadata": {
+                "selected_signal_item_ids": ["wi-feature-42"]
+              }
+            }
+          ]
+        }
+        """,
+        signals,
+        [],
+    )
+
+    assert verified.planned == []
+    assert verified.consumed_item_ids == []
+
+
+def test_plan_verifier_rejects_multiple_feature_issues_in_one_task() -> None:
+    first = SignalItem(
+        id="wi-feature-42",
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="wi-feature-42",
+        title="Implement #42",
+        summary="GitHub issue #42 requests feature work",
+        payload={"issue_number": 42},
+    )
+    second = SignalItem(
+        id="wi-feature-43",
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="wi-feature-43",
+        title="Implement #43",
+        summary="GitHub issue #43 requests feature work",
+        payload={"issue_number": 43},
+    )
+    signals = ProjectSignals(repository="minhuw/coquic", items=[first, second])
+
+    verified = PlanVerifier().verify_plan(
+        """
+        {
+          "consumed_item_ids": ["wi-feature-42", "wi-feature-43"],
+          "tasks": [
+            {
+              "dedupe_key": "github-issue:42-43",
+              "kind": "feature",
+              "worker": "feature-implementer",
+              "title": "Implement #42 and #43",
+              "prompt": "Implement both GitHub issues locally.",
+              "priority": "medium",
+              "risk": "medium",
+              "evidence": ["wi-feature-42", "wi-feature-43"],
+              "metadata": {
+                "selected_signal_item_ids": ["wi-feature-42", "wi-feature-43"]
+              }
+            }
+          ]
+        }
+        """,
+        signals,
+        [],
+    )
+
+    assert verified.planned == []
+    assert verified.consumed_item_ids == []
+
+
+def test_plan_verifier_rejects_mixed_feature_issue_source_selection() -> None:
+    feature = SignalItem(
+        id="wi-feature-42",
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="wi-feature-42",
+        title="Implement #42",
+        summary="GitHub issue #42 requests feature work",
+        payload={"issue_number": 42},
+    )
+    codacy = SignalItem(
+        id="wi-codacy-1",
+        provider="codacy",
+        kind="codacy.issue",
+        fingerprint="wi-codacy-1",
+        title="Codacy issue",
+    )
+    signals = ProjectSignals(repository="minhuw/coquic", items=[feature, codacy])
+
+    verified = PlanVerifier().verify_plan(
+        """
+        {
+          "consumed_item_ids": ["wi-feature-42", "wi-codacy-1"],
+          "tasks": [
+            {
+              "dedupe_key": "github-issue:42",
+              "kind": "feature",
+              "worker": "feature-implementer",
+              "title": "Implement #42 and fix Codacy",
+              "prompt": "Implement GitHub issue #42 and fix the Codacy issue.",
+              "priority": "medium",
+              "risk": "medium",
+              "evidence": ["wi-feature-42", "wi-codacy-1"],
+              "metadata": {
+                "selected_signal_item_ids": ["wi-feature-42", "wi-codacy-1"]
+              }
+            }
+          ]
+        }
+        """,
+        signals,
+        [],
+    )
+
+    assert verified.planned == []
+    assert verified.consumed_item_ids == []
+
+
+def test_plan_verifier_rejects_mismatched_feature_issue_evidence() -> None:
+    feature = SignalItem(
+        id="wi-feature-42",
+        provider="github-issues:features",
+        kind="github-issues.feature-request",
+        fingerprint="wi-feature-42",
+        title="Implement #42",
+        summary="GitHub issue #42 requests feature work",
+        payload={"issue_number": 42},
+    )
+    codacy = SignalItem(
+        id="wi-codacy-1",
+        provider="codacy",
+        kind="codacy.issue",
+        fingerprint="wi-codacy-1",
+        title="Codacy issue",
+    )
+    signals = ProjectSignals(repository="minhuw/coquic", items=[feature, codacy])
+
+    verified = PlanVerifier().verify_plan(
+        """
+        {
+          "consumed_item_ids": ["wi-codacy-1"],
+          "tasks": [
+            {
+              "dedupe_key": "github-issue:42",
+              "kind": "feature",
+              "worker": "feature-implementer",
+              "title": "Implement #42",
+              "prompt": "Implement GitHub issue #42.",
+              "priority": "medium",
+              "risk": "medium",
+              "evidence": ["wi-codacy-1"],
+              "metadata": {
+                "selected_signal_item_ids": ["wi-feature-42"]
+              }
+            }
+          ]
+        }
+        """,
+        signals,
+        [],
+    )
+
+    assert verified.planned == []
+    assert verified.consumed_item_ids == []
+
+
 def test_plan_verifier_ignores_proposed_main_write_flags() -> None:
     signals = ProjectSignals(
         repository="minhuw/coquic",
@@ -3031,6 +3281,7 @@ def test_planner_schema_file_matches_expected_shape(config: StewardConfig) -> No
     assert schema["properties"]["consumed_item_ids"]["type"] == "array"
     item = schema["properties"]["tasks"]["items"]
     assert "code-quality" in item["properties"]["kind"]["enum"]
+    assert "feature" in item["properties"]["kind"]["enum"]
     assert schema["additionalProperties"] is False
     assert item["additionalProperties"] is False
     assert item["properties"]["metadata"]["additionalProperties"] is False
@@ -3898,6 +4149,99 @@ def test_worker_prompt_highlights_workflow_signal_guidance(
     assert "workflow_file: test.yml" in prompt
     assert "nix develop -c zig build test" in prompt
     assert "Authoritative source context:" in prompt
+
+
+def test_worker_prompt_highlights_feature_issue_signal_guidance(
+    config: StewardConfig,
+) -> None:
+    task = TaskStore(config.db_path).add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="Implement #42 Add QUIC DATAGRAM send API",
+            prompt="Implement the selected GitHub issue.",
+            metadata={
+                "source_context": {
+                    "selected_signal_item_ids": ["wi-feature-42"],
+                    "selected_signal_items": [
+                        {
+                            "id": "wi-feature-42",
+                            "provider": "github-issues:features",
+                            "kind": "github-issues.feature-request",
+                            "payload": {
+                                "issue_number": 42,
+                                "issue_url": "https://github.com/minhuw/coquic/issues/42",
+                                "issue_title": "Add QUIC DATAGRAM send API",
+                                "body_excerpt": "Expose an application-facing datagram sender.",
+                                "worker_context": {
+                                    "recommended_task_kind": "feature",
+                                    "recommended_worker": "feature-implementer",
+                                    "issue_purpose": "Implement a scoped feature request.",
+                                    "implementation_steps": [
+                                        "Open or fetch only the selected issue to confirm it is still open.",
+                                        "Steward comments on and closes the selected issue only after the reviewed patch is pushed to main.",
+                                    ],
+                                    "local_validation": [
+                                        "nix develop -c zig build test"
+                                    ],
+                                    "scope_limits": [
+                                        "Do not close, label, comment on, or otherwise mutate GitHub issues from the worker."
+                                    ],
+                                },
+                            },
+                        }
+                    ],
+                }
+            },
+        )
+    )[0]
+    task.worktree_path = config.repo_root
+
+    prompt = render_worker_prompt(task, config)
+
+    assert "Selected source guidance:" in prompt
+    assert "recommended_task_kind: feature" in prompt
+    assert "recommended_worker: feature-implementer" in prompt
+    assert "issue_purpose: Implement a scoped feature request." in prompt
+    assert "implementation_steps:" in prompt
+    assert "Open or fetch only the selected issue" in prompt
+    assert "Steward comments on and closes the selected issue" in prompt
+    assert "Authoritative source context:" in prompt
+    assert "https://github.com/minhuw/coquic/issues/42" in prompt
+    assert "Do not fetch a broad or unknown issue list" in prompt
+    assert "gh-issue-implementation" not in prompt
+
+
+def test_worker_prompt_suppresses_mutating_issue_skill_for_feature_signal(
+    config: StewardConfig,
+) -> None:
+    task = TaskStore(config.db_path).add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.issue_implementer,
+            title="Implement #42",
+            prompt="Implement the selected GitHub issue.",
+            metadata={
+                "source_context": {
+                    "selected_signal_items": [
+                        {
+                            "id": "wi-feature-42",
+                            "provider": "github-issues:features",
+                            "kind": "github-issues.feature-request",
+                            "payload": {"issue_number": 42},
+                        }
+                    ],
+                }
+            },
+        )
+    )[0]
+    task.worktree_path = config.repo_root
+
+    prompt = render_worker_prompt(task, config)
+
+    assert "Worker: Issue Implementer" in prompt
+    assert "gh-issue-implementation" not in prompt
+    assert "change GitHub issues" in prompt
 
 
 def test_review_verdict_uses_structured_output() -> None:

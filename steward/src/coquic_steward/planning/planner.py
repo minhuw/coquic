@@ -57,6 +57,12 @@ Use payload.worker_context to choose the task kind, worker, validation scope, an
 worker prompt. Do not create a generic "GitHub Actions" task that combines
 different workflow files.
 
+For GitHub feature issue signal items, plan one feature task per selected issue.
+Use kind "feature" and worker "feature-implementer". The task prompt must name the
+issue number and URL, ask for a local implementation of only that issue, ask for
+focused tests or validation, and leave issue comments, labeling, closing,
+commits, and pushes to Steward or a human.
+
 Return only JSON matching the requested schema. Do not include markdown,
 commentary, code fences, or prose outside the JSON object.
 """
@@ -169,6 +175,7 @@ def render_planner_prompt(
         "active_tasks": [task.model_dump(mode="json") for task in active_tasks],
         "allowed_kinds": [
             "code-quality",
+            "feature",
             "interop",
             "ci",
             "rfc-audit",
@@ -180,6 +187,7 @@ def render_planner_prompt(
             "code-quality-janitor",
             "ci-doctor",
             "rfc-auditor",
+            "feature-implementer",
             "issue-implementer",
             "work-item-creator",
             "custom",
@@ -249,6 +257,7 @@ PLANNER_OUTPUT_SCHEMA = {
                         "type": "string",
                         "enum": [
                             "code-quality",
+                            "feature",
                             "interop",
                             "ci",
                             "rfc-audit",
@@ -263,6 +272,7 @@ PLANNER_OUTPUT_SCHEMA = {
                             "code-quality-janitor",
                             "ci-doctor",
                             "rfc-auditor",
+                            "feature-implementer",
                             "issue-implementer",
                             "work-item-creator",
                             "custom",

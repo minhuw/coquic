@@ -21,6 +21,7 @@ PLANNABLE_WORKERS = {
     WorkerKind.code_quality_janitor,
     WorkerKind.ci_doctor,
     WorkerKind.rfc_auditor,
+    WorkerKind.feature_implementer,
     WorkerKind.issue_implementer,
     WorkerKind.work_item_creator,
     WorkerKind.custom,
@@ -97,6 +98,7 @@ class PlanVerifier:
                 active_dedupes=active_dedupes,
                 active_kinds=active_kinds,
                 evidence_ids=evidence_ids,
+                signals=signals,
             )
             if proposed is None:
                 rejected = True
@@ -177,6 +179,7 @@ def _verified_proposal(
     active_dedupes: set[str],
     active_kinds: set[str],
     evidence_ids: set[str],
+    signals: ProjectSignals,
 ) -> ProposedTask | None:
     try:
         proposed = ProposedTask.model_validate(item)
@@ -188,6 +191,7 @@ def _verified_proposal(
         active_dedupes=active_dedupes,
         active_kinds=active_kinds,
         evidence_ids=evidence_ids,
+        signals=signals,
     ):
         return None
     return proposed
@@ -200,6 +204,7 @@ def _proposal_is_acceptable(
     active_dedupes: set[str],
     active_kinds: set[str],
     evidence_ids: set[str],
+    signals: ProjectSignals,
 ) -> bool:
     return not any(
         (
@@ -213,7 +218,40 @@ def _proposal_is_acceptable(
             not proposed.evidence,
             any(evidence not in evidence_ids for evidence in proposed.evidence),
             not _metadata_is_bounded(proposed.metadata),
+            not _feature_issue_proposal_is_safe(proposed, signals),
         )
+    )
+
+
+def _feature_issue_proposal_is_safe(
+    proposed: ProposedTask, signals: ProjectSignals
+) -> bool:
+    selected = _selected_signal_items(proposed, signals.items)
+    evidence = _signal_items_by_id(proposed.evidence, signals.items)
+    feature_items = [
+        item for item in [*selected, *evidence]
+        if item.get("kind") == "github-issues.feature-request"
+    ]
+    if not feature_items:
+        return True
+    selected_feature_items = [
+        item for item in selected if item.get("kind") == "github-issues.feature-request"
+    ]
+    feature_ids = {
+        str(item.get("id"))
+        for item in feature_items
+        if isinstance(item.get("id"), str)
+    }
+    selected_ids = _item_ids(selected)
+    evidence_ids = _item_ids(evidence)
+    return (
+        proposed.kind == TaskKind.feature
+        and proposed.worker == WorkerKind.feature_implementer
+        and len(selected) == 1
+        and len(evidence) == 1
+        and len(selected_feature_items) == 1
+        and len(feature_ids) == 1
+        and selected_ids == evidence_ids == feature_ids
     )
 
 
@@ -268,3 +306,16 @@ def _selected_signal_items(
         if item.id in selected_ids
     ]
     return matched[:8]
+
+
+def _signal_items_by_id(ids: list[str], items: list[SignalItem]) -> list[dict[str, Any]]:
+    selected_ids = {item for item in ids if isinstance(item, str)}
+    return [item.model_dump(mode="json") for item in items if item.id in selected_ids]
+
+
+def _item_ids(items: list[dict[str, Any]]) -> set[str]:
+    return {
+        str(item.get("id"))
+        for item in items
+        if isinstance(item.get("id"), str)
+    }

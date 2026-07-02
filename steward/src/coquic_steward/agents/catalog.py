@@ -135,7 +135,7 @@ def render_worker_prompt(task: TaskRecord, config: StewardConfig) -> str:
                 ),
             ]
         )
-    skill_text = _render_skills(config, agent.skills)
+    skill_text = _render_skills(config, _skills_for_task(task, agent))
     if skill_text:
         sections.extend(["", "Embedded repo skills:", skill_text])
     if task.spec.metadata:
@@ -185,12 +185,14 @@ def _render_context_block(item: dict[str, object], context: dict[str, object]) -
         "recommended_task_kind",
         "recommended_worker",
         "workflow_purpose",
+        "issue_purpose",
     ):
         value = context.get(key)
         if isinstance(value, str) and value:
             lines.append(f"- {key}: {value}")
     for key in (
         "investigation_steps",
+        "implementation_steps",
         "local_validation",
         "scope_limits",
         "artifact_paths",
@@ -214,6 +216,24 @@ def _render_skills(config: StewardConfig, skill_names: tuple[str, ...]) -> str:
         else:
             blocks.append(f"## {name}\n\nMissing skill at {path}.")
     return "\n\n".join(blocks)
+
+
+def _skills_for_task(task: TaskRecord, agent: StewardAgent) -> tuple[str, ...]:
+    if _has_source_signal_kind(task, "github-issues.feature-request"):
+        return tuple(
+            skill for skill in agent.skills if skill != "gh-issue-implementation"
+        )
+    return agent.skills
+
+
+def _has_source_signal_kind(task: TaskRecord, kind: str) -> bool:
+    context = task.spec.metadata.get("source_context")
+    if not isinstance(context, dict):
+        return False
+    selected = context.get("selected_signal_items")
+    if not isinstance(selected, list):
+        return False
+    return any(isinstance(item, dict) and item.get("kind") == kind for item in selected)
 
 
 def _render_execution_boundary(task: TaskRecord, config: StewardConfig) -> str:

@@ -28,6 +28,7 @@ export default function BlogIndexPage() {
                   <time dateTime={post.date}>{formatBlogDate(post.date)}</time>
                   <span>{post.readingMinutes} min read</span>
                   <span>{post.author}</span>
+                  {post.writtenBy ? <span className="blog-polish-badge">Written by {post.writtenBy}</span> : null}
                   {post.polishedBy ? <span className="blog-polish-badge">Polished by {post.polishedBy}</span> : null}
                 </span>
                 <h2>{post.title}</h2>

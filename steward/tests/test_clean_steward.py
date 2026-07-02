@@ -5207,6 +5207,240 @@ def test_integration_manager_serializes_push_to_main(
     assert any(event.kind == "main.pushed" for event in store.events(source.id))
 
 
+def test_integration_manager_closes_feature_issue_after_push(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=config.repo_root, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True)
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        "printf '%s\\n' '{\"subject\":\"feat(api): add datagram sender\",\"body\":\"Add the datagram sender requested by the selected issue.\\n\\nChanged files:\\n- README.md\\n\\nValidation:\\n- fake: passed\\n\\nSource task: source-task\"}' > \"$last\"\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "codex_bin": str(fake),
+            "git_remote": "origin",
+            "integration_mode": IntegrationMode.push_main.value,
+            "local_only": False,
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    source, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="Implement #42 Add QUIC DATAGRAM send API",
+            prompt="P",
+            metadata={
+                "source_context": {
+                    "selected_signal_items": [
+                        {
+                            "id": "wi-feature-42",
+                            "provider": "github-issues:features",
+                            "kind": "github-issues.feature-request",
+                            "payload": {
+                                "issue_number": 42,
+                                "issue_url": "https://github.com/minhuw/coquic/issues/42",
+                            },
+                        }
+                    ]
+                }
+            },
+        )
+    )
+    worktree, branch = Worktrees(config).create(source)
+    (worktree / "README.md").write_text("feature integrated\n", encoding="utf-8")
+    source.worktree_path = worktree
+    source.branch_name = branch
+    patch_path = config.patches_dir / f"{source.id}.patch"
+    Worktrees(config).save_patch(worktree, patch_path)
+    source.patch_path = patch_path
+    store.save(source)
+    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate feature",
+            prompt="Integrate",
+            metadata={"source_task_id": source.id, "dedupe_key": f"integration:{source.id}"},
+        ),
+        dedupe_key=f"integration:{source.id}",
+    )
+
+    def fake_gates(_config, task_id, cwd):
+        output = _config.logs_dir / task_id / "fake.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("ok\n", encoding="utf-8")
+        return [
+            ValidationResult(
+                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
+            )
+        ]
+
+    commands: list[list[str]] = []
+
+    def fake_run_command(command, cwd, *, timeout=None, **_kwargs):
+        commands.append(command)
+        return CommandResult(command, cwd, 0, "", "")
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", fake_run_command)
+
+    assert StewardExecutor(config, store).run_task(integration.id)
+
+    comment = next(command for command in commands if command[:3] == ["gh", "issue", "comment"])
+    close = next(command for command in commands if command[:3] == ["gh", "issue", "close"])
+    assert comment[:6] == ["gh", "issue", "comment", "42", "-R", "minhuw/coquic"]
+    assert "Source task: " + source.id in comment[comment.index("--body") + 1]
+    assert close == [
+        "gh",
+        "issue",
+        "close",
+        "42",
+        "-R",
+        "minhuw/coquic",
+        "--reason",
+        "completed",
+    ]
+    assert any(event.kind == "github.issue_closed" for event in store.events(source.id))
+
+
+def test_integration_manager_keeps_push_when_feature_issue_close_fails(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    source = TaskRecord(
+        spec=TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="Feature",
+            prompt="P",
+            metadata={
+                "source_context": {
+                    "selected_signal_items": [
+                        {
+                            "kind": "github-issues.feature-request",
+                            "payload": {"issue_number": 42},
+                        }
+                    ]
+                }
+            },
+        )
+    )
+    task = TaskRecord(
+        spec=TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate",
+            prompt="P",
+        )
+    )
+    store = TaskStore(config.db_path)
+    saved_source, _ = store.add_task(source.spec)
+    saved_task, _ = store.add_task(task.spec)
+    transcript_messages: list[tuple[str, str]] = []
+
+    class Transcript:
+        def write(self, stage: str, message: str) -> None:
+            transcript_messages.append((stage, message))
+
+    def fake_run_command(command, cwd, *, timeout=None, **_kwargs):
+        return CommandResult(command, cwd, 1, "", "api unavailable")
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_command", fake_run_command)
+
+    StewardExecutor(config, store)._update_feature_issues_after_push(
+        saved_task, saved_source, "abc123", Transcript()
+    )
+
+    assert ("issue_update_failed", "#42 comment: api unavailable") in transcript_messages
+    event = next(
+        event
+        for event in store.events(saved_source.id)
+        if event.kind == "github.issue_update_failed"
+    )
+    assert event.data["issue_number"] == 42
+    assert event.data["step"] == "comment"
+
+
+def test_integration_manager_skips_feature_issue_close_for_multiple_issues(
+    config: StewardConfig, monkeypatch
+) -> None:
+    source = TaskRecord(
+        spec=TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="Feature",
+            prompt="P",
+            metadata={
+                "source_context": {
+                    "selected_signal_items": [
+                        {
+                            "kind": "github-issues.feature-request",
+                            "payload": {"issue_number": 42},
+                        },
+                        {
+                            "kind": "github-issues.feature-request",
+                            "payload": {"issue_number": 43},
+                        },
+                    ]
+                }
+            },
+        )
+    )
+    task = TaskRecord(
+        spec=TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate",
+            prompt="P",
+        )
+    )
+    store = TaskStore(config.db_path)
+    saved_source, _ = store.add_task(source.spec)
+    saved_task, _ = store.add_task(task.spec)
+    transcript_messages: list[tuple[str, str]] = []
+
+    class Transcript:
+        def write(self, stage: str, message: str) -> None:
+            transcript_messages.append((stage, message))
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_command",
+        lambda *_args, **_kwargs: pytest.fail("issue close should be skipped"),
+    )
+
+    StewardExecutor(config, store)._update_feature_issues_after_push(
+        saved_task, saved_source, "abc123", Transcript()
+    )
+
+    assert transcript_messages == [
+        (
+            "issue_update_skipped",
+            "multiple selected feature issues; skipping automatic close",
+        )
+    ]
+    event = next(
+        event
+        for event in store.events(saved_source.id)
+        if event.kind == "github.issue_update_skipped"
+    )
+    assert event.data["issue_count"] == 2
+
+
 def test_integration_manager_skips_terminal_source_task(
     config: StewardConfig,
 ) -> None:

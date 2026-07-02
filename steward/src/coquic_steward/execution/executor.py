@@ -24,6 +24,7 @@ from ..core.models import (
     WorkerResult,
     utc_now,
 )
+from ..core.subprocesses import run_command
 from ..storage import TaskStore
 from .review import (
     parse_review,
@@ -1241,9 +1242,110 @@ class StewardExecutor:
             sha,
             {"integration_task_id": task.id, "output_path": str(push_log_path)},
         )
+        self._update_feature_issues_after_push(task, source, sha, transcript)
         self._finish_task(task.id, TaskStatus.pushed, f"pushed {sha}")
         self._finish_task(source.id, TaskStatus.pushed, f"pushed {sha}")
         return True
+
+    def _update_feature_issues_after_push(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        sha: str,
+        transcript: "IntegrationTranscript",
+    ) -> None:
+        issues = _selected_feature_issues(source)
+        if not issues:
+            return
+        if len(issues) > 1:
+            message = "multiple selected feature issues; skipping automatic close"
+            transcript.write("issue_update_skipped", message)
+            self.store.add_event(
+                source.id,
+                "github.issue_update_skipped",
+                message,
+                {
+                    "integration_task_id": task.id,
+                    "issue_count": len(issues),
+                },
+            )
+            return
+        issue = issues[0]
+        number = issue.get("issue_number")
+        if not isinstance(number, int):
+            return
+        body = (
+            f"Implemented by Steward in {sha} and pushed to "
+            f"`{self.config.main_branch}`.\n\n"
+            f"Source task: {source.id}"
+        )
+        comment = run_command(
+            [
+                "gh",
+                "issue",
+                "comment",
+                str(number),
+                "-R",
+                self.config.github_repository,
+                "--body",
+                body,
+            ],
+            cwd=self.config.repo_root,
+            timeout=30,
+        )
+        if not comment.ok:
+            self._record_feature_issue_update_failure(
+                task, source, number, "comment", comment.stderr, transcript
+            )
+            return
+        close = run_command(
+            [
+                "gh",
+                "issue",
+                "close",
+                str(number),
+                "-R",
+                self.config.github_repository,
+                "--reason",
+                "completed",
+            ],
+            cwd=self.config.repo_root,
+            timeout=30,
+        )
+        if not close.ok:
+            self._record_feature_issue_update_failure(
+                task, source, number, "close", close.stderr, transcript
+            )
+            return
+        transcript.write("issue_closed", f"#{number}")
+        self.store.add_event(
+            source.id,
+            "github.issue_closed",
+            str(number),
+            {"integration_task_id": task.id, "issue_number": number},
+        )
+
+    def _record_feature_issue_update_failure(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        number: int,
+        step: str,
+        error: str,
+        transcript: "IntegrationTranscript",
+    ) -> None:
+        message = error[-2000:] or f"{step} failed"
+        transcript.write("issue_update_failed", f"#{number} {step}: {message}")
+        self.store.add_event(
+            source.id,
+            "github.issue_update_failed",
+            message,
+            {
+                "integration_task_id": task.id,
+                "issue_number": number,
+                "step": step,
+            },
+        )
 
     def _commit_message_for_integration(
         self,
@@ -1424,6 +1526,7 @@ def render_commit_message_prompt(
             f"- End with \"Source task: {source.id}\".",
             "- Do not mention internal agents, prompts, transcripts, or automation details.",
             "- Do not invent validation, issue links, or affected files.",
+            "- For selected GitHub feature issues, describe the implementation but do not write closing language; Steward comments on and closes those issues only after a successful push.",
             "",
             "Context:",
             "<source_task>",
@@ -1558,6 +1661,19 @@ def _selected_signal_items_context(source: TaskRecord) -> list[object]:
         return []
     selected = context.get("selected_signal_items")
     return selected if isinstance(selected, list) else []
+
+
+def _selected_feature_issues(source: TaskRecord) -> list[dict[str, object]]:
+    issues: list[dict[str, object]] = []
+    for item in _selected_signal_items_context(source):
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") != "github-issues.feature-request":
+            continue
+        payload = item.get("payload")
+        if isinstance(payload, dict):
+            issues.append(payload)
+    return issues
 
 
 def _validation_context(validation: ValidationResult) -> dict[str, object]:

@@ -1,0 +1,160 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1536 1024" role="img" aria-label="A robot groundskeeper waters glowing circuit garden beds inside a chip-shaped glass conservatory at night">
+  <!-- night sky -->
+  <rect width="1536" height="1024" fill="#191c40"/>
+  <g fill="#f5f1e6" opacity="0.85">
+    <circle cx="130" cy="120" r="3"/>
+    <circle cx="320" cy="80" r="2"/>
+    <circle cx="520" cy="150" r="2.5"/>
+    <circle cx="720" cy="70" r="2"/>
+    <circle cx="960" cy="110" r="3"/>
+    <circle cx="1180" cy="60" r="2"/>
+    <circle cx="1350" cy="140" r="2.5"/>
+    <circle cx="1460" cy="90" r="2"/>
+    <circle cx="80" cy="300" r="2"/>
+    <circle cx="1490" cy="280" r="2"/>
+    <circle cx="240" cy="210" r="1.5"/>
+    <circle cx="1080" cy="180" r="1.5"/>
+  </g>
+  <!-- moon -->
+  <circle cx="220" cy="190" r="58" fill="#f5f1e6" opacity="0.9"/>
+  <circle cx="242" cy="178" r="50" fill="#191c40"/>
+
+  <!-- ground -->
+  <rect y="760" width="1536" height="264" fill="#23264f"/>
+  <ellipse cx="768" cy="768" rx="900" ry="40" fill="#23264f"/>
+
+  <!-- conservatory: chip-shaped glasshouse -->
+  <g>
+    <!-- chip pins -->
+    <g fill="#3f3d8f">
+      <rect x="600" y="742" width="26" height="40" rx="6"/>
+      <rect x="700" y="742" width="26" height="40" rx="6"/>
+      <rect x="800" y="742" width="26" height="40" rx="6"/>
+      <rect x="900" y="742" width="26" height="40" rx="6"/>
+      <rect x="1000" y="742" width="26" height="40" rx="6"/>
+      <rect x="1100" y="742" width="26" height="40" rx="6"/>
+      <rect x="1200" y="742" width="26" height="40" rx="6"/>
+      <rect x="524" y="430" width="40" height="24" rx="6"/>
+      <rect x="524" y="520" width="40" height="24" rx="6"/>
+      <rect x="524" y="610" width="40" height="24" rx="6"/>
+      <rect x="1262" y="430" width="40" height="24" rx="6"/>
+      <rect x="1262" y="520" width="40" height="24" rx="6"/>
+      <rect x="1262" y="610" width="40" height="24" rx="6"/>
+    </g>
+    <!-- glass body -->
+    <rect x="560" y="360" width="706" height="390" rx="28" fill="#232a5e" stroke="#8d9bd6" stroke-width="5"/>
+    <!-- dome roof -->
+    <path d="M560 388 A 353 170 0 0 1 1266 388" fill="#232a5e" stroke="#8d9bd6" stroke-width="5"/>
+    <!-- glass panes: verticals -->
+    <g stroke="#8d9bd6" stroke-width="2.5" opacity="0.65">
+      <line x1="678" y1="252" x2="678" y2="750"/>
+      <line x1="796" y1="228" x2="796" y2="750"/>
+      <line x1="913" y1="220" x2="913" y2="750"/>
+      <line x1="1030" y1="228" x2="1030" y2="750"/>
+      <line x1="1148" y1="252" x2="1148" y2="750"/>
+      <!-- horizontals -->
+      <line x1="560" y1="470" x2="1266" y2="470"/>
+      <line x1="560" y1="580" x2="1266" y2="580"/>
+      <line x1="560" y1="672" x2="1266" y2="672"/>
+      <path d="M580 320 A 340 150 0 0 1 1246 320" fill="none"/>
+    </g>
+    <!-- antenna beacon on dome -->
+    <line x1="913" y1="218" x2="913" y2="176" stroke="#8d9bd6" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="913" cy="166" r="10" fill="#f2a33c"/>
+
+    <!-- glowing circuit garden beds inside -->
+    <g>
+      <g fill="#f2a33c" opacity="0.9">
+        <rect x="610" y="700" width="150" height="18" rx="9"/>
+        <rect x="800" y="700" width="220" height="18" rx="9"/>
+        <rect x="1060" y="700" width="150" height="18" rx="9"/>
+        <rect x="640" y="612" width="200" height="16" rx="8" opacity="0.75"/>
+        <rect x="900" y="612" width="280" height="16" rx="8" opacity="0.75"/>
+        <rect x="700" y="512" width="180" height="14" rx="7" opacity="0.55"/>
+        <rect x="940" y="512" width="180" height="14" rx="7" opacity="0.55"/>
+      </g>
+      <!-- circuit trace connectors -->
+      <g stroke="#f2a33c" stroke-width="4" fill="none" opacity="0.6" stroke-linecap="round">
+        <path d="M760 709 h40"/>
+        <path d="M1020 709 h40"/>
+        <path d="M840 620 h60"/>
+        <path d="M880 519 h60"/>
+        <path d="M730 628 v72"/>
+        <path d="M1090 628 v72"/>
+        <path d="M790 526 v86"/>
+        <path d="M1030 526 v86"/>
+      </g>
+      <!-- via dots -->
+      <g fill="#f8d9a0">
+        <circle cx="760" cy="709" r="6"/>
+        <circle cx="1060" cy="709" r="6"/>
+        <circle cx="840" cy="620" r="5"/>
+        <circle cx="940" cy="519" r="5"/>
+        <circle cx="730" cy="700" r="5"/>
+        <circle cx="1090" cy="700" r="5"/>
+      </g>
+      <!-- sprouts on beds -->
+      <g stroke="#7ec9a3" stroke-width="4" fill="none" stroke-linecap="round">
+        <path d="M660 700 v-26 m0 10 c-10 -4 -14 -12 -14 -20 m14 10 c10 -4 14 -12 14 -20"/>
+        <path d="M900 700 v-22 m0 8 c-8 -3 -12 -10 -12 -16 m12 8 c8 -3 12 -10 12 -16"/>
+        <path d="M1130 700 v-26 m0 10 c-10 -4 -14 -12 -14 -20 m14 10 c10 -4 14 -12 14 -20"/>
+        <path d="M720 612 v-20 m0 8 c-8 -3 -12 -9 -12 -15 m12 7 c8 -3 12 -9 12 -15"/>
+        <path d="M1000 612 v-20 m0 8 c-8 -3 -12 -9 -12 -15 m12 7 c8 -3 12 -9 12 -15"/>
+      </g>
+    </g>
+  </g>
+
+  <!-- robot groundskeeper -->
+  <g>
+    <!-- shadow -->
+    <ellipse cx="330" cy="905" rx="120" ry="16" fill="#14163a"/>
+    <!-- legs -->
+    <rect x="290" y="840" width="26" height="52" rx="10" fill="#8d9bd6"/>
+    <rect x="344" y="840" width="26" height="52" rx="10" fill="#8d9bd6"/>
+    <ellipse cx="303" cy="896" rx="22" ry="10" fill="#aeb8e8"/>
+    <ellipse cx="357" cy="896" rx="22" ry="10" fill="#aeb8e8"/>
+    <!-- body -->
+    <rect x="252" y="700" width="156" height="150" rx="40" fill="#aeb8e8"/>
+    <rect x="284" y="742" width="92" height="58" rx="14" fill="#232a5e"/>
+    <circle cx="310" cy="771" r="9" fill="#f2a33c"/>
+    <circle cx="350" cy="771" r="9" fill="#7ec9a3"/>
+    <!-- head -->
+    <rect x="270" y="596" width="120" height="92" rx="30" fill="#aeb8e8"/>
+    <rect x="292" y="622" width="76" height="40" rx="16" fill="#191c40"/>
+    <circle cx="316" cy="642" r="8" fill="#f8d9a0"/>
+    <circle cx="344" cy="642" r="8" fill="#f8d9a0"/>
+    <line x1="330" y1="596" x2="330" y2="562" stroke="#8d9bd6" stroke-width="6" stroke-linecap="round"/>
+    <circle cx="330" cy="552" r="9" fill="#f2a33c"/>
+    <!-- right arm: watering can -->
+    <path d="M404 740 C 448 726, 470 706, 486 684" fill="none" stroke="#8d9bd6" stroke-width="18" stroke-linecap="round"/>
+    <g>
+      <rect x="470" y="628" width="88" height="58" rx="14" fill="#f2a33c"/>
+      <path d="M558 646 l40 -22" stroke="#f2a33c" stroke-width="14" stroke-linecap="round"/>
+      <circle cx="604" cy="620" r="10" fill="#f2a33c"/>
+      <path d="M478 628 a 30 30 0 0 1 60 0" fill="none" stroke="#f2a33c" stroke-width="10"/>
+      <!-- water drops -->
+      <g fill="#8d9bd6">
+        <circle cx="616" cy="648" r="5"/>
+        <circle cx="628" cy="672" r="5"/>
+        <circle cx="638" cy="698" r="5"/>
+      </g>
+    </g>
+    <!-- left arm: clipboard -->
+    <path d="M256 748 C 218 762, 200 780, 194 800" fill="none" stroke="#8d9bd6" stroke-width="18" stroke-linecap="round"/>
+    <g transform="rotate(-8 176 836)">
+      <rect x="140" y="788" width="76" height="98" rx="10" fill="#f5f1e6"/>
+      <rect x="162" y="778" width="32" height="16" rx="6" fill="#8d9bd6"/>
+      <line x1="154" y1="816" x2="202" y2="816" stroke="#3f3d8f" stroke-width="5" stroke-linecap="round"/>
+      <line x1="154" y1="838" x2="202" y2="838" stroke="#3f3d8f" stroke-width="5" stroke-linecap="round"/>
+      <line x1="154" y1="860" x2="186" y2="860" stroke="#3f3d8f" stroke-width="5" stroke-linecap="round"/>
+      <path d="M190 854 l6 8 l12 -14" fill="none" stroke="#7ec9a3" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+
+  <!-- path from robot to conservatory -->
+  <g fill="#3f3d8f" opacity="0.8">
+    <ellipse cx="450" cy="860" rx="34" ry="10"/>
+    <ellipse cx="520" cy="840" rx="30" ry="9"/>
+    <ellipse cx="580" cy="822" rx="26" ry="8"/>
+  </g>
+</svg>

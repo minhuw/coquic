@@ -1,6 +1,6 @@
 ---
 title: "CoQUIC Steward: Letting an Agent Maintain the Repository"
-description: A technical note on Steward, the local daemon that turns CI failures, static-analysis findings, and feature issues into validated, reviewed, and integrated patches.
+description: How Steward turns CI failures, static-analysis findings, and feature issues into validated, independently reviewed patches — and pushes them to main with no human in the loop.
 date: 2026-07-02
 author: Minhu Wang
 writtenBy: Claude Fable 5
@@ -9,169 +9,227 @@ tags: AI, agents, engineering
 
 <BlogLanguagePanel language="en">
 
-## Why a Steward?
+![A robot groundskeeper tending a chip-shaped conservatory](/blog/steward-hero.svg)
 
-CoQUIC is an experiment in LLM-generated systems software: the QUIC implementation, its tests, and its tooling are all produced through a coding-agent workflow, with humans deciding direction and judging evidence. [Why CoQUIC?](/blog/why-coquic) describes that setup.
+CoQUIC's main branch now receives commits that no human wrote, reviewed, or pushed. Before each one landed, it passed a whitespace check, a full build and test run, a lint pass, an independent agent review with zero findings — and then passed all of it again after being rebased onto the latest main. The system that does this is called CoQUIC Steward, and it fits in a single Python package running on one machine.
 
-After the initial implementation existed, a pattern emerged. Most of the day-to-day work was no longer "build a new subsystem." It was maintenance: a CI workflow fails on main, CodeQL or Codacy reports a new finding, an interop run regresses, someone files a small feature issue. Each of these is a well-scoped task with clear evidence attached. Writing a prompt by hand for each one, running an agent, checking the diff, and merging it became a repetitive loop — and repetitive loops are exactly what this project is supposed to automate.
+This post explains how Steward works and, more importantly, why it is built the way it is. The short version: getting an agent to produce a patch is the easy part. The hard part is deciding who gets to decide.
 
-CoQUIC Steward is the automation of that loop. It is a small local daemon that watches the repository's health signals, turns them into a durable task list, runs Codex workers to produce patches, validates and reviews those patches, and — under strict budgets — pushes them to `main`.
+## Maintenance is the new bottleneck
 
-The interesting part is not that an agent can produce a patch. It is the machinery around the agent: who is allowed to decide what, what evidence gates each step, and what happens when something goes wrong at 3 a.m. with nobody watching.
+CoQUIC is an experiment in LLM-generated systems software — the QUIC implementation, tests, and tooling are all agent-generated, with humans setting direction and judging evidence. [Why CoQUIC?](/blog/why-coquic) covers that premise.
 
-## The Shape of the System
+Once the initial implementation existed, the daily work changed shape. It was no longer "build the recovery subsystem." It was: CI failed on main overnight. CodeQL opened a new alert. An interop run regressed against another implementation. Someone filed a small feature issue.
 
-Steward is intentionally simple in deployment terms. There is no distributed control plane. The daemon, CLI, executor, task store, worktree manager, and web UI all run in the local repository checkout. State lives under `~/.coquic/steward`: a SQLite database for tasks, signals, and events, plus directories for prompts, transcripts, patches, validation logs, and Steward-owned git worktrees.
+Each of these tasks has two properties that make it a perfect target for automation. It is narrowly scoped, and it arrives with its own evidence attached — a failing run ID, an alert with a file and line, an issue number. Yet handling one still meant a human writing a prompt, running an agent, reading the diff, and merging. I was spending my time being a job scheduler. That is a role software is quite good at.
 
-The pipeline has five stages:
+## Why not just cron an agent?
 
-1. **Signals** — collect evidence of work that needs doing.
-2. **Planning** — turn signals into concrete task specs.
-3. **Execution** — run a worker agent in an isolated worktree.
-4. **Validation and review** — gate the patch on builds, tests, and an independent reviewer.
-5. **Integration** — rebase, re-validate, commit, and optionally push. Steward performs this step itself; workers never touch git history.
+The naive version of Steward is a cron job: every hour, ask an agent to "fix whatever is broken" and push the result. Nobody should run that, and the reasons why shape the entire design:
 
-A single daemon drives the loop. It takes an exclusive file lock so only one instance can run per repository, and it is event-driven rather than polling on a fixed timer: it wakes when a new signal arrives, a task changes state, or a signal provider's next fetch comes due. Each tick recovers stale tasks (a worker that hung past its timeout gets failed and its worktree cleaned up), plans new tasks if there is capacity, and dispatches at most one queued task.
+- An agent with push access can rewrite history, and one bad `git push --force` costs more than a month of automated fixes saves.
+- An agent asked to "make CI green" will find the shortest path to green — which is sometimes deleting the test, weakening the CodeQL config, or marking the workflow as optional.
+- An agent that watches its own dashboards will happily create the same task fifteen times for the same recurring failure.
+- And when something goes wrong at 3 a.m., "the agent did something" is not an acceptable incident report.
 
-## Signals: Evidence First
+So Steward is not an agent with credentials. It is a control loop around agents, where every capability the agents don't strictly need has been taken away from them.
 
-Every task starts from a signal, and every signal is a concrete, checkable piece of evidence. The current providers:
+## The control loop
 
-- **GitHub Actions**: one provider per workflow — CI, tests, nightly builds, RFC-compliance checks (duvet), interop runs, performance runs. Each queries `gh run list` for failed runs on main. Each provider also carries a hand-written *worker context*: what the workflow is for, how to investigate, which commands reproduce it locally, and what the fix is allowed to touch.
-- **Code scanning**: open CodeQL alerts, with rule, file, and severity.
-- **Codacy**: open error- and warning-level findings from the Codacy API.
-- **Feature issues**: open GitHub issues labeled `steward:feature` or `steward:enhancement`, oldest first.
+![Steward's pipeline: signals flow through a planner and verifier into sandboxed workers, then validation, review, and gated integration to main](/blog/steward-architecture.svg)
 
-Signals are fingerprinted from a canonical identity — provider, kind, and either an explicit key (a feature issue's number) or the finding's title, location, and payload. A unique index in SQLite enforces one pending item per fingerprint, and a suppression window keeps a recurring failure from spawning a new task every 30 minutes while a fix is already in flight. Providers poll on their own schedules (frequent workflows every 30 minutes, daily ones every 24 hours) with deterministic jitter, and only when a provider's failure is actually new does the daemon wake up to plan.
+Steward runs as a single daemon in the local repository checkout — no distributed control plane, no queue service. State lives in a SQLite database under `~/.coquic/steward`, next to directories full of prompts, transcripts, patches, validation logs, and Steward-owned git worktrees. The daemon takes an exclusive file lock, so exactly one instance can manage a repository.
 
-## Planning: an LLM Proposes, a Verifier Disposes
+The pipeline has five stages, and the diagram above is the whole system:
 
-The planner itself is a Codex run. It resumes a persistent thread, receives the pending signals and the current active-task list, and must answer against a strict JSON schema: which tasks to create, each with a title, a worker kind, a priority, a stable dedupe key, and — mandatory — citations of the signal IDs that justify it.
+1. **Signals** collect evidence that work exists.
+2. **Planning** turns signals into task specs.
+3. **Execution** runs a worker agent in an isolated worktree.
+4. **Validation and review** gate the patch.
+5. **Integration** rebases, re-validates, commits, and pushes. Only Steward performs this stage.
 
-That output is not trusted. A deterministic verifier checks every proposal: the worker must come from the allow-list, the dedupe key must not collide with an active task, the evidence must reference real pending signals, the prompt and metadata must fit size limits, and feature-issue tasks must map exactly one issue to one task with the right worker. If *any* proposal fails, the verifier refuses to mark signals as consumed that round, so nothing gets silently dropped — the items simply come back next tick.
+The loop is event-driven, not polled. The daemon sleeps until a new signal arrives, a task changes state, or a provider's next fetch comes due; each wakeup recovers any stale tasks, plans if there is capacity, and dispatches at most one task. Up to four source tasks run concurrently. Everything else waits its turn.
 
-This split is the design idea I care most about: the model gets to propose, and cheap deterministic code decides what is admissible. It is the same asymmetry the whole CoQUIC project is built on — generation is cheap, so spend the engineering effort on verification.
+## Nothing happens without evidence
 
-## Execution: Workers in a Box
+Every task begins as a signal, and every signal is a checkable fact:
 
-A dispatched task gets its own git worktree, created by Steward under its state directory on a branch like `steward/ci/task-…`. The worker is a Codex CLI process sandboxed to that worktree, with its full JSONL transcript captured to disk.
+- **GitHub Actions** providers — one per workflow, covering CI, tests, nightly builds, RFC-compliance checks, interop runs, and performance runs — query for failed runs on main. Each provider carries a hand-written worker context: what this workflow verifies, how to investigate a failure, the exact commands that reproduce it locally, and what a fix is allowed to touch.
+- **Code scanning** collects open CodeQL alerts, with rule, file, and severity.
+- **Codacy** collects open error- and warning-level findings.
+- **Feature issues** picks up GitHub issues labeled `steward:feature` or `steward:enhancement`, oldest first.
 
-The worker prompt is assembled from layers: a common rule block ("do not commit, push, merge, change GitHub settings, or weaken CodeQL, Codacy, or CI configuration"), the worker's identity from a small agent catalog (`ci-doctor`, `code-quality-janitor`, `interop-doctor`, `rfc-auditor`, `feature-implementer`, and so on), the task prompt from the planner, the authoritative signal payload, and the repository's own skill files — the same `SKILL.md` documents a human-driven session would use — inlined verbatim.
+Signals are fingerprinted from a canonical identity — the provider, the kind, and either an explicit key like an issue number or the finding's title and location. A unique index in SQLite allows one pending item per fingerprint, and a 24-hour suppression window keeps a flaky workflow from spawning a fresh task every 30 minutes while a fix is already in flight. Fast-moving workflows are polled every half hour, daily ones every 24 hours, each with deterministic jitter.
 
-The rule against committing is not just a prompt instruction. Workers produce edits; Steward extracts the diff itself with `git diff --binary`, saves it as a patch artifact, and owns every subsequent git operation. Even a worker that ignored its instructions could not push anything.
+The effect is that Steward cannot invent work. If a task exists, there is a specific failed run, alert, or issue that justifies it, and the task record cites it.
 
-## Validation and Independent Review
+## The planner proposes, the verifier decides
 
-A patch must pass three gates, run inside the worktree with logs saved per gate: `git diff --check` for whitespace and conflict markers, `nix develop -c zig build test` for build and tests, and `pre-commit run --all-files` for lint. Before any of that, the diff is rejected outright if it touches generated or cache paths. A failed gate does not fail the task — the worker's thread is resumed with the failure output and asked to fix it, within a bounded revision budget.
+Here is the design decision I care most about.
 
-Then a second, independent Codex agent reviews the patch. The reviewer is read-only, sees only the uncommitted diff in the worktree, and must answer against a schema: a verdict plus a list of findings with severity, file, and recommendation. Approval requires an `approve` verdict *and* zero findings. A blocking review is fed back to the original worker as a revision prompt, and the cycle repeats. The reviewer is told explicitly to block on the failure modes we learned to fear in this project: touching generated state, unrelated rewrites, missing validation, and changes that make dashboards greener without making the code better.
+The planner is itself an LLM — a Codex session with a persistent thread that receives the pending signals and the current active-task list, and must respond in a strict JSON schema: proposed tasks, each with a title, a worker kind, a priority, a stable dedupe key, and mandatory citations of the signal IDs that justify it.
 
-The reviewer is an LLM too, so this is not proof of correctness — it is one more independent piece of evidence, cheap to produce, with its transcript saved next to everything else.
+That output is treated as untrusted input. A deterministic verifier — plain Python, no model — checks every proposal: the worker must be on the allow-list, the dedupe key must not collide with an active task, every cited signal must actually exist and be pending, prompts and metadata must fit size limits, and a feature-issue task must map exactly one issue to one task with the right worker.
 
-## Integration: the Only Path to Main
+If any proposal fails, the verifier rejects the whole round and refuses to mark any signal as consumed. Nothing is silently dropped; the signals simply come back on the next tick. Generation is cheap and verification is cheap — so we can afford to throw away an entire planning round rather than accept a partially suspect one.
 
-In the default `local-only` mode, an approved patch just sits in the state directory and a human applies it. In `push-main` mode, approval queues a separate Integration task, serialized by its own lock so only one integration ever runs at a time.
+This is the asymmetry the whole CoQUIC project is built on, applied to the orchestrator itself: let the model propose, and let boring deterministic code decide what is admissible.
 
-Integration re-verifies everything from scratch: fetch main, hard-reset a fresh worktree, apply the patch, and re-run all validation gates on the rebased tree. If the patch no longer applies or a gate fails against newer main, the original worker's thread is resumed to re-port its change, which then goes through review again. The commit message is generated by yet another schema-constrained agent run — a conventional-commit subject plus a body listing changed files, validation results, and a trailer linking back to the task, so every Steward commit on main is traceable to its transcript.
+## Workers cannot touch history
 
-Pushes are budgeted: at most ten pushes to main per UTC day, checked against the event log before each integration. On startup in push mode, the daemon runs a push preflight — a `git push --dry-run` with prompts disabled — and refuses to start if it fails, so credential problems surface immediately instead of after a worker has spent an hour on a patch. After a successful push of a feature task, Steward comments on and closes the originating issue.
+A dispatched task gets a fresh git worktree, created by Steward under its own state directory on a branch like `steward/ci/task-…`. The worker is a Codex CLI process sandboxed to that worktree, with a 120-minute budget and its full JSONL transcript captured to disk.
 
-An additional `local_only` flag stops integration after the local commit, which is how I debug Steward changes without letting it mutate GitHub.
+Its prompt is assembled in layers: a common rule block ("do not commit, push, merge, change GitHub settings, or weaken CodeQL, Codacy, or CI configuration"), the worker's identity from a small catalog — `ci-doctor`, `code-quality-janitor`, `interop-doctor`, `rfc-auditor`, `feature-implementer` — the planner's task prompt, the authoritative signal payload, and the repository's own skill files, inlined verbatim. The same `SKILL.md` documents a human-driven session would load.
 
-## Observability
+The rule against committing is not enforced by the prompt. It is enforced by architecture. Workers produce edits; Steward extracts the diff itself with `git diff --binary`, stores it as a patch artifact, and owns every git operation from that point on. A worker that ignored every instruction it was given still could not push anything, because it was never handed the ability to.
 
-Every step leaves an artifact: prompts, transcripts, patches, validation logs, review JSON, and an event log in SQLite. A local FastAPI server (loopback-only) and a Next.js dashboard show the control loop live — scheduler lanes, the task graph, planner iterations, integration runs with per-run patch and validation tabs, and the signal inbox.
+## Two gates, and the second one is adversarial
 
-There is also a public mirror: a redacted static snapshot published to the demo site. Redaction strips filesystem paths, prompts, thread IDs, and anything secret-shaped, and the transcript exposure level is configurable. The point is that "an agent maintains this repository" is a claim you should be able to audit from the outside.
+A patch must clear three validation gates, run inside the worktree with logs kept per gate: `git diff --check` for whitespace and conflict markers, `nix develop -c zig build test` for the build and full test suite, and `pre-commit run --all-files` for lint. Before any gate runs, the diff is rejected outright if it touches generated or cache paths. A failed gate doesn't kill the task — the worker's thread is resumed with the failure output and asked to fix it, inside a bounded revision budget.
 
-## What This Does and Does Not Show
+Then comes the gate I consider the interesting one: a second, independent Codex agent reviews the patch. The reviewer is read-only. It sees only the uncommitted diff in the worktree, and it must answer in a schema — a verdict plus findings, each with severity, file, and recommendation. Approval requires an `approve` verdict *and* zero findings. Anything less goes back to the original worker as a revision prompt.
 
-Steward has been closing real CI failures, static-analysis findings, and small feature issues on this repository. But the honest framing matches the rest of CoQUIC: it does not show that autonomous maintenance is safe in general. It shows one concrete architecture for making it *inspectable* — evidence-based task creation, deterministic verification of LLM plans, workers that cannot touch history, independent review, full re-validation at integration time, hard budgets, and artifacts for every decision.
+The reviewer's instructions encode the failure modes this project taught us to fear: patches that touch generated state, unrelated rewrites, missing validation, and — above all — changes that make a dashboard greener without making the code better. An agent asked to fix a CodeQL alert must fix the code, not the CodeQL configuration.
 
-The open questions are the same ones as before, one level up. When the planner, the worker, and the reviewer are all models, which disagreements between them are informative and which are noise? How do you keep an autonomous loop from optimizing the visible metric — green CI — instead of the underlying property? Steward is the instrument for studying those questions, and its own history on main is the dataset.
+Is an LLM reviewer proof of correctness? No, and I won't pretend otherwise. It is one more independent measurement, cheap to run, with its full transcript saved next to everything else. The validation gates are the hard floor; the reviewer raises the ceiling.
+
+## The only path to main
+
+By default, Steward runs in `local-only` mode: an approved patch just sits in the state directory and a human applies it. Flipping `integration_mode` to `push-main` is where the guardrails earn their keep.
+
+Approval queues a separate Integration task, serialized by its own lock — only one integration ever runs at a time. Integration trusts nothing that came before it. It fetches main, hard-resets a fresh worktree, applies the patch, and re-runs every validation gate on the rebased tree. If the patch no longer applies, or a gate fails against newer main, the original worker's thread is resumed to re-port its change — and the result goes through review again.
+
+The commit message is produced by yet another schema-constrained agent run: a conventional-commit subject, a body listing changed files and validation results, and a trailer linking to the task. Every Steward commit on main traces back to its complete transcript.
+
+Then there are the budgets. At most ten pushes to main per UTC day, checked against the event log before every integration. On startup in push mode, the daemon performs a push preflight — a `git push --dry-run` with all interactive prompts disabled — and refuses to start if it fails, so a credential problem surfaces in seconds rather than after a worker has spent an hour on a patch. After a feature task lands, Steward comments on the originating issue with the commit and closes it.
+
+One more switch matters day to day: `local_only = true` stops integration after the local commit. That is how I test changes to Steward itself without letting it near GitHub.
+
+## You can watch it work
+
+Every step leaves an artifact: prompts, transcripts, patches, per-gate validation logs, review JSON, and an append-only event log in SQLite. A loopback-only FastAPI server and a Next.js dashboard render the loop live — scheduler lanes, the task graph, planner iterations, integration runs with per-run patch and validation tabs, and the signal inbox.
+
+There is also a public mirror: a redacted static snapshot published to this site. The redaction strips filesystem paths, prompts, thread IDs, and anything secret-shaped. The principle behind it: "an agent maintains this repository" should be a claim outsiders can audit, not one they have to take on faith.
+
+## What this proves, and what it doesn't
+
+Steward has closed real CI failures, real static-analysis findings, and real feature issues on this repository, unattended. That is worth something. It is not proof that autonomous maintenance is safe in general, and I want to be precise about the distinction.
+
+What Steward demonstrates is an architecture for making autonomy *inspectable*: tasks that must cite evidence, LLM plans checked by deterministic code, workers that were never given the ability to push, an adversarial second agent, full re-validation at the moment of integration, hard budgets on the blast radius, and an artifact trail for every decision.
+
+The open questions moved up a level, and they are the ones I find genuinely interesting. When the planner, the worker, and the reviewer are all models, which disagreements between them carry signal and which are noise? How do you keep a loop that watches its own metrics from optimizing the metric instead of the property it stands for? Steward is the instrument for studying those questions — and its own commit history on main is the dataset.
 
 </BlogLanguagePanel>
 <BlogLanguagePanel language="zh">
 
-## 为什么需要 Steward？
+![一个机器人园丁在照料芯片形状的温室](/blog/steward-hero.svg)
 
-CoQUIC 是一个关于 LLM 生成系统软件的实验：QUIC 实现、测试和工具链都通过 coding agent 工作流生成，人负责决定方向和评判证据。[Why CoQUIC?](/blog/why-coquic) 介绍了这个背景。
+CoQUIC 的 main 分支上，现在会出现没有任何人编写、评审或推送的提交。每一个提交在落地之前，都通过了空白字符检查、完整的构建和测试、lint 检查、一次零 findings 的独立 agent 评审——然后在 rebase 到最新的 main 之后，把这一切又通过了一遍。做这件事的系统叫 CoQUIC Steward，它只是一个跑在单机上的 Python 包。
 
-在初始实现完成之后，一个模式逐渐显现出来。日常工作的大部分不再是"构建一个新的子系统"，而是维护：某个 CI workflow 在 main 上失败了，CodeQL 或 Codacy 报了一个新问题，互通测试出现回退，有人提了一个小的 feature issue。这些任务的共同点是范围清晰、并且自带明确的证据。为每一个任务手写 prompt、运行 agent、检查 diff、再合并，本身变成了一个重复性的循环——而重复性循环恰恰是这个项目想要自动化的对象。
+这篇文章讲 Steward 是怎么工作的，以及更重要的：它为什么被设计成这个样子。一句话概括：让 agent 生成补丁是容易的部分，难的部分是决定谁有权做决定。
 
-CoQUIC Steward 就是这个循环的自动化。它是一个小的本地守护进程：监视仓库的健康信号，把信号变成持久化的任务列表，运行 Codex worker 生成补丁，对补丁做验证和评审，并在严格的预算约束下把补丁推送到 `main`。
+## 维护成了新的瓶颈
 
-有意思的地方不在于 agent 能生成补丁，而在于 agent 周围的机制：谁有权决定什么，每一步由什么证据把关，以及当凌晨三点没有人盯着的时候，出了问题会发生什么。
+CoQUIC 是一个关于 LLM 生成系统软件的实验——QUIC 实现、测试和工具链全部由 agent 生成，人负责设定方向、评判证据。[Why CoQUIC?](/blog/why-coquic) 介绍了这个前提。
 
-## 系统的形态
+初始实现完成之后，日常工作的形态变了。不再是"构建丢包恢复子系统"，而是：CI 昨晚在 main 上挂了。CodeQL 报了一个新告警。互通测试对某个实现出现了回退。有人提了一个小的 feature issue。
 
-从部署角度看，Steward 刻意保持简单。没有分布式控制平面。守护进程、CLI、执行器、任务存储、worktree 管理器和 Web UI 全部运行在本地仓库中。状态存放在 `~/.coquic/steward` 下：一个 SQLite 数据库保存任务、信号和事件，另有目录保存 prompt、transcript、补丁、验证日志，以及 Steward 自己管理的 git worktree。
+这类任务有两个共同点，使它们成为自动化的完美目标：范围窄，而且自带证据——一个失败的 run ID、一条带文件和行号的告警、一个 issue 编号。但处理一个这样的任务，仍然需要人来写 prompt、跑 agent、读 diff、再合并。我发现自己的时间花在了当一个任务调度器上，而调度恰恰是软件最擅长的事。
 
-整个流水线分五个阶段：
+## 为什么不直接用 cron 跑一个 agent？
 
-1. **信号（Signals）**——收集"有活要干"的证据。
-2. **规划（Planning）**——把信号变成具体的任务描述。
-3. **执行（Execution）**——在隔离的 worktree 中运行 worker agent。
-4. **验证与评审（Validation and review）**——用构建、测试和一个独立评审者为补丁把关。
-5. **集成（Integration）**——rebase、重新验证、提交，并可选地推送。这一步由 Steward 自己完成；worker 永远不碰 git 历史。
+Steward 最朴素的版本是一个 cron 任务：每小时让 agent"把坏了的东西修好"，然后推送结果。没有人应该这么跑，而不能这么跑的原因，塑造了整个设计：
 
-一个守护进程驱动整个循环。它持有一个排他文件锁，保证每个仓库只有一个实例在运行；它是事件驱动的，而不是固定间隔轮询：新信号到达、任务状态变化、或某个信号源到了下次抓取时间，它才会醒来。每个 tick 会先恢复卡住的任务（超时挂起的 worker 会被标记失败并清理 worktree），然后在有容量时规划新任务，最后至多分发一个排队中的任务。
+- 一个有推送权限的 agent 可以改写历史，一次错误的 `git push --force` 造成的损失，超过一个月自动修复省下的时间。
+- 一个被要求"让 CI 变绿"的 agent 会找最短的变绿路径——有时候那条路径是删掉测试、削弱 CodeQL 配置，或者把 workflow 标记成可选。
+- 一个盯着自己仪表盘的 agent，会为同一个反复出现的失败兴高采烈地创建十五个相同的任务。
+- 而当凌晨三点出了问题，"agent 做了一些操作"不是一份合格的事故报告。
 
-## 信号：证据优先
+所以 Steward 不是一个拿着凭据的 agent。它是一个包裹在 agent 外面的控制循环，agent 不严格需要的每一项能力，都被拿走了。
 
-每个任务都始于一个信号，而每个信号都是一条具体、可核查的证据。当前的信号源：
+## 控制循环
 
-- **GitHub Actions**：每个 workflow 一个 provider——CI、测试、nightly 构建、RFC 合规检查（duvet）、互通测试、性能测试。每个 provider 通过 `gh run list` 查询 main 上失败的运行。每个 provider 还携带一段手写的 *worker context*：这个 workflow 是干什么的、如何排查、哪些命令能在本地复现、修复允许改动的范围。
-- **Code scanning**：打开状态的 CodeQL 告警，包含规则、文件和严重级别。
-- **Codacy**：Codacy API 中 Error 和 Warning 级别的未解决问题。
-- **Feature issues**：带 `steward:feature` 或 `steward:enhancement` 标签的开放 issue，按最早的优先。
+![Steward 的流水线：信号经过规划器和验证器，进入沙箱中的 worker，再经过验证、评审和受控集成，最终到达 main](/blog/steward-architecture.svg)
 
-信号按规范化的身份做指纹：provider、类型，加上显式键（如 feature issue 编号）或问题的标题、位置和内容。SQLite 中的唯一索引保证同一指纹只有一条待处理记录；再加上一个抑制窗口，避免一个反复出现的失败在修复还在进行时每 30 分钟就生成一个新任务。各个 provider 按自己的节奏轮询（高频 workflow 每 30 分钟一次，日常任务每 24 小时一次），并带有确定性抖动。只有当某个 provider 真的出现新失败时，守护进程才会醒来做规划。
+Steward 以单个守护进程的形式运行在本地仓库中——没有分布式控制平面，没有队列服务。状态存在 `~/.coquic/steward` 下的一个 SQLite 数据库里，旁边是保存 prompt、transcript、补丁、验证日志和 Steward 自有 git worktree 的目录。守护进程持有排他文件锁，每个仓库只能有一个实例。
 
-## 规划：LLM 提议，验证器裁决
+流水线分五个阶段，上面这张图就是整个系统：
 
-规划器本身也是一次 Codex 运行。它恢复一个持久化的会话线程，接收待处理的信号和当前活跃任务列表，并且必须按照严格的 JSON schema 作答：要创建哪些任务，每个任务包含标题、worker 类型、优先级、稳定的去重键，以及——强制要求的——引用支撑它的信号 ID。
+1. **信号（Signals）**收集"有活要干"的证据。
+2. **规划（Planning）**把信号变成任务描述。
+3. **执行（Execution）**在隔离的 worktree 中运行 worker agent。
+4. **验证与评审（Validation and review）**为补丁把关。
+5. **集成（Integration）**负责 rebase、重新验证、提交和推送。只有 Steward 自己执行这个阶段。
 
-这个输出是不被信任的。一个确定性的验证器逐条检查每个提案：worker 必须来自允许列表，去重键不能和活跃任务冲突，证据必须指向真实存在的待处理信号，prompt 和元数据必须符合大小限制，feature issue 任务必须精确地一个 issue 对应一个任务并使用正确的 worker。只要有*任何一个*提案不合格，验证器在这一轮就拒绝把信号标记为已消费，因此不会有信号被悄悄丢掉——它们会在下一个 tick 重新出现。
+循环是事件驱动的，不做固定轮询。守护进程休眠，直到新信号到达、任务状态变化、或某个信号源到了下次抓取时间；每次醒来先恢复卡住的任务，有容量就规划，然后至多分发一个任务。最多四个源任务并发运行，其余排队等待。
 
-这个分工是我最在意的设计：模型负责提议，廉价的确定性代码决定什么是可接受的。这和整个 CoQUIC 项目所依赖的不对称性是同一个：生成是便宜的，所以把工程精力花在验证上。
+## 没有证据就没有任务
 
-## 执行：盒子里的 Worker
+每个任务都始于一个信号，而每个信号都是一条可核查的事实：
 
-被分发的任务会得到一个自己的 git worktree，由 Steward 在其状态目录下创建，分支名类似 `steward/ci/task-…`。worker 是一个 Codex CLI 进程，沙箱限制在这个 worktree 内，完整的 JSONL transcript 被记录到磁盘。
+- **GitHub Actions** provider——每个 workflow 一个，覆盖 CI、测试、nightly 构建、RFC 合规检查、互通测试和性能测试——查询 main 上失败的运行。每个 provider 都带一段手写的 worker context：这个 workflow 验证什么、失败了如何排查、哪些命令能在本地精确复现、修复允许触碰的范围。
+- **Code scanning** 收集打开状态的 CodeQL 告警，含规则、文件和严重级别。
+- **Codacy** 收集 Error 和 Warning 级别的未解决问题。
+- **Feature issues** 按最早优先抓取带 `steward:feature` 或 `steward:enhancement` 标签的 issue。
 
-worker 的 prompt 由多层组装而成：一段通用规则（"不得提交、推送、合并、修改 GitHub 设置，不得削弱 CodeQL、Codacy 或 CI 配置"），来自一个小型 agent 目录的 worker 身份（`ci-doctor`、`code-quality-janitor`、`interop-doctor`、`rfc-auditor`、`feature-implementer` 等），规划器写的任务 prompt，权威的信号内容，以及仓库自己的技能文件——和人工驱动的会话使用的同一批 `SKILL.md` 文档——原样内嵌。
+信号按规范化身份做指纹：provider、类型，加上显式键（比如 issue 编号）或问题的标题和位置。SQLite 的唯一索引保证同一指纹只有一条待处理记录；一个 24 小时的抑制窗口，让一个不稳定的 workflow 不会在修复还在进行时每 30 分钟生成一个新任务。高频 workflow 每半小时轮询一次，日常任务每 24 小时一次，各自带确定性抖动。
 
-"不得提交"不只是一条 prompt 指令。worker 只产出文件修改；Steward 自己用 `git diff --binary` 提取 diff，保存为补丁工件，并掌控之后所有的 git 操作。即使一个 worker 无视了指令，它也推不出任何东西。
+结果是：Steward 无法凭空发明工作。只要一个任务存在，就有一个具体的失败运行、告警或 issue 支撑它，而且任务记录里引用着它。
 
-## 验证与独立评审
+## 规划器提议，验证器裁决
 
-补丁必须通过三道关卡，全部在 worktree 内运行，每道关卡的日志单独保存：`git diff --check` 检查空白和冲突标记，`nix develop -c zig build test` 负责构建和测试，`pre-commit run --all-files` 负责 lint。在此之前，如果 diff 触碰了生成文件或缓存路径，会被直接拒绝。某道关卡失败并不会导致任务失败——worker 的会话线程会被恢复，附上失败输出要求它修复，整个过程受修订次数预算约束。
+这是我最在意的设计决定。
 
-之后，第二个独立的 Codex agent 评审这个补丁。评审者是只读的，只能看到 worktree 中未提交的 diff，并且必须按 schema 作答：一个结论，加上一份带严重级别、文件和建议的 findings 列表。通过的条件是结论为 `approve` *并且* findings 为空。被拒绝的评审会作为修订 prompt 反馈给原 worker，循环继续。评审者被明确告知要拦截我们在这个项目中学会警惕的失败模式：触碰生成状态、无关的大范围重写、缺失验证，以及那些让仪表盘变绿但没有让代码变好的改动。
+规划器本身就是一个 LLM——一个带持久线程的 Codex 会话，接收待处理信号和当前活跃任务列表，必须按严格的 JSON schema 作答：提议的任务，每个带标题、worker 类型、优先级、稳定的去重键，以及强制引用的、支撑它的信号 ID。
 
-评审者也是 LLM，所以这不是正确性证明——它只是又一条独立的证据，生成成本低，transcript 和其他所有工件保存在一起。
+这个输出被当作不可信输入处理。一个确定性的验证器——纯 Python，没有模型——逐条检查每个提案：worker 必须在允许列表上，去重键不能与活跃任务冲突，引用的每个信号必须真实存在且处于待处理状态，prompt 和元数据必须符合大小限制，feature issue 任务必须精确地一个 issue 对应一个任务、并使用正确的 worker。
 
-## 集成：通往 main 的唯一路径
+只要有任何一个提案不合格，验证器就拒绝整轮结果，并且不把任何信号标记为已消费。没有东西被悄悄丢掉；信号会在下一个 tick 重新出现。生成是便宜的，验证也是便宜的——所以我们负担得起扔掉一整轮规划，而不是接受一轮部分可疑的结果。
 
-在默认的 `local-only` 模式下，通过评审的补丁只是留在状态目录里，由人来应用。在 `push-main` 模式下，通过评审会触发一个单独的 Integration 任务，由专门的锁串行化，保证任何时刻只有一个集成在运行。
+这就是整个 CoQUIC 项目所依赖的不对称性，应用到了编排器自己身上：让模型提议，让无聊的确定性代码决定什么是可接受的。
 
-集成从零开始重新校验一切：fetch main、把一个新 worktree 硬重置到最新、应用补丁，在 rebase 后的代码树上重跑全部验证关卡。如果补丁不再能应用，或者某道关卡在更新的 main 上失败，原 worker 的会话会被恢复来重新移植改动，然后再次经过评审。提交信息由又一次受 schema 约束的 agent 运行生成——conventional commit 格式的标题，正文列出改动文件和验证结果，并带一个指回任务的 trailer，因此 main 上每一个 Steward 提交都可以追溯到它的完整 transcript。
+## Worker 碰不到历史
 
-推送是有预算的：每个 UTC 日最多推送 main 十次，每次集成前都会核对事件日志。在推送模式下启动时，守护进程会先做一次推送预检——禁用交互提示的 `git push --dry-run`——失败则拒绝启动，这样凭据问题会立刻暴露，而不是在某个 worker 已经花了一小时写补丁之后。feature 任务成功推送后，Steward 会在对应 issue 下留言并关闭它。
+被分发的任务会得到一个全新的 git worktree，由 Steward 在自己的状态目录下创建，分支名类似 `steward/ci/task-…`。worker 是一个 Codex CLI 进程，沙箱限制在这个 worktree 内，预算 120 分钟，完整的 JSONL transcript 记录到磁盘。
 
-另有一个 `local_only` 开关可以让集成停在本地提交，这也是我调试 Steward 自身改动时的方式——不让它改动 GitHub 上的任何东西。
+它的 prompt 分层组装：一段通用规则（"不得提交、推送、合并、修改 GitHub 设置，不得削弱 CodeQL、Codacy 或 CI 配置"），来自一个小型目录的 worker 身份——`ci-doctor`、`code-quality-janitor`、`interop-doctor`、`rfc-auditor`、`feature-implementer`——规划器写的任务 prompt，权威的信号内容，以及原样内嵌的仓库技能文件。和人工驱动的会话加载的是同一批 `SKILL.md` 文档。
 
-## 可观测性
+"不得提交"这条规则不是靠 prompt 执行的，而是靠架构执行的。worker 只产出文件修改；Steward 自己用 `git diff --binary` 提取 diff，保存为补丁工件，并从那一刻起掌控所有 git 操作。一个无视全部指令的 worker 仍然推不出任何东西——因为它从未被赋予推送的能力。
 
-每一步都留下工件：prompt、transcript、补丁、验证日志、评审 JSON，以及 SQLite 中的事件日志。一个只监听本机回环的 FastAPI 服务和一个 Next.js 仪表盘实时展示控制循环——调度泳道、任务图、规划器的每轮迭代、带补丁和验证标签页的集成运行记录，以及信号收件箱。
+## 两道关卡，第二道是对抗性的
 
-还有一个公开镜像：一份脱敏后的静态快照，发布到演示站点。脱敏会去掉文件系统路径、prompt、线程 ID 和任何形似密钥的内容，transcript 的公开程度可配置。这样做的意义是："一个 agent 在维护这个仓库"应当是一个外部可以审计的断言。
+补丁必须通过三道验证关卡，全部在 worktree 内运行，每道关卡的日志单独保存：`git diff --check` 检查空白和冲突标记，`nix develop -c zig build test` 负责构建和完整测试，`pre-commit run --all-files` 负责 lint。在任何关卡运行之前，触碰生成文件或缓存路径的 diff 会被直接拒绝。关卡失败不会杀死任务——worker 的线程会被恢复，附上失败输出要求修复，整个过程受修订预算约束。
 
-## 这说明了什么，没说明什么
+然后是我认为最有意思的那道关卡：第二个独立的 Codex agent 评审这个补丁。评审者是只读的，只能看到 worktree 中未提交的 diff，必须按 schema 作答——一个结论，加上带严重级别、文件和建议的 findings。通过的条件是 `approve` 结论*并且* findings 为空。达不到就作为修订 prompt 退回原 worker。
 
-Steward 已经在这个仓库上修复了真实的 CI 失败、静态分析问题和小型 feature issue。但诚实的表述和 CoQUIC 的其余部分一致：它并不能说明自主维护在一般意义上是安全的。它展示的是一种让自主维护*可检验*的具体架构——基于证据的任务创建、对 LLM 规划的确定性验证、无法触碰历史的 worker、独立评审、集成时的完整重新验证、硬性预算，以及每个决策对应的工件。
+评审者的指令编码了这个项目教会我们警惕的失败模式：触碰生成状态的补丁、无关的大范围重写、缺失的验证，以及——最重要的——让仪表盘变绿但没有让代码变好的改动。一个被要求修复 CodeQL 告警的 agent，必须修代码，而不是修 CodeQL 配置。
 
-开放的问题和之前一样，只是上升了一层。当规划器、worker 和评审者都是模型时，它们之间的哪些分歧是有信息量的，哪些只是噪声？如何避免一个自主循环去优化可见指标——绿色的 CI——而不是背后的真实属性？Steward 是研究这些问题的仪器，而它自己在 main 上留下的历史就是数据集。
+LLM 评审者是正确性证明吗？不是，我也不打算假装它是。它是又一次独立的测量，运行成本低，完整 transcript 和其他工件保存在一起。验证关卡是硬底线；评审者抬高的是上限。
+
+## 通往 main 的唯一路径
+
+默认情况下 Steward 运行在 `local-only` 模式：通过评审的补丁只是留在状态目录里，由人来应用。把 `integration_mode` 切到 `push-main`，才是护栏真正发挥作用的地方。
+
+评审通过会触发一个单独的 Integration 任务，由专门的锁串行化——任何时刻只有一个集成在运行。集成不信任它之前发生的任何事情。它 fetch main、把一个全新 worktree 硬重置到最新、应用补丁，然后在 rebase 后的代码树上重跑每一道验证关卡。如果补丁不再能应用，或者某道关卡在更新的 main 上失败，原 worker 的线程会被恢复来重新移植改动——结果再次经过评审。
+
+提交信息由又一次受 schema 约束的 agent 运行生成：conventional commit 格式的标题，正文列出改动文件和验证结果，加一个指回任务的 trailer。main 上每一个 Steward 提交都能追溯到它的完整 transcript。
+
+然后是预算。每个 UTC 日最多向 main 推送十次，每次集成前都核对事件日志。推送模式下启动时，守护进程先做推送预检——禁用一切交互提示的 `git push --dry-run`——失败则拒绝启动，让凭据问题在几秒内暴露，而不是在某个 worker 已经花了一小时写补丁之后。feature 任务落地后，Steward 会在对应 issue 下留言注明提交并关闭它。
+
+还有一个日常很重要的开关：`local_only = true` 让集成停在本地提交。这是我测试 Steward 自身改动的方式——不让它靠近 GitHub。
+
+## 你可以看着它干活
+
+每一步都留下工件：prompt、transcript、补丁、每道关卡的验证日志、评审 JSON，以及 SQLite 中只增不改的事件日志。一个只监听本机回环的 FastAPI 服务和一个 Next.js 仪表盘实时渲染整个循环——调度泳道、任务图、规划器的每轮迭代、带补丁和验证标签页的集成运行记录，以及信号收件箱。
+
+还有一个公开镜像：一份脱敏后的静态快照，发布到这个站点上。脱敏会去掉文件系统路径、prompt、线程 ID 和任何形似密钥的内容。背后的原则是："一个 agent 在维护这个仓库"应当是外部可以审计的断言，而不是只能凭信任接受的说法。
+
+## 这证明了什么，没证明什么
+
+Steward 已经在这个仓库上无人值守地修复了真实的 CI 失败、真实的静态分析问题和真实的 feature issue。这是有价值的。但它不能证明自主维护在一般意义上是安全的，我想把这个区别说清楚。
+
+Steward 展示的是一种让自主性*可检验*的架构：必须引用证据的任务、由确定性代码检查的 LLM 规划、从未被赋予推送能力的 worker、一个对抗性的第二 agent、集成时刻的完整重新验证、限制爆炸半径的硬预算，以及每个决策对应的工件链。
+
+开放的问题上升了一层，而这些正是我真正感兴趣的。当规划器、worker 和评审者都是模型时，它们之间的哪些分歧携带信号，哪些只是噪声？一个盯着自己指标的循环，如何避免去优化指标本身、而不是指标所代表的属性？Steward 是研究这些问题的仪器——而它自己在 main 上的提交历史，就是数据集。
 
 </BlogLanguagePanel>

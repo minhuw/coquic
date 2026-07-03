@@ -4210,6 +4210,13 @@ def test_worker_prompt_highlights_feature_issue_signal_guidance(
     assert "https://github.com/minhuw/coquic/issues/42" in prompt
     assert "Do not fetch a broad or unknown issue list" in prompt
     assert "gh-issue-implementation" not in prompt
+    assert "Scope control:" in prompt
+    assert "Make the smallest coherent patch" in prompt
+    assert "Follow-up task proposals:" in prompt
+    assert "Kind: <feature|ci|code-quality|rfc-audit|custom>" in prompt
+    assert "code_quality" not in prompt
+    assert "rfc_audit" not in prompt
+    assert "Do not create GitHub issues, Steward tasks, commits, pushes" in prompt
 
 
 def test_worker_prompt_suppresses_mutating_issue_skill_for_feature_signal(

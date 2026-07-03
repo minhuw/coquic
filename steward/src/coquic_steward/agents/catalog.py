@@ -92,6 +92,28 @@ Produce a concise final report with root cause, changed files, validation
 performed, remaining risk, and any generated state avoided.
 """
 
+SCOPE_CONTROL_RULES = """\
+Scope control:
+- Make the smallest coherent patch that satisfies the selected task.
+- Do not broaden the patch to fix unrelated tooling, generated snapshots, backend
+  infrastructure, public API/binding surfaces, or adjacent defects unless that
+  work is explicitly part of the selected task.
+- If the selected task depends on prerequisite work that is larger than the task
+  boundary, stop before implementing that prerequisite. Keep or reduce the patch
+  to a safe slice and report follow-up task proposals instead.
+- Follow-up task proposals must be concrete and independently executable. Use
+  this format in the final report when needed:
+  Follow-up task proposals:
+  - Title: <imperative title>
+    Kind: <feature|ci|code-quality|rfc-audit|custom>
+    Worker: <recommended steward worker>
+    Rationale: <why this is outside the current task>
+    Scope: <files/subsystems and explicit non-goals>
+    Validation: <commands/tests>
+- Do not create GitHub issues, Steward tasks, commits, pushes, or remote writes
+  for follow-up proposals unless the task explicitly grants that authority.
+"""
+
 
 def agent_for_worker(worker: WorkerKind | str) -> StewardAgent:
     return AGENTS.get(WorkerKind(worker), AGENTS[WorkerKind.custom])
@@ -113,6 +135,8 @@ def render_worker_prompt(task: TaskRecord, config: StewardConfig) -> str:
         "",
         "Task prompt:",
         task.spec.prompt,
+        "",
+        SCOPE_CONTROL_RULES,
     ]
     source_context = _render_source_context(task)
     if source_context:

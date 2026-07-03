@@ -7,6 +7,25 @@ from typing import Any
 from ..core.config import StewardConfig
 from ..core.models import TaskRecord
 
+REVISION_SCOPE_CONTROL = """\
+Revision scope control:
+- Fix only findings that can be addressed within the original task boundary.
+- Do not add unrelated tooling changes, generated-state updates, new backend
+  infrastructure, broad public API/binding rewrites, or speculative hardening to
+  satisfy a review finding.
+- If a finding is valid but requires broader prerequisite work, reduce or keep
+  the current patch to a safe scoped slice and report a follow-up task proposal
+  instead of implementing that prerequisite here.
+- Follow-up task proposals must use this format in the final report:
+  Follow-up task proposals:
+  - Title: <imperative title>
+    Kind: <feature|ci|code-quality|rfc-audit|custom>
+    Worker: <recommended steward worker>
+    Rationale: <why this is outside the current task>
+    Scope: <files/subsystems and explicit non-goals>
+    Validation: <commands/tests>
+"""
+
 
 def render_review_prompt(task: TaskRecord, config: StewardConfig) -> str:
     return "\n".join(
@@ -120,6 +139,7 @@ def render_review_revision_prompt(task: TaskRecord, review: dict[str, Any]) -> s
             "",
             "Address the review findings in the existing worktree.",
             "Keep the original task scope. Do not commit, push, or change generated state.",
+            REVISION_SCOPE_CONTROL,
             "After editing, run the relevant local validation commands and leave the revised patch in the worktree.",
             "",
             "Review JSON:",

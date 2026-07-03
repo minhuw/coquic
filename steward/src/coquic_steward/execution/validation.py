@@ -7,6 +7,26 @@ from ..core.config import StewardConfig
 from ..core.models import TaskRecord, ValidationResult, utc_now
 from ..core.subprocesses import run_command
 
+VALIDATION_SCOPE_CONTROL = """\
+Validation repair scope control:
+- Fix validation failures caused by the current patch with the smallest source
+  change that preserves the original task scope.
+- Do not change repo-wide tooling, Nix/flake setup, generated snapshots, vendored
+  files, or scanner/CI policy just to make a gate pass unless the original task
+  is explicitly about that tooling.
+- If a validation failure exposes unrelated broken tooling or prerequisite work,
+  keep the feature patch scoped and report a follow-up task proposal instead of
+  implementing that work here.
+- Follow-up task proposals must use this format in the final report:
+  Follow-up task proposals:
+  - Title: <imperative title>
+    Kind: <feature|ci|code-quality|rfc-audit|custom>
+    Worker: <recommended steward worker>
+    Rationale: <why this is outside the current task>
+    Scope: <files/subsystems and explicit non-goals>
+    Validation: <commands/tests>
+"""
+
 
 DEFAULT_GATES = (
     ("git-diff-check.txt", ["git", "diff", "--check"]),
@@ -71,6 +91,7 @@ def render_validation_revision_prompt(
             "",
             "Fix the validation failures in the existing worktree.",
             "Keep the original task scope. Do not commit, push, or change generated state.",
+            VALIDATION_SCOPE_CONTROL,
             "After editing, run the relevant local validation commands and leave the revised patch in the worktree.",
             "",
             "Original task prompt:",
@@ -81,6 +102,7 @@ def render_validation_revision_prompt(
                 [
                     {
                         "command": validation.command,
+                        "command_text": " ".join(validation.command),
                         "exit_code": validation.exit_code,
                         "summary": validation.summary,
                         "log": str(validation.output_path),

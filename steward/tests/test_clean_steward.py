@@ -55,9 +55,11 @@ from coquic_steward.execution.executor import (
 )
 from coquic_steward.execution.review import (
     parse_review,
+    render_review_revision_prompt,
     review_approved,
     review_schema_path,
 )
+from coquic_steward.execution.validation import render_validation_revision_prompt
 from coquic_steward.orchestration import (
     DaemonAlreadyRunning,
     StewardDaemon,
@@ -4249,6 +4251,78 @@ def test_worker_prompt_suppresses_mutating_issue_skill_for_feature_signal(
     assert "Worker: Issue Implementer" in prompt
     assert "gh-issue-implementation" not in prompt
     assert "change GitHub issues" in prompt
+
+
+def test_review_revision_prompt_keeps_repairs_scoped(
+    config: StewardConfig,
+) -> None:
+    task = TaskStore(config.db_path).add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="Implement strict 0-RTT policy",
+            prompt="Implement the selected feature.",
+        )
+    )[0]
+    review = {
+        "verdict": "block",
+        "summary": "Backend work is too broad.",
+        "findings": [
+            {
+                "severity": "high",
+                "title": "Requires new backend ticket storage",
+                "file": "src/quic/crypto/tls_adapter_boringssl.cpp",
+                "line": 42,
+                "detail": "The fix requires a backend feature.",
+                "recommendation": "Split the backend prerequisite.",
+            }
+        ],
+        "validation_gaps": [],
+        "remaining_risk": "",
+    }
+
+    prompt = render_review_revision_prompt(task, review)
+
+    assert "Revision scope control:" in prompt
+    assert "Fix only findings that can be addressed within the original task boundary" in prompt
+    assert "report a follow-up task proposal" in prompt
+    assert "Follow-up task proposals:" in prompt
+    assert "Kind: <feature|ci|code-quality|rfc-audit|custom>" in prompt
+    assert "code_quality" not in prompt
+    assert "rfc_audit" not in prompt
+    assert "Do not add unrelated tooling changes" in prompt
+
+
+def test_validation_revision_prompt_keeps_tooling_repairs_out_of_feature_patch(
+    config: StewardConfig,
+) -> None:
+    task = TaskStore(config.db_path).add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="Implement strict 0-RTT policy",
+            prompt="Implement the selected feature.",
+        )
+    )[0]
+    validation = ValidationResult(
+        command=["nix", "develop", "-c", "pre-commit", "run", "--all-files"],
+        cwd=config.repo_root,
+        passed=False,
+        exit_code=1,
+        output_path=config.logs_dir / "pre-commit.txt",
+        summary="clang-tidy failed in repo-wide tooling",
+    )
+
+    prompt = render_validation_revision_prompt(task, [validation])
+
+    assert "Validation repair scope control:" in prompt
+    assert "Do not change repo-wide tooling" in prompt
+    assert "report a follow-up task proposal" in prompt
+    assert "Follow-up task proposals:" in prompt
+    assert "Kind: <feature|ci|code-quality|rfc-audit|custom>" in prompt
+    assert "code_quality" not in prompt
+    assert "rfc_audit" not in prompt
+    assert "nix develop -c pre-commit run --all-files" in prompt
 
 
 def test_review_verdict_uses_structured_output() -> None:

@@ -5,7 +5,7 @@ import ctypes.util
 import os
 from pathlib import Path
 
-FFI_ABI_VERSION = 5
+FFI_ABI_VERSION = 6
 
 COQUIC_STATUS_OK = 0
 COQUIC_STATUS_INVALID_ARGUMENT = 1
@@ -167,6 +167,7 @@ class coquic_transport_config_t(C.Structure):
         ("pmtud_max_datagram_size", C.c_size_t),
         ("active_connection_id_limit", C.c_uint64),
         ("disable_active_migration", C.c_uint8),
+        ("defer_active_migration_path_validation", C.c_uint8),
         ("ack_delay_exponent", C.c_uint64),
         ("max_ack_delay", C.c_uint64),
         ("ack_eliciting_threshold", C.c_uint64),

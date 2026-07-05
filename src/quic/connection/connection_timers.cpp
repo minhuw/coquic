@@ -25,8 +25,8 @@ std::optional<QuicCoreTimePoint> QuicConnection::non_pacing_wakeup_deadline() co
         close_mode_ == QuicConnectionCloseMode::draining) {
         return close_deadline_;
     }
-    return earliest_of({loss_deadline(), pto_deadline(), ack_deadline(), pmtud_deadline(),
-                        zero_rtt_discard_deadline(),
+    return earliest_of({loss_deadline(), pto_deadline(), ack_deadline(), path_validation_deadline(),
+                        pmtud_deadline(), zero_rtt_discard_deadline(),
                         previous_application_read_secret_discard_deadline(),
                         idle_timeout_deadline()});
 }
@@ -220,6 +220,17 @@ std::optional<QuicCoreTimePoint> QuicConnection::ack_deadline() const {
         {initial_packet_space_discarded_ ? std::nullopt : initial_space_.pending_ack_deadline,
          handshake_packet_space_discarded_ ? std::nullopt : handshake_space_.pending_ack_deadline,
          application_space_.pending_ack_deadline});
+}
+
+std::optional<QuicCoreTimePoint> QuicConnection::path_validation_deadline() const {
+    if (!current_send_path_id_.has_value()) {
+        return std::nullopt;
+    }
+    const auto current = paths_.find(*current_send_path_id_);
+    if (current == paths_.end()) {
+        return std::nullopt;
+    }
+    return current->second.validation_deadline;
 }
 
 QuicCoreDuration QuicConnection::path_validation_timeout_period() const {

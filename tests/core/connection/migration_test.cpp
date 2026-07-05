@@ -1,3 +1,5 @@
+#include "tests/support/quic_test_utils.h"
+
 #include <array>
 
 #include <gtest/gtest.h>
@@ -13,7 +15,6 @@
 #include "src/quic/codec/varint.h"
 #include "src/quic/qlog/types.h"
 #include "tests/support/core/connection_test_fixtures.h"
-#include "tests/support/quic_test_utils.h"
 #include "src/http3/http3.h"
 #include "src/quic/qlog/session.h"
 
@@ -759,6 +760,205 @@ TEST(QuicCoreTest, LocalMigrationRequestSendsPathChallengeWithoutOtherPayload) {
     EXPECT_TRUE(saw_path_challenge);
 }
 
+TEST(QuicCoreTest, ActiveLocalMigrationDefersPathChallengeUntilPeerNonProbingTraffic) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.defer_active_migration_path_validation = true;
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    install_spare_peer_connection_id(connection);
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::active, coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(requested.has_value());
+    ASSERT_TRUE(connection.paths_.contains(7));
+    auto &deferred_path = connection.paths_.at(7);
+    EXPECT_FALSE(deferred_path.validated);
+    EXPECT_FALSE(deferred_path.challenge_pending);
+    EXPECT_FALSE(deferred_path.outstanding_challenge.has_value());
+    EXPECT_TRUE(deferred_path.validation_initiated_locally);
+    EXPECT_TRUE(deferred_path.path_validation_deferred_until_peer_non_probing);
+    EXPECT_FALSE(deferred_path.validation_deadline.has_value());
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+
+    auto deferred_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    EXPECT_TRUE(deferred_datagram.empty());
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{coquic::quic::PingFrame{}},
+                        coquic::quic::test::test_time(3), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/7, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/40)
+                    .has_value());
+
+    auto &triggered_path = connection.paths_.at(7);
+    EXPECT_TRUE(triggered_path.challenge_pending);
+    EXPECT_TRUE(triggered_path.outstanding_challenge.has_value());
+    EXPECT_FALSE(triggered_path.path_validation_deferred_until_peer_non_probing);
+    EXPECT_TRUE(triggered_path.validation_deadline.has_value());
+
+    auto validation_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(4));
+    ASSERT_FALSE(validation_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 7u);
+
+    auto packets = decode_sender_datagram(connection, validation_datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(application, nullptr);
+    EXPECT_TRUE(std::ranges::any_of(application->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+    }));
+}
+
+TEST(QuicCoreTest, ActiveLocalMigrationDeferredValidationIgnoresPeerProbingTraffic) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.defer_active_migration_path_validation = true;
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    install_spare_peer_connection_id(connection);
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::active);
+    ASSERT_TRUE(requested.has_value());
+    ASSERT_TRUE(connection.paths_.contains(7));
+
+    const auto inbound_challenge = std::array<std::byte, 8>{
+        std::byte{0x10}, std::byte{0x11}, std::byte{0x12}, std::byte{0x13},
+        std::byte{0x14}, std::byte{0x15}, std::byte{0x16}, std::byte{0x17}};
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{
+                            coquic::quic::PathChallengeFrame{.data = inbound_challenge},
+                        },
+                        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/7, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/41)
+                    .has_value());
+
+    auto &path = connection.paths_.at(7);
+    EXPECT_FALSE(path.validated);
+    EXPECT_FALSE(path.challenge_pending);
+    EXPECT_FALSE(path.outstanding_challenge.has_value());
+    EXPECT_TRUE(path.validation_initiated_locally);
+    EXPECT_TRUE(path.path_validation_deferred_until_peer_non_probing);
+    EXPECT_FALSE(path.validation_deadline.has_value());
+    ASSERT_TRUE(path.pending_response.has_value());
+
+    auto response_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(response_datagram.empty());
+
+    auto packets = decode_sender_datagram(connection, response_datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(application, nullptr);
+    EXPECT_TRUE(std::ranges::any_of(application->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::PathResponseFrame>(frame);
+    }));
+    EXPECT_FALSE(std::ranges::any_of(application->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+    }));
+}
+
+TEST(QuicCoreTest, ActiveLocalMigrationDeferredWaitDoesNotArmValidationTimeout) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.defer_active_migration_path_validation = true;
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    install_spare_peer_connection_id(connection);
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::active, coquic::quic::test::test_time(10));
+
+    ASSERT_TRUE(requested.has_value());
+    ASSERT_TRUE(connection.paths_.contains(7));
+    EXPECT_FALSE(connection.paths_.at(7).validation_deadline.has_value());
+    EXPECT_TRUE(connection.paths_.at(7).path_validation_deferred_until_peer_non_probing);
+    EXPECT_FALSE(connection.path_validation_timed_out(7, coquic::quic::test::test_time(999)));
+
+    connection.on_timeout(coquic::quic::test::test_time(999));
+
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_FALSE(connection.paths_.at(3).is_current_send_path);
+    EXPECT_TRUE(connection.paths_.at(7).is_current_send_path);
+    EXPECT_FALSE(connection.paths_.at(7).validation_deadline.has_value());
+    EXPECT_TRUE(connection.paths_.at(7).validation_initiated_locally);
+    EXPECT_TRUE(connection.paths_.at(7).path_validation_deferred_until_peer_non_probing);
+    EXPECT_FALSE(connection.paths_.at(7).challenge_pending);
+    EXPECT_FALSE(connection.paths_.at(7).outstanding_challenge.has_value());
+}
+
+TEST(QuicCoreTest, ActiveLocalMigrationDeferralPreservesInFlightValidation) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.defer_active_migration_path_validation = true;
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    install_spare_peer_connection_id(connection);
+
+    auto &path = connection.ensure_path_state(7);
+    const auto existing_challenge = std::array<std::byte, 8>{
+        std::byte{0x70}, std::byte{0x71}, std::byte{0x72}, std::byte{0x73},
+        std::byte{0x74}, std::byte{0x75}, std::byte{0x76}, std::byte{0x77}};
+    path.outstanding_challenge = existing_challenge;
+    path.validation_deadline = coquic::quic::test::test_time(20);
+    path.peer_connection_id_sequence = 2;
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::active, coquic::quic::test::test_time(10));
+
+    ASSERT_TRUE(requested.has_value());
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_TRUE(connection.paths_.at(7).challenge_pending);
+    EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+    EXPECT_EQ(optional_value_or_terminate(connection.paths_.at(7).outstanding_challenge),
+              existing_challenge);
+    EXPECT_TRUE(connection.paths_.at(7).validation_deadline.has_value());
+    EXPECT_FALSE(connection.paths_.at(7).path_validation_deferred_until_peer_non_probing);
+}
+
+TEST(QuicCoreTest, ActiveLocalMigrationDeferredValidationRespectsAntiAmplificationLimit) {
+    auto connection = make_connected_server_connection();
+    connection.config_.transport.defer_active_migration_path_validation = true;
+    connection.peer_address_validated_ = true;
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    install_spare_peer_connection_id(connection);
+
+    auto requested = connection.request_connection_migration(
+        7, coquic::quic::QuicMigrationRequestReason::active, coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(requested.has_value());
+    ASSERT_TRUE(connection.paths_.contains(7));
+    auto &path = connection.paths_.at(7);
+    path.anti_amplification_received_bytes = 1;
+    path.anti_amplification_sent_bytes = 3;
+    EXPECT_TRUE(connection.anti_amplification_applies(7));
+    EXPECT_EQ(connection.anti_amplification_remaining_send_budget(), 0u);
+
+    ASSERT_TRUE(connection
+                    .process_inbound_application(
+                        std::array<coquic::quic::Frame, 1>{coquic::quic::PingFrame{}},
+                        coquic::quic::test::test_time(2), /*allow_preconnected_frames=*/false,
+                        /*path_id=*/7, /*used_previous_application_read_secret=*/false,
+                        /*packet_number=*/42)
+                    .has_value());
+
+    EXPECT_TRUE(connection.paths_.at(7).challenge_pending);
+    EXPECT_TRUE(connection.paths_.at(7).outstanding_challenge.has_value());
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+    EXPECT_TRUE(datagram.empty());
+}
+
 TEST(QuicCoreTest, LocalMigrationBeforeHandshakeConfirmedIsRejected) {
     auto connection = make_connected_client_connection();
     connection.handshake_confirmed_ = false;
@@ -1401,6 +1601,7 @@ TEST(QuicCoreTest, PreferredAddressMigrationUsesPreferredAddressConnectionId) {
 
 TEST(QuicCoreTest, PreferredAddressMigrationSendsOnlyProbingFramesUntilValidated) {
     auto connection = make_connected_client_connection();
+    connection.config_.transport.defer_active_migration_path_validation = true;
     connection.paths_.clear();
     connection.last_validated_path_id_ = 3;
     connection.current_send_path_id_ = 3;
@@ -2433,7 +2634,9 @@ TEST(QuicCoreTest, MigrationHelpersCoverAdditionalPrivateBranches) {
         auto connection = make_connected_client_connection();
         connection.current_send_path_id_ = 11;
         connection.last_validated_path_id_.reset();
-        connection.ensure_path_state(11).validation_deadline = coquic::quic::test::test_time(9);
+        auto &path = connection.ensure_path_state(11);
+        path.outstanding_challenge = std::array<std::byte, 8>{};
+        path.validation_deadline = coquic::quic::test::test_time(9);
 
         connection.on_timeout(coquic::quic::test::test_time(10));
 

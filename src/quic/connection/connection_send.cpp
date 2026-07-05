@@ -2639,7 +2639,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     };
                     mark_path_challenge_sent(response_path->second);
                 } else if (!response_path->second.validated &
-                           !response_path->second.outstanding_challenge.has_value()) {
+                               !response_path->second.outstanding_challenge.has_value() &&
+                           !response_path->second.path_validation_deferred_until_peer_non_probing) {
                     response_path->second.outstanding_challenge =
                         next_path_challenge_data(response_path->first);
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2

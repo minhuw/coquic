@@ -1,5 +1,7 @@
 #pragma once
 
+#include "src/quic/core.h"
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -15,7 +17,6 @@
 #include <vector>
 
 #include "src/quic/transport/congestion.h"
-#include "src/quic/core.h"
 #include "src/quic/crypto/crypto_stream.h"
 #include "src/quic/qlog/fwd.h"
 #include "src/quic/qlog/types.h"
@@ -515,6 +516,7 @@ struct PathState {
     bool preferred_address_path = false;
     bool challenge_pending = false;
     bool validation_initiated_locally = false;
+    bool path_validation_deferred_until_peer_non_probing = false;
     bool validation_probe_only = false;
     bool path_mtu_validation_pending = false;
     bool outstanding_challenge_sent_with_expanded_datagram = true;
@@ -787,6 +789,7 @@ class QuicConnection {
     std::optional<QuicCoreTimePoint> loss_deadline() const;
     std::optional<QuicCoreTimePoint> pto_deadline() const;
     std::optional<QuicCoreTimePoint> ack_deadline() const;
+    std::optional<QuicCoreTimePoint> path_validation_deadline() const;
     std::optional<QuicCoreTimePoint> pacing_deadline() const;
     std::optional<QuicCoreTimePoint> non_pacing_wakeup_deadline() const;
     bool non_pacing_wakeup_due(QuicCoreTimePoint now) const;
@@ -827,6 +830,8 @@ class QuicConnection {
     PathState &ensure_path_state(QuicPathId path_id);
     void start_path_validation(QuicPathId path_id, bool initiated_locally,
                                QuicCoreTimePoint now = QuicCoreClock::now());
+    void defer_path_validation_until_peer_non_probing(QuicPathId path_id);
+    void maybe_start_deferred_path_validation(QuicPathId path_id, QuicCoreTimePoint now);
     void start_path_validation_probe(QuicPathId path_id, bool initiated_locally,
                                      QuicCoreTimePoint now = QuicCoreClock::now());
     void queue_path_response(QuicPathId path_id, const std::array<std::byte, 8> &data);

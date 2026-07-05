@@ -373,6 +373,8 @@ coquic::core::TransportConfig to_cpp(const coquic_transport_config_t &config) {
         .pmtud_max_datagram_size = config.pmtud_max_datagram_size,
         .active_connection_id_limit = config.active_connection_id_limit,
         .disable_active_migration = config.disable_active_migration != 0,
+        .defer_active_migration_path_validation =
+            config.defer_active_migration_path_validation != 0,
         .ack_delay_exponent = config.ack_delay_exponent,
         .max_ack_delay = config.max_ack_delay,
         .ack_eliciting_threshold = config.ack_eliciting_threshold,
@@ -809,6 +811,8 @@ void coquic_transport_config_init(coquic_transport_config_t *config) {
         .active_connection_id_limit = defaults.active_connection_id_limit,
         .disable_active_migration =
             static_cast<std::uint8_t>(defaults.disable_active_migration ? 1 : 0),
+        .defer_active_migration_path_validation =
+            static_cast<std::uint8_t>(defaults.defer_active_migration_path_validation ? 1 : 0),
         .ack_delay_exponent = defaults.ack_delay_exponent,
         .max_ack_delay = defaults.max_ack_delay,
         .ack_eliciting_threshold = defaults.ack_eliciting_threshold,

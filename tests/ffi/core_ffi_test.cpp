@@ -1,3 +1,21 @@
+#if defined(__clang_analyzer__) && !__has_builtin(__builtin_ctzg)
+// Zig 0.16's libc++ references Clang 19 builtins while the lint shell still
+// runs clang-tidy 18.
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_ctzg(value, fallback)                                                            \
+    ((value) == 0 ? (fallback) : __builtin_ctzll(static_cast<unsigned long long>(value)))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_clzg(value, fallback)                                                            \
+    ((value) == 0 ? (fallback)                                                                     \
+                  : (__builtin_clzll(static_cast<unsigned long long>(value)) -                     \
+                     (static_cast<int>(sizeof(unsigned long long) * __CHAR_BIT__) -                \
+                      static_cast<int>(sizeof(value) * __CHAR_BIT__))))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_popcountg(value) __builtin_popcountll(static_cast<unsigned long long>(value))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __is_nothrow_convertible(from_type, to_type) __is_convertible(from_type, to_type)
+#endif
+
 #include <array>
 #include <bit>
 #include <chrono>
@@ -343,6 +361,7 @@ TEST(CoquicCoreFfiTest, InitializersAndNullQueriesAreStable) {
     EXPECT_EQ(static_cast<unsigned>(transport.congestion_control),
               static_cast<unsigned>(COQUIC_CONGESTION_CONTROL_NEWRENO));
     EXPECT_NE(transport.max_udp_payload_size, 0u);
+    EXPECT_EQ(transport.defer_active_migration_path_validation, 0);
     //= https://www.rfc-editor.org/rfc/rfc9000#section-14.3
     // # Endpoints SHOULD set the initial value of BASE_PLPMTU (Section 5.1 of
     // # [DPLPMTUD]) to be consistent with QUIC's smallest allowed maximum
@@ -456,6 +475,7 @@ TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
     endpoint_config.application_protocol_length = sizeof(alpn) - 1;
     endpoint_config.identity = &identity;
     endpoint_config.transport.congestion_control = COQUIC_CONGESTION_CONTROL_CUBIC;
+    endpoint_config.transport.defer_active_migration_path_validation = 1;
     endpoint_config.transport.enable_latency_spin_bit = 1;
     endpoint_config.zero_rtt = coquic_zero_rtt_config_t{
         .attempt = 1,

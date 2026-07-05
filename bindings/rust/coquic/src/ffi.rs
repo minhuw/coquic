@@ -4,7 +4,7 @@
 
 use std::ffi::c_char;
 
-pub const COQUIC_FFI_ABI_VERSION: u32 = 5;
+pub const COQUIC_FFI_ABI_VERSION: u32 = 6;
 
 pub enum coquic_endpoint_t {}
 pub enum coquic_result_t {}
@@ -212,6 +212,7 @@ pub struct coquic_transport_config_t {
     pub pmtud_max_datagram_size: usize,
     pub active_connection_id_limit: u64,
     pub disable_active_migration: u8,
+    pub defer_active_migration_path_validation: u8,
     pub ack_delay_exponent: u64,
     pub max_ack_delay: u64,
     pub ack_eliciting_threshold: u64,

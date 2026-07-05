@@ -1,5 +1,23 @@
 #pragma once
 
+#if defined(__clang_analyzer__) && !__has_builtin(__builtin_ctzg)
+// Zig 0.16's libc++ references Clang 19 builtins while the lint shell still
+// runs clang-tidy 18.
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_ctzg(value, fallback)                                                            \
+    ((value) == 0 ? (fallback) : __builtin_ctzll(static_cast<unsigned long long>(value)))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_clzg(value, fallback)                                                            \
+    ((value) == 0 ? (fallback)                                                                     \
+                  : (__builtin_clzll(static_cast<unsigned long long>(value)) -                     \
+                     (static_cast<int>(sizeof(unsigned long long) * __CHAR_BIT__) -                \
+                      static_cast<int>(sizeof(value) * __CHAR_BIT__))))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_popcountg(value) __builtin_popcountll(static_cast<unsigned long long>(value))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __is_nothrow_convertible(from_type, to_type) __is_convertible(from_type, to_type)
+#endif
+
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -110,6 +128,7 @@ struct TransportConfig {
     std::size_t pmtud_max_datagram_size = 0;
     std::uint64_t active_connection_id_limit = 2;
     bool disable_active_migration = false;
+    bool defer_active_migration_path_validation = false;
     std::uint64_t ack_delay_exponent = 3;
     std::uint64_t max_ack_delay = 25;
     std::uint64_t ack_eliciting_threshold = 2;

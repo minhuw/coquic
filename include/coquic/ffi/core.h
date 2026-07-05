@@ -23,7 +23,7 @@ extern "C" {
 #endif
 #endif
 
-#define COQUIC_FFI_ABI_VERSION 5u
+#define COQUIC_FFI_ABI_VERSION 6u
 
 typedef struct coquic_endpoint coquic_endpoint_t;
 typedef struct coquic_result coquic_result_t;
@@ -185,6 +185,7 @@ typedef struct coquic_transport_config {
     size_t pmtud_max_datagram_size;
     uint64_t active_connection_id_limit;
     uint8_t disable_active_migration;
+    uint8_t defer_active_migration_path_validation;
     uint64_t ack_delay_exponent;
     uint64_t max_ack_delay;
     uint64_t ack_eliciting_threshold;

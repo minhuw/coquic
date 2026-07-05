@@ -1,7 +1,8 @@
 #pragma once
 
 #if defined(__clang_analyzer__) && !__has_builtin(__builtin_ctzg)
-// Zig 0.16's libc++ references Clang 19 builtins when this header is linted directly.
+// Zig 0.16's libc++ references Clang 19 builtins while the lint shell still
+// runs clang-tidy 18.
 // NOLINTNEXTLINE(bugprone-reserved-identifier)
 #define __builtin_ctzg(value, fallback)                                                            \
     ((value) == 0 ? (fallback) : __builtin_ctzll(static_cast<unsigned long long>(value)))
@@ -15,7 +16,6 @@
 #define __builtin_popcountg(value) __builtin_popcountll(static_cast<unsigned long long>(value))
 // NOLINTNEXTLINE(bugprone-reserved-identifier)
 #define __is_nothrow_convertible(from_type, to_type) __is_convertible(from_type, to_type)
-#define COQUIC_UNDEF_CLANG_TIDY_LIBCXX_COMPAT
 #endif
 
 #include <algorithm>
@@ -45,14 +45,6 @@
 #undef private
 #include "src/quic/codec/buffer.h"
 #include "src/quic/crypto/packet_crypto.h"
-
-#if defined(COQUIC_UNDEF_CLANG_TIDY_LIBCXX_COMPAT)
-#undef __builtin_ctzg
-#undef __builtin_clzg
-#undef __builtin_popcountg
-#undef __is_nothrow_convertible
-#undef COQUIC_UNDEF_CLANG_TIDY_LIBCXX_COMPAT
-#endif
 
 namespace coquic::quic::test {
 

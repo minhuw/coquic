@@ -738,6 +738,7 @@ void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_lo
     path.path_mtu_validation_pending = false;
     path.outstanding_challenge_sent_with_expanded_datagram = true;
     path.validation_probe_only = false;
+    path.path_validation_deferred_until_peer_non_probing = false;
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9
     // # If the peer violates this requirement, the endpoint MUST either drop
     // # the incoming packets on that path without generating a Stateless Reset
@@ -766,6 +767,47 @@ void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_lo
     current_send_path_id_ = path_id;
 }
 
+void QuicConnection::defer_path_validation_until_peer_non_probing(QuicPathId path_id) {
+    if (current_send_path_id_.has_value() && current_send_path_id_ != path_id) {
+        previous_path_id_ = current_send_path_id_;
+        if (const auto current = paths_.find(*current_send_path_id_); current != paths_.end()) {
+            current->second.is_current_send_path = false;
+        }
+    }
+
+    const auto peer_connection_id_sequence = select_peer_connection_id_sequence_for_path(path_id);
+    if (!peer_connection_id_sequence.has_value()) {
+        return;
+    }
+
+    auto &path = ensure_path_state(path_id);
+    path.validated = false;
+    path.challenge_pending = false;
+    path.validation_initiated_locally = true;
+    path.path_validation_deferred_until_peer_non_probing = true;
+    path.validation_probe_only = false;
+    path.path_mtu_validation_pending = false;
+    path.outstanding_challenge.reset();
+    path.outstanding_challenge_sent_with_expanded_datagram = true;
+    path.validation_deadline.reset();
+    path.is_current_send_path = true;
+    set_path_peer_connection_id_sequence(path, *peer_connection_id_sequence);
+    current_send_path_id_ = path_id;
+}
+
+void QuicConnection::maybe_start_deferred_path_validation(QuicPathId path_id,
+                                                          QuicCoreTimePoint now) {
+    const auto path = paths_.find(path_id);
+    if (path == paths_.end() || path->second.validated ||
+        !path->second.validation_initiated_locally || path->second.challenge_pending ||
+        path->second.outstanding_challenge.has_value() ||
+        !path->second.path_validation_deferred_until_peer_non_probing) {
+        return;
+    }
+
+    start_path_validation(path_id, /*initiated_locally=*/true, now);
+}
+
 void QuicConnection::start_path_validation_probe(QuicPathId path_id, bool initiated_locally,
                                                  QuicCoreTimePoint now) {
     auto existing = paths_.find(path_id);
@@ -780,6 +822,7 @@ void QuicConnection::start_path_validation_probe(QuicPathId path_id, bool initia
     path.path_mtu_validation_pending = false;
     path.outstanding_challenge_sent_with_expanded_datagram = true;
     path.validation_probe_only = true;
+    path.path_validation_deferred_until_peer_non_probing = false;
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.3
     // # In response to an apparent migration, endpoints MUST validate the
     // # previously active path using a PATH_CHALLENGE frame.
@@ -853,13 +896,15 @@ bool QuicConnection::path_validation_timed_out(QuicPathId path_id, QuicCoreTimeP
     }
 
     const auto &validation_deadline = path->second.validation_deadline;
-    return validation_deadline.has_value() && now >= validation_deadline.value();
+    return path->second.outstanding_challenge.has_value() && validation_deadline.has_value() &&
+           now >= validation_deadline.value();
 }
 
 void QuicConnection::complete_path_validation(QuicPathId path_id, PathState &path,
                                               QuicCoreTimePoint now) {
     path.validated = true;
     path.validation_initiated_locally = false;
+    path.path_validation_deferred_until_peer_non_probing = false;
     last_validated_path_id_ = path_id;
 
     if (!path.outstanding_challenge_sent_with_expanded_datagram) {
@@ -872,6 +917,7 @@ void QuicConnection::complete_path_validation(QuicPathId path_id, PathState &pat
         // # an expanded datagram to verify that the path supports the required MTU.
         path.path_mtu_validation_pending = true;
         path.challenge_pending = true;
+        path.path_validation_deferred_until_peer_non_probing = false;
         path.outstanding_challenge = next_path_challenge_data(path_id);
         path.outstanding_challenge_sent_with_expanded_datagram = true;
         path.validation_deadline = now + path_validation_timeout_period();
@@ -880,6 +926,7 @@ void QuicConnection::complete_path_validation(QuicPathId path_id, PathState &pat
 
     path.path_mtu_validation_pending = false;
     path.challenge_pending = false;
+    path.path_validation_deferred_until_peer_non_probing = false;
     path.validation_probe_only = false;
     path.outstanding_challenge.reset();
     path.outstanding_challenge_sent_with_expanded_datagram = true;
@@ -904,6 +951,7 @@ void QuicConnection::abandon_original_address_validation_after_preferred_success
         // # using the server's preferred address.
         path.challenge_pending = false;
         path.validation_probe_only = false;
+        path.path_validation_deferred_until_peer_non_probing = false;
         path.path_mtu_validation_pending = false;
         path.outstanding_challenge.reset();
         path.outstanding_challenge_sent_with_expanded_datagram = true;
@@ -3519,6 +3567,17 @@ void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_loc
     if (initiated_locally && !can_initiate_path_validation(path_id)) {
         return;
     }
+    if (initiated_locally && config_.transport.defer_active_migration_path_validation) {
+        const auto path = paths_.find(path_id);
+        const bool preferred_address_path =
+            path != paths_.end() && path->second.preferred_address_path;
+        const bool validation_in_progress =
+            path != paths_.end() && path->second.outstanding_challenge.has_value();
+        if (!preferred_address_path && !validation_in_progress) {
+            defer_path_validation_until_peer_non_probing(path_id);
+            return;
+        }
+    }
     const auto old_path_id = current_send_path_id_;
     start_path_validation(path_id, initiated_locally, now);
     if (!initiated_locally && old_path_id.has_value() && *old_path_id != path_id) {
@@ -3941,6 +4000,7 @@ void QuicConnection::mark_peer_address_validated() {
         path.validated = true;
         path.challenge_pending = false;
         path.validation_initiated_locally = false;
+        path.path_validation_deferred_until_peer_non_probing = false;
         path.validation_probe_only = false;
         path.path_mtu_validation_pending = false;
         path.outstanding_challenge_sent_with_expanded_datagram = true;

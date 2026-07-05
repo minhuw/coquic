@@ -143,6 +143,7 @@ class TransportConfig:
     pmtud_max_datagram_size: int
     active_connection_id_limit: int
     disable_active_migration: bool
+    defer_active_migration_path_validation: bool
     ack_delay_exponent: int
     max_ack_delay: int
     ack_eliciting_threshold: int
@@ -177,6 +178,9 @@ class TransportConfig:
             pmtud_max_datagram_size=raw.pmtud_max_datagram_size,
             active_connection_id_limit=raw.active_connection_id_limit,
             disable_active_migration=bool(raw.disable_active_migration),
+            defer_active_migration_path_validation=bool(
+                raw.defer_active_migration_path_validation
+            ),
             ack_delay_exponent=raw.ack_delay_exponent,
             max_ack_delay=raw.max_ack_delay,
             ack_eliciting_threshold=raw.ack_eliciting_threshold,
@@ -205,6 +209,9 @@ class TransportConfig:
             pmtud_max_datagram_size=self.pmtud_max_datagram_size,
             active_connection_id_limit=self.active_connection_id_limit,
             disable_active_migration=int(self.disable_active_migration),
+            defer_active_migration_path_validation=int(
+                self.defer_active_migration_path_validation
+            ),
             ack_delay_exponent=self.ack_delay_exponent,
             max_ack_delay=self.max_ack_delay,
             ack_eliciting_threshold=self.ack_eliciting_threshold,

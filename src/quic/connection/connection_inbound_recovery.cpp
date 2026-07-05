@@ -2920,6 +2920,9 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             note_peer_progress();
         }
     }
+    if (!is_probing_only(frames)) {
+        maybe_start_deferred_path_validation(path_id, now);
+    }
     if (!paths_.empty() | (path_id != 0) | current_send_path_id_.has_value()) {
         ensure_path_state(path_id);
     }
@@ -3290,6 +3293,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                     validated_path_id);
             if (ignore_original_address_validation) {
                 path->challenge_pending = false;
+                path->path_validation_deferred_until_peer_non_probing = false;
                 path->validation_probe_only = false;
                 path->path_mtu_validation_pending = false;
                 path->outstanding_challenge.reset();
@@ -3442,6 +3446,9 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
         if (current_send_path_id_ != previous_send_path_id) {
             note_peer_progress();
         }
+    }
+    if (!probing_only) {
+        maybe_start_deferred_path_validation(path_id, now);
     }
     if (!paths_.empty() | (path_id != 0) | current_send_path_id_.has_value()) {
         ensure_path_state(path_id);
@@ -3801,6 +3808,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
                     validated_path_id);
             if (ignore_original_address_validation) {
                 path->challenge_pending = false;
+                path->path_validation_deferred_until_peer_non_probing = false;
                 path->validation_probe_only = false;
                 path->path_mtu_validation_pending = false;
                 path->outstanding_challenge.reset();
@@ -4134,6 +4142,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_stream_pa
             note_peer_progress();
         }
     }
+    maybe_start_deferred_path_validation(last_inbound_path_id_, now);
     if (should_ensure_inbound_application_path(paths_.empty(), last_inbound_path_id_,
                                                current_send_path_id_)) {
         ensure_path_state(last_inbound_path_id_);
@@ -4206,6 +4215,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_ack_only(
             note_peer_progress();
         }
     }
+    maybe_start_deferred_path_validation(path_id, now);
     if (should_ensure_inbound_application_path(paths_.empty(), path_id, current_send_path_id_)) {
         ensure_path_state(path_id);
     }

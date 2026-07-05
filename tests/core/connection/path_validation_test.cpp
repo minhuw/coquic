@@ -1,3 +1,5 @@
+#include "tests/support/quic_test_utils.h"
+
 #include <array>
 
 #include <gtest/gtest.h>
@@ -13,7 +15,6 @@
 #include "src/quic/codec/varint.h"
 #include "src/quic/qlog/types.h"
 #include "tests/support/core/connection_test_fixtures.h"
-#include "tests/support/quic_test_utils.h"
 #include "src/http3/http3.h"
 #include "src/quic/qlog/session.h"
 
@@ -2017,7 +2018,9 @@ TEST(QuicCoreTest, FailedPathValidationRevertsToLastValidatedPath) {
     connection.last_validated_path_id_ = 3;
     connection.current_send_path_id_ = 9;
     connection.previous_path_id_ = 3;
-    connection.ensure_path_state(9).validation_deadline = coquic::quic::test::test_time(1);
+    auto &path = connection.ensure_path_state(9);
+    path.outstanding_challenge = std::array<std::byte, 8>{};
+    path.validation_deadline = coquic::quic::test::test_time(1);
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.4
     // # Endpoints SHOULD abandon path validation based on a timer.

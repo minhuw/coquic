@@ -224,6 +224,7 @@ quic::QuicTransportConfig to_internal(const TransportConfig &config) {
         .pmtud_max_datagram_size = config.pmtud_max_datagram_size,
         .active_connection_id_limit = config.active_connection_id_limit,
         .disable_active_migration = config.disable_active_migration,
+        .defer_active_migration_path_validation = config.defer_active_migration_path_validation,
         .preferred_address = std::nullopt,
         .ack_delay_exponent = config.ack_delay_exponent,
         .max_ack_delay = config.max_ack_delay,

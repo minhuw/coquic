@@ -26,3 +26,22 @@ enabled = [
 max_active_tasks = 4
 max_main_pushes_per_day = 10
 worker_timeout_minutes = 120
+
+[steward.path_policy]
+# Frozen paths are repository-relative. Matching patches are blocked before
+# validation/review, and the active policy is included in worker prompts.
+frozen = [
+  ".coquic-steward/**",
+  ".remote-ci/**",
+  ".rag/**",
+]
+
+[steward.path_policy.feature]
+frozen = [
+  ".github/**",
+  ".clang-tidy",
+  ".pre-commit-config.yaml",
+  "flake.nix",
+  "flake.lock",
+  "scripts/run-clang-tidy.sh",
+]

@@ -907,6 +907,255 @@ def test_store_requeues_planned_signal_after_configured_suppression(
     assert refreshed.id == first.id
 
 
+def test_store_requeues_failed_planned_signal_after_retry_window(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    signal, created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        )
+    )
+    assert created
+    store.mark_signal_items_planned(
+        [signal.id], planner_run_id="planner-1", task_id=task.id
+    )
+    store.finish_task(task.id, TaskStatus.failed, "failed")
+    old = utc_now() - timedelta(hours=25)
+    with Session(store.engine) as session, session.begin():
+        signal_row = session.get(SignalItemRow, signal.id)
+        task_row = session.get(TaskRow, task.id)
+        assert signal_row is not None
+        assert task_row is not None
+        signal_row.planned_at = old.isoformat()
+        signal_row.updated_at = old.isoformat()
+        task_row.updated_at = old.isoformat()
+
+    requeued = store.requeue_failed_signal_items()
+
+    assert requeued == 1
+    pending = store.pending_signal_items()
+    assert [item.id for item in pending] == [signal.id]
+    assert pending[0].planned_at is None
+    assert pending[0].planner_run_id is None
+    assert pending[0].planned_task_id is None
+
+
+def test_store_skips_failed_signal_requeue_with_duplicate_pending(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    first, created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        )
+    )
+    assert created
+    store.mark_signal_items_planned(
+        [first.id], planner_run_id="planner-1", task_id=task.id
+    )
+    store.finish_task(task.id, TaskStatus.failed, "failed")
+    old = utc_now() - timedelta(hours=25)
+    with Session(store.engine) as session, session.begin():
+        signal_row = session.get(SignalItemRow, first.id)
+        task_row = session.get(TaskRow, task.id)
+        assert signal_row is not None
+        assert task_row is not None
+        signal_row.planned_at = old.isoformat()
+        signal_row.updated_at = old.isoformat()
+        task_row.updated_at = old.isoformat()
+    second, duplicate_created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-2",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        ),
+        suppression_hours=1,
+    )
+    assert duplicate_created
+
+    requeued = store.requeue_failed_signal_items()
+
+    assert requeued == 0
+    assert [item.id for item in store.pending_signal_items()] == [second.id]
+    planned = store.list_signal_items(status=SignalItemStatus.planned)
+    assert [item.id for item in planned] == [first.id]
+
+
+def test_store_skips_failed_signal_requeue_with_duplicate_planned(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    first_task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T1", prompt="P")
+    )
+    first, created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        )
+    )
+    assert created
+    store.mark_signal_items_planned(
+        [first.id], planner_run_id="planner-1", task_id=first_task.id
+    )
+    store.finish_task(first_task.id, TaskStatus.failed, "failed")
+    old = utc_now() - timedelta(hours=25)
+    with Session(store.engine) as session, session.begin():
+        signal_row = session.get(SignalItemRow, first.id)
+        task_row = session.get(TaskRow, first_task.id)
+        assert signal_row is not None
+        assert task_row is not None
+        signal_row.planned_at = old.isoformat()
+        signal_row.updated_at = old.isoformat()
+        task_row.updated_at = old.isoformat()
+    second, duplicate_created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-2",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        ),
+        suppression_hours=1,
+    )
+    assert duplicate_created
+    second_task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T2", prompt="P")
+    )
+    store.mark_signal_items_planned(
+        [second.id], planner_run_id="planner-2", task_id=second_task.id
+    )
+
+    requeued = store.requeue_failed_signal_items()
+
+    assert requeued == 0
+    assert store.pending_signal_items() == []
+    planned = store.list_signal_items(status=SignalItemStatus.planned)
+    assert {item.id for item in planned} == {first.id, second.id}
+
+
+def test_store_requeues_failed_signal_with_stale_terminal_planned_duplicate(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    first_task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T1", prompt="P")
+    )
+    first, created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        )
+    )
+    assert created
+    store.mark_signal_items_planned(
+        [first.id], planner_run_id="planner-1", task_id=first_task.id
+    )
+    store.finish_task(first_task.id, TaskStatus.failed, "failed")
+    old = utc_now() - timedelta(hours=49)
+    with Session(store.engine) as session, session.begin():
+        signal_row = session.get(SignalItemRow, first.id)
+        task_row = session.get(TaskRow, first_task.id)
+        assert signal_row is not None
+        assert task_row is not None
+        signal_row.planned_at = old.isoformat()
+        signal_row.updated_at = old.isoformat()
+        task_row.updated_at = old.isoformat()
+    second, duplicate_created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-2",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        ),
+        suppression_hours=1,
+    )
+    assert duplicate_created
+    second_task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T2", prompt="P")
+    )
+    store.mark_signal_items_planned(
+        [second.id], planner_run_id="planner-2", task_id=second_task.id
+    )
+    store.finish_task(second_task.id, TaskStatus.failed, "failed")
+    retry_at = utc_now() - timedelta(hours=25)
+    with Session(store.engine) as session, session.begin():
+        signal_row = session.get(SignalItemRow, second.id)
+        task_row = session.get(TaskRow, second_task.id)
+        assert signal_row is not None
+        assert task_row is not None
+        signal_row.planned_at = retry_at.isoformat()
+        signal_row.updated_at = retry_at.isoformat()
+        task_row.updated_at = retry_at.isoformat()
+
+    requeued = store.requeue_failed_signal_items()
+
+    assert requeued == 1
+    assert [item.id for item in store.pending_signal_items()] == [second.id]
+    planned = store.list_signal_items(status=SignalItemStatus.planned)
+    assert [item.id for item in planned] == [first.id]
+
+
+def test_store_does_not_requeue_recent_failed_signal(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    signal, created = store.add_signal_item(
+        SignalItem(
+            id="wi-codacy-1",
+            provider="codacy",
+            kind="codacy.issue",
+            fingerprint="same-finding",
+            title="Open Codacy finding",
+        )
+    )
+    assert created
+    store.mark_signal_items_planned(
+        [signal.id], planner_run_id="planner-1", task_id=task.id
+    )
+    old = utc_now() - timedelta(hours=25)
+    with Session(store.engine) as session, session.begin():
+        signal_row = session.get(SignalItemRow, signal.id)
+        assert signal_row is not None
+        signal_row.planned_at = old.isoformat()
+        signal_row.updated_at = old.isoformat()
+    store.finish_task(task.id, TaskStatus.failed, "failed")
+
+    requeued = store.requeue_failed_signal_items()
+
+    assert requeued == 0
+    assert store.pending_signal_items() == []
+    planned = store.list_signal_items(status=SignalItemStatus.planned)
+    assert [item.id for item in planned] == [signal.id]
+
+
 def test_store_suppresses_planned_signal_while_task_is_active(
     config: StewardConfig,
 ) -> None:

@@ -462,6 +462,71 @@ class SQLiteTaskStore:
             self._notify_change()
         return planned
 
+    def requeue_failed_signal_items(
+        self, *, retry_after_hours: int = 24, provider: str | None = None
+    ) -> int:
+        now = utc_now()
+        cutoff = now - timedelta(hours=retry_after_hours)
+        now_text = now.isoformat()
+        statement = (
+            select(SignalItemRow, TaskRow)
+            .join(TaskRow, SignalItemRow.planned_task_id == TaskRow.id)
+            .where(
+                SignalItemRow.status == SignalItemStatus.planned.value,
+                TaskRow.status == TaskStatus.failed.value,
+            )
+            .order_by(SignalItemRow.created_at.desc())
+        )
+        if provider is not None:
+            statement = statement.where(SignalItemRow.provider == provider)
+        with Session(self.engine) as session, session.begin():
+            rows = session.execute(statement).all()
+            requeued = 0
+            for signal_row, task_row in rows:
+                planned_at = signal_row.planned_at or signal_row.updated_at
+                retry_from = max(
+                    datetime.fromisoformat(planned_at),
+                    datetime.fromisoformat(task_row.updated_at),
+                )
+                if retry_from > cutoff:
+                    continue
+                duplicate_rows = session.execute(
+                    select(SignalItemRow, TaskRow)
+                    .outerjoin(TaskRow, SignalItemRow.planned_task_id == TaskRow.id)
+                    .where(
+                        SignalItemRow.id != signal_row.id,
+                        SignalItemRow.provider == signal_row.provider,
+                        SignalItemRow.fingerprint == signal_row.fingerprint,
+                        SignalItemRow.status.in_(
+                            [
+                                SignalItemStatus.pending.value,
+                                SignalItemStatus.planned.value,
+                            ]
+                        ),
+                    )
+                ).all()
+                if any(
+                    _signal_duplicate_blocks_requeue(
+                        duplicate_signal_row,
+                        duplicate_task_row,
+                        cutoff=cutoff,
+                    )
+                    for duplicate_signal_row, duplicate_task_row in duplicate_rows
+                ):
+                    continue
+                signal_row.status = SignalItemStatus.pending.value
+                signal_row.updated_at = now_text
+                signal_row.planned_at = None
+                signal_row.planner_run_id = None
+                signal_row.planned_task_id = None
+                requeued += 1
+        if requeued:
+            self.request_wakeup(
+                "signal.pending",
+                {"provider": provider, "requeued_failed": requeued},
+            )
+        return requeued
+
     def supersede_signal_items(
         self, ids: list[str], *, planner_run_id: str | None
     ) -> int:
@@ -1032,6 +1097,23 @@ def _signal_row_suppressed(
     cutoff = utc_now() - timedelta(hours=suppression_hours)
     planned_at = row.planned_at or row.updated_at
     return datetime.fromisoformat(planned_at) >= cutoff
+
+
+def _signal_duplicate_blocks_requeue(
+    row: SignalItemRow, task: TaskRow | None, *, cutoff: datetime
+) -> bool:
+    if row.status == SignalItemStatus.pending.value:
+        return True
+    if row.status != SignalItemStatus.planned.value:
+        return False
+    if task is not None and task.status in {
+        status.value for status in ACTIVE_STATUSES
+    }:
+        return True
+    retry_from = datetime.fromisoformat(row.planned_at or row.updated_at)
+    if task is not None:
+        retry_from = max(retry_from, datetime.fromisoformat(task.updated_at))
+    return retry_from > cutoff
 
 
 def _has_active_integration_for_source(session: Session, source_task_id: str) -> bool:

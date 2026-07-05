@@ -170,6 +170,9 @@ def render_worker_prompt(task: TaskRecord, config: StewardConfig) -> str:
     boundary = _render_execution_boundary(task, config)
     if boundary:
         sections.extend(["", "Execution boundary:", boundary])
+    frozen = _render_frozen_paths(task, config)
+    if frozen:
+        sections.extend(["", "Frozen path policy:", frozen])
     return "\n".join(sections).strip()
 
 
@@ -276,3 +279,15 @@ def _render_execution_boundary(task: TaskRecord, config: StewardConfig) -> str:
         "source-context findings in the worktree, run local validation, and report what "
         "remote re-check remains."
     )
+
+
+def _render_frozen_paths(task: TaskRecord, config: StewardConfig) -> str:
+    patterns = config.path_policy.frozen_for_kind(task.spec.kind)
+    if not patterns:
+        return ""
+    lines = [
+        "Do not modify these repository paths for this task. Steward will block "
+        "patches that change them.",
+    ]
+    lines.extend(f"- {pattern}" for pattern in patterns)
+    return "\n".join(lines)

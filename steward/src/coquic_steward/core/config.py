@@ -83,6 +83,17 @@ class PublicMirrorConfig:
 
 
 @dataclass(frozen=True)
+class PathPolicyConfig:
+    frozen: tuple[str, ...] = ()
+    frozen_by_kind: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def frozen_for_kind(self, kind: object) -> tuple[str, ...]:
+        kind_value = str(kind)
+        paths = [*self.frozen, *self.frozen_by_kind.get(kind_value, ())]
+        return tuple(dict.fromkeys(paths))
+
+
+@dataclass(frozen=True)
 class SignalProviderConfig:
     poll_interval_minutes: int
     error_retry_minutes: int = DEFAULT_SIGNAL_ERROR_RETRY_MINUTES
@@ -108,6 +119,7 @@ class StewardConfig:
     scheduler_wait_interval_sec: float = 1.0
     limits: StewardLimits = field(default_factory=StewardLimits)
     public_mirror: PublicMirrorConfig = field(default_factory=PublicMirrorConfig)
+    path_policy: PathPolicyConfig = field(default_factory=PathPolicyConfig)
 
     def __post_init__(self) -> None:
         if self.integration_mode not in VALID_INTEGRATION_MODES:
@@ -184,6 +196,7 @@ def load_config(
     limits_data = steward.get("limits", {})
     signals_data = steward.get("signals", {})
     mirror_data = steward.get("public_mirror", {})
+    path_policy_data = steward.get("path_policy", {})
     enabled_signals = _string_tuple(
         signals_data.get(
             "enabled", steward.get("enabled_signals", DEFAULT_ENABLED_SIGNALS)
@@ -226,6 +239,7 @@ def load_config(
             ),
         ),
         public_mirror=_public_mirror_config(mirror_data),
+        path_policy=_path_policy_config(path_policy_data),
     )
     config.ensure_dirs()
     return config
@@ -276,6 +290,46 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     if isinstance(value, list | tuple):
         return tuple(str(part).strip() for part in value if str(part).strip())
     raise ValueError(f"expected string or list of strings, got {type(value).__name__}")
+
+
+def _path_patterns(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        raw_patterns: tuple[object, ...] = tuple(value.split(","))
+    elif isinstance(value, list | tuple):
+        raw_patterns = tuple(value)
+    else:
+        raise ValueError(
+            f"expected string or list of path patterns, got {type(value).__name__}"
+        )
+    return tuple(_normalize_path_pattern(pattern) for pattern in raw_patterns)
+
+
+def _normalize_path_pattern(value: object) -> str:
+    pattern = str(value).strip().replace("\\", "/")
+    while pattern.startswith("./"):
+        pattern = pattern[2:]
+    if not pattern:
+        raise ValueError("path policy patterns must not be empty")
+    if pattern.startswith("/"):
+        raise ValueError(
+            f"path policy pattern {pattern!r} must be repository-relative"
+        )
+    if any(part == ".." for part in pattern.split("/")):
+        raise ValueError(f"path policy pattern {pattern!r} must not contain '..'")
+    return pattern.rstrip("/") or pattern
+
+
+def _path_policy_config(raw: object) -> PathPolicyConfig:
+    data = raw if isinstance(raw, dict) else {}
+    frozen = _path_patterns(data.get("frozen", ()))
+    frozen_by_kind: dict[str, tuple[str, ...]] = {}
+    for key, value in data.items():
+        if key == "frozen" or not isinstance(value, dict):
+            continue
+        frozen_for_kind = _path_patterns(value.get("frozen", ()))
+        if frozen_for_kind:
+            frozen_by_kind[str(key)] = frozen_for_kind
+    return PathPolicyConfig(frozen=frozen, frozen_by_kind=frozen_by_kind)
 
 
 def _signal_provider_configs(

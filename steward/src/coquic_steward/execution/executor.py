@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import fnmatch
 import json
 import re
 import threading
@@ -211,6 +212,8 @@ class StewardExecutor:
                 "generated state changed: " + ", ".join(forbidden),
             )
             return PatchPreparationResult.terminal_failure
+        if self._block_task_for_frozen_paths(task, task.worktree_path):
+            return PatchPreparationResult.terminal_failure
 
         patch_path = self.config.patches_dir / task.id / f"{_iteration_log_label(iteration)}.patch"
         self.worktrees.save_patch(task.worktree_path, patch_path)
@@ -225,6 +228,8 @@ class StewardExecutor:
         ]
         self.store.record_iteration_validations(task.id, iteration, validations)
         task = self.store.get(task.id)
+        if self._block_task_for_frozen_paths(task, task.worktree_path):
+            return PatchPreparationResult.terminal_failure
         if any(not validation.passed for validation in validations):
             self.worktrees.save_patch(task.worktree_path, patch_path)
             self.store.record_iteration_patch(task.id, iteration, patch_path)
@@ -258,6 +263,20 @@ class StewardExecutor:
         self.store.record_iteration_patch(task.id, iteration, patch_path)
         self.store.add_event(task.id, "patch.saved", str(patch_path), {"label": label})
         return PatchPreparationResult.ready
+
+    def _block_task_for_frozen_paths(self, task: TaskRecord, worktree: Path) -> bool:
+        frozen = self.worktrees.frozen_paths(worktree, task)
+        if not frozen:
+            return False
+        message = "frozen paths changed: " + ", ".join(frozen)
+        self._finish_task(task.id, TaskStatus.blocked, message)
+        self.store.add_event(
+            task.id,
+            "path_policy.blocked",
+            message,
+            {"paths": frozen},
+        )
+        return True
 
     def _prepare_patch_with_validation_revisions(
         self,
@@ -462,7 +481,7 @@ class StewardExecutor:
             task.id,
             lambda: self.runner.run(
                 task,
-                render_review_revision_prompt(task, review),
+                render_review_revision_prompt(task, review, self.config),
                 task.worktree_path,
                 name=f"worker-revision-{revision}",
                 resume_session=_worker_thread_id(task),
@@ -529,7 +548,7 @@ class StewardExecutor:
             task.id,
             lambda: self.runner.run(
                 task,
-                render_validation_revision_prompt(task, validations),
+                render_validation_revision_prompt(task, validations, self.config),
                 task.worktree_path,
                 name=name,
                 resume_session=_worker_thread_id(task),
@@ -877,6 +896,11 @@ class StewardExecutor:
         task, validations = self._run_integration_validations(
             task, worktree, transcript
         )
+        block_result = self._block_integration_for_frozen_paths(
+            task, source, worktree, transcript
+        )
+        if block_result is not None:
+            return block_result
         validation_result = self._handle_integration_validation_failure(
             task, source, validations, worktree, transcript
         )
@@ -888,6 +912,11 @@ class StewardExecutor:
         )
         if commit_message is None:
             return False
+        block_result = self._block_integration_for_frozen_paths(
+            task, source, worktree, transcript
+        )
+        if block_result is not None:
+            return block_result
 
         sha, commit_result = self._commit_integration_patch(
             task, source, worktree, commit_message, transcript
@@ -1003,6 +1032,19 @@ class StewardExecutor:
             return patch_text, False
         try:
             transcript.write("apply", "applying reviewed patch")
+            frozen = frozen_patch_paths(self.config, source, patch_text)
+            if frozen:
+                message = "frozen paths changed: " + ", ".join(frozen)
+                transcript.write("path_policy_blocked", message)
+                self._finish_task(task.id, TaskStatus.blocked, message)
+                self._finish_task(source.id, TaskStatus.blocked, message)
+                self.store.add_event(
+                    source.id,
+                    "path_policy.blocked",
+                    message,
+                    {"integration_task_id": task.id, "paths": frozen},
+                )
+                return patch_text, False
             self.worktrees.apply_patch(worktree, patch_text)
         except (OSError, RuntimeError) as exc:
             conflict = str(exc)[-4000:]
@@ -1042,6 +1084,28 @@ class StewardExecutor:
         task.validations.extend(validations)
         self.store.save(task)
         return task, validations
+
+    def _block_integration_for_frozen_paths(
+        self,
+        task: TaskRecord,
+        source: TaskRecord,
+        worktree: Path,
+        transcript: "IntegrationTranscript",
+    ) -> bool | None:
+        frozen = self.worktrees.frozen_paths(worktree, source)
+        if not frozen:
+            return None
+        message = "frozen paths changed: " + ", ".join(frozen)
+        transcript.write("path_policy_blocked", message)
+        self._finish_task(task.id, TaskStatus.blocked, message)
+        self._finish_task(source.id, TaskStatus.blocked, message)
+        self.store.add_event(
+            source.id,
+            "path_policy.blocked",
+            message,
+            {"integration_task_id": task.id, "paths": frozen},
+        )
+        return False
 
     def _handle_integration_validation_failure(
         self,
@@ -1720,14 +1784,38 @@ def _patch_paths(patch_text: str) -> list[str]:
         match = re.match(r"^diff --git a/(.+?) b/(.+)$", line)
         if not match:
             continue
-        path = match.group(2)
-        if path == "/dev/null":
-            path = match.group(1)
-        if path in seen:
-            continue
-        paths.append(path)
-        seen.add(path)
+        for path in (match.group(1), match.group(2)):
+            if path == "/dev/null" or path in seen:
+                continue
+            paths.append(path)
+            seen.add(path)
     return paths
+
+
+def frozen_patch_paths(
+    config: StewardConfig, task: TaskRecord, patch_text: str
+) -> list[str]:
+    patterns = config.path_policy.frozen_for_kind(task.spec.kind)
+    if not patterns:
+        return []
+    return [
+        path
+        for path in _patch_paths(patch_text)
+        if any(_path_matches_policy(path, pattern) for pattern in patterns)
+    ]
+
+
+def _path_matches_policy(path: str, pattern: str) -> bool:
+    normalized_path = path.strip().replace("\\", "/")
+    normalized_pattern = pattern.strip().replace("\\", "/").rstrip("/")
+    if not normalized_path or not normalized_pattern:
+        return False
+    if any(char in normalized_pattern for char in "*?["):
+        return fnmatch.fnmatchcase(normalized_path, normalized_pattern)
+    return (
+        normalized_path == normalized_pattern
+        or normalized_path.startswith(normalized_pattern + "/")
+    )
 
 
 def _limit_commit_subject(subject: str) -> str:

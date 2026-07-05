@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import shutil
 from pathlib import Path
 
@@ -96,17 +97,27 @@ class Worktrees:
 
     def forbidden_paths(self, path: Path) -> list[str]:
         output = run_command(
-            ["git", "status", "--porcelain"], cwd=path, check=True
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=path,
+            check=True,
         ).stdout
         forbidden: list[str] = []
-        for line in output.splitlines():
-            if not line:
-                continue
-            changed = line[3:] if len(line) > 3 else line
+        for changed in _changed_paths_from_porcelain(output):
             parts = set(Path(changed).parts)
             if parts & FORBIDDEN_PATH_PARTS:
                 forbidden.append(changed)
         return forbidden
+
+    def frozen_paths(self, path: Path, task: TaskRecord) -> list[str]:
+        patterns = self.config.path_policy.frozen_for_kind(task.spec.kind)
+        if not patterns:
+            return []
+        output = run_command(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=path,
+            check=True,
+        ).stdout
+        return _matching_paths(_changed_paths_from_porcelain(output), patterns)
 
     def remove(self, path: Path, branch: str | None = None) -> None:
         if path.exists():
@@ -127,6 +138,49 @@ def _slug(value: object) -> str:
         char if char.isalnum() or char in {"-", "_", "/"} else "-" for char in text
     ]
     return "".join(chars).strip("-/") or "task"
+
+
+def _changed_paths_from_porcelain(output: str) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in output.splitlines():
+        if not line:
+            continue
+        changed = line[3:] if len(line) > 3 else line
+        for path in _porcelain_paths(changed):
+            if not path or path in seen:
+                continue
+            paths.append(path)
+            seen.add(path)
+    return paths
+
+
+def _porcelain_paths(changed: str) -> list[str]:
+    return [
+        part.strip().strip('"').replace("\\", "/")
+        for part in changed.split(" -> ")
+    ]
+
+
+def _matching_paths(paths: list[str], patterns: tuple[str, ...]) -> list[str]:
+    return [
+        path
+        for path in paths
+        if any(_path_matches_pattern(path, pattern) for pattern in patterns)
+    ]
+
+
+def _path_matches_pattern(path: str, pattern: str) -> bool:
+    normalized_path = path.strip().replace("\\", "/")
+    normalized_pattern = pattern.strip().replace("\\", "/").rstrip("/")
+    if not normalized_path or not normalized_pattern:
+        return False
+    if any(char in normalized_pattern for char in "*?["):
+        return fnmatch.fnmatchcase(normalized_path, normalized_pattern)
+    return (
+        normalized_path == normalized_pattern
+        or normalized_path.startswith(normalized_pattern + "/")
+    )
 
 
 def _commit_command(path: Path, message: str, body: str = "") -> list[str]:

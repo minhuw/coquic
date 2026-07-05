@@ -22,7 +22,12 @@ from typer.testing import CliRunner
 from coquic_steward.cli import app
 from coquic_steward.agents import CodexRunner, render_worker_prompt
 from coquic_steward.agents.diagnostics import diagnostics_for_paths
-from coquic_steward.core.config import StewardConfig, StewardLimits, load_config
+from coquic_steward.core.config import (
+    PathPolicyConfig,
+    StewardConfig,
+    StewardLimits,
+    load_config,
+)
 from coquic_steward.core.lifecycle import InvalidTaskTransition
 from coquic_steward.core.models import (
     IntegrationMode,
@@ -50,6 +55,7 @@ from coquic_steward.core.subprocesses import CommandResult
 from coquic_steward.execution import StewardExecutor, Worktrees
 from coquic_steward.execution.executor import (
     commit_message_schema_path,
+    frozen_patch_paths,
     parse_commit_message,
     render_commit_message_prompt,
 )
@@ -231,6 +237,88 @@ connect_timeout_seconds = 7
     assert mirror.ssh_key_path == Path("~/.ssh/steward").expanduser()
     assert mirror.known_hosts_path == Path("~/.ssh/known_hosts").expanduser()
     assert mirror.connect_timeout_seconds == 7
+
+
+def test_config_reads_global_and_kind_frozen_paths(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.path_policy]
+frozen = [".github/**", "flake.nix"]
+
+[steward.path_policy.feature]
+frozen = [".clang-tidy", "scripts/run-clang-tidy.sh"]
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(repo_root=repo, config_path=config_path)
+
+    assert config.path_policy.frozen == (".github/**", "flake.nix")
+    assert config.path_policy.frozen_for_kind(TaskKind.feature) == (
+        ".github/**",
+        "flake.nix",
+        ".clang-tidy",
+        "scripts/run-clang-tidy.sh",
+    )
+    assert config.path_policy.frozen_for_kind(TaskKind.ci) == (
+        ".github/**",
+        "flake.nix",
+    )
+
+
+def test_config_rejects_absolute_frozen_paths(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.path_policy]
+frozen = ["/etc/passwd"]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="repository-relative"):
+        load_config(repo_root=repo, config_path=config_path)
+
+
+def test_config_rejects_blank_frozen_paths(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.path_policy]
+frozen = [""]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        load_config(repo_root=repo, config_path=config_path)
+
+
+def test_config_rejects_blank_kind_frozen_paths(repo: Path) -> None:
+    config_path = repo / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+github_repository = "minhuw/coquic"
+
+[steward.path_policy.feature]
+frozen = ["   "]
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        load_config(repo_root=repo, config_path=config_path)
 
 
 def test_config_reads_review_timeout_limit(repo: Path) -> None:
@@ -4156,6 +4244,17 @@ def test_worker_prompt_highlights_workflow_signal_guidance(
 def test_worker_prompt_highlights_feature_issue_signal_guidance(
     config: StewardConfig,
 ) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={
+                    TaskKind.feature.value: ("flake.nix", ".github/**")
+                }
+            ),
+        }
+    )
+    config.ensure_dirs()
     task = TaskStore(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.feature,
@@ -4219,6 +4318,10 @@ def test_worker_prompt_highlights_feature_issue_signal_guidance(
     assert "code_quality" not in prompt
     assert "rfc_audit" not in prompt
     assert "Do not create GitHub issues, Steward tasks, commits, pushes" in prompt
+    assert "Frozen path policy:" in prompt
+    assert "Steward will block patches that change them" in prompt
+    assert "- flake.nix" in prompt
+    assert "- .github/**" in prompt
 
 
 def test_worker_prompt_suppresses_mutating_issue_skill_for_feature_signal(
@@ -4256,6 +4359,15 @@ def test_worker_prompt_suppresses_mutating_issue_skill_for_feature_signal(
 def test_review_revision_prompt_keeps_repairs_scoped(
     config: StewardConfig,
 ) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={TaskKind.feature.value: ("flake.nix",)}
+            ),
+        }
+    )
+    config.ensure_dirs()
     task = TaskStore(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.feature,
@@ -4281,7 +4393,7 @@ def test_review_revision_prompt_keeps_repairs_scoped(
         "remaining_risk": "",
     }
 
-    prompt = render_review_revision_prompt(task, review)
+    prompt = render_review_revision_prompt(task, review, config)
 
     assert "Revision scope control:" in prompt
     assert "Fix only findings that can be addressed within the original task boundary" in prompt
@@ -4291,11 +4403,22 @@ def test_review_revision_prompt_keeps_repairs_scoped(
     assert "code_quality" not in prompt
     assert "rfc_audit" not in prompt
     assert "Do not add unrelated tooling changes" in prompt
+    assert "Frozen path policy:" in prompt
+    assert "- flake.nix" in prompt
 
 
 def test_validation_revision_prompt_keeps_tooling_repairs_out_of_feature_patch(
     config: StewardConfig,
 ) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={TaskKind.feature.value: (".clang-tidy",)}
+            ),
+        }
+    )
+    config.ensure_dirs()
     task = TaskStore(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.feature,
@@ -4313,7 +4436,7 @@ def test_validation_revision_prompt_keeps_tooling_repairs_out_of_feature_patch(
         summary="clang-tidy failed in repo-wide tooling",
     )
 
-    prompt = render_validation_revision_prompt(task, [validation])
+    prompt = render_validation_revision_prompt(task, [validation], config)
 
     assert "Validation repair scope control:" in prompt
     assert "Do not change repo-wide tooling" in prompt
@@ -4323,6 +4446,8 @@ def test_validation_revision_prompt_keeps_tooling_repairs_out_of_feature_patch(
     assert "code_quality" not in prompt
     assert "rfc_audit" not in prompt
     assert "nix develop -c pre-commit run --all-files" in prompt
+    assert "Frozen path policy:" in prompt
+    assert "- .clang-tidy" in prompt
 
 
 def test_review_verdict_uses_structured_output() -> None:
@@ -4414,6 +4539,71 @@ def test_worktree_create_and_patch(config: StewardConfig) -> None:
     assert worktrees.has_changes(path)
 
 
+def test_worktree_reports_frozen_file_and_directory_changes(
+    config: StewardConfig,
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={
+                    TaskKind.feature.value: ("flake.nix", ".github/**")
+                }
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="T",
+            prompt="P",
+        )
+    )
+    worktrees = Worktrees(config)
+    path, _ = worktrees.create(task)
+    (path / "flake.nix").write_text("{}\n", encoding="utf-8")
+    workflow = path / ".github" / "workflows" / "test.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("name: test\n", encoding="utf-8")
+    (path / "src").mkdir()
+    (path / "src" / "main.cpp").write_text("int main() {}\n", encoding="utf-8")
+
+    assert worktrees.frozen_paths(path, task) == [
+        ".github/workflows/test.yml",
+        "flake.nix",
+    ]
+
+
+def test_frozen_patch_paths_match_renamed_files(config: StewardConfig) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={TaskKind.feature.value: ("flake.nix",)}
+            ),
+        }
+    )
+    task = TaskRecord(
+        spec=TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="T",
+            prompt="P",
+        )
+    )
+    patch = """\
+diff --git a/flake.nix b/config/flake.nix
+similarity index 100%
+rename from flake.nix
+rename to config/flake.nix
+"""
+
+    assert frozen_patch_paths(config, task, patch) == ["flake.nix"]
+
+
 def test_codex_runner_writes_prompt_and_transcript(
     config: StewardConfig, tmp_path: Path
 ) -> None:
@@ -4493,6 +4683,120 @@ def test_executor_no_changes_reaches_terminal_status(
     assert saved.worktree_path is not None
     assert not saved.worktree_path.exists()
     assert any(event.kind == "worktree.cleaned" for event in store.events(task.id))
+
+
+def test_executor_blocks_worker_patch_that_changes_frozen_path(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        "printf '{}\\n' > flake.nix\n"
+        "printf 'changed frozen path\\n' > \"$last\"\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "codex_bin": str(fake),
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={TaskKind.feature.value: ("flake.nix",)}
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="T",
+            prompt="P",
+        )
+    )
+
+    def fail_if_validated(*_args, **_kwargs):
+        pytest.fail("validation should not run after a frozen path change")
+
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.run_gates", fail_if_validated
+    )
+
+    assert not StewardExecutor(config, store).run_task(task.id)
+
+    saved = store.get(task.id)
+    events = store.events(task.id)
+    assert saved.status == TaskStatus.blocked
+    assert saved.summary == "frozen paths changed: flake.nix"
+    assert any(event.kind == "path_policy.blocked" for event in events)
+    assert saved.worktree_path is not None
+    assert not saved.worktree_path.exists()
+
+
+def test_executor_blocks_frozen_path_written_by_validation(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        "printf 'source change\\n' > README.md\n"
+        "printf 'changed source\\n' > \"$last\"\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "codex_bin": str(fake),
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={TaskKind.feature.value: ("flake.nix",)}
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="T",
+            prompt="P",
+        )
+    )
+
+    def fake_gates(_config, task_id, cwd, *, label=None):
+        output = _config.logs_dir / task_id / (label or "validation") / "fake.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("ok\n", encoding="utf-8")
+        (cwd / "flake.nix").write_text("{}\n", encoding="utf-8")
+        return [
+            ValidationResult(
+                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
+            )
+        ]
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+
+    assert not StewardExecutor(config, store).run_task(task.id)
+
+    saved = store.get(task.id)
+    assert saved.status == TaskStatus.blocked
+    assert saved.summary == "frozen paths changed: flake.nix"
+    assert saved.patch_path is None
+    assert any(event.kind == "path_policy.blocked" for event in store.events(task.id))
 
 
 def test_executor_heartbeats_active_worker(
@@ -5026,6 +5330,225 @@ def test_integration_manager_local_only_commits_without_push(
         for event in store.events(source.id)
     )
     assert not any(event.kind == "main.pushed" for event in store.events(source.id))
+
+
+def test_integration_manager_blocks_frozen_path_before_commit(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
+    )
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "git_remote": "origin",
+            "integration_mode": IntegrationMode.push_main.value,
+            "local_only": False,
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={TaskKind.feature.value: ("flake.nix",)}
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        "printf '%s\\n' '{\"subject\":\"fix(docs): update integration fixture\",\"body\":\"Update README only.\\n\\nChanged files:\\n- README.md\\n\\nValidation:\\n- fake: passed\"}' > \"$last\"\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    source, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="T",
+            prompt="P",
+        )
+    )
+    worktree, branch = Worktrees(config).create(source)
+    (worktree / "README.md").write_text("integration source\n", encoding="utf-8")
+    source.worktree_path = worktree
+    source.branch_name = branch
+    patch_path = config.patches_dir / f"{source.id}.patch"
+    Worktrees(config).save_patch(worktree, patch_path)
+    source.patch_path = patch_path
+    store.save(source)
+    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate T",
+            prompt="Integrate",
+            metadata={
+                "source_task_id": source.id,
+                "source_patch_path": str(patch_path),
+                "dedupe_key": f"integration:{source.id}",
+            },
+        ),
+        dedupe_key=f"integration:{source.id}",
+    )
+
+    def fake_gates(_config, task_id, cwd):
+        output = _config.logs_dir / task_id / "fake.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("ok\n", encoding="utf-8")
+        (cwd / "flake.nix").write_text("{}\n", encoding="utf-8")
+        return [
+            ValidationResult(
+                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
+            )
+        ]
+
+    def fail_commit(_self, _path, _message, _body=""):
+        pytest.fail("commit should not run after a frozen path change")
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+    monkeypatch.setattr(
+        "coquic_steward.execution.worktree.Worktrees.commit_all", fail_commit
+    )
+
+    assert not StewardExecutor(config, store).run_task(integration.id)
+
+    saved_source = store.get(source.id)
+    saved_integration = store.get(integration.id)
+    remote_text = subprocess.run(
+        ["git", "show", "origin/main:README.md"],
+        cwd=config.repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    assert saved_source.status == TaskStatus.blocked
+    assert saved_integration.status == TaskStatus.blocked
+    assert saved_source.summary == "frozen paths changed: flake.nix"
+    assert saved_integration.summary == "frozen paths changed: flake.nix"
+    assert remote_text == "hello\n"
+    assert any(event.kind == "path_policy.blocked" for event in store.events(source.id))
+
+
+def test_integration_manager_blocks_frozen_path_before_validation_repair(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
+    )
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "git_remote": "origin",
+            "integration_mode": IntegrationMode.push_main.value,
+            "local_only": False,
+            "path_policy": PathPolicyConfig(
+                frozen_by_kind={TaskKind.feature.value: ("flake.nix",)}
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        "printf 'unexpected repair\\n' > \"$last\"\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    source, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.feature,
+            worker=WorkerKind.feature_implementer,
+            title="T",
+            prompt="P",
+        )
+    )
+    worktree, branch = Worktrees(config).create(source)
+    (worktree / "README.md").write_text("integration source\n", encoding="utf-8")
+    source.worktree_path = worktree
+    source.branch_name = branch
+    source.patch_path = config.patches_dir / f"{source.id}.patch"
+    source.spec.metadata["worker_thread_id"] = "worker-thread-1"
+    Worktrees(config).save_patch(worktree, source.patch_path)
+    store.save(source)
+    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate T",
+            prompt="Integrate",
+            metadata={
+                "source_task_id": source.id,
+                "source_patch_path": str(source.patch_path),
+                "dedupe_key": f"integration:{source.id}",
+            },
+        ),
+        dedupe_key=f"integration:{source.id}",
+    )
+
+    def fake_gates(_config, task_id, cwd):
+        output = _config.logs_dir / task_id / "fake.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("failed\n", encoding="utf-8")
+        (cwd / "flake.nix").write_text("{}\n", encoding="utf-8")
+        return [
+            ValidationResult(
+                command=["fake"],
+                cwd=cwd,
+                passed=False,
+                exit_code=1,
+                output_path=output,
+                summary="failed",
+            )
+        ]
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+
+    assert not StewardExecutor(config, store).run_task(integration.id)
+
+    saved_source = store.get(source.id)
+    saved_integration = store.get(integration.id)
+    events = store.events(source.id)
+
+    assert saved_source.status == TaskStatus.blocked
+    assert saved_integration.status == TaskStatus.blocked
+    assert saved_source.summary == "frozen paths changed: flake.nix"
+    assert saved_integration.summary == "frozen paths changed: flake.nix"
+    assert any(event.kind == "path_policy.blocked" for event in events)
+    assert not any(event.kind == "integration.validation_failed" for event in events)
+    assert not any(event.kind == "worker.validation_revision_requested" for event in events)
+    assert not any(event.kind == "integration.retry_requested" for event in events)
 
 
 def test_integration_manager_counts_main_push_budget_per_utc_day(

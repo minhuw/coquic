@@ -80,19 +80,26 @@ def run_validation(
 
 
 def render_validation_revision_prompt(
-    task: TaskRecord, validations: list[ValidationResult]
+    task: TaskRecord,
+    validations: list[ValidationResult],
+    config: StewardConfig | None = None,
 ) -> str:
     failed = [validation for validation in validations if not validation.passed]
-    return "\n".join(
+    lines = [
+        "A Steward validation gate failed for your current patch.",
+        "",
+        f"Task: {task.id} - {task.spec.title}",
+        "",
+        "Fix the validation failures in the existing worktree.",
+        "Keep the original task scope. Do not commit, push, or change generated state.",
+        VALIDATION_SCOPE_CONTROL,
+        "After editing, run the relevant local validation commands and leave the revised patch in the worktree.",
+    ]
+    frozen = _render_frozen_paths(task, config)
+    if frozen:
+        lines.extend(["", "Frozen path policy:", frozen])
+    lines.extend(
         [
-            "A Steward validation gate failed for your current patch.",
-            "",
-            f"Task: {task.id} - {task.spec.title}",
-            "",
-            "Fix the validation failures in the existing worktree.",
-            "Keep the original task scope. Do not commit, push, or change generated state.",
-            VALIDATION_SCOPE_CONTROL,
-            "After editing, run the relevant local validation commands and leave the revised patch in the worktree.",
             "",
             "Original task prompt:",
             task.spec.prompt,
@@ -112,4 +119,21 @@ def render_validation_revision_prompt(
                 indent=2,
             ),
         ]
-    ).strip()
+    )
+    return "\n".join(lines).strip()
+
+
+def _render_frozen_paths(
+    task: TaskRecord, config: StewardConfig | None
+) -> str:
+    if config is None:
+        return ""
+    patterns = config.path_policy.frozen_for_kind(task.spec.kind)
+    if not patterns:
+        return ""
+    lines = [
+        "Do not modify these repository paths for this task. Steward will block "
+        "patches that change them.",
+    ]
+    lines.extend(f"- {pattern}" for pattern in patterns)
+    return "\n".join(lines)

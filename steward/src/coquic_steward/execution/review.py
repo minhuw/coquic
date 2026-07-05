@@ -130,22 +130,46 @@ def _is_meta_review_failure(review: dict[str, Any]) -> bool:
     )
 
 
-def render_review_revision_prompt(task: TaskRecord, review: dict[str, Any]) -> str:
-    return "\n".join(
+def render_review_revision_prompt(
+    task: TaskRecord, review: dict[str, Any], config: StewardConfig | None = None
+) -> str:
+    lines = [
+        "A Steward review blocked your current patch.",
+        "",
+        f"Task: {task.id} - {task.spec.title}",
+        "",
+        "Address the review findings in the existing worktree.",
+        "Keep the original task scope. Do not commit, push, or change generated state.",
+        REVISION_SCOPE_CONTROL,
+        "After editing, run the relevant local validation commands and leave the revised patch in the worktree.",
+    ]
+    frozen = _render_frozen_paths(task, config)
+    if frozen:
+        lines.extend(["", "Frozen path policy:", frozen])
+    lines.extend(
         [
-            "A Steward review blocked your current patch.",
-            "",
-            f"Task: {task.id} - {task.spec.title}",
-            "",
-            "Address the review findings in the existing worktree.",
-            "Keep the original task scope. Do not commit, push, or change generated state.",
-            REVISION_SCOPE_CONTROL,
-            "After editing, run the relevant local validation commands and leave the revised patch in the worktree.",
             "",
             "Review JSON:",
             json.dumps(review, indent=2, sort_keys=True),
         ]
-    ).strip()
+    )
+    return "\n".join(lines).strip()
+
+
+def _render_frozen_paths(
+    task: TaskRecord, config: StewardConfig | None
+) -> str:
+    if config is None:
+        return ""
+    patterns = config.path_policy.frozen_for_kind(task.spec.kind)
+    if not patterns:
+        return ""
+    lines = [
+        "Do not modify these repository paths for this task. Steward will block "
+        "patches that change them.",
+    ]
+    lines.extend(f"- {pattern}" for pattern in patterns)
+    return "\n".join(lines)
 
 
 def _render_skills(config: StewardConfig) -> str:

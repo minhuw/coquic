@@ -1,4 +1,4 @@
-from .config import StewardConfig, StewardLimits, load_config
+from .config import PathPolicyConfig, StewardConfig, StewardLimits, load_config
 from .lifecycle import InvalidTaskTransition, TaskPhase, TaskTransition
 from .models import (
     Event,
@@ -23,6 +23,7 @@ __all__ = [
     "Event",
     "IntegrationMode",
     "InvalidTaskTransition",
+    "PathPolicyConfig",
     "Priority",
     "ProjectSignals",
     "Risk",

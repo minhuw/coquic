@@ -1309,6 +1309,73 @@ def test_daemon_tick_recovers_stale_task_before_planning(
     assert store.get(task.id).status == TaskStatus.failed
 
 
+def test_daemon_replans_expired_failed_signal_without_refetch(
+    config: StewardConfig, monkeypatch
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    signal, _ = store.add_signal_item(
+        SignalItem(
+            id="wi-codeql-1",
+            provider="code-scanning",
+            kind="code-scanning.alert",
+            fingerprint="wi-codeql-1",
+            title="CodeQL alert",
+        )
+    )
+    store.mark_signal_items_planned(
+        [signal.id], planner_run_id="planner-1", task_id=task.id
+    )
+    store.finish_task(task.id, TaskStatus.failed, "failed")
+    old = utc_now() - timedelta(hours=25)
+    with Session(store.engine) as session, session.begin():
+        signal_row = session.get(SignalItemRow, signal.id)
+        task_row = session.get(TaskRow, task.id)
+        assert signal_row is not None
+        assert task_row is not None
+        signal_row.planned_at = old.isoformat()
+        signal_row.updated_at = old.isoformat()
+        task_row.updated_at = old.isoformat()
+    store.consume_wakeups([wakeup.id for wakeup in store.pending_wakeups()])
+
+    seen_inbox: list[list[str]] = []
+
+    def fake_run_planner(_config, signals, _active):
+        seen_inbox.append([item.id for item in signals.items])
+        return PlannerRun(
+            planned=[],
+            accepted_count=0,
+            proposed_count=0,
+            completed=True,
+            exit_code=0,
+            prompt_path=None,
+            transcript_path=_config.transcripts_dir / "planner" / "codex.jsonl",
+            thread_id=None,
+            consumed_item_ids=[],
+        )
+
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.collect_signal_items",
+        lambda *_args, **_kwargs: pytest.fail("signals should not be fetched"),
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.run_planner",
+        fake_run_planner,
+    )
+
+    result = StewardDaemon(config, store).tick(plan=True, dispatch=False)
+
+    assert result.planned == 0
+    assert seen_inbox == [[signal.id]]
+    assert [item.id for item in store.pending_signal_items()] == [signal.id]
+    assert any(
+        event.kind == "signals.requeued_failed"
+        for event in store.events(DAEMON_EVENT_TASK_ID)
+    )
+
+
 def test_daemon_recovers_stale_reviewing_task_with_review_timeout(
     config: StewardConfig, monkeypatch
 ) -> None:

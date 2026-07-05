@@ -120,6 +120,15 @@ class StewardDaemon:
             )
             self._log(f"recovered stale task {task_id}")
         if plan:
+            requeued = self.store.requeue_failed_signal_items()
+            if requeued:
+                self.store.add_event(
+                    DAEMON_EVENT_TASK_ID,
+                    "signals.requeued_failed",
+                    f"requeued {requeued} failed signal item(s)",
+                    {"count": requeued, "retry_after_hours": 24},
+                )
+                self._log(f"requeued failed signals count={requeued}")
             if fetch_providers:
                 self._fetch_signals(result, fetch_providers)
             else:

@@ -47,6 +47,28 @@ coquic::core::ClientConnectionConfig client_connection_config() {
     };
 }
 
+std::vector<std::byte> supported_tokenless_initial_datagram() {
+    constexpr std::uint32_t version = 1;
+    auto destination_connection_id = bytes({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});
+    auto source_connection_id = bytes({0xc1, 0x01});
+
+    std::vector<std::byte> datagram;
+    datagram.reserve(1200);
+    datagram.push_back(std::byte{0xc0});
+    datagram.push_back(static_cast<std::byte>((version >> 24) & 0xffu));
+    datagram.push_back(static_cast<std::byte>((version >> 16) & 0xffu));
+    datagram.push_back(static_cast<std::byte>((version >> 8) & 0xffu));
+    datagram.push_back(static_cast<std::byte>(version & 0xffu));
+    datagram.push_back(static_cast<std::byte>(destination_connection_id.size()));
+    datagram.insert(datagram.end(), destination_connection_id.begin(),
+                    destination_connection_id.end());
+    datagram.push_back(static_cast<std::byte>(source_connection_id.size()));
+    datagram.insert(datagram.end(), source_connection_id.begin(), source_connection_id.end());
+    datagram.push_back(std::byte{0x00});
+    datagram.resize(1200, std::byte{0x00});
+    return datagram;
+}
+
 TEST(CoquicPublicApiTest, CoreEndpointOpensConnectionAndReportsDatagrams) {
     coquic::core::Endpoint endpoint(coquic::core::EndpointConfig{
         .role = coquic::core::Role::client,
@@ -117,6 +139,7 @@ TEST(CoquicPublicApiTest, CoreEndpointCoversServerAndTransportOptions) {
             .supported_versions = {1, 0x6b3343cfu},
             .verify_peer = true,
             .retry_enabled = true,
+            .require_address_validation_token = true,
             .application_protocol = "h3",
             .identity =
                 coquic::core::TlsIdentity{
@@ -153,6 +176,33 @@ TEST(CoquicPublicApiTest, CoreEndpointCoversServerAndTransportOptions) {
         EXPECT_FALSE(endpoint.has_pending_stream_send());
         EXPECT_TRUE(endpoint.connection_diagnostics().empty());
     }
+}
+
+TEST(CoquicPublicApiTest, CoreEndpointStrictTokenPolicyDiscardsTokenlessInitial) {
+    coquic::core::Endpoint endpoint(coquic::core::EndpointConfig{
+        .role = coquic::core::Role::server,
+        .verify_peer = false,
+        .retry_enabled = true,
+        .require_address_validation_token = true,
+        .application_protocol = "coquic",
+        .identity =
+            coquic::core::TlsIdentity{
+                .certificate_pem = "not a certificate",
+                .private_key_pem = "not a key",
+            },
+    });
+
+    auto result = endpoint.input_datagram(
+        coquic::core::InboundDatagram{
+            .bytes = supported_tokenless_initial_datagram(),
+            .route_handle = std::optional<coquic::core::RouteHandle>{7},
+            .address_validation_identity = bytes({0xc0, 0x00, 0x02, 0x01}),
+        },
+        coquic::core::TimePoint{});
+
+    EXPECT_TRUE(result.effects.empty());
+    EXPECT_FALSE(result.local_error.has_value());
+    EXPECT_EQ(endpoint.connection_count(), 0u);
 }
 
 TEST(CoquicPublicApiTest, CoreEndpointCanOptIntoReservedVersionProbe) {

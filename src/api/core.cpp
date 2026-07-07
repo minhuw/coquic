@@ -277,6 +277,7 @@ quic::QuicCoreEndpointConfig to_internal(const EndpointConfig &config) {
         .supported_versions = config.supported_versions,
         .verify_peer = config.verify_peer,
         .retry_enabled = config.retry_enabled,
+        .require_address_validation_token = config.require_address_validation_token,
         .max_server_connections = config.max_server_connections,
         .orphan_zero_rtt_buffer = to_internal(config.orphan_zero_rtt_buffer),
         .application_protocol = config.application_protocol,

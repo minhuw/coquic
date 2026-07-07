@@ -181,6 +181,7 @@ struct EndpointConfig {
     std::vector<std::uint32_t> supported_versions = {1};
     bool verify_peer = true;
     bool retry_enabled = false;
+    bool require_address_validation_token = false;
     std::size_t max_server_connections = 0;
     OrphanZeroRttBufferConfig orphan_zero_rtt_buffer;
     std::string application_protocol = "coquic";

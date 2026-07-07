@@ -1,3 +1,21 @@
+#if defined(__clang_analyzer__) && !__has_builtin(__builtin_ctzg)
+// Zig 0.16's libc++ references Clang 19 builtins while the lint shell still
+// runs clang-tidy 18.
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_ctzg(value, fallback)                                                            \
+    ((value) == 0 ? (fallback) : __builtin_ctzll(static_cast<unsigned long long>(value)))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_clzg(value, fallback)                                                            \
+    ((value) == 0 ? (fallback)                                                                     \
+                  : (__builtin_clzll(static_cast<unsigned long long>(value)) -                     \
+                     (static_cast<int>(sizeof(unsigned long long) * __CHAR_BIT__) -                \
+                      static_cast<int>(sizeof(value) * __CHAR_BIT__))))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_popcountg(value) __builtin_popcountll(static_cast<unsigned long long>(value))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __is_nothrow_convertible(from_type, to_type) __is_convertible(from_type, to_type)
+#endif
+
 #include <gtest/gtest.h>
 
 #include <array>
@@ -1613,6 +1631,181 @@ TEST(QuicCoreEndpointInternalTest, ServerRetriesInvalidNewTokenAsUnvalidatedAddr
     ASSERT_TRUE(decoded_retry.has_value());
     EXPECT_NE(std::get_if<RetryPacket>(&decoded_retry.value().packet), nullptr);
     EXPECT_EQ(server.connection_count(), 0u);
+}
+
+TEST(QuicCoreEndpointInternalTest, StrictServerDiscardsTokenlessInitialBeforeRetry) {
+    auto config = make_server_endpoint_config();
+    config.retry_enabled = true;
+    config.require_address_validation_token = true;
+    config.address_validation_token_secret = make_address_validation_secret(0x90);
+    QuicCore server(std::move(config));
+
+    auto result = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_client_initial_datagram(),
+            .route_handle = 55,
+            .address_validation_identity = make_ipv4_identity(198, 51, 100, 7, 4433),
+        },
+        coquic::quic::test::test_time(1));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # Servers MAY discard any Initial packet that does not carry the
+    // # expected token.
+    EXPECT_TRUE(result.effects.empty());
+    EXPECT_FALSE(result.local_error.has_value());
+    EXPECT_EQ(server.connection_count(), 0u);
+    EXPECT_TRUE(server.retry_tokens_.empty());
+}
+
+TEST(QuicCoreEndpointInternalTest, RetryFallbackForTokenlessInitialRemainsDefault) {
+    auto config = make_server_endpoint_config();
+    config.retry_enabled = true;
+    config.address_validation_token_secret = make_address_validation_secret(0x91);
+    QuicCore server(std::move(config));
+
+    auto result = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_client_initial_datagram(),
+            .route_handle = 56,
+            .address_validation_identity = make_ipv4_identity(198, 51, 100, 8, 4433),
+        },
+        coquic::quic::test::test_time(1));
+
+    auto sends = send_effects_from(result);
+    ASSERT_EQ(sends.size(), 1u);
+    auto decoded_retry = deserialize_packet(sends.front().bytes.span(), {});
+    ASSERT_TRUE(decoded_retry.has_value());
+    EXPECT_NE(std::get_if<RetryPacket>(&decoded_retry.value().packet), nullptr);
+    EXPECT_EQ(server.connection_count(), 0u);
+    EXPECT_EQ(server.retry_tokens_.size(), 1u);
+}
+
+TEST(QuicCoreEndpointInternalTest, StrictServerDiscardsTokenlessInitialAtAdmissionLimit) {
+    auto config = make_server_endpoint_config();
+    config.application_protocol = "coquic";
+    config.max_server_connections = 1;
+    QuicCore server(std::move(config));
+
+    auto accepted = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_client_initial_datagram(),
+            .route_handle = 55,
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_EQ(lifecycle_events_from(accepted).size(), 1u);
+    ASSERT_EQ(server.connection_count(), 1u);
+    server.endpoint_config_.require_address_validation_token = true;
+
+    auto refused_client_dcid = bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x09});
+    auto refused_client_scid = bytes_from_ints({0xc1, 0x02});
+    auto refused_initial = make_supported_initial_datagram(kQuicVersion1, refused_client_dcid,
+                                                           refused_client_scid, {});
+    auto refused = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = refused_initial,
+            .route_handle = 56,
+        },
+        coquic::quic::test::test_time(2));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+    // # Servers MAY discard any Initial packet that does not carry the
+    // # expected token.
+    EXPECT_TRUE(refused.effects.empty());
+    EXPECT_FALSE(refused.local_error.has_value());
+    EXPECT_EQ(server.connection_count(), 1u);
+}
+
+TEST(QuicCoreEndpointInternalTest, StrictServerAcceptsValidNewTokenAndValidatesAddress) {
+    auto issuer_config = make_server_endpoint_config();
+    issuer_config.address_validation_token_secret = make_address_validation_secret(0x92);
+    QuicCore issuer(std::move(issuer_config));
+
+    const auto identity = make_ipv4_identity(198, 51, 100, 9, 4433);
+    auto token = issuer.make_endpoint_new_token(1, kQuicVersion1, 57, identity,
+                                                coquic::quic::test::test_time(1));
+    ASSERT_FALSE(token.empty());
+
+    auto server_config = make_server_endpoint_config();
+    server_config.application_protocol = "coquic";
+    server_config.require_address_validation_token = true;
+    server_config.address_validation_token_secret = make_address_validation_secret(0x92);
+    QuicCore server(std::move(server_config));
+
+    auto open = make_client_open_config(6);
+    open.retry_token = token;
+    QuicCore client(make_client_endpoint_config());
+    auto opened = client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = std::move(open),
+            .initial_route_handle = 57,
+        },
+        coquic::quic::test::test_time(2));
+    auto initial_sends = send_effects_from(opened);
+    ASSERT_FALSE(initial_sends.empty());
+
+    auto accepted = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = initial_sends.front().bytes,
+            .route_handle = 57,
+            .address_validation_identity = identity,
+        },
+        coquic::quic::test::test_time(3));
+
+    auto lifecycle = lifecycle_events_from(accepted);
+    ASSERT_EQ(lifecycle.size(), 1u);
+    EXPECT_EQ(lifecycle.front().event, QuicCoreConnectionLifecycle::accepted);
+    ASSERT_EQ(server.connection_count(), 1u);
+    auto &connection = *server.connections_.at(lifecycle.front().connection).connection;
+    EXPECT_TRUE(connection.peer_address_validated_);
+    EXPECT_FALSE(connection.anti_amplification_applies());
+}
+
+TEST(QuicCoreEndpointInternalTest, StrictServerKeepsInvalidNewTokenUnvalidated) {
+    auto issuer_config = make_server_endpoint_config();
+    issuer_config.address_validation_token_secret = make_address_validation_secret(0x93);
+    QuicCore issuer(std::move(issuer_config));
+
+    const auto identity = make_ipv4_identity(198, 51, 100, 10, 4433);
+    auto token = issuer.make_endpoint_new_token(1, kQuicVersion1, 58, identity,
+                                                coquic::quic::test::test_time(1));
+    ASSERT_FALSE(token.empty());
+    token.back() = static_cast<std::byte>(std::to_integer<std::uint8_t>(token.back()) ^ 0x01u);
+
+    auto server_config = make_server_endpoint_config();
+    server_config.application_protocol = "coquic";
+    server_config.require_address_validation_token = true;
+    server_config.address_validation_token_secret = make_address_validation_secret(0x93);
+    QuicCore server(std::move(server_config));
+
+    auto open = make_client_open_config(7);
+    open.retry_token = token;
+    QuicCore client(make_client_endpoint_config());
+    auto opened = client.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = std::move(open),
+            .initial_route_handle = 58,
+        },
+        coquic::quic::test::test_time(2));
+    auto initial_sends = send_effects_from(opened);
+    ASSERT_FALSE(initial_sends.empty());
+
+    auto accepted = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = initial_sends.front().bytes,
+            .route_handle = 58,
+            .address_validation_identity = identity,
+        },
+        coquic::quic::test::test_time(3));
+
+    auto lifecycle = lifecycle_events_from(accepted);
+    ASSERT_EQ(lifecycle.size(), 1u);
+    EXPECT_EQ(lifecycle.front().event, QuicCoreConnectionLifecycle::accepted);
+    ASSERT_EQ(server.connection_count(), 1u);
+    auto &connection = *server.connections_.at(lifecycle.front().connection).connection;
+    EXPECT_FALSE(connection.peer_address_validated_);
+    EXPECT_TRUE(connection.anti_amplification_applies());
+    EXPECT_EQ(connection.anti_amplification_send_budget(),
+              connection.anti_amplification_received_bytes_ * 3u);
 }
 
 TEST(QuicCoreEndpointInternalTest, EndpointAndLegacyCommandsCoverErrorAndCleanupBranches) {

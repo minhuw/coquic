@@ -458,8 +458,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]:    Retry replaces the token with a newer one.
     TEXT[!MUST,implementation,test]: The client MUST NOT use
     TEXT[!MUST,implementation,test]:    the token provided in a Retry for future connections.
-    TEXT[!MAY]: Servers MAY
-    TEXT[!MAY]:    discard any Initial packet that does not carry the expected token.
+    TEXT[!MAY,implementation,test]: Servers MAY
+    TEXT[!MAY,implementation,test]:    discard any Initial packet that does not carry the expected token.
     TEXT[!SHOULD,implementation,test]: Thus, a token SHOULD have an
     TEXT[!SHOULD,implementation,test]:    expiration time, which could be either an explicit expiration time or
     TEXT[!SHOULD,implementation,test]:    an issued timestamp that can be used to dynamically calculate the

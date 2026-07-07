@@ -3921,6 +3921,17 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             return finalize_endpoint_result(std::move(result), now);
         }
 
+        const auto token_classification = classify_address_validation_token(*parsed);
+        if (endpoint_config_.require_address_validation_token &&
+            token_classification == AddressValidationTokenClassification::missing) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
+            // # Servers MAY discard any Initial packet that does not carry the
+            // # expected token.
+            drop_matching_orphan_zero_rtt(*parsed, inbound->route_handle,
+                                          inbound->address_validation_identity, now);
+            return finalize_endpoint_result(std::move(result), now);
+        }
+
         if (endpoint_config_.max_server_connections != 0 &&
             connections_.size() >= endpoint_config_.max_server_connections) {
             auto close_bytes = make_connection_refused_close_packet_bytes(*parsed);
@@ -3942,7 +3953,6 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             return finalize_endpoint_result(std::move(result), now);
         }
 
-        const auto token_classification = classify_address_validation_token(*parsed);
         std::optional<PendingRetryToken> retry_context;
         std::optional<StoredEndpointNewToken> new_token_context;
         if (!parsed->token.empty()) {

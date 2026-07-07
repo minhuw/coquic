@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
-import tarfile
 from hashlib import sha256
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any
 
 from .agents.diagnostics import diagnostics_for_paths
@@ -34,8 +33,7 @@ DEFAULT_MIRROR_SIGNAL_LIMIT = 80
 DEFAULT_MIRROR_FETCH_LIMIT = 40
 PUBLIC_TASK_DATA_PREFIX = "/steward/data/tasks"
 REMOTE_MIRROR_TMP_DIR = "/" + "tmp"
-REMOTE_MIRROR_ARCHIVE_PREFIX = "coquic-steward-mirror."
-REMOTE_MIRROR_ARCHIVE_SUFFIX = ".tar.gz"
+REMOTE_MIRROR_STAGE_PREFIX = "coquic-steward-mirror."
 MIRROR_PATCH_BYTES = 128 * 1024
 MIRROR_TRANSCRIPT_BYTES = 64 * 1024
 MIRROR_LOG_BYTES = 64 * 1024
@@ -263,43 +261,45 @@ class PublicMirrorPublisher:
         remote_target = f"{self.config.remote_user}@{self.config.remote_host}"
         remote_path = self.config.remote_path
         local_dir = local_path.parent
-        tmp_remote_result = self._remote_temp_archive(remote_target, cwd=cwd)
-        if not tmp_remote_result.ok:
-            return tmp_remote_result
-        tmp_remote = tmp_remote_result.stdout.strip()
-        if not tmp_remote:
+        stage_result = self._remote_temp_stage(remote_target, cwd=cwd)
+        if not stage_result.ok:
+            return stage_result
+        stage_dir = stage_result.stdout.strip()
+        if not stage_dir:
             return CommandResult(
-                args=tmp_remote_result.args,
+                args=stage_result.args,
                 cwd=cwd,
                 returncode=1,
-                stdout=tmp_remote_result.stdout,
+                stdout=stage_result.stdout,
                 stderr="remote mktemp did not return a path",
             )
-        if not _safe_remote_archive_path(tmp_remote):
+        if not _safe_remote_stage_path(stage_dir):
             return CommandResult(
-                args=tmp_remote_result.args,
+                args=stage_result.args,
                 cwd=cwd,
                 returncode=1,
-                stdout=tmp_remote_result.stdout,
+                stdout=stage_result.stdout,
                 stderr="remote mktemp returned an unsafe path",
             )
-        with TemporaryDirectory(prefix="steward-mirror-") as temp_dir:
-            archive_path = Path(temp_dir) / "steward-public.tar.gz"
-            with tarfile.open(archive_path, "w:gz") as archive:
-                archive.add(local_dir, arcname="steward")
-            scp_result = run_command(
-                [
-                    "scp",
-                    *self._scp_options(),
-                    str(archive_path),
-                    f"{remote_target}:{tmp_remote}",
-                ],
-                cwd=cwd,
-                timeout=max(10, self.config.connect_timeout_seconds + 10),
-            )
-            if not scp_result.ok:
-                self._remove_remote_file(remote_target, tmp_remote, cwd=cwd)
-                return scp_result
+        rsync_result = run_command(
+            [
+                "rsync",
+                "-az",
+                "--delete",
+                "--partial",
+                "--delay-updates",
+                "--exclude=.~tmp~/",
+                "-e",
+                self._rsync_ssh_command(),
+                f"{local_dir}/",
+                f"{remote_target}:{stage_dir}/steward/",
+            ],
+            cwd=cwd,
+            timeout=self._rsync_timeout_seconds(),
+        )
+        if not rsync_result.ok:
+            self._remove_remote_tree(remote_target, stage_dir, cwd=cwd)
+            return rsync_result
         install_result = run_command(
             [
                 "ssh",
@@ -309,28 +309,27 @@ class PublicMirrorPublisher:
                 "-s",
                 "--",
                 remote_path,
-                tmp_remote,
+                stage_dir,
             ],
             cwd=cwd,
             input_text=(
                 "set -euo pipefail\n"
                 "remote_path=\"$1\"\n"
-                "tmp_remote=\"$2\"\n"
+                "stage_dir=\"$2\"\n"
                 "remote_dir=\"$(dirname \"${remote_path}\")\"\n"
-                "tmp_dir=\"$(mktemp -d /tmp/coquic-steward-public.XXXXXX)\"\n"
-                "trap 'rm -rf \"${tmp_dir}\" \"${tmp_remote}\"' EXIT\n"
-                "tar -xzf \"${tmp_remote}\" -C \"${tmp_dir}\"\n"
+                "trap 'rm -rf \"${stage_dir}\"' EXIT\n"
                 "sudo install -d -m 755 \"${remote_dir}\"\n"
-                "sudo find \"${remote_dir}\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +\n"
-                "sudo cp -a \"${tmp_dir}/steward/.\" \"${remote_dir}/\"\n"
+                "sudo rsync -a --delete --exclude='.~tmp~/' "
+                "\"${stage_dir}/steward/\" \"${remote_dir}/\"\n"
                 "sudo chmod -R a+rX \"${remote_dir}\"\n"
-                "rm -f \"${tmp_remote}\"\n"
             ),
-            timeout=max(10, self.config.connect_timeout_seconds + 10),
+            timeout=self._rsync_timeout_seconds(),
         )
+        if not install_result.ok:
+            self._remove_remote_tree(remote_target, stage_dir, cwd=cwd)
         return install_result
 
-    def _remote_temp_archive(self, remote_target: str, *, cwd: Path) -> CommandResult:
+    def _remote_temp_stage(self, remote_target: str, *, cwd: Path) -> CommandResult:
         return run_command(
             [
                 "ssh",
@@ -342,26 +341,30 @@ class PublicMirrorPublisher:
             cwd=cwd,
             input_text=(
                 "set -eu\n"
-                f"tmp_dir={REMOTE_MIRROR_TMP_DIR!r}\n"
-                "mktemp "
-                f"\"${{tmp_dir}}/{REMOTE_MIRROR_ARCHIVE_PREFIX}"
-                f"XXXXXX{REMOTE_MIRROR_ARCHIVE_SUFFIX}\"\n"
+                "umask 077\n"
+                f"stage_dir=$(mktemp -d {REMOTE_MIRROR_TMP_DIR!r}/"
+                f"{REMOTE_MIRROR_STAGE_PREFIX}XXXXXX)\n"
+                "mkdir -p \"${stage_dir}/steward\"\n"
+                "chmod 700 \"${stage_dir}\"\n"
+                "printf '%s\\n' \"${stage_dir}\"\n"
             ),
             timeout=max(10, self.config.connect_timeout_seconds + 10),
         )
 
-    def _remove_remote_file(
-        self, remote_target: str, remote_file: str, *, cwd: Path
+    def _remove_remote_tree(
+        self, remote_target: str, remote_dir: str, *, cwd: Path
     ) -> None:
+        if not _safe_remote_stage_path(remote_dir):
+            return
         run_command(
             [
                 "ssh",
                 *self._ssh_options(),
                 remote_target,
                 "rm",
-                "-f",
+                "-rf",
                 "--",
-                remote_file,
+                remote_dir,
             ],
             cwd=cwd,
             timeout=max(10, self.config.connect_timeout_seconds + 10),
@@ -388,25 +391,18 @@ class PublicMirrorPublisher:
             options.extend(["-o", f"UserKnownHostsFile={self.config.known_hosts_path}"])
         return options
 
-    def _scp_options(self) -> list[str]:
-        options = self._ssh_options()
-        scp_options = options.copy()
-        port_index = scp_options.index("-p")
-        scp_options[port_index] = "-P"
-        return scp_options
+    def _rsync_ssh_command(self) -> str:
+        return shlex.join(["ssh", *self._ssh_options()])
+
+    def _rsync_timeout_seconds(self) -> int:
+        return max(300, self.config.connect_timeout_seconds * 30)
 
 
-def _safe_remote_archive_path(remote_path: str) -> bool:
-    expected_prefix = (
-        REMOTE_MIRROR_TMP_DIR + "/" + REMOTE_MIRROR_ARCHIVE_PREFIX
-    )
+def _safe_remote_stage_path(remote_path: str) -> bool:
+    expected_prefix = REMOTE_MIRROR_TMP_DIR + "/" + REMOTE_MIRROR_STAGE_PREFIX
     if not remote_path.startswith(expected_prefix):
         return False
-    if not remote_path.endswith(REMOTE_MIRROR_ARCHIVE_SUFFIX):
-        return False
-    random_part = remote_path[
-        len(expected_prefix) : -len(REMOTE_MIRROR_ARCHIVE_SUFFIX)
-    ]
+    random_part = remote_path[len(expected_prefix) :]
     return bool(random_part) and all(
         char.isalnum() or char in "._-" for char in random_part
     )

@@ -2159,6 +2159,125 @@ def test_public_mirror_publish_flag_can_skip_configured_upload(
     assert calls == 0
 
 
+def test_public_mirror_publisher_uploads_with_rsync(
+    config: StewardConfig, monkeypatch
+) -> None:
+    mirror = config.public_mirror.__class__(
+        publish=True,
+        output_path=Path("public/steward/status.json"),
+        remote_user="deploy",
+        remote_host="example.test",
+        remote_port=2222,
+        remote_path="/srv/site/public/steward/status.json",
+        connect_timeout_seconds=7,
+    )
+    publisher = PublicMirrorPublisher(mirror)
+    local_path = config.state_dir / "public" / "steward" / "status.json"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_text("{}", encoding="utf-8")
+    stage_dir = "/tmp/coquic-steward-mirror.ABC123"
+    calls: list[dict[str, object]] = []
+
+    def fake_run_command(
+        args: list[str],
+        cwd: Path,
+        *,
+        check: bool = False,
+        input_text: str | None = None,
+        timeout: float | None = None,
+        env: dict[str, str] | None = None,
+        replace_env: bool = False,
+    ) -> CommandResult:
+        calls.append(
+            {
+                "args": args,
+                "cwd": cwd,
+                "input_text": input_text,
+                "timeout": timeout,
+                "check": check,
+                "env": env,
+                "replace_env": replace_env,
+            }
+        )
+        stdout = (
+            stage_dir + "\n"
+            if args[0] == "ssh" and args[-2:] == ["sh", "-s"]
+            else ""
+        )
+        return CommandResult(args=args, cwd=cwd, returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("coquic_steward.public_mirror.run_command", fake_run_command)
+
+    result = publisher.publish(local_path, cwd=config.repo_root)
+
+    assert result.ok
+    assert [call["args"][0] for call in calls] == ["ssh", "rsync", "ssh"]
+    prepare_args = calls[0]["args"]
+    rsync_args = calls[1]["args"]
+    install_args = calls[2]["args"]
+    assert prepare_args[:3] == ["ssh", "-p", "2222"]
+    assert prepare_args[-2:] == ["sh", "-s"]
+    assert "mktemp -d '/tmp'/coquic-steward-mirror." in (calls[0]["input_text"] or "")
+    assert "chmod 700" in (calls[0]["input_text"] or "")
+    assert "--delete" in rsync_args
+    assert "--delay-updates" in rsync_args
+    assert "--exclude=.~tmp~/" in rsync_args
+    assert f"{local_path.parent}/" in rsync_args
+    assert rsync_args[-1] == f"deploy@example.test:{stage_dir}/steward/"
+    assert "scp" not in [str(part) for call in calls for part in call["args"]]
+    assert install_args[:3] == ["ssh", "-p", "2222"]
+    assert install_args[-2:] == [
+        "/srv/site/public/steward/status.json",
+        stage_dir,
+    ]
+    assert "trap 'rm -rf \"${stage_dir}\"' EXIT" in (calls[2]["input_text"] or "")
+    assert "sudo rsync -a --delete --exclude='.~tmp~/'" in (
+        calls[2]["input_text"] or ""
+    )
+
+
+def test_public_mirror_publisher_cleans_stage_on_rsync_failure(
+    config: StewardConfig, monkeypatch
+) -> None:
+    mirror = config.public_mirror.__class__(
+        publish=True,
+        output_path=Path("public/steward/status.json"),
+        remote_user="deploy",
+        remote_host="example.test",
+        remote_path="/srv/site/public/steward/status.json",
+    )
+    publisher = PublicMirrorPublisher(mirror)
+    local_path = config.state_dir / "public" / "steward" / "status.json"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_text("{}", encoding="utf-8")
+    stage_dir = "/tmp/coquic-steward-mirror.FAIL42"
+    calls: list[list[str]] = []
+
+    def fake_run_command(
+        args: list[str],
+        cwd: Path,
+        *,
+        check: bool = False,
+        input_text: str | None = None,
+        timeout: float | None = None,
+        env: dict[str, str] | None = None,
+        replace_env: bool = False,
+    ) -> CommandResult:
+        calls.append(args)
+        if args[0] == "ssh" and args[-2:] == ["sh", "-s"]:
+            return CommandResult(args=args, cwd=cwd, returncode=0, stdout=stage_dir + "\n", stderr="")
+        if args[0] == "rsync":
+            return CommandResult(args=args, cwd=cwd, returncode=23, stdout="", stderr="rsync failed")
+        return CommandResult(args=args, cwd=cwd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("coquic_steward.public_mirror.run_command", fake_run_command)
+
+    result = publisher.publish(local_path, cwd=config.repo_root)
+
+    assert result.returncode == 23
+    assert calls[-1][-3:] == ["-rf", "--", stage_dir]
+
+
 def test_daemon_public_mirror_writes_on_state_change(
     config: StewardConfig, monkeypatch
 ) -> None:

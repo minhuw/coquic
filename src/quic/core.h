@@ -115,6 +115,8 @@ std::string_view congestion_control_algorithm_name(QuicCongestionControlAlgorith
 std::optional<QuicCongestionControlAlgorithm>
 parse_congestion_control_algorithm(std::string_view value);
 
+using QuicCoreDuration = std::chrono::microseconds;
+
 struct QuicTransportConfig {
     std::uint64_t max_idle_timeout = 0;
     std::uint64_t max_udp_payload_size = 65527;
@@ -129,6 +131,7 @@ struct QuicTransportConfig {
     std::uint64_t active_connection_id_limit = 2;
     bool disable_active_migration = false;
     bool defer_active_migration_path_validation = false;
+    QuicCoreDuration migration_recovery_retention_timeout{0};
     std::optional<PreferredAddress> preferred_address;
     std::uint64_t ack_delay_exponent = 3;
     //= https://www.rfc-editor.org/rfc/rfc9000#section-18.2
@@ -228,7 +231,6 @@ struct QuicCoreConfig {
 
 using QuicCoreClock = std::chrono::steady_clock;
 using QuicCoreTimePoint = QuicCoreClock::time_point;
-using QuicCoreDuration = std::chrono::microseconds;
 using QuicPathId = std::uint64_t;
 using QuicConnectionHandle = std::uint64_t;
 using QuicRouteHandle = std::uint64_t;

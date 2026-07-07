@@ -362,6 +362,7 @@ TEST(CoquicCoreFfiTest, InitializersAndNullQueriesAreStable) {
               static_cast<unsigned>(COQUIC_CONGESTION_CONTROL_NEWRENO));
     EXPECT_NE(transport.max_udp_payload_size, 0u);
     EXPECT_EQ(transport.defer_active_migration_path_validation, 0);
+    EXPECT_EQ(transport.migration_recovery_retention_timeout_us, 0u);
     //= https://www.rfc-editor.org/rfc/rfc9000#section-14.3
     // # Endpoints SHOULD set the initial value of BASE_PLPMTU (Section 5.1 of
     // # [DPLPMTUD]) to be consistent with QUIC's smallest allowed maximum

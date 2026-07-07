@@ -686,6 +686,8 @@ void QuicConnection::apply_path_mtu_update(
 
 void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_locally,
                                            QuicCoreTimePoint now) {
+    const bool recovering_from_no_send_path =
+        migration_recovery_retention_waiting_for_candidate_path();
     if (current_send_path_id_.has_value() && current_send_path_id_ != path_id) {
         previous_path_id_ = current_send_path_id_;
         if (const auto current = paths_.find(*current_send_path_id_); current != paths_.end()) {
@@ -765,6 +767,9 @@ void QuicConnection::start_path_validation(QuicPathId path_id, bool initiated_lo
     // # [QUIC-RECOVERY] and MUST NOT be more aggressive.
     path.validation_deadline = now + path_validation_timeout_period();
     current_send_path_id_ = path_id;
+    if (recovering_from_no_send_path) {
+        previous_path_id_.reset();
+    }
 }
 
 void QuicConnection::defer_path_validation_until_peer_non_probing(QuicPathId path_id) {
@@ -889,15 +894,42 @@ void QuicConnection::respond_to_path_challenge(QuicPathId path_id,
     }
 }
 
-bool QuicConnection::path_validation_timed_out(QuicPathId path_id, QuicCoreTimePoint now) const {
+bool QuicConnection::path_validation_timed_out(QuicPathId path_id, QuicCoreTimePoint now) {
     const auto path = paths_.find(path_id);
     if (path == paths_.end()) {
         return false;
     }
 
     const auto &validation_deadline = path->second.validation_deadline;
-    return path->second.outstanding_challenge.has_value() && validation_deadline.has_value() &&
-           now >= validation_deadline.value();
+    const bool validation_expired = path->second.outstanding_challenge.has_value() &&
+                                    validation_deadline.has_value() &&
+                                    now >= validation_deadline.value();
+    if (migration_recovery_retention_expired(now)) {
+        return true;
+    }
+    if (!validation_expired) {
+        return false;
+    }
+    if (last_validated_path_id_.has_value() ||
+        (!migration_recovery_retention_active() && !migration_recovery_retention_enabled())) {
+        return true;
+    }
+
+    auto &timed_out_path = path->second;
+    timed_out_path.is_current_send_path = false;
+    timed_out_path.challenge_pending = false;
+    timed_out_path.validation_initiated_locally = false;
+    timed_out_path.validation_probe_only = false;
+    timed_out_path.path_mtu_validation_pending = false;
+    timed_out_path.outstanding_challenge_sent_with_expanded_datagram = true;
+    timed_out_path.validation_deadline.reset();
+    timed_out_path.outstanding_challenge.reset();
+    if (!migration_recovery_retention_active()) {
+        enter_migration_recovery_retention(now);
+    } else {
+        previous_path_id_.reset();
+    }
+    return false;
 }
 
 void QuicConnection::complete_path_validation(QuicPathId path_id, PathState &path,
@@ -906,6 +938,7 @@ void QuicConnection::complete_path_validation(QuicPathId path_id, PathState &pat
     path.validation_initiated_locally = false;
     path.path_validation_deferred_until_peer_non_probing = false;
     last_validated_path_id_ = path_id;
+    clear_migration_recovery_retention();
 
     if (!path.outstanding_challenge_sent_with_expanded_datagram) {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-8.2.1
@@ -1308,7 +1341,6 @@ bool QuicConnection::can_issue_local_connection_id() const {
             }
         }
     }
-
     return peer_transport_parameters_->active_connection_id_limit != 0;
 }
 
@@ -1733,6 +1765,7 @@ void QuicConnection::mark_connection_close_frame_sent(const Frame &frame, QuicCo
 }
 
 void QuicConnection::clear_connection_failure_effects() {
+    clear_migration_recovery_retention();
     streams_.clear();
     invalidate_active_stream_lookup_cache();
     active_queued_stream_bytes_ = 0;
@@ -1815,6 +1848,7 @@ void QuicConnection::queue_transport_close_for_error(QuicCoreTimePoint now, cons
         close_mode_ == QuicConnectionCloseMode::draining) {
         return;
     }
+    clear_migration_recovery_retention();
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-11.1
     // # Errors that result in the connection being unusable, such as an
@@ -2025,6 +2059,7 @@ void QuicConnection::mark_failed() {
     if (!pending_terminal_state_.has_value()) {
         pending_terminal_state_ = QuicConnectionTerminalState::failed;
     }
+    clear_migration_recovery_retention();
     status_ = HandshakeStatus::failed;
     clear_connection_failure_effects();
     queue_state_change(QuicCoreStateChange::failed);
@@ -2038,6 +2073,7 @@ void QuicConnection::mark_silent_close() {
     if (!pending_terminal_state_.has_value()) {
         pending_terminal_state_ = QuicConnectionTerminalState::closed;
     }
+    clear_migration_recovery_retention();
     status_ = HandshakeStatus::failed;
     clear_connection_failure_effects();
 }
@@ -2845,13 +2881,12 @@ bool QuicConnection::has_pending_application_send() const {
         }
     }
 
-    for (const auto &[path_id, path] : paths_) {
-        static_cast<void>(path_id);
-        if (path.pending_response.has_value() || path.challenge_pending) {
-            if (path.mtu.viable) {
-                return true;
-            }
-        }
+    if (has_pending_path_validation_send()) {
+        return true;
+    }
+
+    if (migration_recovery_retention_active()) {
+        return false;
     }
 
     if (pending_application_close_.has_value()) {
@@ -2929,6 +2964,13 @@ bool QuicConnection::has_pending_congestion_controlled_send() const {
         return false;
     }
 
+    if (has_pending_path_validation_send()) {
+        return true;
+    }
+    if (migration_recovery_retention_active()) {
+        return false;
+    }
+
     return has_pending_application_send() || application_space_.pending_probe_packet.has_value() ||
            !pending_new_connection_id_frames_.empty() ||
            !pending_retire_connection_id_frames_.empty() ||
@@ -2947,6 +2989,13 @@ bool QuicConnection::has_pending_fresh_application_stream_send() const {
 }
 
 bool QuicConnection::has_pending_application_control_send(bool application_ack_due) const {
+    if (has_pending_path_validation_send()) {
+        return true;
+    }
+    if (migration_recovery_retention_active()) {
+        return false;
+    }
+
     if (application_ack_due || application_space_.pending_probe_packet.has_value() ||
         application_space_.send_crypto.has_pending_data() ||
         pending_application_close_.has_value() || !pending_new_token_frames_.empty() ||
@@ -2962,14 +3011,17 @@ bool QuicConnection::has_pending_application_control_send(bool application_ack_d
         return true;
     }
 
+    return streams_have_pending_application_control_send();
+}
+
+bool QuicConnection::has_pending_path_validation_send() const {
     for (const auto &[path_id, path] : paths_) {
         static_cast<void>(path_id);
         if ((path.pending_response.has_value() || path.challenge_pending) && path.mtu.viable) {
             return true;
         }
     }
-
-    return streams_have_pending_application_control_send();
+    return false;
 }
 
 bool QuicConnection::streams_have_pending_application_control_send() const {
@@ -3525,7 +3577,10 @@ void QuicConnection::note_inbound_application_packet_for_path(QuicPathId path_id
 
 void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_locally,
                                           QuicCoreTimePoint now) {
-    if (current_send_path_id_.has_value() && current_send_path_id_ == path_id) {
+    const bool recovering_from_no_send_path =
+        migration_recovery_retention_waiting_for_candidate_path();
+    if (!recovering_from_no_send_path && current_send_path_id_.has_value() &&
+        current_send_path_id_ == path_id) {
         return;
     }
 
@@ -3580,7 +3635,8 @@ void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_loc
     }
     const auto old_path_id = current_send_path_id_;
     start_path_validation(path_id, initiated_locally, now);
-    if (!initiated_locally && old_path_id.has_value() && *old_path_id != path_id) {
+    if (!recovering_from_no_send_path && !initiated_locally && old_path_id.has_value() &&
+        *old_path_id != path_id) {
         start_path_validation_probe(*old_path_id, /*initiated_locally=*/false, now);
     }
 }

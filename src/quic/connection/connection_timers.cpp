@@ -13,7 +13,8 @@ std::optional<QuicCoreTimePoint> QuicConnection::next_wakeup() const {
         return close_deadline_;
     }
 
-    return earliest_of({non_pacing_wakeup_deadline(), pacing_deadline()});
+    return earliest_of(
+        {non_pacing_wakeup_deadline(), pacing_deadline(), migration_recovery_retention_deadline()});
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::non_pacing_wakeup_deadline() const {
@@ -25,10 +26,10 @@ std::optional<QuicCoreTimePoint> QuicConnection::non_pacing_wakeup_deadline() co
         close_mode_ == QuicConnectionCloseMode::draining) {
         return close_deadline_;
     }
-    return earliest_of({loss_deadline(), pto_deadline(), ack_deadline(), path_validation_deadline(),
-                        pmtud_deadline(), zero_rtt_discard_deadline(),
-                        previous_application_read_secret_discard_deadline(),
-                        idle_timeout_deadline()});
+    return earliest_of(
+        {loss_deadline(), pto_deadline(), ack_deadline(), path_validation_deadline(),
+         pmtud_deadline(), zero_rtt_discard_deadline(), migration_recovery_retention_deadline(),
+         previous_application_read_secret_discard_deadline(), idle_timeout_deadline()});
 }
 
 bool QuicConnection::non_pacing_wakeup_due(QuicCoreTimePoint now) const {
@@ -106,7 +107,8 @@ std::optional<QuicCoreTimePoint> QuicConnection::loss_deadline() const {
 
     return earliest_of({packet_space_loss_deadline(initial_space_),
                         packet_space_loss_deadline(handshake_space_),
-                        packet_space_loss_deadline(application_space_), pmtu_probe_deadline()});
+                        packet_space_loss_deadline(application_space_), pmtu_probe_deadline(),
+                        migration_recovery_retention_deadline()});
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::pto_deadline() const {
@@ -297,6 +299,11 @@ std::optional<QuicCoreTimePoint> QuicConnection::pmtud_deadline() const {
 }
 
 void QuicConnection::detect_lost_packets(QuicCoreTimePoint now) {
+    if (migration_recovery_retention_expired(now)) {
+        mark_silent_close();
+        return;
+    }
+
     if (!initial_packet_space_discarded_) {
         detect_lost_packets(initial_space_, now);
     }
@@ -1140,6 +1147,58 @@ void QuicConnection::maybe_discard_previous_application_read_secret(QuicCoreTime
     previous_application_read_secret_.reset();
     previous_application_read_secret_discard_deadline_.reset();
     static_cast<void>(ensure_next_application_read_secret());
+}
+
+std::optional<QuicCoreTimePoint> QuicConnection::migration_recovery_retention_deadline() const {
+    if (status_ == HandshakeStatus::failed || close_state_active()) {
+        return std::nullopt;
+    }
+    return migration_recovery_retention_deadline_;
+}
+
+bool QuicConnection::migration_recovery_retention_active() const {
+    return migration_recovery_retention_deadline().has_value();
+}
+
+bool QuicConnection::migration_recovery_retention_expired(QuicCoreTimePoint now) const {
+    const auto deadline = migration_recovery_retention_deadline();
+    return deadline.has_value() && now >= *deadline;
+}
+
+bool QuicConnection::migration_recovery_retention_enabled() const {
+    return config_.transport.migration_recovery_retention_timeout > QuicCoreDuration{0};
+}
+
+bool QuicConnection::migration_recovery_retention_waiting_for_candidate_path() const {
+    if (!migration_recovery_retention_active()) {
+        return false;
+    }
+    if (!current_send_path_id_.has_value()) {
+        return true;
+    }
+    const auto path = paths_.find(*current_send_path_id_);
+    return path == paths_.end() || !path->second.is_current_send_path;
+}
+
+void QuicConnection::enter_migration_recovery_retention(QuicCoreTimePoint now) {
+    if (!migration_recovery_retention_enabled()) {
+        return;
+    }
+    // # An endpoint capable of connection migration MAY wait for a new path to
+    // # become available before discarding connection state.
+    migration_recovery_retention_deadline_ =
+        now + config_.transport.migration_recovery_retention_timeout;
+    if (current_send_path_id_.has_value()) {
+        if (auto current = paths_.find(*current_send_path_id_); current != paths_.end()) {
+            current->second.is_current_send_path = false;
+        }
+    }
+    last_validated_path_id_.reset();
+    previous_path_id_.reset();
+}
+
+void QuicConnection::clear_migration_recovery_retention() {
+    migration_recovery_retention_deadline_.reset();
 }
 
 void QuicConnection::synchronize_recovery_rtt_state() {

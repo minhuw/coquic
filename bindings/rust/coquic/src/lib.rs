@@ -361,6 +361,7 @@ pub struct TransportConfig {
     pub active_connection_id_limit: u64,
     pub disable_active_migration: bool,
     pub defer_active_migration_path_validation: bool,
+    pub migration_recovery_retention_timeout_us: u64,
     pub ack_delay_exponent: u64,
     pub max_ack_delay: u64,
     pub ack_eliciting_threshold: u64,
@@ -391,6 +392,7 @@ impl TransportConfig {
             active_connection_id_limit: raw.active_connection_id_limit,
             disable_active_migration: raw.disable_active_migration != 0,
             defer_active_migration_path_validation: raw.defer_active_migration_path_validation != 0,
+            migration_recovery_retention_timeout_us: raw.migration_recovery_retention_timeout_us,
             ack_delay_exponent: raw.ack_delay_exponent,
             max_ack_delay: raw.max_ack_delay,
             ack_eliciting_threshold: raw.ack_eliciting_threshold,
@@ -422,6 +424,7 @@ impl TransportConfig {
             disable_active_migration: self.disable_active_migration as u8,
             defer_active_migration_path_validation: self.defer_active_migration_path_validation
                 as u8,
+            migration_recovery_retention_timeout_us: self.migration_recovery_retention_timeout_us,
             ack_delay_exponent: self.ack_delay_exponent,
             max_ack_delay: self.max_ack_delay,
             ack_eliciting_threshold: self.ack_eliciting_threshold,

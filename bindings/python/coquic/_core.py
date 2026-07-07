@@ -144,6 +144,7 @@ class TransportConfig:
     active_connection_id_limit: int
     disable_active_migration: bool
     defer_active_migration_path_validation: bool
+    migration_recovery_retention_timeout_us: int
     ack_delay_exponent: int
     max_ack_delay: int
     ack_eliciting_threshold: int
@@ -181,6 +182,9 @@ class TransportConfig:
             defer_active_migration_path_validation=bool(
                 raw.defer_active_migration_path_validation
             ),
+            migration_recovery_retention_timeout_us=(
+                raw.migration_recovery_retention_timeout_us
+            ),
             ack_delay_exponent=raw.ack_delay_exponent,
             max_ack_delay=raw.max_ack_delay,
             ack_eliciting_threshold=raw.ack_eliciting_threshold,
@@ -211,6 +215,9 @@ class TransportConfig:
             disable_active_migration=int(self.disable_active_migration),
             defer_active_migration_path_validation=int(
                 self.defer_active_migration_path_validation
+            ),
+            migration_recovery_retention_timeout_us=(
+                self.migration_recovery_retention_timeout_us
             ),
             ack_delay_exponent=self.ack_delay_exponent,
             max_ack_delay=self.max_ack_delay,

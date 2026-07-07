@@ -2237,7 +2237,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
     auto application_crypto_ranges = std::vector<ByteRange>{};
     auto &application_crypto_frames = application_crypto_frame_scratch_;
     application_crypto_frames.clear();
-    if (application_space_.write_secret.has_value()) {
+    if (application_space_.write_secret.has_value() && !migration_recovery_retention_active()) {
         application_crypto_ranges =
             application_space_.send_crypto.take_ranges(std::numeric_limits<std::size_t>::max());
     }
@@ -2406,6 +2406,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             return reserved_packet_number;
         };
         const auto try_send_simple_application_ack_only = [&]() -> std::optional<DatagramBuffer> {
+            if (migration_recovery_retention_active()) {
+                return std::nullopt;
+            }
             if (!can_try_simple_application_ack_only(SimpleApplicationAckOnlyEligibility{
                     .application_ack_due_now = application_ack_due_now,
                     .has_base_ack_frame = base_ack_frame.has_value(),
@@ -3480,7 +3483,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             // # An endpoint MAY send data to an unvalidated peer address, but it
             // # MUST protect against potential attacks as described in Sections
             // # 9.3.1 and 9.3.2.
-            return !handshake_confirmed_ || validation_path->second.preferred_address_path;
+            return !handshake_confirmed_ || validation_path->second.preferred_address_path ||
+                   migration_recovery_retention_active();
         };
         const auto validation_only_send_is_preferred_address =
             [&](std::optional<QuicPathId> path_id) {
@@ -4088,7 +4092,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             }
             clear_probe_packet_after_send(application_space_.pending_probe_packet);
         } else {
-            const auto include_handshake_done =
+            const auto pending_handshake_done =
                 !use_zero_rtt_packet_protection && config_.role == EndpointRole::server &&
                 handshake_done_state_ == StreamControlFrameState::pending;
             //= https://www.rfc-editor.org/rfc/rfc9001#section-4.1.2
@@ -4106,7 +4110,12 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             }();
             const bool suppress_ack_for_preferred_address_validation =
                 validation_only_send_is_preferred_address(selected_validation_only_path_id);
-            auto application_close_frame = pending_application_close_;
+            const bool recovery_validation_only_send =
+                migration_recovery_retention_active() && has_pending_path_validation_frame();
+            const bool include_handshake_done =
+                pending_handshake_done && !recovery_validation_only_send;
+            auto application_close_frame =
+                recovery_validation_only_send ? std::nullopt : pending_application_close_;
             bool send_application_close_only = application_close_frame.has_value();
             if (application_close_frame.has_value() && !can_send_one_rtt_packets) {
                 return {};
@@ -4223,27 +4232,30 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             auto force_ack_due = application_space_.force_ack_send & base_ack_frame.has_value();
             auto ack_only_mode =
                 (force_ack_due | validation_only_send) & !send_application_close_only;
-            auto defer_flow_credit = validation_only_send | send_application_close_only;
+            auto defer_flow_credit =
+                validation_only_send | send_application_close_only | recovery_validation_only_send;
+            auto omit_recovery_control = ack_only_mode | recovery_validation_only_send;
             auto application_max_data_frame = defer_flow_credit
                                                   ? std::optional<MaxDataFrame>{}
                                                   : connection_flow_control_.take_max_data_frame();
-            auto data_blocked_frame = (ack_only_mode || send_application_close_only)
+            auto data_blocked_frame = (omit_recovery_control || send_application_close_only)
                                           ? std::optional<DataBlockedFrame>{}
                                           : connection_flow_control_.take_data_blocked_frame();
             auto stream_control_frames = take_pending_stream_control_frames(
-                streams_, defer_flow_credit, ack_only_mode || send_application_close_only);
+                streams_, defer_flow_credit, omit_recovery_control || send_application_close_only);
             auto &max_stream_data_frames = stream_control_frames.max_stream_data;
             auto max_streams_frames = send_application_close_only
                                           ? std::vector<MaxStreamsFrame>{}
-                                          : take_max_streams_frames(ack_only_mode);
-            auto streams_blocked_frames = (ack_only_mode || send_application_close_only)
+                                          : take_max_streams_frames(omit_recovery_control);
+            auto streams_blocked_frames = (omit_recovery_control || send_application_close_only)
                                               ? std::vector<StreamsBlockedFrame>{}
                                               : stream_open_limits_.take_streams_blocked_frames();
             auto new_token_frames = send_application_close_only
                                         ? std::vector<NewTokenFrame>{}
-                                        : take_new_token_frames(ack_only_mode);
-            auto new_connection_id_frames = take_new_connection_id_frames(ack_only_mode);
-            auto retire_connection_id_frames = take_retire_connection_id_frames(ack_only_mode);
+                                        : take_new_token_frames(omit_recovery_control);
+            auto new_connection_id_frames = take_new_connection_id_frames(omit_recovery_control);
+            auto retire_connection_id_frames =
+                take_retire_connection_id_frames(omit_recovery_control);
             //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.3
             // # An endpoint that receives a PATH_CHALLENGE on an active path
             // # SHOULD send a non-probing packet in response.
@@ -4258,7 +4270,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             auto &reset_stream_frames = stream_control_frames.reset_stream;
             auto &stop_sending_frames = stream_control_frames.stop_sending;
             auto &stream_data_blocked_frames = stream_control_frames.stream_data_blocked;
-            if (application_probing_response_only) {
+            if (application_probing_response_only || recovery_validation_only_send) {
                 application_max_data_frame = std::nullopt;
                 data_blocked_frame = std::nullopt;
                 max_stream_data_frames.clear();
@@ -4268,6 +4280,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 stop_sending_frames.clear();
                 stream_data_blocked_frames.clear();
                 new_token_frames.clear();
+                new_connection_id_frames.clear();
                 retire_connection_id_frames.clear();
             }
             auto congestion_limited_datagram_size = [&]() {
@@ -4307,7 +4320,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             std::optional<std::size_t> selected_datagram_queue_index;
             bool can_select_datagram_frame =
                 !ack_only_mode && !send_application_close_only && !validation_only_send &&
-                !application_probing_response_only && !pending_datagram_send_queue_.empty();
+                !recovery_validation_only_send && !application_probing_response_only &&
+                !pending_datagram_send_queue_.empty();
             if (can_select_datagram_frame) {
                 for (std::size_t index = 0; index < pending_datagram_send_queue_.size(); ++index) {
                     const auto &pending_datagram = pending_datagram_send_queue_[index];
@@ -4359,7 +4373,8 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
             } application_stream_scratch_guard{stream_fragments, active_stream_iterator_scratch_};
             std::optional<OutboundAckHeader> selected_ack_frame;
             if (!send_application_close_only && !suppress_ack_for_preferred_address_validation &&
-                !application_probing_response_only && base_ack_frame.has_value()) {
+                !recovery_validation_only_send && !application_probing_response_only &&
+                base_ack_frame.has_value()) {
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-13.2
                 // # When sending a packet for any reason, an endpoint SHOULD attempt to
                 // # include an ACK frame if one has not been sent recently.
@@ -4448,7 +4463,7 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 ++send_profile_counters().application_select_pacing_blocked;
             }
             const bool select_application_stream_data =
-                !ack_only_mode && !send_application_close_only &&
+                !ack_only_mode && !send_application_close_only && !recovery_validation_only_send &&
                 !application_probing_response_only && application_stream_pacing_ready;
 
             if (select_application_stream_data) {

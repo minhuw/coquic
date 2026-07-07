@@ -2903,7 +2903,9 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
         // # received on the old IP address.
         return CodecResult<bool>::success(false);
     }
-    if (path_id != current_send_path_id_.value_or(path_id) && !is_probing_only(frames) &&
+    if ((migration_recovery_retention_waiting_for_candidate_path() ||
+         path_id != current_send_path_id_.value_or(path_id)) &&
+        !is_probing_only(frames) &&
         !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
         // # If the recipient permits the migration, it MUST send subsequent
@@ -3439,7 +3441,9 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
         // # received on the old IP address.
         return CodecResult<bool>::success(false);
     }
-    if (path_id != current_send_path_id_.value_or(path_id) && !probing_only &&
+    if ((migration_recovery_retention_waiting_for_candidate_path() ||
+         path_id != current_send_path_id_.value_or(path_id)) &&
+        !probing_only &&
         !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
         const auto previous_send_path_id = current_send_path_id_;
         maybe_switch_to_path(path_id, /*initiated_locally=*/false, now);
@@ -4124,7 +4128,8 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_stream_pa
         // # received on the old IP address.
         return CodecResult<bool>::success(false);
     }
-    if (last_inbound_path_id_ != current_send_path_id_.value_or(last_inbound_path_id_) &&
+    if ((migration_recovery_retention_waiting_for_candidate_path() ||
+         last_inbound_path_id_ != current_send_path_id_.value_or(last_inbound_path_id_)) &&
         !should_keep_current_send_path_for_inbound_non_probing(last_inbound_path_id_,
                                                                packet_number)) {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
@@ -4198,7 +4203,8 @@ CodecResult<bool> QuicConnection::process_inbound_received_application_ack_only(
         // # received on the old IP address.
         return CodecResult<bool>::success(false);
     }
-    if (path_id != current_send_path_id_.value_or(path_id) &&
+    if ((migration_recovery_retention_waiting_for_candidate_path() ||
+         path_id != current_send_path_id_.value_or(path_id)) &&
         !should_keep_current_send_path_for_inbound_non_probing(path_id, packet_number)) {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3
         // # If the recipient permits the migration, it MUST send subsequent

@@ -225,6 +225,7 @@ quic::QuicTransportConfig to_internal(const TransportConfig &config) {
         .active_connection_id_limit = config.active_connection_id_limit,
         .disable_active_migration = config.disable_active_migration,
         .defer_active_migration_path_validation = config.defer_active_migration_path_validation,
+        .migration_recovery_retention_timeout = config.migration_recovery_retention_timeout,
         .preferred_address = std::nullopt,
         .ack_delay_exponent = config.ack_delay_exponent,
         .max_ack_delay = config.max_ack_delay,

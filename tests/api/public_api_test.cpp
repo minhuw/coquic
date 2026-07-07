@@ -17,6 +17,7 @@
 #endif
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -149,6 +150,7 @@ TEST(CoquicPublicApiTest, CoreEndpointCoversServerAndTransportOptions) {
             .transport =
                 {
                     .defer_active_migration_path_validation = true,
+                    .migration_recovery_retention_timeout = std::chrono::milliseconds(125),
                     .congestion_control = algorithm,
                     .enable_latency_spin_bit = true,
                     .grease_reserved_versions = true,

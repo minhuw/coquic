@@ -331,6 +331,7 @@ type TransportConfig struct {
 	ActiveConnectionIDLimit        uint64
 	DisableActiveMigration         bool
 	DeferActiveMigrationValidation bool
+	MigrationRecoveryRetentionUs   uint64
 	AckDelayExponent               uint64
 	MaxAckDelay                    uint64
 	AckElicitingThreshold          uint64
@@ -366,6 +367,7 @@ func transportConfigFromRaw(raw C.coquic_transport_config_t) TransportConfig {
 		ActiveConnectionIDLimit:        uint64(raw.active_connection_id_limit),
 		DisableActiveMigration:         raw.disable_active_migration != 0,
 		DeferActiveMigrationValidation: raw.defer_active_migration_path_validation != 0,
+		MigrationRecoveryRetentionUs:   uint64(raw.migration_recovery_retention_timeout_us),
 		AckDelayExponent:               uint64(raw.ack_delay_exponent),
 		MaxAckDelay:                    uint64(raw.max_ack_delay),
 		AckElicitingThreshold:          uint64(raw.ack_eliciting_threshold),
@@ -396,23 +398,25 @@ func (c TransportConfig) raw() C.coquic_transport_config_t {
 		active_connection_id_limit:             C.uint64_t(c.ActiveConnectionIDLimit),
 		disable_active_migration:               cBool(c.DisableActiveMigration),
 		defer_active_migration_path_validation: cBool(c.DeferActiveMigrationValidation),
-		ack_delay_exponent:                     C.uint64_t(c.AckDelayExponent),
-		max_ack_delay:                          C.uint64_t(c.MaxAckDelay),
-		ack_eliciting_threshold:                C.uint64_t(c.AckElicitingThreshold),
-		initial_max_data:                       C.uint64_t(c.InitialMaxData),
-		initial_max_stream_data_bidi_local:     C.uint64_t(c.InitialMaxStreamDataBidiLocal),
-		initial_max_stream_data_bidi_remote:    C.uint64_t(c.InitialMaxStreamDataBidiRemote),
-		initial_max_stream_data_uni:            C.uint64_t(c.InitialMaxStreamDataUni),
-		initial_max_streams_bidi:               C.uint64_t(c.InitialMaxStreamsBidi),
-		initial_max_streams_uni:                C.uint64_t(c.InitialMaxStreamsUni),
-		max_datagram_frame_size:                C.uint64_t(c.MaxDatagramFrameSize),
-		congestion_control:                     C.coquic_congestion_control_t(c.CongestionControl),
-		enable_hystart_plus_plus:               cBool(c.EnableHyStartPlusPlus),
-		send_stream_fairness:                   cBool(c.SendStreamFairness),
-		enable_latency_spin_bit:                cBool(c.EnableLatencySpinBit),
-		grease_reserved_versions:               cBool(c.GreaseReservedVersions),
-		grease_quic_bit:                        cBool(c.GreaseQUICBit),
-		enable_optimistic_ack_mitigation:       cBool(c.EnableOptimisticAckMitigation),
+		migration_recovery_retention_timeout_us: C.coquic_time_us_t(
+			c.MigrationRecoveryRetentionUs),
+		ack_delay_exponent:                  C.uint64_t(c.AckDelayExponent),
+		max_ack_delay:                       C.uint64_t(c.MaxAckDelay),
+		ack_eliciting_threshold:             C.uint64_t(c.AckElicitingThreshold),
+		initial_max_data:                    C.uint64_t(c.InitialMaxData),
+		initial_max_stream_data_bidi_local:  C.uint64_t(c.InitialMaxStreamDataBidiLocal),
+		initial_max_stream_data_bidi_remote: C.uint64_t(c.InitialMaxStreamDataBidiRemote),
+		initial_max_stream_data_uni:         C.uint64_t(c.InitialMaxStreamDataUni),
+		initial_max_streams_bidi:            C.uint64_t(c.InitialMaxStreamsBidi),
+		initial_max_streams_uni:             C.uint64_t(c.InitialMaxStreamsUni),
+		max_datagram_frame_size:             C.uint64_t(c.MaxDatagramFrameSize),
+		congestion_control:                  C.coquic_congestion_control_t(c.CongestionControl),
+		enable_hystart_plus_plus:            cBool(c.EnableHyStartPlusPlus),
+		send_stream_fairness:                cBool(c.SendStreamFairness),
+		enable_latency_spin_bit:             cBool(c.EnableLatencySpinBit),
+		grease_reserved_versions:            cBool(c.GreaseReservedVersions),
+		grease_quic_bit:                     cBool(c.GreaseQUICBit),
+		enable_optimistic_ack_mitigation:    cBool(c.EnableOptimisticAckMitigation),
 	}
 }
 

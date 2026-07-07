@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
@@ -2707,6 +2708,496 @@ TEST(QuicCoreTest, MigrationHelpersCoverAdditionalPrivateBranches) {
 
         EXPECT_EQ(path.anti_amplification_sent_bytes, std::numeric_limits<std::uint64_t>::max());
     }
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionIsDisabledByDefault) {
+    auto connection = make_connected_client_connection();
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &path = connection.ensure_path_state(11);
+    path.outstanding_challenge = std::array<std::byte, 8>{};
+    path.validation_deadline = coquic::quic::test::test_time(9);
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.3.2
+    // # If an endpoint has no state about the last validated peer address, it
+    // # MUST close the connection silently by discarding all connection state.
+    EXPECT_TRUE(connection.has_failed());
+    EXPECT_EQ(optional_value_or_terminate(connection.pending_terminal_state_),
+              coquic::quic::QuicConnectionTerminalState::closed);
+    EXPECT_FALSE(connection.migration_recovery_retention_active());
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionEntersBoundedNoSendPathState) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.migration_recovery_retention_timeout =
+        std::chrono::milliseconds(50);
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &path = connection.ensure_path_state(11);
+    path.outstanding_challenge = std::array<std::byte, 8>{};
+    path.validation_deadline = coquic::quic::test::test_time(9);
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+
+    ASSERT_FALSE(connection.has_failed());
+    EXPECT_TRUE(connection.migration_recovery_retention_active());
+    EXPECT_EQ(optional_value_or_terminate(connection.next_wakeup()),
+              coquic::quic::test::test_time(60));
+    EXPECT_TRUE(connection.migration_recovery_retention_waiting_for_candidate_path());
+    EXPECT_FALSE(connection.last_validated_path_id_.has_value());
+    EXPECT_FALSE(connection.paths_.at(11).is_current_send_path);
+    EXPECT_FALSE(connection.paths_.at(11).challenge_pending);
+    EXPECT_FALSE(connection.paths_.at(11).outstanding_challenge.has_value());
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionSuppressesApplicationSendsUntilNewPathArrives) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.migration_recovery_retention_timeout =
+        std::chrono::milliseconds(50);
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &path = connection.ensure_path_state(11);
+    path.outstanding_challenge = std::array<std::byte, 8>{};
+    path.validation_deadline = coquic::quic::test::test_time(9);
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("held"), false)
+            .has_value());
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+
+    EXPECT_TRUE(connection.migration_recovery_retention_active());
+    EXPECT_FALSE(connection.has_sendable_datagram(coquic::quic::test::test_time(11)));
+    auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(11));
+    EXPECT_TRUE(datagram.empty());
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionRecoversWhenNewPathValidates) {
+    auto connection = make_connected_server_connection();
+    connection.config_.transport.migration_recovery_retention_timeout =
+        std::chrono::milliseconds(100);
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &lost_path = connection.ensure_path_state(11);
+    lost_path.outstanding_challenge = std::array<std::byte, 8>{};
+    lost_path.validation_deadline = coquic::quic::test::test_time(9);
+    ASSERT_TRUE(
+        connection
+            .queue_stream_send(0, coquic::quic::test::bytes_from_string("after-validate"), false)
+            .has_value());
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+    ASSERT_TRUE(connection.migration_recovery_retention_active());
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 23, {coquic::quic::PingFrame{}}));
+    ASSERT_TRUE(connection.current_send_path_id_.has_value());
+    EXPECT_EQ(optional_value_or_terminate(connection.current_send_path_id_), 23u);
+    ASSERT_TRUE(connection.paths_.contains(23));
+    auto &candidate = connection.paths_.at(23);
+    EXPECT_TRUE(candidate.challenge_pending);
+    EXPECT_TRUE(candidate.outstanding_challenge.has_value());
+    candidate.anti_amplification_received_bytes = 4000;
+    connection.application_space_.received_packets.record_received(
+        /*packet_number=*/77, /*ack_eliciting=*/true, coquic::quic::test::test_time(10));
+
+    auto challenge_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(11));
+    ASSERT_FALSE(challenge_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 23u);
+    auto challenge_packets = decode_sender_datagram(connection, challenge_datagram);
+    ASSERT_EQ(challenge_packets.size(), 1u);
+    const auto *challenge_packet =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&challenge_packets.front());
+    ASSERT_NE(challenge_packet, nullptr);
+    EXPECT_TRUE(std::ranges::any_of(challenge_packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+    }));
+    EXPECT_TRUE(connection.is_probing_only(challenge_packet->frames));
+    EXPECT_FALSE(datagram_has_application_ack(connection, challenge_datagram));
+    EXPECT_FALSE(datagram_has_application_stream(connection, challenge_datagram));
+
+    const auto challenge = optional_value_or_terminate(candidate.outstanding_challenge);
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 23, {coquic::quic::PathResponseFrame{.data = challenge}}));
+
+    EXPECT_FALSE(connection.migration_recovery_retention_active());
+    EXPECT_TRUE(connection.paths_.at(23).validated);
+    EXPECT_EQ(connection.last_validated_path_id_, 23u);
+    EXPECT_EQ(connection.current_send_path_id_, 23u);
+
+    auto stream_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(12));
+    ASSERT_FALSE(stream_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 23u);
+    EXPECT_TRUE(datagram_has_application_stream(connection, stream_datagram));
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionRespondsToProbingNewPathChallenge) {
+    auto connection = make_connected_server_connection();
+    connection.config_.transport.migration_recovery_retention_timeout =
+        std::chrono::milliseconds(100);
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &lost_path = connection.ensure_path_state(11);
+    lost_path.outstanding_challenge = std::array<std::byte, 8>{};
+    lost_path.validation_deadline = coquic::quic::test::test_time(9);
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("held"), false)
+            .has_value());
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+    ASSERT_TRUE(connection.migration_recovery_retention_active());
+
+    const auto challenge_data = std::array<std::byte, 8>{
+        std::byte{0x20}, std::byte{0x21}, std::byte{0x22}, std::byte{0x23},
+        std::byte{0x24}, std::byte{0x25}, std::byte{0x26}, std::byte{0x27},
+    };
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 23, {coquic::quic::PathChallengeFrame{.data = challenge_data}}));
+    ASSERT_TRUE(connection.paths_.contains(23));
+    auto &candidate = connection.paths_.at(23);
+    ASSERT_TRUE(candidate.pending_response.has_value());
+    candidate.anti_amplification_received_bytes = 4000;
+
+    auto response_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(11));
+    ASSERT_FALSE(response_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 23u);
+
+    auto response_packets = decode_sender_datagram(connection, response_datagram);
+    ASSERT_EQ(response_packets.size(), 1u);
+    const auto *response_packet =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&response_packets.front());
+    ASSERT_NE(response_packet, nullptr);
+    EXPECT_TRUE(connection.is_probing_only(response_packet->frames));
+    EXPECT_TRUE(std::ranges::any_of(response_packet->frames, [&](const auto &frame) {
+        const auto *path_response = std::get_if<coquic::quic::PathResponseFrame>(&frame);
+        return path_response != nullptr &&
+               std::equal(path_response->data.begin(), path_response->data.end(),
+                          challenge_data.begin(), challenge_data.end());
+    }));
+    EXPECT_FALSE(datagram_has_application_stream(connection, response_datagram));
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionValidationSendOmitsQueuedControlFrames) {
+    auto connection = make_connected_server_connection();
+    connection.config_.transport.migration_recovery_retention_timeout =
+        std::chrono::milliseconds(100);
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &lost_path = connection.ensure_path_state(11);
+    lost_path.outstanding_challenge = std::array<std::byte, 8>{};
+    lost_path.validation_deadline = coquic::quic::test::test_time(9);
+    connection.handshake_done_state_ = coquic::quic::StreamControlFrameState::pending;
+    connection.pending_new_connection_id_frames_.push_back(coquic::quic::NewConnectionIdFrame{
+        .sequence_number = 99,
+        .retire_prior_to = 0,
+        .connection_id = bytes_from_ints({0x99, 0x9a, 0x9b, 0x9c}),
+    });
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+    ASSERT_TRUE(connection.migration_recovery_retention_active());
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 23, {coquic::quic::PingFrame{}}));
+    ASSERT_TRUE(connection.paths_.contains(23));
+    auto &candidate = connection.paths_.at(23);
+    ASSERT_TRUE(candidate.challenge_pending);
+    ASSERT_TRUE(candidate.outstanding_challenge.has_value());
+    candidate.anti_amplification_received_bytes = 4000;
+
+    auto challenge_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(11));
+    ASSERT_FALSE(challenge_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 23u);
+    EXPECT_EQ(connection.handshake_done_state_, coquic::quic::StreamControlFrameState::pending);
+    EXPECT_EQ(connection.pending_new_connection_id_frames_.size(), 1u);
+
+    auto packets = decode_sender_datagram(connection, challenge_datagram);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *one_rtt = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets.front());
+    ASSERT_NE(one_rtt, nullptr);
+    EXPECT_TRUE(connection.is_probing_only(one_rtt->frames));
+    EXPECT_FALSE(std::ranges::any_of(one_rtt->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::NewConnectionIdFrame>(frame);
+    }));
+    EXPECT_FALSE(std::ranges::any_of(one_rtt->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::HandshakeDoneFrame>(frame);
+    }));
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionValidationSendDefersReceiveCreditFrames) {
+    auto connection = make_connected_server_connection();
+    connection.config_.transport.migration_recovery_retention_timeout =
+        std::chrono::milliseconds(100);
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &lost_path = connection.ensure_path_state(11);
+    lost_path.outstanding_challenge = std::array<std::byte, 8>{};
+    lost_path.validation_deadline = coquic::quic::test::test_time(9);
+    connection.connection_flow_control_.queue_max_data(
+        connection.connection_flow_control_.advertised_max_data + 1024);
+    auto &stream =
+        connection.streams_
+            .emplace(0, coquic::quic::make_implicit_stream_state(0, connection.config_.role))
+            .first->second;
+    connection.initialize_stream_flow_control(stream);
+    stream.queue_max_stream_data(stream.flow_control.advertised_max_stream_data + 1024);
+    connection.invalidate_stream_sendability_cache();
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+    ASSERT_TRUE(connection.migration_recovery_retention_active());
+
+    const auto challenge_data = std::array<std::byte, 8>{
+        std::byte{0x30}, std::byte{0x31}, std::byte{0x32}, std::byte{0x33},
+        std::byte{0x34}, std::byte{0x35}, std::byte{0x36}, std::byte{0x37},
+    };
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 23, {coquic::quic::PathChallengeFrame{.data = challenge_data}}));
+    ASSERT_TRUE(connection.paths_.contains(23));
+    connection.paths_.at(23).anti_amplification_received_bytes = 4000;
+
+    const auto response_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(11));
+    ASSERT_FALSE(response_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 23u);
+    auto response_packets = decode_sender_datagram(connection, response_datagram);
+    ASSERT_EQ(response_packets.size(), 1u);
+    const auto *response_packet =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&response_packets.front());
+    ASSERT_NE(response_packet, nullptr);
+    EXPECT_TRUE(connection.is_probing_only(response_packet->frames));
+    EXPECT_TRUE(std::ranges::any_of(response_packet->frames, [&](const auto &frame) {
+        const auto *path_response = std::get_if<coquic::quic::PathResponseFrame>(&frame);
+        return path_response != nullptr &&
+               std::equal(path_response->data.begin(), path_response->data.end(),
+                          challenge_data.begin(), challenge_data.end());
+    }));
+    EXPECT_TRUE(std::ranges::any_of(response_packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+    }));
+    EXPECT_FALSE(std::ranges::any_of(response_packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::MaxDataFrame>(frame);
+    }));
+    EXPECT_FALSE(std::ranges::any_of(response_packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::MaxStreamDataFrame>(frame);
+    }));
+    EXPECT_EQ(connection.connection_flow_control_.max_data_state,
+              coquic::quic::StreamControlFrameState::pending);
+    EXPECT_EQ(stream.flow_control.max_stream_data_state,
+              coquic::quic::StreamControlFrameState::pending);
+
+    ASSERT_TRUE(connection.paths_.at(23).outstanding_challenge.has_value());
+    const auto challenge =
+        optional_value_or_terminate(connection.paths_.at(23).outstanding_challenge);
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 23, {coquic::quic::PathResponseFrame{.data = challenge}}));
+
+    const auto credit_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(12));
+    ASSERT_FALSE(credit_datagram.empty());
+    auto credit_packets = decode_sender_datagram(connection, credit_datagram);
+    ASSERT_EQ(credit_packets.size(), 1u);
+    const auto *credit_packet =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&credit_packets.front());
+    ASSERT_NE(credit_packet, nullptr);
+    EXPECT_TRUE(std::ranges::any_of(credit_packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::MaxDataFrame>(frame);
+    }));
+    EXPECT_TRUE(std::ranges::any_of(credit_packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::MaxStreamDataFrame>(frame);
+    }));
+    EXPECT_EQ(connection.connection_flow_control_.max_data_state,
+              coquic::quic::StreamControlFrameState::sent);
+    EXPECT_EQ(stream.flow_control.max_stream_data_state,
+              coquic::quic::StreamControlFrameState::sent);
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionValidationSendOmitsQueuedStreamData) {
+    auto connection = make_connected_server_connection();
+    connection.config_.transport.migration_recovery_retention_timeout =
+        std::chrono::milliseconds(100);
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &lost_path = connection.ensure_path_state(11);
+    lost_path.outstanding_challenge = std::array<std::byte, 8>{};
+    lost_path.validation_deadline = coquic::quic::test::test_time(9);
+    ASSERT_TRUE(
+        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("fits"), false)
+            .has_value());
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+    ASSERT_TRUE(connection.migration_recovery_retention_active());
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 23, {coquic::quic::PingFrame{}}));
+    ASSERT_TRUE(connection.paths_.contains(23));
+    auto &candidate = connection.paths_.at(23);
+    ASSERT_TRUE(candidate.challenge_pending);
+    ASSERT_TRUE(candidate.outstanding_challenge.has_value());
+    candidate.anti_amplification_received_bytes = 4000;
+    connection.current_send_path_id_ = 99;
+    connection.paths_.erase(99);
+
+    auto challenge_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(11));
+    ASSERT_FALSE(challenge_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 23u);
+
+    auto challenge_packets = decode_sender_datagram(connection, challenge_datagram);
+    ASSERT_EQ(challenge_packets.size(), 1u);
+    const auto *challenge_packet =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&challenge_packets.front());
+    ASSERT_NE(challenge_packet, nullptr);
+    EXPECT_TRUE(std::ranges::any_of(challenge_packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::PathChallengeFrame>(frame);
+    }));
+    EXPECT_TRUE(connection.is_probing_only(challenge_packet->frames));
+    EXPECT_FALSE(datagram_has_application_ack(connection, challenge_datagram));
+    EXPECT_FALSE(datagram_has_application_stream(connection, challenge_datagram));
+
+    const auto challenge = optional_value_or_terminate(candidate.outstanding_challenge);
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 23, {coquic::quic::PathResponseFrame{.data = challenge}}));
+
+    auto stream_datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(12));
+    ASSERT_FALSE(stream_datagram.empty());
+    EXPECT_EQ(connection.last_drained_path_id(), 23u);
+    EXPECT_TRUE(datagram_has_application_stream(connection, stream_datagram));
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionDoesNotSuppressLocalApplicationClose) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.migration_recovery_retention_timeout =
+        std::chrono::milliseconds(100);
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &lost_path = connection.ensure_path_state(11);
+    lost_path.outstanding_challenge = std::array<std::byte, 8>{};
+    lost_path.validation_deadline = coquic::quic::test::test_time(9);
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+    ASSERT_TRUE(connection.migration_recovery_retention_active());
+
+    ASSERT_TRUE(connection
+                    .queue_application_close({
+                        .application_error_code = 77,
+                        .reason_phrase = "done",
+                    })
+                    .has_value());
+
+    EXPECT_FALSE(connection.migration_recovery_retention_active());
+    EXPECT_TRUE(connection.has_pending_application_send());
+
+    const auto close_datagram =
+        connection.drain_outbound_datagram(coquic::quic::test::test_time(11));
+    ASSERT_FALSE(close_datagram.empty());
+    const auto close_packets = decode_sender_datagram(connection, close_datagram);
+    ASSERT_EQ(close_packets.size(), 1u);
+    const auto *close_packet =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&close_packets.front());
+    ASSERT_NE(close_packet, nullptr);
+    EXPECT_TRUE(std::ranges::any_of(close_packet->frames, [](const auto &frame) {
+        return std::holds_alternative<coquic::quic::ApplicationConnectionCloseFrame>(frame);
+    }));
+    EXPECT_TRUE(connection.has_failed());
+    EXPECT_FALSE(connection.pending_application_close_.has_value());
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionExpiresAndDiscardsState) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.migration_recovery_retention_timeout =
+        std::chrono::milliseconds(50);
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &path = connection.ensure_path_state(11);
+    path.outstanding_challenge = std::array<std::byte, 8>{};
+    path.validation_deadline = coquic::quic::test::test_time(9);
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+    ASSERT_TRUE(connection.migration_recovery_retention_active());
+    connection.on_timeout(coquic::quic::test::test_time(60));
+
+    EXPECT_TRUE(connection.has_failed());
+    EXPECT_FALSE(connection.migration_recovery_retention_active());
+    EXPECT_EQ(optional_value_or_terminate(connection.pending_terminal_state_),
+              coquic::quic::QuicConnectionTerminalState::closed);
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionExpiresWithoutCurrentSendPath) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.migration_recovery_retention_timeout =
+        std::chrono::milliseconds(50);
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &path = connection.ensure_path_state(11);
+    path.outstanding_challenge = std::array<std::byte, 8>{};
+    path.validation_deadline = coquic::quic::test::test_time(9);
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+    ASSERT_TRUE(connection.migration_recovery_retention_active());
+    ASSERT_EQ(optional_value_or_terminate(connection.current_send_path_id_), 11u);
+    connection.paths_.erase(11);
+
+    connection.on_timeout(coquic::quic::test::test_time(60));
+
+    EXPECT_TRUE(connection.has_failed());
+    EXPECT_FALSE(connection.migration_recovery_retention_active());
+    EXPECT_EQ(optional_value_or_terminate(connection.pending_terminal_state_),
+              coquic::quic::QuicConnectionTerminalState::closed);
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionDoesNotExtendAfterFailedCandidatePath) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.migration_recovery_retention_timeout =
+        std::chrono::milliseconds(100);
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &lost_path = connection.ensure_path_state(11);
+    lost_path.outstanding_challenge = std::array<std::byte, 8>{};
+    lost_path.validation_deadline = coquic::quic::test::test_time(9);
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+    ASSERT_TRUE(connection.migration_recovery_retention_active());
+
+    ASSERT_TRUE(coquic::quic::test::inject_inbound_application_frames_on_path(
+        connection, 23, {coquic::quic::PingFrame{}}));
+    ASSERT_TRUE(connection.current_send_path_id_.has_value());
+    ASSERT_TRUE(connection.paths_.at(23).validation_deadline.has_value());
+    connection.paths_.at(23).validation_deadline = coquic::quic::test::test_time(20);
+
+    connection.on_timeout(coquic::quic::test::test_time(20));
+
+    EXPECT_FALSE(connection.has_failed());
+    EXPECT_TRUE(connection.migration_recovery_retention_active());
+    EXPECT_TRUE(connection.migration_recovery_retention_waiting_for_candidate_path());
+    EXPECT_EQ(optional_value_or_terminate(connection.next_wakeup()),
+              coquic::quic::test::test_time(110));
+
+    connection.on_timeout(coquic::quic::test::test_time(110));
+    EXPECT_TRUE(connection.has_failed());
+}
+
+TEST(QuicCoreTest, MigrationRecoveryRetentionLosesToIdleTimeout) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.migration_recovery_retention_timeout =
+        std::chrono::milliseconds(100);
+    connection.local_transport_parameters_.max_idle_timeout = 30;
+    optional_ref_or_terminate(connection.peer_transport_parameters_).max_idle_timeout = 30;
+    connection.idle_timeout_base_time_ = coquic::quic::test::test_time(0);
+    connection.current_send_path_id_ = 11;
+    connection.last_validated_path_id_.reset();
+    auto &path = connection.ensure_path_state(11);
+    path.outstanding_challenge = std::array<std::byte, 8>{};
+    path.validation_deadline = coquic::quic::test::test_time(9);
+
+    connection.on_timeout(coquic::quic::test::test_time(10));
+    ASSERT_TRUE(connection.migration_recovery_retention_active());
+    ASSERT_TRUE(connection.idle_timeout_deadline().has_value());
+
+    connection.on_timeout(optional_value_or_terminate(connection.idle_timeout_deadline()));
+
+    EXPECT_TRUE(connection.has_failed());
+    EXPECT_FALSE(connection.migration_recovery_retention_active());
+    EXPECT_EQ(optional_value_or_terminate(connection.pending_terminal_state_),
+              coquic::quic::QuicConnectionTerminalState::closed);
 }
 
 TEST(QuicCoreTest, PacketTraceLogsAckTimeoutMigrationAndBlockedSendPaths) {

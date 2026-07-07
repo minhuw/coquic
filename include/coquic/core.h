@@ -129,6 +129,7 @@ struct TransportConfig {
     std::uint64_t active_connection_id_limit = 2;
     bool disable_active_migration = false;
     bool defer_active_migration_path_validation = false;
+    Duration migration_recovery_retention_timeout{0};
     std::uint64_t ack_delay_exponent = 3;
     std::uint64_t max_ack_delay = 25;
     std::uint64_t ack_eliciting_threshold = 2;

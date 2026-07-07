@@ -129,6 +129,7 @@ QuicConnection::queue_application_close(const LocalApplicationCloseCommand &comm
                 .bytes = connection_close_reason_bytes(command.reason_phrase),
             },
     };
+    clear_migration_recovery_retention();
     local_application_close_sent_ = false;
     return StreamStateResult<bool>::success(true);
 }

@@ -813,6 +813,13 @@ class QuicConnection {
     void reset_current_short_header_deserialize_context_cache();
     std::optional<QuicCoreTimePoint> previous_application_read_secret_discard_deadline() const;
     void maybe_discard_previous_application_read_secret(QuicCoreTimePoint now);
+    std::optional<QuicCoreTimePoint> migration_recovery_retention_deadline() const;
+    bool migration_recovery_retention_active() const;
+    bool migration_recovery_retention_expired(QuicCoreTimePoint now) const;
+    bool migration_recovery_retention_enabled() const;
+    bool migration_recovery_retention_waiting_for_candidate_path() const;
+    void enter_migration_recovery_retention(QuicCoreTimePoint now);
+    void clear_migration_recovery_retention();
     void synchronize_recovery_rtt_state();
     QuicCoreDuration path_validation_timeout_period() const;
     void install_available_secrets();
@@ -836,7 +843,7 @@ class QuicConnection {
                                      QuicCoreTimePoint now = QuicCoreClock::now());
     void queue_path_response(QuicPathId path_id, const std::array<std::byte, 8> &data);
     void respond_to_path_challenge(QuicPathId path_id, const std::array<std::byte, 8> &data);
-    bool path_validation_timed_out(QuicPathId path_id, QuicCoreTimePoint now) const;
+    bool path_validation_timed_out(QuicPathId path_id, QuicCoreTimePoint now);
     void complete_path_validation(QuicPathId path_id, PathState &path, QuicCoreTimePoint now);
     void abandon_original_address_validation_after_preferred_success(QuicPathId preferred_path_id);
     static bool
@@ -943,6 +950,7 @@ class QuicConnection {
     bool has_pending_congestion_controlled_send() const;
     bool has_pending_fresh_application_stream_send() const;
     bool has_pending_application_control_send(bool application_ack_due) const;
+    bool has_pending_path_validation_send() const;
     bool streams_have_pending_application_control_send() const;
     bool streams_have_sendable_fin() const;
     bool streams_have_sendable_data() const;
@@ -1220,6 +1228,7 @@ class QuicConnection {
     std::optional<QuicCoreTimePoint> last_client_handshake_keepalive_probe_time_;
     std::optional<QuicCoreTimePoint> last_client_receive_keepalive_probe_time_;
     std::optional<QuicCoreTimePoint> server_zero_rtt_discard_deadline_;
+    std::optional<QuicCoreTimePoint> migration_recovery_retention_deadline_;
     std::optional<QuicPathId> last_validated_path_id_;
     std::optional<QuicPathId> previous_path_id_;
     std::optional<QuicPathId> current_send_path_id_;

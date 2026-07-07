@@ -479,6 +479,9 @@ coquic_transport_config_t transport_from_object(napi_env env, napi_value value,
     fallback.defer_active_migration_path_validation =
         static_cast<std::uint8_t>(get_bool(env, value, "deferActiveMigrationPathValidation",
                                            fallback.defer_active_migration_path_validation));
+    fallback.migration_recovery_retention_timeout_us =
+        get_u64(env, value, "migrationRecoveryRetentionTimeoutUs",
+                fallback.migration_recovery_retention_timeout_us);
     fallback.ack_delay_exponent =
         get_u64(env, value, "ackDelayExponent", fallback.ack_delay_exponent);
     fallback.max_ack_delay = get_u64(env, value, "maxAckDelay", fallback.max_ack_delay);
@@ -525,6 +528,8 @@ napi_value transport_to_js(napi_env env, const coquic_transport_config_t &raw) {
     set_bool(env, out, "disableActiveMigration", raw.disable_active_migration != 0);
     set_bool(env, out, "deferActiveMigrationPathValidation",
              raw.defer_active_migration_path_validation != 0);
+    set_u64(env, out, "migrationRecoveryRetentionTimeoutUs",
+            raw.migration_recovery_retention_timeout_us);
     set_u64(env, out, "ackDelayExponent", raw.ack_delay_exponent);
     set_u64(env, out, "maxAckDelay", raw.max_ack_delay);
     set_u64(env, out, "ackElicitingThreshold", raw.ack_eliciting_threshold);

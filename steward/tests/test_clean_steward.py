@@ -1532,6 +1532,66 @@ def test_store_recovers_unfinished_review_revision_with_worker_timeout(
     }
 
 
+def test_store_recovers_validation_phase_with_validation_timeout(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="V", prompt="V")
+    )
+    store.start_worker(task.id, "worker started")
+    store.start_validation(task.id, "validation running: retry")
+    validation_started_at = utc_now() - timedelta(minutes=40)
+    with Session(store.engine) as session, session.begin():
+        task_row = session.get(TaskRow, task.id)
+        assert task_row is not None
+        task_row.updated_at = utc_now().isoformat()
+        event = (
+            session.query(EventRow)
+            .filter_by(task_id=task.id, kind="task.status", message="running")
+            .order_by(EventRow.id.desc())
+            .first()
+        )
+        assert event is not None
+        event.created_at = validation_started_at.isoformat()
+
+    recovered = store.recover_stale_active_tasks(
+        stale_after_minutes=125,
+        status_stale_after_minutes={"validation": 35},
+    )
+
+    assert recovered == [task.id]
+    assert store.get(task.id).status == TaskStatus.failed
+    recovered_event = next(
+        event for event in store.events(task.id) if event.kind == "task.recovered_stale"
+    )
+    assert {
+        key: recovered_event.data[key]
+        for key in ("previous_status", "effective_status", "stale_after_minutes")
+    } == {
+        "previous_status": "running",
+        "effective_status": "validation",
+        "stale_after_minutes": 35,
+    }
+
+
+def test_status_stale_minutes_includes_validation_timeout(
+    config: StewardConfig,
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "limits": StewardLimits(
+                worker_timeout_minutes=120,
+                review_timeout_minutes=20,
+                validation_timeout_minutes=30,
+            ),
+        }
+    )
+
+    assert status_stale_minutes(config) == {"reviewing": 25, "validation": 35}
+
+
 def test_status_stale_minutes_respects_explicit_stale_limit(config: StewardConfig) -> None:
     config = config.__class__(
         **{

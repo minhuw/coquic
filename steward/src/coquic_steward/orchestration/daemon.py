@@ -488,7 +488,8 @@ def status_stale_minutes(config: StewardConfig) -> dict[str, int]:
     if config.limits.stale_task_minutes is not None:
         return {}
     return {
-        TaskStatus.reviewing.value: config.limits.review_timeout_minutes + 5
+        TaskStatus.reviewing.value: config.limits.review_timeout_minutes + 5,
+        "validation": config.limits.validation_timeout_minutes + 5,
     }
 
 

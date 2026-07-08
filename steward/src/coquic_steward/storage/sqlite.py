@@ -844,7 +844,7 @@ class SQLiteTaskStore:
                     effective_status, stale_after_minutes
                 )
                 cutoff = utc_now() - timedelta(minutes=stale_after)
-                if datetime.fromisoformat(row.updated_at) >= cutoff:
+                if _effective_stale_since(row, events) >= cutoff:
                     continue
                 previous_status = row.status
                 summary = f"stale active task recovered after {stale_after} minutes"
@@ -1163,12 +1163,67 @@ def _effective_stale_status(row: TaskRow, events: list[EventRow]) -> str:
     ):
         return TaskStatus.reviewing.value
 
+    if _latest_status_phase(events) == TaskPhase.validation.value:
+        return TaskPhase.validation.value
+
     return row.status
+
+
+def _effective_stale_since(row: TaskRow, events: list[EventRow]) -> datetime:
+    if _latest_status_phase(events) == TaskPhase.validation.value:
+        event = _latest_validation_progress_event(events)
+        if event is not None:
+            return datetime.fromisoformat(event.created_at)
+    return datetime.fromisoformat(row.updated_at)
 
 
 def _latest_event_id(events: list[EventRow], kinds: set[str]) -> int | None:
     matching = [event.id for event in events if event.kind in kinds]
     return max(matching) if matching else None
+
+
+def _latest_status_event(events: list[EventRow]) -> EventRow | None:
+    matching = [event for event in events if event.kind == "task.status"]
+    if not matching:
+        return None
+    return max(matching, key=lambda event: event.id)
+
+
+def _latest_status_phase(events: list[EventRow]) -> str | None:
+    event = _latest_status_event(events)
+    if event is None:
+        return None
+    try:
+        data = json.loads(event.data_json)
+    except json.JSONDecodeError:
+        return None
+    phase = data.get("phase")
+    return phase if isinstance(phase, str) else None
+
+
+def _latest_validation_progress_event(events: list[EventRow]) -> EventRow | None:
+    matching = [
+        event
+        for event in events
+        if event.kind in {"validation.command_started", "validation.command_finished"}
+        or (
+            event.kind == "task.status"
+            and event.message == TaskStatus.running.value
+            and _event_phase(event) == TaskPhase.validation.value
+        )
+    ]
+    if not matching:
+        return None
+    return max(matching, key=lambda event: event.id)
+
+
+def _event_phase(event: EventRow) -> str | None:
+    try:
+        data = json.loads(event.data_json)
+    except json.JSONDecodeError:
+        return None
+    phase = data.get("phase")
+    return phase if isinstance(phase, str) else None
 
 
 def _latest_review_start_id(events: list[EventRow]) -> int | None:

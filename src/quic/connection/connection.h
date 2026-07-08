@@ -528,6 +528,8 @@ struct PathState {
     std::uint64_t peer_connection_id_sequence = 0;
     std::optional<ConnectionId> destination_connection_id_override;
     std::optional<std::uint64_t> largest_inbound_application_packet_number;
+    QuicPathRecoveryResetPolicy recovery_reset_policy = QuicPathRecoveryResetPolicy::reset;
+    std::optional<QuicPathId> recovery_reset_policy_source_path_id;
     PathEcnState ecn;
     PathSpinState spin;
     PathMtuState mtu;
@@ -737,7 +739,9 @@ class QuicConnection {
                                                     QuicCoreTimePoint now,
                                                     std::chrono::microseconds decoded_ack_delay,
                                                     std::uint64_t max_ack_delay_ms);
-    void reset_recovery_for_new_path(QuicPathId path_id);
+    void apply_recovery_reset_policy(QuicPathRecoveryResetPolicy reset_policy);
+    void apply_recovery_reset_policy_for_validated_path(QuicPathId path_id);
+    void reset_recovery_for_new_path(QuicPathId path_id, QuicPathRecoveryResetPolicy reset_policy);
     void track_sent_packet(PacketSpaceState &packet_space, SentPacketRecord packet);
     void track_sent_simple_stream_packet(PacketSpaceState &packet_space,
                                          PendingSimpleStreamPacketScratch &&packet);
@@ -1003,8 +1007,9 @@ class QuicConnection {
     should_ignore_original_address_validation_after_preferred_success(QuicPathId path_id) const;
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     void note_inbound_application_packet_for_path(QuicPathId path_id, std::uint64_t packet_number);
-    void maybe_switch_to_path(QuicPathId path_id, bool initiated_locally,
-                              QuicCoreTimePoint now = QuicCoreClock::now());
+    void maybe_switch_to_path(
+        QuicPathId path_id, bool initiated_locally, QuicCoreTimePoint now = QuicCoreClock::now(),
+        QuicPathRecoveryResetPolicy recovery_reset_policy = QuicPathRecoveryResetPolicy::reset);
     static void set_path_peer_connection_id_sequence(PathState &path,
                                                      std::uint64_t sequence_number);
     void update_spin_bit_on_receive(QuicPathId path_id, bool peer_spin_bit,

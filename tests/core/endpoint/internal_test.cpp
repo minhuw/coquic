@@ -2905,6 +2905,179 @@ TEST(QuicCoreEndpointInternalTest, RouteIdentityHelpersReuseStoredIdentityAndRej
     EXPECT_FALSE(entry.path_id_by_route_handle.contains(29));
 }
 
+TEST(QuicCoreEndpointInternalTest, PortOnlyRebindingSelectsRecoveryRetentionPolicy) {
+    auto config = make_server_endpoint_config();
+    config.allow_peer_address_change = true;
+    QuicCore server(std::move(config));
+
+    QuicCore::ConnectionEntry entry{
+        .handle = 7,
+    };
+    entry.connection = std::make_unique<QuicConnection>(make_connected_server_connection());
+    entry.default_route_handle = 17;
+    entry.connection->current_send_path_id_ = 0;
+    entry.path_id_by_route_handle.emplace(17, 0);
+    entry.route_handle_by_path_id.emplace(0, 17);
+    entry.address_validation_identity_by_path_id.emplace(0,
+                                                         make_ipv4_identity(198, 51, 100, 7, 4433));
+
+    EXPECT_EQ(server.recovery_reset_policy_for_peer_address_change(
+                  entry, make_ipv4_identity(198, 51, 100, 7, 9443)),
+              QuicPathRecoveryResetPolicy::retain_congestion_and_rtt);
+    EXPECT_EQ(server.recovery_reset_policy_for_peer_address_change(
+                  entry, make_ipv4_identity(198, 51, 100, 8, 9443)),
+              QuicPathRecoveryResetPolicy::reset);
+    EXPECT_EQ(
+        server.recovery_reset_policy_for_peer_address_change(entry, std::span<const std::byte>{}),
+        QuicPathRecoveryResetPolicy::reset);
+}
+
+TEST(QuicCoreEndpointInternalTest, NewPortOnlyInboundRouteStoresRecoveryRetentionPolicy) {
+    auto config = make_server_endpoint_config();
+    config.allow_peer_address_change = true;
+    QuicCore server(std::move(config));
+
+    QuicCore::ConnectionEntry entry{
+        .handle = 7,
+    };
+    entry.connection = std::make_unique<QuicConnection>(make_connected_server_connection());
+    entry.default_route_handle = 17;
+    entry.connection->current_send_path_id_ = 0;
+    entry.path_id_by_route_handle.emplace(17, 0);
+    entry.route_handle_by_path_id.emplace(0, 17);
+    entry.address_validation_identity_by_path_id.emplace(0,
+                                                         make_ipv4_identity(198, 51, 100, 7, 4433));
+
+    const auto port_only_path =
+        server.path_id_for_inbound_route(entry, 18, make_ipv4_identity(198, 51, 100, 7, 9443));
+
+    ASSERT_TRUE(port_only_path.has_value());
+    const auto path_id = optional_value_or_terminate(port_only_path);
+    EXPECT_EQ(entry.connection->paths_.at(path_id).recovery_reset_policy,
+              QuicPathRecoveryResetPolicy::retain_congestion_and_rtt);
+    EXPECT_EQ(entry.connection->paths_.at(path_id).recovery_reset_policy_source_path_id, 0u);
+
+    const auto ip_change_path =
+        server.path_id_for_inbound_route(entry, 19, make_ipv4_identity(198, 51, 100, 8, 9443));
+
+    ASSERT_TRUE(ip_change_path.has_value());
+    EXPECT_EQ(entry.connection->paths_.at(optional_value_or_terminate(ip_change_path))
+                  .recovery_reset_policy,
+              QuicPathRecoveryResetPolicy::reset);
+}
+
+TEST(QuicCoreEndpointInternalTest, PortOnlyInboundValidationRetainsRecoveryPolicy) {
+    auto config = make_server_endpoint_config();
+    config.allow_peer_address_change = true;
+    QuicCore server(std::move(config));
+
+    QuicCore::ConnectionEntry entry{
+        .handle = 7,
+    };
+    entry.connection = std::make_unique<QuicConnection>(make_connected_server_connection());
+    entry.default_route_handle = 17;
+    entry.connection->current_send_path_id_ = 0;
+    entry.connection->ensure_path_state(0).validated = true;
+    entry.connection->ensure_path_state(0).is_current_send_path = true;
+    entry.connection->congestion_controller_.congestion_window_ = 48000;
+    entry.connection->congestion_controller_.bytes_in_flight_ = 4800;
+    entry.connection->recovery_rtt_state_.latest_rtt = std::chrono::milliseconds(42);
+    entry.connection->recovery_rtt_state_.min_rtt = std::chrono::milliseconds(30);
+    entry.connection->recovery_rtt_state_.smoothed_rtt = std::chrono::milliseconds(36);
+    entry.connection->recovery_rtt_state_.rttvar = std::chrono::milliseconds(6);
+    entry.path_id_by_route_handle.emplace(17, 0);
+    entry.route_handle_by_path_id.emplace(0, 17);
+    entry.address_validation_identity_by_path_id.emplace(0,
+                                                         make_ipv4_identity(198, 51, 100, 7, 4433));
+
+    const auto port_only_path =
+        server.path_id_for_inbound_route(entry, 18, make_ipv4_identity(198, 51, 100, 7, 9443));
+    ASSERT_TRUE(port_only_path.has_value());
+    const auto path_id = optional_value_or_terminate(port_only_path);
+
+    auto first_packet = entry.connection->process_inbound_application(
+        std::array<Frame, 1>{PingFrame{}}, coquic::quic::test::test_time(1),
+        /*allow_preconnected_frames=*/false, path_id);
+    ASSERT_TRUE(first_packet.has_value());
+
+    ASSERT_TRUE(entry.connection->paths_.contains(path_id));
+    ASSERT_TRUE(entry.connection->paths_.at(path_id).outstanding_challenge.has_value());
+    const auto challenge =
+        optional_value_or_terminate(entry.connection->paths_.at(path_id).outstanding_challenge);
+    EXPECT_EQ(entry.connection->paths_.at(path_id).recovery_reset_policy,
+              QuicPathRecoveryResetPolicy::retain_congestion_and_rtt);
+    EXPECT_EQ(entry.connection->current_send_path_id_, path_id);
+    EXPECT_EQ(entry.connection->congestion_controller_.congestion_window(), 48000u);
+    EXPECT_EQ(entry.connection->congestion_controller_.bytes_in_flight(), 4800u);
+    EXPECT_EQ(entry.connection->recovery_rtt_state_.latest_rtt, std::chrono::milliseconds(42));
+    EXPECT_EQ(entry.connection->recovery_rtt_state_.min_rtt, std::chrono::milliseconds(30));
+    EXPECT_EQ(entry.connection->recovery_rtt_state_.smoothed_rtt, std::chrono::milliseconds(36));
+    EXPECT_EQ(entry.connection->recovery_rtt_state_.rttvar, std::chrono::milliseconds(6));
+
+    auto validated = entry.connection->process_inbound_application(
+        std::array<Frame, 1>{PathResponseFrame{.data = challenge}},
+        coquic::quic::test::test_time(2), /*allow_preconnected_frames=*/false, path_id);
+    ASSERT_TRUE(validated.has_value());
+
+    EXPECT_TRUE(entry.connection->paths_.at(path_id).validated);
+    EXPECT_EQ(entry.connection->congestion_controller_.congestion_window(), 48000u);
+    EXPECT_EQ(entry.connection->congestion_controller_.bytes_in_flight(), 4800u);
+    EXPECT_EQ(entry.connection->recovery_rtt_state_.latest_rtt, std::chrono::milliseconds(42));
+    EXPECT_EQ(entry.connection->recovery_rtt_state_.min_rtt, std::chrono::milliseconds(30));
+    EXPECT_EQ(entry.connection->recovery_rtt_state_.smoothed_rtt, std::chrono::milliseconds(36));
+}
+
+TEST(QuicCoreEndpointInternalTest, IpChangeInboundValidationResetsRecoveryPolicy) {
+    auto config = make_server_endpoint_config();
+    config.allow_peer_address_change = true;
+    QuicCore server(std::move(config));
+
+    QuicCore::ConnectionEntry entry{
+        .handle = 7,
+    };
+    entry.connection = std::make_unique<QuicConnection>(make_connected_server_connection());
+    entry.default_route_handle = 17;
+    entry.connection->current_send_path_id_ = 0;
+    entry.connection->ensure_path_state(0).validated = true;
+    entry.connection->ensure_path_state(0).is_current_send_path = true;
+    entry.connection->congestion_controller_.bytes_in_flight_ = 4800;
+    entry.connection->recovery_rtt_state_.latest_rtt = std::chrono::milliseconds(42);
+    entry.connection->recovery_rtt_state_.min_rtt = std::chrono::milliseconds(30);
+    entry.connection->recovery_rtt_state_.smoothed_rtt = std::chrono::milliseconds(36);
+    entry.path_id_by_route_handle.emplace(17, 0);
+    entry.route_handle_by_path_id.emplace(0, 17);
+    entry.address_validation_identity_by_path_id.emplace(0,
+                                                         make_ipv4_identity(198, 51, 100, 7, 4433));
+
+    const auto ip_change_path =
+        server.path_id_for_inbound_route(entry, 18, make_ipv4_identity(198, 51, 100, 8, 9443));
+    ASSERT_TRUE(ip_change_path.has_value());
+    const auto path_id = optional_value_or_terminate(ip_change_path);
+
+    auto first_packet = entry.connection->process_inbound_application(
+        std::array<Frame, 1>{PingFrame{}}, coquic::quic::test::test_time(1),
+        /*allow_preconnected_frames=*/false, path_id);
+    ASSERT_TRUE(first_packet.has_value());
+
+    ASSERT_TRUE(entry.connection->paths_.contains(path_id));
+    ASSERT_TRUE(entry.connection->paths_.at(path_id).outstanding_challenge.has_value());
+    const auto challenge =
+        optional_value_or_terminate(entry.connection->paths_.at(path_id).outstanding_challenge);
+    EXPECT_EQ(entry.connection->paths_.at(path_id).recovery_reset_policy,
+              QuicPathRecoveryResetPolicy::reset);
+
+    auto validated = entry.connection->process_inbound_application(
+        std::array<Frame, 1>{PathResponseFrame{.data = challenge}},
+        coquic::quic::test::test_time(2), /*allow_preconnected_frames=*/false, path_id);
+    ASSERT_TRUE(validated.has_value());
+
+    EXPECT_TRUE(entry.connection->paths_.at(path_id).validated);
+    EXPECT_EQ(entry.connection->congestion_controller_.bytes_in_flight(), 0u);
+    EXPECT_EQ(entry.connection->recovery_rtt_state_.latest_rtt, std::nullopt);
+    EXPECT_EQ(entry.connection->recovery_rtt_state_.min_rtt, std::nullopt);
+    EXPECT_EQ(entry.connection->recovery_rtt_state_.smoothed_rtt, std::chrono::milliseconds(333));
+}
+
 TEST(QuicCoreEndpointInternalTest, ClientRejectsUnknownInboundServerRoute) {
     auto config = make_client_endpoint_config();
     config.allow_peer_address_change = true;

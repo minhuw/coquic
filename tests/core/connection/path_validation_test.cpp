@@ -1495,6 +1495,96 @@ TEST(QuicCoreTest, MatchingPathResponseResetsRecoveryForNewPath) {
     EXPECT_FALSE(connection.application_space_.pending_probe_packet.has_value());
 }
 
+TEST(QuicCoreTest, PortOnlyPathValidationRetainsCongestionAndRttState) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 3;
+    connection.ensure_path_state(3).validated = true;
+    connection.ensure_path_state(3).is_current_send_path = true;
+    connection.congestion_controller_.congestion_window_ = 48000;
+    connection.congestion_controller_.bytes_in_flight_ = 4800;
+    connection.recovery_rtt_state_.latest_rtt = std::chrono::milliseconds(42);
+    connection.recovery_rtt_state_.min_rtt = std::chrono::milliseconds(30);
+    connection.recovery_rtt_state_.smoothed_rtt = std::chrono::milliseconds(36);
+    connection.recovery_rtt_state_.rttvar = std::chrono::milliseconds(6);
+    connection.pto_count_ = 2;
+    connection.remaining_pto_probe_datagrams_ = 1;
+    connection.application_space_.pending_probe_packet = coquic::quic::SentPacketRecord{
+        .packet_number = 21,
+        .ack_eliciting = true,
+        .in_flight = true,
+        .has_ping = true,
+        .path_id = 3,
+    };
+
+    constexpr std::array<std::byte, 8> outstanding_challenge = {
+        std::byte{0x51}, std::byte{0x52}, std::byte{0x53}, std::byte{0x54},
+        std::byte{0x55}, std::byte{0x56}, std::byte{0x57}, std::byte{0x58}};
+    auto &candidate_path = connection.ensure_path_state(9);
+    candidate_path.validated = false;
+    candidate_path.outstanding_challenge = outstanding_challenge;
+    candidate_path.recovery_reset_policy =
+        coquic::quic::QuicPathRecoveryResetPolicy::retain_congestion_and_rtt;
+    candidate_path.recovery_reset_policy_source_path_id = 3;
+
+    auto processed = connection.process_inbound_application(
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::PathResponseFrame{
+                .data = outstanding_challenge,
+            },
+        },
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/9);
+    ASSERT_TRUE(processed.has_value());
+
+    EXPECT_EQ(connection.current_send_path_id_, 9u);
+    EXPECT_EQ(connection.congestion_controller_.congestion_window(), 48000u);
+    EXPECT_EQ(connection.congestion_controller_.bytes_in_flight(), 4800u);
+    EXPECT_EQ(connection.recovery_rtt_state_.latest_rtt, std::chrono::milliseconds(42));
+    EXPECT_EQ(connection.recovery_rtt_state_.min_rtt, std::chrono::milliseconds(30));
+    EXPECT_EQ(connection.recovery_rtt_state_.smoothed_rtt, std::chrono::milliseconds(36));
+    EXPECT_EQ(connection.recovery_rtt_state_.rttvar, std::chrono::milliseconds(6));
+    EXPECT_EQ(connection.pto_count_, 0u);
+    EXPECT_EQ(connection.remaining_pto_probe_datagrams_, 0u);
+    EXPECT_FALSE(connection.application_space_.pending_probe_packet.has_value());
+}
+
+TEST(QuicCoreTest, StalePortOnlyRecoveryPolicyStillResetsRecoveryForNewPath) {
+    auto connection = make_connected_server_connection();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 5;
+    connection.ensure_path_state(5).validated = true;
+    connection.ensure_path_state(5).is_current_send_path = true;
+    connection.congestion_controller_.bytes_in_flight_ = 4800;
+    connection.recovery_rtt_state_.latest_rtt = std::chrono::milliseconds(42);
+    connection.recovery_rtt_state_.min_rtt = std::chrono::milliseconds(30);
+    connection.recovery_rtt_state_.smoothed_rtt = std::chrono::milliseconds(36);
+
+    constexpr std::array<std::byte, 8> outstanding_challenge = {
+        std::byte{0x61}, std::byte{0x62}, std::byte{0x63}, std::byte{0x64},
+        std::byte{0x65}, std::byte{0x66}, std::byte{0x67}, std::byte{0x68}};
+    auto &candidate_path = connection.ensure_path_state(9);
+    candidate_path.validated = false;
+    candidate_path.outstanding_challenge = outstanding_challenge;
+    candidate_path.recovery_reset_policy =
+        coquic::quic::QuicPathRecoveryResetPolicy::retain_congestion_and_rtt;
+    candidate_path.recovery_reset_policy_source_path_id = 3;
+
+    auto processed = connection.process_inbound_application(
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::PathResponseFrame{
+                .data = outstanding_challenge,
+            },
+        },
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/9);
+    ASSERT_TRUE(processed.has_value());
+
+    EXPECT_EQ(connection.current_send_path_id_, 9u);
+    EXPECT_EQ(connection.congestion_controller_.bytes_in_flight(), 0u);
+    EXPECT_EQ(connection.recovery_rtt_state_.latest_rtt, std::nullopt);
+    EXPECT_EQ(connection.recovery_rtt_state_.min_rtt, std::nullopt);
+    EXPECT_EQ(connection.recovery_rtt_state_.smoothed_rtt, std::chrono::milliseconds(333));
+}
+
 TEST(QuicCoreTest, RepeatedPathValidationUsesFreshChallengeData) {
     auto connection = make_connected_client_connection();
     install_spare_peer_connection_id(connection);

@@ -443,6 +443,11 @@ enum class QuicMigrationRequestReason : std::uint8_t {
     preferred_address,
 };
 
+enum class QuicPathRecoveryResetPolicy : std::uint8_t {
+    reset,
+    retain_congestion_and_rtt,
+};
+
 struct QuicCoreLocalError {
     std::optional<QuicConnectionHandle> connection;
     QuicCoreLocalErrorCode code;
@@ -914,6 +919,8 @@ class QuicCore {
         std::span<const std::byte> proposed_identity) const;
     bool address_validation_identity_allowed_for_new_route(
         const ConnectionEntry *entry, std::span<const std::byte> address_validation_identity) const;
+    QuicPathRecoveryResetPolicy recovery_reset_policy_for_peer_address_change(
+        const ConnectionEntry &entry, std::span<const std::byte> address_validation_identity) const;
     static bool preferred_address_migration_route_family_allowed(
         const ConnectionEntry &entry, std::span<const std::byte> address_validation_identity);
     static std::vector<std::byte>

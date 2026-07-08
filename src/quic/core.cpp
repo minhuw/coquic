@@ -1053,6 +1053,29 @@ std::optional<std::uint16_t>
     return std::nullopt;
 }
 
+COQUIC_NO_PROFILE bool
+address_validation_identities_are_port_only_change(std::span<const std::byte> current_identity,
+                                                   std::span<const std::byte> candidate_identity) {
+    if (current_identity.size() != candidate_identity.size() || current_identity.empty() ||
+        candidate_identity.empty() || current_identity.front() != candidate_identity.front()) {
+        return false;
+    }
+    const auto current_port = address_validation_identity_udp_port(current_identity);
+    const auto candidate_port = address_validation_identity_udp_port(candidate_identity);
+    if (!current_port.has_value() || !candidate_port.has_value() ||
+        current_port == candidate_port) {
+        return false;
+    }
+    const auto address_length = current_identity.front() == std::byte{0x04}   ? std::size_t{4}
+                                : current_identity.front() == std::byte{0x06} ? std::size_t{16}
+                                                                              : std::size_t{0};
+    if (address_length == 0 || current_identity.size() != address_length + 3u) {
+        return false;
+    }
+    return std::ranges::equal(current_identity.subspan(1u, address_length),
+                              candidate_identity.subspan(1u, address_length));
+}
+
 COQUIC_NO_PROFILE QuicRouteAddressFamily
 route_address_family_from_identity(std::span<const std::byte> identity) {
     if (identity.size() == 7 && identity.front() == std::byte{0x04}) {
@@ -2545,6 +2568,19 @@ bool QuicCore::address_validation_identity_allowed_for_new_route(
         endpoint_config_.request_forgery_policy, current_identity, address_validation_identity);
 }
 
+QuicPathRecoveryResetPolicy QuicCore::recovery_reset_policy_for_peer_address_change(
+    const ConnectionEntry &entry, std::span<const std::byte> address_validation_identity) const {
+    if (address_validation_identity.empty()) {
+        return QuicPathRecoveryResetPolicy::reset;
+    }
+    const auto current_identity = current_address_validation_identity(entry);
+    if (!address_validation_identities_are_port_only_change(current_identity,
+                                                            address_validation_identity)) {
+        return QuicPathRecoveryResetPolicy::reset;
+    }
+    return QuicPathRecoveryResetPolicy::retain_congestion_and_rtt;
+}
+
 bool QuicCore::preferred_address_migration_route_family_allowed(
     const ConnectionEntry &entry, std::span<const std::byte> address_validation_identity) {
     if (entry.connection == nullptr || !entry.connection->peer_transport_parameters_.has_value() ||
@@ -3198,7 +3234,19 @@ std::optional<QuicPathId> COQUIC_NO_PROFILE QuicCore::path_id_for_inbound_route(
                                                                address_validation_identity)) {
             return std::nullopt;
         }
-        return remember_inbound_path(entry, *route_handle, address_validation_identity);
+        const auto reset_policy =
+            recovery_reset_policy_for_peer_address_change(entry, address_validation_identity);
+        const auto path_id =
+            remember_inbound_path(entry, *route_handle, address_validation_identity);
+        if (entry.connection != nullptr) {
+            if (auto path = entry.connection->paths_.find(path_id);
+                path != entry.connection->paths_.end()) {
+                path->second.recovery_reset_policy = reset_policy;
+                path->second.recovery_reset_policy_source_path_id =
+                    entry.connection->current_send_path_id_;
+            }
+        }
+        return path_id;
     }
 
     if (entry.default_route_handle.has_value()) {

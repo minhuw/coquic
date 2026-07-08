@@ -934,6 +934,7 @@ bool QuicConnection::path_validation_timed_out(QuicPathId path_id, QuicCoreTimeP
 
 void QuicConnection::complete_path_validation(QuicPathId path_id, PathState &path,
                                               QuicCoreTimePoint now) {
+    const bool validation_probe_only = path.validation_probe_only;
     path.validated = true;
     path.validation_initiated_locally = false;
     path.path_validation_deferred_until_peer_non_probing = false;
@@ -964,6 +965,22 @@ void QuicConnection::complete_path_validation(QuicPathId path_id, PathState &pat
     path.outstanding_challenge.reset();
     path.outstanding_challenge_sent_with_expanded_datagram = true;
     path.validation_deadline.reset();
+    if (!validation_probe_only) {
+        apply_recovery_reset_policy_for_validated_path(path_id);
+    }
+}
+
+void QuicConnection::apply_recovery_reset_policy_for_validated_path(QuicPathId path_id) {
+    const auto path = paths_.find(path_id);
+    if (path == paths_.end()) {
+        return;
+    }
+    if (current_send_path_id_ != path_id ||
+        !path->second.recovery_reset_policy_source_path_id.has_value() ||
+        path->second.recovery_reset_policy_source_path_id == path_id) {
+        return;
+    }
+    apply_recovery_reset_policy(path->second.recovery_reset_policy);
 }
 
 void QuicConnection::abandon_original_address_validation_after_preferred_success(
@@ -3576,7 +3593,8 @@ void QuicConnection::note_inbound_application_packet_for_path(QuicPathId path_id
 }
 
 void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_locally,
-                                          QuicCoreTimePoint now) {
+                                          QuicCoreTimePoint now,
+                                          QuicPathRecoveryResetPolicy recovery_reset_policy) {
     const bool recovering_from_no_send_path =
         migration_recovery_retention_waiting_for_candidate_path();
     if (!recovering_from_no_send_path && current_send_path_id_.has_value() &&
@@ -3589,6 +3607,12 @@ void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_loc
         if (!existing_path->second.mtu.viable) {
             return;
         }
+        if (recovery_reset_policy == QuicPathRecoveryResetPolicy::reset &&
+            existing_path->second.recovery_reset_policy ==
+                QuicPathRecoveryResetPolicy::retain_congestion_and_rtt &&
+            existing_path->second.recovery_reset_policy_source_path_id == current_send_path_id_) {
+            recovery_reset_policy = QuicPathRecoveryResetPolicy::retain_congestion_and_rtt;
+        }
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
         // # Packets sent on the old path MUST NOT contribute to congestion
         // # control or RTT estimation for the new path.
@@ -3598,7 +3622,7 @@ void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_loc
         // # time estimator for the new path to initial values (see Appendices
         // # A.3 and B.3 of [QUIC-RECOVERY]) unless the only change in the
         // # peer's address is its port number.
-        reset_recovery_for_new_path(path_id);
+        reset_recovery_for_new_path(path_id, recovery_reset_policy);
         const auto old_path_id = current_send_path_id_;
         if (current_send_path_id_.has_value()) {
             previous_path_id_ = current_send_path_id_;
@@ -3634,7 +3658,23 @@ void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_loc
         }
     }
     const auto old_path_id = current_send_path_id_;
+    const auto pending_path = paths_.find(path_id);
+    const auto existing_recovery_reset_policy = pending_path != paths_.end()
+                                                    ? pending_path->second.recovery_reset_policy
+                                                    : QuicPathRecoveryResetPolicy::reset;
+    const auto existing_recovery_reset_policy_source_path_id =
+        pending_path != paths_.end() ? pending_path->second.recovery_reset_policy_source_path_id
+                                     : std::optional<QuicPathId>{};
+    if (!initiated_locally && recovery_reset_policy == QuicPathRecoveryResetPolicy::reset &&
+        existing_recovery_reset_policy == QuicPathRecoveryResetPolicy::retain_congestion_and_rtt &&
+        existing_recovery_reset_policy_source_path_id == old_path_id) {
+        recovery_reset_policy = QuicPathRecoveryResetPolicy::retain_congestion_and_rtt;
+    }
     start_path_validation(path_id, initiated_locally, now);
+    if (const auto path = paths_.find(path_id); path != paths_.end()) {
+        path->second.recovery_reset_policy = recovery_reset_policy;
+        path->second.recovery_reset_policy_source_path_id = old_path_id;
+    }
     if (!recovering_from_no_send_path && !initiated_locally && old_path_id.has_value() &&
         *old_path_id != path_id) {
         start_path_validation_probe(*old_path_id, /*initiated_locally=*/false, now);
@@ -3749,11 +3789,16 @@ std::size_t QuicConnection::outbound_datagram_size_limit(bool allow_pmtu_probe_s
     return max_datagram_size;
 }
 
-void QuicConnection::reset_recovery_for_new_path(QuicPathId path_id) {
+void QuicConnection::reset_recovery_for_new_path(QuicPathId path_id,
+                                                 QuicPathRecoveryResetPolicy reset_policy) {
     if (current_send_path_id_ == path_id) {
         return;
     }
 
+    apply_recovery_reset_policy(reset_policy);
+}
+
+void QuicConnection::apply_recovery_reset_policy(QuicPathRecoveryResetPolicy reset_policy) {
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
     // # Packets sent on the old path MUST NOT contribute to congestion control
     // # or RTT estimation for the new path.
@@ -3763,8 +3808,10 @@ void QuicConnection::reset_recovery_for_new_path(QuicPathId path_id) {
     // # estimator for the new path to initial values (see Appendices A.3 and
     // # B.3 of [QUIC-RECOVERY]) unless the only change in the peer's address is
     // # its port number.
-    congestion_controller_.reset_for_new_path();
-    recovery_rtt_state_ = RecoveryRttState{};
+    if (reset_policy == QuicPathRecoveryResetPolicy::reset) {
+        congestion_controller_.reset_for_new_path();
+        recovery_rtt_state_ = RecoveryRttState{};
+    }
     pto_count_ = 0;
     remaining_pto_probe_datagrams_ = 0;
     initial_space_.pending_probe_packet.reset();

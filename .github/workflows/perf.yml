@@ -642,7 +642,8 @@ jobs:
 
           for _ in range(30):
               try:
-                  profiles_ok = 0
+                  ok_rows = 0
+                  profile_statuses = {}
                   with urllib.request.urlopen(f"{base}/perf-results.json", timeout=15) as response:
                       results = json.load(response)
                   with urllib.request.urlopen(f"{base}/perf-history/index.json", timeout=15) as response:
@@ -665,20 +666,39 @@ jobs:
                           f"latest perf-history snapshot has commit {snapshot.get('commit')}, expected {expected_commit}"
                       )
                   sample_svg_path = None
-                  for row in results.get("rows", []):
+                  sample_log_path = None
+                  rows = results.get("rows")
+                  if not isinstance(rows, list) or not rows:
+                      raise RuntimeError("published perf results contain no benchmark rows")
+                  for row in rows:
+                      if row.get("status") == "ok":
+                          ok_rows += 1
                       for profile in (row.get("profiles") or {}).values():
-                          if profile.get("status") == "ok":
-                              profiles_ok += 1
+                          status = str(profile.get("status") or "unknown")
+                          profile_statuses[status] = profile_statuses.get(status, 0) + 1
+                          if status == "ok":
                               if sample_svg_path is None:
                                   sample_svg_path = profile.get("svg_file")
-                  if profiles_ok == 0:
-                      raise RuntimeError("published perf results contain no successful flamegraph profiles")
-                  if not isinstance(sample_svg_path, str) or not sample_svg_path.endswith(".svg"):
-                      raise RuntimeError("published perf results do not reference a flamegraph SVG")
-                  with urllib.request.urlopen(f"{base}/perf-artifacts/{sample_svg_path}", timeout=15) as response:
-                      sample = response.read(4096)
-                  if response.status != 200 or b"<svg" not in sample:
-                      raise RuntimeError(f"published flamegraph SVG is not readable: {sample_svg_path}")
+                          elif sample_log_path is None:
+                              sample_log_path = profile.get("log_file")
+                  if ok_rows == 0:
+                      raise RuntimeError("published perf results contain no successful benchmark rows")
+                  if sample_svg_path is not None:
+                      if not isinstance(sample_svg_path, str) or not sample_svg_path.endswith(".svg"):
+                          raise RuntimeError("published perf results do not reference a flamegraph SVG")
+                      with urllib.request.urlopen(f"{base}/perf-artifacts/{sample_svg_path}", timeout=15) as response:
+                          sample = response.read(4096)
+                      if response.status != 200 or b"<svg" not in sample:
+                          raise RuntimeError(f"published flamegraph SVG is not readable: {sample_svg_path}")
+                  elif sample_log_path is not None:
+                      if not isinstance(sample_log_path, str) or not sample_log_path.endswith(".perf.log"):
+                          raise RuntimeError("published unavailable profile does not reference a perf log")
+                      with urllib.request.urlopen(f"{base}/perf-artifacts/{sample_log_path}", timeout=15) as response:
+                          sample = response.read(4096)
+                      if response.status != 200 or not sample:
+                          raise RuntimeError(f"published perf profile log is not readable: {sample_log_path}")
+                  else:
+                      raise RuntimeError("published perf results contain no flamegraph or profile log references")
                   break
               except Exception as exc:
                   last_error = exc
@@ -687,7 +707,8 @@ jobs:
               print(f"published perf verification failed: {last_error}", file=sys.stderr)
               sys.exit(1)
 
-          print(f"verified published perf results: latest_snapshot={latest_snapshot_path}, ok_profiles={profiles_ok}, sample_svg={sample_svg_path}")
+          profile_summary = ",".join(f"{status}:{count}" for status, count in sorted(profile_statuses.items())) or "none"
+          print(f"verified published perf results: latest_snapshot={latest_snapshot_path}, ok_rows={ok_rows}, profiles={profile_summary}, sample_svg={sample_svg_path}")
           PY
 
       - name: Fail On Perf Job Errors

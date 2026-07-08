@@ -3568,6 +3568,12 @@ bool QuicConnection::should_drop_inbound_packet_on_old_path_after_preferred_succ
     }
 
     //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+    // # The server MAY continue to process delayed packets that are
+    // # received on the old IP address.
+    // CoQUIC treats an old-path application packet as delayed when its packet
+    // number is no greater than the largest application packet number already
+    // remembered for that old path. Newer old-path packets are dropped below.
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
     // # The server SHOULD drop newer packets for this connection that are
     // # received on the old IP address.
     return *packet_number > *inbound->largest_inbound_application_packet_number;

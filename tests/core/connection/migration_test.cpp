@@ -2006,6 +2006,103 @@ TEST(QuicCoreTest, PreferredAddressSuccessDropsNewerPacketsOnOldPath) {
     EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
 }
 
+TEST(QuicCoreTest, PreferredAddressSuccessProcessesDelayedOldPathStreamPacket) {
+    auto connection = make_connected_server_connection();
+    connection.paths_.clear();
+    connection.last_inbound_path_id_ = 3;
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 7;
+    auto &old_path = connection.ensure_path_state(3);
+    old_path.validated = true;
+    old_path.largest_inbound_application_packet_number = 100;
+    auto &preferred_path = connection.ensure_path_state(7);
+    preferred_path.validated = true;
+    preferred_path.is_current_send_path = true;
+    preferred_path.preferred_address_path = true;
+    connection.streams_.clear();
+
+    auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number = 99,
+            .frames =
+                {
+                    coquic::quic::StreamFrame{
+                        .has_offset = true,
+                        .has_length = true,
+                        .stream_id = 0,
+                        .offset = 0,
+                        .stream_data = coquic::quic::test::bytes_from_string("delayed-old-path"),
+                    },
+                },
+        },
+        coquic::quic::test::test_time(1), coquic::quic::QuicEcnCodepoint::not_ect);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_TRUE(processed.value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+    // # The server MAY continue to process delayed packets that are
+    // # received on the old IP address.
+    EXPECT_TRUE(connection.streams_.contains(0));
+    EXPECT_TRUE(connection.application_space_.received_packets.contains(99));
+    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 100u);
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_TRUE(connection.paths_.at(7).is_current_send_path);
+    EXPECT_FALSE(connection.paths_.at(3).is_current_send_path);
+    EXPECT_FALSE(connection.paths_.at(3).challenge_pending);
+    EXPECT_FALSE(connection.paths_.at(3).outstanding_challenge.has_value());
+}
+
+TEST(QuicCoreTest, PreferredAddressSuccessProcessesDelayedOldPathAckAndControlPacket) {
+    auto connection = make_connected_server_connection();
+    connection.paths_.clear();
+    connection.last_validated_path_id_ = 3;
+    connection.current_send_path_id_ = 7;
+    auto &old_path = connection.ensure_path_state(3);
+    old_path.validated = true;
+    old_path.largest_inbound_application_packet_number = 100;
+    auto &preferred_path = connection.ensure_path_state(7);
+    preferred_path.validated = true;
+    preferred_path.is_current_send_path = true;
+    preferred_path.preferred_address_path = true;
+    connection.connection_flow_control_.peer_max_data = 1024;
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 0,
+                                     .sent_time = coquic::quic::test::test_time(0),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .path_id = 7,
+                                 });
+
+    auto processed = connection.process_inbound_application(
+        std::array<coquic::quic::Frame, 2>{
+            coquic::quic::AckFrame{
+                .largest_acknowledged = 0,
+                .first_ack_range = 0,
+            },
+            coquic::quic::MaxDataFrame{.maximum_data = 4096},
+        },
+        coquic::quic::test::test_time(1), /*allow_preconnected_frames=*/false, /*path_id=*/3,
+        /*used_previous_application_read_secret=*/false, /*packet_number=*/100);
+
+    ASSERT_TRUE(processed.has_value());
+    EXPECT_TRUE(processed.value());
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-9.6.2
+    // # The server MAY continue to process delayed packets that are
+    // # received on the old IP address.
+    EXPECT_EQ(connection.application_space_.recovery.largest_acked_packet_number(),
+              std::optional<std::uint64_t>{0});
+    EXPECT_EQ(connection.connection_flow_control_.peer_max_data, 4096u);
+    EXPECT_EQ(connection.paths_.at(3).largest_inbound_application_packet_number, 100u);
+    EXPECT_EQ(connection.current_send_path_id_, 7u);
+    EXPECT_TRUE(connection.paths_.at(7).is_current_send_path);
+    EXPECT_FALSE(connection.paths_.at(3).is_current_send_path);
+    EXPECT_FALSE(connection.paths_.at(3).challenge_pending);
+    EXPECT_FALSE(connection.paths_.at(3).outstanding_challenge.has_value());
+}
+
 TEST(QuicCoreTest, PreferredAddressClientProcessesDelayedOldPathPacketsAfterSuccess) {
     auto connection = make_connected_client_connection();
     connection.paths_.clear();

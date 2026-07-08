@@ -731,8 +731,8 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!SHOULD,implementation,test]: The server SHOULD drop
     TEXT[!SHOULD,implementation,test]:    newer packets for this connection that are received on the old IP
     TEXT[!SHOULD,implementation,test]:    address.
-    TEXT[!MAY]: The server MAY continue to process delayed packets that are
-    TEXT[!MAY]:    received on the old IP address.
+    TEXT[!MAY,implementation,test]: The server MAY continue to process delayed packets that are
+    TEXT[!MAY,implementation,test]:    received on the old IP address.
     TEXT[!MUST,implementation]: A client MUST NOT use these for other connections,
     TEXT[!MUST,implementation]:    including connections that are resumed from the current connection.
 

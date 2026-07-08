@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from ..core.config import StewardConfig
@@ -36,13 +37,22 @@ DEFAULT_GATES = (
 
 
 def run_gates(
-    config: StewardConfig, task_id: str, cwd: Path, *, label: str | None = None
+    config: StewardConfig,
+    task_id: str,
+    cwd: Path,
+    *,
+    label: str | None = None,
+    on_gate_start: Callable[[int, str, list[str]], None] | None = None,
+    on_gate_result: Callable[[int, ValidationResult], None] | None = None,
 ) -> list[ValidationResult]:
     results: list[ValidationResult] = []
-    for filename, command in DEFAULT_GATES:
-        results.append(
-            run_validation(config, task_id, cwd, filename, command, label=label)
-        )
+    for index, (filename, command) in enumerate(DEFAULT_GATES):
+        if on_gate_start is not None:
+            on_gate_start(index, filename, command)
+        result = run_validation(config, task_id, cwd, filename, command, label=label)
+        results.append(result)
+        if on_gate_result is not None:
+            on_gate_result(index, result)
     return results
 
 

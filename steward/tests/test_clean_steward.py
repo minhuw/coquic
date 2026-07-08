@@ -5413,6 +5413,98 @@ def test_executor_marks_task_validation_running_before_gates(
     }
 
 
+def test_executor_records_validation_results_incrementally(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "mode=worker\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        '  case "$last" in */reviewer-*) mode=review;; esac\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        'if [ "$mode" = "review" ]; then\n'
+        "  printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
+        "else\n"
+        "  printf 'changed by steward\\n' > README.md\n"
+        "  printf 'done\\n' > \"$last\"\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    observed: dict[str, object] = {}
+
+    def fake_gates(
+        _config,
+        task_id,
+        cwd,
+        *,
+        label=None,
+        on_gate_start=None,
+        on_gate_result=None,
+    ):
+        assert label == "iteration-0"
+        assert on_gate_start is not None
+        assert on_gate_result is not None
+        results = []
+        for position, command in enumerate((["gate-0"], ["gate-1"])):
+            filename = f"gate-{position}.txt"
+            on_gate_start(position, filename, command)
+            output = _config.logs_dir / task_id / label / filename
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(f"gate {position}\n", encoding="utf-8")
+            validation = ValidationResult(
+                command=command,
+                cwd=cwd,
+                passed=True,
+                exit_code=0,
+                output_path=output,
+                summary=f"gate {position}",
+            )
+            results.append(validation)
+            on_gate_result(position, validation)
+            observed[f"after_gate_{position}"] = [
+                item.command for item in store.get(task_id).validations
+            ]
+        return results
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+
+    assert StewardExecutor(config, store).run_task(task.id)
+
+    assert observed == {
+        "after_gate_0": [["gate-0"]],
+        "after_gate_1": [["gate-0"], ["gate-1"]],
+    }
+    with Session(store.engine) as session:
+        rows = (
+            session.query(ValidationRow)
+            .filter_by(task_id=task.id)
+            .order_by(ValidationRow.position)
+            .all()
+        )
+    assert [json.loads(row.command_json) for row in rows] == [
+        ["gate-0"],
+        ["gate-1"],
+    ]
+    assert [row.iteration for row in rows] == [0, 0]
+    assert [row.position for row in rows] == [0, 1]
+    assert [row.passed for row in rows] == [True, True]
+    events = store.events(task.id)
+    assert [event.kind for event in events].count("validation.command_started") == 2
+    assert [event.kind for event in events].count("validation.command_finished") == 2
+
+
 def test_run_validation_applies_configured_timeout(
     config: StewardConfig, monkeypatch
 ) -> None:

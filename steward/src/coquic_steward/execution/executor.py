@@ -219,14 +219,9 @@ class StewardExecutor:
         self.worktrees.save_patch(task.worktree_path, patch_path)
         self.store.record_iteration_patch(task.id, iteration, patch_path)
         self.store.start_validation(task.id, f"validation running: {label}")
-        validations = _run_gates_for_iteration(
-            self.config, task.id, task.worktree_path, iteration
+        validations = self._run_gates_for_iteration(
+            task.id, task.worktree_path, iteration
         )
-        validations = [
-            validation.model_copy(update={"iteration": iteration})
-            for validation in validations
-        ]
-        self.store.record_iteration_validations(task.id, iteration, validations)
         task = self.store.get(task.id)
         if self._block_task_for_frozen_paths(task, task.worktree_path):
             return PatchPreparationResult.terminal_failure
@@ -1107,6 +1102,75 @@ class StewardExecutor:
         )
         return False
 
+    def _run_gates_for_iteration(
+        self, task_id: str, worktree: Path, iteration: int
+    ) -> list[ValidationResult]:
+        label = _iteration_log_label(iteration)
+
+        def on_gate_start(
+            position: int, filename: str, command: list[str]
+        ) -> None:
+            self.store.add_event(
+                task_id,
+                "validation.command_started",
+                " ".join(command),
+                {
+                    "iteration": iteration,
+                    "position": position,
+                    "command": command,
+                    "output_path": str(
+                        self.config.logs_dir / task_id / label / filename
+                    ),
+                },
+            )
+
+        def on_gate_result(position: int, validation: ValidationResult) -> None:
+            validation = validation.model_copy(update={"iteration": iteration})
+            self.store.record_iteration_validations(task_id, iteration, [validation])
+            status = "passed" if validation.passed else "failed"
+            self.store.add_event(
+                task_id,
+                "validation.command_finished",
+                f"{status}: {' '.join(validation.command)}",
+                {
+                    "iteration": iteration,
+                    "position": position,
+                    "exit_code": validation.exit_code,
+                    "passed": validation.passed,
+                    "output_path": str(validation.output_path),
+                },
+            )
+
+        try:
+            return [
+                validation.model_copy(update={"iteration": iteration})
+                for validation in run_gates(
+                    self.config,
+                    task_id,
+                    worktree,
+                    label=label,
+                    on_gate_start=on_gate_start,
+                    on_gate_result=on_gate_result,
+                )
+            ]
+        except TypeError as exc:
+            if "label" not in str(exc) and "on_gate" not in str(exc):
+                raise
+            try:
+                validations = run_gates(
+                    self.config, task_id, worktree, label=label
+                )
+            except TypeError as label_exc:
+                if "label" not in str(label_exc):
+                    raise
+                validations = run_gates(self.config, task_id, worktree)
+            validations = [
+                validation.model_copy(update={"iteration": iteration})
+                for validation in validations
+            ]
+            self.store.record_iteration_validations(task_id, iteration, validations)
+            return validations
+
     def _handle_integration_validation_failure(
         self,
         task: TaskRecord,
@@ -1675,19 +1739,6 @@ COMMIT_MESSAGE_OUTPUT_SCHEMA = {
     },
     "required": ["subject", "body"],
 }
-
-
-def _run_gates_for_iteration(
-    config: StewardConfig, task_id: str, worktree: Path, iteration: int
-) -> list[ValidationResult]:
-    try:
-        return run_gates(
-            config, task_id, worktree, label=_iteration_log_label(iteration)
-        )
-    except TypeError as exc:
-        if "label" not in str(exc):
-            raise
-        return run_gates(config, task_id, worktree)
 
 
 def _is_integration_task(task) -> bool:

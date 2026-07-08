@@ -71,6 +71,17 @@ run_diff_command() {
             exit 2
         fi
 
+        if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            local fallback_base
+            fallback_base="$(git rev-parse --verify --quiet "${head}^" || true)"
+            if [ -z "${fallback_base}" ]; then
+                echo "COQUIC_CLANG_TIDY_DIFF_BASE ${base} is not available and ${head}^ could not be resolved" >&2
+                exit 2
+            fi
+            echo "COQUIC_CLANG_TIDY_DIFF_BASE ${base} is not available; using ${head}^ (${fallback_base})" >&2
+            base="${fallback_base}"
+        fi
+
         git diff --unified=0 --no-ext-diff "${base}" "${head}" -- "$@"
         return
     fi

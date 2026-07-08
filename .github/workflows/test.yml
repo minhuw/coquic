@@ -25,7 +25,7 @@ jobs:
           summarize: false
 
       - name: Build
-        run: nix develop -c zig build
+        run: nix develop .#quictls -c zig build
 
       - name: Test
-        run: nix develop -c zig build test
+        run: nix develop .#quictls -c zig build test

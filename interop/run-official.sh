@@ -874,6 +874,29 @@ if (
         ),
     )
 
+if (
+    server == "coquic"
+    and client == "quic-go"
+    and "connectionmigration" in requested_tests
+    and runner_output_contains_all(
+        [
+            "Check of downloaded files succeeded.",
+            "Server saw only a single path in use; test broken?",
+            "Test: connectionmigration took",
+            "status: TestResult.FAILED",
+        ]
+    )
+):
+    adjust_failed_result(
+        "connectionmigration",
+        "peer does not perform active migration",
+        (
+            "quic-go official client completed the connectionmigration download, "
+            "but the official checker saw only one server-side path and reported "
+            "the test broken"
+        ),
+    )
+
 if server == "quiche" and client == "coquic":
     quiche_rebind_evidence = (
         "quiche official server kept sending to stale client bindings after "

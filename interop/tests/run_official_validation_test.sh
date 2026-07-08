@@ -786,6 +786,81 @@ if data.get("coquic_compat_adjustments"):
     raise SystemExit("expected no quiche client missing-evidence compatibility audit trail")
 PY
 
+quicgo_client_dir="${tmpdir}/quicgo-client"
+mkdir -p "${quicgo_client_dir}"
+quicgo_client_results="${quicgo_client_dir}/results.json"
+cat >"${quicgo_client_results}" <<'JSON'
+{
+  "servers": ["coquic"],
+  "clients": ["quic-go"],
+  "results": [[
+    {"name": "connectionmigration", "result": "failed"}
+  ]],
+  "measurements": [[]]
+}
+JSON
+cat >"${quicgo_client_dir}/runner-output.txt" <<'TXT'
+Check of downloaded files succeeded.
+Server saw these paths used: {(('193.167.100.100', 443), ('193.167.0.100', 57958))}
+Server saw only a single path in use; test broken?
+Test: connectionmigration took 42.231298s, status: TestResult.FAILED
+TXT
+
+apply_official_result_compatibility_adjustments \
+  "${quicgo_client_results}" coquic quic-go connectionmigration
+
+python3 - "${quicgo_client_results}" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+connectionmigration = data["results"][0][0]
+if connectionmigration["result"] != "peer_broken":
+    raise SystemExit("expected quic-go connectionmigration to be marked peer_broken")
+if connectionmigration.get("details") != "peer does not perform active migration":
+    raise SystemExit("expected quic-go connectionmigration public reason")
+if "official checker saw only one server-side path" not in connectionmigration.get("evidence", ""):
+    raise SystemExit("expected quic-go connectionmigration evidence")
+adjustments = data.get("coquic_compat_adjustments", [])
+if {entry.get("name") for entry in adjustments} != {"connectionmigration"}:
+    raise SystemExit("expected quic-go client compatibility adjustment audit trail")
+if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
+    raise SystemExit("expected quic-go client audit trail to include reason and evidence")
+PY
+
+quicgo_client_missing_evidence_dir="${tmpdir}/quicgo-client-missing-evidence"
+mkdir -p "${quicgo_client_missing_evidence_dir}"
+quicgo_client_missing_evidence_results="${quicgo_client_missing_evidence_dir}/results.json"
+cat >"${quicgo_client_missing_evidence_results}" <<'JSON'
+{
+  "servers": ["coquic"],
+  "clients": ["quic-go"],
+  "results": [[
+    {"name": "connectionmigration", "result": "failed"}
+  ]],
+  "measurements": [[]]
+}
+JSON
+
+apply_official_result_compatibility_adjustments \
+  "${quicgo_client_missing_evidence_results}" coquic quic-go connectionmigration
+
+python3 - "${quicgo_client_missing_evidence_results}" <<'PY'
+import json
+import pathlib
+import sys
+
+data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+connectionmigration = data["results"][0][0]
+if connectionmigration["result"] != "failed":
+    raise SystemExit("expected quic-go connectionmigration without evidence to remain failed")
+if "details" in connectionmigration or "evidence" in connectionmigration:
+    raise SystemExit("expected quic-go connectionmigration without evidence to avoid metadata")
+if data.get("coquic_compat_adjustments"):
+    raise SystemExit("expected no quic-go client missing-evidence compatibility audit trail")
+PY
+
 quiche_server_dir="${tmpdir}/quiche-server"
 mkdir -p "${quiche_server_dir}"
 quiche_server_results="${quiche_server_dir}/results.json"

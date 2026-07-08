@@ -391,6 +391,10 @@ quic::QuicCoreEndpointInput to_internal(EndpointInput input) {
                     .connection = value.connection,
                     .input = to_internal(std::move(value.input)),
                 };
+            } else if constexpr (std::is_same_v<T, CloseRoute>) {
+                return quic::QuicCoreCloseRoute{
+                    .route_handle = value.route_handle,
+                };
             } else if constexpr (std::is_same_v<T, TimerExpired>) {
                 return quic::QuicCoreTimerExpired{};
             }
@@ -598,6 +602,10 @@ Result Endpoint::update_path_mtu(PathMtuUpdate input, TimePoint now) {
 
 Result Endpoint::advance_connection(ConnectionCommand input, TimePoint now) {
     return advance(EndpointInput{std::move(input)}, now);
+}
+
+Result Endpoint::close_route(CloseRoute input, TimePoint now) {
+    return advance(EndpointInput{input}, now);
 }
 
 Result Endpoint::timer_expired(TimePoint now) {

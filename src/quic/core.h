@@ -542,6 +542,10 @@ struct QuicCoreRequestConnectionMigration {
     std::vector<std::byte> address_validation_identity;
 };
 
+struct QuicCoreCloseRoute {
+    QuicRouteHandle route_handle = 0;
+};
+
 struct QuicCoreOpenConnection {
     QuicCoreClientConnectionConfig connection;
     QuicRouteHandle initial_route_handle = 0;
@@ -561,7 +565,7 @@ struct QuicCoreConnectionCommand {
 
 using QuicCoreEndpointInput =
     std::variant<QuicCoreOpenConnection, QuicCoreInboundDatagram, QuicCorePathMtuUpdate,
-                 QuicCoreConnectionCommand, QuicCoreTimerExpired>;
+                 QuicCoreConnectionCommand, QuicCoreCloseRoute, QuicCoreTimerExpired>;
 
 using QuicCoreInput =
     std::variant<QuicCoreStart, QuicCoreInboundDatagram, QuicCoreSendStreamData,
@@ -747,6 +751,7 @@ class QuicCore {
         std::unordered_map<QuicPathId, std::vector<std::byte>>
             address_validation_identity_by_path_id;
         std::unordered_map<QuicPathId, QuicRouteAddressFamily> address_family_by_path_id;
+        std::vector<QuicRouteHandle> closed_receive_routes;
         QuicPathId next_path_id = 1;
     };
 
@@ -984,6 +989,13 @@ class QuicCore {
     route_handle_for_path(const ConnectionEntry &entry, const std::optional<QuicPathId> &path_id);
     static bool should_run_connection_timeout(const ConnectionEntry &entry, QuicCoreTimePoint now);
     static void maybe_run_connection_timeout(ConnectionEntry &entry, QuicCoreTimePoint now);
+    void mark_receive_route_closed(QuicRouteHandle route_handle);
+    bool should_remove_endpoint_connection_entry(const ConnectionEntry &entry,
+                                                 const QuicCoreResult &drained_result,
+                                                 QuicCoreTimePoint now) const;
+    bool should_keep_endpoint_connection_entry(const ConnectionEntry &entry,
+                                               const QuicCoreResult &drained_result,
+                                               QuicCoreTimePoint now) const;
     void note_send_continuation(ConnectionEntry &entry, const QuicCoreResult &result,
                                 QuicCoreTimePoint now) const;
     static bool take_send_continuation_drain(ConnectionEntry &entry);

@@ -1,3 +1,21 @@
+#if defined(__clang_analyzer__) && !__has_builtin(__builtin_ctzg)
+// Zig 0.16's libc++ references Clang 19 builtins while the lint shell still
+// runs clang-tidy 18.
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_ctzg(value, fallback)                                                            \
+    ((value) == 0 ? (fallback) : __builtin_ctzll(static_cast<unsigned long long>(value)))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_clzg(value, fallback)                                                            \
+    ((value) == 0 ? (fallback)                                                                     \
+                  : (__builtin_clzll(static_cast<unsigned long long>(value)) -                     \
+                     (static_cast<int>(sizeof(unsigned long long) * __CHAR_BIT__) -                \
+                      static_cast<int>(sizeof(value) * __CHAR_BIT__))))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_popcountg(value) __builtin_popcountll(static_cast<unsigned long long>(value))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __is_nothrow_convertible(from_type, to_type) __is_convertible(from_type, to_type)
+#endif
+
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -524,6 +542,154 @@ TEST(QuicCoreEndpointTest, CloseConnectionCommandRetainsStateUntilCloseDeadline)
     EXPECT_EQ(core.connection_count(), 0u);
 }
 
+TEST(QuicCoreEndpointTest, ClosedRouteAllowsEarlyClosingCleanupAndRouteReuse) {
+    auto endpoint_config = make_client_endpoint_config();
+    endpoint_config.supported_versions = {coquic::quic::kQuicVersion2, coquic::quic::kQuicVersion1};
+    coquic::quic::QuicCore core(std::move(endpoint_config));
+
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(1),
+            .initial_route_handle = 11,
+        },
+        coquic::quic::test::test_time(0)));
+
+    *core.connections_.at(1).connection = make_connected_client_connection();
+    core.connections_.at(1).route_handle_by_path_id.emplace(0, 11);
+    core.connections_.at(1).path_id_by_route_handle.emplace(11, 0);
+
+    auto close = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreCloseConnection{
+                    .application_error_code = 0,
+                    .reason_phrase = "done",
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    EXPECT_EQ(core.connection_count(), 1u);
+    EXPECT_TRUE(close.next_wakeup.has_value());
+    EXPECT_TRUE(lifecycle_events_from(close).empty());
+
+    auto early = core.advance_endpoint(coquic::quic::QuicCoreCloseRoute{.route_handle = 11},
+                                       coquic::quic::test::test_time(2));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+    // # Endpoints that have some alternative means to ensure that
+    // # late-arriving packets do not induce a response, such as those that
+    // # are able to close the UDP socket, MAY end these states earlier to
+    // # allow for faster resource recovery.
+    EXPECT_EQ(core.connection_count(), 0u);
+    auto lifecycle = lifecycle_events_from(early);
+    ASSERT_EQ(lifecycle.size(), 1u);
+    EXPECT_EQ(lifecycle.front().connection, 1u);
+    EXPECT_EQ(lifecycle.front().event, coquic::quic::QuicCoreConnectionLifecycle::closed);
+
+    auto open_config = make_client_open_config(2);
+    open_config.original_version = coquic::quic::kQuicVersion1;
+    open_config.initial_version = coquic::quic::kQuicVersion1;
+    auto reopened = core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = open_config,
+            .initial_route_handle = 11,
+        },
+        coquic::quic::test::test_time(4));
+    ASSERT_FALSE(send_effects_from(reopened).empty());
+    ASSERT_EQ(core.connections_.size(), 1u);
+
+    const auto version_negotiation =
+        coquic::quic::serialize_packet(coquic::quic::VersionNegotiationPacket{
+            .destination_connection_id = open_config.source_connection_id,
+            .source_connection_id = open_config.initial_destination_connection_id,
+            .supported_versions = {coquic::quic::kQuicVersion2},
+        });
+    ASSERT_TRUE(version_negotiation.has_value());
+    auto reused_route = core.advance_endpoint(
+        coquic::quic::QuicCoreInboundDatagram{
+            .bytes = version_negotiation.value(),
+            .route_handle = 11,
+        },
+        coquic::quic::test::test_time(5));
+    EXPECT_FALSE(send_effects_from(reused_route).empty());
+}
+
+TEST(QuicCoreEndpointTest, EarlyClosingCleanupWaitsForEveryConnectionRouteClosedAndDropsOne) {
+    coquic::quic::QuicCore core(make_client_endpoint_config());
+
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(1),
+            .initial_route_handle = 11,
+        },
+        coquic::quic::test::test_time(0)));
+
+    *core.connections_.at(1).connection = make_connected_client_connection();
+    core.connections_.at(1).route_handle_by_path_id.emplace(0, 11);
+    core.connections_.at(1).path_id_by_route_handle.emplace(11, 0);
+    core.connections_.at(1).route_handle_by_path_id.emplace(1, 22);
+    core.connections_.at(1).path_id_by_route_handle.emplace(22, 1);
+
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreCloseConnection{
+                    .application_error_code = 0,
+                    .reason_phrase = "done",
+                },
+        },
+        coquic::quic::test::test_time(1)));
+
+    auto first_route_closed = core.advance_endpoint(
+        coquic::quic::QuicCoreCloseRoute{.route_handle = 11}, coquic::quic::test::test_time(2));
+    EXPECT_EQ(core.connection_count(), 1u);
+    EXPECT_TRUE(lifecycle_events_from(first_route_closed).empty());
+
+    auto closed_route_datagram = core.advance_endpoint(
+        coquic::quic::QuicCoreInboundDatagram{
+            .bytes = bytes_from_ints({0x40, 0xa1, 0xb2, 0x00, 0x00}),
+            .route_handle = 11,
+        },
+        coquic::quic::test::test_time(3));
+    EXPECT_TRUE(send_effects_from(closed_route_datagram).empty());
+    EXPECT_TRUE(lifecycle_events_from(closed_route_datagram).empty());
+    EXPECT_EQ(core.connection_count(), 1u);
+
+    auto second_route_closed = core.advance_endpoint(
+        coquic::quic::QuicCoreCloseRoute{.route_handle = 22}, coquic::quic::test::test_time(4));
+    EXPECT_EQ(core.connection_count(), 0u);
+    auto lifecycle = lifecycle_events_from(second_route_closed);
+    ASSERT_EQ(lifecycle.size(), 1u);
+    EXPECT_EQ(lifecycle.front().event, coquic::quic::QuicCoreConnectionLifecycle::closed);
+}
+
+TEST(QuicCoreEndpointTest, ClosedRouteAllowsEarlyDrainingCleanup) {
+    coquic::quic::QuicCore core(make_client_endpoint_config());
+
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreOpenConnection{
+            .connection = make_client_open_config(1),
+            .initial_route_handle = 11,
+        },
+        coquic::quic::test::test_time(0)));
+
+    *core.connections_.at(1).connection = make_connected_client_connection();
+    core.connections_.at(1).route_handle_by_path_id.emplace(0, 11);
+    core.connections_.at(1).path_id_by_route_handle.emplace(11, 0);
+    core.connections_.at(1).connection->enter_draining_state(coquic::quic::test::test_time(1));
+
+    auto early = core.advance_endpoint(coquic::quic::QuicCoreCloseRoute{.route_handle = 11},
+                                       coquic::quic::test::test_time(2));
+
+    EXPECT_EQ(core.connection_count(), 0u);
+    auto lifecycle = lifecycle_events_from(early);
+    ASSERT_EQ(lifecycle.size(), 1u);
+    EXPECT_EQ(lifecycle.front().connection, 1u);
+    EXPECT_EQ(lifecycle.front().event, coquic::quic::QuicCoreConnectionLifecycle::closed);
+    EXPECT_TRUE(send_effects_from(early).empty());
+}
+
 TEST(QuicCoreEndpointTest, ServerCloseConnectionCommandRetainsStateUntilCloseDeadline) {
     coquic::quic::QuicCore core(make_server_endpoint_config());
 
@@ -571,5 +737,45 @@ TEST(QuicCoreEndpointTest, ServerCloseConnectionCommandRetainsStateUntilCloseDea
     EXPECT_EQ(lifecycle.front().connection, 1u);
     EXPECT_EQ(lifecycle.front().event, coquic::quic::QuicCoreConnectionLifecycle::closed);
     EXPECT_EQ(core.connection_count(), 0u);
+}
+
+TEST(QuicCoreEndpointTest, ServerClosedActiveRouteDoesNotUseEarlyClosingCleanup) {
+    coquic::quic::QuicCore core(make_server_endpoint_config());
+
+    auto entry = coquic::quic::QuicCore::ConnectionEntry{
+        .handle = 1,
+        .default_route_handle = 11,
+        .connection = std::make_unique<coquic::quic::QuicConnection>(
+            coquic::quic::test::make_server_core_config()),
+    };
+    *entry.connection = make_connected_server_connection();
+    entry.route_handle_by_path_id.emplace(0, 11);
+    entry.path_id_by_route_handle.emplace(11, 0);
+    core.connections_.emplace(entry.handle, std::move(entry));
+
+    auto close = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreCloseConnection{
+                    .application_error_code = 0,
+                    .reason_phrase = "done",
+                },
+        },
+        coquic::quic::test::test_time(1));
+
+    auto close_deadline = optional_value_or_terminate(close.next_wakeup);
+    auto active_route_closed = core.advance_endpoint(
+        coquic::quic::QuicCoreCloseRoute{.route_handle = 11}, coquic::quic::test::test_time(2));
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+    // # Servers that retain an open socket for accepting new connections
+    // # SHOULD NOT end the closing or draining state early.
+    EXPECT_EQ(core.connection_count(), 1u);
+    EXPECT_TRUE(lifecycle_events_from(active_route_closed).empty());
+
+    auto before_deadline = core.advance_endpoint(coquic::quic::QuicCoreTimerExpired{},
+                                                 close_deadline - std::chrono::microseconds(1));
+    EXPECT_EQ(core.connection_count(), 1u);
+    EXPECT_TRUE(lifecycle_events_from(before_deadline).empty());
 }
 } // namespace

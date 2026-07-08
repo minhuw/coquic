@@ -799,10 +799,10 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[implementation]:    properly discarded.
     TEXT[!SHOULD,implementation,test]: These states SHOULD persist for at least three
     TEXT[!SHOULD,implementation,test]:    times the current PTO interval as defined in [QUIC-RECOVERY].
-    TEXT[!MAY]:    Endpoints that have some alternative means to ensure that late-
-    TEXT[!MAY]:    arriving packets do not induce a response, such as those that are
-    TEXT[!MAY]:    able to close the UDP socket, MAY end these states earlier to allow
-    TEXT[!MAY]:    for faster resource recovery.
+    TEXT[!MAY,implementation,test]:    Endpoints that have some alternative means to ensure that late-
+    TEXT[!MAY,implementation,test]:    arriving packets do not induce a response, such as those that are
+    TEXT[!MAY,implementation,test]:    able to close the UDP socket, MAY end these states earlier to allow
+    TEXT[!MAY,implementation,test]:    for faster resource recovery.
     TEXT[!SHOULD,implementation,test]: Servers that retain an open socket for
     TEXT[!SHOULD,implementation,test]:    accepting new connections SHOULD NOT end the closing or draining
     TEXT[!SHOULD,implementation,test]:    state early.

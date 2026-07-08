@@ -49,6 +49,8 @@ size, and congestion-control algorithm.
 - `InboundDatagram`: UDP payload received from the runtime.
 - `PathMtuUpdate`: runtime PMTU observation.
 - `ConnectionCommand`: application action for an existing connection.
+- `CloseRoute`: opt-in signal that the runtime has closed a receive route, so
+  late packets on that route cannot induce responses.
 - `TimerExpired`: runtime timer expiry.
 
 Connection commands carry `core::ConnectionInput`, a variant of:

@@ -637,29 +637,21 @@ bool has_closed_lifecycle_event(const QuicCoreResult &core_result) {
         });
 }
 
-COQUIC_NO_PROFILE bool
-should_remove_endpoint_connection_entry(const QuicConnection &quic_connection,
-                                        const QuicCoreResult &drained_result,
-                                        QuicCoreTimePoint now) {
-    if (quic_connection.has_failed()) {
-        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
-        // # Servers that retain an open socket for accepting new connections
-        // # SHOULD NOT end the closing or draining state early.
-        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
-        // # Once its closing or draining state ends, an endpoint SHOULD
-        // # discard all connection state.
-        return !quic_connection.close_state_active() || quic_connection.terminal_state_expired(now);
+void ensure_closed_lifecycle_event(QuicCoreResult &core_result,
+                                   QuicConnectionHandle connection_handle) {
+    const bool already_present = std::any_of(
+        core_result.effects.begin(), core_result.effects.end(), [&](const auto &effect) {
+            const auto *event = std::get_if<QuicCoreConnectionLifecycleEvent>(&effect);
+            return event != nullptr && event->connection == connection_handle &&
+                   event->event == QuicCoreConnectionLifecycle::closed;
+        });
+    if (already_present) {
+        return;
     }
-    return has_closed_lifecycle_event(drained_result);
-}
-
-bool should_keep_endpoint_connection_entry(const QuicConnection &quic_connection,
-                                           const QuicCoreResult &drained_result,
-                                           QuicCoreTimePoint now = QuicCoreTimePoint{}) {
-    const bool failed_before_handshake =
-        quic_connection.has_failed() && !quic_connection.has_processed_peer_packet();
-    return !failed_before_handshake &&
-           !should_remove_endpoint_connection_entry(quic_connection, drained_result, now);
+    core_result.effects.emplace_back(QuicCoreConnectionLifecycleEvent{
+        .connection = connection_handle,
+        .event = QuicCoreConnectionLifecycle::closed,
+    });
 }
 
 bool is_reserved_version(std::uint32_t version) {
@@ -3256,6 +3248,23 @@ std::optional<QuicPathId> COQUIC_NO_PROFILE QuicCore::path_id_for_inbound_route(
     return kDefaultPathId;
 }
 
+void QuicCore::mark_receive_route_closed(QuicRouteHandle route_handle) {
+    for (auto &[handle, entry] : connections_) {
+        (void)handle;
+        if (entry.connection == nullptr || entry.connection->config_.role != EndpointRole::client ||
+            !entry.connection->has_failed() || !entry.connection->close_state_active() ||
+            !entry.path_id_by_route_handle.contains(route_handle)) {
+            continue;
+        }
+        if (!entry.closed_receive_routes.empty() &&
+            std::find(entry.closed_receive_routes.begin(), entry.closed_receive_routes.end(),
+                      route_handle) != entry.closed_receive_routes.end()) {
+            continue;
+        }
+        entry.closed_receive_routes.push_back(route_handle);
+    }
+}
+
 std::optional<QuicRouteHandle>
 QuicCore::route_handle_for_path(const ConnectionEntry &entry,
                                 const std::optional<QuicPathId> &path_id) {
@@ -3277,6 +3286,49 @@ void QuicCore::maybe_run_connection_timeout(ConnectionEntry &entry, QuicCoreTime
     if (should_run_connection_timeout(entry, now)) {
         entry.connection->on_timeout(now);
     }
+}
+
+bool QuicCore::should_remove_endpoint_connection_entry(const ConnectionEntry &entry,
+                                                       const QuicCoreResult &drained_result,
+                                                       QuicCoreTimePoint now) const {
+    const auto &quic_connection = *entry.connection;
+    if (quic_connection.has_failed()) {
+        if (endpoint_config_.role == EndpointRole::client && quic_connection.close_state_active()) {
+            //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+            // # Endpoints that have some alternative means to ensure that
+            // # late-arriving packets do not induce a response, such as those
+            // # that are able to close the UDP socket, MAY end these states
+            // # earlier to allow for faster resource recovery.
+            const bool all_routes_closed =
+                !entry.path_id_by_route_handle.empty() &&
+                std::all_of(entry.path_id_by_route_handle.begin(),
+                            entry.path_id_by_route_handle.end(), [&](const auto &route) {
+                                return std::find(entry.closed_receive_routes.begin(),
+                                                 entry.closed_receive_routes.end(),
+                                                 route.first) != entry.closed_receive_routes.end();
+                            });
+            if (all_routes_closed) {
+                return true;
+            }
+        }
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+        // # Servers that retain an open socket for accepting new connections
+        // # SHOULD NOT end the closing or draining state early.
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
+        // # Once its closing or draining state ends, an endpoint SHOULD
+        // # discard all connection state.
+        return !quic_connection.close_state_active() || quic_connection.terminal_state_expired(now);
+    }
+    return has_closed_lifecycle_event(drained_result);
+}
+
+bool QuicCore::should_keep_endpoint_connection_entry(const ConnectionEntry &entry,
+                                                     const QuicCoreResult &drained_result,
+                                                     QuicCoreTimePoint now) const {
+    const bool failed_before_handshake =
+        entry.connection->has_failed() && !entry.connection->has_processed_peer_packet();
+    return !failed_before_handshake &&
+           !should_remove_endpoint_connection_entry(entry, drained_result, now);
 }
 
 template <typename Entry>
@@ -3714,6 +3766,11 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
         QuicCoreResult result;
         purge_expired_orphan_zero_rtt(now);
         const auto inbound_payload = inbound->payload();
+        const auto inbound_route_closed_for_entry = [&](const ConnectionEntry &entry) {
+            return inbound->route_handle.has_value() &&
+                   std::find(entry.closed_receive_routes.begin(), entry.closed_receive_routes.end(),
+                             *inbound->route_handle) != entry.closed_receive_routes.end();
+        };
         const auto drain_stateless_reset_owner = [&](QuicConnectionHandle owner) -> bool {
             const auto entry_it = connections_.find(owner);
             if (entry_it == connections_.end() || entry_it->second.connection == nullptr) {
@@ -3727,9 +3784,10 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                 /*continue_paced_burst=*/false, send_sink);
             append_result(result, std::move(drained));
             bool remove_entry =
-                should_remove_endpoint_connection_entry(*entry_it->second.connection, result, now);
+                should_remove_endpoint_connection_entry(entry_it->second, result, now);
             refresh_server_connection_routes(entry_it->second);
             if (remove_entry) {
+                ensure_closed_lifecycle_event(result, entry_it->second.handle);
                 retire_endpoint_connection_routes(entry_it->second, now);
                 ++entry_it->second.wakeup_generation;
                 connections_.erase(entry_it);
@@ -3746,6 +3804,9 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                 if (entry.connection == nullptr) {
                     continue;
                 }
+                if (inbound_route_closed_for_entry(entry)) {
+                    continue;
+                }
                 const auto path_id = path_id_for_inbound_route(
                     entry, inbound->route_handle, inbound->address_validation_identity);
                 if (!path_id.has_value()) {
@@ -3756,8 +3817,8 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                 if (!version_negotiation.has_value()) {
                     continue;
                 }
-                if (should_remove_endpoint_connection_entry(*entry.connection, *version_negotiation,
-                                                            now)) {
+                if (should_remove_endpoint_connection_entry(entry, *version_negotiation, now)) {
+                    ensure_closed_lifecycle_event(*version_negotiation, entry.handle);
                     retire_endpoint_connection_routes(entry, now);
                     ++entry.wakeup_generation;
                     connections_.erase(handle);
@@ -3790,6 +3851,9 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             auto entry_it = connections_.find(*handle);
             if (entry_it != connections_.end()) {
                 auto &entry = entry_it->second;
+                if (inbound_route_closed_for_entry(entry)) {
+                    return finalize_endpoint_result(std::move(result), now);
+                }
                 //= https://www.rfc-editor.org/rfc/rfc9000#section-11
                 // # A stateless reset MUST NOT be used by an endpoint that has
                 // # the state necessary to send a frame on the connection.
@@ -3838,8 +3902,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                 if (!defer_send_drain) {
                     drain_queued_server_new_token(entry, drained, now, send_sink);
                 }
-                bool remove_entry =
-                    should_remove_endpoint_connection_entry(*entry.connection, drained, now);
+                bool remove_entry = should_remove_endpoint_connection_entry(entry, drained, now);
                 remember_client_new_tokens(entry, drained);
                 if (defer_send_drain) {
                     refresh_entry_wakeup(entry);
@@ -3849,6 +3912,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                 append_result(result, std::move(drained));
                 refresh_server_connection_routes(entry);
                 if (remove_entry) {
+                    ensure_closed_lifecycle_event(result, entry.handle);
                     retire_endpoint_connection_routes(entry, now);
                     ++entry.wakeup_generation;
                     connections_.erase(entry_it);
@@ -4155,7 +4219,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                                      entry.route_handle_by_path_id, *entry.connection, now,
                                      /*continue_paced_burst=*/false, send_sink);
         drain_queued_server_new_token(entry, drained, now, send_sink);
-        bool keep_entry = should_keep_endpoint_connection_entry(*entry.connection, drained, now);
+        bool keep_entry = should_keep_endpoint_connection_entry(entry, drained, now);
         append_result(result, std::move(drained));
         result.effects.insert(result.effects.begin(),
                               QuicCoreConnectionLifecycleEvent{
@@ -4334,8 +4398,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
         auto drained = drain_connection_effects(
             entry.handle, entry.default_route_handle, entry.route_handle_by_path_id,
             *entry.connection, now, take_send_continuation_drain(entry), send_sink);
-        bool remove_entry =
-            should_remove_endpoint_connection_entry(*entry.connection, drained, now);
+        bool remove_entry = should_remove_endpoint_connection_entry(entry, drained, now);
         note_send_continuation(entry, drained, now);
         append_result(result, std::move(drained));
         refresh_server_connection_routes(entry);
@@ -4343,9 +4406,42 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2
             // # Once its closing or draining state ends, an endpoint SHOULD
             // # discard all connection state.
+            ensure_closed_lifecycle_event(result, entry.handle);
             retire_endpoint_connection_routes(entry, now);
             ++entry.wakeup_generation;
             connections_.erase(entry_it);
+        }
+        return finalize_endpoint_result(std::move(result), now);
+    }
+
+    if (const auto *close_route = std::get_if<QuicCoreCloseRoute>(&input); close_route != nullptr) {
+        mark_receive_route_closed(close_route->route_handle);
+
+        QuicCoreResult result;
+        for (auto entry_it = connections_.begin(); entry_it != connections_.end();) {
+            auto &entry = entry_it->second;
+            if (entry.connection == nullptr ||
+                std::find(entry.closed_receive_routes.begin(), entry.closed_receive_routes.end(),
+                          close_route->route_handle) == entry.closed_receive_routes.end()) {
+                ++entry_it;
+                continue;
+            }
+
+            auto drained = drain_connection_effects(
+                entry.handle, entry.default_route_handle, entry.route_handle_by_path_id,
+                *entry.connection, now, take_send_continuation_drain(entry), send_sink);
+            const bool remove_entry = should_remove_endpoint_connection_entry(entry, drained, now);
+            note_send_continuation(entry, drained, now);
+            append_result(result, std::move(drained));
+            refresh_server_connection_routes(entry);
+            if (remove_entry) {
+                ensure_closed_lifecycle_event(result, entry.handle);
+                retire_endpoint_connection_routes(entry, now);
+                ++entry.wakeup_generation;
+                entry_it = connections_.erase(entry_it);
+                continue;
+            }
+            ++entry_it;
         }
         return finalize_endpoint_result(std::move(result), now);
     }
@@ -4364,12 +4460,12 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
         auto drained = drain_connection_effects(entry.handle, entry.default_route_handle,
                                                 entry.route_handle_by_path_id, *entry.connection,
                                                 now, continue_paced_burst, send_sink);
-        const bool remove_entry =
-            should_remove_endpoint_connection_entry(*entry.connection, drained, now);
+        const bool remove_entry = should_remove_endpoint_connection_entry(entry, drained, now);
         note_send_continuation(entry, drained, now);
         append_result(result, std::move(drained));
         refresh_server_connection_routes(entry);
         if (remove_entry) {
+            ensure_closed_lifecycle_event(result, entry.handle);
             retire_endpoint_connection_routes(entry, now);
             ++entry.wakeup_generation;
             connections_.erase(entry_it);

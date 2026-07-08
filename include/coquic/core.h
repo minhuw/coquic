@@ -280,10 +280,14 @@ struct ConnectionCommand {
     ConnectionInput input;
 };
 
+struct CloseRoute {
+    RouteHandle route_handle = 0;
+};
+
 struct TimerExpired {};
 
-using EndpointInput =
-    std::variant<OpenConnection, InboundDatagram, PathMtuUpdate, ConnectionCommand, TimerExpired>;
+using EndpointInput = std::variant<OpenConnection, InboundDatagram, PathMtuUpdate,
+                                   ConnectionCommand, CloseRoute, TimerExpired>;
 
 struct SendDatagram {
     ConnectionHandle connection = 0;
@@ -424,6 +428,7 @@ class Endpoint {
     Result input_datagram(InboundDatagram input, TimePoint now);
     Result update_path_mtu(PathMtuUpdate input, TimePoint now);
     Result advance_connection(ConnectionCommand input, TimePoint now);
+    Result close_route(CloseRoute input, TimePoint now);
     Result timer_expired(TimePoint now);
 
     std::optional<TimePoint> next_wakeup() const;

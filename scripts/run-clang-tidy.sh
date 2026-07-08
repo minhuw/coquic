@@ -72,6 +72,9 @@ run_diff_command() {
         fi
 
         if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "${base}" >/dev/null 2>&1 || true
+        fi
+        if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
             local fallback_base
             fallback_base="$(git rev-parse --verify --quiet "${head}^" || true)"
             if [ -z "${fallback_base}" ]; then

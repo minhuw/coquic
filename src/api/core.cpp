@@ -244,6 +244,8 @@ quic::QuicTransportConfig to_internal(const TransportConfig &config) {
         .grease_reserved_versions = config.grease_reserved_versions,
         .grease_quic_bit = config.grease_quic_bit,
         .enable_optimistic_ack_mitigation = config.enable_optimistic_ack_mitigation,
+        .retain_read_keys_for_peer_close_while_closing =
+            config.retain_read_keys_for_peer_close_while_closing,
     };
 }
 

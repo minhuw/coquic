@@ -1,7 +1,19 @@
 #include "src/quic/connection/connection.h"
 #include "src/quic/connection/connection_internal.h"
 
+#include <type_traits>
+#include <utility>
+
 namespace coquic::quic {
+
+namespace {
+template <typename T, typename = void> struct PacketValueHasBegin : std::false_type {};
+
+template <typename T>
+struct PacketValueHasBegin<
+    T, std::void_t<decltype(std::declval<T &>().begin()), decltype(std::declval<T &>().end())>>
+    : std::true_type {};
+} // namespace
 
 QuicConnection::QuicConnection(QuicCoreConfig config)
     : config_(std::move(config)),
@@ -177,6 +189,10 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
                 // # packets in the closing state.
                 closing_close_packet_pending_ = true;
             }
+        }
+        if (close_mode_ == QuicConnectionCloseMode::closing &&
+            config_.transport.retain_read_keys_for_peer_close_while_closing && !bytes.empty()) {
+            result.processed_any_packet = process_closing_peer_close_datagram(bytes, now, ecn);
         }
         return result;
     }
@@ -603,7 +619,8 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
 
         bool processed_any_decoded_packet = false;
         bool completed_any_decoded_packet = false;
-        if constexpr (requires { packets.value().begin(); }) {
+        using DecodedPackets = std::remove_reference_t<decltype(packets.value())>;
+        if constexpr (PacketValueHasBegin<DecodedPackets>::value) {
             for (const auto &packet : packets.value()) {
                 const auto packet_result = process_decoded_packet(packet);
                 if (!packet_result.ok) {
@@ -1026,6 +1043,157 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
         offset += packet_length.value();
     }
     return result;
+}
+
+bool QuicConnection::process_closing_peer_close_datagram(std::span<const std::byte> bytes,
+                                                         QuicCoreTimePoint now,
+                                                         QuicEcnCodepoint ecn) {
+    if (bytes.empty()) {
+        return false;
+    }
+
+    const auto make_deserialize_context = [&]() -> CodecResult<DeserializeProtectionContext> {
+        const auto handshake_ready = prime_traffic_secret_cache(handshake_space_.read_secret);
+        if (!handshake_ready.has_value()) {
+            return CodecResult<DeserializeProtectionContext>::failure(
+                handshake_ready.error().code, handshake_ready.error().offset);
+        }
+
+        const auto zero_rtt_ready = prime_traffic_secret_cache(zero_rtt_space_.read_secret);
+        if (!zero_rtt_ready.has_value()) {
+            return CodecResult<DeserializeProtectionContext>::failure(
+                zero_rtt_ready.error().code, zero_rtt_ready.error().offset);
+        }
+
+        const auto one_rtt_ready = prime_traffic_secret_cache(application_space_.read_secret);
+        if (!one_rtt_ready.has_value()) {
+            return CodecResult<DeserializeProtectionContext>::failure(one_rtt_ready.error().code,
+                                                                      one_rtt_ready.error().offset);
+        }
+
+        return CodecResult<DeserializeProtectionContext>::success(DeserializeProtectionContext{
+            .peer_role = opposite_role(config_.role),
+            .client_initial_destination_connection_id = client_initial_destination_connection_id(),
+            .handshake_secret = handshake_space_.read_secret,
+            .zero_rtt_secret = zero_rtt_space_.read_secret,
+            .one_rtt_secret = application_space_.read_secret,
+            .one_rtt_secret_cache_primed =
+                traffic_secret_cache_is_primed(application_space_.read_secret),
+            .one_rtt_key_phase = application_read_key_phase_,
+            .largest_authenticated_initial_packet_number =
+                initial_space_.largest_authenticated_packet_number,
+            .largest_authenticated_handshake_packet_number =
+                handshake_space_.largest_authenticated_packet_number,
+            .largest_authenticated_application_packet_number =
+                application_space_.largest_authenticated_packet_number,
+            .one_rtt_destination_connection_id_length = config_.source_connection_id.size(),
+            .accept_greased_quic_bit = accepts_greased_quic_bit(),
+        });
+    };
+
+    const auto process_received_packet = [&](const ReceivedProtectedPacket &packet) -> bool {
+        return std::visit(
+            [&](const auto &protected_packet) -> bool {
+                using PacketType = std::decay_t<decltype(protected_packet)>;
+                PacketSpaceState *packet_space = nullptr;
+                if constexpr (std::is_same_v<PacketType, ReceivedProtectedInitialPacket>) {
+                    if (initial_packet_space_discarded_) {
+                        return false;
+                    }
+                    packet_space = &initial_space_;
+                } else if constexpr (std::is_same_v<PacketType, ReceivedProtectedHandshakePacket>) {
+                    if (handshake_packet_space_discarded_) {
+                        return false;
+                    }
+                    packet_space = &handshake_space_;
+                } else {
+                    packet_space = &application_space_;
+                }
+
+                note_authenticated_packet_number(*packet_space, protected_packet.packet_number);
+                if (should_ignore_received_packet(*packet_space, protected_packet.packet_number)) {
+                    return true;
+                }
+
+                bool peer_close = false;
+                if constexpr (std::is_same_v<PacketType, ReceivedProtectedOneRttAckOnlyPacket> ||
+                              std::is_same_v<PacketType, ReceivedProtectedOneRttStreamPacket>) {
+                    peer_close = false;
+                } else {
+                    peer_close = std::ranges::any_of(
+                        protected_packet.frames, [](const ReceivedFrame &frame) {
+                            return std::holds_alternative<TransportConnectionCloseFrame>(frame) ||
+                                   std::holds_alternative<ApplicationConnectionCloseFrame>(frame);
+                        });
+                }
+
+                if (!peer_close) {
+                    return true;
+                }
+
+                const bool ack_eliciting = [&]() {
+                    if constexpr (std::is_same_v<PacketType,
+                                                 ReceivedProtectedOneRttAckOnlyPacket> ||
+                                  std::is_same_v<PacketType, ReceivedProtectedOneRttStreamPacket>) {
+                        return false;
+                    } else {
+                        return has_ack_eliciting_frame(protected_packet.frames);
+                    }
+                }();
+                packet_space->received_packets.record_received(
+                    protected_packet.packet_number, ack_eliciting, now, ecn,
+                    config_.transport.ack_eliciting_threshold);
+                note_local_connection_id_used_by_peer(protected_packet.destination_connection_id);
+                enter_draining_state(now);
+                return true;
+            },
+            packet);
+    };
+
+    const auto context = make_deserialize_context();
+    if (!context.has_value()) {
+        log_codec_failure("closing_state_deserialize_context", context.error());
+        return false;
+    }
+
+    std::size_t offset = 0;
+    bool processed_any_packet = false;
+    std::optional<ConnectionId> first_datagram_destination_connection_id;
+    while (offset < bytes.size()) {
+        const auto packet_length = peek_next_packet_length(bytes.subspan(offset));
+        if (!packet_length.has_value()) {
+            return processed_any_packet;
+        }
+
+        const auto packet_bytes = bytes.subspan(offset, packet_length.value());
+        auto current_packet_destination_connection_id =
+            peek_long_header_destination_connection_id(packet_bytes);
+        if (current_packet_destination_connection_id.has_value()) {
+            if (!first_datagram_destination_connection_id.has_value()) {
+                first_datagram_destination_connection_id =
+                    current_packet_destination_connection_id.value();
+            } else if (current_packet_destination_connection_id.value() !=
+                       first_datagram_destination_connection_id.value()) {
+                offset += packet_length.value();
+                continue;
+            }
+        }
+
+        const auto packets = deserialize_received_protected_packet(packet_bytes, context.value());
+        if (!packets.has_value()) {
+            static_cast<void>(note_packet_authentication_failure(packets.error(), now));
+            offset += packet_length.value();
+            continue;
+        }
+
+        processed_any_packet |= process_received_packet(packets.value());
+        if (close_mode_ == QuicConnectionCloseMode::draining) {
+            return true;
+        }
+        offset += packet_length.value();
+    }
+
+    return processed_any_packet;
 }
 
 StreamStateResult<bool> QuicConnection::queue_stream_send_impl(

@@ -166,6 +166,7 @@ struct QuicTransportConfig {
     bool grease_reserved_versions = false;
     bool grease_quic_bit = false;
     bool enable_optimistic_ack_mitigation = false;
+    bool retain_read_keys_for_peer_close_while_closing = false;
 };
 
 struct QuicQlogConfig {

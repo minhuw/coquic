@@ -1,3 +1,21 @@
+#if defined(__clang_analyzer__) && !__has_builtin(__builtin_ctzg)
+// Zig 0.16's libc++ references Clang 19 builtins while the lint shell still
+// runs clang-tidy 18.
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_ctzg(value, fallback)                                                            \
+    ((value) == 0 ? (fallback) : __builtin_ctzll(static_cast<unsigned long long>(value)))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_clzg(value, fallback)                                                            \
+    ((value) == 0 ? (fallback)                                                                     \
+                  : (__builtin_clzll(static_cast<unsigned long long>(value)) -                     \
+                     (static_cast<int>(sizeof(unsigned long long) * __CHAR_BIT__) -                \
+                      static_cast<int>(sizeof(value) * __CHAR_BIT__))))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_popcountg(value) __builtin_popcountll(static_cast<unsigned long long>(value))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __is_nothrow_convertible(from_type, to_type) __is_convertible(from_type, to_type)
+#endif
+
 #include <gtest/gtest.h>
 #include "tests/support/core/connection_handshake_test_support.h"
 
@@ -4117,6 +4135,232 @@ TEST(QuicCoreTest, DrainOutboundDatagramReturnsEmptyWhenNothingIsPending) {
 
     EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
     EXPECT_FALSE(connection.has_failed());
+}
+
+TEST(QuicCoreTest, ClosingStateKeyRetentionDefaultDoesNotDecryptPeerClose) {
+    auto connection = make_connected_client_connection();
+    connection.closing_transport_close_ = coquic::quic::TransportConnectionCloseFrame{
+        .error_code = 1,
+        .frame_type = 0,
+    };
+    connection.enter_closing_state(coquic::quic::test::test_time(1),
+                                   coquic::quic::QuicConnectionTerminalState::failed);
+    connection.closing_close_packet_pending_ = false;
+    connection.closing_packets_since_last_close_ = 0;
+    connection.closing_packet_response_threshold_ = 8;
+    ASSERT_TRUE(connection.application_space_.read_secret.has_value());
+
+    const auto peer_close_packet = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 7,
+                .frames =
+                    {
+                        coquic::quic::ApplicationConnectionCloseFrame{
+                            .error_code = 99,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(peer_close_packet.has_value());
+
+    const auto result = connection.process_inbound_datagram(peer_close_packet.value(),
+                                                            coquic::quic::test::test_time(2));
+
+    EXPECT_FALSE(result.processed_any_packet);
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::closing);
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_FALSE(connection.closing_close_packet_pending_);
+    EXPECT_EQ(connection.closing_packets_since_last_close_, 1u);
+}
+
+TEST(QuicCoreTest, ClosingStateKeyRetentionProcessesOnlyPeerConnectionClose) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.retain_read_keys_for_peer_close_while_closing = true;
+    connection.closing_transport_close_ = coquic::quic::TransportConnectionCloseFrame{
+        .error_code = 1,
+        .frame_type = 0,
+    };
+    connection.enter_closing_state(coquic::quic::test::test_time(1),
+                                   coquic::quic::QuicConnectionTerminalState::failed);
+    connection.closing_close_packet_pending_ = false;
+    connection.closing_packets_since_last_close_ = 0;
+    connection.closing_packet_response_threshold_ = 8;
+    ASSERT_TRUE(connection.application_space_.read_secret.has_value());
+
+    const auto peer_close_packet = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 7,
+                .frames =
+                    {
+                        coquic::quic::ApplicationConnectionCloseFrame{
+                            .error_code = 99,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(peer_close_packet.has_value());
+
+    const auto result = connection.process_inbound_datagram(peer_close_packet.value(),
+                                                            coquic::quic::test::test_time(2));
+
+    EXPECT_TRUE(result.processed_any_packet);
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::draining);
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, 7u);
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_FALSE(connection.closing_close_packet_pending_);
+    EXPECT_EQ(connection.closing_packets_since_last_close_, 0u);
+}
+
+TEST(QuicCoreTest, ClosingStateKeyRetentionSuppressesOrdinaryFramesAndKeyUpdates) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.retain_read_keys_for_peer_close_while_closing = true;
+    connection.closing_transport_close_ = coquic::quic::TransportConnectionCloseFrame{
+        .error_code = 1,
+        .frame_type = 0,
+    };
+    connection.enter_closing_state(coquic::quic::test::test_time(1),
+                                   coquic::quic::QuicConnectionTerminalState::failed);
+    connection.closing_close_packet_pending_ = false;
+    connection.closing_packets_since_last_close_ = 0;
+    connection.closing_packet_response_threshold_ = 2;
+    connection.connection_flow_control_.peer_max_data = 1024;
+    ASSERT_TRUE(connection.application_space_.read_secret.has_value());
+    const auto original_read_secret =
+        optional_ref_or_terminate(connection.application_space_.read_secret);
+    const auto next_read_secret = coquic::quic::derive_next_traffic_secret(original_read_secret);
+    ASSERT_TRUE(next_read_secret.has_value());
+
+    const auto max_data_packet = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 8,
+                .frames =
+                    {
+                        coquic::quic::MaxDataFrame{
+                            .maximum_data = 4096,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(max_data_packet.has_value());
+
+    const auto updated_key_phase_packet = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .key_phase = true,
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 9,
+                .frames =
+                    {
+                        coquic::quic::ApplicationConnectionCloseFrame{
+                            .error_code = 99,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = next_read_secret.value(),
+            .one_rtt_key_phase = true,
+        });
+    ASSERT_TRUE(updated_key_phase_packet.has_value());
+
+    const auto ordinary_result = connection.process_inbound_datagram(
+        max_data_packet.value(), coquic::quic::test::test_time(2));
+    const auto key_update_result = connection.process_inbound_datagram(
+        updated_key_phase_packet.value(), coquic::quic::test::test_time(3));
+
+    EXPECT_TRUE(ordinary_result.processed_any_packet);
+    EXPECT_FALSE(key_update_result.processed_any_packet);
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::closing);
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, 8u);
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_EQ(connection.connection_flow_control_.peer_max_data, 1024u);
+    EXPECT_TRUE(connection.application_space_.read_secret.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(connection.application_space_.read_secret).secret,
+              original_read_secret.secret);
+    EXPECT_FALSE(connection.next_application_read_secret_.has_value());
+    EXPECT_TRUE(connection.closing_close_packet_pending_);
+    EXPECT_EQ(connection.closing_packets_since_last_close_, 2u);
+}
+
+TEST(QuicCoreTest, ClosingStateKeyRetentionDiscardsInvalidPacketsWithoutPeerClose) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.retain_read_keys_for_peer_close_while_closing = true;
+    connection.closing_transport_close_ = coquic::quic::TransportConnectionCloseFrame{
+        .error_code = 1,
+        .frame_type = 0,
+    };
+    connection.enter_closing_state(coquic::quic::test::test_time(1),
+                                   coquic::quic::QuicConnectionTerminalState::failed);
+    connection.closing_close_packet_pending_ = false;
+    connection.closing_packets_since_last_close_ = 0;
+    connection.closing_packet_response_threshold_ = 1;
+    ASSERT_TRUE(connection.application_space_.read_secret.has_value());
+
+    auto corrupted_packet = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 10,
+                .frames =
+                    {
+                        coquic::quic::ApplicationConnectionCloseFrame{
+                            .error_code = 99,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(corrupted_packet.has_value());
+    ASSERT_FALSE(corrupted_packet.value().empty());
+    corrupted_packet.value().back() ^= std::byte{0x01};
+
+    const auto result = connection.process_inbound_datagram(corrupted_packet.value(),
+                                                            coquic::quic::test::test_time(2));
+
+    EXPECT_FALSE(result.processed_any_packet);
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::closing);
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_TRUE(connection.closing_close_packet_pending_);
+    EXPECT_EQ(connection.closing_packets_since_last_close_, 1u);
 }
 
 TEST(QuicCoreTest, PacketTargetsDiscardedLongHeaderSpaceCoversEdgeCases) {

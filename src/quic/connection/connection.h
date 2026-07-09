@@ -673,6 +673,8 @@ class QuicConnection {
                              QuicEcnCodepoint ecn, std::optional<std::uint32_t> inbound_datagram_id,
                              bool replay_trigger, bool count_inbound_bytes,
                              bool allow_in_place_receive_decode);
+    bool process_closing_peer_close_datagram(std::span<const std::byte> bytes,
+                                             QuicCoreTimePoint now, QuicEcnCodepoint ecn);
     CodecResult<ConnectionId>
     peek_client_initial_destination_connection_id(std::span<const std::byte> bytes) const;
     CodecResult<ConnectionId>

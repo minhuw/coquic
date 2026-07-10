@@ -1,6 +1,7 @@
 #include "src/quic/connection/connection.h"
 #include "src/quic/connection/connection_internal.h"
 
+#include <algorithm>
 #include <type_traits>
 #include <utility>
 
@@ -34,6 +35,11 @@ QuicConnection::QuicConnection(QuicCoreConfig config)
       congestion_controller_(config_.transport.congestion_control,
                              initial_congestion_datagram_size(config_),
                              config_.transport.enable_hystart_plus_plus) {
+    const auto handshake_crypto_buffer_limit =
+        std::clamp(config_.handshake_crypto_buffer_limit, kMinimumOutOfOrderCryptoBufferSize,
+                   kMaximumHandshakeCryptoBufferSize);
+    initial_space_.receive_crypto.set_buffered_byte_limit(handshake_crypto_buffer_limit);
+    handshake_space_.receive_crypto.set_buffered_byte_limit(handshake_crypto_buffer_limit);
     if (config_.supported_versions.empty()) {
         config_.supported_versions.push_back(current_version_);
     }

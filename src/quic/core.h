@@ -193,6 +193,8 @@ struct QuicRequestForgeryPolicyConfig {
     std::vector<std::uint16_t> blocked_udp_ports;
 };
 
+inline constexpr std::size_t kMaximumHandshakeCryptoBufferSize = 1 << 20;
+
 struct QuicCoreConfig {
     EndpointRole role = EndpointRole::client;
     ConnectionId source_connection_id;
@@ -213,6 +215,8 @@ struct QuicCoreConfig {
     std::vector<CipherSuite> allowed_tls_cipher_suites;
     std::optional<QuicResumptionState> resumption_state;
     QuicZeroRttConfig zero_rtt;
+    // CRYPTO frames are not flow controlled, so this handshake-only limit is capped when applied.
+    std::size_t handshake_crypto_buffer_limit = kMinimumOutOfOrderCryptoBufferSize;
     std::optional<QuicQlogConfig> qlog;
     std::optional<std::filesystem::path> tls_keylog_path;
     std::optional<QuicStatelessResetSecret> stateless_reset_secret;

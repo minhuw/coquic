@@ -539,6 +539,8 @@ void QuicConnection::confirm_handshake() {
         return;
     }
 
+    initial_space_.receive_crypto.set_buffered_byte_limit(kMinimumOutOfOrderCryptoBufferSize);
+    handshake_space_.receive_crypto.set_buffered_byte_limit(kMinimumOutOfOrderCryptoBufferSize);
     handshake_confirmed_ = true;
     queue_state_change(QuicCoreStateChange::handshake_confirmed);
     issue_spare_connection_ids();

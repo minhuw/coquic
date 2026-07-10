@@ -147,6 +147,137 @@ TEST(QuicCoreTest, ProcessInboundCryptoClosesWithCryptoBufferExceededWhenLimitEx
                                    coquic::quic::QuicTransportErrorCode::crypto_buffer_exceeded);
 }
 
+TEST(QuicCoreTest, ProcessInboundCryptoAllowsConfiguredHandshakeBuffering) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.handshake_crypto_buffer_limit = 2 * coquic::quic::kMinimumOutOfOrderCryptoBufferSize;
+    coquic::quic::QuicConnection connection(std::move(config));
+    const auto tail = std::vector<std::byte>(2 * coquic::quic::kMinimumOutOfOrderCryptoBufferSize,
+                                             std::byte{0x5a});
+
+    const auto buffered = connection.process_inbound_crypto(
+        coquic::quic::EncryptionLevel::handshake,
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::CryptoFrame{.offset = 1, .crypto_data = tail},
+        },
+        coquic::quic::test::test_time());
+
+    EXPECT_TRUE(buffered.has_value());
+}
+
+TEST(QuicCoreTest, ProcessInboundCryptoClosesWhenConfiguredHandshakeLimitIsExhausted) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.handshake_crypto_buffer_limit = 2 * coquic::quic::kMinimumOutOfOrderCryptoBufferSize;
+    coquic::quic::QuicConnection connection(std::move(config));
+    const auto tail = std::vector<std::byte>(2 * coquic::quic::kMinimumOutOfOrderCryptoBufferSize,
+                                             std::byte{0x5a});
+
+    ASSERT_TRUE(
+        connection
+            .process_inbound_crypto(coquic::quic::EncryptionLevel::initial,
+                                    std::array<coquic::quic::Frame, 1>{
+                                        coquic::quic::CryptoFrame{.offset = 1, .crypto_data = tail},
+                                    },
+                                    coquic::quic::test::test_time())
+            .has_value());
+
+    const auto overflow = connection.process_inbound_crypto(
+        coquic::quic::EncryptionLevel::initial,
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::CryptoFrame{.offset = 1 + static_cast<std::uint64_t>(tail.size()),
+                                      .crypto_data = {std::byte{0x5b}}},
+        },
+        coquic::quic::test::test_time(1));
+
+    expect_transport_codec_failure(overflow, coquic::quic::CodecErrorCode::crypto_buffer_exceeded,
+                                   coquic::quic::QuicTransportErrorCode::crypto_buffer_exceeded);
+}
+
+TEST(QuicCoreTest, ProcessInboundCryptoClampsConfiguredHandshakeLimit) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.handshake_crypto_buffer_limit = coquic::quic::kMaximumHandshakeCryptoBufferSize +
+                                           coquic::quic::kMinimumOutOfOrderCryptoBufferSize;
+    coquic::quic::QuicConnection connection(std::move(config));
+    const auto tail =
+        std::vector<std::byte>(coquic::quic::kMaximumHandshakeCryptoBufferSize, std::byte{0x5a});
+
+    ASSERT_TRUE(
+        connection
+            .process_inbound_crypto(coquic::quic::EncryptionLevel::initial,
+                                    std::array<coquic::quic::Frame, 1>{
+                                        coquic::quic::CryptoFrame{.offset = 1, .crypto_data = tail},
+                                    },
+                                    coquic::quic::test::test_time())
+            .has_value());
+
+    const auto overflow = connection.process_inbound_crypto(
+        coquic::quic::EncryptionLevel::initial,
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::CryptoFrame{.offset = 1 + static_cast<std::uint64_t>(tail.size()),
+                                      .crypto_data = {std::byte{0x5b}}},
+        },
+        coquic::quic::test::test_time(1));
+
+    expect_transport_codec_failure(overflow, coquic::quic::CodecErrorCode::crypto_buffer_exceeded,
+                                   coquic::quic::QuicTransportErrorCode::crypto_buffer_exceeded);
+}
+
+TEST(QuicCoreTest, ProcessInboundCryptoKeepsApplicationBufferAtMinimum) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.handshake_crypto_buffer_limit = 2 * coquic::quic::kMinimumOutOfOrderCryptoBufferSize;
+    coquic::quic::QuicConnection connection(std::move(config));
+    const auto tail =
+        std::vector<std::byte>(coquic::quic::kMinimumOutOfOrderCryptoBufferSize, std::byte{0x5a});
+
+    ASSERT_TRUE(
+        connection
+            .process_inbound_crypto(coquic::quic::EncryptionLevel::application,
+                                    std::array<coquic::quic::Frame, 1>{
+                                        coquic::quic::CryptoFrame{.offset = 1, .crypto_data = tail},
+                                    },
+                                    coquic::quic::test::test_time())
+            .has_value());
+
+    const auto overflow = connection.process_inbound_crypto(
+        coquic::quic::EncryptionLevel::application,
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::CryptoFrame{.offset = 1 + static_cast<std::uint64_t>(tail.size()),
+                                      .crypto_data = {std::byte{0x5b}}},
+        },
+        coquic::quic::test::test_time(1));
+
+    expect_transport_codec_failure(overflow, coquic::quic::CodecErrorCode::crypto_buffer_exceeded,
+                                   coquic::quic::QuicTransportErrorCode::crypto_buffer_exceeded);
+}
+
+TEST(QuicCoreTest, ProcessInboundCryptoRestoresHandshakeLimitAfterConfirmation) {
+    auto config = coquic::quic::test::make_client_core_config();
+    config.handshake_crypto_buffer_limit = 2 * coquic::quic::kMinimumOutOfOrderCryptoBufferSize;
+    coquic::quic::QuicConnection connection(std::move(config));
+    connection.confirm_handshake();
+    const auto tail =
+        std::vector<std::byte>(coquic::quic::kMinimumOutOfOrderCryptoBufferSize, std::byte{0x5a});
+
+    ASSERT_TRUE(
+        connection
+            .process_inbound_crypto(coquic::quic::EncryptionLevel::initial,
+                                    std::array<coquic::quic::Frame, 1>{
+                                        coquic::quic::CryptoFrame{.offset = 1, .crypto_data = tail},
+                                    },
+                                    coquic::quic::test::test_time())
+            .has_value());
+
+    const auto overflow = connection.process_inbound_crypto(
+        coquic::quic::EncryptionLevel::initial,
+        std::array<coquic::quic::Frame, 1>{
+            coquic::quic::CryptoFrame{.offset = 1 + static_cast<std::uint64_t>(tail.size()),
+                                      .crypto_data = {std::byte{0x5b}}},
+        },
+        coquic::quic::test::test_time(1));
+
+    expect_transport_codec_failure(overflow, coquic::quic::CodecErrorCode::crypto_buffer_exceeded,
+                                   coquic::quic::QuicTransportErrorCode::crypto_buffer_exceeded);
+}
+
 TEST(QuicCoreTest, ConnectionProcessInboundCryptoAcceptsPingBeforeCryptoFrames) {
     coquic::quic::QuicConnection connection(coquic::quic::test::make_client_core_config());
 

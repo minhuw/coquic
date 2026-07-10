@@ -4405,7 +4405,7 @@ TEST(QuicCoreTest, ClosingStateKeyRetentionDefaultDoesNotDecryptPeerClose) {
     EXPECT_EQ(connection.closing_packets_since_last_close_, 1u);
 }
 
-TEST(QuicCoreTest, ClosingStateKeyRetentionProcessesOnlyPeerConnectionClose) {
+TEST(QuicCoreTest, ClosingStateKeyRetentionProcessesApplicationPeerConnectionClose) {
     auto connection = make_connected_client_connection();
     connection.config_.transport.retain_read_keys_for_peer_close_while_closing = true;
     connection.closing_transport_close_ = coquic::quic::TransportConnectionCloseFrame{
@@ -4418,6 +4418,8 @@ TEST(QuicCoreTest, ClosingStateKeyRetentionProcessesOnlyPeerConnectionClose) {
     connection.closing_packets_since_last_close_ = 0;
     connection.closing_packet_response_threshold_ = 8;
     ASSERT_TRUE(connection.application_space_.read_secret.has_value());
+    ASSERT_TRUE(connection.close_deadline_.has_value());
+    const auto closing_deadline = connection.close_deadline_;
 
     const auto peer_close_packet = coquic::quic::serialize_protected_datagram(
         std::array<coquic::quic::ProtectedPacket, 1>{
@@ -4450,6 +4452,62 @@ TEST(QuicCoreTest, ClosingStateKeyRetentionProcessesOnlyPeerConnectionClose) {
     EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
     EXPECT_FALSE(connection.closing_close_packet_pending_);
     EXPECT_EQ(connection.closing_packets_since_last_close_, 0u);
+    EXPECT_EQ(connection.close_deadline_, closing_deadline);
+    EXPECT_FALSE(connection.has_sendable_datagram(coquic::quic::test::test_time(2)));
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(2)).empty());
+}
+
+TEST(QuicCoreTest, ClosingStateKeyRetentionProcessesTransportPeerConnectionClose) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.retain_read_keys_for_peer_close_while_closing = true;
+    connection.closing_transport_close_ = coquic::quic::TransportConnectionCloseFrame{
+        .error_code = 1,
+        .frame_type = 0,
+    };
+    connection.enter_closing_state(coquic::quic::test::test_time(1),
+                                   coquic::quic::QuicConnectionTerminalState::failed);
+    connection.closing_close_packet_pending_ = false;
+    connection.closing_packets_since_last_close_ = 0;
+    connection.closing_packet_response_threshold_ = 8;
+    ASSERT_TRUE(connection.application_space_.read_secret.has_value());
+    ASSERT_TRUE(connection.close_deadline_.has_value());
+    const auto closing_deadline = connection.close_deadline_;
+
+    const auto peer_close_packet = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{
+            coquic::quic::ProtectedOneRttPacket{
+                .destination_connection_id = connection.config_.source_connection_id,
+                .packet_number_length = 2,
+                .packet_number = 7,
+                .frames =
+                    {
+                        coquic::quic::TransportConnectionCloseFrame{
+                            .error_code = 99,
+                            .frame_type = 0,
+                        },
+                    },
+            },
+        },
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(peer_close_packet.has_value());
+
+    const auto result = connection.process_inbound_datagram(peer_close_packet.value(),
+                                                            coquic::quic::test::test_time(2));
+
+    EXPECT_TRUE(result.processed_any_packet);
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::draining);
+    EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, 7u);
+    EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
+    EXPECT_FALSE(connection.closing_close_packet_pending_);
+    EXPECT_EQ(connection.closing_packets_since_last_close_, 0u);
+    EXPECT_EQ(connection.close_deadline_, closing_deadline);
+    EXPECT_FALSE(connection.has_sendable_datagram(coquic::quic::test::test_time(2)));
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(2)).empty());
 }
 
 TEST(QuicCoreTest, ClosingStateKeyRetentionSuppressesOrdinaryFramesAndKeyUpdates) {

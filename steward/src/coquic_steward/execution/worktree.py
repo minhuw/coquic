@@ -95,6 +95,35 @@ class Worktrees:
             check=True,
         )
 
+    def branch_has_commits_not_on_main(self, branch: str) -> bool:
+        branch_ref = f"refs/heads/{branch}"
+        main_refs = [
+            f"refs/remotes/{self.config.git_remote}/{self.config.main_branch}",
+            f"refs/heads/{self.config.main_branch}",
+        ]
+        existing_main_refs = [
+            ref
+            for ref in main_refs
+            if run_command(
+                ["git", "show-ref", "--verify", "--quiet", ref],
+                cwd=self.config.repo_root,
+            ).ok
+        ]
+        if not existing_main_refs:
+            return False
+        result = run_command(
+            [
+                "git",
+                "rev-list",
+                "--max-count=1",
+                branch_ref,
+                "--not",
+                *existing_main_refs,
+            ],
+            cwd=self.config.repo_root,
+        )
+        return result.ok and bool(result.stdout.strip())
+
     def forbidden_paths(self, path: Path) -> list[str]:
         output = run_command(
             ["git", "status", "--porcelain", "--untracked-files=all"],
@@ -128,7 +157,7 @@ class Worktrees:
             if not result.ok and path.exists():
                 shutil.rmtree(path)
         run_command(["git", "worktree", "prune"], cwd=self.config.repo_root)
-        if branch:
+        if branch and branch.startswith("steward/"):
             run_command(["git", "branch", "-D", branch], cwd=self.config.repo_root)
 
 

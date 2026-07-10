@@ -51,7 +51,7 @@ from coquic_steward.core.models import (
     new_task_id,
     utc_now,
 )
-from coquic_steward.core.subprocesses import CommandResult
+from coquic_steward.core.subprocesses import CommandResult, run_command
 from coquic_steward.execution import StewardExecutor, Worktrees
 from coquic_steward.execution.executor import (
     commit_message_schema_path,
@@ -114,6 +114,20 @@ from coquic_steward.storage.schema import (
     ValidationRow,
 )
 from coquic_steward.web.app import TEXT_TAIL_BYTES, create_app
+
+
+def git_branch_exists(repo: Path, branch: str) -> bool:
+    result = run_command(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=repo,
+    )
+    return result.returncode == 0
+
+
+def git_branch_head(repo: Path, branch: str) -> str:
+    return run_command(
+        ["git", "rev-parse", branch], cwd=repo, check=True
+    ).stdout.strip()
 
 
 def test_config_defaults_from_repo(repo: Path, coquic_home: Path) -> None:
@@ -528,6 +542,69 @@ def test_daemon_cleans_recovered_stale_task_worktree(config: StewardConfig) -> N
     assert store.get(task.id).status == TaskStatus.failed
     assert not worktree.exists()
     assert any(event.kind == "worktree.cleaned" for event in store.events(task.id))
+
+
+def test_daemon_preserves_recovered_stale_integration_commit(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
+    )
+    store = TaskStore(config.db_path)
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    store.start_integration(source.id, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate T",
+            prompt="Integrate",
+            metadata={"source_task_id": source.id},
+        )
+    )
+    worktree, branch = Worktrees(config).create(integration)
+    (worktree / "README.md").write_text("interrupted integration\n", encoding="utf-8")
+    integration.worktree_path = worktree
+    integration.branch_name = branch
+    store.save(integration)
+    integration = store.start_integration(integration.id, "integration started")
+
+    # Simulate termination after Git commits but before the database event is written.
+    sha = Worktrees(config).commit_all(
+        worktree,
+        "fix(docs): preserve interrupted integration",
+        "Keep the commit reachable.",
+    )
+    assert sha is not None
+    assert not any(
+        event.kind == "integration.commit_created"
+        for event in store.events(integration.id)
+    )
+    store.start_integration(integration.id, "pushing to main")
+    make_task_stale(store, integration.id)
+
+    result = StewardDaemon(config, store).tick(plan=False, dispatch=False)
+
+    saved = store.get(integration.id)
+    cleaned = next(
+        event for event in store.events(integration.id) if event.kind == "worktree.cleaned"
+    )
+    assert result.recovered == 1
+    assert saved.status == TaskStatus.failed
+    assert saved.summary.startswith("stale active task recovered")
+    assert saved.worktree_path is not None
+    assert not saved.worktree_path.exists()
+    assert git_branch_head(config.repo_root, branch) == sha
+    assert cleaned.data["branch_preserved"] is True
 
 
 def test_daemon_does_not_clean_external_recovered_stale_worktree(
@@ -5176,7 +5253,9 @@ def test_executor_no_changes_reaches_terminal_status(
     saved = store.get(task.id)
     assert saved.status == TaskStatus.no_changes
     assert saved.worktree_path is not None
+    assert saved.branch_name is not None
     assert not saved.worktree_path.exists()
+    assert not git_branch_exists(config.repo_root, saved.branch_name)
     assert any(event.kind == "worktree.cleaned" for event in store.events(task.id))
 
 
@@ -5374,7 +5453,9 @@ def test_executor_patch_happy_path(
     assert saved.patch_path is not None
     assert "changed by steward" in saved.patch_path.read_text(encoding="utf-8")
     assert saved.worktree_path is not None
+    assert saved.branch_name is not None
     assert not saved.worktree_path.exists()
+    assert not git_branch_exists(config.repo_root, saved.branch_name)
     assert any(event.kind == "worktree.cleaned" for event in store.events(task.id))
 
 
@@ -5904,12 +5985,22 @@ def test_integration_manager_local_only_commits_without_push(
 
     assert saved_source.status == TaskStatus.succeeded
     assert saved_integration.status == TaskStatus.succeeded
+    assert saved_integration.worktree_path is not None
+    assert saved_integration.branch_name is not None
+    assert not saved_integration.worktree_path.exists()
     assert saved_integration.transcript_path is not None
     transcript = saved_integration.transcript_path.read_text(encoding="utf-8")
     assert "start: Integration run" in transcript
     assert "validation: passed: fake" in transcript
     assert "local_only: external writes disabled" in transcript
     assert "local-only integration commit" in saved_source.summary
+    local_commit = saved_integration.summary.removeprefix(
+        "local-only integration commit "
+    )
+    assert (
+        git_branch_head(config.repo_root, saved_integration.branch_name)
+        == local_commit
+    )
     assert remote_text == "hello\n"
     assert any(event.kind == "integration.local_only" for event in store.events(source.id))
     assert any(
@@ -6373,7 +6464,9 @@ def test_integration_manager_serializes_push_to_main(
     assert pushed_source.status == TaskStatus.pushed
     assert pushed_integration.status == TaskStatus.pushed
     assert pushed_integration.worktree_path is not None
+    assert pushed_integration.branch_name is not None
     assert not pushed_integration.worktree_path.exists()
+    assert not git_branch_exists(config.repo_root, pushed_integration.branch_name)
     assert remote_text == "integrated\n"
     assert remote_commit_message.startswith("fix(docs): describe integration output\n")
     assert "Source task: source-task" in remote_commit_message
@@ -6396,6 +6489,110 @@ def test_integration_manager_serializes_push_to_main(
         for event in store.events(source.id)
     )
     assert any(event.kind == "main.pushed" for event in store.events(source.id))
+
+
+def test_integration_manager_preserves_branch_when_push_fails(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    remote = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
+    )
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "git_remote": "origin",
+            "integration_mode": IntegrationMode.push_main.value,
+            "local_only": False,
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    fake = tmp_path / "codex"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        "printf '%s\\n' '{\"subject\":\"fix(docs): keep failed push commit\",\"body\":\"Keep the integration commit available when pushing fails.\\n\\nChanged files:\\n- README.md\\n\\nValidation:\\n- fake: passed\\n\\nSource task: source-task\"}' > \"$last\"\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    source, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worktree, branch = Worktrees(config).create(source)
+    (worktree / "README.md").write_text("push failure integration\n", encoding="utf-8")
+    source.worktree_path = worktree
+    source.branch_name = branch
+    patch_path = config.patches_dir / f"{source.id}.patch"
+    Worktrees(config).save_patch(worktree, patch_path)
+    source.patch_path = patch_path
+    store.save(source)
+    source = store.update_status(source.id, TaskStatus.integrating, "integration queued")
+    integration, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.integration,
+            worker=WorkerKind.integration_manager,
+            title="Integrate T",
+            prompt="Integrate",
+            metadata={
+                "source_task_id": source.id,
+                "source_patch_path": str(patch_path),
+                "dedupe_key": f"integration:{source.id}",
+            },
+        ),
+        dedupe_key=f"integration:{source.id}",
+    )
+
+    def fake_gates(_config, task_id, cwd):
+        output = _config.logs_dir / task_id / "fake.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("ok\n", encoding="utf-8")
+        return [
+            ValidationResult(
+                command=["fake"], cwd=cwd, passed=True, exit_code=0, output_path=output
+            )
+        ]
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+    monkeypatch.setattr(
+        Worktrees,
+        "push_head_to_main",
+        lambda _self, _path: (_ for _ in ()).throw(RuntimeError("network down")),
+    )
+
+    assert not StewardExecutor(config, store).run_task(integration.id)
+    failed_source = store.get(source.id)
+    failed_integration = store.get(integration.id)
+    push_event = next(
+        event
+        for event in store.events(source.id)
+        if event.kind == "integration.push_failed"
+    )
+
+    assert failed_source.status == TaskStatus.failed
+    assert failed_integration.status == TaskStatus.failed
+    assert failed_integration.summary == "push failed"
+    assert failed_integration.worktree_path is not None
+    assert failed_integration.branch_name is not None
+    assert not failed_integration.worktree_path.exists()
+    assert (
+        git_branch_head(config.repo_root, failed_integration.branch_name)
+        == push_event.data["commit"]
+    )
+    assert not any(event.kind == "main.pushed" for event in store.events(source.id))
 
 
 def test_integration_manager_closes_feature_issue_after_push(

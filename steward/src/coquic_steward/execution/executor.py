@@ -174,15 +174,39 @@ class StewardExecutor:
         if task.worktree_path is None:
             return False
         if _is_steward_owned_worktree(self.config, task.worktree_path):
-            self.worktrees.remove(task.worktree_path)
+            branch = (
+                None if self._preserves_finished_task_branch(task) else task.branch_name
+            )
+            self.worktrees.remove(task.worktree_path, branch)
             self.store.add_event(
                 task.id,
                 "worktree.cleaned",
                 str(task.worktree_path),
-                {"status": str(task.status)},
+                {
+                    "status": str(task.status),
+                    "branch": task.branch_name or "",
+                    "branch_preserved": branch is None and task.branch_name is not None,
+                },
             )
             return True
         return False
+
+    def _preserves_finished_task_branch(self, task: TaskRecord) -> bool:
+        if not _is_integration_task(task):
+            return False
+        event_kinds = {event.kind for event in self.store.events(task.id)}
+        if "main.pushed" in event_kinds:
+            return False
+        if "integration.commit_created" in event_kinds:
+            return True
+        if task.branch_name and self.worktrees.branch_has_commits_not_on_main(
+            task.branch_name
+        ):
+            return True
+        return task.summary.startswith("local-only integration commit ") or (
+            TaskStatus(task.status) == TaskStatus.failed
+            and task.summary == "push failed"
+        )
 
     def _prepare_patch(
         self,
@@ -1281,6 +1305,12 @@ class StewardExecutor:
             )
             return None, True
         transcript.write("commit", f"created {sha}")
+        self.store.add_event(
+            task.id,
+            "integration.commit_created",
+            sha,
+            {"commit": sha},
+        )
         return sha, None
 
     def _finish_or_push_integration_commit(

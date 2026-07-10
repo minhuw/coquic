@@ -72,6 +72,118 @@ void install_spare_peer_connection_id(coquic::quic::QuicConnection &quic_connect
     }
 }
 
+coquic::quic::CodecResult<bool> process_one_rtt_ping_with_destination_connection_id(
+    coquic::quic::QuicConnection &connection,
+    const coquic::quic::ConnectionId &destination_connection_id, std::uint64_t packet_number) {
+    return connection.process_inbound_packet(
+        coquic::quic::ProtectedOneRttPacket{
+            .key_phase = false,
+            .destination_connection_id = destination_connection_id,
+            .packet_number_length = 1,
+            .packet_number = packet_number,
+            .frames = {coquic::quic::PingFrame{}},
+        },
+        coquic::quic::test::test_time(static_cast<std::int64_t>(packet_number)));
+}
+
+void prepare_unvalidated_migration_path(coquic::quic::QuicConnection &connection,
+                                        coquic::quic::QuicPathId path_id) {
+    connection.peer_address_validated_ = false;
+    connection.last_inbound_path_id_ = path_id;
+    for (auto &entry : connection.paths_) {
+        entry.second.is_current_send_path = false;
+    }
+    connection.current_send_path_id_ = path_id;
+    auto &path = connection.ensure_path_state(path_id);
+    path.validated = false;
+    path.is_current_send_path = true;
+    path.anti_amplification_received_bytes = 1;
+}
+
+TEST(QuicCoreTest, ConnectionIdAddressValidationIsDisabledByDefault) {
+    auto connection = make_connected_server_connection();
+    prepare_unvalidated_migration_path(connection, 9);
+
+    auto processed = process_one_rtt_ping_with_destination_connection_id(
+        connection, connection.config_.source_connection_id, 7);
+
+    ASSERT_TRUE(processed.has_value());
+    ASSERT_TRUE(processed.value());
+    EXPECT_FALSE(connection.peer_address_validated_);
+    EXPECT_FALSE(connection.paths_.at(9).validated);
+    EXPECT_TRUE(connection.anti_amplification_applies(9));
+}
+
+TEST(QuicCoreTest, ConnectionIdAddressValidationValidatesMigrationPath) {
+    auto connection = make_connected_server_connection();
+    connection.config_.enable_connection_id_address_validation = true;
+    connection.config_.source_connection_id =
+        bytes_from_ints({0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57});
+    const auto issued_connection_id = connection.issue_local_connection_id(/*retire_prior_to=*/0);
+    prepare_unvalidated_migration_path(connection, 9);
+
+    auto processed = process_one_rtt_ping_with_destination_connection_id(
+        connection, issued_connection_id.connection_id, 7);
+
+    ASSERT_TRUE(processed.has_value());
+    ASSERT_TRUE(processed.value());
+    EXPECT_TRUE(connection.peer_address_validated_);
+    EXPECT_TRUE(connection.paths_.at(9).validated);
+    EXPECT_EQ(connection.last_validated_path_id_, 9u);
+    EXPECT_EQ(connection.current_send_path_id_, 9u);
+    EXPECT_FALSE(connection.anti_amplification_applies(9));
+}
+
+TEST(QuicCoreTest, ConnectionIdAddressValidationRejectsShortConnectionId) {
+    auto connection = make_connected_server_connection();
+    connection.config_.enable_connection_id_address_validation = true;
+    connection.local_connection_ids_.at(0).connection_id =
+        bytes_from_ints({0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16});
+    prepare_unvalidated_migration_path(connection, 9);
+
+    auto processed = process_one_rtt_ping_with_destination_connection_id(
+        connection, connection.local_connection_ids_.at(0).connection_id, 7);
+
+    ASSERT_TRUE(processed.has_value());
+    ASSERT_TRUE(processed.value());
+    EXPECT_FALSE(connection.peer_address_validated_);
+    EXPECT_FALSE(connection.paths_.at(9).validated);
+    EXPECT_TRUE(connection.anti_amplification_applies(9));
+}
+
+TEST(QuicCoreTest, ConnectionIdAddressValidationRejectsPredictableConfiguredConnectionId) {
+    auto connection = make_connected_server_connection();
+    connection.config_.enable_connection_id_address_validation = true;
+    connection.config_.source_connection_id =
+        bytes_from_ints({0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57});
+    connection.local_connection_ids_.at(0).connection_id = connection.config_.source_connection_id;
+    prepare_unvalidated_migration_path(connection, 9);
+
+    auto processed = process_one_rtt_ping_with_destination_connection_id(
+        connection, connection.config_.source_connection_id, 7);
+
+    ASSERT_TRUE(processed.has_value());
+    ASSERT_TRUE(processed.value());
+    EXPECT_FALSE(connection.peer_address_validated_);
+    EXPECT_FALSE(connection.paths_.at(9).validated);
+    EXPECT_TRUE(connection.anti_amplification_applies(9));
+}
+
+TEST(QuicCoreTest, ConnectionIdAddressValidationRejectsUnknownConnectionId) {
+    auto connection = make_connected_server_connection();
+    connection.config_.enable_connection_id_address_validation = true;
+    prepare_unvalidated_migration_path(connection, 9);
+
+    auto processed = process_one_rtt_ping_with_destination_connection_id(
+        connection, bytes_from_ints({0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17}), 7);
+
+    ASSERT_TRUE(processed.has_value());
+    ASSERT_TRUE(processed.value());
+    EXPECT_FALSE(connection.peer_address_validated_);
+    EXPECT_FALSE(connection.paths_.at(9).validated);
+    EXPECT_TRUE(connection.anti_amplification_applies(9));
+}
+
 TEST(QuicCoreTest,
      ServerProcessesOneRttPathChallengeBeforeHandshakeCompletesWhenApplicationKeysExist) {
     auto connection = make_connected_server_connection();

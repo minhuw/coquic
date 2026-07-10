@@ -746,7 +746,9 @@ make_secret_derivation_context(std::span<const std::byte> connection_id,
 }
 
 inline ConnectionId make_issued_connection_id(std::span<const std::byte> base_connection_id,
-                                              std::uint64_t sequence_number) {
+                                              std::uint64_t sequence_number,
+                                              bool &has_sufficient_entropy) {
+    has_sufficient_entropy = false;
     ConnectionId connection_id(base_connection_id.begin(), base_connection_id.end());
     if (connection_id.empty()) {
         return connection_id;
@@ -764,10 +766,12 @@ inline ConnectionId make_issued_connection_id(std::span<const std::byte> base_co
     const auto derived = prf_bytes<32>(quic_connection_id_secret(), label, context);
     if (derived.has_value()) {
         std::copy_n(derived->begin(), connection_id.size(), connection_id.begin());
+        has_sufficient_entropy = true;
         return connection_id;
     }
 
     if (rand_bytes_for_connection(connection_id)) {
+        has_sufficient_entropy = true;
         return connection_id;
     }
 

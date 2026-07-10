@@ -1371,8 +1371,9 @@ NewConnectionIdFrame QuicConnection::issue_local_connection_id(std::uint64_t ret
     //= https://www.rfc-editor.org/rfc/rfc9000#section-5.1
     // # As a trivial example, this means the same connection ID
     // # MUST NOT be issued more than once on the same connection.
-    const auto connection_id =
-        make_issued_connection_id(config_.source_connection_id, sequence_number);
+    bool connection_id_has_sufficient_entropy = false;
+    const auto connection_id = make_issued_connection_id(
+        config_.source_connection_id, sequence_number, connection_id_has_sufficient_entropy);
     //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.2
     // # The same stateless reset token MUST NOT be used for multiple
     // # connection IDs.
@@ -1382,6 +1383,7 @@ NewConnectionIdFrame QuicConnection::issue_local_connection_id(std::uint64_t ret
         .sequence_number = sequence_number,
         .connection_id = connection_id,
         .stateless_reset_token = stateless_reset_token,
+        .eligible_for_address_validation = connection_id_has_sufficient_entropy,
     };
     for (auto &[issued_sequence_number, record] : local_connection_ids_) {
         if (issued_sequence_number >= retire_prior_to || record.retired) {
@@ -1516,7 +1518,12 @@ void QuicConnection::note_local_connection_id_used_by_peer(
         local_connection_ids_.begin(), local_connection_ids_.end(), [&](const auto &entry) {
             return !entry.second.retired && entry.second.connection_id == destination_connection_id;
         });
-    if (record == local_connection_ids_.end() || record->second.used_by_peer) {
+    if (record == local_connection_ids_.end()) {
+        return;
+    }
+
+    maybe_validate_peer_address_from_connection_id(destination_connection_id);
+    if (record->second.used_by_peer) {
         return;
     }
 
@@ -1565,6 +1572,25 @@ void QuicConnection::issue_path_probe_replacement_connection_id() {
         peer_limit) {
         issue_spare_connection_ids();
     }
+}
+
+void QuicConnection::maybe_validate_peer_address_from_connection_id(
+    const ConnectionId &destination_connection_id) {
+    if (!config_.enable_connection_id_address_validation ||
+        destination_connection_id.size() < sizeof(std::uint64_t)) {
+        return;
+    }
+
+    const auto record = std::find_if(
+        local_connection_ids_.begin(), local_connection_ids_.end(), [&](const auto &entry) {
+            return !entry.second.retired && entry.second.eligible_for_address_validation &&
+                   entry.second.connection_id == destination_connection_id;
+        });
+    if (record == local_connection_ids_.end()) {
+        return;
+    }
+
+    mark_peer_address_validated();
 }
 
 std::optional<std::uint64_t>

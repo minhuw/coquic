@@ -232,6 +232,9 @@ struct QuicCoreConfig {
     bool enable_packet_inspection = false;
     bool enable_reserved_version_probe = false;
     bool defer_inbound_application_send_drain = false;
+    // RFC 9000 Section 8.1 permits this optional shortcut for endpoint-chosen
+    // connection IDs with at least 64 bits of entropy.
+    bool enable_connection_id_address_validation = false;
 };
 
 using QuicCoreClock = std::chrono::steady_clock;

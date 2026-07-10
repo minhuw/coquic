@@ -49,9 +49,17 @@ Steward reads global config from `$COQUIC_HOME/steward.toml`, where
 The example config is `steward/steward.example.toml`.
 
 ```toml
+[steward]
+codex_model = "gpt-5.6-terra"
+codex_reasoning_effort = "medium"
+
 [steward.signals]
 enabled = ["github-actions", "code-scanning", "codacy"]
 ```
+
+The Codex model is passed through without a Steward allowlist. Reasoning effort
+is forwarded as Codex's `model_reasoning_effort` setting for new and resumed
+sessions.
 
 ## State
 

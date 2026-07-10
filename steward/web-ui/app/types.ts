@@ -288,6 +288,7 @@ export type StewardState = {
     codex_bin_resolved?: string | null;
     codex_bin_available?: boolean;
     codex_model?: string | null;
+    codex_reasoning_effort?: string | null;
     codex_profile?: string | null;
     codex_sandbox?: string;
     integration_mode: string;

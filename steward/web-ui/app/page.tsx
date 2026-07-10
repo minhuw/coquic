@@ -131,6 +131,7 @@ const EMPTY_STATE: StewardState = {
     codex_bin_resolved: null,
     codex_bin_available: false,
     codex_model: null,
+    codex_reasoning_effort: null,
     codex_profile: null,
     codex_sandbox: "",
     integration_mode: "",
@@ -1140,6 +1141,7 @@ function ConfigurationPanel({ state }: { state: StewardState }) {
             <KeyValue label="Resolved" value={config.codex_bin_resolved || "-"} />
             <KeyValue label="Sandbox" value={config.codex_sandbox || "-"} />
             <KeyValue label="Model" value={config.codex_model || "default"} />
+            <KeyValue label="Reasoning effort" value={config.codex_reasoning_effort || "default"} />
             <KeyValue label="Profile" value={config.codex_profile || "default"} />
             <KeyValue label="Steward runner" value="host process" />
           </div>

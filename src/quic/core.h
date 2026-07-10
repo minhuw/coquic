@@ -402,6 +402,9 @@ struct QuicCoreEndpointConfig {
     bool enable_reserved_version_probe = false;
     bool defer_inbound_application_send_drain = false;
     bool allow_peer_address_change = true;
+    // Validated peer addresses are reusable only within this connection and for this bounded
+    // interval. Set to zero to disable recent-address reuse.
+    QuicCoreDuration recent_peer_address_validation_timeout{std::chrono::seconds(10)};
     bool retain_stateless_reset_tokens_after_connection_close = true;
     QuicCoreDuration stateless_reset_token_retention{600000000};
 };
@@ -758,6 +761,7 @@ class QuicCore {
         std::vector<QuicRouteHandle> new_token_issued_routes;
         std::unordered_map<QuicPathId, std::vector<std::byte>>
             address_validation_identity_by_path_id;
+        std::unordered_map<std::string, QuicCoreTimePoint> recent_validated_peer_addresses;
         std::unordered_map<QuicPathId, QuicRouteAddressFamily> address_family_by_path_id;
         std::vector<QuicRouteHandle> closed_receive_routes;
         QuicPathId next_path_id = 1;
@@ -987,12 +991,19 @@ class QuicCore {
                                          std::span<const std::byte> address_validation_identity);
     static void remember_path_address_family(ConnectionEntry &entry, QuicPathId path_id,
                                              QuicRouteAddressFamily family);
+    void remember_recently_validated_peer_address(ConnectionEntry &entry, QuicPathId path_id,
+                                                  QuicCoreTimePoint now);
+    bool
+    restore_recently_validated_peer_address(ConnectionEntry &entry, QuicPathId path_id,
+                                            std::span<const std::byte> address_validation_identity,
+                                            QuicCoreTimePoint now);
     QuicPathId remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle,
                                      std::span<const std::byte> address_validation_identity);
     std::optional<QuicPathId>
     path_id_for_inbound_route(ConnectionEntry &entry,
                               const std::optional<QuicRouteHandle> &route_handle,
-                              std::span<const std::byte> address_validation_identity);
+                              std::span<const std::byte> address_validation_identity,
+                              QuicCoreTimePoint now = QuicCoreClock::now());
     static std::optional<QuicRouteHandle>
     route_handle_for_path(const ConnectionEntry &entry, const std::optional<QuicPathId> &path_id);
     static bool should_run_connection_timeout(const ConnectionEntry &entry, QuicCoreTimePoint now);

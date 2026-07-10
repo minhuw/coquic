@@ -34,6 +34,7 @@
 namespace {
 using namespace coquic::quic;
 using namespace coquic::quic::test_support;
+using coquic::quic::test::bytes_from_string;
 
 std::vector<std::byte> make_client_initial_datagram() {
     auto client_config = make_client_endpoint_config();
@@ -1001,6 +1002,94 @@ TEST(QuicCoreEndpointInternalTest, InboundDatagramCanDeferSendDrainUntilReceiveE
         },
         coquic::quic::test::test_time(2));
     EXPECT_FALSE(send_effects_from(response).empty());
+}
+
+TEST(QuicCoreEndpointInternalTest, RecentAddressCacheReusesValidatedServerPathOnMigration) {
+    QuicCore endpoint(make_server_endpoint_config());
+    QuicCore::ConnectionEntry entry{.handle = 1, .default_route_handle = 17};
+    entry.connection = std::make_unique<QuicConnection>(make_connected_server_connection());
+    const ConnectionId endpoint_cid = bytes_from_ints({0x53, 0x01, 0, 0, 0, 0, 0, 1});
+    entry.connection->config_.source_connection_id = endpoint_cid;
+    entry.connection->local_connection_ids_[0].connection_id = endpoint_cid;
+    entry.connection->note_endpoint_route_state_changed();
+    entry.path_id_by_route_handle.emplace(17, 0);
+    entry.route_handle_by_path_id.emplace(0, 17);
+    entry.address_validation_identity_by_path_id.emplace(0, bytes_from_string("addr-a"));
+    entry.connection->peer_connection_ids_[0] = PeerConnectionIdRecord{
+        .sequence_number = 0,
+        .connection_id = bytes_from_ints({0xaa}),
+    };
+    entry.connection->peer_connection_ids_[1] = PeerConnectionIdRecord{
+        .sequence_number = 1,
+        .connection_id = bytes_from_ints({0xab}),
+    };
+    entry.connection->ensure_path_state(0).peer_connection_id_sequence = 0;
+    auto [entry_it, inserted] = endpoint.connections_.emplace(1, std::move(entry));
+    ASSERT_TRUE(inserted);
+    endpoint.refresh_server_connection_routes(entry_it->second);
+    const auto client_initial_destination_connection_id =
+        entry_it->second.connection->client_initial_destination_connection_id();
+    const auto one_rtt_secret = entry_it->second.connection->application_space_.read_secret;
+    const auto one_rtt_key_phase = entry_it->second.connection->application_read_key_phase_;
+
+    const auto make_inbound = [&](std::uint64_t packet_number) {
+        return serialize_protected_datagram(
+            std::array<ProtectedPacket, 1>{
+                ProtectedOneRttPacket{
+                    .destination_connection_id = endpoint_cid,
+                    .packet_number_length = 1,
+                    .packet_number = packet_number,
+                    .frames =
+                        {
+                            StreamFrame{
+                                .fin = false,
+                                .has_offset = true,
+                                .has_length = true,
+                                .stream_id = 0,
+                                .offset = packet_number - 1,
+                                .stream_data = bytes_from_ints(
+                                    {static_cast<std::uint8_t>(0x60u + packet_number)}),
+                            },
+                        },
+                },
+            },
+            SerializeProtectionContext{
+                .local_role = EndpointRole::client,
+                .client_initial_destination_connection_id =
+                    client_initial_destination_connection_id,
+                .one_rtt_secret = one_rtt_secret,
+                .one_rtt_key_phase = one_rtt_key_phase,
+            });
+    };
+
+    auto first = make_inbound(1);
+    ASSERT_TRUE(first.has_value());
+    static_cast<void>(endpoint.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = std::move(first.value()),
+            .route_handle = 17,
+            .address_validation_identity = bytes_from_string("addr-a"),
+        },
+        coquic::quic::test::test_time(1)));
+    EXPECT_EQ(endpoint.connections_.at(1).recent_validated_peer_addresses.size(), 1u);
+
+    auto migrated = make_inbound(2);
+    ASSERT_TRUE(migrated.has_value());
+    static_cast<void>(endpoint.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = std::move(migrated.value()),
+            .route_handle = 18,
+            .address_validation_identity = bytes_from_string("addr-a"),
+        },
+        coquic::quic::test::test_time(2)));
+
+    const auto &connection = *endpoint.connections_.at(1).connection;
+    ASSERT_EQ(connection.current_send_path_id_, 1u);
+    ASSERT_TRUE(connection.paths_.at(1).validated);
+    EXPECT_EQ(connection.paths_.at(1).peer_connection_id_sequence, 1u);
+    EXPECT_TRUE(connection.paths_.at(0).outstanding_challenge.has_value());
+    EXPECT_FALSE(connection.anti_amplification_applies(1));
+    EXPECT_EQ(connection.recovery_rtt_state_.latest_rtt, std::nullopt);
 }
 
 TEST(QuicCoreEndpointInternalTest, EndpointDiagnosticsSkipNullEntriesAndTrackContinuations) {

@@ -3168,6 +3168,76 @@ void QuicCore::remember_path_address_family(ConnectionEntry &entry, QuicPathId p
     }
 }
 
+void QuicCore::remember_recently_validated_peer_address(ConnectionEntry &entry, QuicPathId path_id,
+                                                        QuicCoreTimePoint now) {
+    if (endpoint_config_.recent_peer_address_validation_timeout <= QuicCoreDuration::zero() ||
+        entry.connection == nullptr) {
+        return;
+    }
+    const auto identity = entry.address_validation_identity_by_path_id.find(path_id);
+    const auto path = entry.connection->paths_.find(path_id);
+    if (identity == entry.address_validation_identity_by_path_id.end() ||
+        identity->second.empty() || path == entry.connection->paths_.end() ||
+        !path->second.validated) {
+        return;
+    }
+    for (auto it = entry.recent_validated_peer_addresses.begin();
+         it != entry.recent_validated_peer_addresses.end();) {
+        if (now >= it->second) {
+            it = entry.recent_validated_peer_addresses.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    const auto key = connection_id_key(identity->second);
+    constexpr std::size_t max_recent_validated_peer_addresses = 8;
+    if (!entry.recent_validated_peer_addresses.contains(key) &&
+        entry.recent_validated_peer_addresses.size() >= max_recent_validated_peer_addresses) {
+        return;
+    }
+    entry.recent_validated_peer_addresses[key] =
+        now + endpoint_config_.recent_peer_address_validation_timeout;
+}
+
+bool QuicCore::restore_recently_validated_peer_address(
+    ConnectionEntry &entry, QuicPathId path_id,
+    std::span<const std::byte> address_validation_identity, QuicCoreTimePoint now) {
+    if (endpoint_config_.recent_peer_address_validation_timeout <= QuicCoreDuration::zero() ||
+        entry.connection == nullptr || address_validation_identity.empty()) {
+        return false;
+    }
+    const auto cached =
+        entry.recent_validated_peer_addresses.find(connection_id_key(address_validation_identity));
+    if (cached == entry.recent_validated_peer_addresses.end() || now >= cached->second) {
+        return false;
+    }
+    const auto peer_connection_id_sequence =
+        entry.connection->select_peer_connection_id_sequence_for_path(path_id);
+    if (!peer_connection_id_sequence.has_value()) {
+        return false;
+    }
+
+    auto &path = entry.connection->ensure_path_state(path_id);
+    QuicConnection::set_path_peer_connection_id_sequence(path, *peer_connection_id_sequence);
+    path.validated = true;
+    path.challenge_pending = false;
+    path.validation_initiated_locally = false;
+    path.path_validation_deferred_until_peer_non_probing = false;
+    path.validation_probe_only = false;
+    path.path_mtu_validation_pending = false;
+    path.outstanding_challenge.reset();
+    path.outstanding_challenge_sent_with_expanded_datagram = true;
+    path.validation_deadline.reset();
+    entry.connection->last_validated_path_id_ = path_id;
+    entry.connection->clear_migration_recovery_retention();
+    if (const auto previous_path_id = entry.connection->current_send_path_id_;
+        previous_path_id.has_value() && *previous_path_id != path_id) {
+        entry.connection->start_path_validation_probe(*previous_path_id,
+                                                      /*initiated_locally=*/false, now);
+    }
+    return true;
+}
+
 COQUIC_NO_PROFILE QuicPathId
 QuicCore::remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_handle,
                                 std::span<const std::byte> address_validation_identity) {
@@ -3198,7 +3268,7 @@ QuicCore::remember_inbound_path(ConnectionEntry &entry, QuicRouteHandle route_ha
 
 std::optional<QuicPathId> COQUIC_NO_PROFILE QuicCore::path_id_for_inbound_route(
     ConnectionEntry &entry, const std::optional<QuicRouteHandle> &route_handle,
-    std::span<const std::byte> address_validation_identity) {
+    std::span<const std::byte> address_validation_identity, QuicCoreTimePoint now) {
     if (route_handle.has_value()) {
         const auto existing = entry.path_id_by_route_handle.find(*route_handle);
         if (existing != entry.path_id_by_route_handle.end()) {
@@ -3237,6 +3307,8 @@ std::optional<QuicPathId> COQUIC_NO_PROFILE QuicCore::path_id_for_inbound_route(
                 path->second.recovery_reset_policy_source_path_id =
                     entry.connection->current_send_path_id_;
             }
+            static_cast<void>(restore_recently_validated_peer_address(
+                entry, path_id, address_validation_identity, now));
         }
         return path_id;
     }
@@ -3808,7 +3880,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                     continue;
                 }
                 const auto path_id = path_id_for_inbound_route(
-                    entry, inbound->route_handle, inbound->address_validation_identity);
+                    entry, inbound->route_handle, inbound->address_validation_identity, now);
                 if (!path_id.has_value()) {
                     continue;
                 }
@@ -3858,7 +3930,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                 // # A stateless reset MUST NOT be used by an endpoint that has
                 // # the state necessary to send a frame on the connection.
                 const auto path_id = path_id_for_inbound_route(
-                    entry, inbound->route_handle, inbound->address_validation_identity);
+                    entry, inbound->route_handle, inbound->address_validation_identity, now);
                 if (!path_id.has_value()) {
                     return finalize_endpoint_result(std::move(result), now);
                 }
@@ -3885,6 +3957,9 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3.1
                     // # Endpoints MAY skip this check if any packet from a
                     // # datagram is successfully processed.
+                }
+                if (inbound_result.processed_any_packet) {
+                    remember_recently_validated_peer_address(entry, *path_id, now);
                 }
 
                 const bool defer_send_drain =
@@ -4213,6 +4288,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             // # handshake to proceed.
             entry.connection->mark_peer_address_validated();
         }
+        remember_recently_validated_peer_address(entry, path_id, now);
 
         auto drained =
             drain_connection_effects(entry.handle, entry.default_route_handle,
@@ -4500,7 +4576,7 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
             [&](const QuicCoreStart &) { connection->start(now); },
             [&](const QuicCoreInboundDatagram &in) {
                 const auto path_id = path_id_for_inbound_route(entry, in.route_handle,
-                                                               in.address_validation_identity);
+                                                               in.address_validation_identity, now);
                 if (!path_id.has_value()) {
                     return;
                 }

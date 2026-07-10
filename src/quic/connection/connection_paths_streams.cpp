@@ -3563,11 +3563,13 @@ bool QuicConnection::should_keep_current_send_path_for_inbound_non_probing(
         }
         return true;
     }
-    if (path_state_is_validating(current) && path_state_is_validated(inbound) &&
-        !current->validation_initiated_locally && current->outstanding_challenge.has_value()) {
+    if (path_state_is_validating(current) && !current->validation_probe_only &&
+        path_state_is_validated(inbound) && !current->validation_initiated_locally &&
+        current->outstanding_challenge.has_value()) {
         return true;
     }
-    if (path_state_is_validating(current) && path_state_is_validated(inbound) &&
+    if (path_state_is_validating(current) && !current->validation_probe_only &&
+        path_state_is_validated(inbound) &&
         (!packet_number.has_value() ||
          !current->largest_inbound_application_packet_number.has_value() ||
          *packet_number < *current->largest_inbound_application_packet_number)) {

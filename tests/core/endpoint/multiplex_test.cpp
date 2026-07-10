@@ -26,6 +26,7 @@
 
 namespace {
 using namespace coquic::quic::test_support;
+using coquic::quic::test::bytes_from_string;
 
 template <typename T, typename = void> struct has_public_path_id_member : std::false_type {};
 
@@ -498,6 +499,93 @@ TEST(QuicCoreEndpointTest, AddressChangePolicyRejectsNewInboundRoutesAndMigratio
         coquic::quic::test::test_time(2));
     EXPECT_TRUE(inbound.effects.empty());
     EXPECT_FALSE(core.connections_.at(1).path_id_by_route_handle.contains(29));
+}
+
+TEST(QuicCoreEndpointTest, RecentPeerAddressValidationPolicyIsBoundedAndConservative) {
+    const auto identity = bytes_from_string("addr-a");
+
+    auto make_entry = [&] {
+        coquic::quic::QuicCore::ConnectionEntry entry;
+        entry.connection =
+            std::make_unique<coquic::quic::QuicConnection>(make_connected_server_connection());
+        entry.path_id_by_route_handle.emplace(11, 0);
+        entry.route_handle_by_path_id.emplace(0, 11);
+        entry.address_validation_identity_by_path_id.emplace(0, identity);
+        entry.connection->ensure_path_state(0).validated = true;
+        entry.connection->last_validated_path_id_ = 0;
+        entry.connection->peer_connection_ids_[0] = coquic::quic::PeerConnectionIdRecord{
+            .sequence_number = 0,
+            .connection_id = bytes_from_ints({0xaa}),
+        };
+        entry.connection->peer_connection_ids_[1] = coquic::quic::PeerConnectionIdRecord{
+            .sequence_number = 1,
+            .connection_id = bytes_from_ints({0xab}),
+        };
+        return entry;
+    };
+
+    {
+        auto config = make_server_endpoint_config();
+        config.recent_peer_address_validation_timeout = std::chrono::milliseconds(10);
+        coquic::quic::QuicCore core(std::move(config));
+        auto entry = make_entry();
+        core.remember_recently_validated_peer_address(entry, 0, coquic::quic::test::test_time(1));
+
+        const auto path_id =
+            core.path_id_for_inbound_route(entry, 22, identity, coquic::quic::test::test_time(10));
+        ASSERT_EQ(path_id, 1u);
+        const auto validated_path_id = optional_value_or_terminate(path_id);
+        EXPECT_TRUE(entry.connection->paths_.at(validated_path_id).validated);
+        EXPECT_EQ(entry.connection->paths_.at(validated_path_id).peer_connection_id_sequence, 1u);
+        EXPECT_FALSE(
+            entry.connection->paths_.at(validated_path_id).outstanding_challenge.has_value());
+        EXPECT_TRUE(entry.connection->paths_.at(0).outstanding_challenge.has_value());
+    }
+
+    {
+        auto config = make_server_endpoint_config();
+        config.recent_peer_address_validation_timeout = std::chrono::milliseconds(0);
+        coquic::quic::QuicCore core(std::move(config));
+        auto entry = make_entry();
+        core.remember_recently_validated_peer_address(entry, 0, coquic::quic::test::test_time(1));
+
+        const auto path_id =
+            core.path_id_for_inbound_route(entry, 22, identity, coquic::quic::test::test_time(2));
+        ASSERT_EQ(path_id, 1u);
+        EXPECT_FALSE(entry.connection->paths_.contains(optional_value_or_terminate(path_id)));
+    }
+
+    {
+        auto config = make_server_endpoint_config();
+        config.recent_peer_address_validation_timeout = std::chrono::milliseconds(10);
+        coquic::quic::QuicCore core(std::move(config));
+        auto entry = make_entry();
+        core.remember_recently_validated_peer_address(entry, 0, coquic::quic::test::test_time(1));
+
+        const auto expired =
+            core.path_id_for_inbound_route(entry, 22, identity, coquic::quic::test::test_time(11));
+        ASSERT_EQ(expired, 1u);
+        EXPECT_FALSE(entry.connection->paths_.contains(optional_value_or_terminate(expired)));
+
+        const auto unknown = core.path_id_for_inbound_route(entry, 33, bytes_from_string("addr-b"),
+                                                            coquic::quic::test::test_time(2));
+        ASSERT_EQ(unknown, 2u);
+        EXPECT_FALSE(entry.connection->paths_.contains(optional_value_or_terminate(unknown)));
+    }
+
+    {
+        auto config = make_server_endpoint_config();
+        config.recent_peer_address_validation_timeout = std::chrono::milliseconds(10);
+        coquic::quic::QuicCore core(std::move(config));
+        auto entry = make_entry();
+        entry.connection->peer_connection_ids_.clear();
+        core.remember_recently_validated_peer_address(entry, 0, coquic::quic::test::test_time(1));
+
+        const auto path_id =
+            core.path_id_for_inbound_route(entry, 22, identity, coquic::quic::test::test_time(2));
+        ASSERT_EQ(path_id, 1u);
+        EXPECT_FALSE(entry.connection->paths_.contains(optional_value_or_terminate(path_id)));
+    }
 }
 
 TEST(QuicCoreEndpointTest, CloseConnectionCommandRetainsStateUntilCloseDeadline) {

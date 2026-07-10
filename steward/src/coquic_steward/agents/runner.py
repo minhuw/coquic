@@ -149,6 +149,14 @@ class CodexRunner:
         args.extend(["--json"])
         if self.config.codex_model:
             args.extend(["--model", self.config.codex_model])
+        if self.config.codex_reasoning_effort:
+            args.extend(
+                [
+                    "--config",
+                    "model_reasoning_effort="
+                    + json.dumps(self.config.codex_reasoning_effort),
+                ]
+            )
         if self.config.codex_profile:
             args.extend(["--profile", self.config.codex_profile])
         if not resume_session:

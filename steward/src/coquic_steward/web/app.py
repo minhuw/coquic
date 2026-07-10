@@ -425,6 +425,7 @@ def _config_payload(config) -> dict[str, object]:
         "codex_bin_resolved": codex_resolved,
         "codex_bin_available": bool(codex_resolved),
         "codex_model": config.codex_model,
+        "codex_reasoning_effort": config.codex_reasoning_effort,
         "codex_profile": config.codex_profile,
         "codex_sandbox": config.codex_sandbox,
         "integration_mode": config.integration_mode,

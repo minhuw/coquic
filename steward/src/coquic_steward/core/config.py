@@ -107,6 +107,7 @@ class StewardConfig:
     repo_root: Path
     codex_bin: str = "codex"
     codex_model: str | None = None
+    codex_reasoning_effort: str | None = None
     codex_profile: str | None = None
     codex_sandbox: str = "workspace-write"
     integration_mode: str = IntegrationMode.local_only.value
@@ -207,6 +208,9 @@ def load_config(
         codex_bin=_resolve_executable(str(steward.get("codex_bin", "codex"))),
         codex_model=steward.get("codex_model")
         or os.getenv("COQUIC_STEWARD_CODEX_MODEL")
+        or None,
+        codex_reasoning_effort=steward.get("codex_reasoning_effort")
+        or os.getenv("COQUIC_STEWARD_CODEX_REASONING_EFFORT")
         or None,
         codex_profile=steward.get("codex_profile")
         or os.getenv("COQUIC_STEWARD_CODEX_PROFILE")

@@ -411,6 +411,25 @@ github_repository = "minhuw/coquic"
     assert config.codex_bin == str(fake)
 
 
+def test_config_reads_codex_model_and_reasoning_effort(
+    repo: Path, tmp_path: Path
+) -> None:
+    config_path = tmp_path / "steward.toml"
+    config_path.write_text(
+        """
+[steward]
+codex_model = "gpt-5.6-terra"
+codex_reasoning_effort = "medium"
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(repo_root=repo, config_path=config_path)
+
+    assert config.codex_model == "gpt-5.6-terra"
+    assert config.codex_reasoning_effort == "medium"
+
+
 def test_config_reads_only_global_file_by_default(
     repo: Path, coquic_home: Path
 ) -> None:
@@ -3755,6 +3774,13 @@ def test_codex_planner_prompt_includes_active_tasks(
 def test_codex_runner_places_resume_options_before_session(
     config: StewardConfig, tmp_path: Path
 ) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "codex_model": "gpt-5.6-terra",
+            "codex_reasoning_effort": "medium",
+        }
+    )
     runner = CodexRunner(config)
     schema = tmp_path / "schema.json"
     schema.write_text('{"type":"object"}', encoding="utf-8")
@@ -3770,6 +3796,9 @@ def test_codex_runner_places_resume_options_before_session(
     assert args[:3] == [config.codex_bin, "exec", "resume"]
     assert args[-2:] == ["planner-thread-1", "-"]
     assert args.index("--output-schema") < args.index("planner-thread-1")
+    assert args[args.index("--model") + 1] == "gpt-5.6-terra"
+    assert args[args.index("--config") + 1] == 'model_reasoning_effort="medium"'
+    assert args.index("--config") < args.index("planner-thread-1")
     assert "--cd" not in args
     assert "--sandbox" not in args
 
@@ -8262,6 +8291,11 @@ def test_web_health_and_dashboard(config: StewardConfig, monkeypatch) -> None:
         "codacy",
     ]
     assert payload["config"]["coquic_home"] == str(config.coquic_home)
+    assert payload["config"]["codex_model"] == config.codex_model
+    assert (
+        payload["config"]["codex_reasoning_effort"]
+        == config.codex_reasoning_effort
+    )
     assert payload["config"]["codex_sandbox"] == config.codex_sandbox
     assert payload["config"]["limits"]["max_active_tasks"] == config.limits.max_active_tasks
     assert payload["config"]["signal_providers"]["codacy"]["max_items"] == 12

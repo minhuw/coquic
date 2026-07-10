@@ -784,29 +784,6 @@ if server == "coquic" and client == "xquic" and "crosstraffic" in requested_test
 
 if (
     server == "coquic"
-    and client == "xquic"
-    and "handshakeloss" in requested_tests
-    and retry_output_contains_all(
-        "handshakeloss",
-        [
-            "start requesty[37]",
-            "Test failed: took longer than 300s.",
-            "Test: handshakeloss took",
-        ],
-    )
-):
-    adjust_failed_result(
-        "handshakeloss",
-        "peer exceeds official handshakeloss timeout",
-        (
-            "xquic official client runs handshakeloss requests serially; the "
-            "selected run's isolated retry still timed out after 300 seconds "
-            "with 37 of 50 one-kilobyte transfers complete"
-        ),
-    )
-
-if (
-    server == "coquic"
     and client == "msquic"
     and "zerortt" in requested_tests
     and runner_output_contains_all(
@@ -826,28 +803,6 @@ if (
             "msquic official client completes all zerortt downloads, but the "
             "official checker measured 10694 bytes in 0-RTT packets and 5122 "
             "bytes in 1-RTT packets in the selected run"
-        ),
-    )
-
-if (
-    server == "coquic"
-    and client == "quiche"
-    and "handshakecorruption" in requested_tests
-    and retry_output_contains_all(
-        "handshakecorruption",
-        [
-            "Test failed: took longer than 300s.",
-            "Test: handshakecorruption took",
-            "status: TestResult.FAILED",
-        ],
-    )
-):
-    adjust_failed_result(
-        "handshakecorruption",
-        "peer exceeds official handshakecorruption timeout",
-        (
-            "quiche official client still timed out after 300 seconds during "
-            "the selected run's isolated handshakecorruption retry"
         ),
     )
 

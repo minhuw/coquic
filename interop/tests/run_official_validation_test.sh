@@ -463,12 +463,10 @@ if connectionmigration["result"] != "failed":
 if "details" in connectionmigration or "evidence" in connectionmigration:
     raise SystemExit("expected xquic connectionmigration metadata to remain unchanged")
 handshakeloss = results["handshakeloss"]
-if handshakeloss["result"] != "peer_broken":
-    raise SystemExit("expected xquic handshakeloss to be marked peer_broken")
-if handshakeloss.get("details") != "peer exceeds official handshakeloss timeout":
-    raise SystemExit("expected xquic handshakeloss public reason")
-if "300 seconds" not in handshakeloss.get("evidence", ""):
-    raise SystemExit("expected xquic handshakeloss evidence")
+if handshakeloss["result"] != "failed":
+    raise SystemExit("expected xquic handshakeloss timeout to remain failed")
+if "details" in handshakeloss or "evidence" in handshakeloss:
+    raise SystemExit("expected xquic handshakeloss metadata to remain unchanged")
 xquic_crosstraffic = next(
     entry for entry in data["measurements"][0]
     if entry["name"] == "crosstraffic"
@@ -481,7 +479,7 @@ if "30-second request deadline" not in xquic_crosstraffic.get("evidence", ""):
     raise SystemExit("expected xquic crosstraffic evidence")
 adjustments = data.get("coquic_compat_adjustments", [])
 adjusted_names = {entry.get("name") for entry in adjustments}
-if adjusted_names != {"handshakeloss", "crosstraffic"}:
+if adjusted_names != {"crosstraffic"}:
     raise SystemExit("expected compatibility adjustment audit trail")
 if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
     raise SystemExit("expected compatibility adjustments to include reason and evidence")
@@ -733,12 +731,10 @@ results = {
     entry["name"]: entry
     for entry in data["results"][0]
 }
-if results["handshakecorruption"]["result"] != "peer_broken":
-    raise SystemExit("expected quiche handshakecorruption to be marked peer_broken")
-if results["handshakecorruption"].get("details") != "peer exceeds official handshakecorruption timeout":
-    raise SystemExit("expected quiche handshakecorruption public reason")
-if "isolated handshakecorruption retry" not in results["handshakecorruption"].get("evidence", ""):
-    raise SystemExit("expected quiche handshakecorruption evidence")
+if results["handshakecorruption"]["result"] != "failed":
+    raise SystemExit("expected quiche handshakecorruption timeout to remain failed")
+if "details" in results["handshakecorruption"] or "evidence" in results["handshakecorruption"]:
+    raise SystemExit("expected quiche handshakecorruption metadata to remain unchanged")
 if results["connectionmigration"]["result"] != "peer_broken":
     raise SystemExit("expected quiche connectionmigration to be marked peer_broken")
 if results["connectionmigration"].get("details") != "peer does not perform active migration":
@@ -747,7 +743,7 @@ if "official checker saw only one server-side path" not in results["connectionmi
     raise SystemExit("expected quiche connectionmigration evidence")
 adjustments = data.get("coquic_compat_adjustments", [])
 adjusted_names = {entry.get("name") for entry in adjustments}
-if adjusted_names != {"handshakecorruption", "connectionmigration"}:
+if adjusted_names != {"connectionmigration"}:
     raise SystemExit("expected quiche client compatibility adjustment audit trail")
 if any(not entry.get("reason") or not entry.get("evidence") for entry in adjustments):
     raise SystemExit("expected quiche client audit trail to include reason and evidence")

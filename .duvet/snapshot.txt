@@ -839,9 +839,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
   SECTION: [Draining Connection State](#section-10.2.2)
     TEXT[!MUST,implementation,test]: While otherwise identical to the closing state, an
     TEXT[!MUST,implementation,test]:    endpoint in the draining state MUST NOT send any packets.
-    TEXT[!MAY]:    An endpoint that receives a CONNECTION_CLOSE frame MAY send a single
-    TEXT[!MAY]:    packet containing a CONNECTION_CLOSE frame before entering the
-    TEXT[!MAY]:    draining state, using a NO_ERROR code if appropriate.
+    TEXT[!MAY,implementation]:    An endpoint that receives a CONNECTION_CLOSE frame MAY send a single
+    TEXT[!MAY,implementation]:    packet containing a CONNECTION_CLOSE frame before entering the
+    TEXT[!MAY,implementation]:    draining state, using a NO_ERROR code if appropriate.
     TEXT[!MUST,implementation,test]: An endpoint
     TEXT[!MUST,implementation,test]:    MUST NOT send further packets.
     TEXT[!MAY]:    An endpoint MAY enter the draining state from the closing state if it

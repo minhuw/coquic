@@ -4268,6 +4268,97 @@ TEST(QuicCoreTest, DrainOutboundDatagramReturnsEmptyWhenNothingIsPending) {
     EXPECT_FALSE(connection.has_failed());
 }
 
+TEST(QuicCoreTest, PeerCloseDefaultsToDrainingWithoutResponse) {
+    auto connection = make_connected_client_connection();
+
+    const auto result = connection.process_inbound_application(
+        std::array<coquic::quic::Frame, 1>{coquic::quic::ApplicationConnectionCloseFrame{}},
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::draining);
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.2
+    // # While otherwise identical to the closing state, an endpoint in the
+    // # draining state MUST NOT send any packets.
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(2)).empty());
+}
+
+TEST(QuicCoreTest, PeerApplicationCloseSendsOneNoErrorResponseBeforeDraining) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.respond_to_peer_connection_close = true;
+    connection.handshake_confirmed_ = false;
+
+    const auto result = connection.process_inbound_application(
+        std::array<coquic::quic::Frame, 1>{coquic::quic::ApplicationConnectionCloseFrame{}},
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::closing);
+    const auto response = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(response.empty());
+    const auto packets = decode_sender_datagram(connection, response);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *application_packet = std::get_if<coquic::quic::ProtectedOneRttPacket>(&packets[0]);
+    ASSERT_NE(application_packet, nullptr);
+    ASSERT_EQ(application_packet->frames.size(), 1u);
+    const auto *close =
+        std::get_if<coquic::quic::TransportConnectionCloseFrame>(&application_packet->frames[0]);
+    ASSERT_NE(close, nullptr);
+    EXPECT_EQ(close->error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::no_error));
+    EXPECT_EQ(close->frame_type, 0u);
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::draining);
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(3)).empty());
+
+    const auto repeated_peer_close = coquic::quic::serialize_protected_datagram(
+        std::array<coquic::quic::ProtectedPacket, 1>{coquic::quic::ProtectedOneRttPacket{
+            .destination_connection_id = connection.config_.source_connection_id,
+            .packet_number_length = 2,
+            .packet_number = 1,
+            .frames = {coquic::quic::ApplicationConnectionCloseFrame{}},
+        }},
+        coquic::quic::SerializeProtectionContext{
+            .local_role = coquic::quic::EndpointRole::server,
+            .client_initial_destination_connection_id =
+                connection.client_initial_destination_connection_id(),
+            .one_rtt_secret = connection.application_space_.read_secret,
+        });
+    ASSERT_TRUE(repeated_peer_close.has_value());
+    const auto repeated_result = connection.process_inbound_datagram(
+        repeated_peer_close.value(), coquic::quic::test::test_time(4));
+    EXPECT_FALSE(repeated_result.processed_any_packet);
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(5)).empty());
+}
+
+TEST(QuicCoreTest, PeerTransportCloseUsesHandshakeProtectionWhenOneRttUnavailable) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.respond_to_peer_connection_close = true;
+    connection.handshake_confirmed_ = false;
+    connection.initial_packet_space_discarded_ = true;
+    connection.application_space_.write_secret.reset();
+    connection.handshake_space_.write_secret = make_test_traffic_secret();
+
+    const auto result = connection.process_inbound_crypto(
+        coquic::quic::EncryptionLevel::handshake,
+        std::array<coquic::quic::Frame, 1>{coquic::quic::TransportConnectionCloseFrame{}},
+        coquic::quic::test::test_time(1));
+
+    ASSERT_TRUE(result.has_value());
+    const auto response = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(response.empty());
+    const auto packets = decode_sender_datagram(connection, response);
+    ASSERT_EQ(packets.size(), 1u);
+    const auto *handshake_packet = std::get_if<coquic::quic::ProtectedHandshakePacket>(&packets[0]);
+    ASSERT_NE(handshake_packet, nullptr);
+    ASSERT_EQ(handshake_packet->frames.size(), 1u);
+    const auto *close =
+        std::get_if<coquic::quic::TransportConnectionCloseFrame>(&handshake_packet->frames[0]);
+    ASSERT_NE(close, nullptr);
+    EXPECT_EQ(close->error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::no_error));
+    EXPECT_EQ(connection.close_mode_, coquic::quic::QuicConnectionCloseMode::draining);
+}
+
 TEST(QuicCoreTest, ClosingStateKeyRetentionDefaultDoesNotDecryptPeerClose) {
     auto connection = make_connected_client_connection();
     connection.closing_transport_close_ = coquic::quic::TransportConnectionCloseFrame{

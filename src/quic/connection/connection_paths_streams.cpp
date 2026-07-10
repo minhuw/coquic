@@ -1802,6 +1802,12 @@ void QuicConnection::mark_connection_close_frame_sent(const Frame &frame, QuicCo
         return;
     }
 
+    if (peer_close_response_pending_) {
+        peer_close_response_pending_ = false;
+        enter_draining_state(now);
+        return;
+    }
+
     enter_closing_state(now, pending_connection_close_terminal_state_.value_or(
                                  QuicConnectionTerminalState::closed));
     closing_packets_since_last_close_ = 0;
@@ -1885,6 +1891,26 @@ void QuicConnection::enter_draining_state(QuicCoreTimePoint now) {
     status_ = HandshakeStatus::failed;
     clear_connection_failure_effects();
     queue_state_change(QuicCoreStateChange::failed);
+}
+
+void QuicConnection::enter_peer_close_response_or_draining(QuicCoreTimePoint now) {
+    if (!config_.transport.respond_to_peer_connection_close ||
+        close_mode_ != QuicConnectionCloseMode::none || !can_send_connection_close_frame()) {
+        enter_draining_state(now);
+        return;
+    }
+
+    //= https://www.rfc-editor.org/rfc/rfc9000#section-10.2.2
+    // # An endpoint that receives a CONNECTION_CLOSE frame MAY send a single
+    // # packet containing a CONNECTION_CLOSE frame before entering the draining
+    // # state, using a NO_ERROR code if appropriate.
+    pending_transport_close_ = TransportConnectionCloseFrame{
+        .error_code = transport_error_code_value(QuicTransportErrorCode::no_error),
+        .frame_type = 0,
+    };
+    peer_close_response_pending_ = true;
+    enter_closing_state(now, QuicConnectionTerminalState::closed);
+    closing_close_packet_pending_ = true;
 }
 
 void QuicConnection::queue_transport_close_for_error(QuicCoreTimePoint now, const CodecError &error,

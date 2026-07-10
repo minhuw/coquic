@@ -1627,6 +1627,9 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         if (close_candidates.empty()) {
             return {};
         }
+        if (peer_close_response_pending_) {
+            reduce_close_candidates_to_strongest();
+        }
         const auto &close_destination_connection_id =
             packet_destination_connection_id(close_candidates.front().packet);
         if (!std::ranges::all_of(close_candidates, [&](const auto &candidate_packet) {

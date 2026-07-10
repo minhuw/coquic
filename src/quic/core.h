@@ -166,6 +166,9 @@ struct QuicTransportConfig {
     bool grease_reserved_versions = false;
     bool grease_quic_bit = false;
     bool enable_optimistic_ack_mitigation = false;
+    // When enabled, acknowledge a peer CONNECTION_CLOSE with one transport
+    // CONNECTION_CLOSE carrying NO_ERROR before entering draining.
+    bool respond_to_peer_connection_close = false;
     bool retain_read_keys_for_peer_close_while_closing = false;
 };
 

@@ -1082,7 +1082,7 @@ CodecResult<bool> QuicConnection::process_inbound_crypto(EncryptionLevel level,
         }
 
         if (std::holds_alternative<TransportConnectionCloseFrame>(frame)) {
-            enter_draining_state(now);
+            enter_peer_close_response_or_draining(now);
             note_peer_progress();
             continue;
         }
@@ -1166,7 +1166,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_crypto(
         }
 
         if (std::holds_alternative<TransportConnectionCloseFrame>(frame)) {
-            enter_draining_state(now);
+            enter_peer_close_response_or_draining(now);
             note_peer_progress();
             continue;
         }
@@ -3354,7 +3354,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             std::holds_alternative<TransportConnectionCloseFrame>(frame);
         bool has_application_close = std::holds_alternative<ApplicationConnectionCloseFrame>(frame);
         if (has_transport_close | has_application_close) {
-            enter_draining_state(now);
+            enter_peer_close_response_or_draining(now);
             note_peer_progress();
             continue;
         }
@@ -3862,7 +3862,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             std::holds_alternative<TransportConnectionCloseFrame>(frame);
         bool has_application_close = std::holds_alternative<ApplicationConnectionCloseFrame>(frame);
         if (has_transport_close | has_application_close) {
-            enter_draining_state(now);
+            enter_peer_close_response_or_draining(now);
             note_peer_progress();
             continue;
         }

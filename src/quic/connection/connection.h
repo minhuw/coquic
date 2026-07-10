@@ -1060,6 +1060,7 @@ class QuicConnection {
     void mark_connection_close_frame_sent(const Frame &frame, QuicCoreTimePoint now);
     void enter_closing_state(QuicCoreTimePoint now, QuicConnectionTerminalState terminal_state);
     void enter_draining_state(QuicCoreTimePoint now);
+    void enter_peer_close_response_or_draining(QuicCoreTimePoint now);
     void queue_transport_close_for_error(QuicCoreTimePoint now, const CodecError &error,
                                          std::uint64_t frame_type = 0);
     bool note_aead_encryption_attempt(std::size_t packet_count, QuicCoreTimePoint now);
@@ -1219,6 +1220,7 @@ class QuicConnection {
     bool zero_rtt_attempted_event_emitted_ = false;
     bool processed_peer_packet_ = false;
     bool local_application_close_sent_ = false;
+    bool peer_close_response_pending_ = false;
     std::optional<ApplicationConnectionCloseFrame> pending_application_close_;
     std::optional<TransportConnectionCloseFrame> pending_transport_close_;
     std::optional<QuicConnectionTerminalState> pending_connection_close_terminal_state_;

@@ -40,7 +40,6 @@ jobs:
             display_name: quiche
             impl: quiche
             image: cloudflare/quiche-qns:latest
-            coquic_server_skip_testcases: handshakeloss
           - peer: ngtcp2
             display_name: ngtcp2
             impl: ngtcp2
@@ -121,7 +120,6 @@ jobs:
           INTEROP_TESTCASES: ${{ env.INTEROP_ALL_TESTCASES }}
           INTEROP_COQUIC_SERVER_TESTCASES: ${{ env.INTEROP_ALL_TESTCASES }}
           INTEROP_COQUIC_CLIENT_TESTCASES: ${{ env.INTEROP_ALL_TESTCASES }}
-          INTEROP_COQUIC_SERVER_SKIP_TESTCASES: ${{ matrix.coquic_server_skip_testcases || '' }}
           INTEROP_PEER_IMPL: ${{ matrix.impl }}
           INTEROP_PEER_IMAGE: ${{ matrix.image }}
           INTEROP_DIRECTIONS: both

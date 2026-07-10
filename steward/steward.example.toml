@@ -36,10 +36,6 @@ frozen = [
   ".coquic-steward/**",
   ".remote-ci/**",
   ".rag/**",
-]
-
-[steward.path_policy.feature]
-frozen = [
   ".github/**",
   ".clang-tidy",
   ".pre-commit-config.yaml",

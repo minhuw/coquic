@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -2717,6 +2718,271 @@ def test_daemon_store_change_mirror_update_skips_remote_publish(
     path = config.state_dir / "public" / "steward" / "status.json"
     assert path.exists()
     assert calls == 0
+
+
+def test_daemon_background_mirror_publishes_during_active_dispatch(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "public_mirror": config.public_mirror.__class__(
+                enabled=True,
+                publish=True,
+                output_path=Path("public/steward/status.json"),
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    published_working = threading.Event()
+    published_states: list[str] = []
+
+    def fake_publish(
+        self: PublicMirrorPublisher, local_path: Path, *, cwd: Path
+    ) -> CommandResult:
+        state = json.loads(local_path.read_text(encoding="utf-8"))["state"]
+        published_states.append(state)
+        if state == "working":
+            published_working.set()
+        return CommandResult(
+            args=["fake-publish"],
+            cwd=cwd,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(PublicMirrorPublisher, "publish", fake_publish)
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.PUBLIC_MIRROR_DEBOUNCE_SECONDS",
+        0.01,
+    )
+    daemon = StewardDaemon(config, store)
+
+    def fake_run(task_id: str) -> bool:
+        store.start_worker(task_id, "worker started")
+        assert published_working.wait(timeout=2)
+        store.finish_task(task_id, TaskStatus.succeeded, "done")
+        return True
+
+    monkeypatch.setattr(daemon.executor, "run_task", fake_run)
+    daemon._start_public_mirror_sync()
+    try:
+        result = daemon.tick(plan=False, dispatch=True)
+    finally:
+        daemon._stop_public_mirror_sync()
+
+    assert result.dispatched == 1
+    assert "working" in published_states
+    assert store.get(task.id).status == TaskStatus.succeeded
+
+
+def test_daemon_background_mirror_retries_failed_publish(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "public_mirror": config.public_mirror.__class__(
+                enabled=True,
+                publish=True,
+                output_path=Path("public/steward/status.json"),
+            ),
+        }
+    )
+    config.ensure_dirs()
+    attempts = 0
+    published = threading.Event()
+
+    def fake_publish(
+        self: PublicMirrorPublisher, local_path: Path, *, cwd: Path
+    ) -> CommandResult:
+        nonlocal attempts
+        attempts += 1
+        returncode = 23 if attempts == 1 else 0
+        if returncode == 0:
+            published.set()
+        return CommandResult(
+            args=["fake-publish"],
+            cwd=cwd,
+            returncode=returncode,
+            stdout="",
+            stderr="rsync failed" if returncode else "",
+        )
+
+    monkeypatch.setattr(PublicMirrorPublisher, "publish", fake_publish)
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.PUBLIC_MIRROR_DEBOUNCE_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.PUBLIC_MIRROR_RETRY_SECONDS",
+        0.01,
+    )
+    daemon = StewardDaemon(config, TaskStore(config.db_path))
+    daemon._start_public_mirror_sync()
+    try:
+        assert published.wait(timeout=2)
+    finally:
+        daemon._stop_public_mirror_sync()
+
+    assert attempts >= 2
+
+
+def test_daemon_background_mirror_flushes_pending_state_on_stop(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "public_mirror": config.public_mirror.__class__(
+                enabled=True,
+                publish=True,
+                output_path=Path("public/steward/status.json"),
+            ),
+        }
+    )
+    config.ensure_dirs()
+    first_publish_started = threading.Event()
+    release_first_publish = threading.Event()
+    published_task_counts: list[int] = []
+
+    def fake_publish(
+        self: PublicMirrorPublisher, local_path: Path, *, cwd: Path
+    ) -> CommandResult:
+        payload = json.loads(local_path.read_text(encoding="utf-8"))
+        published_task_counts.append(payload["counts"]["tasks"])
+        if len(published_task_counts) == 1:
+            first_publish_started.set()
+            release_first_publish.wait(timeout=5)
+        return CommandResult(
+            args=["fake-publish"],
+            cwd=cwd,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(PublicMirrorPublisher, "publish", fake_publish)
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.PUBLIC_MIRROR_DEBOUNCE_SECONDS",
+        0.01,
+    )
+    store = TaskStore(config.db_path)
+    daemon = StewardDaemon(config, store)
+
+    daemon._start_public_mirror_sync()
+    assert first_publish_started.wait(timeout=2)
+    store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    stop_thread = threading.Thread(target=daemon._stop_public_mirror_sync)
+    stop_thread.start()
+    assert daemon._public_mirror_stop.wait(timeout=2)
+    release_first_publish.set()
+    stop_thread.join(timeout=2)
+
+    assert not stop_thread.is_alive()
+    assert published_task_counts == [0, 1]
+    assert daemon._public_mirror_thread is None
+
+
+def test_daemon_background_mirror_hands_off_change_at_shutdown_exit(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "public_mirror": config.public_mirror.__class__(
+                enabled=True,
+                publish=True,
+                output_path=Path("public/steward/status.json"),
+            ),
+        }
+    )
+    config.ensure_dirs()
+    initial_publish_finished = threading.Event()
+    published_task_counts: list[int] = []
+
+    def fake_publish(
+        self: PublicMirrorPublisher, local_path: Path, *, cwd: Path
+    ) -> CommandResult:
+        payload = json.loads(local_path.read_text(encoding="utf-8"))
+        published_task_counts.append(payload["counts"]["tasks"])
+        initial_publish_finished.set()
+        return CommandResult(
+            args=["fake-publish"],
+            cwd=cwd,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(PublicMirrorPublisher, "publish", fake_publish)
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.PUBLIC_MIRROR_DEBOUNCE_SECONDS",
+        0.01,
+    )
+    store = TaskStore(config.db_path)
+    daemon = StewardDaemon(config, store)
+    final_check_reached = threading.Event()
+    release_final_check = threading.Event()
+    callback_started = threading.Event()
+    dirty_is_set = daemon._public_mirror_dirty.is_set
+
+    def pause_final_dirty_check() -> bool:
+        dirty = dirty_is_set()
+        if daemon._public_mirror_stop.is_set() and not dirty:
+            final_check_reached.set()
+            release_final_check.wait(timeout=5)
+        return dirty
+
+    monkeypatch.setattr(daemon._public_mirror_dirty, "is_set", pause_final_dirty_check)
+    store_changed = store.on_change
+
+    def signal_store_change() -> None:
+        callback_started.set()
+        store_changed()
+
+    store.on_change = signal_store_change
+    stop_thread = threading.Thread(target=daemon._stop_public_mirror_sync)
+    change_thread: threading.Thread | None = None
+
+    daemon._start_public_mirror_sync()
+    try:
+        assert initial_publish_finished.wait(timeout=2)
+        stop_thread.start()
+        assert final_check_reached.wait(timeout=2)
+        change_thread = threading.Thread(
+            target=lambda: store.add_task(
+                TaskSpec(
+                    kind=TaskKind.custom,
+                    worker=WorkerKind.custom,
+                    title="T",
+                    prompt="P",
+                )
+            )
+        )
+        change_thread.start()
+        assert callback_started.wait(timeout=2)
+    finally:
+        release_final_check.set()
+        if change_thread is not None:
+            change_thread.join(timeout=2)
+        if stop_thread.ident is not None:
+            stop_thread.join(timeout=2)
+
+    path = config.state_dir / "public" / "steward" / "status.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert change_thread is not None and not change_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert payload["counts"]["tasks"] == 1
+    assert published_task_counts[-1] == 1
+    assert daemon._public_mirror_thread is None
 
 
 def test_daemon_cycle_mirror_update_respects_disabled_publish(

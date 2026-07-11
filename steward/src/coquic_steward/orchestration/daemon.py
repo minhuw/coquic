@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,6 +27,8 @@ from ..signals import collect_signal_items, project_signals_from_items
 from .preflight import preflight_remote_push
 
 DAEMON_EVENT_TASK_ID = "daemon"
+PUBLIC_MIRROR_DEBOUNCE_SECONDS = 1.0
+PUBLIC_MIRROR_RETRY_SECONDS = 30.0
 
 
 @dataclass
@@ -65,9 +68,14 @@ class StewardDaemon:
         self.executor = StewardExecutor(config, store)
         self._public_mirror_local_digest: str | None = None
         self._public_mirror_remote_digest: str | None = None
-        self._public_mirror_publishing = False
+        self._public_mirror_update_lock = threading.Lock()
+        self._public_mirror_thread_lock = threading.Lock()
+        self._public_mirror_dirty = threading.Event()
+        self._public_mirror_stop = threading.Event()
+        self._public_mirror_thread: threading.Thread | None = None
+        self._public_mirror_stopping = False
         if config.public_mirror.enabled and hasattr(store, "on_change"):
-            store.on_change = self._write_public_mirror_if_changed
+            store.on_change = self._public_mirror_store_changed
 
     def tick(
         self,
@@ -423,59 +431,137 @@ class StewardDaemon:
         )
 
     def run_forever(self) -> None:
-        while True:
-            trigger = wait_for_scheduler_event(self.config, self.store)
-            self.run_cycle(
-                fetch_providers=trigger.providers,
-                max_dispatch=1,
-                reason=trigger.reason,
-            )
+        self._start_public_mirror_sync()
+        try:
+            while True:
+                trigger = wait_for_scheduler_event(self.config, self.store)
+                self.run_cycle(
+                    fetch_providers=trigger.providers,
+                    max_dispatch=1,
+                    reason=trigger.reason,
+                )
+        finally:
+            self._stop_public_mirror_sync()
 
     def _log(self, message: str) -> None:
         if self.logger is not None:
             self.logger(f"[steward] {message}")
 
-    def _publish_public_mirror_if_changed(self) -> None:
-        self._update_public_mirror_if_changed(publish=True)
-
-    def _write_public_mirror_if_changed(self) -> None:
-        self._update_public_mirror_if_changed(publish=False)
-
-    def _update_public_mirror_if_changed(self, *, publish: bool) -> None:
-        if not self.config.public_mirror.enabled:
+    def _start_public_mirror_sync(self) -> None:
+        if (
+            not self.config.public_mirror.enabled
+            or not self.config.public_mirror.publish
+        ):
             return
+        with self._public_mirror_thread_lock:
+            if self._public_mirror_thread is not None or self._public_mirror_stopping:
+                return
+            self._public_mirror_stop.clear()
+            self._public_mirror_dirty.set()
+            thread = threading.Thread(
+                target=self._run_public_mirror_sync,
+                name="steward-public-mirror",
+                daemon=True,
+            )
+            self._public_mirror_thread = thread
+            thread.start()
+
+    def _stop_public_mirror_sync(self) -> None:
+        with self._public_mirror_thread_lock:
+            thread = self._public_mirror_thread
+            if thread is None:
+                return
+            self._public_mirror_stopping = True
+            self._public_mirror_stop.set()
+            self._public_mirror_dirty.set()
+        thread.join()
         try:
-            if self._public_mirror_publishing:
-                return
-            self._public_mirror_publishing = True
-            digest = public_mirror_digest(self.config, self.store)
-            current_digest = (
-                self._public_mirror_remote_digest
-                if publish and self.config.public_mirror.publish
-                else self._public_mirror_local_digest
-            )
-            if digest == current_digest:
-                return
-            should_publish = publish and self.config.public_mirror.publish
-            path, result = publish_public_mirror(
-                self.config,
-                self.store,
-                publish=should_publish,
-            )
-            if result is not None and not result.ok:
-                self._log(
-                    "public mirror publish failed "
-                    f"code={result.returncode} error={result.stderr.strip()}"
-                )
-                return
-            self._public_mirror_local_digest = digest
-            if result is not None:
-                self._public_mirror_remote_digest = digest
-            self._log(f"public mirror published path={path}")
-        except Exception as exc:  # pragma: no cover - daemon boundary guard.
-            self._log(f"public mirror publish failed error={exc}")
+            self._update_public_mirror_if_changed(publish=True)
         finally:
-            self._public_mirror_publishing = False
+            with self._public_mirror_thread_lock:
+                if self._public_mirror_thread is thread:
+                    self._public_mirror_thread = None
+                self._public_mirror_stopping = False
+
+    def _run_public_mirror_sync(self) -> None:
+        while True:
+            self._public_mirror_dirty.wait()
+            stopping = self._public_mirror_stop.is_set()
+            if not stopping and self._public_mirror_stop.wait(
+                PUBLIC_MIRROR_DEBOUNCE_SECONDS
+            ):
+                stopping = True
+            self._public_mirror_dirty.clear()
+            synced = self._update_public_mirror_if_changed(publish=True)
+            if stopping or self._public_mirror_stop.is_set():
+                with self._public_mirror_thread_lock:
+                    if self._public_mirror_dirty.is_set():
+                        continue
+                    if self._public_mirror_thread is threading.current_thread():
+                        self._public_mirror_thread = None
+                    return
+            if synced:
+                continue
+            if self._public_mirror_stop.wait(PUBLIC_MIRROR_RETRY_SECONDS):
+                self._public_mirror_dirty.set()
+                continue
+            self._public_mirror_dirty.set()
+
+    def _public_mirror_store_changed(self) -> None:
+        with self._public_mirror_thread_lock:
+            if self._public_mirror_thread is not None:
+                self._public_mirror_dirty.set()
+                return
+            if self._public_mirror_stopping:
+                self._update_public_mirror_if_changed(publish=True)
+                return
+        self._write_public_mirror_if_changed()
+
+    def _publish_public_mirror_if_changed(self) -> bool:
+        with self._public_mirror_thread_lock:
+            if self._public_mirror_thread is not None:
+                self._public_mirror_dirty.set()
+                return True
+        return self._update_public_mirror_if_changed(publish=True)
+
+    def _write_public_mirror_if_changed(self) -> bool:
+        return self._update_public_mirror_if_changed(publish=False)
+
+    def _update_public_mirror_if_changed(self, *, publish: bool) -> bool:
+        if not self.config.public_mirror.enabled:
+            return True
+        with self._public_mirror_update_lock:
+            try:
+                digest = public_mirror_digest(self.config, self.store)
+                current_digest = (
+                    self._public_mirror_remote_digest
+                    if publish and self.config.public_mirror.publish
+                    else self._public_mirror_local_digest
+                )
+                if digest == current_digest:
+                    return True
+                should_publish = publish and self.config.public_mirror.publish
+                path, result = publish_public_mirror(
+                    self.config,
+                    self.store,
+                    publish=should_publish,
+                )
+                self._public_mirror_local_digest = digest
+                if result is not None and not result.ok:
+                    self._log(
+                        "public mirror publish failed "
+                        f"code={result.returncode} error={result.stderr.strip()}"
+                    )
+                    return False
+                if result is not None:
+                    self._public_mirror_remote_digest = digest
+                    self._log(f"public mirror published path={path}")
+                else:
+                    self._log(f"public mirror written path={path}")
+                return True
+            except Exception as exc:  # pragma: no cover - daemon boundary guard.
+                self._log(f"public mirror publish failed error={exc}")
+                return False
 
 
 def stale_task_minutes(config: StewardConfig) -> int:

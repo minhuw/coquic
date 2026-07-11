@@ -3721,14 +3721,13 @@ void QuicConnection::maybe_switch_to_path(QuicPathId path_id, bool initiated_loc
     }
     const auto old_path_id = current_send_path_id_;
     const auto pending_path = paths_.find(path_id);
-    const auto existing_recovery_reset_policy = pending_path != paths_.end()
-                                                    ? pending_path->second.recovery_reset_policy
-                                                    : QuicPathRecoveryResetPolicy::reset;
     const auto existing_recovery_reset_policy_source_path_id =
         pending_path != paths_.end() ? pending_path->second.recovery_reset_policy_source_path_id
                                      : std::optional<QuicPathId>{};
     if (!initiated_locally && recovery_reset_policy == QuicPathRecoveryResetPolicy::reset &&
-        existing_recovery_reset_policy == QuicPathRecoveryResetPolicy::retain_congestion_and_rtt &&
+        pending_path != paths_.end() &&
+        pending_path->second.recovery_reset_policy ==
+            QuicPathRecoveryResetPolicy::retain_congestion_and_rtt &&
         existing_recovery_reset_policy_source_path_id == old_path_id) {
         recovery_reset_policy = QuicPathRecoveryResetPolicy::retain_congestion_and_rtt;
     }

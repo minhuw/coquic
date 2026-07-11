@@ -3769,6 +3769,19 @@ bool QuicConnection::anti_amplification_applies(QuicPathId path_id) const {
                                (path.anti_amplification_sent_bytes != 0));
 }
 
+std::optional<QuicPathAntiAmplificationState>
+QuicConnection::path_anti_amplification_state(QuicPathId path_id) const {
+    const auto path = paths_.find(path_id);
+    if (path == paths_.end()) {
+        return std::nullopt;
+    }
+    return QuicPathAntiAmplificationState{
+        .validated = path->second.validated,
+        .received_bytes = path->second.anti_amplification_received_bytes,
+        .sent_bytes = path->second.anti_amplification_sent_bytes,
+    };
+}
+
 std::uint64_t QuicConnection::anti_amplification_send_budget() const {
     const auto pending_response_path =
         std::find_if(paths_.begin(), paths_.end(),

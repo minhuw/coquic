@@ -48,6 +48,9 @@ constexpr std::size_t kEndpointConfigSizeV5 =
 constexpr std::size_t kEndpointConfigSizeV6 =
     offsetof(coquic_endpoint_config_t, enable_long_header_stateless_reset) +
     sizeof(coquic_endpoint_config_t::enable_long_header_stateless_reset);
+constexpr std::size_t kEndpointConfigSizeV7 =
+    offsetof(coquic_endpoint_config_t, enable_minimal_closing_state_retention) +
+    sizeof(coquic_endpoint_config_t::enable_minimal_closing_state_retention);
 constexpr std::size_t kClientConnectionConfigSizeV1 =
     offsetof(coquic_client_connection_config_t, zero_rtt) +
     sizeof(coquic_client_connection_config_t::zero_rtt);
@@ -450,6 +453,10 @@ coquic::core::EndpointConfig to_cpp(const coquic_endpoint_config_t &config) {
         .enable_long_header_stateless_reset = config.size >= kEndpointConfigSizeV6
                                                   ? config.enable_long_header_stateless_reset != 0
                                                   : false,
+        .enable_minimal_closing_state_retention =
+            config.size >= kEndpointConfigSizeV7
+                ? config.enable_minimal_closing_state_retention != 0
+                : false,
         .allow_peer_address_change = config.allow_peer_address_change != 0,
     };
 }
@@ -883,6 +890,7 @@ void coquic_endpoint_config_init(coquic_endpoint_config_t *config) {
         .orphan_zero_rtt_buffer = {},
         .enable_reserved_version_probe = 0,
         .enable_long_header_stateless_reset = 0,
+        .enable_minimal_closing_state_retention = 0,
         .reserved_endpoint_config_tail_padding = {},
     };
 }

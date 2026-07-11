@@ -303,6 +303,7 @@ quic::QuicCoreEndpointConfig to_internal(const EndpointConfig &config) {
         .enable_packet_inspection = config.enable_packet_inspection,
         .enable_reserved_version_probe = config.enable_reserved_version_probe,
         .enable_long_header_stateless_reset = config.enable_long_header_stateless_reset,
+        .enable_minimal_closing_state_retention = config.enable_minimal_closing_state_retention,
         .allow_peer_address_change = config.allow_peer_address_change,
     };
 }

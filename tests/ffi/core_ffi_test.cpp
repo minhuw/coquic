@@ -384,6 +384,7 @@ TEST(CoquicCoreFfiTest, InitializersAndNullQueriesAreStable) {
     EXPECT_EQ(endpoint_config.orphan_zero_rtt_buffer.max_age_us, 0u);
     EXPECT_EQ(endpoint_config.enable_reserved_version_probe, 0);
     EXPECT_EQ(endpoint_config.enable_long_header_stateless_reset, 0);
+    EXPECT_EQ(endpoint_config.enable_minimal_closing_state_retention, 0);
 
     endpoint_config.transport.underfilled_packet_coalescing_delay_us = 5000;
 
@@ -461,7 +462,19 @@ TEST(CoquicCoreFfiTest, EndpointConfigSizeGatesLongHeaderStatelessResetOption) {
     coquic_endpoint_config_t endpoint_config{};
     coquic_endpoint_config_init(&endpoint_config);
     endpoint_config.enable_long_header_stateless_reset = 1;
+    endpoint_config.enable_minimal_closing_state_retention = 1;
     endpoint_config.size = offsetof(coquic_endpoint_config_t, enable_long_header_stateless_reset);
+
+    coquic_endpoint_t *endpoint = nullptr;
+    ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);
+    ASSERT_NE(endpoint, nullptr);
+    coquic_endpoint_destroy(endpoint);
+}
+
+TEST(CoquicCoreFfiTest, EndpointConfigCoversMinimalClosingStateRetentionOption) {
+    coquic_endpoint_config_t endpoint_config{};
+    coquic_endpoint_config_init(&endpoint_config);
+    endpoint_config.enable_minimal_closing_state_retention = 1;
 
     coquic_endpoint_t *endpoint = nullptr;
     ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);
@@ -512,6 +525,7 @@ TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
     };
     endpoint_config.enable_reserved_version_probe = 1;
     endpoint_config.enable_long_header_stateless_reset = 1;
+    endpoint_config.enable_minimal_closing_state_retention = 1;
 
     coquic_endpoint_t *endpoint = nullptr;
     ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);

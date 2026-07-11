@@ -1230,6 +1230,10 @@ bool QuicConnection::close_state_active() const {
            close_mode_ == QuicConnectionCloseMode::draining;
 }
 
+bool QuicConnection::is_closing() const {
+    return close_mode_ == QuicConnectionCloseMode::closing;
+}
+
 bool QuicConnection::terminal_state_expired(QuicCoreTimePoint now) const {
     if (!close_state_active()) {
         return status_ == HandshakeStatus::failed;

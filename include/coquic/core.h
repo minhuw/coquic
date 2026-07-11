@@ -207,6 +207,7 @@ struct EndpointConfig {
     // peers are expected to discard.
     bool enable_reserved_version_probe = false;
     bool enable_long_header_stateless_reset = false;
+    bool enable_minimal_closing_state_retention = false;
     bool allow_peer_address_change = true;
 };
 

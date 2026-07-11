@@ -81,6 +81,7 @@ TEST(CoquicPublicApiTest, CoreEndpointOpensConnectionAndReportsDatagrams) {
                 .max_age = std::chrono::milliseconds(10),
             },
         .application_protocol = "coquic",
+        .enable_minimal_closing_state_retention = true,
     });
 
     auto result = endpoint.open_connection(

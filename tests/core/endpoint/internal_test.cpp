@@ -1627,6 +1627,32 @@ TEST(QuicCoreEndpointInternalTest, InboundEndpointBranchesCoverAcceptRetryAndUnk
     EXPECT_EQ(retry_server.connection_count(), 0u);
 }
 
+TEST(QuicCoreEndpointInternalTest, InitialServerCloseUsesMinimalRetention) {
+    auto config = make_server_endpoint_config();
+    config.application_protocol = "coquic";
+    config.enable_minimal_closing_state_retention = true;
+    config.identity = TlsIdentity{
+        .certificate_pem = "invalid certificate",
+        .private_key_pem = "invalid key",
+    };
+    QuicCore server(std::move(config));
+
+    static_cast<void>(server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_client_initial_datagram(),
+            .route_handle = 61,
+        },
+        coquic::quic::test::test_time(1)));
+
+    ASSERT_EQ(server.connection_count(), 1u);
+    const auto &entry = server.connections_.begin()->second;
+    EXPECT_EQ(entry.connection, nullptr);
+    EXPECT_TRUE(entry.minimal_closing_state.has_value());
+    ASSERT_FALSE(entry.active_connection_id_keys.empty());
+    EXPECT_EQ(server.connection_id_routes_.at(entry.active_connection_id_keys.front()),
+              entry.handle);
+}
+
 TEST(QuicCoreEndpointInternalTest, ServerClosesInvalidRetryTokenWithInvalidToken) {
     auto config = make_server_endpoint_config();
     config.retry_enabled = true;

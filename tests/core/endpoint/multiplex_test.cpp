@@ -778,6 +778,224 @@ TEST(QuicCoreEndpointTest, ClosedRouteAllowsEarlyDrainingCleanup) {
     EXPECT_TRUE(send_effects_from(early).empty());
 }
 
+TEST(QuicCoreEndpointTest, MinimalClosingStateRetainsCloseResponseOnKnownRoutes) {
+    auto config = make_server_endpoint_config();
+    config.enable_minimal_closing_state_retention = true;
+    coquic::quic::QuicCore core(std::move(config));
+
+    auto entry = coquic::quic::QuicCore::ConnectionEntry{
+        .handle = 1,
+        .default_route_handle = 11,
+        .connection = std::make_unique<coquic::quic::QuicConnection>(
+            coquic::quic::test::make_server_core_config()),
+    };
+    *entry.connection = make_connected_server_connection();
+    entry.connection->peer_address_validated_ = true;
+    entry.route_handle_by_path_id.emplace(0, 11);
+    entry.path_id_by_route_handle.emplace(11, 0);
+    entry.route_handle_by_path_id.emplace(1, 22);
+    entry.path_id_by_route_handle.emplace(22, 1);
+    entry.connection->ensure_path_state(0).validated = true;
+    entry.connection->current_send_path_id_ = 1;
+    entry.connection->ensure_path_state(1).is_current_send_path = true;
+    const auto local_connection_id = coquic::quic::ConnectionId{
+        std::byte{0xa1}, std::byte{0xb2}, std::byte{0xc3}, std::byte{0xd4},
+        std::byte{0xe5}, std::byte{0xf6}, std::byte{0x07}, std::byte{0x18},
+    };
+    entry.active_connection_id_keys.push_back(
+        coquic::quic::QuicCore::connection_id_key(local_connection_id));
+    core.connection_id_routes_.emplace(entry.active_connection_id_keys.front(), entry.handle);
+    core.connections_.emplace(entry.handle, std::move(entry));
+
+    auto close = core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input = coquic::quic::QuicCoreCloseConnection{.reason_phrase = "done"},
+        },
+        coquic::quic::test::test_time(1));
+
+    auto &closing_entry = core.connections_.at(1);
+    ASSERT_EQ(closing_entry.connection, nullptr);
+    ASSERT_TRUE(closing_entry.minimal_closing_state.has_value());
+    auto &closing = optional_ref_or_terminate(closing_entry.minimal_closing_state);
+    const auto close_deadline = optional_value_or_terminate(close.next_wakeup);
+    auto mtu_update = core.advance_endpoint(
+        coquic::quic::QuicCorePathMtuUpdate{
+            .route_handle = 22,
+            .max_udp_payload_size = 1200,
+        },
+        coquic::quic::test::test_time(2));
+    EXPECT_TRUE(mtu_update.effects.empty());
+    EXPECT_EQ(core.connections_.at(1).connection, nullptr);
+    std::vector<std::byte> inbound{std::byte{0x40}};
+    inbound.insert(inbound.end(), local_connection_id.begin(), local_connection_id.end());
+    inbound.push_back(std::byte{0x00});
+
+    auto first = core.advance_endpoint(
+        coquic::quic::QuicCoreInboundDatagram{.bytes = inbound, .route_handle = 22},
+        coquic::quic::test::test_time(3));
+    EXPECT_TRUE(send_effects_from(first).empty());
+    auto migrated = core.advance_endpoint(
+        coquic::quic::QuicCoreInboundDatagram{.bytes = inbound, .route_handle = 22},
+        coquic::quic::test::test_time(4));
+    auto migrated_sends = send_effects_from(migrated);
+    ASSERT_EQ(migrated_sends.size(), 1u);
+    EXPECT_EQ(migrated_sends.front().route_handle,
+              std::optional<coquic::quic::QuicRouteHandle>{22});
+    EXPECT_EQ(migrated_sends.front().bytes, closing.close_datagram);
+
+    closing.response_threshold = 1;
+    auto previous = core.advance_endpoint(
+        coquic::quic::QuicCoreInboundDatagram{.bytes = std::move(inbound), .route_handle = 11},
+        coquic::quic::test::test_time(5));
+    auto previous_sends = send_effects_from(previous);
+    ASSERT_EQ(previous_sends.size(), 1u);
+    EXPECT_EQ(previous_sends.front().route_handle,
+              std::optional<coquic::quic::QuicRouteHandle>{11});
+
+    auto expired = core.advance_endpoint(coquic::quic::QuicCoreTimerExpired{}, close_deadline);
+    EXPECT_EQ(core.connection_count(), 0u);
+    ASSERT_EQ(lifecycle_events_from(expired).size(), 1u);
+}
+
+TEST(QuicCoreEndpointTest, MinimalClosingStateRetainsInboundTransportClose) {
+    auto config = make_server_endpoint_config();
+    config.enable_minimal_closing_state_retention = true;
+    coquic::quic::QuicCore core(std::move(config));
+    auto entry = coquic::quic::QuicCore::ConnectionEntry{
+        .handle = 1,
+        .default_route_handle = 11,
+        .connection = std::make_unique<coquic::quic::QuicConnection>(
+            coquic::quic::test::make_server_core_config()),
+    };
+    *entry.connection = make_connected_server_connection();
+    entry.connection->peer_address_validated_ = true;
+    entry.route_handle_by_path_id.emplace(0, 11);
+    entry.path_id_by_route_handle.emplace(11, 0);
+    const auto local_connection_id = coquic::quic::ConnectionId{
+        std::byte{0xa1}, std::byte{0xb2}, std::byte{0xc3}, std::byte{0xd4},
+        std::byte{0xe5}, std::byte{0xf6}, std::byte{0x07}, std::byte{0x18},
+    };
+    entry.active_connection_id_keys.push_back(
+        coquic::quic::QuicCore::connection_id_key(local_connection_id));
+    core.connection_id_routes_.emplace(entry.active_connection_id_keys.front(), entry.handle);
+    core.connections_.emplace(entry.handle, std::move(entry));
+    core.connections_.at(1).connection->queue_transport_close_for_error(
+        coquic::quic::test::test_time(1),
+        coquic::quic::CodecError{.code = coquic::quic::CodecErrorCode::invalid_varint});
+    std::vector<std::byte> inbound{std::byte{0x40}};
+    inbound.insert(inbound.end(), local_connection_id.begin(), local_connection_id.end());
+    inbound.push_back(std::byte{0x00});
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreInboundDatagram{.bytes = std::move(inbound), .route_handle = 11},
+        coquic::quic::test::test_time(2)));
+    EXPECT_EQ(core.connections_.at(1).connection, nullptr);
+    EXPECT_TRUE(core.connections_.at(1).minimal_closing_state.has_value());
+}
+
+TEST(QuicCoreEndpointTest, MinimalDrainingStateDoesNotRetransmitClose) {
+    auto config = make_server_endpoint_config();
+    config.enable_minimal_closing_state_retention = true;
+    coquic::quic::QuicCore core(std::move(config));
+    auto entry = coquic::quic::QuicCore::ConnectionEntry{
+        .handle = 1,
+        .default_route_handle = 11,
+        .connection = std::make_unique<coquic::quic::QuicConnection>(
+            coquic::quic::test::make_server_core_config()),
+    };
+    *entry.connection = make_connected_server_connection();
+    entry.route_handle_by_path_id.emplace(0, 11);
+    entry.path_id_by_route_handle.emplace(11, 0);
+    const auto local_connection_id = coquic::quic::ConnectionId{
+        std::byte{0xa1}, std::byte{0xb2}, std::byte{0xc3}, std::byte{0xd4},
+        std::byte{0xe5}, std::byte{0xf6}, std::byte{0x07}, std::byte{0x18},
+    };
+    entry.active_connection_id_keys.push_back(
+        coquic::quic::QuicCore::connection_id_key(local_connection_id));
+    core.connection_id_routes_.emplace(entry.active_connection_id_keys.front(), entry.handle);
+    core.connections_.emplace(entry.handle, std::move(entry));
+    core.connections_.at(1).connection->enter_draining_state(coquic::quic::test::test_time(1));
+    std::vector<std::byte> inbound{std::byte{0x40}};
+    inbound.insert(inbound.end(), local_connection_id.begin(), local_connection_id.end());
+    inbound.push_back(std::byte{0x00});
+    auto first = core.advance_endpoint(
+        coquic::quic::QuicCoreInboundDatagram{.bytes = inbound, .route_handle = 11},
+        coquic::quic::test::test_time(2));
+    EXPECT_TRUE(send_effects_from(first).empty());
+    ASSERT_EQ(core.connections_.at(1).connection, nullptr);
+    auto second = core.advance_endpoint(
+        coquic::quic::QuicCoreInboundDatagram{.bytes = std::move(inbound), .route_handle = 11},
+        coquic::quic::test::test_time(3));
+    EXPECT_TRUE(send_effects_from(second).empty());
+}
+
+TEST(QuicCoreEndpointTest, MinimalClosingStateLimitsUnvalidatedCloseResponses) {
+    auto config = make_server_endpoint_config();
+    config.enable_minimal_closing_state_retention = true;
+    coquic::quic::QuicCore core(std::move(config));
+    auto entry = coquic::quic::QuicCore::ConnectionEntry{
+        .handle = 1,
+        .default_route_handle = 11,
+        .connection = std::make_unique<coquic::quic::QuicConnection>(
+            coquic::quic::test::make_server_core_config()),
+    };
+    *entry.connection = make_connected_server_connection();
+    entry.route_handle_by_path_id.emplace(0, 11);
+    entry.path_id_by_route_handle.emplace(11, 0);
+    entry.route_handle_by_path_id.emplace(1, 22);
+    entry.path_id_by_route_handle.emplace(22, 1);
+    entry.connection->ensure_path_state(0).anti_amplification_received_bytes = 1200;
+    entry.connection->ensure_path_state(1);
+    const auto local_connection_id = coquic::quic::ConnectionId{
+        std::byte{0xa1}, std::byte{0xb2}, std::byte{0xc3}, std::byte{0xd4},
+        std::byte{0xe5}, std::byte{0xf6}, std::byte{0x07}, std::byte{0x18},
+    };
+    entry.active_connection_id_keys.push_back(
+        coquic::quic::QuicCore::connection_id_key(local_connection_id));
+    core.connection_id_routes_.emplace(entry.active_connection_id_keys.front(), entry.handle);
+    core.connections_.emplace(entry.handle, std::move(entry));
+    static_cast<void>(core.advance_endpoint(
+        coquic::quic::QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                coquic::quic::QuicCoreCloseConnection{
+                    .reason_phrase = "per-route anti-amplification budget",
+                },
+        },
+        coquic::quic::test::test_time(1)));
+    auto &closing = optional_ref_or_terminate(core.connections_.at(1).minimal_closing_state);
+    std::vector<std::byte> inbound{std::byte{0x40}};
+    inbound.insert(inbound.end(), local_connection_id.begin(), local_connection_id.end());
+    inbound.push_back(std::byte{0x00});
+    auto first = core.advance_endpoint(
+        coquic::quic::QuicCoreInboundDatagram{.bytes = inbound, .route_handle = 11},
+        coquic::quic::test::test_time(2));
+    EXPECT_TRUE(send_effects_from(first).empty());
+    auto second = core.advance_endpoint(
+        coquic::quic::QuicCoreInboundDatagram{.bytes = std::move(inbound), .route_handle = 11},
+        coquic::quic::test::test_time(3));
+    ASSERT_EQ(send_effects_from(second).size(), 1u);
+    const auto &route = closing.routes.at(11);
+    EXPECT_LE(route.sent_bytes, route.received_bytes * 3u);
+
+    auto &other_route = closing.routes.at(22);
+    EXPECT_EQ(other_route.received_bytes, 0u);
+    EXPECT_EQ(other_route.sent_bytes, 0u);
+    closing.response_threshold = 1;
+    std::vector<std::byte> other_inbound{std::byte{0x40}};
+    other_inbound.insert(other_inbound.end(), local_connection_id.begin(),
+                         local_connection_id.end());
+    other_inbound.push_back(std::byte{0x00});
+    ASSERT_GT(closing.close_datagram.size(), other_inbound.size() * 3u);
+    auto other_response = core.advance_endpoint(
+        coquic::quic::QuicCoreInboundDatagram{
+            .bytes = std::move(other_inbound),
+            .route_handle = 22,
+        },
+        coquic::quic::test::test_time(4));
+    EXPECT_TRUE(send_effects_from(other_response).empty());
+}
+
 TEST(QuicCoreEndpointTest, ServerCloseConnectionCommandRetainsStateUntilCloseDeadline) {
     coquic::quic::QuicCore core(make_server_endpoint_config());
 

@@ -410,6 +410,8 @@ struct QuicCoreEndpointConfig {
     bool defer_inbound_application_send_drain = false;
     bool allow_peer_address_change = true;
     bool enable_long_header_stateless_reset = false;
+    // Retain only packet attribution and close-response state after an immediate close.
+    bool enable_minimal_closing_state_retention = false;
     // Validated peer addresses are reusable only within this connection and for this bounded
     // interval. Set to zero to disable recent-address reuse.
     QuicCoreDuration recent_peer_address_validation_timeout{std::chrono::seconds(10)};
@@ -752,10 +754,34 @@ class QuicCore {
     bool has_failed() const;
 
   private:
+    struct MinimalClosingRoute {
+        bool amplification_limited = false;
+        std::uint64_t received_bytes = 0;
+        std::uint64_t sent_bytes = 0;
+    };
+
+    struct MinimalClosingState {
+        QuicCoreTimePoint deadline{};
+        std::uint32_t version = kQuicVersion1;
+        DatagramBuffer close_datagram;
+        QuicEcnCodepoint ecn = QuicEcnCodepoint::not_ect;
+        std::uint64_t packets_since_last_close = 0;
+        std::uint64_t response_threshold = 2;
+        bool responds_to_packets = false;
+        std::unordered_map<QuicRouteHandle, MinimalClosingRoute> routes;
+    };
+
+    struct DrainedCloseDatagram {
+        DatagramBuffer bytes;
+        std::optional<QuicRouteHandle> route;
+        std::optional<QuicPathId> path;
+    };
+
     struct ConnectionEntry {
         QuicConnectionHandle handle = 0;
         std::optional<QuicRouteHandle> default_route_handle;
         std::unique_ptr<QuicConnection> connection;
+        std::optional<MinimalClosingState> minimal_closing_state;
         std::unordered_map<QuicRouteHandle, QuicPathId> path_id_by_route_handle;
         std::unordered_map<QuicPathId, QuicRouteHandle> route_handle_by_path_id;
         std::vector<std::string> active_connection_id_keys;
@@ -1025,6 +1051,8 @@ class QuicCore {
     bool should_keep_endpoint_connection_entry(const ConnectionEntry &entry,
                                                const QuicCoreResult &drained_result,
                                                QuicCoreTimePoint now) const;
+    bool maybe_retain_minimal_closing_state(ConnectionEntry &entry,
+                                            DrainedCloseDatagram close_datagram);
     void note_send_continuation(ConnectionEntry &entry, const QuicCoreResult &result,
                                 QuicCoreTimePoint now) const;
     static bool take_send_continuation_drain(ConnectionEntry &entry);

@@ -536,6 +536,12 @@ struct PathState {
     PathMtuState mtu;
 };
 
+struct QuicPathAntiAmplificationState {
+    bool validated = false;
+    std::uint64_t received_bytes = 0;
+    std::uint64_t sent_bytes = 0;
+};
+
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 class QuicConnection {
   public:
@@ -602,6 +608,9 @@ class QuicConnection {
     bool has_processed_peer_packet() const;
     bool has_failed() const;
     bool close_state_active() const;
+    bool is_closing() const;
+    std::optional<QuicPathAntiAmplificationState>
+    path_anti_amplification_state(QuicPathId path_id) const;
     bool terminal_state_expired(QuicCoreTimePoint now) const;
     void enter_stateless_reset_draining(QuicCoreTimePoint now);
     QuicCoreConnectionDiagnostics diagnostics(QuicConnectionHandle handle) const;

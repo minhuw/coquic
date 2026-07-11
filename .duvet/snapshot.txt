@@ -1028,9 +1028,9 @@ SPECIFICATION: https://www.rfc-editor.org/rfc/rfc9000
     TEXT[!MUST,implementation,test]: To ensure simple and efficient
     TEXT[!MUST,implementation,test]:    implementations of frame parsing, a frame type MUST use the shortest
     TEXT[!MUST,implementation,test]:    possible encoding.
-    TEXT[!MAY]: An endpoint MAY treat the
-    TEXT[!MAY]:    receipt of a frame type that uses a longer encoding than necessary as
-    TEXT[!MAY]:    a connection error of type PROTOCOL_VIOLATION.
+    TEXT[!MAY,implementation]: An endpoint MAY treat the
+    TEXT[!MAY,implementation]:    receipt of a frame type that uses a longer encoding than necessary as
+    TEXT[!MAY,implementation]:    a connection error of type PROTOCOL_VIOLATION.
 
   SECTION: [Frames and Number Spaces](#section-12.5)
     TEXT[!MAY,implementation]:    *  PADDING, PING, and CRYPTO frames MAY appear in any packet number

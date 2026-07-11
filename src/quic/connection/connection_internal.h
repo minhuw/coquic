@@ -1657,17 +1657,22 @@ inline CodecError version_negotiation_error(std::size_t offset = 0) {
     };
 }
 
-inline COQUIC_NO_PROFILE QuicTransportErrorCode
+inline COQUIC_NO_PROFILE constexpr QuicTransportErrorCode
 transport_error_for_codec_error(CodecErrorCode code) {
     switch (code) {
     case CodecErrorCode::truncated_input:
     case CodecErrorCode::invalid_varint:
     case CodecErrorCode::unknown_frame_type:
-    case CodecErrorCode::non_shortest_frame_type_encoding:
     case CodecErrorCode::empty_packet_payload:
     case CodecErrorCode::packet_length_mismatch:
     case CodecErrorCode::frame_not_allowed_in_packet_type:
         return QuicTransportErrorCode::frame_encoding_error;
+    case CodecErrorCode::non_shortest_frame_type_encoding:
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-12.4
+        // # An endpoint MAY treat the receipt of a frame type that uses a
+        // # longer encoding than necessary as a connection error of type
+        // # PROTOCOL_VIOLATION.
+        return QuicTransportErrorCode::protocol_violation;
     case CodecErrorCode::unsupported_cipher_suite:
     case CodecErrorCode::invalid_packet_protection_state:
         return QuicTransportErrorCode::transport_parameter_error;
@@ -1693,6 +1698,9 @@ transport_error_for_codec_error(CodecErrorCode code) {
     }
     return QuicTransportErrorCode::protocol_violation;
 }
+
+static_assert(transport_error_for_codec_error(CodecErrorCode::non_shortest_frame_type_encoding) ==
+              QuicTransportErrorCode::protocol_violation);
 
 inline QuicCoreDuration transport_parameter_milliseconds(std::uint64_t milliseconds) {
     using Rep = QuicCoreDuration::rep;

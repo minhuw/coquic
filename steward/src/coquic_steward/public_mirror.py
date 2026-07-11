@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from .agents.diagnostics import diagnostics_for_paths
-from .core.config import PublicMirrorConfig, StewardConfig
+from .core.config import (
+    DEFAULT_PUBLIC_MIRROR_OUTPUT,
+    PublicMirrorConfig,
+    StewardConfig,
+)
 from .core.models import (
     Event,
     SignalFetchRun,
@@ -32,8 +36,9 @@ DEFAULT_MIRROR_TASK_LIMIT = 80
 DEFAULT_MIRROR_SIGNAL_LIMIT = 80
 DEFAULT_MIRROR_FETCH_LIMIT = 40
 PUBLIC_TASK_DATA_PREFIX = "/steward/data/tasks"
-REMOTE_MIRROR_TMP_DIR = "/" + "tmp"
-REMOTE_MIRROR_STAGE_PREFIX = "coquic-steward-mirror."
+REMOTE_MIRROR_ROOT = ".cache/coquic-steward/public-mirror"
+REMOTE_MIRROR_HELPER = f"{REMOTE_MIRROR_ROOT}/publish-helper-v1"
+REMOTE_MIRROR_LOCK = f"{REMOTE_MIRROR_ROOT}/publish.lock"
 MIRROR_PATCH_BYTES = 128 * 1024
 MIRROR_TRANSCRIPT_BYTES = 64 * 1024
 MIRROR_LOG_BYTES = 64 * 1024
@@ -125,6 +130,8 @@ def write_public_mirror(
         else set()
     )
     path.parent.mkdir(parents=True, exist_ok=True)
+    if _is_default_mirror_output(config, path):
+        _remove_legacy_task_details(mirror_dir)
     path.write_text(
         json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
@@ -260,35 +267,28 @@ class PublicMirrorPublisher:
     def publish(self, local_path: Path, *, cwd: Path) -> CommandResult:
         remote_target = f"{self.config.remote_user}@{self.config.remote_host}"
         remote_path = self.config.remote_path
+        target_key = sha256(remote_path.encode("utf-8")).hexdigest()
+        stage_dir = f"{REMOTE_MIRROR_ROOT}/targets/{target_key}"
         local_dir = local_path.parent
-        stage_result = self._remote_temp_stage(remote_target, cwd=cwd)
+        stage_result = self._prepare_remote_stage(
+            remote_target,
+            remote_path,
+            target_key,
+            cwd=cwd,
+        )
         if not stage_result.ok:
             return stage_result
-        stage_dir = stage_result.stdout.strip()
-        if not stage_dir:
-            return CommandResult(
-                args=stage_result.args,
-                cwd=cwd,
-                returncode=1,
-                stdout=stage_result.stdout,
-                stderr="remote mktemp did not return a path",
-            )
-        if not _safe_remote_stage_path(stage_dir):
-            return CommandResult(
-                args=stage_result.args,
-                cwd=cwd,
-                returncode=1,
-                stdout=stage_result.stdout,
-                stderr="remote mktemp returned an unsafe path",
-            )
         rsync_result = run_command(
             [
                 "rsync",
                 "-az",
-                "--delete",
+                "--checksum",
+                "--delete-delay",
                 "--partial",
                 "--delay-updates",
                 "--exclude=.~tmp~/",
+                "--rsync-path",
+                self._remote_rsync_path(remote_path, stage_dir),
                 "-e",
                 self._rsync_ssh_command(),
                 f"{local_dir}/",
@@ -297,10 +297,17 @@ class PublicMirrorPublisher:
             cwd=cwd,
             timeout=self._rsync_timeout_seconds(),
         )
-        if not rsync_result.ok:
-            self._remove_remote_tree(remote_target, stage_dir, cwd=cwd)
-            return rsync_result
-        install_result = run_command(
+        return rsync_result
+
+    def _prepare_remote_stage(
+        self,
+        remote_target: str,
+        remote_path: str,
+        target_key: str,
+        *,
+        cwd: Path,
+    ) -> CommandResult:
+        return run_command(
             [
                 "ssh",
                 *self._ssh_options(),
@@ -309,65 +316,70 @@ class PublicMirrorPublisher:
                 "-s",
                 "--",
                 remote_path,
-                stage_dir,
+                target_key,
             ],
             cwd=cwd,
             input_text=(
                 "set -euo pipefail\n"
                 "remote_path=\"$1\"\n"
-                "stage_dir=\"$2\"\n"
+                "target_key=\"$2\"\n"
+                "cache_root=\"$HOME/.cache/coquic-steward\"\n"
+                f"mirror_root=\"$HOME/{REMOTE_MIRROR_ROOT}\"\n"
+                "targets_dir=\"${mirror_root}/targets\"\n"
+                "stage_dir=\"${targets_dir}/${target_key}\"\n"
+                f"helper_path=\"$HOME/{REMOTE_MIRROR_HELPER}\"\n"
+                f"lock_path=\"$HOME/{REMOTE_MIRROR_LOCK}\"\n"
+                "umask 077\n"
+                "case \"${target_key}\" in\n"
+                "  *[!0-9a-f]*) echo 'invalid mirror target key' >&2; exit 1 ;;\n"
+                "esac\n"
+                "if [ -L \"${cache_root}\" ] || [ -L \"${mirror_root}\" ] || "
+                "[ -L \"${targets_dir}\" ] || [ -L \"${stage_dir}\" ]; then\n"
+                "  echo 'refusing symlinked Steward mirror stage' >&2\n"
+                "  exit 1\n"
+                "fi\n"
+                "install -d -m 700 \"${cache_root}\" \"${mirror_root}\" "
+                "\"${targets_dir}\" \"${stage_dir}\" "
+                "\"${stage_dir}/steward\"\n"
+                ": > \"${lock_path}\"\n"
+                "chmod 600 \"${lock_path}\"\n"
+                "exec 9>\"${lock_path}\"\n"
+                "flock -x 9\n"
+                "helper_tmp=\"${helper_path}.tmp.$$\"\n"
+                "trap 'rm -f \"${helper_tmp}\"' EXIT\n"
+                "cat > \"${helper_tmp}\" <<'STEWARD_PUBLISH_HELPER'\n"
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "remote_path=\"$1\"\n"
+                "stage_relative=\"$2\"\n"
+                "shift 2\n"
+                "stage_dir=\"$HOME/${stage_relative}\"\n"
                 "remote_dir=\"$(dirname \"${remote_path}\")\"\n"
-                "trap 'rm -rf \"${stage_dir}\"' EXIT\n"
+                "rsync \"$@\"\n"
+                "test -d \"${stage_dir}/steward\"\n"
                 "sudo install -d -m 755 \"${remote_dir}\"\n"
-                "sudo rsync -a --delete --exclude='.~tmp~/' "
-                "\"${stage_dir}/steward/\" \"${remote_dir}/\"\n"
+                "sudo rsync -a --checksum --delete-delay --delay-updates "
+                "--exclude='.~tmp~/' \"${stage_dir}/steward/\" "
+                "\"${remote_dir}/\"\n"
                 "sudo chmod -R a+rX \"${remote_dir}\"\n"
+                "STEWARD_PUBLISH_HELPER\n"
+                "chmod 700 \"${helper_tmp}\"\n"
+                "mv -f \"${helper_tmp}\" \"${helper_path}\"\n"
+                "trap - EXIT\n"
             ),
             timeout=self._rsync_timeout_seconds(),
         )
-        if not install_result.ok:
-            self._remove_remote_tree(remote_target, stage_dir, cwd=cwd)
-        return install_result
 
-    def _remote_temp_stage(self, remote_target: str, *, cwd: Path) -> CommandResult:
-        return run_command(
+    def _remote_rsync_path(self, remote_path: str, stage_dir: str) -> str:
+        return shlex.join(
             [
-                "ssh",
-                *self._ssh_options(),
-                remote_target,
-                "sh",
-                "-s",
-            ],
-            cwd=cwd,
-            input_text=(
-                "set -eu\n"
-                "umask 077\n"
-                f"stage_dir=$(mktemp -d {REMOTE_MIRROR_TMP_DIR!r}/"
-                f"{REMOTE_MIRROR_STAGE_PREFIX}XXXXXX)\n"
-                "mkdir -p \"${stage_dir}/steward\"\n"
-                "chmod 700 \"${stage_dir}\"\n"
-                "printf '%s\\n' \"${stage_dir}\"\n"
-            ),
-            timeout=max(10, self.config.connect_timeout_seconds + 10),
-        )
-
-    def _remove_remote_tree(
-        self, remote_target: str, remote_dir: str, *, cwd: Path
-    ) -> None:
-        if not _safe_remote_stage_path(remote_dir):
-            return
-        run_command(
-            [
-                "ssh",
-                *self._ssh_options(),
-                remote_target,
-                "rm",
-                "-rf",
-                "--",
-                remote_dir,
-            ],
-            cwd=cwd,
-            timeout=max(10, self.config.connect_timeout_seconds + 10),
+                "flock",
+                "-x",
+                REMOTE_MIRROR_LOCK,
+                REMOTE_MIRROR_HELPER,
+                remote_path,
+                stage_dir,
+            ]
         )
 
     def _ssh_options(self) -> list[str]:
@@ -398,21 +410,16 @@ class PublicMirrorPublisher:
         return max(300, self.config.connect_timeout_seconds * 30)
 
 
-def _safe_remote_stage_path(remote_path: str) -> bool:
-    expected_prefix = REMOTE_MIRROR_TMP_DIR + "/" + REMOTE_MIRROR_STAGE_PREFIX
-    if not remote_path.startswith(expected_prefix):
-        return False
-    random_part = remote_path[len(expected_prefix) :]
-    return bool(random_part) and all(
-        char.isalnum() or char in "._-" for char in random_part
-    )
-
-
 def _mirror_output_path(config: StewardConfig, output_path: Path | None) -> Path:
     selected = output_path or config.public_mirror.output_path
     if selected is None:
-        selected = Path("public/steward/status.json")
+        selected = Path(DEFAULT_PUBLIC_MIRROR_OUTPUT)
     return selected if selected.is_absolute() else config.state_dir / selected
+
+
+def _is_default_mirror_output(config: StewardConfig, path: Path) -> bool:
+    default_path = config.state_dir / DEFAULT_PUBLIC_MIRROR_OUTPUT
+    return path.resolve() == default_path.resolve()
 
 
 def _public_state(tasks: list[TaskRecord]) -> str:
@@ -1318,6 +1325,14 @@ def _remove_stale_task_details(
     for path in tasks_dir.glob("task-*"):
         if path.is_dir() and path.name not in raw_task_ids:
             shutil.rmtree(path)
+
+
+def _remove_legacy_task_details(mirror_dir: Path) -> None:
+    legacy_tasks_dir = mirror_dir / "tasks"
+    if legacy_tasks_dir.is_symlink() or legacy_tasks_dir.is_file():
+        legacy_tasks_dir.unlink(missing_ok=True)
+    elif legacy_tasks_dir.is_dir():
+        shutil.rmtree(legacy_tasks_dir)
 
 
 def _safe_file_exists(path: Path | None, root: Path) -> bool:

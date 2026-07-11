@@ -169,6 +169,7 @@ TEST(CoquicPublicApiTest, CoreEndpointCoversServerAndTransportOptions) {
             .enable_out_of_order_receive = true,
             .enable_packet_inspection = true,
             .enable_reserved_version_probe = true,
+            .enable_long_header_stateless_reset = true,
             .allow_peer_address_change = false,
         });
 

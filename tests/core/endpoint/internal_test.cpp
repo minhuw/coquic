@@ -3739,6 +3739,86 @@ TEST(QuicCoreEndpointInternalTest, StatelessResetHelpersGenerateAndDetectResets)
     EXPECT_FALSE(client.detect_stateless_reset(corrupted).has_value());
 }
 
+TEST(QuicCoreEndpointInternalTest, LongHeaderStatelessResetIsOptInAndHandshakeOnly) {
+    const auto connection_id = bytes_from_ints({0x53, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33});
+    const auto source_connection_id = bytes_from_ints({0xc1, 0x01});
+    const auto token = std::array<std::byte, 16>{
+        std::byte{0x00}, std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
+        std::byte{0x04}, std::byte{0x05}, std::byte{0x06}, std::byte{0x07},
+        std::byte{0x08}, std::byte{0x09}, std::byte{0x0a}, std::byte{0x0b},
+        std::byte{0x0c}, std::byte{0x0d}, std::byte{0x0e}, std::byte{0x0f},
+    };
+    const auto handshake =
+        make_supported_long_header_datagram(kQuicVersion1, connection_id, source_connection_id, 64);
+    const auto parsed_handshake =
+        optional_value_or_terminate(QuicCore::parse_endpoint_datagram(handshake));
+    ASSERT_EQ(parsed_handshake.kind, QuicCore::ParsedEndpointDatagram::Kind::supported_long_header);
+
+    QuicCore disabled(make_server_endpoint_config());
+    disabled.local_stateless_reset_tokens_by_cid_.emplace(
+        QuicCore::connection_id_key(connection_id),
+        QuicCore::LocalStatelessResetTokenRoute{.owner = 9, .stateless_reset_token = token});
+    EXPECT_FALSE(disabled
+                     .make_stateless_reset_for_unknown_cid(parsed_handshake, handshake, 55,
+                                                           coquic::quic::test::test_time(0))
+                     .has_value());
+
+    auto enabled_config = make_server_endpoint_config();
+    enabled_config.enable_long_header_stateless_reset = true;
+    QuicCore enabled(std::move(enabled_config));
+    enabled.local_stateless_reset_tokens_by_cid_.emplace(
+        QuicCore::connection_id_key(connection_id),
+        QuicCore::LocalStatelessResetTokenRoute{.owner = 9, .stateless_reset_token = token});
+    const auto endpoint_result =
+        enabled.advance_endpoint(QuicCoreInboundDatagram{.bytes = handshake, .route_handle = 55},
+                                 coquic::quic::test::test_time(0));
+    const auto sends = send_effects_from(endpoint_result);
+    ASSERT_EQ(sends.size(), 1u);
+    const auto &reset = sends.front();
+    EXPECT_EQ(reset.connection, 9u);
+    EXPECT_EQ(reset.route_handle, std::optional<QuicRouteHandle>{55u});
+    EXPECT_LT(reset.bytes.size(), handshake.size());
+    EXPECT_EQ(std::to_integer<std::uint8_t>(reset.bytes.span().front()) & 0xc0u, 0x40u);
+    EXPECT_TRUE(std::equal(token.begin(), token.end(),
+                           reset.bytes.end() - static_cast<std::ptrdiff_t>(token.size())));
+
+    const auto initial =
+        make_supported_initial_datagram(kQuicVersion1, connection_id, source_connection_id, {}, 64);
+    const auto parsed_initial =
+        optional_value_or_terminate(QuicCore::parse_endpoint_datagram(initial));
+    EXPECT_FALSE(enabled
+                     .make_stateless_reset_for_unknown_cid(parsed_initial, initial, 55,
+                                                           coquic::quic::test::test_time(0))
+                     .has_value());
+
+    auto zero_rtt = handshake;
+    zero_rtt.front() = std::byte{0xd0};
+    const auto parsed_zero_rtt =
+        optional_value_or_terminate(QuicCore::parse_endpoint_datagram(zero_rtt));
+    ASSERT_EQ(parsed_zero_rtt.kind, QuicCore::ParsedEndpointDatagram::Kind::supported_zero_rtt);
+    EXPECT_FALSE(enabled
+                     .make_stateless_reset_for_unknown_cid(parsed_zero_rtt, zero_rtt, 55,
+                                                           coquic::quic::test::test_time(0))
+                     .has_value());
+
+    auto retry = handshake;
+    retry.front() = std::byte{0xf0};
+    const auto parsed_retry = optional_value_or_terminate(QuicCore::parse_endpoint_datagram(retry));
+    ASSERT_EQ(parsed_retry.kind, QuicCore::ParsedEndpointDatagram::Kind::supported_retry);
+    EXPECT_FALSE(enabled
+                     .make_stateless_reset_for_unknown_cid(parsed_retry, retry, 55,
+                                                           coquic::quic::test::test_time(0))
+                     .has_value());
+
+    auto no_token_config = make_server_endpoint_config();
+    no_token_config.enable_long_header_stateless_reset = true;
+    QuicCore no_token(std::move(no_token_config));
+    EXPECT_FALSE(no_token
+                     .make_stateless_reset_for_unknown_cid(parsed_handshake, handshake, 55,
+                                                           coquic::quic::test::test_time(0))
+                     .has_value());
+}
+
 TEST(QuicCoreEndpointInternalTest, ClosedConnectionResetTokensAreRetainedUntilExpiry) {
     auto server_config = make_server_endpoint_config();
     server_config.stateless_reset_token_retention = std::chrono::milliseconds(50);

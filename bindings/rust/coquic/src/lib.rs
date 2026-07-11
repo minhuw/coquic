@@ -472,6 +472,7 @@ pub struct EndpointConfig {
     pub enable_out_of_order_receive: bool,
     pub enable_packet_inspection: bool,
     pub enable_reserved_version_probe: bool,
+    pub enable_long_header_stateless_reset: bool,
     pub allow_peer_address_change: bool,
 }
 
@@ -521,11 +522,12 @@ impl EndpointConfig {
                 enable_out_of_order_receive: self.enable_out_of_order_receive as u8,
                 enable_packet_inspection: self.enable_packet_inspection as u8,
                 enable_reserved_version_probe: self.enable_reserved_version_probe as u8,
+                enable_long_header_stateless_reset: self.enable_long_header_stateless_reset as u8,
                 allow_peer_address_change: self.allow_peer_address_change as u8,
                 reserved_server_connections_padding: [0; 5],
                 max_server_connections: 0,
                 reserved_orphan_zero_rtt_padding: [0; 7],
-                reserved_endpoint_config_tail_padding: [0; 7],
+                reserved_endpoint_config_tail_padding: [0; 6],
             },
             _marker: PhantomData,
         }
@@ -558,6 +560,7 @@ impl Default for EndpointConfig {
                 enable_out_of_order_receive: raw.enable_out_of_order_receive != 0,
                 enable_packet_inspection: raw.enable_packet_inspection != 0,
                 enable_reserved_version_probe: raw.enable_reserved_version_probe != 0,
+                enable_long_header_stateless_reset: raw.enable_long_header_stateless_reset != 0,
                 allow_peer_address_change: raw.allow_peer_address_change != 0,
             }
         }

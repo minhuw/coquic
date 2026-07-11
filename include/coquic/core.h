@@ -203,6 +203,7 @@ struct EndpointConfig {
     // opening a connection also sends a standalone reserved-version probe that
     // peers are expected to discard.
     bool enable_reserved_version_probe = false;
+    bool enable_long_header_stateless_reset = false;
     bool allow_peer_address_change = true;
 };
 

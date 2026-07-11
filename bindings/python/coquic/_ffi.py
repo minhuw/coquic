@@ -216,7 +216,8 @@ class coquic_endpoint_config_t(C.Structure):
         ("reserved_orphan_zero_rtt_padding", C.c_uint8 * 7),
         ("orphan_zero_rtt_buffer", coquic_orphan_zero_rtt_buffer_config_t),
         ("enable_reserved_version_probe", C.c_uint8),
-        ("reserved_endpoint_config_tail_padding", C.c_uint8 * 7),
+        ("enable_long_header_stateless_reset", C.c_uint8),
+        ("reserved_endpoint_config_tail_padding", C.c_uint8 * 6),
     ]
 
 

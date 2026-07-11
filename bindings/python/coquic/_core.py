@@ -257,6 +257,7 @@ class EndpointConfig:
     enable_out_of_order_receive: bool = False
     enable_packet_inspection: bool = False
     enable_reserved_version_probe: bool = False
+    enable_long_header_stateless_reset: bool = False
     allow_peer_address_change: bool = False
 
     @classmethod
@@ -284,6 +285,7 @@ class EndpointConfig:
             enable_out_of_order_receive=bool(raw.enable_out_of_order_receive),
             enable_packet_inspection=bool(raw.enable_packet_inspection),
             enable_reserved_version_probe=bool(raw.enable_reserved_version_probe),
+            enable_long_header_stateless_reset=bool(raw.enable_long_header_stateless_reset),
             allow_peer_address_change=bool(raw.allow_peer_address_change),
         )
 
@@ -1035,6 +1037,7 @@ class _EndpointConfigMaterialization:
             enable_out_of_order_receive=int(config.enable_out_of_order_receive),
             enable_packet_inspection=int(config.enable_packet_inspection),
             enable_reserved_version_probe=int(config.enable_reserved_version_probe),
+            enable_long_header_stateless_reset=int(config.enable_long_header_stateless_reset),
             allow_peer_address_change=int(config.allow_peer_address_change),
         )
 

@@ -7,9 +7,13 @@ func TestConnectProducesInitialDatagram(t *testing.T) {
 	if config.EnableOutOfOrderReceive {
 		t.Fatal("out-of-order receive default is enabled")
 	}
+	if config.EnableLongHeaderStatelessReset {
+		t.Fatal("long-header stateless reset default is enabled")
+	}
 	config.Role = RoleClient
 	config.ApplicationProtocol = []byte("coquic-perf/1")
 	config.MaxOutboundDatagramSize = 60 * 1024
+	config.EnableLongHeaderStatelessReset = true
 
 	endpoint, err := NewEndpoint(config)
 	if err != nil {

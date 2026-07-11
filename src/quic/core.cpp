@@ -1307,6 +1307,14 @@ bool is_zero_rtt_long_header_type(std::uint32_t version, std::uint8_t type) {
     return type == 0x01u;
 }
 
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+bool is_retry_long_header_type(std::uint32_t version, std::uint8_t type) {
+    if (version == kQuicVersion2) {
+        return type == 0x00u;
+    }
+    return type == 0x03u;
+}
+
 std::optional<VersionNegotiationPacket>
 parse_version_negotiation_packet(std::span<const std::byte> bytes) {
     if (bytes.size() < 5) {
@@ -1668,6 +1676,8 @@ QuicCore::parse_endpoint_datagram(std::span<const std::byte> bytes, bool accept_
         kind = ParsedEndpointDatagram::Kind::supported_initial;
     } else if (is_zero_rtt_long_header_type(version, type)) {
         kind = ParsedEndpointDatagram::Kind::supported_zero_rtt;
+    } else if (is_retry_long_header_type(version, type)) {
+        kind = ParsedEndpointDatagram::Kind::supported_retry;
     }
 
     return ParsedEndpointDatagram{
@@ -2357,8 +2367,11 @@ QuicCore::make_stateless_reset_for_unknown_cid(const ParsedEndpointDatagram &par
     //= https://www.rfc-editor.org/rfc/rfc9000#section-10.3
     // # Endpoints MUST send Stateless Resets formatted as a packet with a
     // # short header.
-    if (parsed.kind != ParsedEndpointDatagram::Kind::short_header ||
-        inbound_bytes.size() < kMinimumStatelessResetDatagramSize) {
+    const bool eligible_header =
+        parsed.kind == ParsedEndpointDatagram::Kind::short_header ||
+        (endpoint_config_.enable_long_header_stateless_reset &&
+         parsed.kind == ParsedEndpointDatagram::Kind::supported_long_header);
+    if (!eligible_header || inbound_bytes.size() < kMinimumStatelessResetDatagramSize) {
         return std::nullopt;
     }
 

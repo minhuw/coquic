@@ -230,7 +230,8 @@ typedef struct coquic_endpoint_config {
     uint8_t reserved_orphan_zero_rtt_padding[7];
     coquic_orphan_zero_rtt_buffer_config_t orphan_zero_rtt_buffer;
     uint8_t enable_reserved_version_probe;
-    uint8_t reserved_endpoint_config_tail_padding[7];
+    uint8_t enable_long_header_stateless_reset;
+    uint8_t reserved_endpoint_config_tail_padding[6];
 } coquic_endpoint_config_t;
 
 typedef struct coquic_resumption_state {

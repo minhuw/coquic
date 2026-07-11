@@ -259,7 +259,8 @@ pub struct coquic_endpoint_config_t {
     pub reserved_orphan_zero_rtt_padding: [u8; 7],
     pub orphan_zero_rtt_buffer: coquic_orphan_zero_rtt_buffer_config_t,
     pub enable_reserved_version_probe: u8,
-    pub reserved_endpoint_config_tail_padding: [u8; 7],
+    pub enable_long_header_stateless_reset: u8,
+    pub reserved_endpoint_config_tail_padding: [u8; 6],
 }
 
 #[repr(C)]

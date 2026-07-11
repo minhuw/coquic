@@ -405,6 +405,7 @@ struct QuicCoreEndpointConfig {
     bool enable_reserved_version_probe = false;
     bool defer_inbound_application_send_drain = false;
     bool allow_peer_address_change = true;
+    bool enable_long_header_stateless_reset = false;
     // Validated peer addresses are reusable only within this connection and for this bounded
     // interval. Set to zero to disable recent-address reuse.
     QuicCoreDuration recent_peer_address_validation_timeout{std::chrono::seconds(10)};
@@ -776,6 +777,7 @@ class QuicCore {
             supported_initial,
             supported_zero_rtt,
             supported_long_header,
+            supported_retry,
             unsupported_version_long_header,
         };
 

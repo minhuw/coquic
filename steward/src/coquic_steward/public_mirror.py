@@ -43,6 +43,7 @@ MIRROR_PATCH_BYTES = 128 * 1024
 MIRROR_TRANSCRIPT_BYTES = 64 * 1024
 MIRROR_LOG_BYTES = 64 * 1024
 MIRROR_LAST_MESSAGE_BYTES = 24 * 1024
+_RawTranscriptArtifacts = dict[str, dict[str, object]]
 WORKING_STATUSES = {
     TaskStatus.running,
     TaskStatus.reviewing,
@@ -142,10 +143,19 @@ def write_public_mirror(
         detail_task_ids={task.id for task in tasks},
         raw_task_ids=raw_task_ids,
     )
+    raw_transcript_artifacts: _RawTranscriptArtifacts = {}
+    for task in tasks:
+        raw_transcript_artifacts.update(
+            _write_public_raw_transcripts(config, store, tasks_dir, task)
+        )
     task_index = []
     for task in tasks:
-        _write_public_raw_transcripts(config, store, tasks_dir, task)
-        detail = public_task_detail_payload(config, store, task)
+        detail = public_task_detail_payload(
+            config,
+            store,
+            task,
+            raw_transcript_artifacts=raw_transcript_artifacts,
+        )
         detail_path = tasks_dir / f"{task.id}.json"
         detail_path.write_text(
             json.dumps(detail, sort_keys=True, separators=(",", ":")) + "\n",
@@ -196,6 +206,8 @@ def public_task_detail_payload(
     config: StewardConfig,
     store: TaskStore,
     task: TaskRecord | str,
+    *,
+    raw_transcript_artifacts: _RawTranscriptArtifacts | None = None,
 ) -> dict[str, object]:
     record = store.get(task) if isinstance(task, str) else task
     source_task = _source_task_for_integration(store, record)
@@ -222,13 +234,28 @@ def public_task_detail_payload(
             for event in source_events
             if event.kind.startswith("integration.") or event.kind == "main.pushed"
         ],
-        "attempts": _public_attempts(config, store, record),
+        "attempts": _public_attempts(
+            config,
+            store,
+            record,
+            raw_transcript_artifacts=raw_transcript_artifacts,
+        ),
         "validations": [
             _public_validation(config, validation, index)
             for index, validation in enumerate(record.validations)
         ],
-        "artifacts": _public_task_artifacts(config, record),
-        "integration": _public_integration_detail(config, store, record, source_task),
+        "artifacts": _public_task_artifacts(
+            config,
+            record,
+            raw_transcript_artifacts=raw_transcript_artifacts,
+        ),
+        "integration": _public_integration_detail(
+            config,
+            store,
+            record,
+            source_task,
+            raw_transcript_artifacts=raw_transcript_artifacts,
+        ),
         "remote": _task_remote(config, store, record.id),
     }
 
@@ -509,11 +536,23 @@ def _public_task_detail_record(
 
 
 def _public_attempts(
-    config: StewardConfig, store: TaskStore, task: TaskRecord
+    config: StewardConfig,
+    store: TaskStore,
+    task: TaskRecord,
+    *,
+    raw_transcript_artifacts: _RawTranscriptArtifacts | None = None,
 ) -> list[dict[str, object]]:
     iterations = store.iterations(task.id)
     if iterations:
-        return [_public_iteration_attempt(config, task, item) for item in iterations]
+        return [
+            _public_iteration_attempt(
+                config,
+                task,
+                item,
+                raw_transcript_artifacts=raw_transcript_artifacts,
+            )
+            for item in iterations
+        ]
     worker = _public_run_artifact(
         config,
         task.transcript_path,
@@ -524,6 +563,7 @@ def _public_attempts(
         name="worker",
         exit_code=None,
         completed=None,
+        raw_transcript_artifacts=raw_transcript_artifacts,
     )
     if worker is None and not task.validations:
         return []
@@ -544,7 +584,11 @@ def _public_attempts(
 
 
 def _public_iteration_attempt(
-    config: StewardConfig, task: TaskRecord, item: TaskIteration
+    config: StewardConfig,
+    task: TaskRecord,
+    item: TaskIteration,
+    *,
+    raw_transcript_artifacts: _RawTranscriptArtifacts | None = None,
 ) -> dict[str, object]:
     return {
         "attempt": item.iteration,
@@ -561,6 +605,7 @@ def _public_iteration_attempt(
             name=item.worker_name or f"worker-{item.iteration}",
             exit_code=item.worker_exit_code,
             completed=item.worker_completed,
+            raw_transcript_artifacts=raw_transcript_artifacts,
         ),
         "reviewer": _public_run_artifact(
             config,
@@ -572,6 +617,7 @@ def _public_iteration_attempt(
             name=item.reviewer_name or f"reviewer-{item.iteration}",
             exit_code=item.reviewer_exit_code,
             completed=item.reviewer_completed,
+            raw_transcript_artifacts=raw_transcript_artifacts,
         ),
         "review": _public_review(config, item.review_json),
         "patch": _public_patch(config, item.patch_path),
@@ -594,6 +640,7 @@ def _public_run_artifact(
     name: str,
     exit_code: int | None,
     completed: bool | None,
+    raw_transcript_artifacts: _RawTranscriptArtifacts | None = None,
 ) -> dict[str, object] | None:
     transcript = _public_text_artifact(
         config,
@@ -604,6 +651,7 @@ def _public_run_artifact(
         transcript=True,
         task_id=task_id,
         run_name=name,
+        raw_transcript_artifacts=raw_transcript_artifacts,
     )
     last_message = _public_text_artifact(
         config,
@@ -669,7 +717,10 @@ def _public_validation(
 
 
 def _public_task_artifacts(
-    config: StewardConfig, task: TaskRecord
+    config: StewardConfig,
+    task: TaskRecord,
+    *,
+    raw_transcript_artifacts: _RawTranscriptArtifacts | None = None,
 ) -> dict[str, object]:
     return {
         "patch": _public_patch(config, task.patch_path),
@@ -682,6 +733,7 @@ def _public_task_artifacts(
             transcript=True,
             task_id=task.id,
             run_name="task",
+            raw_transcript_artifacts=raw_transcript_artifacts,
         ),
         "last_message": _public_text_artifact(
             config,
@@ -713,6 +765,7 @@ def _public_text_artifact(
     transcript: bool = False,
     task_id: str | None = None,
     run_name: str | None = None,
+    raw_transcript_artifacts: _RawTranscriptArtifacts | None = None,
 ) -> dict[str, object] | None:
     if path is None or not _allowed_public_file(path, root):
         return None
@@ -721,6 +774,10 @@ def _public_text_artifact(
     if transcript and config.public_mirror.transcript_mode == "raw":
         if task_id is None or run_name is None:
             return None
+        if raw_transcript_artifacts is not None:
+            return raw_transcript_artifacts.get(
+                _public_raw_transcript_url(task_id, run_name)
+            )
         return _public_raw_transcript_artifact(
             config, path, task_id=task_id, run_name=run_name
         )
@@ -761,46 +818,63 @@ def _public_raw_transcript_artifact(
 
 def _write_public_raw_transcripts(
     config: StewardConfig, store: TaskStore, tasks_dir: Path, task: TaskRecord
-) -> None:
+) -> _RawTranscriptArtifacts:
+    snapshots: _RawTranscriptArtifacts = {}
     if config.public_mirror.transcript_mode != "raw":
-        return
+        return snapshots
     task_dir = tasks_dir / _safe_public_segment(task.id, fallback="task")
-    if task_dir.exists():
-        shutil.rmtree(task_dir)
-    _copy_public_raw_transcript(
-        config,
-        task.transcript_path,
-        task_dir=task_dir,
-        run_name="task",
-    )
+    expected_runs: set[str] = set()
+
+    def copy_transcript(source: Path | None, run_name: str) -> None:
+        copied = _copy_public_raw_transcript(
+            config,
+            source,
+            task_dir=task_dir,
+            run_name=run_name,
+        )
+        if copied is None:
+            return
+        run_segment, destination = copied
+        expected_runs.add(run_segment)
+        artifact = _public_raw_transcript_artifact(
+            config,
+            destination,
+            task_id=task.id,
+            run_name=run_segment,
+        )
+        if artifact is not None:
+            snapshots[_public_raw_transcript_url(task.id, run_segment)] = artifact
+
+    copy_transcript(task.transcript_path, "task")
     iterations = store.iterations(task.id)
     if iterations:
         for item in iterations:
-            _copy_public_raw_transcript(
-                config,
+            copy_transcript(
                 item.worker_transcript_path,
-                task_dir=task_dir,
-                run_name=item.worker_name or f"worker-{item.iteration}",
+                item.worker_name or f"worker-{item.iteration}",
             )
-            _copy_public_raw_transcript(
-                config,
+            copy_transcript(
                 item.reviewer_transcript_path,
-                task_dir=task_dir,
-                run_name=item.reviewer_name or f"reviewer-{item.iteration}",
+                item.reviewer_name or f"reviewer-{item.iteration}",
             )
     else:
-        _copy_public_raw_transcript(
-            config,
-            task.transcript_path,
-            task_dir=task_dir,
-            run_name="worker",
-        )
-    _copy_public_raw_transcript(
-        config,
+        copy_transcript(task.transcript_path, "worker")
+    copy_transcript(
         config.transcripts_dir / task.id / "commit-message" / "codex.jsonl",
-        task_dir=task_dir,
-        run_name="commit-message",
+        "commit-message",
     )
+    runs_dir = task_dir / "runs"
+    if runs_dir.is_dir():
+        for path in runs_dir.iterdir():
+            if path.name in expected_runs:
+                continue
+            if path.is_symlink() or path.is_file():
+                path.unlink(missing_ok=True)
+            elif path.is_dir():
+                shutil.rmtree(path)
+    if not expected_runs and task_dir.is_dir():
+        shutil.rmtree(task_dir)
+    return snapshots
 
 
 def _copy_public_raw_transcript(
@@ -809,17 +883,26 @@ def _copy_public_raw_transcript(
     *,
     task_dir: Path,
     run_name: str,
-) -> None:
+) -> tuple[str, Path] | None:
     if source is None or not _allowed_public_file(source, config.state_dir):
-        return
-    destination = task_dir / "runs" / _safe_public_segment(run_name) / "codex.jsonl"
+        return None
+    run_segment = _safe_public_segment(run_name)
+    destination = task_dir / "runs" / run_segment / "codex.jsonl"
     try:
         if source.resolve() == destination.resolve():
-            return
+            return run_segment, destination
     except OSError:
-        return
+        return None
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, destination)
+    try:
+        unchanged = destination.is_file() and (
+            _file_sha256(source) == _file_sha256(destination)
+        )
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        shutil.copyfile(source, destination)
+    return run_segment, destination
 
 
 def _public_raw_transcript_url(task_id: str, run_name: str) -> str:
@@ -1204,6 +1287,8 @@ def _public_integration_detail(
     store: TaskStore,
     task: TaskRecord,
     source_task: TaskRecord | None,
+    *,
+    raw_transcript_artifacts: _RawTranscriptArtifacts | None = None,
 ) -> dict[str, object]:
     integration_tasks = [
         candidate
@@ -1225,7 +1310,11 @@ def _public_integration_detail(
             {
                 "task": _public_task(config, run),
                 "remote": _task_remote(config, store, run.id),
-                "commit_message": _public_commit_message_artifact(config, run.id),
+                "commit_message": _public_commit_message_artifact(
+                    config,
+                    run.id,
+                    raw_transcript_artifacts=raw_transcript_artifacts,
+                ),
                 "push_log": _public_push_log(config, run.id),
             }
             for run in integration_tasks[:8]
@@ -1234,7 +1323,10 @@ def _public_integration_detail(
 
 
 def _public_commit_message_artifact(
-    config: StewardConfig, integration_task_id: str
+    config: StewardConfig,
+    integration_task_id: str,
+    *,
+    raw_transcript_artifacts: _RawTranscriptArtifacts | None = None,
 ) -> dict[str, object] | None:
     run_dir = config.transcripts_dir / integration_task_id / "commit-message"
     transcript = _public_text_artifact(
@@ -1246,6 +1338,7 @@ def _public_commit_message_artifact(
         transcript=True,
         task_id=integration_task_id,
         run_name="commit-message",
+        raw_transcript_artifacts=raw_transcript_artifacts,
     )
     last_message = _public_text_artifact(
         config,

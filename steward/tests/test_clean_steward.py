@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
+import coquic_steward.public_mirror as public_mirror_module
 from coquic_steward.cli import app
 from coquic_steward.agents import CodexRunner, render_worker_prompt
 from coquic_steward.agents.diagnostics import diagnostics_for_paths
@@ -2184,7 +2185,7 @@ def test_write_public_mirror_custom_output_preserves_sibling_tasks(
 
 
 def test_write_public_mirror_raw_transcript_mode_publishes_original_transcript(
-    config: StewardConfig,
+    config: StewardConfig, monkeypatch
 ) -> None:
     config = config.__class__(
         **{
@@ -2262,6 +2263,116 @@ def test_write_public_mirror_raw_transcript_mode_publishes_original_transcript(
     assert "private-thread" not in encoded_detail
     assert "prompt_path" not in encoded_detail
     assert all(file.name != "worker.md" for file in mirror_files)
+
+    preserved_timestamp_ns = 1_700_000_000_000_000_000
+    os.utime(
+        transcript,
+        ns=(preserved_timestamp_ns, preserved_timestamp_ns),
+    )
+    os.utime(
+        raw_path,
+        ns=(preserved_timestamp_ns, preserved_timestamp_ns),
+    )
+    source_stat = transcript.stat()
+    with monkeypatch.context() as context:
+        context.setattr(
+            "coquic_steward.public_mirror.shutil.copyfile",
+            lambda *_args, **_kwargs: pytest.fail("unchanged transcript was recopied"),
+        )
+        write_public_mirror(config, store)
+
+    replacement_text = transcript_text.replace("private-thread", "changed-thread")
+    assert len(replacement_text) == len(transcript_text)
+    transcript.write_text(replacement_text, encoding="utf-8")
+    os.utime(
+        transcript,
+        ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns),
+    )
+
+    write_public_mirror(config, store)
+
+    replacement_detail = json.loads(detail_path.read_text(encoding="utf-8"))
+    replacement_artifact = replacement_detail["attempts"][0]["worker"]["transcript"]
+    assert raw_path.read_text(encoding="utf-8") == replacement_text
+    assert raw_path.stat().st_mtime_ns != source_stat.st_mtime_ns
+    assert replacement_artifact["sha256"] == sha256(
+        replacement_text.encode("utf-8")
+    ).hexdigest()
+
+
+def test_file_sha256_rehashes_when_mutable_file_metadata_is_unchanged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "mutable.jsonl"
+    original = b"first\n"
+    replacement = b"other\n"
+    path.write_bytes(original)
+    frozen_stat = path.stat()
+    real_stat = Path.stat
+
+    def coalesced_stat(candidate: Path, *args, **kwargs):
+        if candidate == path:
+            return frozen_stat
+        return real_stat(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", coalesced_stat)
+
+    original_digest = public_mirror_module._file_sha256(path)
+    path.write_bytes(replacement)
+    replacement_digest = public_mirror_module._file_sha256(path)
+
+    assert original_digest == sha256(original).hexdigest()
+    assert replacement_digest == sha256(replacement).hexdigest()
+
+
+def test_write_public_mirror_raw_metadata_uses_copied_snapshot(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "public_mirror": config.public_mirror.__class__(
+                output_path=Path("public/steward/status.json"),
+                transcript_mode="raw",
+            ),
+        }
+    )
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    transcript = config.transcripts_dir / task.id / "worker" / "codex.jsonl"
+    transcript.parent.mkdir(parents=True)
+    copied_text = '{"type":"item.completed","value":"copied"}\n'
+    live_text = '{"type":"item.completed","value":"newer"}\n'
+    transcript.write_text(copied_text, encoding="utf-8")
+    task.transcript_path = transcript
+    store.save(task)
+    copy_raw_transcripts = public_mirror_module._write_public_raw_transcripts
+
+    def copy_then_change_source(*args, **kwargs):
+        snapshots = copy_raw_transcripts(*args, **kwargs)
+        transcript.write_text(live_text, encoding="utf-8")
+        return snapshots
+
+    monkeypatch.setattr(
+        public_mirror_module,
+        "_write_public_raw_transcripts",
+        copy_then_change_source,
+    )
+
+    path = write_public_mirror(config, store)
+    detail_path = path.parent / "data" / "tasks" / f"{task.id}.json"
+    detail = json.loads(detail_path.read_text(encoding="utf-8"))
+    artifact = detail["artifacts"]["transcript"]
+    raw_path = path.parent / artifact["url"].removeprefix("/steward/")
+    raw_bytes = raw_path.read_bytes()
+
+    assert raw_bytes == copied_text.encode("utf-8")
+    assert transcript.read_text(encoding="utf-8") == live_text
+    assert artifact["size"] == len(raw_bytes)
+    assert artifact["sha256"] == sha256(raw_bytes).hexdigest()
 
 
 def test_public_mirror_force_publish_ignores_disabled_upload(

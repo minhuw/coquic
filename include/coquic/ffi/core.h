@@ -23,7 +23,7 @@ extern "C" {
 #endif
 #endif
 
-#define COQUIC_FFI_ABI_VERSION 7u
+#define COQUIC_FFI_ABI_VERSION 8u
 
 typedef struct coquic_endpoint coquic_endpoint_t;
 typedef struct coquic_result coquic_result_t;
@@ -168,6 +168,7 @@ typedef struct coquic_tls_identity {
 typedef struct coquic_zero_rtt_config {
     uint8_t attempt;
     uint8_t allow;
+    uint8_t strict_updated_transport_parameters;
     coquic_bytes_t application_context;
 } coquic_zero_rtt_config_t;
 

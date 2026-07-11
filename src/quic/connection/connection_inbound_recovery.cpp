@@ -471,8 +471,8 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                 }
                 const auto processed = process_inbound_application(
                     protected_packet.frames, now, true, last_inbound_path_id_,
-                    /*used_previous_application_read_secret=*/false,
-                    protected_packet.packet_number);
+                    /*used_previous_application_read_secret=*/false, protected_packet.packet_number,
+                    /*is_zero_rtt_packet=*/true);
                 if (processed.has_value() && processed.value()) {
                     processed_peer_packet_ = true;
                     note_local_connection_id_used_by_peer(
@@ -748,8 +748,8 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 }
                 const auto processed = process_inbound_received_application(
                     protected_packet.frames, now, true, last_inbound_path_id_,
-                    /*used_previous_application_read_secret=*/false,
-                    protected_packet.packet_number);
+                    /*used_previous_application_read_secret=*/false, protected_packet.packet_number,
+                    /*is_zero_rtt_packet=*/true);
                 if (processed.has_value() && processed.value()) {
                     processed_peer_packet_ = true;
                     note_local_connection_id_used_by_peer(
@@ -2856,14 +2856,30 @@ void QuicConnection::rebuild_recovery(PacketSpaceState &packet_space) {
     packet_space.recovery.rebuild_auxiliary_indexes();
 }
 
-CodecResult<bool>
-QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicCoreTimePoint now,
-                                            bool allow_preconnected_frames, QuicPathId path_id,
-                                            bool used_previous_application_read_secret,
-                                            std::optional<std::uint64_t> packet_number) {
+CodecResult<bool> QuicConnection::process_inbound_application(
+    std::span<const Frame> frames, QuicCoreTimePoint now, bool allow_preconnected_frames,
+    QuicPathId path_id, bool used_previous_application_read_secret,
+    std::optional<std::uint64_t> packet_number, bool is_zero_rtt_packet) {
     static_assert(std::variant_size_v<Frame> == 23,
                   "Update process_inbound_application when Frame gains new variants");
     const bool require_connected = !allow_preconnected_frames;
+    const auto early_data_accepted =
+        tls_.has_value() ? tls_->early_data_accepted() : std::optional<bool>{};
+    const bool zero_rtt_rejected = tls_.has_value() && tls_->early_data_attempted() &&
+                                   early_data_accepted.has_value() && !*early_data_accepted;
+    const bool strict_zero_rtt_transport_parameters =
+        config_.role == EndpointRole::server && config_.zero_rtt.allow &&
+        config_.strict_updated_transport_parameters && !zero_rtt_rejected && is_zero_rtt_packet;
+    const auto strict_zero_rtt_error = [&](const CodecError &error) {
+        if (!strict_zero_rtt_transport_parameters || !error.has_transport_error_code)
+            return error;
+        const auto code = static_cast<QuicTransportErrorCode>(error.transport_error_code);
+        if (code != QuicTransportErrorCode::flow_control_error &&
+            code != QuicTransportErrorCode::stream_limit_error &&
+            code != QuicTransportErrorCode::connection_id_limit_error)
+            return error;
+        return protocol_violation_error(error.frame_type, error.offset);
+    };
     const bool allow_preconnected_max_data_frame =
         application_space_.read_secret.has_value() && status_ == HandshakeStatus::in_progress;
     const bool traces_this_packet = packet_trace_matches_connection(config_.source_connection_id);
@@ -3017,7 +3033,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
                 stream_frame->stream_id, stream_offset, SharedBytes(stream_frame->stream_data),
                 stream_frame->fin, stream_frame_type_for(*stream_frame), require_connected);
             if (!processed.has_value()) {
-                return processed;
+                return CodecResult<bool>::failure(strict_zero_rtt_error(processed.error()));
             }
             continue;
         }
@@ -3072,19 +3088,19 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
 
             auto stream = get_or_open_receive_stream(reset_stream->stream_id);
             if (!stream.has_value()) {
-                return CodecResult<bool>::failure(
-                    stream_state_codec_error(stream.error(), kFrameTypeResetStream));
+                return CodecResult<bool>::failure(strict_zero_rtt_error(
+                    stream_state_codec_error(stream.error(), kFrameTypeResetStream)));
             }
             auto *stream_state = stream.value();
             const auto noted = stream_state->note_peer_reset(*reset_stream);
             if (!noted.has_value()) {
-                return CodecResult<bool>::failure(
-                    stream_state_codec_error(noted.error(), kFrameTypeResetStream));
+                return CodecResult<bool>::failure(strict_zero_rtt_error(
+                    stream_state_codec_error(noted.error(), kFrameTypeResetStream)));
             }
             const auto committed = commit_peer_stream_final_size_to_connection_flow_control(
                 *stream_state, kFrameTypeResetStream);
             if (!committed.has_value()) {
-                return committed;
+                return CodecResult<bool>::failure(strict_zero_rtt_error(committed.error()));
             }
 
             pending_peer_reset_effects_.push_back(QuicCorePeerResetStream{
@@ -3220,8 +3236,8 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
 
             auto stream = get_or_open_receive_stream(stream_data_blocked->stream_id);
             if (!stream.has_value()) {
-                return CodecResult<bool>::failure(
-                    stream_state_codec_error(stream.error(), kFrameTypeStreamDataBlocked));
+                return CodecResult<bool>::failure(strict_zero_rtt_error(
+                    stream_state_codec_error(stream.error(), kFrameTypeStreamDataBlocked)));
             }
 
             auto *stream_state = stream.value();
@@ -3245,7 +3261,7 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
             const auto previous_endpoint_route_generation = endpoint_route_generation();
             const auto stored = process_new_connection_id_frame(*new_connection_id);
             if (!stored.has_value()) {
-                return CodecResult<bool>::failure(stored.error());
+                return CodecResult<bool>::failure(strict_zero_rtt_error(stored.error()));
             }
             if (endpoint_route_generation() != previous_endpoint_route_generation) {
                 note_peer_progress();
@@ -3394,10 +3410,27 @@ QuicConnection::process_inbound_application(std::span<const Frame> frames, QuicC
 CodecResult<bool> QuicConnection::process_inbound_received_application(
     std::span<const ReceivedFrame> frames, QuicCoreTimePoint now, bool allow_preconnected_frames,
     QuicPathId path_id, bool used_previous_application_read_secret,
-    std::optional<std::uint64_t> packet_number) {
+    std::optional<std::uint64_t> packet_number, bool is_zero_rtt_packet) {
     static_assert(std::variant_size_v<ReceivedFrame> == 22,
                   "Update process_inbound_received_application when ReceivedFrame changes");
     const bool require_connected = !allow_preconnected_frames;
+    const auto early_data_accepted =
+        tls_.has_value() ? tls_->early_data_accepted() : std::optional<bool>{};
+    const bool zero_rtt_rejected = tls_.has_value() && tls_->early_data_attempted() &&
+                                   early_data_accepted.has_value() && !*early_data_accepted;
+    const bool strict_zero_rtt_transport_parameters =
+        config_.role == EndpointRole::server && config_.zero_rtt.allow &&
+        config_.strict_updated_transport_parameters && !zero_rtt_rejected && is_zero_rtt_packet;
+    const auto strict_zero_rtt_error = [&](const CodecError &error) {
+        if (!strict_zero_rtt_transport_parameters || !error.has_transport_error_code)
+            return error;
+        const auto code = static_cast<QuicTransportErrorCode>(error.transport_error_code);
+        if (code != QuicTransportErrorCode::flow_control_error &&
+            code != QuicTransportErrorCode::stream_limit_error &&
+            code != QuicTransportErrorCode::connection_id_limit_error)
+            return error;
+        return protocol_violation_error(error.frame_type, error.offset);
+    };
     const bool allow_preconnected_max_data_frame =
         application_space_.read_secret.has_value() && status_ == HandshakeStatus::in_progress;
     const bool traces_this_packet = packet_trace_matches_connection(config_.source_connection_id);
@@ -3533,7 +3566,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             const auto processed =
                 process_inbound_received_application_stream(*stream_frame, require_connected);
             if (!processed.has_value()) {
-                return processed;
+                return CodecResult<bool>::failure(strict_zero_rtt_error(processed.error()));
             }
             continue;
         }
@@ -3589,19 +3622,19 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
 
             auto stream = get_or_open_receive_stream(reset_stream->stream_id);
             if (!stream.has_value()) {
-                return CodecResult<bool>::failure(
-                    stream_state_codec_error(stream.error(), kFrameTypeResetStream));
+                return CodecResult<bool>::failure(strict_zero_rtt_error(
+                    stream_state_codec_error(stream.error(), kFrameTypeResetStream)));
             }
             auto *stream_state = stream.value();
             const auto noted = stream_state->note_peer_reset(*reset_stream);
             if (!noted.has_value()) {
-                return CodecResult<bool>::failure(
-                    stream_state_codec_error(noted.error(), kFrameTypeResetStream));
+                return CodecResult<bool>::failure(strict_zero_rtt_error(
+                    stream_state_codec_error(noted.error(), kFrameTypeResetStream)));
             }
             const auto committed = commit_peer_stream_final_size_to_connection_flow_control(
                 *stream_state, kFrameTypeResetStream);
             if (!committed.has_value()) {
-                return committed;
+                return CodecResult<bool>::failure(strict_zero_rtt_error(committed.error()));
             }
 
             pending_peer_reset_effects_.push_back(QuicCorePeerResetStream{
@@ -3737,8 +3770,8 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
 
             auto stream = get_or_open_receive_stream(stream_data_blocked->stream_id);
             if (!stream.has_value()) {
-                return CodecResult<bool>::failure(
-                    stream_state_codec_error(stream.error(), kFrameTypeStreamDataBlocked));
+                return CodecResult<bool>::failure(strict_zero_rtt_error(
+                    stream_state_codec_error(stream.error(), kFrameTypeStreamDataBlocked)));
             }
 
             auto *stream_state = stream.value();
@@ -3762,7 +3795,7 @@ CodecResult<bool> QuicConnection::process_inbound_received_application(
             const auto previous_endpoint_route_generation = endpoint_route_generation();
             const auto stored = process_new_connection_id_frame(*new_connection_id);
             if (!stored.has_value()) {
-                return CodecResult<bool>::failure(stored.error());
+                return CodecResult<bool>::failure(strict_zero_rtt_error(stored.error()));
             }
             if (endpoint_route_generation() != previous_endpoint_route_generation) {
                 note_peer_progress();

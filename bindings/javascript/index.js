@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const native = loadNative();
 
-export const FFI_ABI_VERSION = 7;
+export const FFI_ABI_VERSION = 8;
 
 export const Status = Object.freeze({
   OK: 0,
@@ -96,10 +96,12 @@ export function TlsIdentity({
 export function ZeroRttConfig({
   attempt = false,
   allow = false,
+  strictUpdatedTransportParameters = false,
   applicationContext = Buffer.alloc(0),
 } = {}) {
   this.attempt = Boolean(attempt);
   this.allow = Boolean(allow);
+  this.strictUpdatedTransportParameters = Boolean(strictUpdatedTransportParameters);
   this.applicationContext = toBuffer(applicationContext);
 }
 

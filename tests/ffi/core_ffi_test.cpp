@@ -494,6 +494,7 @@ TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
     endpoint_config.zero_rtt = coquic_zero_rtt_config_t{
         .attempt = 1,
         .allow = 1,
+        .strict_updated_transport_parameters = 1,
         .application_context = bytes_view(context),
     };
     endpoint_config.emit_shared_receive_stream_data = 1;

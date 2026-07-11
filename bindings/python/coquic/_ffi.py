@@ -5,7 +5,7 @@ import ctypes.util
 import os
 from pathlib import Path
 
-FFI_ABI_VERSION = 7
+FFI_ABI_VERSION = 8
 
 coquic_time_us_t = C.c_uint64
 
@@ -148,6 +148,7 @@ class coquic_zero_rtt_config_t(C.Structure):
     _fields_ = [
         ("attempt", C.c_uint8),
         ("allow", C.c_uint8),
+        ("strict_updated_transport_parameters", C.c_uint8),
         ("application_context", coquic_bytes_t),
     ]
 

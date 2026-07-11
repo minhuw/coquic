@@ -165,6 +165,7 @@ struct QlogConfig {
 struct ZeroRttConfig {
     bool attempt = false;
     bool allow = false;
+    bool strict_updated_transport_parameters = false;
     std::vector<std::byte> application_context;
 };
 

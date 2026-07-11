@@ -1,3 +1,21 @@
+#if defined(__clang_analyzer__) && !__has_builtin(__builtin_ctzg)
+// Zig 0.16's libc++ references Clang 19 builtins while the lint shell still
+// runs clang-tidy 18.
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_ctzg(value, fallback)                                                            \
+    ((value) == 0 ? (fallback) : __builtin_ctzll(static_cast<unsigned long long>(value)))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_clzg(value, fallback)                                                            \
+    ((value) == 0 ? (fallback)                                                                     \
+                  : (__builtin_clzll(static_cast<unsigned long long>(value)) -                     \
+                     (static_cast<int>(sizeof(unsigned long long) * __CHAR_BIT__) -                \
+                      static_cast<int>(sizeof(value) * __CHAR_BIT__))))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __builtin_popcountg(value) __builtin_popcountll(static_cast<unsigned long long>(value))
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+#define __is_nothrow_convertible(from_type, to_type) __is_convertible(from_type, to_type)
+#endif
+
 #include <array>
 
 #include <gtest/gtest.h>
@@ -804,6 +822,8 @@ TEST(QuicCoreTest, AckOnlyZeroRttPacketDoesNotScheduleApplicationAckDeadline) {
 
 TEST(QuicCoreTest, ServerProcessesZeroRttStreamBeforeHandshakeCompletes) {
     auto connection = make_connected_server_connection();
+    connection.config_.zero_rtt.allow = true;
+    connection.config_.strict_updated_transport_parameters = true;
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     connection.handshake_confirmed_ = false;
     connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
@@ -926,12 +946,145 @@ TEST(QuicCoreTest, ServerRejectsZeroRttStreamOpenOverRememberedLimit) {
               static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::stream_limit_error));
 }
 
-TEST(QuicCoreTest, ProcessInboundDatagramProcessesZeroRttStreamBeforeHandshakeCompletes) {
+TEST(QuicCoreTest, ServerStrictZeroRttMapsRememberedFlowControlErrorToProtocolViolation) {
     auto connection = make_connected_server_connection();
+    connection.config_.zero_rtt.allow = true;
+    connection.config_.strict_updated_transport_parameters = true;
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
     connection.handshake_confirmed_ = false;
     connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
         coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+    const auto stream = connection.get_or_open_receive_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    stream.value()->flow_control.advertised_max_stream_data = 4;
+    stream.value()->receive_flow_control_limit = 4;
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedZeroRttPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id =
+                optional_value_or_terminate(connection.peer_source_connection_id_),
+            .packet_number_length = 1,
+            .packet_number = 11,
+            .frames = {coquic::quic::StreamFrame{
+                .has_offset = true,
+                .has_length = true,
+                .stream_id = 0,
+                .offset = 0,
+                .stream_data = coquic::quic::test::bytes_from_string("early")}},
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_FALSE(processed.has_value());
+    ASSERT_TRUE(processed.error().has_transport_error_code);
+    EXPECT_EQ(processed.error().transport_error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation));
+}
+
+TEST(QuicCoreTest, ServerStrictZeroRttMapsRememberedStreamLimitErrorToProtocolViolation) {
+    auto connection = make_connected_server_connection();
+    connection.config_.zero_rtt.allow = true;
+    connection.config_.strict_updated_transport_parameters = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+    connection.local_stream_limit_state_.advertised_max_streams_bidi = 1;
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedZeroRttPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id =
+                optional_value_or_terminate(connection.peer_source_connection_id_),
+            .packet_number_length = 1,
+            .packet_number = 13,
+            .frames = {coquic::quic::StreamFrame{
+                .has_offset = true,
+                .has_length = true,
+                .stream_id = 4,
+                .offset = 0,
+                .stream_data = coquic::quic::test::bytes_from_string("early")}},
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(processed.has_value());
+    ASSERT_TRUE(processed.error().has_transport_error_code);
+    EXPECT_EQ(processed.error().transport_error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation));
+}
+
+TEST(QuicCoreTest, ServerStrictZeroRttMapsResetStreamFlowControlErrorToProtocolViolation) {
+    auto connection = make_connected_server_connection();
+    connection.config_.zero_rtt.allow = true;
+    connection.config_.strict_updated_transport_parameters = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+    connection.connection_flow_control_.advertised_max_data = 4;
+
+    const auto processed = connection.process_inbound_packet(
+        coquic::quic::ProtectedZeroRttPacket{
+            .version = coquic::quic::kQuicVersion1,
+            .destination_connection_id = connection.config_.source_connection_id,
+            .source_connection_id =
+                optional_value_or_terminate(connection.peer_source_connection_id_),
+            .packet_number_length = 1,
+            .packet_number = 12,
+            .frames = {coquic::quic::ResetStreamFrame{
+                .stream_id = 0, .application_protocol_error_code = 1, .final_size = 5}},
+        },
+        coquic::quic::test::test_time(1));
+
+    ASSERT_FALSE(processed.has_value());
+    ASSERT_TRUE(processed.error().has_transport_error_code);
+    EXPECT_EQ(processed.error().transport_error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation));
+}
+
+TEST(QuicCoreTest, ServerStrictZeroRttRejectedEarlyDataPreservesFlowControlError) {
+    auto config = coquic::quic::test::make_server_core_config();
+    config.zero_rtt.allow = true;
+    config.strict_updated_transport_parameters = true;
+    coquic::quic::QuicConnection connection(std::move(config));
+    connection.start_server_if_needed({std::byte{0x01}, std::byte{0x02}});
+    ASSERT_TRUE(connection.tls_.has_value());
+    connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+    auto &tls = optional_ref_or_terminate(connection.tls_);
+    coquic::quic::test::TlsAdapterTestPeer::set_early_data_attempted(tls, true);
+    coquic::quic::test::TlsAdapterTestPeer::apply_early_data_status(tls, SSL_EARLY_DATA_REJECTED,
+                                                                    true);
+    const auto stream = connection.get_or_open_receive_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    stream.value()->flow_control.advertised_max_stream_data = 4;
+    stream.value()->receive_flow_control_limit = 4;
+    const std::array<coquic::quic::Frame, 1> frames{
+        coquic::quic::StreamFrame{.has_offset = true,
+                                  .has_length = true,
+                                  .stream_id = 0,
+                                  .offset = 0,
+                                  .stream_data = coquic::quic::test::bytes_from_string("early")}};
+    const auto processed = connection.process_inbound_application(
+        frames, coquic::quic::test::test_time(1), true, 0, false, 1, true);
+    ASSERT_FALSE(processed.has_value());
+    ASSERT_TRUE(processed.error().has_transport_error_code);
+    EXPECT_EQ(processed.error().transport_error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::flow_control_error));
+}
+
+TEST(QuicCoreTest, StrictZeroRttDatagramQueuesProtocolViolationClose) {
+    auto connection = make_connected_server_connection();
+    connection.config_.zero_rtt.allow = true;
+    connection.config_.strict_updated_transport_parameters = true;
+    connection.status_ = coquic::quic::HandshakeStatus::in_progress;
+    connection.handshake_confirmed_ = false;
+    connection.zero_rtt_space_.read_secret = make_test_traffic_secret(
+        coquic::quic::CipherSuite::tls_aes_128_gcm_sha256, std::byte{0x41});
+    const auto stream = connection.get_or_open_receive_stream(0);
+    ASSERT_TRUE(stream.has_value());
+    stream.value()->flow_control.advertised_max_stream_data = 4;
+    stream.value()->receive_flow_control_limit = 4;
 
     const auto encoded = coquic::quic::serialize_protected_datagram(
         std::array<coquic::quic::ProtectedPacket, 1>{
@@ -945,12 +1098,11 @@ TEST(QuicCoreTest, ProcessInboundDatagramProcessesZeroRttStreamBeforeHandshakeCo
                 .frames =
                     {
                         coquic::quic::StreamFrame{
-                            .fin = true,
                             .has_offset = true,
                             .has_length = true,
                             .stream_id = 0,
                             .offset = 0,
-                            .stream_data = coquic::quic::test::bytes_from_string("early-data"),
+                            .stream_data = coquic::quic::test::bytes_from_string("early"),
                         },
                     },
             },
@@ -965,17 +1117,10 @@ TEST(QuicCoreTest, ProcessInboundDatagramProcessesZeroRttStreamBeforeHandshakeCo
 
     connection.process_inbound_datagram(encoded.value(), coquic::quic::test::test_time(1));
 
-    auto received = connection.take_received_stream_data();
-    ASSERT_TRUE(received.has_value());
-    if (!received.has_value()) {
-        return;
-    }
-    const auto &received_stream = *received;
-    EXPECT_EQ(received_stream.stream_id, 0u);
-    EXPECT_EQ(received_stream.bytes, coquic::quic::test::bytes_from_string("early-data"));
-    EXPECT_TRUE(received_stream.fin);
-    EXPECT_TRUE(connection.application_space_.received_packets.has_ack_to_send());
-    EXPECT_TRUE(connection.deferred_protected_packets_.empty());
+    EXPECT_TRUE(connection.has_failed());
+    ASSERT_TRUE(connection.pending_transport_close_.has_value());
+    EXPECT_EQ(optional_ref_or_terminate(connection.pending_transport_close_).error_code,
+              static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation));
 }
 
 TEST(QuicCoreTest, ClientStopsUsingZeroRttWhenApplicationWriteKeysExist) {

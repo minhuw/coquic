@@ -3460,6 +3460,7 @@ QuicCore::QuicCore(QuicCoreConfig config)
           .transport = config.transport,
           .allowed_tls_cipher_suites = config.allowed_tls_cipher_suites,
           .zero_rtt = config.zero_rtt,
+          .strict_updated_transport_parameters = config.strict_updated_transport_parameters,
           .qlog = config.qlog,
           .tls_keylog_path = config.tls_keylog_path,
           .stateless_reset_secret = config.stateless_reset_secret,
@@ -3774,6 +3775,8 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             .allowed_tls_cipher_suites = endpoint_config_.allowed_tls_cipher_suites,
             .resumption_state = open->connection.resumption_state,
             .zero_rtt = open->connection.zero_rtt,
+            .strict_updated_transport_parameters =
+                open->connection.strict_updated_transport_parameters,
             .qlog = endpoint_config_.qlog,
             .tls_keylog_path = endpoint_config_.tls_keylog_path,
             .stateless_reset_secret = endpoint_config_.stateless_reset_secret,
@@ -4247,6 +4250,8 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             .max_outbound_datagram_size = endpoint_config_.max_outbound_datagram_size,
             .allowed_tls_cipher_suites = endpoint_config_.allowed_tls_cipher_suites,
             .zero_rtt = endpoint_config_.zero_rtt,
+            .strict_updated_transport_parameters =
+                endpoint_config_.strict_updated_transport_parameters,
             .qlog = endpoint_config_.qlog,
             .tls_keylog_path = endpoint_config_.tls_keylog_path,
             .stateless_reset_secret = endpoint_config_.stateless_reset_secret,

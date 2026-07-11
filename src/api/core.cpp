@@ -289,6 +289,7 @@ quic::QuicCoreEndpointConfig to_internal(const EndpointConfig &config) {
         .max_outbound_datagram_size = config.max_outbound_datagram_size,
         .allowed_tls_cipher_suites = {},
         .zero_rtt = to_internal(config.zero_rtt),
+        .strict_updated_transport_parameters = config.zero_rtt.strict_updated_transport_parameters,
         .qlog = to_internal(config.qlog),
         .tls_keylog_path = config.tls_keylog_path,
         .stateless_reset_secret = std::nullopt,
@@ -318,6 +319,7 @@ quic::QuicCoreClientConnectionConfig to_internal(const ClientConnectionConfig &c
         .server_name = config.server_name,
         .resumption_state = to_internal(config.resumption_state),
         .zero_rtt = to_internal(config.zero_rtt),
+        .strict_updated_transport_parameters = config.zero_rtt.strict_updated_transport_parameters,
     };
 }
 

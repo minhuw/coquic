@@ -31,6 +31,7 @@ static inline coquic_status_t coquic_go_endpoint_create(
     size_t max_outbound_datagram_size,
     uint8_t zero_rtt_attempt,
     uint8_t zero_rtt_allow,
+    uint8_t zero_rtt_strict_updated_transport_parameters,
     const uint8_t *zero_rtt_context,
     size_t zero_rtt_context_length,
     size_t orphan_zero_rtt_max_packets,
@@ -67,6 +68,7 @@ static inline coquic_status_t coquic_go_endpoint_create(
     config.max_outbound_datagram_size = max_outbound_datagram_size;
     config.zero_rtt.attempt = zero_rtt_attempt;
     config.zero_rtt.allow = zero_rtt_allow;
+    config.zero_rtt.strict_updated_transport_parameters = zero_rtt_strict_updated_transport_parameters;
     config.zero_rtt.application_context = coquic_go_bytes(zero_rtt_context, zero_rtt_context_length);
     config.orphan_zero_rtt_buffer.max_packets = orphan_zero_rtt_max_packets;
     config.orphan_zero_rtt_buffer.max_bytes = orphan_zero_rtt_max_bytes;
@@ -319,9 +321,10 @@ type TlsIdentity struct {
 }
 
 type ZeroRttConfig struct {
-	Attempt            bool
-	Allow              bool
-	ApplicationContext []byte
+	Attempt                          bool
+	Allow                            bool
+	StrictUpdatedTransportParameters bool
+	ApplicationContext               []byte
 }
 
 type TransportConfig struct {
@@ -537,6 +540,7 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		C.size_t(config.MaxOutboundDatagramSize),
 		cBool(config.ZeroRtt.Attempt),
 		cBool(config.ZeroRtt.Allow),
+		cBool(config.ZeroRtt.StrictUpdatedTransportParameters),
 		bytePtr(config.ZeroRtt.ApplicationContext),
 		C.size_t(len(config.ZeroRtt.ApplicationContext)),
 		C.size_t(config.OrphanZeroRttBuffer.MaxPackets),

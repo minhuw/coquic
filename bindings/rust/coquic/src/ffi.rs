@@ -4,7 +4,7 @@
 
 use std::ffi::c_char;
 
-pub const COQUIC_FFI_ABI_VERSION: u32 = 7;
+pub const COQUIC_FFI_ABI_VERSION: u32 = 8;
 
 pub enum coquic_endpoint_t {}
 pub enum coquic_result_t {}
@@ -191,6 +191,7 @@ pub struct coquic_tls_identity_t {
 pub struct coquic_zero_rtt_config_t {
     pub attempt: u8,
     pub allow: u8,
+    pub strict_updated_transport_parameters: u8,
     pub application_context: coquic_bytes_t,
 }
 

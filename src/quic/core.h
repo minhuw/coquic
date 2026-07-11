@@ -218,6 +218,7 @@ struct QuicCoreConfig {
     std::vector<CipherSuite> allowed_tls_cipher_suites;
     std::optional<QuicResumptionState> resumption_state;
     QuicZeroRttConfig zero_rtt;
+    bool strict_updated_transport_parameters = false;
     // CRYPTO frames are not flow controlled, so this handshake-only limit is capped when applied.
     std::size_t handshake_crypto_buffer_limit = kMinimumOutOfOrderCryptoBufferSize;
     std::optional<QuicQlogConfig> qlog;
@@ -389,6 +390,7 @@ struct QuicCoreEndpointConfig {
     std::size_t max_outbound_datagram_size = 1200;
     std::vector<CipherSuite> allowed_tls_cipher_suites;
     QuicZeroRttConfig zero_rtt;
+    bool strict_updated_transport_parameters = false;
     std::optional<QuicQlogConfig> qlog;
     std::optional<std::filesystem::path> tls_keylog_path;
     std::optional<QuicStatelessResetSecret> stateless_reset_secret;
@@ -425,6 +427,7 @@ struct QuicCoreClientConnectionConfig {
     std::string server_name = "localhost";
     std::optional<QuicResumptionState> resumption_state;
     QuicZeroRttConfig zero_rtt;
+    bool strict_updated_transport_parameters = false;
 };
 
 enum class QuicEcnCodepoint : std::uint8_t {

@@ -303,6 +303,7 @@ pub struct TlsIdentity {
 pub struct ZeroRttConfig {
     pub attempt: bool,
     pub allow: bool,
+    pub strict_updated_transport_parameters: bool,
     pub application_context: Vec<u8>,
 }
 
@@ -311,6 +312,7 @@ impl ZeroRttConfig {
         ffi::coquic_zero_rtt_config_t {
             attempt: self.attempt as u8,
             allow: self.allow as u8,
+            strict_updated_transport_parameters: self.strict_updated_transport_parameters as u8,
             application_context: bytes(self.application_context.as_slice()),
         }
     }
@@ -321,6 +323,7 @@ impl Default for ZeroRttConfig {
         Self {
             attempt: false,
             allow: false,
+            strict_updated_transport_parameters: false,
             application_context: Vec::new(),
         }
     }
@@ -715,6 +718,7 @@ impl OpenConnection {
                     zero_rtt: ffi::coquic_zero_rtt_config_t {
                         attempt: 0,
                         allow: 0,
+                        strict_updated_transport_parameters: 0,
                         application_context: ffi::coquic_bytes_t::empty(),
                     },
                 },

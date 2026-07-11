@@ -124,6 +124,7 @@ class TlsIdentity:
 class ZeroRttConfig:
     attempt: bool = False
     allow: bool = False
+    strict_updated_transport_parameters: bool = False
     application_context: bytes = b""
 
 
@@ -1024,6 +1025,7 @@ class _EndpointConfigMaterialization:
             zero_rtt=ffi.coquic_zero_rtt_config_t(
                 attempt=int(config.zero_rtt.attempt),
                 allow=int(config.zero_rtt.allow),
+                strict_updated_transport_parameters=int(config.zero_rtt.strict_updated_transport_parameters),
                 application_context=self._arena.bytes(
                     config.zero_rtt.application_context
                 ),
@@ -1102,6 +1104,7 @@ class _ClientConnectionConfigMaterialization:
             zero_rtt=ffi.coquic_zero_rtt_config_t(
                 attempt=int(config.zero_rtt.attempt),
                 allow=int(config.zero_rtt.allow),
+                strict_updated_transport_parameters=int(config.zero_rtt.strict_updated_transport_parameters),
                 application_context=self._arena.bytes(
                     config.zero_rtt.application_context
                 ),

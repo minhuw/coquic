@@ -697,12 +697,13 @@ class QuicConnection {
     process_inbound_application(std::span<const Frame> frames, QuicCoreTimePoint now,
                                 bool allow_preconnected_frames = false, QuicPathId path_id = 0,
                                 bool used_previous_application_read_secret = false,
-                                std::optional<std::uint64_t> packet_number = std::nullopt);
+                                std::optional<std::uint64_t> packet_number = std::nullopt,
+                                bool is_zero_rtt_packet = false);
     CodecResult<bool> process_inbound_received_application(
         std::span<const ReceivedFrame> frames, QuicCoreTimePoint now,
         bool allow_preconnected_frames = false, QuicPathId path_id = 0,
         bool used_previous_application_read_secret = false,
-        std::optional<std::uint64_t> packet_number = std::nullopt);
+        std::optional<std::uint64_t> packet_number = std::nullopt, bool is_zero_rtt_packet = false);
     CodecResult<bool> process_inbound_application_stream_data(std::uint64_t stream_id,
                                                               std::uint64_t stream_offset,
                                                               const SharedBytes &stream_data,

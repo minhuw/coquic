@@ -355,6 +355,7 @@ coquic::core::ZeroRttConfig to_cpp(coquic_zero_rtt_config_t config) {
     return coquic::core::ZeroRttConfig{
         .attempt = config.attempt != 0,
         .allow = config.allow != 0,
+        .strict_updated_transport_parameters = config.strict_updated_transport_parameters != 0,
         .application_context = to_vector(config.application_context),
     };
 }

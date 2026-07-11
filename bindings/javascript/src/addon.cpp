@@ -442,6 +442,9 @@ coquic_zero_rtt_config_t zero_rtt_from_object(napi_env env, napi_value value, By
         .attempt =
             static_cast<std::uint8_t>(get_bool(env, value, "attempt", fallback.attempt != 0)),
         .allow = static_cast<std::uint8_t>(get_bool(env, value, "allow", fallback.allow != 0)),
+        .strict_updated_transport_parameters =
+            static_cast<std::uint8_t>(get_bool(env, value, "strictUpdatedTransportParameters",
+                                               fallback.strict_updated_transport_parameters != 0)),
         .application_context = context.view(),
     };
 }
@@ -554,6 +557,8 @@ napi_value zero_rtt_to_js(napi_env env, const coquic_zero_rtt_config_t &raw) {
     napi_value out = make_object(env);
     set_bool(env, out, "attempt", raw.attempt != 0);
     set_bool(env, out, "allow", raw.allow != 0);
+    set_bool(env, out, "strictUpdatedTransportParameters",
+             raw.strict_updated_transport_parameters != 0);
     set_buffer(env, out, "applicationContext", raw.application_context);
     return out;
 }

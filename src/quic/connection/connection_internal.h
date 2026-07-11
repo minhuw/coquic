@@ -131,6 +131,8 @@ struct SendProfileCounters {
     std::uint64_t pmtu_probe_datagrams = 0;
     std::uint64_t congestion_blocks = 0;
     std::uint64_t pacing_blocks = 0;
+    std::uint64_t coalescing_delays = 0;
+    std::uint64_t coalescing_timeout_flushes = 0;
     std::uint64_t has_sendable_checks = 0;
     std::uint64_t has_sendable_false = 0;
     std::uint64_t has_sendable_no_application_packets = 0;
@@ -369,8 +371,9 @@ inline void print_send_profile() {
         // Overall send-loop counters stay first so log parsers can locate profile records.
         << "coquic-send-profile" << " drains=" << c.drain_calls << " datagrams=" << c.datagrams
         << " empty=" << c.empty_drains << " pmtu_probe=" << c.pmtu_probe_datagrams
-        << " congestion_blocks=" << c.congestion_blocks << " pacing_blocks="
-        << c.pacing_blocks
+        << " congestion_blocks=" << c.congestion_blocks << " pacing_blocks=" << c.pacing_blocks
+        << " coalescing_delays=" << c.coalescing_delays << " coalescing_timeout_flushes="
+        << c.coalescing_timeout_flushes
         // Sendability and application-selection counters explain why packets were not emitted.
         << " has_sendable_checks=" << c.has_sendable_checks
         << " has_sendable_false=" << c.has_sendable_false

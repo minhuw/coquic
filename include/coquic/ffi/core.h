@@ -23,7 +23,7 @@ extern "C" {
 #endif
 #endif
 
-#define COQUIC_FFI_ABI_VERSION 8u
+#define COQUIC_FFI_ABI_VERSION 9u
 
 typedef struct coquic_endpoint coquic_endpoint_t;
 typedef struct coquic_result coquic_result_t;
@@ -205,6 +205,7 @@ typedef struct coquic_transport_config {
     uint8_t grease_reserved_versions;
     uint8_t grease_quic_bit;
     uint8_t enable_optimistic_ack_mitigation;
+    coquic_time_us_t underfilled_packet_coalescing_delay_us;
 } coquic_transport_config_t;
 
 typedef struct coquic_endpoint_config {

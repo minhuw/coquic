@@ -240,6 +240,7 @@ quic::QuicTransportConfig to_internal(const TransportConfig &config) {
         .congestion_control = to_internal(config.congestion_control),
         .enable_hystart_plus_plus = config.enable_hystart_plus_plus,
         .send_stream_fairness = config.send_stream_fairness,
+        .underfilled_packet_coalescing_delay = config.underfilled_packet_coalescing_delay,
         .enable_latency_spin_bit = config.enable_latency_spin_bit,
         .grease_reserved_versions = config.grease_reserved_versions,
         .grease_quic_bit = config.grease_quic_bit,

@@ -363,6 +363,7 @@ TEST(CoquicCoreFfiTest, InitializersAndNullQueriesAreStable) {
     EXPECT_NE(transport.max_udp_payload_size, 0u);
     EXPECT_EQ(transport.defer_active_migration_path_validation, 0);
     EXPECT_EQ(transport.migration_recovery_retention_timeout_us, 0u);
+    EXPECT_EQ(transport.underfilled_packet_coalescing_delay_us, 0u);
     //= https://www.rfc-editor.org/rfc/rfc9000#section-14.3
     // # Endpoints SHOULD set the initial value of BASE_PLPMTU (Section 5.1 of
     // # [DPLPMTUD]) to be consistent with QUIC's smallest allowed maximum
@@ -383,6 +384,8 @@ TEST(CoquicCoreFfiTest, InitializersAndNullQueriesAreStable) {
     EXPECT_EQ(endpoint_config.orphan_zero_rtt_buffer.max_age_us, 0u);
     EXPECT_EQ(endpoint_config.enable_reserved_version_probe, 0);
     EXPECT_EQ(endpoint_config.enable_long_header_stateless_reset, 0);
+
+    endpoint_config.transport.underfilled_packet_coalescing_delay_us = 5000;
 
     coquic_client_connection_config_t connection_config{};
     coquic_client_connection_config_init(&connection_config);

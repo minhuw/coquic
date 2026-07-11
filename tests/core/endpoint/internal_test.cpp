@@ -1204,6 +1204,54 @@ TEST(QuicCoreEndpointInternalTest, EndpointDrainMarksContinuationAfterBatchCap) 
     EXPECT_EQ(send_effects_from(result).size(), 10u);
 }
 
+TEST(QuicCoreEndpointInternalTest, EndpointFlushesUnderfilledPacketAtCoalescingWakeup) {
+    class SendSink final : public QuicCoreSendDatagramSink {
+      public:
+        bool on_send_datagram(QuicCoreSendDatagram datagram) override {
+            datagrams.push_back(std::move(datagram));
+            return true;
+        }
+
+        std::vector<QuicCoreSendDatagram> datagrams;
+    } sink;
+    QuicCore endpoint(make_client_endpoint_config());
+    static_cast<void>(endpoint.advance_endpoint(
+        QuicCoreOpenConnection{
+            .connection = make_client_open_config(),
+            .initial_route_handle = 17,
+        },
+        coquic::quic::test::test_time(0)));
+
+    auto &entry = endpoint.connections_.at(1);
+    *entry.connection = make_connected_client_connection();
+    entry.connection->config_.transport.underfilled_packet_coalescing_delay =
+        std::chrono::milliseconds{5};
+
+    const auto delayed = endpoint.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                QuicCoreSendStreamData{
+                    .stream_id = 0,
+                    .bytes = bytes_from_string("ping"),
+                },
+        },
+        coquic::quic::test::test_time(1), sink);
+
+    EXPECT_TRUE(send_effects_from(delayed).empty());
+    EXPECT_TRUE(sink.datagrams.empty());
+    EXPECT_FALSE(delayed.send_continuation_pending);
+    EXPECT_FALSE(endpoint.has_send_continuation_pending());
+    ASSERT_TRUE(delayed.next_wakeup.has_value());
+    EXPECT_EQ(optional_value_or_terminate(delayed.next_wakeup), coquic::quic::test::test_time(6));
+
+    const auto flushed =
+        endpoint.advance_endpoint(QuicCoreTimerExpired{}, coquic::quic::test::test_time(6), sink);
+    EXPECT_TRUE(send_effects_from(flushed).empty());
+    EXPECT_EQ(sink.datagrams.size(), 1u);
+    EXPECT_EQ(flushed.next_wakeup, endpoint.next_wakeup());
+}
+
 TEST(QuicCoreEndpointInternalTest, EndpointSendContinuationResumesPacedBurst) {
     QuicCore endpoint(make_client_endpoint_config());
     static_cast<void>(endpoint.advance_endpoint(

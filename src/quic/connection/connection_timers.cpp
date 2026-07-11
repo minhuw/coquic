@@ -13,8 +13,9 @@ std::optional<QuicCoreTimePoint> QuicConnection::next_wakeup() const {
         return close_deadline_;
     }
 
-    return earliest_of(
-        {non_pacing_wakeup_deadline(), pacing_deadline(), migration_recovery_retention_deadline()});
+    return earliest_of({non_pacing_wakeup_deadline(), pacing_deadline(),
+                        underfilled_packet_coalescing_deadline_,
+                        migration_recovery_retention_deadline()});
 }
 
 std::optional<QuicCoreTimePoint> QuicConnection::non_pacing_wakeup_deadline() const {

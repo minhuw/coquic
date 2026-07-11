@@ -146,6 +146,8 @@ struct TransportConfig {
     CongestionControl congestion_control = CongestionControl::newreno;
     bool enable_hystart_plus_plus = true;
     bool send_stream_fairness = true;
+    // A zero duration disables the optional RFC 9000 Section 13 stream-packet coalescing delay.
+    Duration underfilled_packet_coalescing_delay{0};
     //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4
     // # The spin bit is an OPTIONAL feature of this version of QUIC.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-17.4

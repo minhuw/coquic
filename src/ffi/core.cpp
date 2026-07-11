@@ -394,6 +394,8 @@ coquic::core::TransportConfig to_cpp(const coquic_transport_config_t &config) {
         .congestion_control = congestion_control_to_cpp(config.congestion_control),
         .enable_hystart_plus_plus = config.enable_hystart_plus_plus != 0,
         .send_stream_fairness = config.send_stream_fairness != 0,
+        .underfilled_packet_coalescing_delay = std::chrono::microseconds{static_cast<std::int64_t>(
+            config.underfilled_packet_coalescing_delay_us)},
         .enable_latency_spin_bit = config.enable_latency_spin_bit != 0,
         .grease_reserved_versions = config.grease_reserved_versions != 0,
         .grease_quic_bit = config.grease_quic_bit != 0,
@@ -838,6 +840,8 @@ void coquic_transport_config_init(coquic_transport_config_t *config) {
         .enable_hystart_plus_plus =
             static_cast<std::uint8_t>(defaults.enable_hystart_plus_plus ? 1 : 0),
         .send_stream_fairness = static_cast<std::uint8_t>(defaults.send_stream_fairness ? 1 : 0),
+        .underfilled_packet_coalescing_delay_us =
+            static_cast<coquic_time_us_t>(defaults.underfilled_packet_coalescing_delay.count()),
         .enable_latency_spin_bit =
             static_cast<std::uint8_t>(defaults.enable_latency_spin_bit ? 1 : 0),
         .grease_reserved_versions =

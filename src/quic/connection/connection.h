@@ -1250,6 +1250,7 @@ class QuicConnection {
     bool last_drained_is_pmtu_probe_ = false;
     bool last_drained_allows_send_continuation_ = false;
     std::optional<QuicCoreTimePoint> last_send_continuation_time_;
+    std::optional<QuicCoreTimePoint> underfilled_packet_coalescing_deadline_;
     std::uint64_t next_packet_inspection_datagram_id_ = 1;
     std::uint64_t last_drained_packet_inspection_datagram_id_ = 0;
     QuicPathId last_inbound_path_id_ = 0;

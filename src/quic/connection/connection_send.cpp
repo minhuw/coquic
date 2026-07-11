@@ -340,7 +340,8 @@ QuicConnection::drain_fast_bulk_stream_datagrams(QuicCoreTimePoint now, bool con
     if (max_datagrams == 0) {
         return 0;
     }
-    if (status_ != HandshakeStatus::connected || close_mode_ != QuicConnectionCloseMode::none ||
+    if (config_.transport.underfilled_packet_coalescing_delay > QuicCoreDuration::zero() ||
+        status_ != HandshakeStatus::connected || close_mode_ != QuicConnectionCloseMode::none ||
         !started_ || !handshake_confirmed_ || !application_space_.write_secret.has_value() ||
         zero_rtt_space_.write_secret.has_value() || !can_skip_outbound_tls_sync() ||
         !deferred_protected_packets_.empty() || qlog_session_ != nullptr ||
@@ -780,6 +781,56 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                       << '\n';
         }
         return {};
+    }
+
+    // RFC 9000 Section 13 permits a short wait to collect frames, but only delay fresh
+    // established stream data. Control, recovery, FIN, and DATAGRAM sends remain immediate.
+    const auto coalescing_delay = config_.transport.underfilled_packet_coalescing_delay;
+    const bool application_ack_due = application_ack_due_for_send(application_space_, now);
+    const bool ack_deadline_within_coalescing_delay =
+        application_space_.pending_ack_deadline.has_value() &&
+        *application_space_.pending_ack_deadline <= now + coalescing_delay;
+    const bool pending_stream_fin = std::ranges::any_of(streams_, [](const auto &entry) {
+        const auto &stream = entry.second;
+        return stream.reset_state == StreamControlFrameState::none &&
+               stream.send_fin_state == StreamSendFinState::pending;
+    });
+    const auto stream_wire_budget = application_stream_frame_budget(
+        max_outbound_datagram_size, outbound_destination_connection_id().size(),
+        packet_number_length_for_send(application_space_,
+                                      application_space_.next_send_packet_number));
+    const bool stream_fills_datagram = std::ranges::any_of(streams_, [&](const auto &entry) {
+        const auto &stream = entry.second;
+        return stream.reset_state == StreamControlFrameState::none &&
+               stream.sendable_bytes() >=
+                   max_stream_frame_payload_for_wire_budget(
+                       entry.first, stream.flow_control.highest_sent, stream_wire_budget);
+    });
+    const bool underfilled_stream_packet_eligible =
+        coalescing_delay > QuicCoreDuration::zero() && status_ == HandshakeStatus::connected &&
+        handshake_confirmed_ && application_space_.write_secret.has_value() &&
+        fresh_sendable_stream_bytes_ != 0 && !stream_fills_datagram &&
+        pending_datagram_send_queue_.empty() &&
+        !has_pending_application_control_send(application_ack_due) &&
+        !has_lost_application_stream_data() && !pending_stream_fin &&
+        remaining_pto_probe_datagrams_ == 0 &&
+        !application_space_.pending_probe_packet.has_value() &&
+        !ack_deadline_within_coalescing_delay;
+    if (!underfilled_stream_packet_eligible) {
+        underfilled_packet_coalescing_deadline_.reset();
+    } else if (!underfilled_packet_coalescing_deadline_.has_value()) {
+        underfilled_packet_coalescing_deadline_ = now + coalescing_delay;
+        if (send_profile_enabled()) {
+            ++send_profile_counters().coalescing_delays;
+        }
+        return {};
+    } else if (now < *underfilled_packet_coalescing_deadline_) {
+        return {};
+    } else {
+        underfilled_packet_coalescing_deadline_.reset();
+        if (send_profile_enabled()) {
+            ++send_profile_counters().coalescing_timeout_flushes;
+        }
     }
 
     if (config_.role == EndpointRole::client && application_space_.write_secret.has_value() &&

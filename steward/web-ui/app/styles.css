@@ -4619,7 +4619,6 @@ button.code-copy-button:hover:not(:disabled) {
   min-height: 64px;
   border-bottom: 1px solid var(--line);
   background: #fffffff0;
-  backdrop-filter: blur(10px);
 }
 
 .task-back-link {

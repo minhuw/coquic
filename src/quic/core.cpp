@@ -4254,6 +4254,27 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             // # A server MUST discard an Initial packet that is carried in a
             // # UDP datagram with a payload that is smaller than the smallest
             // # allowed maximum datagram size of 1200 bytes.
+            if (endpoint_config_.close_on_undersized_initial) {
+                auto close_bytes = make_initial_transport_close_packet_bytes(
+                    *parsed, static_cast<std::uint64_t>(QuicTransportErrorCode::protocol_violation),
+                    make_endpoint_connection_id(kServerConnectionIdPrefix,
+                                                next_server_connection_id_sequence_++,
+                                                endpoint_random_));
+                //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1
+                // # Prior to validating the client address, servers MUST NOT
+                // # send more than three times as many bytes as the number of
+                // # bytes they have received.
+                if (!close_bytes.empty() &&
+                    (close_bytes.size() + 2) / 3 <= inbound_payload.size()) {
+                    emit_send_datagram(result,
+                                       QuicCoreSendDatagram{
+                                           .connection = 0,
+                                           .route_handle = inbound->route_handle,
+                                           .bytes = DatagramBuffer(std::move(close_bytes)),
+                                       },
+                                       send_sink);
+                }
+            }
             //= https://www.rfc-editor.org/rfc/rfc9000#section-14
             // # Therefore, an endpoint MUST NOT close a connection when it
             // # receives a datagram that does not meet size constraints; the

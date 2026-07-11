@@ -384,6 +384,9 @@ struct QuicCoreEndpointConfig {
     bool verify_peer = true;
     bool retry_enabled = false;
     bool require_address_validation_token = false;
+    // RFC 9000 Section 14.1 permits an immediate PROTOCOL_VIOLATION close for
+    // supported Initial datagrams smaller than 1200 bytes. Disabled by default.
+    bool close_on_undersized_initial = false;
     std::size_t max_server_connections = 0;
     QuicOrphanZeroRttBufferConfig orphan_zero_rtt_buffer;
     std::string application_protocol = "coquic";

@@ -2358,6 +2358,83 @@ TEST(QuicCoreEndpointInternalTest, ServerDiscardsSupportedInitialDatagramSmaller
     EXPECT_TRUE(server.retry_tokens_.empty());
 }
 
+TEST(QuicCoreEndpointInternalTest, ServerCanCloseUndersizedSupportedInitialWithProtocolViolation) {
+    auto config = make_server_endpoint_config();
+    config.close_on_undersized_initial = true;
+    config.retry_enabled = true;
+    QuicCore server(std::move(config));
+
+    const auto client_dcid = bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});
+    auto undersized_initial = make_supported_initial_datagram(
+        kQuicVersion1, client_dcid, bytes_from_ints({0xc1, 0x01}), {}, 1199);
+    const auto result = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = undersized_initial,
+            .route_handle = 55,
+        },
+        coquic::quic::test::test_time(1));
+
+    const auto sends = send_effects_from(result);
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends.front().route_handle, std::optional<QuicRouteHandle>{55u});
+    EXPECT_LE(sends.front().bytes.size(), undersized_initial.size() * 3);
+    const auto close_packets = decode_endpoint_initial_datagram(sends.front().bytes, client_dcid);
+    ASSERT_EQ(close_packets.size(), 1u);
+    const auto *initial_close = std::get_if<ProtectedInitialPacket>(&close_packets.front());
+    ASSERT_NE(initial_close, nullptr);
+    ASSERT_EQ(initial_close->frames.size(), 1u);
+    const auto *close_frame =
+        std::get_if<TransportConnectionCloseFrame>(&initial_close->frames.front());
+    ASSERT_NE(close_frame, nullptr);
+    EXPECT_EQ(close_frame->error_code,
+              static_cast<std::uint64_t>(QuicTransportErrorCode::protocol_violation));
+    EXPECT_FALSE(result.local_error.has_value());
+    EXPECT_EQ(server.connection_count(), 0u);
+    EXPECT_TRUE(server.retry_tokens_.empty());
+}
+
+TEST(QuicCoreEndpointInternalTest, StrictUndersizedInitialPolicyDropsIneligibleDatagrams) {
+    auto config = make_server_endpoint_config();
+    config.close_on_undersized_initial = true;
+    QuicCore server(std::move(config));
+
+    const auto destination_connection_id =
+        bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});
+    const auto source_connection_id = bytes_from_ints({0xc1, 0x01});
+    const auto unsupported_initial = make_supported_long_header_datagram(
+        0x0a0a0a0a, destination_connection_id, source_connection_id, 1199);
+    const auto non_initial = make_supported_long_header_datagram(
+        kQuicVersion1, destination_connection_id, source_connection_id, 1199);
+
+    for (const auto &datagram : {unsupported_initial, non_initial}) {
+        const auto result =
+            server.advance_endpoint(QuicCoreInboundDatagram{.bytes = datagram, .route_handle = 55},
+                                    coquic::quic::test::test_time(1));
+        EXPECT_TRUE(result.effects.empty());
+        EXPECT_FALSE(result.local_error.has_value());
+    }
+    EXPECT_EQ(server.connection_count(), 0u);
+}
+
+TEST(QuicCoreEndpointInternalTest, StrictUndersizedInitialPolicyAccepts1200ByteInitial) {
+    auto config = make_server_endpoint_config();
+    config.application_protocol = "coquic";
+    config.close_on_undersized_initial = true;
+    QuicCore server(std::move(config));
+
+    const auto result = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_client_initial_datagram(),
+            .route_handle = 55,
+        },
+        coquic::quic::test::test_time(1));
+
+    const auto lifecycle = lifecycle_events_from(result);
+    ASSERT_EQ(lifecycle.size(), 1u);
+    EXPECT_EQ(lifecycle.front().event, QuicCoreConnectionLifecycle::accepted);
+    EXPECT_EQ(server.connection_count(), 1u);
+}
+
 TEST(QuicCoreEndpointInternalTest, ServerDiscardsInitialWithShortDestinationConnectionId) {
     auto server_config = make_server_endpoint_config();
     server_config.retry_enabled = true;

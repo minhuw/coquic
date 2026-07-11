@@ -142,6 +142,7 @@ TEST(CoquicPublicApiTest, CoreEndpointCoversServerAndTransportOptions) {
             .verify_peer = true,
             .retry_enabled = true,
             .require_address_validation_token = true,
+            .close_on_undersized_initial = true,
             .application_protocol = "h3",
             .identity =
                 coquic::core::TlsIdentity{

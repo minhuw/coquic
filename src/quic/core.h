@@ -378,6 +378,7 @@ struct QuicCorePacketInspection {
     std::vector<ReceivedFrame> frames;
 };
 
+// NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
 struct QuicCoreEndpointConfig {
     EndpointRole role = EndpointRole::client;
     std::vector<std::uint32_t> supported_versions = {kQuicVersion1};

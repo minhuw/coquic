@@ -1810,6 +1810,11 @@ void QuicConnection::mark_connection_close_frame_sent(const Frame &frame, QuicCo
 
     enter_closing_state(now, pending_connection_close_terminal_state_.value_or(
                                  QuicConnectionTerminalState::closed));
+    advance_closing_close_response_rate_limit();
+}
+
+void QuicConnection::advance_closing_close_response_rate_limit() {
+    closing_close_packet_pending_ = false;
     closing_packets_since_last_close_ = 0;
     closing_packet_response_threshold_ =
         std::min<std::uint64_t>(closing_packet_response_threshold_ * 2u, 1024u);
@@ -1855,6 +1860,7 @@ void QuicConnection::enter_closing_state(QuicCoreTimePoint now,
     pending_connection_close_terminal_state_ = terminal_state;
     closing_close_packet_pending_ = false;
     if (entering_closing) {
+        closing_close_packet_cache_.reset();
         closing_packets_since_last_close_ = 0;
         closing_packet_response_threshold_ = 1;
     }
@@ -1886,6 +1892,7 @@ void QuicConnection::enter_draining_state(QuicCoreTimePoint now) {
     pending_transport_close_.reset();
     closing_application_close_.reset();
     closing_transport_close_.reset();
+    closing_close_packet_cache_.reset();
     closing_packets_since_last_close_ = 0;
     closing_packet_response_threshold_ = 1;
     status_ = HandshakeStatus::failed;

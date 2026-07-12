@@ -854,6 +854,179 @@ TEST(QuicCoreTest, ClosingStateRateLimitsClosePacketRetransmission) {
     EXPECT_TRUE(connection.has_sendable_datagram(coquic::quic::test::test_time(8)));
 }
 
+TEST(QuicCoreTest, ClosingStateCanReplayExactClosePacketWhenEnabled) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.replay_exact_close_packet_while_closing = true;
+    connection.pending_transport_close_ = coquic::quic::TransportConnectionCloseFrame{
+        .error_code =
+            static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation),
+        .frame_type = 0,
+    };
+    connection.pending_connection_close_terminal_state_ =
+        coquic::quic::QuicConnectionTerminalState::failed;
+    connection.enter_closing_state(coquic::quic::test::test_time(1),
+                                   coquic::quic::QuicConnectionTerminalState::failed);
+    connection.closing_close_packet_pending_ = true;
+
+    const auto first = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first.empty());
+    const auto first_packets = decode_sender_datagram(connection, first);
+    ASSERT_EQ(first_packets.size(), 1u);
+    const auto *first_one_rtt =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&first_packets.front());
+    ASSERT_NE(first_one_rtt, nullptr);
+    const auto next_packet_number = connection.application_space_.next_send_packet_number;
+    const auto encrypted_packet_count = connection.current_application_write_key_encrypted_packets_;
+    const auto tracked_packets = tracked_packet_count(connection.application_space_);
+
+    const auto inbound_datagram = bytes_from_ints({0x40, 0x01, 0x02, 0x03});
+    for (const auto response_count : {2u, 4u}) {
+        for (std::uint32_t index = 0; index < response_count; ++index) {
+            connection.process_inbound_datagram(inbound_datagram,
+                                                coquic::quic::test::test_time(2 + index));
+            if (index + 1 < response_count) {
+                EXPECT_FALSE(
+                    connection.has_sendable_datagram(coquic::quic::test::test_time(2 + index)));
+            }
+        }
+
+        ASSERT_TRUE(
+            connection.has_sendable_datagram(coquic::quic::test::test_time(2 + response_count)));
+        const auto replay =
+            connection.drain_outbound_datagram(coquic::quic::test::test_time(2 + response_count));
+        ASSERT_FALSE(replay.empty());
+        EXPECT_EQ(replay, first);
+        const auto replay_packets = decode_sender_datagram(connection, replay);
+        ASSERT_EQ(replay_packets.size(), 1u);
+        const auto *replay_one_rtt =
+            std::get_if<coquic::quic::ProtectedOneRttPacket>(&replay_packets.front());
+        ASSERT_NE(replay_one_rtt, nullptr);
+        EXPECT_EQ(replay_one_rtt->packet_number, first_one_rtt->packet_number);
+        EXPECT_EQ(replay_one_rtt->key_phase, first_one_rtt->key_phase);
+        EXPECT_EQ(connection.application_space_.next_send_packet_number, next_packet_number);
+        EXPECT_EQ(connection.current_application_write_key_encrypted_packets_,
+                  encrypted_packet_count);
+        EXPECT_EQ(tracked_packet_count(connection.application_space_), tracked_packets);
+        EXPECT_FALSE(connection.closing_close_packet_pending_);
+        EXPECT_EQ(connection.closing_packets_since_last_close_, 0u);
+    }
+}
+
+TEST(QuicCoreTest, CachedClosingCloseReplayPreservesOutboundObservability) {
+    coquic::quic::test::ScopedTempDir qlog_dir;
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.replay_exact_close_packet_while_closing = true;
+    connection.config_.enable_packet_inspection = true;
+    enable_qlog_session_for_test(connection, qlog_dir.path());
+    connection.pending_transport_close_ = coquic::quic::TransportConnectionCloseFrame{
+        .error_code =
+            static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation),
+        .frame_type = 0,
+    };
+    connection.pending_connection_close_terminal_state_ =
+        coquic::quic::QuicConnectionTerminalState::failed;
+    connection.enter_closing_state(coquic::quic::test::test_time(1),
+                                   coquic::quic::QuicConnectionTerminalState::failed);
+    connection.closing_close_packet_pending_ = true;
+
+    const auto first = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first.empty());
+    const auto first_inspection = connection.take_packet_inspection();
+    ASSERT_TRUE(first_inspection.has_value());
+    const auto &first_inspection_value = optional_ref_or_terminate(first_inspection);
+    const auto first_records = coquic::quic::test::qlog_seq_records_from_file(
+        coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
+    EXPECT_EQ(coquic::quic::test::qlog_event_count(first_records, "quic:packet_sent"), 1u);
+
+    const auto inbound_datagram = bytes_from_ints({0x40, 0x01, 0x02, 0x03});
+    connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(2));
+    connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(3));
+    const auto replay = connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+
+    ASSERT_FALSE(replay.empty());
+    EXPECT_EQ(replay, first);
+    const auto replay_inspection = connection.take_packet_inspection();
+    ASSERT_TRUE(replay_inspection.has_value());
+    const auto &replay_inspection_value = optional_ref_or_terminate(replay_inspection);
+    EXPECT_EQ(replay_inspection_value.datagram_id, first_inspection_value.datagram_id + 1);
+    EXPECT_EQ(replay_inspection_value.encrypted_packet, first_inspection_value.encrypted_packet);
+    const auto replay_records = coquic::quic::test::qlog_seq_records_from_file(
+        coquic::quic::test::only_sqlog_file_in(qlog_dir.path()));
+    EXPECT_EQ(coquic::quic::test::qlog_event_count(replay_records, "quic:packet_sent"), 2u);
+}
+
+TEST(QuicCoreTest, LocalApplicationCloseCanReplayExactPacketWhenEnabled) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.replay_exact_close_packet_while_closing = true;
+    ASSERT_TRUE(connection
+                    .queue_application_close({
+                        .application_error_code = 91,
+                        .reason_phrase = "exact application close",
+                    })
+                    .has_value());
+
+    const auto first = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first.empty());
+    const auto first_packets = decode_sender_datagram(connection, first);
+    ASSERT_EQ(first_packets.size(), 1u);
+    const auto *first_one_rtt =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&first_packets.front());
+    ASSERT_NE(first_one_rtt, nullptr);
+    const auto next_packet_number = connection.application_space_.next_send_packet_number;
+    const auto encrypted_packet_count = connection.current_application_write_key_encrypted_packets_;
+    const auto tracked_packets = tracked_packet_count(connection.application_space_);
+
+    const auto inbound_datagram = bytes_from_ints({0x40, 0x01, 0x02, 0x03});
+    connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(2));
+    connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(3));
+    const auto replay = connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+
+    ASSERT_FALSE(replay.empty());
+    EXPECT_EQ(replay, first);
+    const auto replay_packets = decode_sender_datagram(connection, replay);
+    ASSERT_EQ(replay_packets.size(), 1u);
+    const auto *replay_one_rtt =
+        std::get_if<coquic::quic::ProtectedOneRttPacket>(&replay_packets.front());
+    ASSERT_NE(replay_one_rtt, nullptr);
+    EXPECT_EQ(replay_one_rtt->packet_number, first_one_rtt->packet_number);
+    EXPECT_EQ(replay_one_rtt->key_phase, first_one_rtt->key_phase);
+    EXPECT_EQ(connection.application_space_.next_send_packet_number, next_packet_number);
+    EXPECT_EQ(connection.current_application_write_key_encrypted_packets_, encrypted_packet_count);
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), tracked_packets);
+}
+
+TEST(QuicCoreTest, ClosingStateRegeneratesClosePacketByDefault) {
+    auto connection = make_connected_client_connection();
+    connection.pending_transport_close_ = coquic::quic::TransportConnectionCloseFrame{
+        .error_code =
+            static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation),
+        .frame_type = 0,
+    };
+    connection.pending_connection_close_terminal_state_ =
+        coquic::quic::QuicConnectionTerminalState::failed;
+    connection.enter_closing_state(coquic::quic::test::test_time(1),
+                                   coquic::quic::QuicConnectionTerminalState::failed);
+    connection.closing_close_packet_pending_ = true;
+
+    const auto first = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
+    ASSERT_FALSE(first.empty());
+    const auto first_next_packet_number = connection.application_space_.next_send_packet_number;
+    const auto first_encrypted_packet_count =
+        connection.current_application_write_key_encrypted_packets_;
+
+    const auto inbound_datagram = bytes_from_ints({0x40, 0x01, 0x02, 0x03});
+    connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(2));
+    connection.process_inbound_datagram(inbound_datagram, coquic::quic::test::test_time(3));
+    const auto second = connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+
+    ASSERT_FALSE(second.empty());
+    EXPECT_NE(second, first);
+    EXPECT_EQ(connection.application_space_.next_send_packet_number, first_next_packet_number + 1);
+    EXPECT_EQ(connection.current_application_write_key_encrypted_packets_,
+              first_encrypted_packet_count + 1);
+    EXPECT_EQ(tracked_packet_count(connection.application_space_), 2u);
+}
+
 TEST(QuicCoreTest, ClosingServerLimitsCloseRetransmissionsByAttributedBytes) {
     auto connection = make_connected_server_connection();
     connection.status_ = coquic::quic::HandshakeStatus::in_progress;
@@ -927,6 +1100,51 @@ TEST(QuicCoreTest, ClosingServerLimitsCloseRetransmissionsOnUnvalidatedPath) {
     // # receives from that address.
     EXPECT_LE(close_datagram.size(), inbound_datagram.size() * 2u * 3u);
     EXPECT_EQ(path.anti_amplification_sent_bytes, close_datagram.size());
+    EXPECT_EQ(connection.last_drained_path_id_, std::optional<coquic::quic::QuicPathId>{7});
+}
+
+TEST(QuicCoreTest, CachedClosingCloseReplayPreservesUnvalidatedPathAmplificationLimit) {
+    auto connection = make_connected_server_connection();
+    connection.config_.transport.replay_exact_close_packet_while_closing = true;
+    connection.queue_transport_close_for_error(
+        coquic::quic::test::test_time(1),
+        coquic::quic::CodecError{.code = coquic::quic::CodecErrorCode::invalid_varint,
+                                 .offset = 0});
+    const auto first = connection.drain_outbound_datagram(coquic::quic::test::test_time(2));
+    ASSERT_FALSE(first.empty());
+
+    connection.current_send_path_id_ = 7;
+    auto &path = connection.ensure_path_state(7);
+    path.validated = false;
+    path.is_current_send_path = true;
+    path.mtu.viable = true;
+    path.mtu.validated_datagram_size = 1200;
+    path.mtu.probe_ceiling = 1200;
+    path.anti_amplification_received_bytes = 1;
+    path.anti_amplification_sent_bytes = 3;
+    connection.closing_close_packet_pending_ = true;
+
+    const auto next_packet_number = connection.application_space_.next_send_packet_number;
+    const auto encrypted_packet_count = connection.current_application_write_key_encrypted_packets_;
+    const auto response_threshold = connection.closing_packet_response_threshold_;
+    const auto packets_since_last_close = connection.closing_packets_since_last_close_;
+    const auto blocked = connection.drain_outbound_datagram(coquic::quic::test::test_time(3));
+
+    EXPECT_TRUE(blocked.empty());
+    EXPECT_EQ(path.anti_amplification_sent_bytes, 3u);
+    EXPECT_TRUE(connection.closing_close_packet_pending_);
+    EXPECT_EQ(connection.application_space_.next_send_packet_number, next_packet_number);
+    EXPECT_EQ(connection.current_application_write_key_encrypted_packets_, encrypted_packet_count);
+    EXPECT_EQ(connection.closing_packet_response_threshold_, response_threshold);
+    EXPECT_EQ(connection.closing_packets_since_last_close_, packets_since_last_close);
+
+    path.anti_amplification_received_bytes =
+        (path.anti_amplification_sent_bytes + first.size() + 2u) / 3u;
+    const auto replay = connection.drain_outbound_datagram(coquic::quic::test::test_time(4));
+
+    ASSERT_FALSE(replay.empty());
+    EXPECT_EQ(replay, first);
+    EXPECT_EQ(path.anti_amplification_sent_bytes, 3u + first.size());
     EXPECT_EQ(connection.last_drained_path_id_, std::optional<coquic::quic::QuicPathId>{7});
 }
 

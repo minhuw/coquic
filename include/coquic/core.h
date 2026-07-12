@@ -158,6 +158,7 @@ struct TransportConfig {
     bool grease_quic_bit = false;
     bool enable_optimistic_ack_mitigation = false;
     bool retain_read_keys_for_peer_close_while_closing = false;
+    bool replay_exact_close_packet_while_closing = false;
 };
 
 struct QlogConfig {

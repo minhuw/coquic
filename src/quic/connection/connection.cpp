@@ -1487,6 +1487,7 @@ void QuicConnection::on_timeout(QuicCoreTimePoint now) {
             pending_transport_close_.reset();
             pending_application_close_.reset();
             pending_connection_close_terminal_state_.reset();
+            closing_close_packet_cache_.reset();
             closing_close_packet_pending_ = false;
             return;
         }

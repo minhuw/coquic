@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "src/quic/transport/congestion.h"
+#include "src/quic/codec/protected_codec.h"
 #include "src/quic/crypto/crypto_stream.h"
 #include "src/quic/qlog/fwd.h"
 #include "src/quic/qlog/types.h"
@@ -1068,6 +1069,7 @@ class QuicConnection {
     bool can_send_connection_close_frame() const;
     std::optional<Frame> connection_close_frame_for_send() const;
     void mark_connection_close_frame_sent(const Frame &frame, QuicCoreTimePoint now);
+    void advance_closing_close_response_rate_limit();
     void enter_closing_state(QuicCoreTimePoint now, QuicConnectionTerminalState terminal_state);
     void enter_draining_state(QuicCoreTimePoint now);
     void enter_peer_close_response_or_draining(QuicCoreTimePoint now);
@@ -1239,6 +1241,11 @@ class QuicConnection {
     std::optional<QuicCoreTimePoint> close_deadline_;
     std::optional<TransportConnectionCloseFrame> closing_transport_close_;
     std::optional<ApplicationConnectionCloseFrame> closing_application_close_;
+    struct ClosingClosePacketCache {
+        SerializedProtectedDatagram datagram;
+        std::vector<ProtectedPacket> packets;
+    };
+    std::optional<ClosingClosePacketCache> closing_close_packet_cache_;
     bool closing_close_packet_pending_ = false;
     std::uint64_t closing_packets_since_last_close_ = 0;
     std::uint64_t closing_packet_response_threshold_ = 1;

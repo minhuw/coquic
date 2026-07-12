@@ -1504,9 +1504,85 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
 
         return commit_serialized_datagram(datagram_packets, std::move(serialized_datagram.value()));
     };
+    const auto cache_closing_close_packet_if_enabled =
+        [&](const std::vector<ProtectedPacket> &packets,
+            const std::vector<SerializedProtectedPacketMetadata> &packet_metadata,
+            const DatagramBuffer &datagram) {
+            if (datagram.empty() || close_mode_ != QuicConnectionCloseMode::closing ||
+                !config_.transport.replay_exact_close_packet_while_closing) {
+                return;
+            }
+            closing_close_packet_cache_ = ClosingClosePacketCache{
+                .datagram =
+                    SerializedProtectedDatagram{
+                        .bytes = datagram,
+                        .packet_metadata = packet_metadata,
+                    },
+                .packets = packets,
+            };
+        };
     if (close_mode_ == QuicConnectionCloseMode::closing) {
         if (!closing_close_packet_pending_ || !can_send_connection_close_frame()) {
             return {};
+        }
+        if (config_.transport.replay_exact_close_packet_while_closing &&
+            closing_close_packet_cache_.has_value()) {
+            const auto &cached_close = closing_close_packet_cache_.value();
+            const auto &cached_datagram = cached_close.datagram.bytes;
+            if (cached_datagram.size() > max_outbound_datagram_size) {
+                return {};
+            }
+
+            const auto ecn = outbound_ecn_codepoint_for_path(selected_send_path_id);
+            if (qlog_session_ != nullptr) {
+                const auto outbound_datagram_id = qlog_session_->next_outbound_datagram_id();
+                for (std::size_t index = 0; index < cached_close.packets.size(); ++index) {
+                    if (index >= cached_close.datagram.packet_metadata.size()) {
+                        break;
+                    }
+                    const auto snapshot = make_qlog_packet_snapshot(
+                        cached_close.packets[index],
+                        qlog::PacketSnapshotContext{
+                            .raw_length = cached_close.datagram.packet_metadata[index].length,
+                            .datagram_id = outbound_datagram_id,
+                        });
+                    static_cast<void>(qlog_session_->write_event(
+                        now, "quic:packet_sent", qlog::serialize_packet_snapshot(snapshot)));
+                }
+            }
+            note_outbound_datagram_bytes(cached_datagram.size(), selected_send_path_id, now);
+            last_drained_path_id_ = selected_send_path_id;
+            last_drained_ecn_codepoint_ = ecn;
+            last_drained_is_pmtu_probe_ = false;
+            last_drained_allows_send_continuation_ = false;
+            last_send_continuation_time_.reset();
+            if (config_.enable_packet_inspection) {
+                const auto datagram_id = next_packet_inspection_datagram_id_++;
+                const auto inspection_count =
+                    queue_outbound_packet_inspections(cached_close.datagram, datagram_id);
+                maybe_record_packet_inspection_datagram_id(
+                    last_drained_packet_inspection_datagram_id_,
+                    PacketInspectionDatagramId{datagram_id},
+                    PacketInspectionCount{inspection_count});
+            }
+            if (send_profile_enabled()) {
+                auto &profile = send_profile_counters();
+                ++profile.datagrams;
+                profile.bytes += cached_datagram.size();
+                profile.max_datagram =
+                    std::max<std::uint64_t>(profile.max_datagram, cached_datagram.size());
+                profile.datagrams_le_1200 +=
+                    static_cast<std::uint64_t>(cached_datagram.size() <= 1200);
+                profile.datagrams_le_1434 +=
+                    static_cast<std::uint64_t>(cached_datagram.size() <= 1434);
+                profile.datagrams_le_1472 +=
+                    static_cast<std::uint64_t>(cached_datagram.size() <= 1472);
+                profile.datagrams_gt_1472 +=
+                    static_cast<std::uint64_t>(cached_datagram.size() > 1472);
+                ++profile.continuation_denied_not_ack_eliciting;
+            }
+            advance_closing_close_response_rate_limit();
+            return cached_datagram;
         }
         const auto close_frame = connection_close_frame_for_send();
         if (!close_frame.has_value()) {
@@ -1755,7 +1831,11 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
         last_drained_path_id_ = selected_send_path_id;
         last_drained_ecn_codepoint_ = outbound_ecn_codepoint_for_path(selected_send_path_id);
         last_drained_is_pmtu_probe_ = false;
-        return commit_serialized_datagram(close_packets, std::move(candidate.value()));
+        const auto cached_packets = close_packets;
+        const auto cached_packet_metadata = candidate.value().packet_metadata;
+        auto datagram = commit_serialized_datagram(close_packets, std::move(candidate.value()));
+        cache_closing_close_packet_if_enabled(cached_packets, cached_packet_metadata, datagram);
+        return datagram;
     }
     const auto trim_crypto_ranges_to_fit = [&](auto &&serialize_with_crypto_ranges,
                                                auto &&restore_trimmed_crypto,
@@ -5264,6 +5344,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                 local_application_close_sent_ = true;
                 mark_connection_close_frame_sent(*application_close_frame, now);
             }
+            const auto cached_application_packet_metadata =
+                application_close_frame.has_value()
+                    ? candidate_application_datagram.value().packet_metadata
+                    : std::vector<SerializedProtectedPacketMetadata>{};
             if (use_fast_serialized_one_rtt_commit) {
                 if (send_profile_enabled()) {
                     ++send_profile_counters().application_fast_serialized_commits;
@@ -5284,6 +5368,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                         .path_challenge_path_id =
                             path_challenge_path_id(application_path_validation_frames),
                     });
+                if (application_close_frame.has_value()) {
+                    cache_closing_close_packet_if_enabled(
+                        packets, cached_application_packet_metadata, committed);
+                }
                 if (should_consume_selected_datagram_frame_after_commit(
                         committed.empty(), selected_datagram_frame.has_value())) {
                     if (selected_datagram_queue_index.has_value() &&
@@ -5308,6 +5396,10 @@ DatagramBuffer QuicConnection::flush_outbound_datagram(QuicCoreTimePoint now,
                     .path_challenge_path_id =
                         path_challenge_path_id(application_path_validation_frames),
                 });
+            if (application_close_frame.has_value()) {
+                cache_closing_close_packet_if_enabled(packets, cached_application_packet_metadata,
+                                                      committed);
+            }
             if (should_consume_selected_datagram_frame_after_commit(
                     committed.empty(), selected_datagram_frame.has_value())) {
                 if (selected_datagram_queue_index.has_value() &&

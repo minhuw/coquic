@@ -172,6 +172,7 @@ struct QuicTransportConfig {
     // CONNECTION_CLOSE carrying NO_ERROR before entering draining.
     bool respond_to_peer_connection_close = false;
     bool retain_read_keys_for_peer_close_while_closing = false;
+    bool replay_exact_close_packet_while_closing = false;
 };
 
 struct QuicQlogConfig {

@@ -247,6 +247,7 @@ quic::QuicTransportConfig to_internal(const TransportConfig &config) {
         .enable_optimistic_ack_mitigation = config.enable_optimistic_ack_mitigation,
         .retain_read_keys_for_peer_close_while_closing =
             config.retain_read_keys_for_peer_close_while_closing,
+        .replay_exact_close_packet_while_closing = config.replay_exact_close_packet_while_closing,
     };
 }
 

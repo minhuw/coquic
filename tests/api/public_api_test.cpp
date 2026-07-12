@@ -158,6 +158,7 @@ TEST(CoquicPublicApiTest, CoreEndpointCoversServerAndTransportOptions) {
                     .grease_reserved_versions = true,
                     .grease_quic_bit = true,
                     .enable_optimistic_ack_mitigation = true,
+                    .replay_exact_close_packet_while_closing = true,
                 },
             .zero_rtt =
                 {

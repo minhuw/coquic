@@ -5,6 +5,7 @@ import fnmatch
 import json
 import re
 import threading
+import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import timezone
@@ -54,6 +55,7 @@ from .worktree import Worktrees
 MAX_TASK_REVISIONS = 100
 MAX_REVIEW_RUN_ATTEMPTS = 2
 WORKER_HEARTBEAT_SECONDS = 30
+PUSH_RETRY_DELAYS_SECONDS = (5.0, 20.0)
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _GTEST_DURATION_RE = re.compile(
@@ -71,6 +73,22 @@ _GTEST_FAILURE_BLOCK_RE = re.compile(
 )
 _GTEST_FAILED_TEST_RE = re.compile(
     r"(?m)^\[  FAILED  \] (?!\d+ tests?\b)[^\n]+$"
+)
+_TRANSIENT_PUSH_PATTERNS = (
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "connection timed out",
+    "connection reset by peer",
+    "failed to connect",
+    "remote end hung up unexpectedly",
+    "tls connection was non-properly terminated",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+)
+_TRANSIENT_PUSH_HTTP_STATUS_RE = re.compile(
+    r"\b(?:http(?: status)?|status(?: code)?|unexpected status)\s*[:=]?\s*5\d\d\b",
+    re.IGNORECASE,
 )
 
 
@@ -1636,27 +1654,64 @@ class StewardExecutor:
             "push",
             f"pushing {sha} to {self.config.git_remote}/{self.config.main_branch}",
         )
-        try:
-            push_result = self.worktrees.push_head_to_main(worktree)
-        except RuntimeError as exc:
-            message = str(exc)[-2000:]
-            log_path = _write_integration_command_log(
-                self.config, task.id, "git-push.txt", message
-            )
-            transcript.write("push_failed", message)
-            self._finish_task(task.id, TaskStatus.failed, "push failed")
-            self._finish_task(source.id, TaskStatus.failed, "push failed")
-            self.store.add_event(
-                source.id,
-                "integration.push_failed",
-                message,
-                {
-                    "integration_task_id": task.id,
-                    "commit": sha,
-                    "output_path": str(log_path),
-                },
-            )
-            return False
+        push_result = None
+        retry_count = 0
+        for attempt in range(len(PUSH_RETRY_DELAYS_SECONDS) + 1):
+            try:
+                push_result = self.worktrees.push_head_to_main(worktree)
+                break
+            except RuntimeError as exc:
+                message = str(exc)[-2000:]
+                retryable = _is_transient_push_failure(message)
+                if retryable and attempt < len(PUSH_RETRY_DELAYS_SECONDS):
+                    delay = PUSH_RETRY_DELAYS_SECONDS[attempt]
+                    retry_count += 1
+                    retry_log_path = _write_integration_command_log(
+                        self.config,
+                        task.id,
+                        f"git-push-attempt-{attempt + 1}.txt",
+                        message,
+                    )
+                    transcript.write(
+                        "push_retry",
+                        f"attempt {attempt + 1} failed; retrying in {delay:g}s\n{message}",
+                    )
+                    self.store.add_event(
+                        source.id,
+                        "integration.push_retry",
+                        message,
+                        {
+                            "integration_task_id": task.id,
+                            "commit": sha,
+                            "attempt": attempt + 1,
+                            "next_attempt": attempt + 2,
+                            "delay_seconds": delay,
+                            "output_path": str(retry_log_path),
+                        },
+                    )
+                    time.sleep(delay)
+                    continue
+
+                log_path = _write_integration_command_log(
+                    self.config, task.id, "git-push.txt", message
+                )
+                transcript.write("push_failed", message)
+                self._finish_task(task.id, TaskStatus.failed, "push failed")
+                self._finish_task(source.id, TaskStatus.failed, "push failed")
+                self.store.add_event(
+                    source.id,
+                    "integration.push_failed",
+                    message,
+                    {
+                        "integration_task_id": task.id,
+                        "commit": sha,
+                        "output_path": str(log_path),
+                        "retry_count": retry_count,
+                        "retryable": retryable,
+                    },
+                )
+                return False
+        assert push_result is not None
         push_log_path = _write_integration_command_log(
             self.config,
             task.id,
@@ -2124,6 +2179,13 @@ def _stable_validation_diagnostics(validation: ValidationResult) -> str:
         match.group(0).strip() for match in _GTEST_FAILED_TEST_RE.finditer(text)
     )
     return "\n\n".join(sorted(signatures)) if signatures else text
+
+
+def _is_transient_push_failure(message: str) -> bool:
+    lowered = message.lower()
+    return any(pattern in lowered for pattern in _TRANSIENT_PUSH_PATTERNS) or bool(
+        _TRANSIENT_PUSH_HTTP_STATUS_RE.search(message)
+    )
 
 
 def _write_integration_command_log(

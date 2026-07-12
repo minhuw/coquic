@@ -58,6 +58,7 @@ from coquic_steward.core.models import (
 from coquic_steward.core.subprocesses import CommandResult, run_command
 from coquic_steward.execution import StewardExecutor, Worktrees
 from coquic_steward.execution.executor import (
+    _is_transient_push_failure,
     commit_message_schema_path,
     frozen_patch_paths,
     parse_commit_message,
@@ -7351,6 +7352,22 @@ def test_integration_manager_serializes_push_to_main(
         ]
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+    real_push = Worktrees.push_head_to_main
+    push_attempts = 0
+    push_delays: list[float] = []
+
+    def transient_push(self, path):
+        nonlocal push_attempts
+        push_attempts += 1
+        if push_attempts == 1:
+            raise RuntimeError("Could not resolve host: github.com")
+        return real_push(self, path)
+
+    monkeypatch.setattr(Worktrees, "push_head_to_main", transient_push)
+    monkeypatch.setattr(
+        "coquic_steward.execution.executor.time.sleep",
+        lambda delay: push_delays.append(delay),
+    )
 
     assert StewardExecutor(config, store).run_task(integration.id)
     pushed_source = store.get(source.id)
@@ -7397,6 +7414,14 @@ def test_integration_manager_serializes_push_to_main(
         event.kind == "integration.commit_message_generated"
         for event in store.events(source.id)
     )
+    retry_event = next(
+        event
+        for event in store.events(source.id)
+        if event.kind == "integration.push_retry"
+    )
+    assert retry_event.data["attempt"] == 1
+    assert push_attempts == 2
+    assert push_delays == [5.0]
     assert any(event.kind == "main.pushed" for event in store.events(source.id))
 
 
@@ -7476,10 +7501,18 @@ def test_integration_manager_preserves_branch_when_push_fails(
         ]
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+    push_attempts = 0
+    push_delays: list[float] = []
+
+    def fail_transient_push(_self, _path):
+        nonlocal push_attempts
+        push_attempts += 1
+        raise RuntimeError("Could not resolve host: github.com")
+
+    monkeypatch.setattr(Worktrees, "push_head_to_main", fail_transient_push)
     monkeypatch.setattr(
-        Worktrees,
-        "push_head_to_main",
-        lambda _self, _path: (_ for _ in ()).throw(RuntimeError("network down")),
+        "coquic_steward.execution.executor.time.sleep",
+        lambda delay: push_delays.append(delay),
     )
 
     assert not StewardExecutor(config, store).run_task(integration.id)
@@ -7501,7 +7534,24 @@ def test_integration_manager_preserves_branch_when_push_fails(
         git_branch_head(config.repo_root, failed_integration.branch_name)
         == push_event.data["commit"]
     )
+    retry_events = [
+        event
+        for event in store.events(source.id)
+        if event.kind == "integration.push_retry"
+    ]
+    assert push_attempts == 3
+    assert push_delays == [5.0, 20.0]
+    assert len(retry_events) == 2
+    assert push_event.data["retry_count"] == 2
+    assert push_event.data["retryable"] is True
     assert not any(event.kind == "main.pushed" for event in store.events(source.id))
+
+
+def test_push_retry_classification_excludes_remote_rejection() -> None:
+    assert _is_transient_push_failure("Could not resolve host: github.com")
+    assert _is_transient_push_failure("unexpected status 503 Service Unavailable")
+    assert not _is_transient_push_failure("remote rejected: permission denied")
+    assert not _is_transient_push_failure("non-fast-forward update rejected")
 
 
 def test_integration_manager_closes_feature_issue_after_push(

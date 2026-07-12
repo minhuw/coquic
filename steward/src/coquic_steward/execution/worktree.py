@@ -48,7 +48,35 @@ class Worktrees:
         return bool(result.stdout.strip())
 
     def diff(self, path: Path) -> str:
-        return run_command(["git", "diff", "--binary"], cwd=path, check=True).stdout
+        tracked = run_command(
+            ["git", "diff", "--binary", "HEAD", "--"], cwd=path, check=True
+        ).stdout
+        untracked = run_command(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z", "--"],
+            cwd=path,
+            check=True,
+        ).stdout
+        patches = [tracked]
+        for relative_path in sorted(filter(None, untracked.split("\0"))):
+            result = run_command(
+                [
+                    "git",
+                    "diff",
+                    "--binary",
+                    "--no-index",
+                    "--",
+                    "/dev/null",
+                    relative_path,
+                ],
+                cwd=path,
+            )
+            if result.returncode not in {0, 1}:
+                raise RuntimeError(
+                    f"could not diff untracked file {relative_path!r}: "
+                    f"{result.stderr.strip()}"
+                )
+            patches.append(result.stdout)
+        return "".join(patches)
 
     def save_patch(self, path: Path, patch_path: Path) -> None:
         patch_path.parent.mkdir(parents=True, exist_ok=True)

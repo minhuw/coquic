@@ -5619,6 +5619,40 @@ def test_worktree_create_and_patch(config: StewardConfig) -> None:
     assert worktrees.has_changes(path)
 
 
+def test_worktree_patch_includes_staged_and_untracked_changes(
+    config: StewardConfig,
+) -> None:
+    store = TaskStore(config.db_path)
+    source, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom, worker=WorkerKind.custom, title="Source", prompt="P"
+        )
+    )
+    target, _ = store.add_task(
+        TaskSpec(
+            kind=TaskKind.custom, worker=WorkerKind.custom, title="Target", prompt="P"
+        )
+    )
+    worktrees = Worktrees(config)
+    source_path, _ = worktrees.create(source)
+    target_path, _ = worktrees.create(target)
+
+    (source_path / "README.md").write_text("staged\n", encoding="utf-8")
+    run_command(["git", "add", "README.md"], cwd=source_path, check=True)
+    untracked = source_path / "notes" / "new file.txt"
+    untracked.parent.mkdir()
+    untracked.write_text("untracked\n", encoding="utf-8")
+
+    patch = worktrees.diff(source_path)
+    worktrees.apply_patch(target_path, patch)
+
+    assert (target_path / "README.md").read_text(encoding="utf-8") == "staged\n"
+    assert (target_path / "notes" / "new file.txt").read_text(
+        encoding="utf-8"
+    ) == "untracked\n"
+    assert "new file mode 100644" in patch
+
+
 def test_worktree_reports_frozen_file_and_directory_changes(
     config: StewardConfig,
 ) -> None:

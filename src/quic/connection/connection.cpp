@@ -397,13 +397,14 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
             return fail_with_codec_error("expand_traffic_secret", current_context.error());
         }
 
-        const auto timed_deserialize = [&](const DeserializeProtectionContext &context) {
-            if (send_profile_enabled()) {
-                ++send_profile_counters().deserialize_attempts;
-            }
-            COQUIC_SEND_PROFILE_TIMER(deserialize_timer, deserialize_ns);
-            return deserialize_packets(packet_bytes, context);
-        };
+        const auto timed_deserialize =
+            [&](const DeserializeProtectionContext &deserialize_context) {
+                if (send_profile_enabled()) {
+                    ++send_profile_counters().deserialize_attempts;
+                }
+                COQUIC_SEND_PROFILE_TIMER(deserialize_timer, deserialize_ns);
+                return deserialize_packets(packet_bytes, deserialize_context);
+            };
         if (send_profile_enabled()) {
             ++send_profile_counters().inbound_packets;
         }
@@ -772,13 +773,15 @@ QuicInboundDatagramResult QuicConnection::process_inbound_datagram(
             return fail_with_codec_error("derive_next_traffic_secret", next_read_ready.error());
         }
 
-        const auto timed_deserialize = [&](const DeserializeProtectionContext &context) {
-            if (send_profile_enabled()) {
-                ++send_profile_counters().deserialize_attempts;
-            }
-            COQUIC_SEND_PROFILE_TIMER(deserialize_timer, deserialize_ns);
-            return deserialize_received_protected_packet_fast_compact(storage, begin, end, context);
-        };
+        const auto timed_deserialize =
+            [&](const DeserializeProtectionContext &deserialize_context) {
+                if (send_profile_enabled()) {
+                    ++send_profile_counters().deserialize_attempts;
+                }
+                COQUIC_SEND_PROFILE_TIMER(deserialize_timer, deserialize_ns);
+                return deserialize_received_protected_packet_fast_compact(storage, begin, end,
+                                                                          deserialize_context);
+            };
 
         const auto current_context = make_current_short_header_deserialize_context();
         if (!current_context.has_value()) {
@@ -1156,9 +1159,9 @@ bool QuicConnection::process_closing_peer_close_datagram(std::span<const std::by
             packet);
     };
 
-    const auto context = make_deserialize_context();
-    if (!context.has_value()) {
-        log_codec_failure("closing_state_deserialize_context", context.error());
+    const auto deserialize_context = make_deserialize_context();
+    if (!deserialize_context.has_value()) {
+        log_codec_failure("closing_state_deserialize_context", deserialize_context.error());
         return false;
     }
 
@@ -1185,7 +1188,8 @@ bool QuicConnection::process_closing_peer_close_datagram(std::span<const std::by
             }
         }
 
-        const auto packets = deserialize_received_protected_packet(packet_bytes, context.value());
+        const auto packets =
+            deserialize_received_protected_packet(packet_bytes, deserialize_context.value());
         if (!packets.has_value()) {
             static_cast<void>(note_packet_authentication_failure(packets.error(), now));
             offset += packet_length.value();

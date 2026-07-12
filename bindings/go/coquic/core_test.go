@@ -54,3 +54,18 @@ func TestConnectProducesInitialDatagram(t *testing.T) {
 	}
 	t.Fatalf("connect result had no send datagram effect: %#v", effects)
 }
+
+func TestTransportConfigDefaultsAndAlternateEcnPolicy(t *testing.T) {
+	config := DefaultTransportConfig()
+	if config.EcnPolicy != EcnPolicyRFC9000ECT0 {
+		t.Fatalf("default ECN policy = %d", config.EcnPolicy)
+	}
+	config.EcnPolicy = EcnPolicyRFC8311ECT1
+	endpointConfig := DefaultEndpointConfig()
+	endpointConfig.Transport = config
+	endpoint, err := NewEndpoint(endpointConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint.Destroy()
+}

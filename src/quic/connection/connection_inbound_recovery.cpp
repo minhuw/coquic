@@ -1473,6 +1473,8 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
 
                 path.ecn.last_peer_counts[packet_space_index] = current_counts;
                 path.ecn.has_last_peer_counts[packet_space_index] = true;
+                trace_ecn_event(config_.source_connection_id, path_id, "validation",
+                                "outcome=success");
                 if (path.ecn.state == QuicPathEcnState::probing) {
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
                     // # Upon successful validation, an endpoint MAY continue
@@ -1529,6 +1531,9 @@ CodecResult<bool> QuicConnection::process_inbound_ack_cursor(
             congestion_controller_.on_persistent_congestion();
         }
     }
+    // RFC 9002 Section 8.3 permits the congestion response to ECN-CE to be
+    // selected by the congestion controller. CoQUIC's RFC 8311 ECT(1) policy
+    // uses the existing single loss-equivalent response.
     if (latest_ecn_ce_sent_time.has_value()) {
         if (send_profile_enabled()) {
             ++send_profile_counters().ecn_loss_events;
@@ -2361,6 +2366,7 @@ bool QuicConnection::process_simple_stream_ack_ecn(
 
         path.ecn.last_peer_counts[packet_space_index] = current_counts;
         path.ecn.has_last_peer_counts[packet_space_index] = true;
+        trace_ecn_event(config_.source_connection_id, path_id, "validation", "outcome=success");
         if (should_mark_ecn_probing_path_capable(path.ecn.state)) {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
             // # Upon successful validation, an endpoint MAY continue to set an
@@ -2428,6 +2434,7 @@ bool QuicConnection::process_single_path_simple_stream_ack_ecn(
 
     path.ecn.last_peer_counts[packet_space_index] = current_counts;
     path.ecn.has_last_peer_counts[packet_space_index] = true;
+    trace_ecn_event(config_.source_connection_id, path_id, "validation", "outcome=success");
     if (path.ecn.state == QuicPathEcnState::probing) {
         //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
         // # Upon successful validation, an endpoint MAY continue to set an ECT
@@ -2472,6 +2479,8 @@ bool QuicConnection::try_ack_simple_stream_fast_path(
     static_cast<void>(try_ack_simple_congestion_batch(simple_stream_ack_samples,
                                                       simple_stream_ack_aggregate, acked_packets,
                                                       now, shared_rtt_state));
+    // Keep the fast path's RFC 8311 ECT(1) response equivalent to the generic
+    // ACK path: one CE-counter increase produces one loss-equivalent event.
     if (latest_ecn_ce_sent_time.has_value()) {
         if (send_profile_enabled()) {
             ++send_profile_counters().ecn_loss_events;

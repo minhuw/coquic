@@ -5,7 +5,7 @@ import ctypes.util
 import os
 from pathlib import Path
 
-FFI_ABI_VERSION = 8
+FFI_ABI_VERSION = 10
 
 coquic_time_us_t = C.c_uint64
 
@@ -29,6 +29,9 @@ COQUIC_ECN_NOT_ECT = 1
 COQUIC_ECN_ECT0 = 2
 COQUIC_ECN_ECT1 = 3
 COQUIC_ECN_CE = 4
+
+COQUIC_ECN_POLICY_RFC9000_ECT0 = 0
+COQUIC_ECN_POLICY_RFC8311_ECT1 = 1
 
 COQUIC_STATE_CHANGE_HANDSHAKE_READY = 0
 COQUIC_STATE_CHANGE_HANDSHAKE_CONFIRMED = 1
@@ -189,6 +192,8 @@ class coquic_transport_config_t(C.Structure):
         ("grease_reserved_versions", C.c_uint8),
         ("grease_quic_bit", C.c_uint8),
         ("enable_optimistic_ack_mitigation", C.c_uint8),
+        ("underfilled_packet_coalescing_delay_us", coquic_time_us_t),
+        ("ecn_policy", C.c_uint8),
     ]
 
 

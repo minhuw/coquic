@@ -4,7 +4,7 @@
 
 use std::ffi::c_char;
 
-pub const COQUIC_FFI_ABI_VERSION: u32 = 8;
+pub const COQUIC_FFI_ABI_VERSION: u32 = 10;
 
 pub enum coquic_endpoint_t {}
 pub enum coquic_result_t {}
@@ -42,6 +42,10 @@ pub const COQUIC_ECN_NOT_ECT: coquic_ecn_codepoint_t = 1;
 pub const COQUIC_ECN_ECT0: coquic_ecn_codepoint_t = 2;
 pub const COQUIC_ECN_ECT1: coquic_ecn_codepoint_t = 3;
 pub const COQUIC_ECN_CE: coquic_ecn_codepoint_t = 4;
+
+pub type coquic_ecn_policy_t = u8;
+pub const COQUIC_ECN_POLICY_RFC9000_ECT0: coquic_ecn_policy_t = 0;
+pub const COQUIC_ECN_POLICY_RFC8311_ECT1: coquic_ecn_policy_t = 1;
 
 pub type coquic_state_change_t = u8;
 pub const COQUIC_STATE_CHANGE_HANDSHAKE_READY: coquic_state_change_t = 0;
@@ -232,6 +236,8 @@ pub struct coquic_transport_config_t {
     pub grease_reserved_versions: u8,
     pub grease_quic_bit: u8,
     pub enable_optimistic_ack_mitigation: u8,
+    pub underfilled_packet_coalescing_delay_us: coquic_time_us_t,
+    pub ecn_policy: coquic_ecn_policy_t,
 }
 
 #[repr(C)]

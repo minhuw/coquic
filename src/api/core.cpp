@@ -82,6 +82,16 @@ quic::QuicEcnCodepoint to_internal(EcnCodepoint ecn) {
     return quic::QuicEcnCodepoint::unavailable;
 }
 
+quic::QuicEcnPolicy to_internal(EcnPolicy policy) {
+    switch (policy) {
+    case EcnPolicy::rfc9000_ect0:
+        return quic::QuicEcnPolicy::rfc9000_ect0;
+    case EcnPolicy::rfc8311_ect1:
+        return quic::QuicEcnPolicy::rfc8311_ect1;
+    }
+    return quic::QuicEcnPolicy::rfc9000_ect0;
+}
+
 EcnCodepoint from_internal(quic::QuicEcnCodepoint ecn) {
     switch (ecn) {
     case quic::QuicEcnCodepoint::unavailable:
@@ -238,6 +248,7 @@ quic::QuicTransportConfig to_internal(const TransportConfig &config) {
         .initial_max_streams_uni = config.initial_max_streams_uni,
         .max_datagram_frame_size = config.max_datagram_frame_size,
         .congestion_control = to_internal(config.congestion_control),
+        .ecn_policy = to_internal(config.ecn_policy),
         .enable_hystart_plus_plus = config.enable_hystart_plus_plus,
         .send_stream_fairness = config.send_stream_fairness,
         .underfilled_packet_coalescing_delay = config.underfilled_packet_coalescing_delay,

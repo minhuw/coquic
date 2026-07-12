@@ -559,6 +559,13 @@ PathState &QuicConnection::ensure_path_state(QuicPathId path_id) {
     if (inserted) {
         it->second.validated =
             last_validated_path_id_.has_value() && last_validated_path_id_ == path_id;
+        it->second.ecn.transmit_mark = config_.transport.ecn_policy == QuicEcnPolicy::rfc8311_ect1
+                                           ? QuicEcnCodepoint::ect1
+                                           : QuicEcnCodepoint::ect0;
+        trace_ecn_event(config_.source_connection_id, path_id, "policy-selected",
+                        config_.transport.ecn_policy == QuicEcnPolicy::rfc8311_ect1
+                            ? "policy=rfc8311_ect1 marking=ect1"
+                            : "policy=rfc9000_ect0 marking=ect0");
         it->second.spin.disabled = latency_spin_bit_disabled_;
         initialize_path_mtu_state(it->second);
     }
@@ -4250,6 +4257,8 @@ bool QuicConnection::outbound_spin_bit_for_path(std::optional<QuicPathId> path_i
 
 void QuicConnection::disable_ecn_on_path(QuicPathId path_id) {
     auto &path = ensure_path_state(path_id);
+    trace_ecn_event(config_.source_connection_id, path_id, "validation",
+                    "outcome=failure fallback=not_ect");
     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
     // # If validation fails, then the endpoint MUST disable ECN.
     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
@@ -4267,12 +4276,25 @@ QuicEcnCodepoint
 QuicConnection::outbound_ecn_codepoint_for_path(std::optional<QuicPathId> path_id) const {
     const auto effective_path_id = path_id.has_value() ? path_id : current_send_path_id_;
     if (!effective_path_id.has_value()) {
+        trace_ecn_event(config_.source_connection_id, std::nullopt, "fallback",
+                        "mark=not_ect reason=no-path");
         return QuicEcnCodepoint::not_ect;
     }
 
     const auto path = paths_.find(*effective_path_id);
-    if (path == paths_.end() || path->second.ecn.state == QuicPathEcnState::failed ||
-        !is_ect_codepoint(path->second.ecn.transmit_mark)) {
+    if (path == paths_.end()) {
+        trace_ecn_event(config_.source_connection_id, effective_path_id, "fallback",
+                        "mark=not_ect reason=path-missing");
+        return QuicEcnCodepoint::not_ect;
+    }
+    if (path->second.ecn.state == QuicPathEcnState::failed) {
+        trace_ecn_event(config_.source_connection_id, effective_path_id, "fallback",
+                        "mark=not_ect reason=validation-failed");
+        return QuicEcnCodepoint::not_ect;
+    }
+    if (!is_ect_codepoint(path->second.ecn.transmit_mark)) {
+        trace_ecn_event(config_.source_connection_id, effective_path_id, "fallback",
+                        "mark=not_ect reason=non-ect-policy");
         //= https://www.rfc-editor.org/rfc/rfc9000#section-13.4.2.2
         // # It stops setting the ECT codepoint in IP packets that it sends,
         // # assuming that either the network path or the peer does not support

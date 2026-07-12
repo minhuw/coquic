@@ -1322,6 +1322,74 @@ TEST(QuicCoreTest, AckProcessingTreatsCeCounterGrowthAsSingleCongestionEvent) {
     EXPECT_EQ(connection.congestion_controller_.congestion_window(), first_reduction);
 }
 
+TEST(QuicCoreTest, Ect1CeCounterGrowthUsesSingleCongestionEvent) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.ecn_policy = coquic::quic::QuicEcnPolicy::rfc8311_ect1;
+    auto &path = connection.ensure_path_state(0);
+    path.ecn.state = coquic::quic::QuicPathEcnState::capable;
+    path.ecn.transmit_mark = coquic::quic::QuicEcnCodepoint::ect1;
+
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 1,
+                                     .sent_time = coquic::quic::test::test_time(1),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                     .path_id = 0,
+                                     .ecn = coquic::quic::QuicEcnCodepoint::ect1,
+                                 });
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 2,
+                                     .sent_time = coquic::quic::test::test_time(2),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                     .path_id = 0,
+                                     .ecn = coquic::quic::QuicEcnCodepoint::ect1,
+                                 });
+
+    const auto before = connection.congestion_controller_.congestion_window();
+    auto first = connection.process_inbound_ack(connection.application_space_,
+                                                coquic::quic::AckFrame{
+                                                    .largest_acknowledged = 1,
+                                                    .first_ack_range = 0,
+                                                    .ecn_counts =
+                                                        coquic::quic::AckEcnCounts{
+                                                            .ect0 = 0,
+                                                            .ect1 = 0,
+                                                            .ecn_ce = 1,
+                                                        },
+                                                },
+                                                coquic::quic::test::test_time(10),
+                                                /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+                                                /*suppress_pto_reset=*/false);
+
+    ASSERT_TRUE(first.has_value());
+    EXPECT_LT(connection.congestion_controller_.congestion_window(), before);
+    EXPECT_EQ(path.ecn.state, coquic::quic::QuicPathEcnState::capable);
+
+    const auto first_reduction = connection.congestion_controller_.congestion_window();
+    auto second = connection.process_inbound_ack(connection.application_space_,
+                                                 coquic::quic::AckFrame{
+                                                     .largest_acknowledged = 2,
+                                                     .first_ack_range = 0,
+                                                     .ecn_counts =
+                                                         coquic::quic::AckEcnCounts{
+                                                             .ect0 = 0,
+                                                             .ect1 = 1,
+                                                             .ecn_ce = 1,
+                                                         },
+                                                 },
+                                                 coquic::quic::test::test_time(12),
+                                                 /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+                                                 /*suppress_pto_reset=*/false);
+
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(connection.congestion_controller_.congestion_window(), first_reduction);
+}
+
 TEST(QuicCoreTest, AckProcessingValidatesEct1CountsIndependently) {
     auto connection = make_connected_client_connection();
     auto &path = connection.ensure_path_state(0);

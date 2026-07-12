@@ -505,6 +505,7 @@ coquic_transport_config_t transport_from_object(napi_env env, napi_value value,
         get_u64(env, value, "maxDatagramFrameSize", fallback.max_datagram_frame_size);
     fallback.congestion_control =
         get_u8(env, value, "congestionControl", fallback.congestion_control);
+    fallback.ecn_policy = get_u8(env, value, "ecnPolicy", fallback.ecn_policy);
     fallback.enable_hystart_plus_plus = static_cast<std::uint8_t>(
         get_bool(env, value, "enableHystartPlusPlus", fallback.enable_hystart_plus_plus));
     fallback.send_stream_fairness = static_cast<std::uint8_t>(
@@ -544,6 +545,7 @@ napi_value transport_to_js(napi_env env, const coquic_transport_config_t &raw) {
     set_u64(env, out, "initialMaxStreamsUni", raw.initial_max_streams_uni);
     set_u64(env, out, "maxDatagramFrameSize", raw.max_datagram_frame_size);
     set_u32(env, out, "congestionControl", raw.congestion_control);
+    set_u32(env, out, "ecnPolicy", raw.ecn_policy);
     set_bool(env, out, "enableHystartPlusPlus", raw.enable_hystart_plus_plus != 0);
     set_bool(env, out, "sendStreamFairness", raw.send_stream_fairness != 0);
     set_bool(env, out, "enableLatencySpinBit", raw.enable_latency_spin_bit != 0);

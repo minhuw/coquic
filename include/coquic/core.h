@@ -62,6 +62,13 @@ enum class EcnCodepoint : std::uint8_t {
     ce,
 };
 
+enum class EcnPolicy : std::uint8_t {
+    // RFC 9000 Section 13.4.2's default ECN marking strategy.
+    rfc9000_ect0,
+    // Explicit RFC 8311-style alternate marking strategy.
+    rfc8311_ect1,
+};
+
 enum class StateChange : std::uint8_t {
     handshake_ready,
     handshake_confirmed,
@@ -144,6 +151,7 @@ struct TransportConfig {
     std::uint64_t initial_max_streams_uni = 16;
     std::uint64_t max_datagram_frame_size = 65535;
     CongestionControl congestion_control = CongestionControl::newreno;
+    EcnPolicy ecn_policy = EcnPolicy::rfc9000_ect0;
     bool enable_hystart_plus_plus = true;
     bool send_stream_fairness = true;
     // A zero duration disables the optional RFC 9000 Section 13 stream-packet coalescing delay.

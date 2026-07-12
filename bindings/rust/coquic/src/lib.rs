@@ -151,6 +151,28 @@ impl EcnCodepoint {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EcnPolicy {
+    Rfc9000Ect0,
+    Rfc8311Ect1,
+}
+
+impl EcnPolicy {
+    fn into_raw(self) -> ffi::coquic_ecn_policy_t {
+        match self {
+            Self::Rfc9000Ect0 => ffi::COQUIC_ECN_POLICY_RFC9000_ECT0,
+            Self::Rfc8311Ect1 => ffi::COQUIC_ECN_POLICY_RFC8311_ECT1,
+        }
+    }
+
+    fn from_raw(raw: ffi::coquic_ecn_policy_t) -> Self {
+        match raw {
+            ffi::COQUIC_ECN_POLICY_RFC8311_ECT1 => Self::Rfc8311Ect1,
+            _ => Self::Rfc9000Ect0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StateChange {
     HandshakeReady,
     HandshakeConfirmed,
@@ -376,6 +398,7 @@ pub struct TransportConfig {
     pub initial_max_streams_uni: u64,
     pub max_datagram_frame_size: u64,
     pub congestion_control: CongestionControl,
+    pub ecn_policy: EcnPolicy,
     pub enable_hystart_plus_plus: bool,
     pub send_stream_fairness: bool,
     pub enable_latency_spin_bit: bool,
@@ -407,6 +430,7 @@ impl TransportConfig {
             initial_max_streams_uni: raw.initial_max_streams_uni,
             max_datagram_frame_size: raw.max_datagram_frame_size,
             congestion_control: CongestionControl::from_raw(raw.congestion_control),
+            ecn_policy: EcnPolicy::from_raw(raw.ecn_policy),
             enable_hystart_plus_plus: raw.enable_hystart_plus_plus != 0,
             send_stream_fairness: raw.send_stream_fairness != 0,
             enable_latency_spin_bit: raw.enable_latency_spin_bit != 0,
@@ -445,6 +469,8 @@ impl TransportConfig {
             grease_reserved_versions: self.grease_reserved_versions as u8,
             grease_quic_bit: self.grease_quic_bit as u8,
             enable_optimistic_ack_mitigation: self.enable_optimistic_ack_mitigation as u8,
+            underfilled_packet_coalescing_delay_us: 0,
+            ecn_policy: self.ecn_policy.into_raw(),
         }
     }
 }
@@ -1783,6 +1809,8 @@ mod tests {
     fn endpoint_create_destroy_smoke() {
         let mut config = EndpointConfig::default();
         assert!(!config.enable_out_of_order_receive);
+        assert_eq!(config.transport.ecn_policy, EcnPolicy::Rfc9000Ect0);
+        config.transport.ecn_policy = EcnPolicy::Rfc8311Ect1;
         config.enable_out_of_order_receive = true;
         let endpoint = Endpoint::new(&config).unwrap();
         assert_eq!(endpoint.connection_count(), 0);

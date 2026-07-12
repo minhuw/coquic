@@ -111,6 +111,11 @@ enum class QuicCongestionControlAlgorithm : std::uint8_t {
     pcc_vivace,
 };
 
+enum class QuicEcnPolicy : std::uint8_t {
+    rfc9000_ect0,
+    rfc8311_ect1,
+};
+
 std::string_view congestion_control_algorithm_name(QuicCongestionControlAlgorithm algorithm);
 std::optional<QuicCongestionControlAlgorithm>
 parse_congestion_control_algorithm(std::string_view value);
@@ -155,6 +160,7 @@ struct QuicTransportConfig {
     // # inside a QUIC packet.
     std::uint64_t max_datagram_frame_size = 65535;
     QuicCongestionControlAlgorithm congestion_control = QuicCongestionControlAlgorithm::newreno;
+    QuicEcnPolicy ecn_policy = QuicEcnPolicy::rfc9000_ect0;
     bool enable_hystart_plus_plus = true;
     bool send_stream_fairness = true;
     // A zero duration disables the optional RFC 9000 Section 13 stream-packet coalescing delay.

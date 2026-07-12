@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const native = loadNative();
 
-export const FFI_ABI_VERSION = 8;
+export const FFI_ABI_VERSION = 10;
 
 export const Status = Object.freeze({
   OK: 0,
@@ -35,6 +35,11 @@ export const EcnCodepoint = Object.freeze({
   ECT0: 2,
   ECT1: 3,
   CE: 4,
+});
+
+export const EcnPolicy = Object.freeze({
+  RFC9000_ECT0: 0,
+  RFC8311_ECT1: 1,
 });
 
 export const StateChange = Object.freeze({

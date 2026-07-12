@@ -276,6 +276,13 @@ const (
 	CongestionControlPCCVivace CongestionControl = C.COQUIC_CONGESTION_CONTROL_PCC_VIVACE
 )
 
+type EcnPolicy uint8
+
+const (
+	EcnPolicyRFC9000ECT0 EcnPolicy = C.COQUIC_ECN_POLICY_RFC9000_ECT0
+	EcnPolicyRFC8311ECT1 EcnPolicy = C.COQUIC_ECN_POLICY_RFC8311_ECT1
+)
+
 type EcnCodepoint uint8
 
 const (
@@ -348,6 +355,7 @@ type TransportConfig struct {
 	InitialMaxStreamsUni           uint64
 	MaxDatagramFrameSize           uint64
 	CongestionControl              CongestionControl
+	EcnPolicy                      EcnPolicy
 	EnableHyStartPlusPlus          bool
 	SendStreamFairness             bool
 	EnableLatencySpinBit           bool
@@ -384,6 +392,7 @@ func transportConfigFromRaw(raw C.coquic_transport_config_t) TransportConfig {
 		InitialMaxStreamsUni:           uint64(raw.initial_max_streams_uni),
 		MaxDatagramFrameSize:           uint64(raw.max_datagram_frame_size),
 		CongestionControl:              CongestionControl(raw.congestion_control),
+		EcnPolicy:                      EcnPolicy(raw.ecn_policy),
 		EnableHyStartPlusPlus:          raw.enable_hystart_plus_plus != 0,
 		SendStreamFairness:             raw.send_stream_fairness != 0,
 		EnableLatencySpinBit:           raw.enable_latency_spin_bit != 0,
@@ -416,6 +425,7 @@ func (c TransportConfig) raw() C.coquic_transport_config_t {
 		initial_max_streams_uni:             C.uint64_t(c.InitialMaxStreamsUni),
 		max_datagram_frame_size:             C.uint64_t(c.MaxDatagramFrameSize),
 		congestion_control:                  C.coquic_congestion_control_t(c.CongestionControl),
+		ecn_policy:                          C.coquic_ecn_policy_t(c.EcnPolicy),
 		enable_hystart_plus_plus:            cBool(c.EnableHyStartPlusPlus),
 		send_stream_fairness:                cBool(c.SendStreamFairness),
 		enable_latency_spin_bit:             cBool(c.EnableLatencySpinBit),

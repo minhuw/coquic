@@ -9,6 +9,8 @@ const clientConfig = new coquic.EndpointConfig({
   enableOutOfOrderReceive: true,
 });
 assert.equal(clientConfig.enableOutOfOrderReceive, true);
+assert.equal(clientConfig.transport.ecnPolicy, coquic.EcnPolicy.RFC9000_ECT0);
+clientConfig.transport.ecnPolicy = coquic.EcnPolicy.RFC8311_ECT1;
 const endpoint = new coquic.Endpoint(clientConfig);
 
 assert.equal(endpoint.connectionCount(), 0);

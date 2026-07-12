@@ -66,6 +66,11 @@ class EcnCodepoint(IntEnum):
     CE = ffi.COQUIC_ECN_CE
 
 
+class EcnPolicy(IntEnum):
+    RFC9000_ECT0 = ffi.COQUIC_ECN_POLICY_RFC9000_ECT0
+    RFC8311_ECT1 = ffi.COQUIC_ECN_POLICY_RFC8311_ECT1
+
+
 class StateChange(IntEnum):
     HANDSHAKE_READY = ffi.COQUIC_STATE_CHANGE_HANDSHAKE_READY
     HANDSHAKE_CONFIRMED = ffi.COQUIC_STATE_CHANGE_HANDSHAKE_CONFIRMED
@@ -157,6 +162,7 @@ class TransportConfig:
     initial_max_streams_uni: int
     max_datagram_frame_size: int
     congestion_control: CongestionControl
+    ecn_policy: EcnPolicy
     enable_hystart_plus_plus: bool
     send_stream_fairness: bool
     enable_latency_spin_bit: bool
@@ -197,6 +203,7 @@ class TransportConfig:
             initial_max_streams_uni=raw.initial_max_streams_uni,
             max_datagram_frame_size=raw.max_datagram_frame_size,
             congestion_control=CongestionControl(raw.congestion_control),
+            ecn_policy=EcnPolicy(raw.ecn_policy),
             enable_hystart_plus_plus=bool(raw.enable_hystart_plus_plus),
             send_stream_fairness=bool(raw.send_stream_fairness),
             enable_latency_spin_bit=bool(raw.enable_latency_spin_bit),
@@ -231,6 +238,8 @@ class TransportConfig:
             initial_max_streams_uni=self.initial_max_streams_uni,
             max_datagram_frame_size=self.max_datagram_frame_size,
             congestion_control=int(self.congestion_control),
+            underfilled_packet_coalescing_delay_us=0,
+            ecn_policy=int(self.ecn_policy),
             enable_hystart_plus_plus=int(self.enable_hystart_plus_plus),
             send_stream_fairness=int(self.send_stream_fairness),
             enable_latency_spin_bit=int(self.enable_latency_spin_bit),

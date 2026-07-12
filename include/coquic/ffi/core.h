@@ -23,7 +23,7 @@ extern "C" {
 #endif
 #endif
 
-#define COQUIC_FFI_ABI_VERSION 9u
+#define COQUIC_FFI_ABI_VERSION 10u
 
 typedef struct coquic_endpoint coquic_endpoint_t;
 typedef struct coquic_result coquic_result_t;
@@ -57,6 +57,10 @@ typedef uint8_t coquic_ecn_codepoint_t;
 #define COQUIC_ECN_ECT0 2u
 #define COQUIC_ECN_ECT1 3u
 #define COQUIC_ECN_CE 4u
+
+typedef uint8_t coquic_ecn_policy_t;
+#define COQUIC_ECN_POLICY_RFC9000_ECT0 0u
+#define COQUIC_ECN_POLICY_RFC8311_ECT1 1u
 
 typedef uint8_t coquic_state_change_t;
 #define COQUIC_STATE_CHANGE_HANDSHAKE_READY 0u
@@ -206,6 +210,7 @@ typedef struct coquic_transport_config {
     uint8_t grease_quic_bit;
     uint8_t enable_optimistic_ack_mitigation;
     coquic_time_us_t underfilled_packet_coalescing_delay_us;
+    coquic_ecn_policy_t ecn_policy;
 } coquic_transport_config_t;
 
 typedef struct coquic_endpoint_config {

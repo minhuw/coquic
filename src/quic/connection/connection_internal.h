@@ -968,6 +968,18 @@ inline std::string format_optional_path_id(std::optional<QuicPathId> path_id) {
     return std::to_string(*path_id);
 }
 
+inline void trace_ecn_event(std::span<const std::byte> local_connection_id,
+                            std::optional<QuicPathId> path_id, std::string_view event,
+                            std::string_view detail) {
+    if (!packet_trace_matches_connection(local_connection_id)) {
+        return;
+    }
+
+    std::cerr << "quic-packet-trace ecn scid=" << format_connection_id_hex(local_connection_id)
+              << " path=" << format_optional_path_id(path_id) << " event=" << event << ' ' << detail
+              << '\n';
+}
+
 inline const PathState *find_path_state(const std::map<QuicPathId, PathState> &paths,
                                         std::optional<QuicPathId> path_id) {
     if (!path_id.has_value()) {

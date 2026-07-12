@@ -254,6 +254,27 @@ coquic_ecn_codepoint_t from_cpp(coquic::core::EcnCodepoint ecn) {
     return COQUIC_ECN_UNAVAILABLE;
 }
 
+coquic::core::EcnPolicy ecn_policy_to_cpp(coquic_ecn_policy_t policy) {
+    switch (policy) {
+    case COQUIC_ECN_POLICY_RFC9000_ECT0:
+        return coquic::core::EcnPolicy::rfc9000_ect0;
+    case COQUIC_ECN_POLICY_RFC8311_ECT1:
+        return coquic::core::EcnPolicy::rfc8311_ect1;
+    default:
+        return coquic::core::EcnPolicy::rfc9000_ect0;
+    }
+}
+
+coquic_ecn_policy_t ecn_policy_from_cpp(coquic::core::EcnPolicy policy) {
+    switch (policy) {
+    case coquic::core::EcnPolicy::rfc9000_ect0:
+        return COQUIC_ECN_POLICY_RFC9000_ECT0;
+    case coquic::core::EcnPolicy::rfc8311_ect1:
+        return COQUIC_ECN_POLICY_RFC8311_ECT1;
+    }
+    return COQUIC_ECN_POLICY_RFC9000_ECT0;
+}
+
 coquic::core::MigrationReason migration_reason_to_cpp(coquic_migration_reason_t reason) {
     switch (reason) {
     case COQUIC_MIGRATION_REASON_ACTIVE:
@@ -395,6 +416,7 @@ coquic::core::TransportConfig to_cpp(const coquic_transport_config_t &config) {
         .initial_max_streams_uni = config.initial_max_streams_uni,
         .max_datagram_frame_size = config.max_datagram_frame_size,
         .congestion_control = congestion_control_to_cpp(config.congestion_control),
+        .ecn_policy = ecn_policy_to_cpp(config.ecn_policy),
         .enable_hystart_plus_plus = config.enable_hystart_plus_plus != 0,
         .send_stream_fairness = config.send_stream_fairness != 0,
         .underfilled_packet_coalescing_delay = std::chrono::microseconds{static_cast<std::int64_t>(
@@ -856,6 +878,7 @@ void coquic_transport_config_init(coquic_transport_config_t *config) {
         .grease_quic_bit = static_cast<std::uint8_t>(defaults.grease_quic_bit ? 1 : 0),
         .enable_optimistic_ack_mitigation =
             static_cast<std::uint8_t>(defaults.enable_optimistic_ack_mitigation ? 1 : 0),
+        .ecn_policy = ecn_policy_from_cpp(defaults.ecn_policy),
     };
 }
 

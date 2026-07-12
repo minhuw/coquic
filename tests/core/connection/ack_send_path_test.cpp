@@ -1723,6 +1723,92 @@ TEST(QuicCoreTest, AckProcessingDisablesEcnWhenPeerCountsDecrease) {
               coquic::quic::QuicEcnCodepoint::not_ect);
 }
 
+TEST(QuicCoreTest, EcnPolicySelectsEct0ByDefaultAndEct1WhenOptedIn) {
+    auto default_config = coquic::quic::test::make_client_core_config();
+    coquic::quic::QuicConnection default_connection(std::move(default_config));
+    EXPECT_EQ(default_connection.ensure_path_state(0).ecn.transmit_mark,
+              coquic::quic::QuicEcnCodepoint::ect0);
+
+    auto alternate_config = coquic::quic::test::make_client_core_config();
+    alternate_config.transport.ecn_policy = coquic::quic::QuicEcnPolicy::rfc8311_ect1;
+    coquic::quic::QuicConnection alternate_connection(std::move(alternate_config));
+    EXPECT_EQ(alternate_connection.ensure_path_state(0).ecn.transmit_mark,
+              coquic::quic::QuicEcnCodepoint::ect1);
+    EXPECT_EQ(alternate_connection.ensure_path_state(7).ecn.transmit_mark,
+              coquic::quic::QuicEcnCodepoint::ect1);
+}
+
+TEST(QuicCoreTest, EcnPacketTraceReportsPolicyValidationAndFallback) {
+    const ScopedEnvVar trace("COQUIC_PACKET_TRACE", "1");
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.ecn_policy = coquic::quic::QuicEcnPolicy::rfc8311_ect1;
+
+    testing::internal::CaptureStderr();
+    auto &path = connection.ensure_path_state(7);
+    path.ecn.state = coquic::quic::QuicPathEcnState::probing;
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 1,
+                                     .sent_time = coquic::quic::test::test_time(1),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                     .path_id = 7,
+                                     .ecn = coquic::quic::QuicEcnCodepoint::ect1,
+                                 });
+    const auto valid = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = 1,
+            .first_ack_range = 0,
+            .ecn_counts =
+                coquic::quic::AckEcnCounts{
+                    .ect0 = 0,
+                    .ect1 = 1,
+                    .ecn_ce = 0,
+                },
+        },
+        coquic::quic::test::test_time(10), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+        /*suppress_pto_reset=*/false);
+    ASSERT_TRUE(valid.has_value());
+
+    connection.track_sent_packet(connection.application_space_,
+                                 coquic::quic::SentPacketRecord{
+                                     .packet_number = 2,
+                                     .sent_time = coquic::quic::test::test_time(2),
+                                     .ack_eliciting = true,
+                                     .in_flight = true,
+                                     .bytes_in_flight = 1200,
+                                     .path_id = 7,
+                                     .ecn = coquic::quic::QuicEcnCodepoint::ect1,
+                                 });
+    const auto invalid = connection.process_inbound_ack(
+        connection.application_space_,
+        coquic::quic::AckFrame{
+            .largest_acknowledged = 2,
+            .first_ack_range = 0,
+            .ecn_counts =
+                coquic::quic::AckEcnCounts{
+                    .ect0 = 0,
+                    .ect1 = 1,
+                    .ecn_ce = 0,
+                },
+        },
+        coquic::quic::test::test_time(12), /*ack_delay_exponent=*/3, /*max_ack_delay_ms=*/25,
+        /*suppress_pto_reset=*/false);
+    ASSERT_TRUE(invalid.has_value());
+    EXPECT_EQ(connection.outbound_ecn_codepoint_for_path(7),
+              coquic::quic::QuicEcnCodepoint::not_ect);
+
+    const auto output = testing::internal::GetCapturedStderr();
+    EXPECT_NE(output.find("event=policy-selected policy=rfc8311_ect1 marking=ect1"),
+              std::string::npos);
+    EXPECT_NE(output.find("event=validation outcome=success"), std::string::npos);
+    EXPECT_NE(output.find("event=validation outcome=failure fallback=not_ect"), std::string::npos);
+    EXPECT_NE(output.find("event=fallback mark=not_ect reason=validation-failed"),
+              std::string::npos);
+}
+
 TEST(QuicCoreTest, AckProcessingDisablesEcnWhenEct1FeedbackIsMissingOrImpossible) {
     {
         auto connection = make_connected_client_connection();

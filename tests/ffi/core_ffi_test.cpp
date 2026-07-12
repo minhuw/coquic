@@ -360,6 +360,8 @@ TEST(CoquicCoreFfiTest, InitializersAndNullQueriesAreStable) {
     coquic_transport_config_init(&transport);
     EXPECT_EQ(static_cast<unsigned>(transport.congestion_control),
               static_cast<unsigned>(COQUIC_CONGESTION_CONTROL_NEWRENO));
+    EXPECT_EQ(static_cast<unsigned>(transport.ecn_policy),
+              static_cast<unsigned>(COQUIC_ECN_POLICY_RFC9000_ECT0));
     EXPECT_NE(transport.max_udp_payload_size, 0u);
     EXPECT_EQ(transport.defer_active_migration_path_validation, 0);
     EXPECT_EQ(transport.migration_recovery_retention_timeout_us, 0u);
@@ -387,6 +389,7 @@ TEST(CoquicCoreFfiTest, InitializersAndNullQueriesAreStable) {
     EXPECT_EQ(endpoint_config.enable_minimal_closing_state_retention, 0);
 
     endpoint_config.transport.underfilled_packet_coalescing_delay_us = 5000;
+    endpoint_config.transport.ecn_policy = COQUIC_ECN_POLICY_RFC8311_ECT1;
 
     coquic_client_connection_config_t connection_config{};
     coquic_client_connection_config_init(&connection_config);
@@ -555,6 +558,7 @@ TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
     coquic_endpoint_destroy(endpoint);
 
     endpoint_config.transport.congestion_control = 99;
+    endpoint_config.transport.ecn_policy = 99;
     ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);
     ASSERT_NE(endpoint, nullptr);
     coquic_endpoint_destroy(endpoint);

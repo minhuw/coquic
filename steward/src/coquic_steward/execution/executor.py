@@ -9,6 +9,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import timezone
 from enum import StrEnum
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,24 @@ from .worktree import Worktrees
 MAX_TASK_REVISIONS = 100
 MAX_REVIEW_RUN_ATTEMPTS = 2
 WORKER_HEARTBEAT_SECONDS = 30
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_GTEST_DURATION_RE = re.compile(
+    r"(?m)^(\[[^\]\r\n]+\].*?)\(\d+(?:\.\d+)? ms(?: total)?\)$"
+)
+_NIX_BUSY_WARNING_RE = re.compile(
+    r"(?m)^error \(ignored\): SQLite database .+ is busy\r?\n?"
+)
+_ZIG_CACHE_OBJECT_RE = re.compile(r"\.zig-cache/o/[0-9a-fA-F]+")
+_ZIG_SEED_RE = re.compile(r"--seed 0x[0-9a-fA-F]+")
+_ZIG_BUILD_NONCE_RE = re.compile(r"(?<!\w)-Z[0-9a-fA-F]+")
+_GTEST_FAILURE_BLOCK_RE = re.compile(
+    r"(?ms)^(?:[^\n]+:\d+|unknown file): Failure\n"
+    r".*?^\[  FAILED  \] [^\n]+$"
+)
+_GTEST_FAILED_TEST_RE = re.compile(
+    r"(?m)^\[  FAILED  \] (?!\d+ tests?\b)[^\n]+$"
+)
 
 
 class PatchPreparationResult(StrEnum):
@@ -317,11 +336,30 @@ class StewardExecutor:
         if prepared != PatchPreparationResult.validation_failed:
             return False, revisions
 
+        seen_failure_states = {self._validation_failure_state(task_id)}
         while revisions < MAX_TASK_REVISIONS:
             revisions += 1
             failed = self._latest_failed_validations.get(task_id, [])
+            task = self.store.get(task_id)
+            if task.worktree_path is None:
+                self._finish_task(
+                    task.id,
+                    TaskStatus.failed,
+                    "validation revision requested without worktree",
+                )
+                return False, revisions
+            before_revision = sha256(
+                self.worktrees.diff(task.worktree_path).encode("utf-8")
+            ).hexdigest()
             if not self._revise_from_validation(task_id, failed, revisions):
                 return False, revisions
+            task = self.store.get(task_id)
+            if task.worktree_path is None:
+                return False, revisions
+            after_revision = sha256(
+                self.worktrees.diff(task.worktree_path).encode("utf-8")
+            ).hexdigest()
+            revision_changed = after_revision != before_revision
             prepared = self._prepare_patch(
                 task_id,
                 f"validation revision {revisions}",
@@ -332,12 +370,76 @@ class StewardExecutor:
                 return True, revisions
             if prepared != PatchPreparationResult.validation_failed:
                 return False, revisions
+            failure_state = self._validation_failure_state(task_id)
+            if failure_state in seen_failure_states:
+                self._block_stalled_validation_revision(
+                    task_id,
+                    revisions,
+                    self._latest_failed_validations.get(task_id, []),
+                    (
+                        "repeated a prior patch and failure"
+                        if revision_changed
+                        else "produced no patch changes"
+                    ),
+                )
+                return False, revisions
+            seen_failure_states.add(failure_state)
         self._finish_task(
             task_id,
             TaskStatus.blocked,
             f"revision budget exhausted after {MAX_TASK_REVISIONS} revision(s)",
         )
         return False, revisions
+
+    def _validation_failure_state(self, task_id: str) -> tuple[str, str]:
+        task = self.store.get(task_id)
+        if task.worktree_path is None:
+            return "", ""
+        patch_digest = sha256(
+            self.worktrees.diff(task.worktree_path).encode("utf-8")
+        ).hexdigest()
+        failures = [
+            {
+                "command": validation.command,
+                "exit_code": validation.exit_code,
+                "output_sha256": sha256(
+                    _stable_validation_diagnostics(validation).encode("utf-8")
+                ).hexdigest(),
+            }
+            for validation in self._latest_failed_validations.get(task_id, [])
+            if not validation.passed
+        ]
+        failure_digest = sha256(
+            json.dumps(failures, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return patch_digest, failure_digest
+
+    def _block_stalled_validation_revision(
+        self,
+        task_id: str,
+        revision: int,
+        validations: list[ValidationResult],
+        reason: str,
+    ) -> None:
+        summary = (
+            f"validation revision {revision} {reason}; unresolved: "
+            f"{_summarize_validations(validations)}"
+        )
+        self._finish_task(task_id, TaskStatus.blocked, summary)
+        self.store.add_event(
+            task_id,
+            "validation.revision_stalled",
+            summary,
+            {
+                "revision": revision,
+                "reason": reason,
+                "failed": [
+                    _validation_context(validation)
+                    for validation in validations
+                    if not validation.passed
+                ],
+            },
+        )
 
     def _review(self, task_id: str, *, attempt: int) -> dict[str, Any] | None:
         task = self.store.get(task_id)
@@ -1830,6 +1932,27 @@ def _validation_context(validation: ValidationResult) -> dict[str, object]:
         "summary": validation.summary,
         "output_path": str(validation.output_path),
     }
+
+
+def _stable_validation_diagnostics(validation: ValidationResult) -> str:
+    text = validation.output_path.read_text(encoding="utf-8", errors="replace")
+    text = _ANSI_ESCAPE_RE.sub("", text)
+    text = _NIX_BUSY_WARNING_RE.sub("", text)
+    text = _GTEST_DURATION_RE.sub(r"\1(<duration>)", text)
+    text = _ZIG_CACHE_OBJECT_RE.sub(".zig-cache/o/<digest>", text)
+    text = _ZIG_SEED_RE.sub("--seed <seed>", text)
+    text = _ZIG_BUILD_NONCE_RE.sub("-Z<nonce>", text)
+
+    if validation.command[-3:] != ["zig", "build", "test"]:
+        return text
+
+    signatures = {
+        match.group(0).strip() for match in _GTEST_FAILURE_BLOCK_RE.finditer(text)
+    }
+    signatures.update(
+        match.group(0).strip() for match in _GTEST_FAILED_TEST_RE.finditer(text)
+    )
+    return "\n\n".join(sorted(signatures)) if signatures else text
 
 
 def _write_integration_command_log(

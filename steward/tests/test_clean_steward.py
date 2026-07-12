@@ -8399,6 +8399,337 @@ def test_executor_routes_validation_failure_back_to_worker_session(
     assert "fixed" in iterations[1].patch_path.read_text(encoding="utf-8")
 
 
+def test_executor_blocks_unchanged_validation_revision(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    fake = tmp_path / "codex"
+    calls = tmp_path / "calls.txt"
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
+        "mode=worker\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "resume" ]; then mode=revision; fi\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        'if [ "$mode" = "revision" ]; then\n'
+        "  printf 'toolchain failure is external\\n' > \"$last\"\n"
+        "else\n"
+        "  printf 'bad patch\\n' > README.md\n"
+        "  printf 'initial done\\n' > \"$last\"\n"
+        "  printf '{\"type\":\"thread.started\",\"thread_id\":\"worker-thread-1\"}\\n'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+    gate_runs = 0
+
+    def fake_gates(_config, task_id, cwd, *, label=None):
+        nonlocal gate_runs
+        gate_runs += 1
+        output = _config.logs_dir / task_id / (label or "legacy") / "fake.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("toolchain failed\n", encoding="utf-8")
+        return [
+            ValidationResult(
+                command=["fake-validation"],
+                cwd=cwd,
+                passed=False,
+                exit_code=1,
+                output_path=output,
+                summary="toolchain failed",
+            )
+        ]
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+
+    assert not StewardExecutor(config, store).run_task(task.id)
+
+    saved = store.get(task.id)
+    assert saved.status == TaskStatus.blocked
+    assert "validation revision 1 produced no patch changes" in saved.summary
+    assert "fake-validation exited 1: toolchain failed" in saved.summary
+    assert gate_runs == 2
+    assert len(calls.read_text(encoding="utf-8").splitlines()) == 2
+    assert [item.iteration for item in store.iterations(task.id)] == [0, 1]
+    events = store.events(task.id)
+    stalled = [event for event in events if event.kind == "validation.revision_stalled"]
+    assert len(stalled) == 1
+    assert stalled[0].data["reason"] == "produced no patch changes"
+
+
+def test_validation_failure_state_uses_complete_validation_log(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    task.worktree_path = config.repo_root
+    store.save(task)
+    (config.repo_root / "README.md").write_text("changed\n", encoding="utf-8")
+    output = tmp_path / "validation.txt"
+    validation = ValidationResult(
+        command=["fake-validation"],
+        cwd=config.repo_root,
+        passed=False,
+        exit_code=1,
+        output_path=output,
+        summary="coquic lint shell ready",
+    )
+    executor = StewardExecutor(config, store)
+    executor._latest_failed_validations[task.id] = [validation]
+
+    output.write_text("STDOUT: banner\nSTDERR: first failure\n", encoding="utf-8")
+    first_state = executor._validation_failure_state(task.id)
+    output.write_text("STDOUT: banner\nSTDERR: second failure\n", encoding="utf-8")
+    second_state = executor._validation_failure_state(task.id)
+    output.write_text(
+        "STDOUT: banner\n"
+        "STDERR: second failure\n"
+        "error (ignored): SQLite database '/tmp/eval.sqlite' is busy\n",
+        encoding="utf-8",
+    )
+
+    assert first_state[0] == second_state[0]
+    assert first_state[1] != second_state[1]
+    assert second_state == executor._validation_failure_state(task.id)
+
+
+def test_validation_failure_state_includes_untracked_changes(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    task.worktree_path = config.repo_root
+    store.save(task)
+    (config.repo_root / "README.md").write_text("changed\n", encoding="utf-8")
+    output = tmp_path / "validation.txt"
+    output.write_text("same failure\n", encoding="utf-8")
+    validation = ValidationResult(
+        command=["fake-validation"],
+        cwd=config.repo_root,
+        passed=False,
+        exit_code=1,
+        output_path=output,
+        summary="same failure",
+    )
+    executor = StewardExecutor(config, store)
+    executor._latest_failed_validations[task.id] = [validation]
+
+    before = executor._validation_failure_state(task.id)
+    (config.repo_root / "repair.txt").write_text("progress\n", encoding="utf-8")
+    after = executor._validation_failure_state(task.id)
+
+    assert before[0] != after[0]
+    assert before[1] == after[1]
+
+
+def test_validation_failure_state_normalizes_volatile_zig_test_output(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    task.worktree_path = config.repo_root
+    store.save(task)
+    (config.repo_root / "README.md").write_text("changed\n", encoding="utf-8")
+    output = tmp_path / "zig-build-test.txt"
+    validation = ValidationResult(
+        command=["nix", "develop", "-c", "zig", "build", "test"],
+        cwd=config.repo_root,
+        passed=False,
+        exit_code=1,
+        output_path=output,
+        summary="1 FAILED TEST",
+    )
+    executor = StewardExecutor(config, store)
+    executor._latest_failed_validations[task.id] = [validation]
+
+    output.write_text(
+        "[       OK ] OtherSuite.PassingTest (1 ms)\n"
+        "/repo/test.cpp:42: Failure\n"
+        "Expected equality of these values:\n  actual\n  expected\n"
+        "[  FAILED  ] Suite.FailingTest (3 ms)\n"
+        "[==========] 2 tests ran. (9 ms total)\n"
+        "error (ignored): SQLite database '/tmp/first.sqlite' is busy\n"
+        "failed command: ./.zig-cache/o/aaaaaaaa/test\n"
+        "--seed 0x11111111 -Zaaaaaaaa test\n",
+        encoding="utf-8",
+    )
+    first_state = executor._validation_failure_state(task.id)
+    output.write_text(
+        "[       OK ] DifferentSuite.OtherPassingTest (17 ms)\n"
+        "/repo/test.cpp:42: Failure\n"
+        "Expected equality of these values:\n  actual\n  expected\n"
+        "[  FAILED  ] Suite.FailingTest (21 ms)\n"
+        "[==========] 2 tests ran. (35 ms total)\n"
+        "error (ignored): SQLite database '/tmp/second.sqlite' is busy\n"
+        "failed command: ./.zig-cache/o/bbbbbbbb/test\n"
+        "--seed 0x22222222 -Zbbbbbbbb test\n",
+        encoding="utf-8",
+    )
+
+    second_state = executor._validation_failure_state(task.id)
+    assert first_state == second_state
+
+    output.write_text(
+        output.read_text(encoding="utf-8").replace("  actual\n", "  different\n"),
+        encoding="utf-8",
+    )
+    assert second_state != executor._validation_failure_state(task.id)
+
+
+def test_executor_revalidates_unchanged_revision_after_gate_repairs_patch(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    fake = tmp_path / "codex"
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    fake.write_text(
+        "#!/bin/sh\n"
+        "mode=worker\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "resume" ]; then mode=revision; fi\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        '  case "$last" in */reviewer-*) mode=review;; esac\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        'if [ "$mode" = "review" ]; then\n'
+        "  printf '{\"verdict\":\"approve\",\"summary\":\"ok\",\"findings\":[],\"validation_gaps\":[],\"remaining_risk\":\"\"}\\n' > \"$last\"\n"
+        'elif [ "$mode" = "revision" ]; then\n'
+        "  printf 'validation revision done\\n' > \"$last\"\n"
+        "else\n"
+        "  printf 'unformatted\\n' > README.md\n"
+        "  printf 'initial done\\n' > \"$last\"\n"
+        "  printf '{\"type\":\"thread.started\",\"thread_id\":\"worker-thread-1\"}\\n'\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+    gate_runs = 0
+
+    def fake_gates(_config, task_id, cwd, *, label=None):
+        nonlocal gate_runs
+        gate_runs += 1
+        output = _config.logs_dir / task_id / (label or "legacy") / "fake.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if gate_runs == 1:
+            (cwd / "README.md").write_text("formatted\n", encoding="utf-8")
+        passed = gate_runs > 1
+        output.write_text("ok\n" if passed else "formatted files\n", encoding="utf-8")
+        return [
+            ValidationResult(
+                command=["fake-format"],
+                cwd=cwd,
+                passed=passed,
+                exit_code=0 if passed else 1,
+                output_path=output,
+                summary="ok" if passed else "formatted files",
+            )
+        ]
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+
+    assert StewardExecutor(config, store).run_task(task.id)
+
+    saved = store.get(task.id)
+    assert saved.status == TaskStatus.succeeded
+    assert saved.patch_path is not None
+    assert "formatted" in saved.patch_path.read_text(encoding="utf-8")
+    assert gate_runs == 2
+    assert not any(
+        event.kind == "validation.revision_stalled" for event in store.events(task.id)
+    )
+
+
+def test_executor_blocks_repeated_patch_and_validation_failure(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    fake = tmp_path / "codex"
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    fake.write_text(
+        "#!/bin/sh\n"
+        "mode=worker\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "resume" ]; then mode=revision; fi\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        'case "$last" in\n'
+        "  */worker-validation-revision-1/*) printf 'patch-b\\n' > README.md ;;\n"
+        "  */worker-validation-revision-2/*) printf 'patch-a\\n' > README.md ;;\n"
+        "  *)\n"
+        "    printf 'patch-a\\n' > README.md\n"
+        "    printf '{\"type\":\"thread.started\",\"thread_id\":\"worker-thread-1\"}\\n'\n"
+        "    ;;\n"
+        "esac\n"
+        "printf '%s\\n' \"$mode done\" > \"$last\"\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+    gate_runs = 0
+
+    def fake_gates(_config, task_id, cwd, *, label=None):
+        nonlocal gate_runs
+        gate_runs += 1
+        output = _config.logs_dir / task_id / (label or "legacy") / "fake.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("same failure\n", encoding="utf-8")
+        return [
+            ValidationResult(
+                command=["fake-validation"],
+                cwd=cwd,
+                passed=False,
+                exit_code=1,
+                output_path=output,
+                summary="same failure",
+            )
+        ]
+
+    monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
+
+    assert not StewardExecutor(config, store).run_task(task.id)
+
+    saved = store.get(task.id)
+    assert saved.status == TaskStatus.blocked
+    assert "validation revision 2 repeated a prior patch and failure" in saved.summary
+    assert gate_runs == 3
+    assert [item.iteration for item in store.iterations(task.id)] == [0, 1, 2]
+    events = store.events(task.id)
+    stalled = [event for event in events if event.kind == "validation.revision_stalled"]
+    assert len(stalled) == 1
+    assert stalled[0].data["reason"] == "repeated a prior patch and failure"
+
+
 def test_executor_uses_shared_revision_counter_for_validation_and_review(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:

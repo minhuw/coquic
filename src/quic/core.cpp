@@ -3241,6 +3241,12 @@ bool QuicCore::restore_recently_validated_peer_address(
         entry.connection == nullptr || address_validation_identity.empty()) {
         return false;
     }
+    // The peer identity does not include the server's local destination address. A server that
+    // advertises a preferred address must validate each local path independently.
+    if (endpoint_config_.role == EndpointRole::server &&
+        endpoint_config_.transport.preferred_address.has_value()) {
+        return false;
+    }
     const auto cached =
         entry.recent_validated_peer_addresses.find(connection_id_key(address_validation_identity));
     if (cached == entry.recent_validated_peer_addresses.end() || now >= cached->second) {

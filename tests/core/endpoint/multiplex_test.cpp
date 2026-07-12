@@ -557,6 +557,19 @@ TEST(QuicCoreEndpointTest, RecentPeerAddressValidationPolicyIsBoundedAndConserva
 
     {
         auto config = make_server_endpoint_config();
+        config.transport.preferred_address = coquic::quic::PreferredAddress{};
+        coquic::quic::QuicCore core(std::move(config));
+        auto entry = make_entry();
+        core.remember_recently_validated_peer_address(entry, 0, coquic::quic::test::test_time(1));
+
+        const auto path_id =
+            core.path_id_for_inbound_route(entry, 22, identity, coquic::quic::test::test_time(2));
+        ASSERT_EQ(path_id, 1u);
+        EXPECT_FALSE(entry.connection->paths_.contains(optional_value_or_terminate(path_id)));
+    }
+
+    {
+        auto config = make_server_endpoint_config();
         config.recent_peer_address_validation_timeout = std::chrono::milliseconds(10);
         coquic::quic::QuicCore core(std::move(config));
         auto entry = make_entry();

@@ -16,6 +16,7 @@ class TaskRow(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     kind: Mapped[str] = mapped_column(String, nullable=False)
+    workflow: Mapped[str] = mapped_column(String, nullable=False, default="fix")
     worker: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[str] = mapped_column(String, nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
@@ -47,6 +48,34 @@ class TaskRow(Base):
         cascade="all, delete-orphan",
         order_by="TaskIterationRow.iteration",
     )
+    plan_runs: Mapped[list[TaskPlanRunRow]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+        order_by="TaskPlanRunRow.run",
+    )
+
+
+class TaskPlanRunRow(Base):
+    __tablename__ = "task_plan_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transcript_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_message_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    plan_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
+    plan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    task: Mapped[TaskRow] = relationship(back_populates="plan_runs")
 
 
 class TaskIterationRow(Base):
@@ -64,12 +93,16 @@ class TaskIterationRow(Base):
     worker_last_message_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     worker_exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     worker_completed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    worker_model: Mapped[str | None] = mapped_column(String, nullable=True)
+    worker_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     reviewer_name: Mapped[str | None] = mapped_column(String, nullable=True)
     reviewer_prompt_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviewer_transcript_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviewer_last_message_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviewer_exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reviewer_completed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    reviewer_model: Mapped[str | None] = mapped_column(String, nullable=True)
+    reviewer_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     reviewer_run: Mapped[int | None] = mapped_column(Integer, nullable=True)
     review_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     patch_path: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -177,6 +210,13 @@ Index(
     "ix_task_iterations_task_iteration",
     TaskIterationRow.task_id,
     TaskIterationRow.iteration,
+    unique=True,
+)
+
+Index(
+    "ix_task_plan_runs_task_run",
+    TaskPlanRunRow.task_id,
+    TaskPlanRunRow.run,
     unique=True,
 )
 

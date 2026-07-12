@@ -45,6 +45,7 @@ from coquic_steward.core.models import (
     TaskRecord,
     TaskSpec,
     TaskStatus,
+    TaskWorkflow,
     ValidationResult,
     WorkerKind,
     WorkerResult,
@@ -1699,7 +1700,11 @@ def test_status_stale_minutes_includes_validation_timeout(
         }
     )
 
-    assert status_stale_minutes(config) == {"reviewing": 25, "validation": 35}
+    assert status_stale_minutes(config) == {
+        "implementation_plan": 35,
+        "reviewing": 25,
+        "validation": 35,
+    }
 
 
 def test_status_stale_minutes_respects_explicit_stale_limit(config: StewardConfig) -> None:
@@ -5338,6 +5343,7 @@ def test_worker_prompt_highlights_feature_issue_signal_guidance(
     task = TaskStore(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.feature,
+            workflow=TaskWorkflow.fix,
             worker=WorkerKind.feature_implementer,
             title="Implement #42 Add QUIC DATAGRAM send API",
             prompt="Implement the selected GitHub issue.",
@@ -5451,6 +5457,7 @@ def test_review_revision_prompt_keeps_repairs_scoped(
     task = TaskStore(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.feature,
+            workflow=TaskWorkflow.fix,
             worker=WorkerKind.feature_implementer,
             title="Implement strict 0-RTT policy",
             prompt="Implement the selected feature.",
@@ -5502,6 +5509,7 @@ def test_validation_revision_prompt_keeps_tooling_repairs_out_of_feature_patch(
     task = TaskStore(config.db_path).add_task(
         TaskSpec(
             kind=TaskKind.feature,
+            workflow=TaskWorkflow.fix,
             worker=WorkerKind.feature_implementer,
             title="Implement strict 0-RTT policy",
             prompt="Implement the selected feature.",
@@ -5671,6 +5679,7 @@ def test_worktree_reports_frozen_file_and_directory_changes(
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.feature,
+            workflow=TaskWorkflow.fix,
             worker=WorkerKind.feature_implementer,
             title="T",
             prompt="P",
@@ -5832,6 +5841,7 @@ def test_executor_blocks_worker_patch_that_changes_frozen_path(
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.feature,
+            workflow=TaskWorkflow.fix,
             worker=WorkerKind.feature_implementer,
             title="T",
             prompt="P",
@@ -5887,6 +5897,7 @@ def test_executor_blocks_frozen_path_written_by_validation(
     task, _ = store.add_task(
         TaskSpec(
             kind=TaskKind.feature,
+            workflow=TaskWorkflow.fix,
             worker=WorkerKind.feature_implementer,
             title="T",
             prompt="P",

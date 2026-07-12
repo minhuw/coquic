@@ -13,6 +13,7 @@ from ..core.lifecycle import (
     TaskPhase,
     TaskTransition,
     integration_started,
+    implementation_plan_started,
     recovery_failed,
     require_transition_allowed,
     review_started,
@@ -29,6 +30,7 @@ from ..core.models import (
     SignalItem,
     SignalItemStatus,
     TaskIteration,
+    TaskPlanRun,
     TaskRecord,
     TaskSpec,
     TaskStatus,
@@ -42,17 +44,20 @@ from .mappers import (
     PathCodec,
     event_to_row,
     iteration_to_row,
+    plan_run_to_row,
     row_to_event,
     row_to_scheduler_wakeup,
     row_to_signal_fetch_run,
     row_to_signal_item,
     row_to_iteration,
+    row_to_plan_run,
     row_to_task,
     scheduler_wakeup_to_row,
     signal_fetch_run_to_row,
     signal_item_to_row,
     task_to_row,
     update_iteration_row,
+    update_plan_run_row,
     update_task_row,
     validation_to_row,
 )
@@ -63,6 +68,7 @@ from .schema import (
     SignalFetchRunRow,
     SignalItemRow,
     TaskIterationRow,
+    TaskPlanRunRow,
     TaskRow,
     ValidationRow,
 )
@@ -198,6 +204,9 @@ class SQLiteTaskStore:
 
     def start_worker(self, task_id: str, summary: str) -> TaskRecord:
         return self.transition_task(task_id, worker_started(summary))
+
+    def start_implementation_plan(self, task_id: str, summary: str) -> TaskRecord:
+        return self.transition_task(task_id, implementation_plan_started(summary))
 
     def start_validation(self, task_id: str, summary: str) -> TaskRecord:
         return self.transition_task(task_id, validation_started(summary))
@@ -588,6 +597,8 @@ class SQLiteTaskStore:
         item.worker_last_message_path = result.last_message_path
         item.worker_exit_code = result.exit_code
         item.worker_completed = result.completed
+        item.worker_model = result.model
+        item.worker_reasoning_effort = result.reasoning_effort
         item.updated_at = utc_now()
         self._upsert_iteration(item)
 
@@ -679,6 +690,8 @@ class SQLiteTaskStore:
         item.reviewer_last_message_path = result.last_message_path
         item.reviewer_exit_code = result.exit_code
         item.reviewer_completed = result.completed
+        item.reviewer_model = result.model
+        item.reviewer_reasoning_effort = result.reasoning_effort
         item.reviewer_run = review_run
         item.review_json = review
         item.updated_at = utc_now()
@@ -704,6 +717,77 @@ class SQLiteTaskStore:
                 .order_by(TaskIterationRow.iteration)
             ).all()
             return [row_to_iteration(row, path_codec=self.path_codec) for row in rows]
+
+    def begin_plan_run(
+        self,
+        task_id: str,
+        run: int,
+        *,
+        prompt_path: Path,
+        transcript_path: Path,
+        last_message_path: Path,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> TaskPlanRun:
+        now = utc_now()
+        item = TaskPlanRun(
+            task_id=task_id,
+            run=run,
+            prompt_path=prompt_path,
+            transcript_path=transcript_path,
+            last_message_path=last_message_path,
+            completed=False,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            started_at=now,
+            updated_at=now,
+        )
+        self._upsert_plan_run(item)
+        return item
+
+    def finish_plan_run(
+        self,
+        task_id: str,
+        run: int,
+        result: WorkerResult,
+        *,
+        plan: dict[str, object] | None,
+        plan_path: Path | None,
+    ) -> TaskPlanRun:
+        item = self.get_plan_run(task_id, run)
+        item.prompt_path = result.prompt_path
+        item.transcript_path = result.transcript_path
+        item.last_message_path = result.last_message_path
+        item.plan_path = plan_path
+        item.exit_code = result.exit_code
+        item.completed = result.completed
+        item.model = result.model
+        item.reasoning_effort = result.reasoning_effort
+        item.plan_json = plan
+        item.updated_at = utc_now()
+        self._upsert_plan_run(item)
+        return item
+
+    def get_plan_run(self, task_id: str, run: int) -> TaskPlanRun:
+        with Session(self.engine) as session:
+            row = session.scalar(
+                select(TaskPlanRunRow).where(
+                    TaskPlanRunRow.task_id == task_id,
+                    TaskPlanRunRow.run == run,
+                )
+            )
+            if row is None:
+                raise KeyError(f"{task_id}:plan:{run}")
+            return row_to_plan_run(row, path_codec=self.path_codec)
+
+    def plan_runs(self, task_id: str) -> list[TaskPlanRun]:
+        with Session(self.engine) as session:
+            rows = session.scalars(
+                select(TaskPlanRunRow)
+                .where(TaskPlanRunRow.task_id == task_id)
+                .order_by(TaskPlanRunRow.run)
+            ).all()
+            return [row_to_plan_run(row, path_codec=self.path_codec) for row in rows]
 
     def list_tasks(self, *, limit: int | None = None) -> list[TaskRecord]:
         statement = _task_query().order_by(TaskRow.created_at.desc())
@@ -966,12 +1050,39 @@ class SQLiteTaskStore:
                 task.updated_at = item.updated_at.isoformat()
         self._notify_change()
 
+    def _upsert_plan_run(self, item: TaskPlanRun) -> None:
+        with Session(self.engine) as session, session.begin():
+            row = session.scalar(
+                select(TaskPlanRunRow).where(
+                    TaskPlanRunRow.task_id == item.task_id,
+                    TaskPlanRunRow.run == item.run,
+                )
+            )
+            if row is None:
+                session.add(plan_run_to_row(item, path_codec=self.path_codec))
+            else:
+                update_plan_run_row(row, item, path_codec=self.path_codec)
+            task = session.get(TaskRow, item.task_id)
+            if task is not None:
+                task.updated_at = item.updated_at.isoformat()
+        self._notify_change()
+
     def _notify_change(self) -> None:
         if self.on_change is not None:
             self.on_change()
 
     def _migrate_schema(self) -> None:
         with self.engine.begin() as connection:
+            task_columns = {
+                row[1] for row in connection.exec_driver_sql("PRAGMA table_info(tasks)")
+            }
+            if "workflow" not in task_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE tasks ADD COLUMN workflow TEXT NOT NULL DEFAULT 'fix'"
+                )
+                connection.exec_driver_sql(
+                    "UPDATE tasks SET workflow = 'feature' WHERE kind = 'feature'"
+                )
             item_columns = {
                 row[1]
                 for row in connection.exec_driver_sql("PRAGMA table_info(signal_items)")
@@ -1005,6 +1116,30 @@ class SQLiteTaskStore:
                 connection.exec_driver_sql(
                     "ALTER TABLE validations ADD COLUMN iteration INTEGER"
                 )
+            iteration_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(task_iterations)"
+                )
+            }
+            for column in (
+                "worker_model",
+                "worker_reasoning_effort",
+                "reviewer_model",
+                "reviewer_reasoning_effort",
+            ):
+                if column not in iteration_columns:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE task_iterations ADD COLUMN {column} TEXT"
+                    )
+            plan_columns = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "PRAGMA table_info(task_plan_runs)"
+                )
+            }
+            if not plan_columns:
+                TaskPlanRunRow.__table__.create(connection, checkfirst=True)
             wakeup_columns = {
                 row[1]
                 for row in connection.exec_driver_sql(
@@ -1030,6 +1165,12 @@ class SQLiteTaskStore:
             "reviewer_last_message_path",
             "patch_path",
         )
+        plan_columns = (
+            "prompt_path",
+            "transcript_path",
+            "last_message_path",
+            "plan_path",
+        )
         with Session(self.engine) as session, session.begin():
             for row in session.scalars(select(TaskRow)).all():
                 for column in task_columns:
@@ -1037,6 +1178,9 @@ class SQLiteTaskStore:
                 row.metadata_json = self._portable_json(row.metadata_json)
             for row in session.scalars(select(TaskIterationRow)).all():
                 for column in iteration_columns:
+                    setattr(row, column, self._portable_path(getattr(row, column)))
+            for row in session.scalars(select(TaskPlanRunRow)).all():
+                for column in plan_columns:
                     setattr(row, column, self._portable_path(getattr(row, column)))
             for row in session.scalars(select(ValidationRow)).all():
                 row.output_path = self._portable_path(row.output_path) or row.output_path
@@ -1163,8 +1307,12 @@ def _effective_stale_status(row: TaskRow, events: list[EventRow]) -> str:
     ):
         return TaskStatus.reviewing.value
 
-    if _latest_status_phase(events) == TaskPhase.validation.value:
-        return TaskPhase.validation.value
+    latest_phase = _latest_status_phase(events)
+    if latest_phase in {
+        TaskPhase.implementation_plan.value,
+        TaskPhase.validation.value,
+    }:
+        return latest_phase
 
     return row.status
 

@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from ..core.config import StewardConfig
-from ..core.models import TaskRecord, WorkerResult
+from ..core.models import CodexStage, TaskRecord, WorkerResult
 from .diagnostics import diagnostics_for_result
 
 
@@ -31,6 +31,8 @@ class CodexRunner:
         name: str = "worker",
         output_schema: Path | None = None,
         resume_session: str | None = None,
+        stage: CodexStage = CodexStage.code,
+        sandbox: str | None = None,
     ) -> WorkerResult:
         transcript_path, last_message_path = self.paths(task, name=name)
         run_dir = transcript_path.parent
@@ -38,11 +40,14 @@ class CodexRunner:
         prompt_path = self.config.prompts_dir / task.id / f"{name}.md"
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
         prompt_path.write_text(prompt, encoding="utf-8")
+        settings = self.config.codex_settings(stage)
         args = self._args(
             cwd,
             last_message_path,
             output_schema=output_schema,
             resume_session=resume_session,
+            stage=stage,
+            sandbox=sandbox,
         )
         try:
             return self._run_process(
@@ -52,7 +57,15 @@ class CodexRunner:
                 prompt_path,
                 transcript_path,
                 last_message_path,
-                timeout_seconds=self.config.limits.worker_timeout_minutes * 60,
+                timeout_seconds=(
+                    self.config.limits.plan_timeout_minutes
+                    if stage == CodexStage.implementation_plan
+                    else self.config.limits.worker_timeout_minutes
+                )
+                * 60,
+                stage=stage,
+                model=settings.model,
+                reasoning_effort=settings.reasoning_effort,
             )
         except FileNotFoundError as exc:
             message = (
@@ -76,6 +89,9 @@ class CodexRunner:
                 transcript_path=transcript_path,
                 last_message_path=last_message_path,
                 final_message=message,
+                stage=stage,
+                model=settings.model,
+                reasoning_effort=settings.reasoning_effort,
                 diagnostics=diagnostics.model_dump(mode="json"),
             )
 
@@ -94,11 +110,14 @@ class CodexRunner:
         prompt_path = self.config.prompts_dir / task.id / f"{name}.md"
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
         prompt_path.write_text(prompt, encoding="utf-8")
+        settings = self.config.codex_settings(CodexStage.review)
         args = self._args(
             cwd,
             last_message_path,
             output_schema=output_schema,
             resume_session=None,
+            stage=CodexStage.review,
+            sandbox=None,
         )
         try:
             return self._run_process(
@@ -109,6 +128,9 @@ class CodexRunner:
                 transcript_path,
                 last_message_path,
                 timeout_seconds=self.config.limits.review_timeout_minutes * 60,
+                stage=CodexStage.review,
+                model=settings.model,
+                reasoning_effort=settings.reasoning_effort,
             )
         except FileNotFoundError as exc:
             message = (
@@ -132,6 +154,9 @@ class CodexRunner:
                 transcript_path=transcript_path,
                 last_message_path=last_message_path,
                 final_message=message,
+                stage=CodexStage.review,
+                model=settings.model,
+                reasoning_effort=settings.reasoning_effort,
                 diagnostics=diagnostics.model_dump(mode="json"),
             )
 
@@ -142,25 +167,30 @@ class CodexRunner:
         *,
         output_schema: Path | None,
         resume_session: str | None,
+        stage: CodexStage = CodexStage.code,
+        sandbox: str | None = None,
     ) -> list[str]:
+        settings = self.config.codex_settings(stage)
         args = [self.config.codex_bin, "exec"]
         if resume_session:
             args.append("resume")
         args.extend(["--json"])
-        if self.config.codex_model:
-            args.extend(["--model", self.config.codex_model])
-        if self.config.codex_reasoning_effort:
+        if settings.model:
+            args.extend(["--model", settings.model])
+        if settings.reasoning_effort:
             args.extend(
                 [
                     "--config",
                     "model_reasoning_effort="
-                    + json.dumps(self.config.codex_reasoning_effort),
+                    + json.dumps(settings.reasoning_effort),
                 ]
             )
         if self.config.codex_profile:
             args.extend(["--profile", self.config.codex_profile])
         if not resume_session:
-            args.extend(["--sandbox", self.config.codex_sandbox, "--cd", str(cwd)])
+            args.extend(
+                ["--sandbox", sandbox or self.config.codex_sandbox, "--cd", str(cwd)]
+            )
         args.extend(["--output-last-message", str(last_message_path)])
         if output_schema is not None:
             args.extend(["--output-schema", str(output_schema)])
@@ -178,6 +208,9 @@ class CodexRunner:
         transcript_path: Path,
         last_message_path: Path,
         timeout_seconds: int,
+        stage: CodexStage,
+        model: str | None,
+        reasoning_effort: str | None,
     ) -> WorkerResult:
         # CodexRunner builds args as an argv list and never enables a shell.
         proc = subprocess.Popen(  # nosec B603
@@ -215,6 +248,14 @@ class CodexRunner:
             final_message=final_message,
             thread_id=thread_id,
         )
+        diagnostics_json = diagnostics.model_dump(mode="json")
+        diagnostics_json.update(
+            {
+                "stage": stage.value,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
+            }
+        )
         return WorkerResult(
             completed=proc.returncode == 0,
             command=args,
@@ -225,7 +266,10 @@ class CodexRunner:
             last_message_path=last_message_path,
             final_message=final_message,
             thread_id=thread_id,
-            diagnostics=diagnostics.model_dump(mode="json"),
+            stage=stage,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            diagnostics=diagnostics_json,
         )
 
 

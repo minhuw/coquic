@@ -18,6 +18,12 @@ class StewardAgent:
 
 
 AGENTS: dict[WorkerKind, StewardAgent] = {
+    WorkerKind.planner: StewardAgent(
+        WorkerKind.planner,
+        "Implementation Planner",
+        "Inspect a feature task and produce a scoped implementation plan without editing files.",
+        read_only=True,
+    ),
     WorkerKind.integration_manager: StewardAgent(
         WorkerKind.integration_manager,
         "Integration Manager",
@@ -119,7 +125,11 @@ def agent_for_worker(worker: WorkerKind | str) -> StewardAgent:
     return AGENTS.get(WorkerKind(worker), AGENTS[WorkerKind.custom])
 
 
-def render_worker_prompt(task: TaskRecord, config: StewardConfig) -> str:
+def render_worker_prompt(
+    task: TaskRecord,
+    config: StewardConfig,
+    implementation_plan: dict[str, object] | None = None,
+) -> str:
     agent = agent_for_worker(task.spec.worker)
     sections = [
         COMMON_RULES,
@@ -170,6 +180,58 @@ def render_worker_prompt(task: TaskRecord, config: StewardConfig) -> str:
     boundary = _render_execution_boundary(task, config)
     if boundary:
         sections.extend(["", "Execution boundary:", boundary])
+    frozen = _render_frozen_paths(task, config)
+    if frozen:
+        sections.extend(["", "Frozen path policy:", frozen])
+    if implementation_plan is not None:
+        sections.extend(
+            [
+                "",
+                "Validated implementation plan:",
+                json.dumps(implementation_plan, indent=2, sort_keys=True),
+                "",
+                (
+                    "Use this plan as implementation guidance within the original task "
+                    "boundary. It does not authorize broader work or changes to "
+                    "validation and integration policy."
+                ),
+            ]
+        )
+    return "\n".join(sections).strip()
+
+
+def render_implementation_plan_prompt(
+    task: TaskRecord, config: StewardConfig
+) -> str:
+    agent = agent_for_worker(task.spec.worker)
+    sections = [
+        "You are CoQUIC Steward's implementation planner.",
+        "",
+        "Inspect the repository and produce a concrete plan for this feature task.",
+        "Do not edit files, create generated state, commit, push, or mutate remote systems.",
+        "Return only JSON matching the provided schema.",
+        "",
+        f"Task ID: {task.id}",
+        f"Task: {task.spec.title}",
+        f"Required worktree: {task.worktree_path}",
+        f"GitHub repository: {config.github_repository}",
+        "",
+        "Original task prompt:",
+        task.spec.prompt,
+        "",
+        "Planning rules:",
+        "- Keep every step inside the original task boundary.",
+        "- Name repository-relative files only when supported by inspection.",
+        "- Include focused tests and the repository validation commands that matter.",
+        "- State assumptions, risks, and explicit non-goals.",
+        "- Do not propose generated, cache, Steward-state, or frozen paths.",
+    ]
+    source_context = _render_source_context(task)
+    if source_context:
+        sections.extend(["", "Authoritative source context:", source_context])
+    skill_text = _render_skills(config, _skills_for_task(task, agent))
+    if skill_text:
+        sections.extend(["", "Embedded repo skills:", skill_text])
     frozen = _render_frozen_paths(task, config)
     if frozen:
         sections.extend(["", "Frozen path policy:", frozen])

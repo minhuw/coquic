@@ -30,8 +30,8 @@ from .core.subprocesses import CommandResult, run_command
 from .signals import project_signals_from_items
 from .storage import TaskStore, scheduler_state
 
-PUBLIC_MIRROR_SCHEMA_VERSION = 1
-PUBLIC_TASK_DETAIL_SCHEMA_VERSION = 1
+PUBLIC_MIRROR_SCHEMA_VERSION = 2
+PUBLIC_TASK_DETAIL_SCHEMA_VERSION = 2
 DEFAULT_MIRROR_TASK_LIMIT = 80
 DEFAULT_MIRROR_SIGNAL_LIMIT = 80
 DEFAULT_MIRROR_FETCH_LIMIT = 40
@@ -235,6 +235,12 @@ def public_task_detail_payload(
             if event.kind.startswith("integration.") or event.kind == "main.pushed"
         ],
         "attempts": _public_attempts(
+            config,
+            store,
+            record,
+            raw_transcript_artifacts=raw_transcript_artifacts,
+        ),
+        "plan_runs": _public_plan_runs(
             config,
             store,
             record,
@@ -485,6 +491,7 @@ def _public_task(config: StewardConfig, task: TaskRecord) -> dict[str, object]:
         "id": task.id,
         "title": _public_text(config, task.spec.title),
         "kind": str(task.spec.kind),
+        "workflow": str(task.spec.workflow),
         "worker": str(task.spec.worker),
         "priority": str(task.spec.priority),
         "risk": str(task.spec.risk),
@@ -516,6 +523,7 @@ def _public_task_detail_record(
         "spec": {
             "id": task.id,
             "kind": str(task.spec.kind),
+            "workflow": str(task.spec.workflow),
             "worker": str(task.spec.worker),
             "title": _public_text(config, task.spec.title),
             "prompt": (
@@ -583,6 +591,43 @@ def _public_attempts(
     ]
 
 
+def _public_plan_runs(
+    config: StewardConfig,
+    store: TaskStore,
+    task: TaskRecord,
+    *,
+    raw_transcript_artifacts: _RawTranscriptArtifacts | None = None,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "run": item.run,
+            "name": f"implementation-plan-{item.run}",
+            "model": _public_text(config, item.model),
+            "reasoning_effort": _public_text(config, item.reasoning_effort),
+            "exit_code": item.exit_code,
+            "completed": item.completed,
+            "started_at": item.started_at.isoformat(),
+            "updated_at": item.updated_at.isoformat(),
+            "plan": _public_json(config, item.plan_json),
+            "planner": _public_run_artifact(
+                config,
+                item.transcript_path,
+                item.last_message_path,
+                task_id=task.id,
+                label=f"Implementation plan {item.run}",
+                role="planner",
+                name=f"implementation-plan-{item.run}",
+                exit_code=item.exit_code,
+                completed=item.completed,
+                model=item.model,
+                reasoning_effort=item.reasoning_effort,
+                raw_transcript_artifacts=raw_transcript_artifacts,
+            ),
+        }
+        for item in store.plan_runs(task.id)
+    ]
+
+
 def _public_iteration_attempt(
     config: StewardConfig,
     task: TaskRecord,
@@ -605,6 +650,8 @@ def _public_iteration_attempt(
             name=item.worker_name or f"worker-{item.iteration}",
             exit_code=item.worker_exit_code,
             completed=item.worker_completed,
+            model=item.worker_model,
+            reasoning_effort=item.worker_reasoning_effort,
             raw_transcript_artifacts=raw_transcript_artifacts,
         ),
         "reviewer": _public_run_artifact(
@@ -617,6 +664,8 @@ def _public_iteration_attempt(
             name=item.reviewer_name or f"reviewer-{item.iteration}",
             exit_code=item.reviewer_exit_code,
             completed=item.reviewer_completed,
+            model=item.reviewer_model,
+            reasoning_effort=item.reviewer_reasoning_effort,
             raw_transcript_artifacts=raw_transcript_artifacts,
         ),
         "review": _public_review(config, item.review_json),
@@ -640,6 +689,8 @@ def _public_run_artifact(
     name: str,
     exit_code: int | None,
     completed: bool | None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
     raw_transcript_artifacts: _RawTranscriptArtifacts | None = None,
 ) -> dict[str, object] | None:
     transcript = _public_text_artifact(
@@ -687,6 +738,8 @@ def _public_run_artifact(
         "label": _public_text(config, label),
         "exit_code": exit_code,
         "completed": completed,
+        "model": _public_text(config, model),
+        "reasoning_effort": _public_text(config, reasoning_effort),
         "diagnostics": diagnostic_payload,
         "transcript": transcript,
         "last_message": last_message,
@@ -846,6 +899,8 @@ def _write_public_raw_transcripts(
             snapshots[_public_raw_transcript_url(task.id, run_segment)] = artifact
 
     copy_transcript(task.transcript_path, "task")
+    for item in store.plan_runs(task.id):
+        copy_transcript(item.transcript_path, f"implementation-plan-{item.run}")
     iterations = store.iterations(task.id)
     if iterations:
         for item in iterations:
@@ -1225,6 +1280,7 @@ def _public_configuration(config: StewardConfig) -> dict[str, object]:
         "limits": {
             "max_active_tasks": config.limits.max_active_tasks,
             "max_main_pushes_per_day": config.limits.max_main_pushes_per_day,
+            "plan_timeout_minutes": config.limits.plan_timeout_minutes,
             "worker_timeout_minutes": config.limits.worker_timeout_minutes,
             "review_timeout_minutes": config.limits.review_timeout_minutes,
             "validation_timeout_minutes": config.limits.validation_timeout_minutes,

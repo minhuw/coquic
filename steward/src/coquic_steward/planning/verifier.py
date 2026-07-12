@@ -13,6 +13,7 @@ from ..core.models import (
     TaskKind,
     TaskSpec,
     TaskStatus,
+    TaskWorkflow,
     WorkerKind,
 )
 
@@ -31,6 +32,7 @@ PLANNABLE_WORKERS = {
 class ActiveTaskSummary(BaseModel):
     id: str
     kind: str
+    workflow: TaskWorkflow = TaskWorkflow.fix
     worker: str
     title: str
     status: str
@@ -132,6 +134,7 @@ def summarize_active_tasks(tasks) -> list[ActiveTaskSummary]:
             ActiveTaskSummary(
                 id=task.id,
                 kind=str(task.spec.kind),
+                workflow=task.spec.workflow,
                 worker=str(task.spec.worker),
                 title=task.spec.title,
                 status=str(task.status),

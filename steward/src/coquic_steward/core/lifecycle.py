@@ -8,6 +8,7 @@ from .models import TaskStatus, TERMINAL_STATUSES
 
 class TaskPhase(StrEnum):
     dispatch = "dispatch"
+    implementation_plan = "implementation_plan"
     worker = "worker"
     validation = "validation"
     review = "review"
@@ -35,6 +36,10 @@ class InvalidTaskTransition(ValueError):
 
 def worker_started(summary: str) -> TaskTransition:
     return TaskTransition(TaskStatus.running, summary, TaskPhase.worker)
+
+
+def implementation_plan_started(summary: str) -> TaskTransition:
+    return TaskTransition(TaskStatus.running, summary, TaskPhase.implementation_plan)
 
 
 def validation_started(summary: str) -> TaskTransition:

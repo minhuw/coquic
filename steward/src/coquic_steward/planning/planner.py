@@ -8,6 +8,7 @@ from ..agents import CodexRunner
 from ..core.config import StewardConfig
 from ..core.models import (
     IntegrationMode,
+    CodexStage,
     ProjectSignals,
     TaskRecord,
     TaskSpec,
@@ -110,6 +111,7 @@ class CodexPlanner:
             name="planner",
             output_schema=planner_schema_path(self.config),
             resume_session=planner_thread_id(self.config),
+            stage=CodexStage.signal_planner,
         )
         if result.thread_id:
             planner_thread_path(self.config).write_text(

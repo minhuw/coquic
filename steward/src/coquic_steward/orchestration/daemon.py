@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from ..core.config import StewardConfig
+from ..core.lifecycle import TaskPhase
 from ..core.models import (
     SignalFetchStatus,
     SignalItem,
@@ -575,6 +576,7 @@ def status_stale_minutes(config: StewardConfig) -> dict[str, int]:
         return {}
     return {
         TaskStatus.reviewing.value: config.limits.review_timeout_minutes + 5,
+        TaskPhase.implementation_plan.value: config.limits.plan_timeout_minutes + 5,
         "validation": config.limits.validation_timeout_minutes + 5,
     }
 

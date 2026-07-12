@@ -21,7 +21,14 @@ from fastapi.responses import (
 
 from ..agents.diagnostics import diagnostics_for_paths
 from ..core.config import load_config
-from ..core.models import TaskKind, TaskSpec, WorkerKind
+from ..core.models import (
+    CodexStage,
+    TaskKind,
+    TaskSpec,
+    TaskWorkflow,
+    WorkerKind,
+    default_workflow_for_kind,
+)
 from ..execution import StewardExecutor, default_worker_for_kind
 from ..orchestration import (
     DaemonAlreadyRunning,
@@ -139,11 +146,22 @@ def _register_create_task_route(app: FastAPI, store: TaskStore) -> None:
         if not title or not prompt:
             raise HTTPException(status_code=400, detail="title and prompt are required")
         kind = TaskKind(str(body.get("kind", TaskKind.custom.value)))
+        workflow_value = body.get("workflow")
+        workflow = (
+            TaskWorkflow(str(workflow_value))
+            if workflow_value is not None
+            else default_workflow_for_kind(kind)
+        )
         worker_value = body.get("worker") or default_worker_for_kind(kind)
         worker = WorkerKind(str(worker_value))
         task, created = store.add_task(
             TaskSpec(
-                kind=kind, worker=worker, title=title, prompt=prompt, source="web"
+                kind=kind,
+                workflow=workflow,
+                worker=worker,
+                title=title,
+                prompt=prompt,
+                source="web",
             ),
             dedupe_key=f"web:{kind}:{worker}:{title}:{prompt[:80]}",
         )
@@ -184,6 +202,9 @@ def _register_task_detail_routes(app: FastAPI, config, store: TaskStore) -> None
                 ],
                 "files": _task_files(config, store, record),
                 "attempts": _task_attempts(config, store, record),
+                "plan_runs": [
+                    _plan_run_payload(item) for item in store.plan_runs(task_id)
+                ],
                 "remote": _task_remote(config, store, task_id),
             }
         )
@@ -400,6 +421,7 @@ def _state_payload(config, store: TaskStore) -> dict[str, object]:
         "scheduler": scheduler_state(config, store).model_dump(mode="json"),
         "planned": [],
         "kinds": [kind.value for kind in TaskKind],
+        "workflows": [workflow.value for workflow in TaskWorkflow],
         "workers": [worker.value for worker in WorkerKind],
         "projects": _project_payload(config, tasks),
         "integration": _integration_payload(config, store, tasks),
@@ -419,6 +441,7 @@ def _config_payload(config) -> dict[str, object]:
         "logs_dir": str(config.logs_dir),
         "prompts_dir": str(config.prompts_dir),
         "patches_dir": str(config.patches_dir),
+        "implementation_plans_dir": str(config.implementation_plans_dir),
         "db_path": str(config.db_path),
         "config_path": str(config.coquic_home / "steward.toml"),
         "codex_bin": config.codex_bin,
@@ -426,6 +449,13 @@ def _config_payload(config) -> dict[str, object]:
         "codex_bin_available": bool(codex_resolved),
         "codex_model": config.codex_model,
         "codex_reasoning_effort": config.codex_reasoning_effort,
+        "codex_stages": {
+            stage.value: {
+                "model": config.codex_settings(stage).model,
+                "reasoning_effort": config.codex_settings(stage).reasoning_effort,
+            }
+            for stage in CodexStage
+        },
         "codex_profile": config.codex_profile,
         "codex_sandbox": config.codex_sandbox,
         "integration_mode": config.integration_mode,
@@ -438,6 +468,7 @@ def _config_payload(config) -> dict[str, object]:
         "limits": {
             "max_active_tasks": config.limits.max_active_tasks,
             "max_main_pushes_per_day": config.limits.max_main_pushes_per_day,
+            "plan_timeout_minutes": config.limits.plan_timeout_minutes,
             "worker_timeout_minutes": config.limits.worker_timeout_minutes,
             "review_timeout_minutes": config.limits.review_timeout_minutes,
             "validation_timeout_minutes": config.limits.validation_timeout_minutes,
@@ -797,6 +828,32 @@ def _task_attempts(config, store: TaskStore, record) -> list[dict[str, object]]:
     return attempts
 
 
+def _plan_run_payload(item) -> dict[str, object]:
+    return {
+        "run": item.run,
+        "name": f"implementation-plan-{item.run}",
+        "prompt_path": str(item.prompt_path) if item.prompt_path else None,
+        "transcript_path": str(item.transcript_path) if item.transcript_path else None,
+        "last_message_path": (
+            str(item.last_message_path) if item.last_message_path else None
+        ),
+        "plan_path": str(item.plan_path) if item.plan_path else None,
+        "exit_code": item.exit_code,
+        "completed": item.completed,
+        "model": item.model,
+        "reasoning_effort": item.reasoning_effort,
+        "plan": item.plan_json,
+        "started_at": item.started_at.isoformat(),
+        "updated_at": item.updated_at.isoformat(),
+        "diagnostics": diagnostics_for_paths(
+            transcript_path=item.transcript_path,
+            last_message_path=item.last_message_path,
+            exit_code=item.exit_code,
+            completed=item.completed,
+        ).model_dump(mode="json"),
+    }
+
+
 def _iteration_attempts(record, iterations) -> list[dict[str, object]]:
     task_dir = _iteration_task_dir(record, iterations)
     runs = _task_runs(task_dir) if task_dir else []
@@ -822,6 +879,8 @@ def _iteration_attempts(record, iterations) -> list[dict[str, object]]:
                 "updated_at": item.updated_at.isoformat(),
                 "exit_code": item.worker_exit_code,
                 "completed": item.worker_completed,
+                "model": item.worker_model,
+                "reasoning_effort": item.worker_reasoning_effort,
                 "diagnostics": diagnostics_for_paths(
                     transcript_path=item.worker_transcript_path,
                     last_message_path=item.worker_last_message_path,
@@ -849,6 +908,8 @@ def _iteration_attempts(record, iterations) -> list[dict[str, object]]:
                 "updated_at": item.updated_at.isoformat(),
                 "exit_code": item.reviewer_exit_code,
                 "completed": item.reviewer_completed,
+                "model": item.reviewer_model,
+                "reasoning_effort": item.reviewer_reasoning_effort,
                 "diagnostics": diagnostics_for_paths(
                     transcript_path=item.reviewer_transcript_path,
                     last_message_path=item.reviewer_last_message_path,

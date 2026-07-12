@@ -14,7 +14,16 @@ from .orchestration import (
     acquire_daemon_lock,
 )
 from .execution.executor import StewardExecutor, default_worker_for_kind
-from .core.models import Priority, Risk, TaskKind, TaskSpec, TaskStatus, WorkerKind
+from .core.models import (
+    Priority,
+    Risk,
+    TaskKind,
+    TaskSpec,
+    TaskStatus,
+    TaskWorkflow,
+    WorkerKind,
+    default_workflow_for_kind,
+)
 from .planning import run_planner
 from .public_mirror import publish_public_mirror, write_public_mirror
 from .signals import (
@@ -46,7 +55,10 @@ def agents() -> None:
 def status(limit: int = typer.Option(20, help="Maximum tasks to show.")) -> None:
     store, _ = _context()
     for task in store.list_tasks(limit=limit):
-        typer.echo(f"{task.id}\t{task.status}\t{task.spec.kind}\t{task.spec.title}")
+        typer.echo(
+            f"{task.id}\t{task.status}\t{task.spec.workflow}\t"
+            f"{task.spec.kind}\t{task.spec.title}"
+        )
 
 
 @app.command()
@@ -274,6 +286,7 @@ def enqueue_custom(
     prompt: Optional[str] = None,
     kind: TaskKind = TaskKind.custom,
     worker: Optional[WorkerKind] = None,
+    workflow: Optional[TaskWorkflow] = None,
 ) -> None:
     if prompt_file is None and prompt is None:
         raise typer.BadParameter("provide prompt_file or prompt")
@@ -283,9 +296,11 @@ def enqueue_custom(
         else prompt or ""
     )
     selected_worker = worker or default_worker_for_kind(kind)
+    selected_workflow = workflow or default_workflow_for_kind(kind)
     _enqueue(
         TaskSpec(
             kind=kind,
+            workflow=selected_workflow,
             worker=selected_worker,
             title=title,
             prompt=text,

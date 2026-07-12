@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .models import IntegrationMode
+from .models import CodexStage, IntegrationMode
 
 
 VALID_INTEGRATION_MODES = {mode.value for mode in IntegrationMode}
@@ -55,12 +55,14 @@ DEFAULT_PUBLIC_MIRROR_REMOTE_PATH = (
     "/opt/coquic-demo/current/app/public/steward/status.json"
 )
 VALID_PUBLIC_MIRROR_TRANSCRIPT_MODES = {"none", "redacted", "raw"}
+VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
 
 @dataclass(frozen=True)
 class StewardLimits:
     max_active_tasks: int = 4
     max_main_pushes_per_day: int = 10
+    plan_timeout_minutes: int = 30
     worker_timeout_minutes: int = 120
     review_timeout_minutes: int = 20
     validation_timeout_minutes: int = 30
@@ -103,11 +105,25 @@ class SignalProviderConfig:
 
 
 @dataclass(frozen=True)
+class CodexStageConfig:
+    model: str | None = None
+    reasoning_effort: str | None = None
+
+
+@dataclass(frozen=True)
+class CodexRunSettings:
+    stage: CodexStage
+    model: str | None
+    reasoning_effort: str | None
+
+
+@dataclass(frozen=True)
 class StewardConfig:
     repo_root: Path
     codex_bin: str = "codex"
     codex_model: str | None = None
     codex_reasoning_effort: str | None = None
+    codex_stages: dict[str, CodexStageConfig] = field(default_factory=dict)
     codex_profile: str | None = None
     codex_sandbox: str = "workspace-write"
     integration_mode: str = IntegrationMode.local_only.value
@@ -129,6 +145,15 @@ class StewardConfig:
                 f"invalid integration_mode {self.integration_mode!r}; expected {choices}"
             )
         _validate_github_repository(self.github_repository)
+        _validate_reasoning_effort(
+            self.codex_reasoning_effort, "codex_reasoning_effort"
+        )
+        for stage, stage_config in self.codex_stages.items():
+            CodexStage(stage)
+            _validate_reasoning_effort(
+                stage_config.reasoning_effort,
+                f"codex.{stage}.reasoning_effort",
+            )
         providers = dict(self.signal_providers)
         for name in self.enabled_signals:
             providers.setdefault(name, default_signal_provider_config(name))
@@ -176,6 +201,21 @@ class StewardConfig:
     def patches_dir(self) -> Path:
         return self.state_dir / "patches"
 
+    @property
+    def implementation_plans_dir(self) -> Path:
+        return self.state_dir / "implementation-plans"
+
+    def codex_settings(self, stage: CodexStage | str) -> CodexRunSettings:
+        selected = CodexStage(stage)
+        override = self.codex_stages.get(selected.value, CodexStageConfig())
+        return CodexRunSettings(
+            stage=selected,
+            model=override.model or self.codex_model,
+            reasoning_effort=(
+                override.reasoning_effort or self.codex_reasoning_effort
+            ),
+        )
+
     def ensure_dirs(self) -> None:
         for path in (
             self.state_dir,
@@ -184,6 +224,7 @@ class StewardConfig:
             self.logs_dir,
             self.prompts_dir,
             self.patches_dir,
+            self.implementation_plans_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -198,6 +239,7 @@ def load_config(
     signals_data = steward.get("signals", {})
     mirror_data = steward.get("public_mirror", {})
     path_policy_data = steward.get("path_policy", {})
+    codex_data = steward.get("codex", {})
     enabled_signals = _string_tuple(
         signals_data.get(
             "enabled", steward.get("enabled_signals", DEFAULT_ENABLED_SIGNALS)
@@ -212,6 +254,7 @@ def load_config(
         codex_reasoning_effort=steward.get("codex_reasoning_effort")
         or os.getenv("COQUIC_STEWARD_CODEX_REASONING_EFFORT")
         or None,
+        codex_stages=_codex_stage_configs(codex_data),
         codex_profile=steward.get("codex_profile")
         or os.getenv("COQUIC_STEWARD_CODEX_PROFILE")
         or None,
@@ -231,6 +274,7 @@ def load_config(
         limits=StewardLimits(
             max_active_tasks=int(limits_data.get("max_active_tasks", 4)),
             max_main_pushes_per_day=int(limits_data.get("max_main_pushes_per_day", 10)),
+            plan_timeout_minutes=int(limits_data.get("plan_timeout_minutes", 30)),
             worker_timeout_minutes=int(limits_data.get("worker_timeout_minutes", 120)),
             review_timeout_minutes=int(limits_data.get("review_timeout_minutes", 20)),
             validation_timeout_minutes=int(
@@ -247,6 +291,39 @@ def load_config(
     )
     config.ensure_dirs()
     return config
+
+
+def _codex_stage_configs(raw: object) -> dict[str, CodexStageConfig]:
+    data = raw if isinstance(raw, dict) else {}
+    configs: dict[str, CodexStageConfig] = {}
+    for stage in CodexStage:
+        value = data.get(stage.value, {})
+        if not isinstance(value, dict):
+            raise ValueError(f"expected [steward.codex.{stage.value}] table")
+        model = value.get("model")
+        reasoning = value.get("reasoning_effort")
+        if model is not None and (not isinstance(model, str) or not model.strip()):
+            raise ValueError(f"codex.{stage.value}.model must be a non-empty string")
+        if reasoning is not None and not isinstance(reasoning, str):
+            raise ValueError(
+                f"codex.{stage.value}.reasoning_effort must be a string"
+            )
+        if model is not None or reasoning is not None:
+            configs[stage.value] = CodexStageConfig(
+                model=model.strip() if isinstance(model, str) else None,
+                reasoning_effort=(
+                    reasoning.strip() if isinstance(reasoning, str) else None
+                ),
+            )
+    return configs
+
+
+def _validate_reasoning_effort(value: str | None, label: str) -> None:
+    if value is None:
+        return
+    if value not in VALID_REASONING_EFFORTS:
+        choices = ", ".join(sorted(VALID_REASONING_EFFORTS))
+        raise ValueError(f"invalid {label} {value!r}; expected one of {choices}")
 
 
 def find_repo_root(start: Path) -> Path:

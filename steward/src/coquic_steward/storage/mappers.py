@@ -11,6 +11,7 @@ from ..core.models import (
     SignalFetchRun,
     SignalItem,
     TaskIteration,
+    TaskPlanRun,
     TaskRecord,
     TaskSpec,
     ValidationResult,
@@ -21,6 +22,7 @@ from .schema import (
     SignalFetchRunRow,
     SignalItemRow,
     TaskIterationRow,
+    TaskPlanRunRow,
     TaskRow,
     ValidationRow,
 )
@@ -28,7 +30,15 @@ from .schema import (
 
 class PathCodec:
     _RELATIVE_ROOTS = frozenset(
-        {"logs", "patches", "prompts", "schemas", "transcripts", "worktrees"}
+        {
+            "implementation-plans",
+            "logs",
+            "patches",
+            "prompts",
+            "schemas",
+            "transcripts",
+            "worktrees",
+        }
     )
     _PATH_KEYS = frozenset({"cwd", "log", "logs", "path", "paths"})
 
@@ -116,6 +126,7 @@ def task_to_row(
     return TaskRow(
         id=record.id,
         kind=str(record.spec.kind),
+        workflow=str(record.spec.workflow),
         worker=str(record.spec.worker),
         title=record.spec.title,
         prompt=record.spec.prompt,
@@ -143,6 +154,7 @@ def task_to_row(
 
 def update_task_row(row: TaskRow, record: TaskRecord, *, path_codec: PathCodec) -> None:
     row.kind = str(record.spec.kind)
+    row.workflow = str(record.spec.workflow)
     row.worker = str(record.spec.worker)
     row.title = record.spec.title
     row.prompt = record.spec.prompt
@@ -170,6 +182,7 @@ def row_to_task(row: TaskRow, *, path_codec: PathCodec) -> TaskRecord:
     spec = TaskSpec(
         id=row.id,
         kind=row.kind,
+        workflow=row.workflow,
         worker=row.worker,
         title=row.title,
         prompt=row.prompt,
@@ -230,12 +243,16 @@ def iteration_to_row(iteration: TaskIteration, *, path_codec: PathCodec) -> Task
         worker_last_message_path=path_codec.dump(iteration.worker_last_message_path),
         worker_exit_code=iteration.worker_exit_code,
         worker_completed=iteration.worker_completed,
+        worker_model=iteration.worker_model,
+        worker_reasoning_effort=iteration.worker_reasoning_effort,
         reviewer_name=iteration.reviewer_name,
         reviewer_prompt_path=path_codec.dump(iteration.reviewer_prompt_path),
         reviewer_transcript_path=path_codec.dump(iteration.reviewer_transcript_path),
         reviewer_last_message_path=path_codec.dump(iteration.reviewer_last_message_path),
         reviewer_exit_code=iteration.reviewer_exit_code,
         reviewer_completed=iteration.reviewer_completed,
+        reviewer_model=iteration.reviewer_model,
+        reviewer_reasoning_effort=iteration.reviewer_reasoning_effort,
         reviewer_run=iteration.reviewer_run,
         review_json=_dump_json(iteration.review_json),
         patch_path=path_codec.dump(iteration.patch_path),
@@ -254,12 +271,16 @@ def update_iteration_row(
     row.worker_last_message_path = path_codec.dump(iteration.worker_last_message_path)
     row.worker_exit_code = iteration.worker_exit_code
     row.worker_completed = iteration.worker_completed
+    row.worker_model = iteration.worker_model
+    row.worker_reasoning_effort = iteration.worker_reasoning_effort
     row.reviewer_name = iteration.reviewer_name
     row.reviewer_prompt_path = path_codec.dump(iteration.reviewer_prompt_path)
     row.reviewer_transcript_path = path_codec.dump(iteration.reviewer_transcript_path)
     row.reviewer_last_message_path = path_codec.dump(iteration.reviewer_last_message_path)
     row.reviewer_exit_code = iteration.reviewer_exit_code
     row.reviewer_completed = iteration.reviewer_completed
+    row.reviewer_model = iteration.reviewer_model
+    row.reviewer_reasoning_effort = iteration.reviewer_reasoning_effort
     row.reviewer_run = iteration.reviewer_run
     row.review_json = _dump_json(iteration.review_json)
     row.patch_path = path_codec.dump(iteration.patch_path)
@@ -278,15 +299,71 @@ def row_to_iteration(row: TaskIterationRow, *, path_codec: PathCodec) -> TaskIte
         worker_last_message_path=path_codec.load(row.worker_last_message_path),
         worker_exit_code=row.worker_exit_code,
         worker_completed=row.worker_completed,
+        worker_model=row.worker_model,
+        worker_reasoning_effort=row.worker_reasoning_effort,
         reviewer_name=row.reviewer_name,
         reviewer_prompt_path=path_codec.load(row.reviewer_prompt_path),
         reviewer_transcript_path=path_codec.load(row.reviewer_transcript_path),
         reviewer_last_message_path=path_codec.load(row.reviewer_last_message_path),
         reviewer_exit_code=row.reviewer_exit_code,
         reviewer_completed=row.reviewer_completed,
+        reviewer_model=row.reviewer_model,
+        reviewer_reasoning_effort=row.reviewer_reasoning_effort,
         reviewer_run=row.reviewer_run,
         review_json=_loads_optional_dict(row.review_json),
         patch_path=path_codec.load(row.patch_path),
+        started_at=_load_datetime(row.started_at),
+        updated_at=_load_datetime(row.updated_at),
+    )
+
+
+def plan_run_to_row(item: TaskPlanRun, *, path_codec: PathCodec) -> TaskPlanRunRow:
+    return TaskPlanRunRow(
+        task_id=item.task_id,
+        run=item.run,
+        prompt_path=path_codec.dump(item.prompt_path),
+        transcript_path=path_codec.dump(item.transcript_path),
+        last_message_path=path_codec.dump(item.last_message_path),
+        plan_path=path_codec.dump(item.plan_path),
+        exit_code=item.exit_code,
+        completed=item.completed,
+        model=item.model,
+        reasoning_effort=item.reasoning_effort,
+        plan_json=_dump_json(item.plan_json),
+        started_at=_dump_datetime(item.started_at),
+        updated_at=_dump_datetime(item.updated_at),
+    )
+
+
+def update_plan_run_row(
+    row: TaskPlanRunRow, item: TaskPlanRun, *, path_codec: PathCodec
+) -> None:
+    row.prompt_path = path_codec.dump(item.prompt_path)
+    row.transcript_path = path_codec.dump(item.transcript_path)
+    row.last_message_path = path_codec.dump(item.last_message_path)
+    row.plan_path = path_codec.dump(item.plan_path)
+    row.exit_code = item.exit_code
+    row.completed = item.completed
+    row.model = item.model
+    row.reasoning_effort = item.reasoning_effort
+    row.plan_json = _dump_json(item.plan_json)
+    row.started_at = _dump_datetime(item.started_at)
+    row.updated_at = _dump_datetime(item.updated_at)
+
+
+def row_to_plan_run(row: TaskPlanRunRow, *, path_codec: PathCodec) -> TaskPlanRun:
+    return TaskPlanRun(
+        task_id=row.task_id,
+        run=row.run,
+        prompt_path=path_codec.load(row.prompt_path),
+        transcript_path=path_codec.load(row.transcript_path),
+        last_message_path=path_codec.load(row.last_message_path),
+        plan_path=path_codec.load(row.plan_path),
+        exit_code=row.exit_code,
+        completed=row.completed,
+        model=row.model,
+        reasoning_effort=row.reasoning_effort,
+        plan_json=_loads_optional_dict(row.plan_json),
         started_at=_load_datetime(row.started_at),
         updated_at=_load_datetime(row.updated_at),
     )

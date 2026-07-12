@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _ID_TIMESTAMP_TRANSLATION = str.maketrans("", "", "-:T")
 
@@ -45,6 +45,19 @@ class TaskKind(StrEnum):
     health = "health"
     integration = "integration"
     custom = "custom"
+
+
+class TaskWorkflow(StrEnum):
+    fix = "fix"
+    feature = "feature"
+
+
+def default_workflow_for_kind(kind: TaskKind | str) -> TaskWorkflow:
+    return (
+        TaskWorkflow.feature
+        if TaskKind(kind) == TaskKind.feature
+        else TaskWorkflow.fix
+    )
 
 
 class TaskStatus(StrEnum):
@@ -94,6 +107,14 @@ class Risk(StrEnum):
 class IntegrationMode(StrEnum):
     local_only = "local-only"
     push_main = "push-main"
+
+
+class CodexStage(StrEnum):
+    signal_planner = "signal_planner"
+    implementation_plan = "implementation_plan"
+    code = "code"
+    review = "review"
+    commit_message = "commit_message"
 
 
 class SignalItemStatus(StrEnum):
@@ -152,15 +173,35 @@ class TaskIteration(BaseModel):
     worker_last_message_path: Path | None = None
     worker_exit_code: int | None = None
     worker_completed: bool | None = None
+    worker_model: str | None = None
+    worker_reasoning_effort: str | None = None
     reviewer_name: str | None = None
     reviewer_prompt_path: Path | None = None
     reviewer_transcript_path: Path | None = None
     reviewer_last_message_path: Path | None = None
     reviewer_exit_code: int | None = None
     reviewer_completed: bool | None = None
+    reviewer_model: str | None = None
+    reviewer_reasoning_effort: str | None = None
     reviewer_run: int | None = None
     review_json: dict[str, Any] | None = None
     patch_path: Path | None = None
+    started_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class TaskPlanRun(BaseModel):
+    task_id: str
+    run: int
+    prompt_path: Path | None = None
+    transcript_path: Path | None = None
+    last_message_path: Path | None = None
+    plan_path: Path | None = None
+    exit_code: int | None = None
+    completed: bool | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
+    plan_json: dict[str, Any] | None = None
     started_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -170,6 +211,7 @@ class TaskSpec(BaseModel):
 
     id: str = Field(default_factory=new_task_id)
     kind: TaskKind
+    workflow: TaskWorkflow
     worker: WorkerKind
     title: str
     prompt: str
@@ -178,6 +220,13 @@ class TaskSpec(BaseModel):
     source: str = "manual"
     allow_main_write: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_workflow(cls, value: Any) -> Any:
+        if isinstance(value, dict) and value.get("workflow") is None and "kind" in value:
+            return {**value, "workflow": default_workflow_for_kind(value["kind"])}
+        return value
 
 
 class TaskRecord(BaseModel):
@@ -297,4 +346,7 @@ class WorkerResult(BaseModel):
     last_message_path: Path
     final_message: str = ""
     thread_id: str | None = None
+    stage: CodexStage = CodexStage.code
+    model: str | None = None
+    reasoning_effort: str | None = None
     diagnostics: dict[str, Any] = Field(default_factory=dict)

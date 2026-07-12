@@ -13,14 +13,20 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from ..agents import CodexRunner, render_worker_prompt
+from ..agents import (
+    CodexRunner,
+    render_implementation_plan_prompt,
+    render_worker_prompt,
+)
 from ..core.config import StewardConfig
 from ..core.models import (
     IntegrationMode,
+    CodexStage,
     TaskRecord,
     TaskKind,
     TaskSpec,
     TaskStatus,
+    TaskWorkflow,
     ValidationResult,
     WorkerKind,
     WorkerResult,
@@ -35,6 +41,12 @@ from .review import (
     review_approved,
     review_schema_path,
     summarize_review,
+)
+from .implementation_plan import (
+    MAX_PLAN_RUN_ATTEMPTS,
+    implementation_plan_schema_path,
+    parse_implementation_plan,
+    save_implementation_plan,
 )
 from .validation import render_validation_revision_prompt, run_gates
 from .worktree import Worktrees
@@ -97,6 +109,13 @@ class StewardExecutor:
         self.store.add_event(
             task.id, "worktree.ready", str(worktree), {"branch": branch}
         )
+        implementation_plan = None
+        if TaskWorkflow(task.spec.workflow) == TaskWorkflow.feature:
+            implementation_plan = self._run_implementation_plan(task.id)
+            if implementation_plan is None:
+                return False
+            self.store.start_worker(task.id, "implementation plan ready; worker started")
+            task = self.store.get(task.id)
         self.store.begin_iteration(
             task.id,
             0,
@@ -110,7 +129,9 @@ class StewardExecutor:
         result = self._run_with_heartbeat(
             task.id,
             lambda: self.runner.run(
-                task, render_worker_prompt(task, self.config), worktree
+                task,
+                render_worker_prompt(task, self.config, implementation_plan),
+                worktree,
             ),
         )
         self.store.add_event(
@@ -133,6 +154,128 @@ class StewardExecutor:
         if revisions is None:
             return False
         return self._queue_or_finish_integration(task.id)
+
+    def _run_implementation_plan(self, task_id: str) -> dict[str, Any] | None:
+        task = self.store.get(task_id)
+        if task.worktree_path is None:
+            self._finish_task(task.id, TaskStatus.failed, "planning requested without worktree")
+            return None
+        if self.worktrees.has_changes(task.worktree_path):
+            self._finish_task(task.id, TaskStatus.failed, "planning worktree was not clean")
+            return None
+        prompt = render_implementation_plan_prompt(task, self.config)
+        schema_path = implementation_plan_schema_path(self.config)
+        settings = self.config.codex_settings(CodexStage.implementation_plan)
+        for run in range(MAX_PLAN_RUN_ATTEMPTS):
+            name = f"implementation-plan-{run}"
+            transcript_path, last_message_path = self.runner.paths(task, name=name)
+            prompt_path = self.config.prompts_dir / task.id / f"{name}.md"
+            self.store.start_implementation_plan(
+                task.id,
+                "implementation planning"
+                if run == 0
+                else f"implementation planning retry {run}",
+            )
+            self.store.begin_plan_run(
+                task.id,
+                run,
+                prompt_path=prompt_path,
+                transcript_path=transcript_path,
+                last_message_path=last_message_path,
+                model=settings.model,
+                reasoning_effort=settings.reasoning_effort,
+            )
+            self.store.add_event(
+                task.id,
+                "implementation_plan.started",
+                name,
+                {
+                    "run": run,
+                    "model": settings.model,
+                    "reasoning_effort": settings.reasoning_effort,
+                },
+            )
+            result = self._run_with_heartbeat(
+                task.id,
+                lambda: self.runner.run(
+                    task,
+                    prompt,
+                    task.worktree_path,
+                    name=name,
+                    output_schema=schema_path,
+                    stage=CodexStage.implementation_plan,
+                    sandbox="read-only",
+                ),
+            )
+            changed = self.worktrees.has_changes(task.worktree_path)
+            plan = (
+                parse_implementation_plan(result.final_message, task, self.config)
+                if result.completed and not changed
+                else None
+            )
+            plan_path = (
+                save_implementation_plan(self.config, task.id, run, plan)
+                if plan is not None
+                else None
+            )
+            self.store.finish_plan_run(
+                task.id,
+                run,
+                result,
+                plan=plan,
+                plan_path=plan_path,
+            )
+            retryable = run + 1 < MAX_PLAN_RUN_ATTEMPTS
+            if changed:
+                self.store.add_event(
+                    task.id,
+                    "implementation_plan.failed",
+                    "implementation planner changed the worktree",
+                    {"run": run, "retryable": False},
+                )
+                self._finish_task(
+                    task.id,
+                    TaskStatus.failed,
+                    "implementation planner changed the worktree",
+                )
+                return None
+            if plan is not None and plan_path is not None:
+                self.store.add_event(
+                    task.id,
+                    "implementation_plan.finished",
+                    str(plan_path),
+                    {
+                        "run": run,
+                        "plan_path": str(plan_path),
+                        "model": result.model,
+                        "reasoning_effort": result.reasoning_effort,
+                    },
+                )
+                return plan
+            event_kind = (
+                "implementation_plan.invalid_output"
+                if result.completed
+                else "implementation_plan.failed"
+            )
+            self.store.add_event(
+                task.id,
+                event_kind,
+                result.final_message[-2000:] or f"plan exited {result.exit_code}",
+                {
+                    "run": run,
+                    "retryable": retryable,
+                    "exit_code": result.exit_code,
+                    "diagnostics": result.diagnostics,
+                },
+            )
+            if not retryable:
+                self._finish_task(
+                    task.id,
+                    TaskStatus.failed,
+                    "implementation planning failed",
+                )
+                return None
+        return None
 
     def _review_and_revise_until_approved(
         self, task_id: str, revisions: int
@@ -915,6 +1058,7 @@ class StewardExecutor:
         assert source.patch_path is not None
         spec = TaskSpec(
             kind=TaskKind.integration,
+            workflow=source.spec.workflow,
             worker=WorkerKind.integration_manager,
             title=f"Integrate {source.spec.title}",
             prompt=(
@@ -1629,12 +1773,14 @@ class StewardExecutor:
             )
         result = self._run_with_heartbeat(
             task.id,
-            lambda: self.runner.run_review(
+            lambda: self.runner.run(
                 task,
                 prompt,
                 task.worktree_path,
                 name="commit-message",
                 output_schema=commit_message_schema_path(self.config),
+                stage=CodexStage.commit_message,
+                sandbox="read-only",
             ),
         )
         data = parse_commit_message(result.final_message)

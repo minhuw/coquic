@@ -5,13 +5,9 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
-if [ -z "${COQUIC_CLANG_TIDY_IN_NIX:-}" ] &&
-    { [ -z "${GTEST_INCLUDE_DIR:-}" ] ||
-      [ -z "${SPDLOG_INCLUDE_DIR:-}" ] ||
-      [ -z "${FMT_INCLUDE_DIR:-}" ] ||
-      [ -z "${LIBURING_INCLUDE_DIR:-}" ]; }; then
+if [ -z "${COQUIC_CLANG_TIDY_IN_NIX:-}" ]; then
     command -v nix >/dev/null || {
-        echo "clang-tidy requires nix develop or the coquic build environment" >&2
+        echo "clang-tidy requires nix develop .#lint or nix on PATH" >&2
         exit 1
     }
     cd "${repo_root}"

@@ -13,6 +13,7 @@ export type TaskStatus =
 export type TaskSpec = {
   id: string;
   kind: string;
+  workflow: "fix" | "feature";
   worker: string;
   title: string;
   prompt: string;
@@ -79,6 +80,25 @@ export type TaskRunArtifact = {
   updated_at: string;
   exit_code?: number | null;
   completed?: boolean | null;
+  model?: string | null;
+  reasoning_effort?: string | null;
+  diagnostics?: CodexRunDiagnostics | null;
+};
+
+export type TaskPlanRun = {
+  run: number;
+  name: string;
+  prompt_path: string | null;
+  transcript_path: string | null;
+  last_message_path: string | null;
+  plan_path: string | null;
+  exit_code: number | null;
+  completed: boolean | null;
+  model: string | null;
+  reasoning_effort: string | null;
+  plan: Record<string, unknown> | null;
+  started_at: string;
+  updated_at: string;
   diagnostics?: CodexRunDiagnostics | null;
 };
 
@@ -251,6 +271,7 @@ export type StewardState = {
   planned: PlannedTask[];
   projects?: StewardProject[];
   kinds: string[];
+  workflows?: string[];
   workers: string[];
   signals: {
     schema_version: number;
@@ -282,6 +303,7 @@ export type StewardState = {
     logs_dir?: string;
     prompts_dir?: string;
     patches_dir?: string;
+    implementation_plans_dir?: string;
     db_path?: string;
     config_path?: string;
     codex_bin?: string;
@@ -289,6 +311,7 @@ export type StewardState = {
     codex_bin_available?: boolean;
     codex_model?: string | null;
     codex_reasoning_effort?: string | null;
+    codex_stages?: Record<string, { model: string | null; reasoning_effort: string | null }>;
     codex_profile?: string | null;
     codex_sandbox?: string;
     integration_mode: string;
@@ -301,6 +324,7 @@ export type StewardState = {
     limits?: {
       max_active_tasks: number;
       max_main_pushes_per_day: number;
+      plan_timeout_minutes?: number;
       worker_timeout_minutes: number;
       review_timeout_minutes: number;
       validation_timeout_minutes: number;
@@ -334,6 +358,7 @@ export type TaskDetail = {
   task: TaskRecord;
   events: EventRecord[];
   attempts: TaskAttempt[];
+  plan_runs: TaskPlanRun[];
   remote: {
     commit: string | null;
     commit_url: string | null;

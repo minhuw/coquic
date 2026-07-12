@@ -35,7 +35,7 @@ import {
 import { CodeBlock } from "./code-block";
 import { TimelineEvent } from "./timeline";
 import { TranscriptView } from "./transcript";
-import type { CodexRunDiagnostics, EventRecord, TaskAttempt, TaskDetail, TaskRecord, TaskRunArtifact, TaskStatus, TranscriptWindow } from "./types";
+import type { CodexRunDiagnostics, EventRecord, TaskAttempt, TaskDetail, TaskPlanRun, TaskRecord, TaskRunArtifact, TaskStatus, TranscriptWindow } from "./types";
 
 type ReviewFinding = {
   severity: string;
@@ -57,7 +57,7 @@ type ReviewRecord = {
   exit_code: number | null;
   command: string;
 };
-type TaskStageKey = "code" | "validation" | "review" | "integration";
+type TaskStageKey = "plan" | "code" | "validation" | "review" | "integration";
 type TaskStageState = "pending" | "active" | "complete" | "blocked";
 type TaskStage = {
   key: TaskStageKey;
@@ -103,7 +103,7 @@ export function TaskDetailRoute({ taskId }: { taskId: string }) {
         attempts.flatMap((attempt) => [
           attempt.worker?.name,
           attempt.reviewer?.name,
-        ]).filter((name): name is string => Boolean(name)),
+        ]).concat((nextDetail.plan_runs ?? []).map((plan) => plan.name)).filter((name): name is string => Boolean(name)),
       ),
     );
     const patchAttempts = attempts.filter((attempt) => Boolean(attempt.patch_path));
@@ -207,6 +207,7 @@ export function TaskDetailRoute({ taskId }: { taskId: string }) {
   const task = loaded.detail.task;
   const events = loaded.detail.events ?? [];
   const attempts = loaded.detail.attempts ?? [];
+  const planRuns = loaded.detail.plan_runs ?? [];
   const reviews = reviewRecords(events);
   const flow = taskFlow(task, attempts, events);
   const timelineEvents = events.slice().reverse();
@@ -233,6 +234,14 @@ export function TaskDetailRoute({ taskId }: { taskId: string }) {
         <div className="task-detail-layout">
           <main className="task-detail-main">
             <TaskFlowPanel flow={flow} />
+            {task.spec.workflow === "feature" && (
+              <PlanRunsPanel
+                onLoadEarlierTranscript={loadEarlierTranscript}
+                planRuns={planRuns}
+                runTranscripts={loaded.runTranscripts}
+                task={task}
+              />
+            )}
             <AttemptStack
               activeStage={flow.active}
               attempts={attempts}
@@ -291,6 +300,7 @@ function TaskOverviewFacts({ detail, task }: { detail: TaskDetail | null; task: 
         <div className="task-overview-meta" aria-label="Task facts">
           <FactPill label="Task" mono value={task.spec.id} />
           <FactPill label="Type" value={display.kind} />
+          <FactPill label="Workflow" value={task.spec.workflow} />
           <FactPill label={isIntegrationTask(task) ? "Source" : "Agent"} value={display.worker} />
           <FactPill label="Updated" mono value={shortDate(task.updated_at)} />
           {remote?.commit && remote.commit_url && <GithubCommitLink commit={remote.commit} url={remote.commit_url} />}
@@ -344,6 +354,60 @@ function TaskFlowPanel({ flow }: { flow: TaskFlow }) {
   );
 }
 
+function PlanRunsPanel({
+  onLoadEarlierTranscript,
+  planRuns,
+  runTranscripts,
+  task,
+}: {
+  onLoadEarlierTranscript: (runName: string) => void;
+  planRuns: TaskPlanRun[];
+  runTranscripts: Record<string, TranscriptWindow>;
+  task: TaskRecord;
+}) {
+  return (
+    <section className="panel">
+      <PanelTitle icon={<FileText size={17} />} title="Implementation Plan" />
+      {!planRuns.length && <div className="empty-state compact">No implementation plan run has been captured yet.</div>}
+      {[...planRuns].reverse().map((planRun) => {
+        const transcriptWindow = runTranscripts[planRun.name];
+        return (
+          <article className="attempt-card" key={planRun.run}>
+            <div className="attempt-card-head">
+              <div>
+                <h3>Plan run {planRun.run}</h3>
+                <span className="mono">{planRun.name}</span>
+              </div>
+              <div className="attempt-card-meta">
+                <span>{planRun.model || "default model"}</span>
+                <span>{planRun.reasoning_effort || "default reasoning"}</span>
+                <StatusPill status={planRun.completed && planRun.plan ? "succeeded" : planRun.completed === false ? "running" : "failed"} />
+              </div>
+            </div>
+            {planRun.plan ? (
+              <CodeBlock compact language="json" text={JSON.stringify(planRun.plan, null, 2)} title="Structured plan" />
+            ) : (
+              <div className="empty-state compact">No valid structured plan was recorded.</div>
+            )}
+            <RunSection
+              diagnostics={planRun.diagnostics}
+              emptyText="No planner transcript for this run."
+              isLiveRun={task.status === "running" && planRun.completed === false}
+              label="Planner transcript"
+              onLoadEarlier={onLoadEarlierTranscript}
+              prompt=""
+              runName={planRun.name}
+              taskId={`${task.spec.id}-${planRun.name}`}
+              text={transcriptWindow?.text || ""}
+              transcriptWindow={transcriptWindow}
+            />
+          </article>
+        );
+      })}
+    </section>
+  );
+}
+
 type PipelineNodeData = {
   stage?: TaskStage;
 };
@@ -386,12 +450,22 @@ type FeedbackEdgeKind = "validation" | "review" | "integration";
 
 function pipelineGraph(flow: TaskFlow): { nodes: PipelineNode[]; edges: PipelineEdge[] } {
   const fitBoundIds = ["fit-top-left", "fit-top-right", "fit-bottom-left", "fit-bottom-right"];
-  const positions: Record<TaskStageKey, { x: number; y: number }> = {
-    code: { x: 0, y: 52 },
-    validation: { x: 178, y: 52 },
-    review: { x: 356, y: 52 },
-    integration: { x: 534, y: 52 },
-  };
+  const hasPlan = flow.stages.some((stage) => stage.key === "plan");
+  const positions: Record<TaskStageKey, { x: number; y: number }> = hasPlan
+    ? {
+        plan: { x: 0, y: 52 },
+        code: { x: 142, y: 52 },
+        validation: { x: 284, y: 52 },
+        review: { x: 426, y: 52 },
+        integration: { x: 568, y: 52 },
+      }
+    : {
+        plan: { x: 0, y: 52 },
+        code: { x: 0, y: 52 },
+        validation: { x: 178, y: 52 },
+        review: { x: 356, y: 52 },
+        integration: { x: 534, y: 52 },
+      };
   const stages = Object.fromEntries(flow.stages.map((stage) => [stage.key, stage])) as Record<TaskStageKey, TaskStage>;
   const nodes: PipelineNode[] = [
     ...fitBoundIds.map((id, index) => ({
@@ -434,6 +508,7 @@ function pipelineGraph(flow: TaskFlow): { nodes: PipelineNode[]; edges: Pipeline
     })),
   ];
   const edges: PipelineEdge[] = [
+    ...(hasPlan ? [forwardEdge("plan-code", "plan", "code", stages.plan.state)] : []),
     forwardEdge("code-validation", "code", "validation", stages.code.state),
     forwardEdge("validation-review", "validation", "review", stages.validation.state),
     forwardEdge("review-integration", "review", "integration", stages.review.state),
@@ -967,6 +1042,7 @@ function taskFlow(task: TaskRecord, attempts: TaskAttempt[], events: EventRecord
   const active = activeStage(task, attempts, events);
   const loops = flowLoops(events);
   const hasWorker = attempts.some((attempt) => Boolean(attempt.worker));
+  const hasPlan = events.some((event) => event.kind === "implementation_plan.finished");
   const hasValidation = attempts.some((attempt) => attempt.validations.length > 0);
   const hasReview = attempts.some((attempt) => Boolean(attempt.reviewer || attempt.review));
   const hasIntegration = events.some((event) => event.kind.startsWith("integration.") || event.kind === "main.pushed")
@@ -975,6 +1051,12 @@ function taskFlow(task: TaskRecord, attempts: TaskAttempt[], events: EventRecord
   const blocked = new Set<TaskStageKey>();
   if (["blocked", "failed", "cancelled"].includes(task.status)) blocked.add(active.key);
   const stages: TaskStage[] = [
+    ...(task.spec.workflow === "feature" ? [{
+      key: "plan" as const,
+      label: "Plan",
+      state: stageState("plan", active, hasPlan, blocked),
+      detail: stageDetail("plan", events, hasPlan),
+    }] : []),
     {
       key: "code",
       label: "Code Generation",
@@ -1031,6 +1113,14 @@ function activeStage(task: TaskRecord, attempts: TaskAttempt[], events: EventRec
       tab: "validation",
     };
   }
+  if (eventStage(latestEvent) === "plan") {
+    return {
+      key: "plan",
+      attempt: null,
+      live,
+      tab: "transcript",
+    };
+  }
   return {
     key: "code",
     attempt,
@@ -1053,6 +1143,7 @@ function stageState(
 function stageDetail(key: TaskStageKey, events: EventRecord[], complete: boolean) {
   const event = [...events].reverse().find((item) => eventStage(item) === key);
   if (!event) return fallbackStageDetail(key, complete);
+  if (key === "plan") return planStageDetail(event);
   if (key === "review") return reviewStageDetail(event);
   if (key === "validation") return validationStageDetail(event);
   if (key === "code") return codeStageDetail(event);
@@ -1061,6 +1152,7 @@ function stageDetail(key: TaskStageKey, events: EventRecord[], complete: boolean
 }
 
 function fallbackStageDetail(key: TaskStageKey, complete: boolean) {
+  if (key === "plan") return complete ? "Implementation plan recorded" : "Waiting for plan";
   if (key === "code") return complete ? "Worker session captured" : "Waiting for worker";
   if (key === "validation") return complete ? "Validation gates recorded" : "No validation run yet";
   if (key === "review") return complete ? "Reviewer verdict recorded" : "Waiting for review";
@@ -1095,6 +1187,13 @@ function codeStageDetail(event: EventRecord) {
   return "Worker activity recorded";
 }
 
+function planStageDetail(event: EventRecord) {
+  if (event.kind === "implementation_plan.finished") return "Implementation plan ready";
+  if (event.kind === "implementation_plan.invalid_output") return "Planner returned invalid output";
+  if (event.kind === "implementation_plan.failed") return "Implementation planning failed";
+  return "Implementation planning in progress";
+}
+
 function integrationStageDetail(event: EventRecord) {
   if (event.kind === "main.pushed") return `Pushed ${shortSha(event.message)}`;
   if (event.kind === "integration.queued") return "Integration queued";
@@ -1113,6 +1212,7 @@ function flowLoops(events: EventRecord[]) {
 function eventStage(event?: EventRecord): TaskStageKey | null {
   const kind = event?.kind || "";
   const phase = stringValue(event?.data?.phase, "");
+  if (kind.startsWith("implementation_plan.") || phase === "implementation_plan") return "plan";
   if (kind === "task.status" && phase === "validation") return "validation";
   if (kind.startsWith("worker.") || kind === "worker.finished" || kind === "worktree.ready") return "code";
   if (kind.startsWith("validation.") || kind === "patch.saved") return "validation";

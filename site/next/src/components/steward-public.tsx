@@ -27,6 +27,7 @@ export type PublicStewardTask = {
   id: string;
   title: string;
   kind: string;
+  workflow?: string;
   worker: string;
   priority: string;
   risk: string;
@@ -63,6 +64,8 @@ export type PublicStewardRunArtifact = {
   label: string;
   exit_code: number | null;
   completed: boolean | null;
+  model?: string;
+  reasoning_effort?: string;
   diagnostics: {
     status: string;
     summary: string;
@@ -105,6 +108,19 @@ export type PublicStewardAttempt = {
   validations: PublicStewardValidationDetail[];
 };
 
+export type PublicStewardPlanRun = {
+  run: number;
+  name: string;
+  model: string;
+  reasoning_effort: string;
+  exit_code: number | null;
+  completed: boolean | null;
+  started_at: string;
+  updated_at: string;
+  plan: Record<string, unknown> | null;
+  planner: PublicStewardRunArtifact;
+};
+
 export type PublicStewardEvent = {
   task_id: string;
   kind: string;
@@ -123,6 +139,7 @@ export type PublicStewardTaskDetail = {
     spec: {
       id: string;
       kind: string;
+      workflow?: string;
       worker: string;
       title: string;
       prompt: string;
@@ -140,6 +157,7 @@ export type PublicStewardTaskDetail = {
   events: PublicStewardEvent[];
   source_events: PublicStewardEvent[];
   attempts: PublicStewardAttempt[];
+  plan_runs?: PublicStewardPlanRun[];
   validations: PublicStewardValidationDetail[];
   artifacts: {
     patch: PublicStewardArtifact;
@@ -292,7 +310,7 @@ const TASK_GRAPH_LANES: Array<{
   { key: 'completed', label: 'Completed', statuses: ['succeeded', 'pushed', 'no_changes'], empty: 'No completed tasks' },
 ];
 
-type PublicTaskStageKey = 'code' | 'validation' | 'review' | 'integration';
+type PublicTaskStageKey = 'plan' | 'code' | 'validation' | 'review' | 'integration';
 type PublicTaskStageState = 'pending' | 'active' | 'complete' | 'blocked';
 type PublicAttemptTab = 'transcript' | 'patch' | 'validation' | 'review';
 type PublicTaskStage = {
@@ -1135,6 +1153,7 @@ export function StewardTaskDetail({ detail, loaded, taskId }: { detail: PublicSt
             <div className="task-overview-meta" aria-label="Task facts">
               <FactPill label="Task" mono value={task.id} />
               <FactPill label="Type" value={task.kind} />
+              <FactPill label="Workflow" value={task.workflow || task.spec.workflow || (task.kind === 'feature' ? 'feature' : 'fix')} />
               <FactPill label="Agent" value={task.worker} />
               <FactPill label="Updated" mono value={shortDate(task.updated_at)} />
               <FactPill label="Attempts" mono value={String(detail.attempts.length)} />
@@ -1152,6 +1171,9 @@ export function StewardTaskDetail({ detail, loaded, taskId }: { detail: PublicSt
         <div className="task-detail-layout">
           <main className="task-detail-main">
             <TaskFlowPanel flow={flow} />
+            {(task.workflow === 'feature' || task.spec.workflow === 'feature' || task.kind === 'feature') && (
+              <PublicPlanRuns planRuns={detail.plan_runs ?? []} />
+            )}
             <div className="attempt-stack page-stack">
               {detail.attempts.length ? (
                 [...detail.attempts].reverse().map((attempt) => (
@@ -1264,12 +1286,22 @@ function PublicPipelineNodeCard({ data }: NodeProps<PublicPipelineNode>) {
 
 function publicPipelineGraph(flow: PublicTaskFlow): { nodes: PublicPipelineNode[]; edges: PublicPipelineEdge[] } {
   const fitBoundIds = ['fit-top-left', 'fit-top-right', 'fit-bottom-left', 'fit-bottom-right'];
-  const positions: Record<PublicTaskStageKey, { x: number; y: number }> = {
-    code: { x: 0, y: 52 },
-    validation: { x: 178, y: 52 },
-    review: { x: 356, y: 52 },
-    integration: { x: 534, y: 52 },
-  };
+  const hasPlan = flow.stages.some((stage) => stage.key === 'plan');
+  const positions: Record<PublicTaskStageKey, { x: number; y: number }> = hasPlan
+    ? {
+        plan: { x: 0, y: 52 },
+        code: { x: 142, y: 52 },
+        validation: { x: 284, y: 52 },
+        review: { x: 426, y: 52 },
+        integration: { x: 568, y: 52 },
+      }
+    : {
+        plan: { x: 0, y: 52 },
+        code: { x: 0, y: 52 },
+        validation: { x: 178, y: 52 },
+        review: { x: 356, y: 52 },
+        integration: { x: 534, y: 52 },
+      };
   const stages = Object.fromEntries(flow.stages.map((stage) => [stage.key, stage])) as Record<PublicTaskStageKey, PublicTaskStage>;
   const nodes: PublicPipelineNode[] = [
     ...fitBoundIds.map((id, index) => ({
@@ -1312,6 +1344,7 @@ function publicPipelineGraph(flow: PublicTaskFlow): { nodes: PublicPipelineNode[
     })),
   ];
   const edges: PublicPipelineEdge[] = [
+    ...(hasPlan ? [publicForwardEdge('plan-code', 'plan', 'code', stages.plan.state)] : []),
     publicForwardEdge('code-validation', 'code', 'validation', stages.code.state),
     publicForwardEdge('validation-review', 'validation', 'review', stages.validation.state),
     publicForwardEdge('review-integration', 'review', 'integration', stages.review.state),
@@ -1376,6 +1409,40 @@ function publicFeedbackEdge(
 
 function publicFeedbackLoopLabel(kind: 'integration' | 'review' | 'validation', count: number) {
   return count > 0 ? `${kind} x${count}` : `${kind} feedback`;
+}
+
+function PublicPlanRuns({ planRuns }: { planRuns: PublicStewardPlanRun[] }) {
+  return (
+    <section className="panel">
+      <PanelTitle icon={<FileText size={17} />} title="Implementation Plan" />
+      {!planRuns.length && <div className="empty-state compact">No implementation plan run has been published yet.</div>}
+      {[...planRuns].reverse().map((planRun) => (
+        <article className="attempt-card" key={planRun.run}>
+          <div className="attempt-card-head">
+            <div>
+              <h3>Plan run {planRun.run}</h3>
+              <span className="font-mono text-xs">{planRun.name}</span>
+            </div>
+            <div className="attempt-card-meta">
+              <span>{planRun.model || 'default model'}</span>
+              <span>{planRun.reasoning_effort || 'default reasoning'}</span>
+              <StatusBadge status={planRun.completed && planRun.plan ? 'succeeded' : planRun.completed === false ? 'running' : 'failed'} />
+            </div>
+          </div>
+          {planRun.plan ? (
+            <CodeBlock language="json" text={JSON.stringify(planRun.plan, null, 2)} title="Structured plan" />
+          ) : (
+            <div className="empty-state compact">No valid structured plan was published.</div>
+          )}
+          <RunSection
+            artifact={planRun.planner?.transcript ?? planRun.planner?.last_message ?? null}
+            run={planRun.planner}
+            title="Planner transcript"
+          />
+        </article>
+      ))}
+    </section>
+  );
 }
 
 function AttemptCard({
@@ -2133,6 +2200,8 @@ function publicTaskFlow(detail: PublicStewardTaskDetail): PublicTaskFlow {
   const attempts = detail.attempts;
   const events = detail.events;
   const activeKey = publicActiveStage(task.status, events);
+  const featureWorkflow = task.workflow === 'feature' || task.spec.workflow === 'feature' || task.kind === 'feature';
+  const hasPlan = events.some((event) => event.kind === 'implementation_plan.finished');
   const hasWorker = attempts.some((attempt) => Boolean(attempt.worker));
   const hasValidation = attempts.some((attempt) => attempt.validations.length > 0);
   const hasReview = attempts.some((attempt) => Boolean(attempt.reviewer || attempt.review));
@@ -2141,6 +2210,12 @@ function publicTaskFlow(detail: PublicStewardTaskDetail): PublicTaskFlow {
     || events.some((event) => event.kind.startsWith('integration.') || event.kind === 'main.pushed');
   const blocked = ['blocked', 'failed', 'cancelled'].includes(task.status) ? activeKey : null;
   const stages: PublicTaskStage[] = [
+    ...(featureWorkflow ? [{
+      detail: publicStageDetail('plan', events, hasPlan),
+      key: 'plan' as const,
+      label: 'Plan',
+      state: publicStageState('plan', activeKey, hasPlan, blocked, task.status),
+    }] : []),
     {
       detail: publicStageDetail('code', events, hasWorker),
       key: 'code',
@@ -2182,6 +2257,7 @@ function publicActiveStage(status: string, events: PublicStewardEvent[]): Public
   if (status === 'integrating' || status === 'pushed' || latestEvent?.kind.startsWith('integration.') || latestEvent?.kind === 'main.pushed') return 'integration';
   if (status === 'reviewing' || publicEventStage(latestEvent) === 'review') return 'review';
   if (publicEventStage(latestEvent) === 'validation') return 'validation';
+  if (publicEventStage(latestEvent) === 'plan') return 'plan';
   return 'code';
 }
 
@@ -2200,6 +2276,12 @@ function publicStageState(
 function publicStageDetail(key: PublicTaskStageKey, events: PublicStewardEvent[], complete: boolean) {
   const event = [...events].reverse().find((item) => publicEventStage(item) === key);
   if (!event) return publicFallbackStageDetail(key, complete);
+  if (key === 'plan') {
+    if (event.kind === 'implementation_plan.finished') return 'Implementation plan ready';
+    if (event.kind === 'implementation_plan.invalid_output') return 'Planner returned invalid output';
+    if (event.kind === 'implementation_plan.failed') return 'Implementation planning failed';
+    return 'Implementation planning in progress';
+  }
   if (key === 'code') {
     if (event.kind === 'worktree.ready') return 'Worktree ready';
     if (event.kind.includes('revision_requested')) return 'Revision requested';
@@ -2224,6 +2306,7 @@ function publicStageDetail(key: PublicTaskStageKey, events: PublicStewardEvent[]
 }
 
 function publicFallbackStageDetail(key: PublicTaskStageKey, complete: boolean) {
+  if (key === 'plan') return complete ? 'Implementation plan recorded' : 'Waiting for plan';
   if (key === 'code') return complete ? 'Worker session captured' : 'Waiting for worker';
   if (key === 'validation') return complete ? 'Validation gates recorded' : 'No validation run yet';
   if (key === 'review') return complete ? 'Reviewer verdict recorded' : 'Waiting for review';
@@ -2233,6 +2316,7 @@ function publicFallbackStageDetail(key: PublicTaskStageKey, complete: boolean) {
 function publicEventStage(event?: PublicStewardEvent): PublicTaskStageKey | null {
   const kind = event?.kind || '';
   const phase = typeof event?.data.phase === 'string' ? event.data.phase : '';
+  if (kind.startsWith('implementation_plan.') || phase === 'implementation_plan') return 'plan';
   if (kind === 'task.status' && phase === 'validation') return 'validation';
   if (kind.startsWith('worker.') || kind === 'worker.finished' || kind === 'worktree.ready') return 'code';
   if (kind.startsWith('validation.') || kind === 'patch.saved') return 'validation';

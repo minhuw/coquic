@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import selectors
 import signal
 # subprocess is required to stream Codex stdio; launches use explicit argv and shell=False.
@@ -12,6 +13,30 @@ from pathlib import Path
 from ..core.config import StewardConfig
 from ..core.models import CodexStage, TaskRecord, WorkerResult
 from .diagnostics import diagnostics_for_result
+
+
+CODEX_RETRY_DELAYS_SECONDS = (5.0, 20.0)
+_CODEX_RETRY_PROMPT = (
+    "Continue the interrupted turn. Complete the original task and return the "
+    "required final response."
+)
+_TRANSIENT_CODEX_PATTERNS = (
+    "selected model is at capacity",
+    "stream disconnected before completion",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "too many requests",
+    "rate limit exceeded",
+    "error sending request for url",
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "connection reset by peer",
+)
+_TRANSIENT_HTTP_STATUS_RE = re.compile(
+    r"\b(?:http(?: status)?|status(?: code)?|unexpected status)\s*[:=]?\s*(?:429|5\d\d)\b",
+    re.IGNORECASE,
+)
 
 
 class CodexRunner:
@@ -41,59 +66,25 @@ class CodexRunner:
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
         prompt_path.write_text(prompt, encoding="utf-8")
         settings = self.config.codex_settings(stage)
-        args = self._args(
-            cwd,
-            last_message_path,
+        return self._run_with_retries(
+            cwd=cwd,
+            prompt=prompt,
+            prompt_path=prompt_path,
+            transcript_path=transcript_path,
+            last_message_path=last_message_path,
             output_schema=output_schema,
             resume_session=resume_session,
             stage=stage,
             sandbox=sandbox,
+            timeout_seconds=(
+                self.config.limits.plan_timeout_minutes
+                if stage == CodexStage.implementation_plan
+                else self.config.limits.worker_timeout_minutes
+            )
+            * 60,
+            model=settings.model,
+            reasoning_effort=settings.reasoning_effort,
         )
-        try:
-            return self._run_process(
-                args,
-                cwd,
-                prompt,
-                prompt_path,
-                transcript_path,
-                last_message_path,
-                timeout_seconds=(
-                    self.config.limits.plan_timeout_minutes
-                    if stage == CodexStage.implementation_plan
-                    else self.config.limits.worker_timeout_minutes
-                )
-                * 60,
-                stage=stage,
-                model=settings.model,
-                reasoning_effort=settings.reasoning_effort,
-            )
-        except FileNotFoundError as exc:
-            message = (
-                f"unable to start Codex executable {self.config.codex_bin!r}: "
-                f"{exc.strerror or exc}"
-            )
-            _write_transcript(transcript_path, "", message)
-            diagnostics = diagnostics_for_result(
-                completed=False,
-                exit_code=127,
-                transcript_path=transcript_path,
-                last_message_path=last_message_path,
-                final_message=message,
-            )
-            return WorkerResult(
-                completed=False,
-                command=args,
-                cwd=cwd,
-                exit_code=127,
-                prompt_path=prompt_path,
-                transcript_path=transcript_path,
-                last_message_path=last_message_path,
-                final_message=message,
-                stage=stage,
-                model=settings.model,
-                reasoning_effort=settings.reasoning_effort,
-                diagnostics=diagnostics.model_dump(mode="json"),
-            )
 
     def run_review(
         self,
@@ -111,54 +102,140 @@ class CodexRunner:
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
         prompt_path.write_text(prompt, encoding="utf-8")
         settings = self.config.codex_settings(CodexStage.review)
-        args = self._args(
-            cwd,
-            last_message_path,
+        return self._run_with_retries(
+            cwd=cwd,
+            prompt=prompt,
+            prompt_path=prompt_path,
+            transcript_path=transcript_path,
+            last_message_path=last_message_path,
             output_schema=output_schema,
             resume_session=None,
             stage=CodexStage.review,
             sandbox=None,
+            timeout_seconds=self.config.limits.review_timeout_minutes * 60,
+            model=settings.model,
+            reasoning_effort=settings.reasoning_effort,
         )
-        try:
-            return self._run_process(
-                args,
+
+    def _run_with_retries(
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        prompt_path: Path,
+        transcript_path: Path,
+        last_message_path: Path,
+        output_schema: Path | None,
+        resume_session: str | None,
+        stage: CodexStage,
+        sandbox: str | None,
+        timeout_seconds: int,
+        model: str | None,
+        reasoning_effort: str | None,
+    ) -> WorkerResult:
+        retries: list[dict[str, object]] = []
+        active_resume_session = resume_session
+        attempt_prompt = prompt
+        for attempt in range(len(CODEX_RETRY_DELAYS_SECONDS) + 1):
+            args = self._args(
                 cwd,
-                prompt,
-                prompt_path,
-                transcript_path,
                 last_message_path,
-                timeout_seconds=self.config.limits.review_timeout_minutes * 60,
-                stage=CodexStage.review,
-                model=settings.model,
-                reasoning_effort=settings.reasoning_effort,
+                output_schema=output_schema,
+                resume_session=active_resume_session,
+                stage=stage,
+                sandbox=sandbox,
             )
-        except FileNotFoundError as exc:
-            message = (
-                f"unable to start Codex executable {self.config.codex_bin!r}: "
-                f"{exc.strerror or exc}"
+            try:
+                result = self._run_process(
+                    args,
+                    cwd,
+                    attempt_prompt,
+                    prompt_path,
+                    transcript_path,
+                    last_message_path,
+                    timeout_seconds=timeout_seconds,
+                    stage=stage,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                )
+            except FileNotFoundError as exc:
+                result = self._missing_executable_result(
+                    args=args,
+                    cwd=cwd,
+                    prompt_path=prompt_path,
+                    transcript_path=transcript_path,
+                    last_message_path=last_message_path,
+                    stage=stage,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    exc=exc,
+                )
+
+            reason = _transient_codex_failure_reason(result)
+            if result.completed or reason is None or attempt >= len(CODEX_RETRY_DELAYS_SECONDS):
+                return _with_retry_diagnostics(
+                    result,
+                    retries,
+                    fallback_thread_id=active_resume_session,
+                )
+
+            delay = CODEX_RETRY_DELAYS_SECONDS[attempt]
+            archived = _archive_retry_artifacts(result, attempt + 1)
+            next_resume_session = result.thread_id or active_resume_session
+            retries.append(
+                {
+                    "attempt": attempt + 1,
+                    "next_attempt": attempt + 2,
+                    "delay_seconds": delay,
+                    "reason": reason[-2000:],
+                    "resume_session": next_resume_session,
+                    **archived,
+                }
             )
-            _write_transcript(transcript_path, "", message)
-            diagnostics = diagnostics_for_result(
-                completed=False,
-                exit_code=127,
-                transcript_path=transcript_path,
-                last_message_path=last_message_path,
-                final_message=message,
-            )
-            return WorkerResult(
-                completed=False,
-                command=args,
-                cwd=cwd,
-                exit_code=127,
-                prompt_path=prompt_path,
-                transcript_path=transcript_path,
-                last_message_path=last_message_path,
-                final_message=message,
-                stage=CodexStage.review,
-                model=settings.model,
-                reasoning_effort=settings.reasoning_effort,
-                diagnostics=diagnostics.model_dump(mode="json"),
-            )
+            time.sleep(delay)
+            active_resume_session = next_resume_session
+            attempt_prompt = _CODEX_RETRY_PROMPT if active_resume_session else prompt
+        raise AssertionError("unreachable Codex retry loop")
+
+    def _missing_executable_result(
+        self,
+        *,
+        args: list[str],
+        cwd: Path,
+        prompt_path: Path,
+        transcript_path: Path,
+        last_message_path: Path,
+        stage: CodexStage,
+        model: str | None,
+        reasoning_effort: str | None,
+        exc: FileNotFoundError,
+    ) -> WorkerResult:
+        message = (
+            f"unable to start Codex executable {self.config.codex_bin!r}: "
+            f"{exc.strerror or exc}"
+        )
+        _write_transcript(transcript_path, "", message)
+        diagnostics = diagnostics_for_result(
+            completed=False,
+            exit_code=127,
+            transcript_path=transcript_path,
+            last_message_path=last_message_path,
+            final_message=message,
+        )
+        return WorkerResult(
+            completed=False,
+            command=args,
+            cwd=cwd,
+            exit_code=127,
+            prompt_path=prompt_path,
+            transcript_path=transcript_path,
+            last_message_path=last_message_path,
+            final_message=message,
+            stage=stage,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            diagnostics=diagnostics.model_dump(mode="json"),
+        )
 
     def _args(
         self,
@@ -271,6 +348,62 @@ class CodexRunner:
             reasoning_effort=reasoning_effort,
             diagnostics=diagnostics_json,
         )
+
+
+def _transient_codex_failure_reason(result: WorkerResult) -> str | None:
+    diagnostics = result.diagnostics
+    candidates = [
+        result.final_message,
+        str(diagnostics.get("last_error") or ""),
+        str(diagnostics.get("last_output") or ""),
+    ]
+    for candidate in candidates:
+        if _is_transient_codex_message(candidate):
+            return candidate.strip()
+    return None
+
+
+def _is_transient_codex_message(message: str) -> bool:
+    lowered = message.lower()
+    return any(pattern in lowered for pattern in _TRANSIENT_CODEX_PATTERNS) or bool(
+        _TRANSIENT_HTTP_STATUS_RE.search(message)
+    )
+
+
+def _archive_retry_artifacts(
+    result: WorkerResult, retry_number: int
+) -> dict[str, object]:
+    archived: dict[str, object] = {}
+    if result.transcript_path.exists():
+        transcript_path = _retry_artifact_path(result.transcript_path, retry_number)
+        result.transcript_path.replace(transcript_path)
+        archived["transcript_path"] = str(transcript_path)
+    if result.last_message_path.exists():
+        last_message_path = _retry_artifact_path(result.last_message_path, retry_number)
+        result.last_message_path.replace(last_message_path)
+        archived["last_message_path"] = str(last_message_path)
+    return archived
+
+
+def _retry_artifact_path(path: Path, retry_number: int) -> Path:
+    return path.with_name(f"{path.stem}.retry-{retry_number}{path.suffix}")
+
+
+def _with_retry_diagnostics(
+    result: WorkerResult,
+    retries: list[dict[str, object]],
+    *,
+    fallback_thread_id: str | None,
+) -> WorkerResult:
+    update: dict[str, object] = {}
+    if retries:
+        diagnostics = dict(result.diagnostics)
+        diagnostics["retry_count"] = len(retries)
+        diagnostics["retries"] = retries
+        update["diagnostics"] = diagnostics
+    if result.thread_id is None and fallback_thread_id is not None:
+        update["thread_id"] = fallback_thread_id
+    return result.model_copy(update=update) if update else result
 
 
 def _write_transcript(path: Path, stdout: str, stderr: str) -> None:

@@ -24,6 +24,7 @@ import coquic_steward.public_mirror as public_mirror_module
 from coquic_steward.cli import app
 from coquic_steward.agents import CodexRunner, render_worker_prompt
 from coquic_steward.agents.diagnostics import diagnostics_for_paths
+from coquic_steward.agents.runner import _is_transient_codex_message
 from coquic_steward.core.config import (
     PathPolicyConfig,
     StewardConfig,
@@ -5922,6 +5923,86 @@ def test_codex_runner_writes_prompt_and_transcript(
     assert result.completed
     assert result.final_message == "done\n"
     assert result.transcript_path.exists()
+
+
+def test_codex_runner_retries_transient_failure_and_resumes(
+    config: StewardConfig, tmp_path: Path, monkeypatch
+) -> None:
+    fake = tmp_path / "codex"
+    calls = tmp_path / "calls.txt"
+    count = tmp_path / "count.txt"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'count=$(cat "{count}" 2>/dev/null || printf 0)\n'
+        "count=$((count + 1))\n"
+        f'printf "%s" "$count" > "{count}"\n'
+        f'printf "%s\\n" "$*" >> "{calls}"\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--output-last-message" ]; then shift; last=$1; fi\n'
+        "  shift || true\n"
+        "done\n"
+        "cat >/dev/null\n"
+        'mkdir -p "$(dirname "$last")"\n'
+        'if [ "$count" -eq 1 ]; then\n'
+        "  printf 'stream disconnected before completion\\n' > \"$last\"\n"
+        "  printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-transient\"}'\n"
+        "  exit 1\n"
+        "fi\n"
+        "printf 'done\\n' > \"$last\"\n"
+        "printf '%s\\n' '{\"message\":\"done\"}'\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    config = config.__class__(**{**config.__dict__, "codex_bin": str(fake)})
+    config.ensure_dirs()
+    store = TaskStore(config.db_path)
+    task = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )[0]
+    delays: list[float] = []
+    monkeypatch.setattr(
+        "coquic_steward.agents.runner.time.sleep", lambda delay: delays.append(delay)
+    )
+
+    result = CodexRunner(config).run(task, "hello", config.repo_root)
+
+    assert result.completed
+    assert result.thread_id == "thread-transient"
+    assert result.diagnostics["retry_count"] == 1
+    retry = result.diagnostics["retries"][0]
+    assert retry["attempt"] == 1
+    assert retry["next_attempt"] == 2
+    assert Path(retry["transcript_path"]).exists()
+    assert Path(retry["last_message_path"]).read_text(encoding="utf-8") == (
+        "stream disconnected before completion\n"
+    )
+    assert delays == [5.0]
+    assert "exec resume" in calls.read_text(encoding="utf-8").splitlines()[1]
+    assert "thread-transient" in calls.read_text(encoding="utf-8").splitlines()[1]
+    StewardExecutor(config, store)._record_codex_retries(task.id, result)
+    retry_event = next(
+        event for event in store.events(task.id) if event.kind == "codex.retry"
+    )
+    assert retry_event.data["next_attempt"] == 2
+    assert retry_event.data["stage"] == "code"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Selected model is at capacity. Please try a different model.",
+        "unexpected status 503 Service Unavailable",
+        "HTTP status 502",
+        "Could not resolve host: cch.example.test",
+    ],
+)
+def test_codex_transient_failure_classification(message: str) -> None:
+    assert _is_transient_codex_message(message)
+
+
+def test_codex_does_not_retry_deterministic_failure() -> None:
+    assert not _is_transient_codex_message("invalid output schema")
+    assert not _is_transient_codex_message("maximum output tokens exceeded")
 
 
 def test_codex_runner_reports_missing_codex_executable(config: StewardConfig) -> None:

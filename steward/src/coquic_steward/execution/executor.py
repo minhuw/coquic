@@ -1016,10 +1016,26 @@ class StewardExecutor:
         )
         thread.start()
         try:
-            return run()
+            result = run()
+            self._record_codex_retries(task_id, result)
+            return result
         finally:
             stop.set()
             thread.join(timeout=1)
+
+    def _record_codex_retries(self, task_id: str, result: WorkerResult) -> None:
+        retries = result.diagnostics.get("retries")
+        if not isinstance(retries, list):
+            return
+        for retry in retries:
+            if not isinstance(retry, dict):
+                continue
+            self.store.add_event(
+                task_id,
+                "codex.retry",
+                f"{result.stage} retry attempt {retry.get('next_attempt', '?')}",
+                {"stage": str(result.stage), **retry},
+            )
 
     def _heartbeat_active_task(self, task_id: str, stop: threading.Event) -> None:
         while not stop.wait(WORKER_HEARTBEAT_SECONDS):

@@ -36,6 +36,7 @@ def preflight_remote_push(config: StewardConfig) -> bool:
     )
     if not fetch.ok:
         raise _preflight_error(config, "fetch remote main", fetch)
+    _require_synced_main(config)
     commit = run_command(
         [
             "git",
@@ -68,6 +69,48 @@ def preflight_remote_push(config: StewardConfig) -> bool:
     if not dry_run.ok:
         raise _preflight_error(config, "dry-run push to main", dry_run)
     return True
+
+
+def _require_synced_main(config: StewardConfig) -> None:
+    local_ref = _remote_branch_ref(config.main_branch)
+    local = run_command(
+        ["git", "rev-parse", "--verify", local_ref],
+        cwd=config.repo_root,
+        timeout=PREFLIGHT_TIMEOUT_SECONDS,
+        env=_NONINTERACTIVE_GIT_ENV,
+    )
+    if not local.ok:
+        raise _preflight_error(config, "resolve local main", local)
+    remote = run_command(
+        ["git", "rev-parse", "--verify", "FETCH_HEAD"],
+        cwd=config.repo_root,
+        timeout=PREFLIGHT_TIMEOUT_SECONDS,
+        env=_NONINTERACTIVE_GIT_ENV,
+    )
+    if not remote.ok:
+        raise _preflight_error(config, "resolve remote main", remote)
+    local_sha = local.stdout.strip()
+    remote_sha = remote.stdout.strip()
+    if local_sha == remote_sha:
+        return
+    counts = run_command(
+        ["git", "rev-list", "--left-right", "--count", f"{local_ref}...FETCH_HEAD"],
+        cwd=config.repo_root,
+        timeout=PREFLIGHT_TIMEOUT_SECONDS,
+        env=_NONINTERACTIVE_GIT_ENV,
+    )
+    divergence = counts.stdout.strip() if counts.ok else "unknown"
+    raise StewardPreflightError(
+        "\n".join(
+            (
+                "remote push preflight failed: local main does not match remote main.",
+                f"local {local_ref}: {local_sha}",
+                f"remote {config.git_remote}/{config.main_branch}: {remote_sha}",
+                f"ahead/behind: {divergence}",
+                "reconcile and push local main before starting Steward",
+            )
+        )
+    )
 
 
 def _remote_branch_ref(branch: str) -> str:

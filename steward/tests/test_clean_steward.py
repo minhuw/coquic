@@ -1768,6 +1768,41 @@ def test_daemon_preflights_push_main_remote(
     assert logs == ["[steward] remote push preflight ok remote=origin branch=main"]
 
 
+def test_daemon_preflight_rejects_divergent_local_main(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    remote = tmp_path / "origin.git"
+    run_command(["git", "init", "--bare", str(remote)], cwd=tmp_path, check=True)
+    run_command(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    run_command(
+        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
+    )
+    (config.repo_root / "LOCAL.md").write_text("local only\n", encoding="utf-8")
+    run_command(["git", "add", "LOCAL.md"], cwd=config.repo_root, check=True)
+    run_command(
+        ["git", "commit", "-m", "local change"], cwd=config.repo_root, check=True
+    )
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "git_remote": "origin",
+            "integration_mode": IntegrationMode.push_main.value,
+        }
+    )
+
+    with pytest.raises(StewardPreflightError) as exc_info:
+        StewardDaemon(config, TaskStore(config.db_path))
+
+    message = str(exc_info.value)
+    assert "local main does not match remote main" in message
+    assert "ahead/behind: 1\t0" in message
+    assert "reconcile and push local main" in message
+
+
 def test_daemon_preflight_fails_before_tick_for_push_main(
     config: StewardConfig, monkeypatch
 ) -> None:
@@ -5627,6 +5662,138 @@ def test_worktree_create_and_patch(config: StewardConfig) -> None:
     assert worktrees.has_changes(path)
 
 
+def test_worktree_create_uses_fresh_remote_main_when_local_main_diverges(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    remote = tmp_path / "origin.git"
+    upstream = tmp_path / "upstream"
+    run_command(["git", "init", "--bare", str(remote)], cwd=tmp_path, check=True)
+    run_command(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    run_command(
+        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
+    )
+    run_command(
+        ["git", "clone", "--branch", "main", str(remote), str(upstream)],
+        cwd=tmp_path,
+        check=True,
+    )
+    run_command(
+        ["git", "config", "user.email", "steward@example.test"],
+        cwd=upstream,
+        check=True,
+    )
+    run_command(
+        ["git", "config", "user.name", "Steward Test"],
+        cwd=upstream,
+        check=True,
+    )
+    (upstream / "README.md").write_text("remote\n", encoding="utf-8")
+    run_command(["git", "add", "README.md"], cwd=upstream, check=True)
+    run_command(["git", "commit", "-m", "remote change"], cwd=upstream, check=True)
+    run_command(["git", "push", "origin", "main"], cwd=upstream, check=True)
+
+    (config.repo_root / "LOCAL.md").write_text("local only\n", encoding="utf-8")
+    run_command(["git", "add", "LOCAL.md"], cwd=config.repo_root, check=True)
+    run_command(
+        ["git", "commit", "-m", "local change"], cwd=config.repo_root, check=True
+    )
+    push_config = config.__class__(
+        **{
+            **config.__dict__,
+            "git_remote": "origin",
+            "integration_mode": IntegrationMode.push_main.value,
+            "local_only": False,
+        }
+    )
+    store = TaskStore(push_config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+
+    path, _ = Worktrees(push_config).create(task)
+
+    worktree_head = run_command(
+        ["git", "rev-parse", "HEAD"], cwd=path, check=True
+    ).stdout.strip()
+    remote_head = run_command(
+        ["git", "rev-parse", "origin/main"], cwd=config.repo_root, check=True
+    ).stdout.strip()
+    assert worktree_head == remote_head
+    assert (path / "README.md").read_text(encoding="utf-8") == "remote\n"
+    assert not (path / "LOCAL.md").exists()
+
+
+def test_commit_all_skips_hooks_only_for_the_validated_tree(
+    config: StewardConfig, tmp_path: Path
+) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worktrees = Worktrees(config)
+    path, _ = worktrees.create(task)
+    (path / "README.md").write_text("validated\n", encoding="utf-8")
+    validated_tree = worktrees.stage_tree(path)
+    hook_marker = tmp_path / "hook-ran"
+    hook = config.repo_root / ".git" / "hooks" / "pre-commit"
+    hook.write_text(
+        f"#!/bin/sh\ntouch '{hook_marker}'\nexit 1\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+
+    sha = worktrees.commit_all(
+        path,
+        "test: commit validated tree",
+        expected_tree=validated_tree,
+    )
+
+    assert sha is not None
+    assert not hook_marker.exists()
+    committed_tree = run_command(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=path, check=True
+    ).stdout.strip()
+    assert committed_tree == validated_tree
+
+
+def test_commit_all_rejects_changes_after_validation(config: StewardConfig) -> None:
+    store = TaskStore(config.db_path)
+    task, _ = store.add_task(
+        TaskSpec(kind=TaskKind.custom, worker=WorkerKind.custom, title="T", prompt="P")
+    )
+    worktrees = Worktrees(config)
+    path, _ = worktrees.create(task)
+    (path / "README.md").write_text("validated\n", encoding="utf-8")
+    validated_tree = worktrees.stage_tree(path)
+    head_before = run_command(
+        ["git", "rev-parse", "HEAD"], cwd=path, check=True
+    ).stdout.strip()
+    (path / "README.md").write_text("changed later\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="staged tree changed after validation"):
+        worktrees.commit_all(
+            path,
+            "test: reject changed tree",
+            expected_tree=validated_tree,
+        )
+    (path / "README.md").write_text("hello\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="staged tree changed after validation"):
+        worktrees.commit_all(
+            path,
+            "test: reject reverted tree",
+            expected_tree=validated_tree,
+        )
+
+    assert (
+        run_command(["git", "rev-parse", "HEAD"], cwd=path, check=True).stdout.strip()
+        == head_before
+    )
+
+
 def test_worktree_patch_includes_staged_and_untracked_changes(
     config: StewardConfig,
 ) -> None:
@@ -6474,6 +6641,16 @@ def test_executor_accepts_approved_review_with_validation_gaps(
 def test_executor_push_main_queues_integration_task(
     config: StewardConfig, tmp_path: Path, monkeypatch
 ) -> None:
+    remote = tmp_path / "origin.git"
+    run_command(["git", "init", "--bare", str(remote)], cwd=tmp_path, check=True)
+    run_command(
+        ["git", "remote", "add", "origin", str(remote)],
+        cwd=config.repo_root,
+        check=True,
+    )
+    run_command(
+        ["git", "push", "-u", "origin", "main"], cwd=config.repo_root, check=True
+    )
     fake = tmp_path / "codex"
     fake.write_text(
         "#!/bin/sh\n"
@@ -6745,7 +6922,7 @@ def test_integration_manager_blocks_frozen_path_before_commit(
             )
         ]
 
-    def fail_commit(_self, _path, _message, _body=""):
+    def fail_commit(_self, _path, _message, _body="", *, expected_tree=None):
         pytest.fail("commit should not run after a frozen path change")
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)
@@ -8121,7 +8298,7 @@ def test_integration_manager_records_commit_failure_without_crashing(
             )
         ]
 
-    def fail_commit(_self, _path, _message, _body=""):
+    def fail_commit(_self, _path, _message, _body="", *, expected_tree=None):
         raise RuntimeError("commit hook failed")
 
     monkeypatch.setattr("coquic_steward.execution.executor.run_gates", fake_gates)

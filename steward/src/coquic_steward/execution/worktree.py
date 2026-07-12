@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 
 from ..core.config import StewardConfig
-from ..core.models import TaskRecord
+from ..core.models import IntegrationMode, TaskRecord
 from ..core.subprocesses import CommandResult, run_command
 
 
@@ -27,6 +27,7 @@ class Worktrees:
         path = task.worktree_path or self.config.worktrees_dir / task.id
         if path.exists():
             return path, branch
+        base = self._new_worktree_base()
         self.config.worktrees_dir.mkdir(parents=True, exist_ok=True)
         run_command(
             [
@@ -36,12 +37,25 @@ class Worktrees:
                 "-B",
                 branch,
                 str(path),
-                self.config.main_branch,
+                base,
             ],
             cwd=self.config.repo_root,
             check=True,
         )
         return path, branch
+
+    def _new_worktree_base(self) -> str:
+        if (
+            self.config.integration_mode != IntegrationMode.push_main.value
+            or self.config.local_only
+        ):
+            return self.config.main_branch
+        run_command(
+            ["git", "fetch", self.config.git_remote, self.config.main_branch],
+            cwd=self.config.repo_root,
+            check=True,
+        )
+        return f"{self.config.git_remote}/{self.config.main_branch}"
 
     def has_changes(self, path: Path) -> bool:
         result = run_command(["git", "status", "--porcelain"], cwd=path, check=True)
@@ -107,14 +121,51 @@ class Worktrees:
             check=True,
         )
 
-    def commit_all(self, path: Path, message: str, body: str = "") -> str | None:
+    def stage_tree(self, path: Path) -> str:
+        run_command(["git", "add", "-A", "--"], cwd=path, check=True)
+        return run_command(["git", "write-tree"], cwd=path, check=True).stdout.strip()
+
+    def commit_all(
+        self,
+        path: Path,
+        message: str,
+        body: str = "",
+        *,
+        expected_tree: str | None = None,
+    ) -> str | None:
+        if expected_tree is None and not self.has_changes(path):
+            return None
+        staged_tree = self.stage_tree(path)
+        if expected_tree is not None and staged_tree != expected_tree:
+            raise RuntimeError(
+                f"staged tree changed after validation: expected {expected_tree}, "
+                f"found {staged_tree}"
+            )
         if not self.has_changes(path):
             return None
-        run_command(["git", "add", "-A"], cwd=path, check=True)
-        run_command(_commit_command(path, message, body), cwd=path, check=True)
-        return run_command(
+        run_command(
+            _commit_command(
+                path,
+                message,
+                body,
+                skip_hooks=expected_tree is not None,
+            ),
+            cwd=path,
+            check=True,
+        )
+        sha = run_command(
             ["git", "rev-parse", "HEAD"], cwd=path, check=True
         ).stdout.strip()
+        if expected_tree is not None:
+            committed_tree = run_command(
+                ["git", "rev-parse", "HEAD^{tree}"], cwd=path, check=True
+            ).stdout.strip()
+            if committed_tree != expected_tree:
+                raise RuntimeError(
+                    f"committed tree differs from validated tree: expected "
+                    f"{expected_tree}, found {committed_tree}"
+                )
+        return sha
 
     def push_head_to_main(self, path: Path) -> CommandResult:
         return run_command(
@@ -240,10 +291,19 @@ def _path_matches_pattern(path: str, pattern: str) -> bool:
     )
 
 
-def _commit_command(path: Path, message: str, body: str = "") -> list[str]:
+def _commit_command(
+    path: Path,
+    message: str,
+    body: str = "",
+    *,
+    skip_hooks: bool = False,
+) -> list[str]:
     commit_args = ["git", "commit", "-m", message]
     if body.strip():
         commit_args.extend(["-m", body.strip()])
+    if skip_hooks:
+        commit_args.insert(2, "--no-verify")
+        return commit_args
     if (path / "flake.nix").exists() and shutil.which("nix"):
         return ["nix", "develop", "-c", *commit_args]
     return commit_args

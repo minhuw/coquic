@@ -1172,6 +1172,8 @@ class StewardExecutor:
         if validation_result is not None:
             return validation_result
 
+        validated_tree = self.worktrees.stage_tree(worktree)
+        transcript.write("validation", f"validated tree: {validated_tree}")
         commit_message = self._integration_commit_message(
             task, source, patch_text, validations, transcript
         )
@@ -1184,7 +1186,12 @@ class StewardExecutor:
             return block_result
 
         sha, commit_result = self._commit_integration_patch(
-            task, source, worktree, commit_message, transcript
+            task,
+            source,
+            worktree,
+            commit_message,
+            validated_tree,
+            transcript,
         )
         if commit_result is not None:
             return commit_result
@@ -1518,6 +1525,7 @@ class StewardExecutor:
         source: TaskRecord,
         worktree: Path,
         commit_message: tuple[str, str],
+        validated_tree: str,
         transcript: "IntegrationTranscript",
     ) -> tuple[str | None, bool | None]:
         commit_subject, commit_body = commit_message
@@ -1528,6 +1536,7 @@ class StewardExecutor:
                 worktree,
                 commit_subject,
                 commit_body,
+                expected_tree=validated_tree,
             )
         except RuntimeError as exc:
             message = str(exc)[-2000:]

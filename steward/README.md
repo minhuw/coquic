@@ -59,7 +59,25 @@ enabled = ["github-actions", "code-scanning", "codacy"]
 
 The Codex model is passed through without a Steward allowlist. Reasoning effort
 is forwarded as Codex's `model_reasoning_effort` setting for new and resumed
-sessions.
+sessions. Each LLM stage can override either global setting with
+`[steward.codex.<stage>]`; supported stages are `signal_planner`,
+`implementation_plan`, `code`, `review`, and `commit_message`.
+
+## Task Workflows
+
+Task kind describes the work domain. Workflow independently controls its
+execution shape. Kinds that represent new functionality default to `feature`;
+all other kinds default to `fix`. A custom task can override the default with
+`coquic-steward enqueue custom --workflow fix|feature`.
+
+- `fix`: code, validation, review, then integration.
+- `feature`: implementation plan, code, validation, review, then integration.
+
+Feature planning runs in a fresh read-only Codex session. Steward validates and
+persists the structured plan, then starts a separate coding session with that
+plan in its prompt. Validation or review rejection resumes only the coding
+session with the rejection details; review sessions remain independent and the
+implementation plan is not regenerated during ordinary revision loops.
 
 ## State
 
@@ -70,8 +88,9 @@ Generated Steward state is stored under `$COQUIC_HOME/steward`, where
 ~/.coquic/steward/
 ```
 
-The task store is `steward.sqlite`. Transcripts, validation logs, prompts,
-patches, and Steward-owned worktrees live under the same state directory.
+The task store is `steward.sqlite`. Implementation plans, transcripts,
+validation logs, prompts, patches, and Steward-owned worktrees live under the
+same state directory.
 
 ## Steward Agents
 

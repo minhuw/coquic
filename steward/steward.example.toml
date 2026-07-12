@@ -10,6 +10,28 @@ git_remote = "origin"
 main_branch = "main"
 github_repository = "minhuw/coquic"
 
+# Stage settings override the global model/reasoning settings above. Omitted
+# values fall back independently to codex_model and codex_reasoning_effort.
+[steward.codex.signal_planner]
+# model = "gpt-5.6-terra"
+# reasoning_effort = "medium"
+
+[steward.codex.implementation_plan]
+# model = "gpt-5.6-terra"
+# reasoning_effort = "high"
+
+[steward.codex.code]
+# model = "gpt-5.6-terra"
+# reasoning_effort = "high"
+
+[steward.codex.review]
+# model = "gpt-5.6-terra"
+# reasoning_effort = "medium"
+
+[steward.codex.commit_message]
+# model = "gpt-5.6-terra"
+# reasoning_effort = "low"
+
 [steward.signals]
 enabled = [
   "github-actions:ci",
@@ -27,6 +49,7 @@ enabled = [
 [steward.limits]
 max_active_tasks = 4
 max_main_pushes_per_day = 10
+plan_timeout_minutes = 30
 worker_timeout_minutes = 120
 
 [steward.path_policy]

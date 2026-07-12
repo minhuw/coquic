@@ -42,4 +42,5 @@ frozen = [
   "flake.nix",
   "flake.lock",
   "scripts/run-clang-tidy.sh",
+  "scripts/run-validation-with-index.sh",
 ]

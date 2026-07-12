@@ -29,11 +29,53 @@ Validation repair scope control:
 """
 
 
-DEFAULT_GATES = (
-    ("git-diff-check.txt", ["git", "diff", "--check"]),
-    ("zig-build-test.txt", ["nix", "develop", "-c", "zig", "build", "test"]),
-    ("pre-commit.txt", ["nix", "develop", "-c", "pre-commit", "run", "--all-files"]),
+_CLEAN_VALIDATION_SHELL_PREFIX = (
+    "nix",
+    "develop",
+    "--ignore-env",
+    "--keep-env-var",
+    "HOME",
 )
+
+
+def default_gates(repo_root: Path) -> tuple[tuple[str, list[str]], ...]:
+    lint_flake = f"git+{repo_root.resolve().as_uri()}#lint"
+    clean_shell = (*_CLEAN_VALIDATION_SHELL_PREFIX, lint_flake, "-c")
+    indexed = (
+        *clean_shell,
+        "bash",
+        str(repo_root.resolve() / "scripts" / "run-validation-with-index.sh"),
+    )
+    return (
+        (
+            "git-diff-check.txt",
+            [*indexed, "git", "diff", "--cached", "--check", "HEAD", "--"],
+        ),
+        (
+            "nix-flake-check.txt",
+            [
+                *indexed,
+                "nix",
+                "flake",
+                "check",
+                "--no-build",
+                "--no-update-lock-file",
+                ".",
+            ],
+        ),
+        ("zig-build-test.txt", [*indexed, "zig", "build", "test"]),
+        (
+            "pre-commit.txt",
+            [
+                *indexed,
+                "env",
+                "COQUIC_CLANG_TIDY_IN_NIX=1",
+                "pre-commit",
+                "run",
+                "--all-files",
+            ],
+        ),
+    )
 
 
 def run_gates(
@@ -46,7 +88,7 @@ def run_gates(
     on_gate_result: Callable[[int, ValidationResult], None] | None = None,
 ) -> list[ValidationResult]:
     results: list[ValidationResult] = []
-    for index, (filename, command) in enumerate(DEFAULT_GATES):
+    for index, (filename, command) in enumerate(default_gates(config.repo_root)):
         if on_gate_start is not None:
             on_gate_start(index, filename, command)
         result = run_validation(config, task_id, cwd, filename, command, label=label)

@@ -67,7 +67,10 @@ from coquic_steward.execution.review import (
     review_approved,
     review_schema_path,
 )
-from coquic_steward.execution.validation import render_validation_revision_prompt
+from coquic_steward.execution.validation import (
+    default_gates,
+    render_validation_revision_prompt,
+)
 from coquic_steward.orchestration import (
     DaemonAlreadyRunning,
     StewardDaemon,
@@ -284,6 +287,15 @@ frozen = [".clang-tidy", "scripts/run-clang-tidy.sh"]
         ".github/**",
         "flake.nix",
     )
+
+
+def test_example_config_freezes_validation_gate_runner(repo: Path) -> None:
+    config = load_config(
+        repo_root=repo,
+        config_path=Path(__file__).resolve().parents[1] / "steward.example.toml",
+    )
+
+    assert "scripts/run-validation-with-index.sh" in config.path_policy.frozen
 
 
 def test_config_rejects_absolute_frozen_paths(repo: Path) -> None:
@@ -6140,6 +6152,104 @@ def test_executor_records_validation_results_incrementally(
     events = store.events(task.id)
     assert [event.kind for event in events].count("validation.command_started") == 2
     assert [event.kind for event in events].count("validation.command_finished") == 2
+
+
+def test_default_gates_use_clean_pinned_controller_nix_shell() -> None:
+    repo_root = Path("/controller/repo")
+    prefix = [
+        "nix",
+        "develop",
+        "--ignore-env",
+        "--keep-env-var",
+        "HOME",
+        "git+file:///controller/repo#lint",
+        "-c",
+        "bash",
+        "/controller/repo/scripts/run-validation-with-index.sh",
+    ]
+    commands = [command for _, command in default_gates(repo_root)]
+
+    assert all(command[: len(prefix)] == prefix for command in commands)
+    assert commands[0][len(prefix) :] == [
+        "git",
+        "diff",
+        "--cached",
+        "--check",
+        "HEAD",
+        "--",
+    ]
+    assert commands[1][len(prefix) :] == [
+        "nix",
+        "flake",
+        "check",
+        "--no-build",
+        "--no-update-lock-file",
+        ".",
+    ]
+    assert commands[2][len(prefix) :] == ["zig", "build", "test"]
+    assert commands[3][len(prefix) :] == [
+        "env",
+        "COQUIC_CLANG_TIDY_IN_NIX=1",
+        "pre-commit",
+        "run",
+        "--all-files",
+    ]
+
+
+def test_validation_index_includes_untracked_files_without_mutating_worker_index(
+    repo: Path,
+) -> None:
+    runner = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "run-validation-with-index.sh"
+    )
+    (repo / "README.md").write_text("staged\n", encoding="utf-8")
+    run_command(["git", "add", "README.md"], cwd=repo, check=True)
+    (repo / "new.cpp").write_text("int value;   \n", encoding="utf-8")
+    cached_before = run_command(
+        ["git", "diff", "--cached", "--binary", "HEAD", "--"],
+        cwd=repo,
+        check=True,
+    ).stdout
+
+    whitespace = run_command(
+        [
+            "bash",
+            str(runner),
+            "git",
+            "diff",
+            "--cached",
+            "--check",
+            "HEAD",
+            "--",
+        ],
+        cwd=repo,
+    )
+    listed = run_command(
+        [
+            "bash",
+            str(runner),
+            "git",
+            "ls-files",
+            "--error-unmatch",
+            "new.cpp",
+        ],
+        cwd=repo,
+        check=True,
+    )
+
+    assert not whitespace.ok
+    assert "new.cpp:1: trailing whitespace" in whitespace.stdout
+    assert listed.stdout.strip() == "new.cpp"
+    assert run_command(
+        ["git", "diff", "--cached", "--binary", "HEAD", "--"],
+        cwd=repo,
+        check=True,
+    ).stdout == cached_before
+    assert "?? new.cpp" in run_command(
+        ["git", "status", "--short"], cwd=repo, check=True
+    ).stdout
 
 
 def test_run_validation_applies_configured_timeout(

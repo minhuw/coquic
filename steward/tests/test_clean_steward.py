@@ -6199,20 +6199,20 @@ def test_executor_records_validation_results_incrementally(
     assert [event.kind for event in events].count("validation.command_finished") == 2
 
 
-def test_default_gates_use_clean_pinned_controller_nix_shell() -> None:
-    repo_root = Path("/controller/repo")
+def test_default_gates_use_clean_pinned_worktree_nix_shell() -> None:
+    worktree = Path("/task/worktree")
     prefix = [
         "nix",
         "develop",
         "--ignore-env",
         "--keep-env-var",
         "HOME",
-        "git+file:///controller/repo#lint",
+        "git+file:///task/worktree#lint",
         "-c",
         "bash",
-        "/controller/repo/scripts/run-validation-with-index.sh",
+        "/task/worktree/scripts/run-validation-with-index.sh",
     ]
-    commands = [command for _, command in default_gates(repo_root)]
+    commands = [command for _, command in default_gates(worktree)]
 
     assert all(command[: len(prefix)] == prefix for command in commands)
     assert commands[0][len(prefix) :] == [

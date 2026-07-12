@@ -38,13 +38,13 @@ _CLEAN_VALIDATION_SHELL_PREFIX = (
 )
 
 
-def default_gates(repo_root: Path) -> tuple[tuple[str, list[str]], ...]:
-    lint_flake = f"git+{repo_root.resolve().as_uri()}#lint"
+def default_gates(worktree: Path) -> tuple[tuple[str, list[str]], ...]:
+    lint_flake = f"git+{worktree.resolve().as_uri()}#lint"
     clean_shell = (*_CLEAN_VALIDATION_SHELL_PREFIX, lint_flake, "-c")
     indexed = (
         *clean_shell,
         "bash",
-        str(repo_root.resolve() / "scripts" / "run-validation-with-index.sh"),
+        str(worktree.resolve() / "scripts" / "run-validation-with-index.sh"),
     )
     return (
         (
@@ -88,7 +88,7 @@ def run_gates(
     on_gate_result: Callable[[int, ValidationResult], None] | None = None,
 ) -> list[ValidationResult]:
     results: list[ValidationResult] = []
-    for index, (filename, command) in enumerate(default_gates(config.repo_root)):
+    for index, (filename, command) in enumerate(default_gates(cwd)):
         if on_gate_start is not None:
             on_gate_start(index, filename, command)
         result = run_validation(config, task_id, cwd, filename, command, label=label)

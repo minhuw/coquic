@@ -20,6 +20,7 @@ vibe-references/
 .interop-logs/
 result
 .papers/
+plans/
 .bench-traces/
 __pycache__/
 rag/.pytest_cache/

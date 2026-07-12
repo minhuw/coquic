@@ -4445,26 +4445,27 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             .default_route_handle = inbound->route_handle,
             .connection = std::make_unique<QuicConnection>(std::move(config)),
         };
-        auto path_id = inbound->route_handle.has_value()
-                           ? remember_inbound_path(entry, *inbound->route_handle,
-                                                   inbound->address_validation_identity)
-                           : kDefaultPathId;
+        QuicPathId initial_path_id =
+            inbound->route_handle.has_value()
+                ? remember_inbound_path(entry, *inbound->route_handle,
+                                        inbound->address_validation_identity)
+                : kDefaultPathId;
         if (!inbound->route_handle.has_value() && !inbound->address_validation_identity.empty()) {
-            entry.address_validation_identity_by_path_id[path_id] =
+            entry.address_validation_identity_by_path_id[initial_path_id] =
                 inbound->address_validation_identity;
         }
         if (inbound->shared_bytes != nullptr) {
             entry.connection->process_inbound_datagram_shared(std::move(inbound->shared_bytes),
                                                               inbound->begin, inbound->end, now,
-                                                              path_id, inbound->ecn);
+                                                              initial_path_id, inbound->ecn);
         } else {
             entry.connection->process_inbound_datagram_owned(std::move(inbound->bytes), now,
-                                                             path_id, inbound->ecn);
+                                                             initial_path_id, inbound->ecn);
         }
         auto buffered_zero_rtt = take_matching_orphan_zero_rtt(*parsed, *inbound, now);
         for (auto &buffered : buffered_zero_rtt) {
             entry.connection->process_inbound_datagram_owned(std::move(buffered.bytes), now,
-                                                             path_id, buffered.ecn);
+                                                             initial_path_id, buffered.ecn);
         }
         if (new_token_context.has_value()) {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.3
@@ -4472,7 +4473,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             // # handshake to proceed.
             entry.connection->mark_peer_address_validated();
         }
-        remember_recently_validated_peer_address(entry, path_id, now);
+        remember_recently_validated_peer_address(entry, initial_path_id, now);
 
         DrainedDatagramCapture capture;
         auto drained = drain_connection_effects(

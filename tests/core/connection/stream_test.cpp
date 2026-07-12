@@ -102,15 +102,26 @@ TEST(QuicCoreTest, UnderfilledPacketCoalescingDelayIsDisabledByDefault) {
     EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
 }
 
+TEST(QuicCoreTest, UnderfilledPacketCoalescingDelayDoesNotDelayIsolatedStreamWrite) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.underfilled_packet_coalescing_delay = std::chrono::milliseconds{5};
+
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0, coquic::quic::test::bytes_from_string("ping"), false, 0,
+                                       coquic::quic::test::test_time(1))
+                    .has_value());
+    EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
+}
+
 TEST(QuicCoreTest, UnderfilledPacketCoalescingDelayDoesNotDelayFramingFullStream) {
     auto connection = make_connected_client_connection();
     connection.config_.transport.underfilled_packet_coalescing_delay = std::chrono::milliseconds{5};
     constexpr std::size_t kFramingFullStreamPayloadSize = 1174;
 
-    ASSERT_TRUE(
-        connection
-            .queue_stream_send(0, std::vector<std::byte>(kFramingFullStreamPayloadSize), false)
-            .has_value());
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0, std::vector<std::byte>(kFramingFullStreamPayloadSize),
+                                       false, 0, coquic::quic::test::test_time(1))
+                    .has_value());
     EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
 }
 
@@ -118,24 +129,62 @@ TEST(QuicCoreTest, UnderfilledPacketCoalescingDelayFlushesAtItsWakeup) {
     auto connection = make_connected_client_connection();
     connection.config_.transport.underfilled_packet_coalescing_delay = std::chrono::milliseconds{5};
 
-    ASSERT_TRUE(
-        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("ping"), false)
-            .has_value());
-    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
-    EXPECT_EQ(connection.next_wakeup(), coquic::quic::test::test_time(6));
-    ASSERT_TRUE(
-        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("pong"), false)
-            .has_value());
-    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(5)).empty());
-    EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(6)).empty());
-    EXPECT_EQ(connection.streams_.at(0).flow_control.highest_sent, 8u);
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0, coquic::quic::test::bytes_from_string("ping"), false, 0,
+                                       coquic::quic::test::test_time(1))
+                    .has_value());
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0, coquic::quic::test::bytes_from_string("pong"), false, 0,
+                                       coquic::quic::test::test_time(2))
+                    .has_value());
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0, coquic::quic::test::bytes_from_string("more"), false, 0,
+                                       coquic::quic::test::test_time(3))
+                    .has_value());
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(3)).empty());
+    EXPECT_EQ(connection.next_wakeup(), coquic::quic::test::test_time(8));
+    EXPECT_TRUE(connection.drain_outbound_datagram(coquic::quic::test::test_time(7)).empty());
+    EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(8)).empty());
+    EXPECT_EQ(connection.streams_.at(0).flow_control.highest_sent, 12u);
+}
+
+TEST(QuicCoreTest, UnderfilledPacketCoalescingDelayDoesNotDelayStaleStreamWrite) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.underfilled_packet_coalescing_delay = std::chrono::milliseconds{5};
+
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0, coquic::quic::test::bytes_from_string("ping"), false, 0,
+                                       coquic::quic::test::test_time(1))
+                    .has_value());
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0, coquic::quic::test::bytes_from_string("pong"), false, 0,
+                                       coquic::quic::test::test_time(7))
+                    .has_value());
+    EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(7)).empty());
+}
+
+TEST(QuicCoreTest, UnderfilledPacketCoalescingDelayDoesNotDelayDifferentStreamWrite) {
+    auto connection = make_connected_client_connection();
+    connection.config_.transport.underfilled_packet_coalescing_delay = std::chrono::milliseconds{5};
+
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0, coquic::quic::test::bytes_from_string("ping"), false, 0,
+                                       coquic::quic::test::test_time(1))
+                    .has_value());
+    ASSERT_TRUE(connection
+                    .queue_stream_send(4, coquic::quic::test::bytes_from_string("pong"), false, 0,
+                                       coquic::quic::test::test_time(2))
+                    .has_value());
+    EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(2)).empty());
 }
 
 TEST(QuicCoreTest, UnderfilledPacketCoalescingDelayDoesNotDelayStreamFin) {
     auto connection = make_connected_client_connection();
     connection.config_.transport.underfilled_packet_coalescing_delay = std::chrono::milliseconds{5};
 
-    ASSERT_TRUE(connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("ping"), true)
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0, coquic::quic::test::bytes_from_string("ping"), true, 0,
+                                       coquic::quic::test::test_time(1))
                     .has_value());
     EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
 }
@@ -147,9 +196,10 @@ TEST(QuicCoreTest, UnderfilledPacketCoalescingDelayDoesNotDelayDueAck) {
         connection, {coquic::quic::PingFrame{}}));
     connection.application_space_.force_ack_send = true;
 
-    ASSERT_TRUE(
-        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("ping"), false)
-            .has_value());
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0, coquic::quic::test::bytes_from_string("ping"), false, 0,
+                                       coquic::quic::test::test_time(1))
+                    .has_value());
     const auto datagram = connection.drain_outbound_datagram(coquic::quic::test::test_time(1));
     EXPECT_FALSE(datagram.empty());
     EXPECT_TRUE(datagram_has_application_ack(connection, datagram));
@@ -162,9 +212,10 @@ TEST(QuicCoreTest, UnderfilledPacketCoalescingDelayDoesNotPassAckDeadline) {
         0, /*ack_eliciting=*/true, coquic::quic::test::test_time(0));
     connection.application_space_.pending_ack_deadline = coquic::quic::test::test_time(4);
 
-    ASSERT_TRUE(
-        connection.queue_stream_send(0, coquic::quic::test::bytes_from_string("ping"), false)
-            .has_value());
+    ASSERT_TRUE(connection
+                    .queue_stream_send(0, coquic::quic::test::bytes_from_string("ping"), false, 0,
+                                       coquic::quic::test::test_time(1))
+                    .has_value());
     EXPECT_FALSE(connection.drain_outbound_datagram(coquic::quic::test::test_time(1)).empty());
 }
 

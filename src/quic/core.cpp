@@ -582,16 +582,17 @@ COQUIC_NO_PROFILE QuicCoreResult drain_connection_effects(
 }
 
 COQUIC_NO_PROFILE StreamStateResult<bool>
-queue_legacy_local_command(QuicConnection &quic_connection, const QuicCoreSendStreamData &input) {
+queue_legacy_local_command(QuicConnection &quic_connection, const QuicCoreSendStreamData &input,
+                           QuicCoreTimePoint now) {
     return quic_connection.queue_stream_send(input.stream_id, input.bytes, input.fin,
-                                             input.priority);
+                                             input.priority, now);
 }
 
 COQUIC_NO_PROFILE StreamStateResult<bool>
 queue_legacy_local_command(QuicConnection &quic_connection,
-                           const QuicCoreSendSharedStreamData &input) {
+                           const QuicCoreSendSharedStreamData &input, QuicCoreTimePoint now) {
     return quic_connection.queue_stream_send_shared(input.stream_id, input.bytes, input.fin,
-                                                    input.priority);
+                                                    input.priority, now);
 }
 
 COQUIC_NO_PROFILE CodecResult<bool>
@@ -4584,8 +4585,8 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
         std::visit(
             overloaded{
                 [&](const QuicCoreSendStreamData &in) {
-                    const auto queued = entry.connection->queue_stream_send(in.stream_id, in.bytes,
-                                                                            in.fin, in.priority);
+                    const auto queued = entry.connection->queue_stream_send(
+                        in.stream_id, in.bytes, in.fin, in.priority, now);
                     if (!queued.has_value()) {
                         result.local_error = stream_state_error_to_local_error(queued.error());
                         result.local_error->connection = entry.handle;
@@ -4593,7 +4594,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                 },
                 [&](const QuicCoreSendSharedStreamData &in) {
                     const auto queued = entry.connection->queue_stream_send_shared(
-                        in.stream_id, in.bytes, in.fin, in.priority);
+                        in.stream_id, in.bytes, in.fin, in.priority, now);
                     if (!queued.has_value()) {
                         result.local_error = stream_state_error_to_local_error(queued.error());
                         result.local_error->connection = entry.handle;
@@ -4997,14 +4998,14 @@ QuicCoreResult QuicCore::advance(QuicCoreInput input, QuicCoreTimePoint now) {
             },
             [&](const QuicCoreSendStreamData &in) {
                 const auto queued =
-                    connection->queue_stream_send(in.stream_id, in.bytes, in.fin, in.priority);
+                    connection->queue_stream_send(in.stream_id, in.bytes, in.fin, in.priority, now);
                 if (!queued.has_value()) {
                     result.local_error = stream_state_error_to_local_error(queued.error());
                 }
             },
             [&](const QuicCoreSendSharedStreamData &in) {
                 const auto queued = connection->queue_stream_send_shared(in.stream_id, in.bytes,
-                                                                         in.fin, in.priority);
+                                                                         in.fin, in.priority, now);
                 if (!queued.has_value()) {
                     result.local_error = stream_state_error_to_local_error(queued.error());
                 }
@@ -5132,13 +5133,13 @@ QuicCoreResult QuicCore::advance(std::span<const QuicCoreInput> inputs, QuicCore
             std::visit(
                 overloaded{
                     [&](const QuicCoreSendStreamData &in) {
-                        const auto queued = queue_legacy_local_command(*entry->connection, in);
+                        const auto queued = queue_legacy_local_command(*entry->connection, in, now);
                         if (!queued.has_value()) {
                             result.local_error = stream_state_error_to_local_error(queued.error());
                         }
                     },
                     [&](const QuicCoreSendSharedStreamData &in) {
-                        const auto queued = queue_legacy_local_command(*entry->connection, in);
+                        const auto queued = queue_legacy_local_command(*entry->connection, in, now);
                         if (!queued.has_value()) {
                             result.local_error = stream_state_error_to_local_error(queued.error());
                         }

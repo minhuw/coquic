@@ -133,6 +133,16 @@ struct SendProfileCounters {
     std::uint64_t pacing_blocks = 0;
     std::uint64_t coalescing_delays = 0;
     std::uint64_t coalescing_timeout_flushes = 0;
+    std::uint64_t coalescing_heuristic_candidates = 0;
+    std::uint64_t coalescing_heuristic_disabled = 0;
+    std::uint64_t coalescing_heuristic_isolated = 0;
+    std::uint64_t coalescing_heuristic_stale = 0;
+    std::uint64_t coalescing_heuristic_cross_stream = 0;
+    std::uint64_t coalescing_heuristic_bypasses = 0;
+    std::uint64_t coalescing_heuristic_ack_bypasses = 0;
+    std::uint64_t coalescing_heuristic_control_bypasses = 0;
+    std::uint64_t coalescing_heuristic_full_packet_bypasses = 0;
+    std::uint64_t coalescing_heuristic_fin_bypasses = 0;
     std::uint64_t has_sendable_checks = 0;
     std::uint64_t has_sendable_false = 0;
     std::uint64_t has_sendable_no_application_packets = 0;
@@ -372,8 +382,19 @@ inline void print_send_profile() {
         << "coquic-send-profile" << " drains=" << c.drain_calls << " datagrams=" << c.datagrams
         << " empty=" << c.empty_drains << " pmtu_probe=" << c.pmtu_probe_datagrams
         << " congestion_blocks=" << c.congestion_blocks << " pacing_blocks=" << c.pacing_blocks
-        << " coalescing_delays=" << c.coalescing_delays << " coalescing_timeout_flushes="
-        << c.coalescing_timeout_flushes
+        << " coalescing_delays=" << c.coalescing_delays
+        << " coalescing_timeout_flushes=" << c.coalescing_timeout_flushes
+        << " coalescing_heuristic_candidates=" << c.coalescing_heuristic_candidates
+        << " coalescing_heuristic_disabled=" << c.coalescing_heuristic_disabled
+        << " coalescing_heuristic_isolated=" << c.coalescing_heuristic_isolated
+        << " coalescing_heuristic_stale=" << c.coalescing_heuristic_stale
+        << " coalescing_heuristic_cross_stream=" << c.coalescing_heuristic_cross_stream
+        << " coalescing_heuristic_bypasses=" << c.coalescing_heuristic_bypasses
+        << " coalescing_heuristic_ack_bypasses=" << c.coalescing_heuristic_ack_bypasses
+        << " coalescing_heuristic_control_bypasses=" << c.coalescing_heuristic_control_bypasses
+        << " coalescing_heuristic_full_packet_bypasses="
+        << c.coalescing_heuristic_full_packet_bypasses << " coalescing_heuristic_fin_bypasses="
+        << c.coalescing_heuristic_fin_bypasses
         // Sendability and application-selection counters explain why packets were not emitted.
         << " has_sendable_checks=" << c.has_sendable_checks
         << " has_sendable_false=" << c.has_sendable_false

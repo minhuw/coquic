@@ -561,9 +561,11 @@ class QuicConnection {
                              QuicEcnCodepoint ecn = QuicEcnCodepoint::unavailable);
     StreamStateResult<bool> queue_stream_send(std::uint64_t stream_id,
                                               std::span<const std::byte> bytes, bool fin,
-                                              std::int32_t priority = 0);
+                                              std::int32_t priority = 0,
+                                              QuicCoreTimePoint now = QuicCoreClock::now());
     StreamStateResult<bool> queue_stream_send_shared(std::uint64_t stream_id, SharedBytes bytes,
-                                                     bool fin, std::int32_t priority = 0);
+                                                     bool fin, std::int32_t priority = 0,
+                                                     QuicCoreTimePoint now = QuicCoreClock::now());
     CodecResult<bool> queue_datagram_send(std::span<const std::byte> bytes,
                                           std::int32_t priority = 0);
     CodecResult<bool> queue_datagram_send_shared(SharedBytes bytes, std::int32_t priority = 0);
@@ -964,6 +966,8 @@ class QuicConnection {
                                                    std::span<const std::byte> owned_bytes,
                                                    std::optional<SharedBytes> shared_bytes,
                                                    bool fin, std::int32_t priority);
+    void note_application_stream_send(std::uint64_t stream_id, bool fin, std::size_t bytes,
+                                      QuicCoreTimePoint now);
     void maybe_emit_zero_rtt_attempted_event();
     PeerStreamOpenLimits peer_stream_open_limits() const;
     bool has_pending_application_send() const;
@@ -1267,6 +1271,9 @@ class QuicConnection {
     bool last_drained_allows_send_continuation_ = false;
     std::optional<QuicCoreTimePoint> last_send_continuation_time_;
     std::optional<QuicCoreTimePoint> underfilled_packet_coalescing_deadline_;
+    std::optional<std::uint64_t> recent_application_send_stream_id_;
+    std::optional<QuicCoreTimePoint> recent_application_send_time_;
+    std::optional<QuicCoreTimePoint> underfilled_packet_coalescing_candidate_;
     std::uint64_t next_packet_inspection_datagram_id_ = 1;
     std::uint64_t last_drained_packet_inspection_datagram_id_ = 0;
     QuicPathId last_inbound_path_id_ = 0;

@@ -1,4 +1,5 @@
 #include "src/quic/connection/connection.h"
+#include "src/quic/connection/connection_internal.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -75,14 +76,88 @@ std::vector<std::byte> connection_close_reason_bytes(std::string_view reason_phr
 
 StreamStateResult<bool> QuicConnection::queue_stream_send(std::uint64_t stream_id,
                                                           std::span<const std::byte> bytes,
-                                                          bool fin, std::int32_t priority) {
-    return queue_stream_send_impl(stream_id, bytes, std::nullopt, fin, priority);
+                                                          bool fin, std::int32_t priority,
+                                                          QuicCoreTimePoint now) {
+    auto result = queue_stream_send_impl(stream_id, bytes, std::nullopt, fin, priority);
+    if (result.has_value() && status_ != HandshakeStatus::failed) {
+        note_application_stream_send(stream_id, fin, bytes.size(), now);
+    }
+    return result;
 }
 
 StreamStateResult<bool> QuicConnection::queue_stream_send_shared(std::uint64_t stream_id,
                                                                  SharedBytes bytes, bool fin,
-                                                                 std::int32_t priority) {
-    return queue_stream_send_impl(stream_id, {}, std::move(bytes), fin, priority);
+                                                                 std::int32_t priority,
+                                                                 QuicCoreTimePoint now) {
+    const auto byte_count = bytes.size();
+    auto result = queue_stream_send_impl(stream_id, {}, std::move(bytes), fin, priority);
+    if (result.has_value() && status_ != HandshakeStatus::failed) {
+        note_application_stream_send(stream_id, fin, byte_count, now);
+    }
+    return result;
+}
+
+void QuicConnection::note_application_stream_send(std::uint64_t stream_id, bool fin,
+                                                  std::size_t bytes, QuicCoreTimePoint now) {
+    const auto coalescing_delay = config_.transport.underfilled_packet_coalescing_delay;
+    if (fin) {
+        if (coalescing_delay > QuicCoreDuration::zero() && send_profile_enabled()) {
+            ++send_profile_counters().coalescing_heuristic_fin_bypasses;
+        }
+        return;
+    }
+    if (bytes == 0) {
+        return;
+    }
+
+    if (coalescing_delay == QuicCoreDuration::zero() && send_profile_enabled()) {
+        ++send_profile_counters().coalescing_heuristic_disabled;
+    }
+
+    if (recent_application_send_time_.has_value() && now < *recent_application_send_time_) {
+        if (coalescing_delay > QuicCoreDuration::zero() && send_profile_enabled()) {
+            ++send_profile_counters().coalescing_heuristic_stale;
+        }
+        recent_application_send_stream_id_.reset();
+        recent_application_send_time_.reset();
+        underfilled_packet_coalescing_candidate_.reset();
+        return;
+    }
+
+    if (underfilled_packet_coalescing_deadline_.has_value()) {
+        recent_application_send_stream_id_ = stream_id;
+        recent_application_send_time_ = now;
+        underfilled_packet_coalescing_candidate_.reset();
+        return;
+    }
+
+    // RFC 9000 Section 13 permits application behavior or heuristics to choose whether and
+    // how long to wait. Repeated writes to one stream within the configured cap are
+    // conservative evidence that the application is producing a burst.
+    const bool same_stream_recently = recent_application_send_stream_id_.has_value() &&
+                                      *recent_application_send_stream_id_ == stream_id &&
+                                      recent_application_send_time_.has_value();
+    if (coalescing_delay > QuicCoreDuration::zero() && send_profile_enabled()) {
+        auto &profile = send_profile_counters();
+        if (!recent_application_send_stream_id_.has_value() ||
+            !recent_application_send_time_.has_value()) {
+            ++profile.coalescing_heuristic_isolated;
+        } else if (!same_stream_recently) {
+            ++profile.coalescing_heuristic_cross_stream;
+        } else if (now - *recent_application_send_time_ > coalescing_delay) {
+            ++profile.coalescing_heuristic_stale;
+        }
+    }
+    underfilled_packet_coalescing_candidate_ =
+        same_stream_recently && coalescing_delay > QuicCoreDuration::zero() &&
+                now - *recent_application_send_time_ <= coalescing_delay
+            ? std::optional<QuicCoreTimePoint>{now}
+            : std::nullopt;
+    if (underfilled_packet_coalescing_candidate_.has_value() && send_profile_enabled()) {
+        ++send_profile_counters().coalescing_heuristic_candidates;
+    }
+    recent_application_send_stream_id_ = stream_id;
+    recent_application_send_time_ = now;
 }
 
 CodecResult<bool> QuicConnection::queue_datagram_send(std::span<const std::byte> bytes,

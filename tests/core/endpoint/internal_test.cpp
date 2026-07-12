@@ -1227,7 +1227,7 @@ TEST(QuicCoreEndpointInternalTest, EndpointFlushesUnderfilledPacketAtCoalescingW
     entry.connection->config_.transport.underfilled_packet_coalescing_delay =
         std::chrono::milliseconds{5};
 
-    const auto delayed = endpoint.advance_endpoint(
+    const auto first = endpoint.advance_endpoint(
         QuicCoreConnectionCommand{
             .connection = 1,
             .input =
@@ -1238,17 +1238,31 @@ TEST(QuicCoreEndpointInternalTest, EndpointFlushesUnderfilledPacketAtCoalescingW
         },
         coquic::quic::test::test_time(1), sink);
 
+    EXPECT_TRUE(send_effects_from(first).empty());
+    EXPECT_EQ(sink.datagrams.size(), 1u);
+
+    const auto delayed = endpoint.advance_endpoint(
+        QuicCoreConnectionCommand{
+            .connection = 1,
+            .input =
+                QuicCoreSendStreamData{
+                    .stream_id = 0,
+                    .bytes = bytes_from_string("pong"),
+                },
+        },
+        coquic::quic::test::test_time(2), sink);
+
     EXPECT_TRUE(send_effects_from(delayed).empty());
-    EXPECT_TRUE(sink.datagrams.empty());
+    EXPECT_EQ(sink.datagrams.size(), 1u);
     EXPECT_FALSE(delayed.send_continuation_pending);
     EXPECT_FALSE(endpoint.has_send_continuation_pending());
     ASSERT_TRUE(delayed.next_wakeup.has_value());
-    EXPECT_EQ(optional_value_or_terminate(delayed.next_wakeup), coquic::quic::test::test_time(6));
+    EXPECT_EQ(optional_value_or_terminate(delayed.next_wakeup), coquic::quic::test::test_time(7));
 
     const auto flushed =
-        endpoint.advance_endpoint(QuicCoreTimerExpired{}, coquic::quic::test::test_time(6), sink);
+        endpoint.advance_endpoint(QuicCoreTimerExpired{}, coquic::quic::test::test_time(7), sink);
     EXPECT_TRUE(send_effects_from(flushed).empty());
-    EXPECT_EQ(sink.datagrams.size(), 1u);
+    EXPECT_EQ(sink.datagrams.size(), 2u);
     EXPECT_EQ(flushed.next_wakeup, endpoint.next_wakeup());
 }
 

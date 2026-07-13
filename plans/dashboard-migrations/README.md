@@ -4,10 +4,10 @@ Status: In Progress
 Date: 2026-07-13
 Last updated: 2026-07-13
 
-Current execution state: subplans 00 through 14 are complete on `main` with
-Wave 4 active for the coordinated shadow-rollout gate. Producer and consumer
-contract tests use the same v3 golden fixtures, and the site browser matrix
-passes on desktop and mobile. The capability matrix is checked in at
+Current execution state: subplans 00 through 15 are complete locally on
+`main`; Wave 5 is active for daemon cutover. The local shadow gate passes, and
+the exit report records the remaining deployed-target route follow-up. The
+capability matrix is checked in at
 [00-capability-matrix.md](00-capability-matrix.md), and the v3 contract is
 checked in at `steward/schema/fixtures/public-monitor-v3/`.
 
@@ -159,8 +159,8 @@ flowchart LR
 | 12 | [Configuration and operator docs](12-operator-docs-and-config.md) | 02, 03, 09, 10, 11 | Complete |
 | 13 | [Producer contract tests](13-producer-contract-tests.md) | 02, 03, 05, 09 | Complete |
 | 14 | [Site monitor tests](14-site-monitor-tests.md) | 04, 05, 06, 07, 08 | Complete |
-| 15 | [Shadow rollout](15-shadow-rollout.md) | 06-14 as graphed | In Progress |
-| 16 | [Daemon entrypoint cutover](16-daemon-entrypoint-cutover.md) | 15 | Pending |
+| 15 | [Shadow rollout](15-shadow-rollout.md) | 06-14 as graphed | Complete |
+| 16 | [Daemon entrypoint cutover](16-daemon-entrypoint-cutover.md) | 15 | In Progress |
 | 17 | [Remove Python web runtime](17-remove-python-web-runtime.md) | 16 | Pending |
 | 18 | [Remove local Next.js UI](18-remove-local-next-ui.md) | 16 | Pending |
 | 19 | [Dependency and documentation cleanup](19-dependency-cleanup.md) | 17, 18 | Pending |

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -171,11 +173,10 @@ def write_public_mirror(
     path.parent.mkdir(parents=True, exist_ok=True)
     if _is_default_mirror_output(config, path):
         _remove_legacy_task_details(mirror_dir)
-    path.write_text(
+    _atomic_write_text(
+        path,
         json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
     )
-    _restrictive_file_permissions(path)
     tasks_dir.mkdir(parents=True, exist_ok=True)
     _remove_stale_task_details(
         tasks_dir,
@@ -196,11 +197,10 @@ def write_public_mirror(
             raw_transcript_artifacts=raw_transcript_artifacts,
         )
         detail_path = tasks_dir / f"{task.id}.json"
-        detail_path.write_text(
+        _atomic_write_text(
+            detail_path,
             json.dumps(detail, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
         )
-        _restrictive_file_permissions(detail_path)
         task_index.append(
             {
                 "id": task.id,
@@ -210,7 +210,8 @@ def write_public_mirror(
                 "detail_json": _public_task_detail_url(task.id),
             }
         )
-    (tasks_dir / "index.json").write_text(
+    _atomic_write_text(
+        tasks_dir / "index.json",
         json.dumps(
             {
                 "schema_version": PUBLIC_TASK_DETAIL_SCHEMA_VERSION,
@@ -221,9 +222,7 @@ def write_public_mirror(
             separators=(",", ":"),
         )
         + "\n",
-        encoding="utf-8",
     )
-    _restrictive_file_permissions(tasks_dir / "index.json")
     return path
 
 
@@ -1920,3 +1919,27 @@ def _restrictive_file_permissions(path: Path) -> None:
         path.chmod(0o600)
     except OSError:
         return
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _restrictive_file_permissions(temporary_path)
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)

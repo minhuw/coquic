@@ -4,9 +4,9 @@ Status: In Progress
 Date: 2026-07-13
 Last updated: 2026-07-13
 
-Current execution state: subplans 00, 01, 02, 04, 05, and 10 are complete on
-`main`; Wave 1 remains active for publisher health, public hardening, and
-direct-run locking. The capability matrix is checked in at
+Current execution state: subplans 00 through 11 are complete on `main` except
+for no outstanding dependency in that range; Wave 3 is active for operator
+docs, producer contract tests, and site monitor tests. The capability matrix is checked in at
 [00-capability-matrix.md](00-capability-matrix.md), and the v3 contract is
 checked in at `steward/schema/fixtures/public-monitor-v3/`.
 
@@ -146,18 +146,18 @@ flowchart LR
 | 00 | [Current-state inventory](00-current-state-inventory.md) | None | Complete |
 | 01 | [Public monitoring contract](01-public-monitoring-contract.md) | 00 | Complete |
 | 02 | [Daemon runtime heartbeat](02-daemon-runtime-heartbeat.md) | 01 | Complete |
-| 03 | [Publisher health and retry state](03-publisher-health.md) | 01 | In Progress |
+| 03 | [Publisher health and retry state](03-publisher-health.md) | 01 | Complete |
 | 04 | [Cache-safe site status endpoint](04-cache-safe-status-endpoint.md) | 01 | Complete |
 | 05 | [Schema and TypeScript ownership](05-schema-and-types.md) | 01 | Complete |
-| 06 | [Freshness and offline UI](06-site-freshness-ui.md) | 02, 04, 05 | Pending |
-| 07 | [Standalone planner history](07-site-planner-history.md) | 01, 05 | Pending |
-| 08 | [Read-view parity](08-site-read-view-parity.md) | 00, 05 | Pending |
-| 09 | [Public data hardening](09-public-data-hardening.md) | 01 | In Progress |
+| 06 | [Freshness and offline UI](06-site-freshness-ui.md) | 02, 04, 05 | Complete |
+| 07 | [Standalone planner history](07-site-planner-history.md) | 01, 05 | Complete |
+| 08 | [Read-view parity](08-site-read-view-parity.md) | 00, 05 | Complete |
+| 09 | [Public data hardening](09-public-data-hardening.md) | 01 | Complete |
 | 10 | [CLI scheduler tick](10-cli-scheduler-tick.md) | 00 | Complete |
-| 11 | [CLI direct-run locking](11-cli-run-locking.md) | 00 | In Progress |
-| 12 | [Configuration and operator docs](12-operator-docs-and-config.md) | 02, 03, 09, 10, 11 | Pending |
-| 13 | [Producer contract tests](13-producer-contract-tests.md) | 02, 03, 05, 09 | Pending |
-| 14 | [Site monitor tests](14-site-monitor-tests.md) | 04, 05, 06, 07, 08 | Pending |
+| 11 | [CLI direct-run locking](11-cli-run-locking.md) | 00 | Complete |
+| 12 | [Configuration and operator docs](12-operator-docs-and-config.md) | 02, 03, 09, 10, 11 | In Progress |
+| 13 | [Producer contract tests](13-producer-contract-tests.md) | 02, 03, 05, 09 | In Progress |
+| 14 | [Site monitor tests](14-site-monitor-tests.md) | 04, 05, 06, 07, 08 | In Progress |
 | 15 | [Shadow rollout](15-shadow-rollout.md) | 06-14 as graphed | Pending |
 | 16 | [Daemon entrypoint cutover](16-daemon-entrypoint-cutover.md) | 15 | Pending |
 | 17 | [Remove Python web runtime](17-remove-python-web-runtime.md) | 16 | Pending |

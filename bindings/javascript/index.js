@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const native = loadNative();
 
-export const FFI_ABI_VERSION = 11;
+export const FFI_ABI_VERSION = 12;
 
 export const Status = Object.freeze({
   OK: 0,
@@ -18,6 +18,12 @@ export const Status = Object.freeze({
 export const Role = Object.freeze({
   CLIENT: 0,
   SERVER: 1,
+});
+
+export const RetryHandshakeValidationPolicy = Object.freeze({
+  DISABLED: 0,
+  DISCARD: 1,
+  CONNECTION_ERROR: 2,
 });
 
 export const CongestionControl = Object.freeze({

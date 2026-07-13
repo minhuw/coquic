@@ -51,6 +51,9 @@ constexpr std::size_t kEndpointConfigSizeV6 =
 constexpr std::size_t kEndpointConfigSizeV7 =
     offsetof(coquic_endpoint_config_t, enable_minimal_closing_state_retention) +
     sizeof(coquic_endpoint_config_t::enable_minimal_closing_state_retention);
+constexpr std::size_t kEndpointConfigSizeV8 =
+    offsetof(coquic_endpoint_config_t, retry_handshake_validation_policy) +
+    sizeof(coquic_endpoint_config_t::retry_handshake_validation_policy);
 constexpr std::size_t kClientConnectionConfigSizeV1 =
     offsetof(coquic_client_connection_config_t, zero_rtt) +
     sizeof(coquic_client_connection_config_t::zero_rtt);
@@ -183,6 +186,20 @@ coquic::core::Role role_to_cpp(coquic_role_t role) {
         return coquic::core::Role::server;
     default:
         return coquic::core::Role::client;
+    }
+}
+
+coquic::core::RetryHandshakeValidationPolicy
+retry_handshake_validation_policy_to_cpp(coquic_retry_handshake_validation_policy_t policy) {
+    switch (policy) {
+    case COQUIC_RETRY_HANDSHAKE_VALIDATION_DISABLED:
+        return coquic::core::RetryHandshakeValidationPolicy::disabled;
+    case COQUIC_RETRY_HANDSHAKE_VALIDATION_DISCARD:
+        return coquic::core::RetryHandshakeValidationPolicy::discard;
+    case COQUIC_RETRY_HANDSHAKE_VALIDATION_CONNECTION_ERROR:
+        return coquic::core::RetryHandshakeValidationPolicy::connection_error;
+    default:
+        return coquic::core::RetryHandshakeValidationPolicy::disabled;
     }
 }
 
@@ -455,6 +472,10 @@ coquic::core::EndpointConfig to_cpp(const coquic_endpoint_config_t &config) {
         .supported_versions = std::move(supported_versions),
         .verify_peer = config.verify_peer != 0,
         .retry_enabled = config.retry_enabled != 0,
+        .retry_handshake_validation_policy =
+            config.size >= kEndpointConfigSizeV8
+                ? retry_handshake_validation_policy_to_cpp(config.retry_handshake_validation_policy)
+                : coquic::core::RetryHandshakeValidationPolicy::disabled,
         .max_server_connections =
             config.size >= kEndpointConfigSizeV2 ? config.max_server_connections : 0,
         .orphan_zero_rtt_buffer = config.size >= kEndpointConfigSizeV4
@@ -920,6 +941,7 @@ void coquic_endpoint_config_init(coquic_endpoint_config_t *config) {
         .enable_long_header_stateless_reset = 0,
         .enable_minimal_closing_state_retention = 0,
         .reserved_endpoint_config_tail_padding = {},
+        .retry_handshake_validation_policy = COQUIC_RETRY_HANDSHAKE_VALIDATION_DISABLED,
     };
 }
 

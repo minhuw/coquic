@@ -5,7 +5,7 @@ import ctypes.util
 import os
 from pathlib import Path
 
-FFI_ABI_VERSION = 11
+FFI_ABI_VERSION = 12
 
 coquic_time_us_t = C.c_uint64
 
@@ -16,6 +16,10 @@ COQUIC_STATUS_INTERNAL_ERROR = 3
 
 COQUIC_ROLE_CLIENT = 0
 COQUIC_ROLE_SERVER = 1
+
+COQUIC_RETRY_HANDSHAKE_VALIDATION_DISABLED = 0
+COQUIC_RETRY_HANDSHAKE_VALIDATION_DISCARD = 1
+COQUIC_RETRY_HANDSHAKE_VALIDATION_CONNECTION_ERROR = 2
 
 COQUIC_CONGESTION_CONTROL_NEWRENO = 0
 COQUIC_CONGESTION_CONTROL_CUBIC = 1
@@ -224,7 +228,9 @@ class coquic_endpoint_config_t(C.Structure):
         ("orphan_zero_rtt_buffer", coquic_orphan_zero_rtt_buffer_config_t),
         ("enable_reserved_version_probe", C.c_uint8),
         ("enable_long_header_stateless_reset", C.c_uint8),
-        ("reserved_endpoint_config_tail_padding", C.c_uint8 * 6),
+        ("enable_minimal_closing_state_retention", C.c_uint8),
+        ("reserved_endpoint_config_tail_padding", C.c_uint8 * 5),
+        ("retry_handshake_validation_policy", C.c_uint8),
     ]
 
 

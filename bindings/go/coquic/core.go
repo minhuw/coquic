@@ -20,6 +20,7 @@ static inline coquic_status_t coquic_go_endpoint_create(
     size_t supported_versions_count,
     uint8_t verify_peer,
     uint8_t retry_enabled,
+    uint8_t retry_handshake_validation_policy,
     const char *application_protocol,
     size_t application_protocol_length,
     uint8_t has_identity,
@@ -53,6 +54,7 @@ static inline coquic_status_t coquic_go_endpoint_create(
     config.supported_versions_count = supported_versions_count;
     config.verify_peer = verify_peer;
     config.retry_enabled = retry_enabled;
+    config.retry_handshake_validation_policy = retry_handshake_validation_policy;
     config.application_protocol = application_protocol;
     config.application_protocol_length = application_protocol_length;
     if (has_identity) {
@@ -265,6 +267,14 @@ const (
 	RoleServer Role = C.COQUIC_ROLE_SERVER
 )
 
+type RetryHandshakeValidationPolicy uint8
+
+const (
+	RetryHandshakeValidationDisabled        RetryHandshakeValidationPolicy = C.COQUIC_RETRY_HANDSHAKE_VALIDATION_DISABLED
+	RetryHandshakeValidationDiscard         RetryHandshakeValidationPolicy = C.COQUIC_RETRY_HANDSHAKE_VALIDATION_DISCARD
+	RetryHandshakeValidationConnectionError RetryHandshakeValidationPolicy = C.COQUIC_RETRY_HANDSHAKE_VALIDATION_CONNECTION_ERROR
+)
+
 type CongestionControl uint8
 
 const (
@@ -443,6 +453,7 @@ type EndpointConfig struct {
 	SupportedVersions              []uint32
 	VerifyPeer                     bool
 	RetryEnabled                   bool
+	RetryHandshakeValidationPolicy RetryHandshakeValidationPolicy
 	ApplicationProtocol            []byte
 	Identity                       *TlsIdentity
 	Transport                      TransportConfig
@@ -467,12 +478,13 @@ func DefaultEndpointConfig() EndpointConfig {
 	var raw C.coquic_endpoint_config_t
 	C.coquic_endpoint_config_init(&raw)
 	return EndpointConfig{
-		Role:                    Role(raw.role),
-		VerifyPeer:              raw.verify_peer != 0,
-		RetryEnabled:            raw.retry_enabled != 0,
-		ApplicationProtocol:     copyChar(raw.application_protocol, raw.application_protocol_length),
-		Transport:               transportConfigFromRaw(raw.transport),
-		MaxOutboundDatagramSize: int(raw.max_outbound_datagram_size),
+		Role:                           Role(raw.role),
+		VerifyPeer:                     raw.verify_peer != 0,
+		RetryEnabled:                   raw.retry_enabled != 0,
+		RetryHandshakeValidationPolicy: RetryHandshakeValidationPolicy(raw.retry_handshake_validation_policy),
+		ApplicationProtocol:            copyChar(raw.application_protocol, raw.application_protocol_length),
+		Transport:                      transportConfigFromRaw(raw.transport),
+		MaxOutboundDatagramSize:        int(raw.max_outbound_datagram_size),
 		OrphanZeroRttBuffer: OrphanZeroRttBufferConfig{
 			MaxPackets: int(raw.orphan_zero_rtt_buffer.max_packets),
 			MaxBytes:   int(raw.orphan_zero_rtt_buffer.max_bytes),
@@ -542,6 +554,7 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		C.size_t(len(config.SupportedVersions)),
 		cBool(config.VerifyPeer),
 		cBool(config.RetryEnabled),
+		C.uint8_t(config.RetryHandshakeValidationPolicy),
 		charPtr(config.ApplicationProtocol),
 		C.size_t(len(config.ApplicationProtocol)),
 		cBool(config.Identity != nil),

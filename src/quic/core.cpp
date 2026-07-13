@@ -70,6 +70,123 @@ CoreTestFaultState &core_test_fault_state() {
     return state;
 }
 
+constexpr std::size_t kMaximumRetryHandshakeCaptureBytes = std::size_t{64} * std::size_t{1024};
+
+struct RetryHandshakeCryptoCapture {
+    std::optional<QuicRetryHandshakeCryptoDigest> digest;
+    bool incomplete = false;
+};
+
+RetryHandshakeCryptoCapture
+capture_retry_handshake_crypto_ranges(std::span<const std::byte> bytes,
+                                      const ConnectionId &destination_connection_id) {
+    if (bytes.empty()) {
+        return {};
+    }
+
+    const auto decoded = deserialize_received_protected_datagram(
+        bytes, DeserializeProtectionContext{
+                   .peer_role = EndpointRole::client,
+                   .client_initial_destination_connection_id = destination_connection_id,
+               });
+    if (!decoded.has_value()) {
+        return {};
+    }
+
+    std::vector<QuicRetryHandshakeCryptoRange> ranges;
+    std::size_t captured_bytes = 0;
+    for (const auto &packet : decoded.value()) {
+        const auto *initial = std::get_if<ReceivedProtectedInitialPacket>(&packet);
+        if (initial == nullptr) {
+            continue;
+        }
+        for (const auto &frame : initial->frames) {
+            const auto *crypto = std::get_if<ReceivedCryptoFrame>(&frame);
+            if (crypto == nullptr || crypto->crypto_data.empty()) {
+                continue;
+            }
+            if (crypto->offset > kMaximumHandshakeCryptoBufferSize ||
+                crypto->crypto_data.size() > kMaximumHandshakeCryptoBufferSize - crypto->offset) {
+                return {};
+            }
+            if (captured_bytes > kMaximumRetryHandshakeCaptureBytes ||
+                crypto->crypto_data.size() > kMaximumRetryHandshakeCaptureBytes - captured_bytes ||
+                ranges.size() >= kMaximumRetryHandshakeCryptoRanges) {
+                return {};
+            }
+            captured_bytes += crypto->crypto_data.size();
+            ranges.push_back(QuicRetryHandshakeCryptoRange{
+                .offset = crypto->offset,
+                .bytes = crypto->crypto_data.to_vector(),
+            });
+        }
+    }
+
+    std::ranges::sort(
+        ranges, [](const auto &left, const auto &right) { return left.offset < right.offset; });
+    std::vector<QuicRetryHandshakeCryptoRange> merged_ranges;
+    merged_ranges.reserve(ranges.size());
+    for (auto &range : ranges) {
+        if (merged_ranges.empty()) {
+            merged_ranges.push_back(std::move(range));
+            continue;
+        }
+
+        auto &previous = merged_ranges.back();
+        const auto previous_end = previous.offset + previous.bytes.size();
+        const auto range_end = range.offset + range.bytes.size();
+        if (previous_end < range.offset) {
+            merged_ranges.push_back(std::move(range));
+            continue;
+        }
+
+        const auto overlap_start = std::max(previous.offset, range.offset);
+        const auto overlap_end = std::min(previous_end, range_end);
+        for (auto offset = overlap_start; offset < overlap_end; ++offset) {
+            const auto previous_index = static_cast<std::size_t>(offset - previous.offset);
+            const auto range_index = static_cast<std::size_t>(offset - range.offset);
+            if (previous.bytes[previous_index] != range.bytes[range_index]) {
+                return {};
+            }
+        }
+        if (range_end > previous_end) {
+            const auto suffix_index = static_cast<std::size_t>(previous_end - range.offset);
+            previous.bytes.insert(previous.bytes.end(),
+                                  range.bytes.begin() + static_cast<std::ptrdiff_t>(suffix_index),
+                                  range.bytes.end());
+        }
+    }
+    if (merged_ranges.empty() || merged_ranges.front().offset != 0 ||
+        merged_ranges.front().bytes.empty() || merged_ranges.front().bytes[0] != std::byte{0x01}) {
+        return {};
+    }
+
+    const auto &handshake_header = merged_ranges.front().bytes;
+    if (handshake_header.size() < 4) {
+        return RetryHandshakeCryptoCapture{.incomplete = true};
+    }
+    const auto client_hello_length =
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(handshake_header[1])) << 16) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(handshake_header[2])) << 8) |
+        static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(handshake_header[3]));
+    const auto client_hello_size = std::size_t{4} + client_hello_length;
+    if (client_hello_size > kMaximumRetryHandshakeCaptureBytes) {
+        return {};
+    }
+    if (handshake_header.size() < client_hello_size) {
+        return RetryHandshakeCryptoCapture{.incomplete = true};
+    }
+
+    return RetryHandshakeCryptoCapture{
+        .digest = make_retry_handshake_crypto_digest({QuicRetryHandshakeCryptoRange{
+            .offset = 0,
+            .bytes = std::vector<std::byte>(handshake_header.begin(),
+                                            handshake_header.begin() +
+                                                static_cast<std::ptrdiff_t>(client_hello_size)),
+        }}),
+    };
+}
+
 class ScopedCoreTestFault {
   public:
     explicit ScopedCoreTestFault(bool &target) : target_(target), previous_(target) {
@@ -1436,6 +1553,67 @@ void fill_random_bytes(std::span<std::byte> bytes, std::mt19937_64 &fallback_ran
 
 } // namespace
 
+std::optional<QuicRetryHandshakeCryptoDigest>
+make_retry_handshake_crypto_digest(const std::vector<QuicRetryHandshakeCryptoRange> &ranges) {
+    if (ranges.empty() || ranges.size() > kMaximumRetryHandshakeCryptoRanges) {
+        return std::nullopt;
+    }
+
+    std::size_t total_bytes = 0;
+    std::uint64_t previous_end = 0;
+    for (const auto &range : ranges) {
+        if (range.bytes.empty() || range.offset > kMaximumHandshakeCryptoBufferSize ||
+            range.bytes.size() > kMaximumHandshakeCryptoBufferSize - range.offset ||
+            (range.offset < previous_end) ||
+            total_bytes > kMaximumHandshakeCryptoBufferSize - range.bytes.size()) {
+            return std::nullopt;
+        }
+        previous_end = range.offset + range.bytes.size();
+        total_bytes += range.bytes.size();
+    }
+
+    EVP_MD_CTX *raw_context = EVP_MD_CTX_new();
+    if (raw_context == nullptr) {
+        return std::nullopt;
+    }
+    const auto free_context = [&] { EVP_MD_CTX_free(raw_context); };
+    if (EVP_DigestInit_ex(raw_context, EVP_sha256(), nullptr) != 1) {
+        free_context();
+        return std::nullopt;
+    }
+
+    QuicRetryHandshakeCryptoDigest result;
+    result.ranges.reserve(ranges.size());
+    for (const auto &range : ranges) {
+        std::array<unsigned char, 16> metadata{};
+        for (std::size_t index = 0; index < sizeof(std::uint64_t); ++index) {
+            metadata[index] = static_cast<unsigned char>(range.offset >>
+                                                         ((sizeof(std::uint64_t) - index - 1) * 8));
+            metadata[sizeof(std::uint64_t) + index] =
+                static_cast<unsigned char>(static_cast<std::uint64_t>(range.bytes.size()) >>
+                                           ((sizeof(std::uint64_t) - index - 1) * 8));
+        }
+        if (EVP_DigestUpdate(raw_context, metadata.data(), metadata.size()) != 1 ||
+            EVP_DigestUpdate(raw_context, range.bytes.data(), range.bytes.size()) != 1) {
+            free_context();
+            return std::nullopt;
+        }
+        result.ranges.push_back(QuicRetryHandshakeCryptoDigestRange{
+            .offset = range.offset,
+            .length = range.bytes.size(),
+        });
+    }
+
+    unsigned int produced = 0;
+    const auto finalized = EVP_DigestFinal_ex(
+        raw_context, reinterpret_cast<unsigned char *>(result.value.data()), &produced);
+    free_context();
+    if (finalized != 1 || produced != result.value.size()) {
+        return std::nullopt;
+    }
+    return result;
+}
+
 namespace detail {
 
 COQUIC_NO_PROFILE void *allocate_core_effect_storage(CoreEffectStorageBytes bytes,
@@ -1881,7 +2059,7 @@ QuicCore::make_connection_refused_close_packet_bytes(const ParsedEndpointDatagra
 
 COQUIC_NO_PROFILE std::optional<QuicCore::PendingRetryToken> QuicCore::take_retry_context(
     const ParsedEndpointDatagram &parsed, const std::optional<QuicRouteHandle> &route_handle,
-    QuicCoreTimePoint now, std::span<const std::byte> address_validation_identity) {
+    QuicCoreTimePoint now, std::span<const std::byte> address_validation_identity, bool consume) {
     purge_expired_consumed_address_validation_tokens(consumed_address_validation_tokens_, now);
     persist_consumed_address_validation_tokens();
     const auto it = retry_tokens_.find(connection_id_key(parsed.token));
@@ -1926,7 +2104,9 @@ COQUIC_NO_PROFILE std::optional<QuicCore::PendingRetryToken> QuicCore::take_retr
             return std::nullopt;
         }
 
-        mark_address_validation_token_consumed(parsed.token, metadata->expires_at);
+        if (consume) {
+            mark_address_validation_token_consumed(parsed.token, metadata->expires_at);
+        }
         return PendingRetryToken{
             .original_destination_connection_id = metadata->original_destination_connection_id,
             .retry_source_connection_id = metadata->retry_source_connection_id,
@@ -1934,6 +2114,9 @@ COQUIC_NO_PROFILE std::optional<QuicCore::PendingRetryToken> QuicCore::take_retr
             .token = parsed.token,
             .route_handle = metadata->route_handle,
             .address_validation_identity = metadata->address_validation_identity,
+            .retry_handshake_validation_state_unavailable =
+                endpoint_config_.retry_handshake_validation_policy !=
+                QuicRetryHandshakeValidationPolicy::disabled,
             .expires_at = metadata->expires_at,
         };
     }
@@ -1961,14 +2144,45 @@ COQUIC_NO_PROFILE std::optional<QuicCore::PendingRetryToken> QuicCore::take_retr
         parsed.version != pending.original_version) {
         return std::nullopt;
     }
+    if (endpoint_config_.retry_handshake_validation_policy !=
+            QuicRetryHandshakeValidationPolicy::disabled &&
+        !pending.retry_handshake_crypto_digest.has_value() &&
+        !pending.retry_handshake_validation_state_incomplete &&
+        !pending.retry_handshake_validation_state_unavailable) {
+        return std::nullopt;
+    }
 
     auto retry_context = pending;
-    retry_tokens_.erase(it);
-    //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
-    // # To protect against such attacks, servers MUST ensure that replay of
-    // # tokens is prevented or limited.
-    mark_address_validation_token_consumed(parsed.token, retry_context.expires_at);
+    if (consume) {
+        retry_tokens_.erase(it);
+        //= https://www.rfc-editor.org/rfc/rfc9000#section-8.1.4
+        // # To protect against such attacks, servers MUST ensure that replay of
+        // # tokens is prevented or limited.
+        mark_address_validation_token_consumed(parsed.token, retry_context.expires_at);
+    }
     return retry_context;
+}
+
+void QuicCore::consume_retry_context(const PendingRetryToken &retry_context) {
+    retry_tokens_.erase(connection_id_key(retry_context.token));
+    mark_address_validation_token_consumed(retry_context.token, retry_context.expires_at);
+}
+
+bool QuicCore::retry_handshake_validation_state_budget_available() const {
+    std::size_t retained_state_bytes = 0;
+    for (const auto &entry : retry_tokens_) {
+        const auto &pending = entry.second;
+        if (!pending.retry_handshake_crypto_digest.has_value()) {
+            continue;
+        }
+        if (retained_state_bytes > kMaximumRetryHandshakeValidationStateBytes -
+                                       kRetryHandshakeValidationStateBytesPerToken) {
+            return false;
+        }
+        retained_state_bytes += kRetryHandshakeValidationStateBytesPerToken;
+    }
+    return retained_state_bytes <=
+           kMaximumRetryHandshakeValidationStateBytes - kRetryHandshakeValidationStateBytesPerToken;
 }
 
 COQUIC_NO_PROFILE std::optional<QuicCore::StoredEndpointNewToken> QuicCore::take_new_token_context(
@@ -4090,6 +4304,8 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                 if (!path_id.has_value()) {
                     return finalize_endpoint_result(std::move(result), now);
                 }
+                const bool retry_validation_was_pending =
+                    entry.connection->retry_handshake_validation_pending();
                 QuicInboundDatagramResult inbound_result;
                 if (inbound->shared_bytes != nullptr) {
                     inbound_result = entry.connection->process_inbound_datagram_shared(
@@ -4137,13 +4353,17 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                     drain_queued_server_new_token(entry, drained, now, send_sink);
                 }
                 const auto drained_path = entry.connection->last_drained_path_id();
+                const bool retry_validation_connection_error =
+                    retry_validation_was_pending &&
+                    entry.connection->retry_handshake_validation_connection_error();
                 static_cast<void>(
                     maybe_retain_minimal_closing_state(entry, DrainedCloseDatagram{
                                                                   .bytes = std::move(capture.bytes),
                                                                   .route = capture.route,
                                                                   .path = drained_path,
                                                               }));
-                bool remove_entry = should_remove_endpoint_connection_entry(entry, drained, now);
+                bool remove_entry = retry_validation_connection_error ||
+                                    should_remove_endpoint_connection_entry(entry, drained, now);
                 remember_client_new_tokens(entry, drained);
                 if (defer_send_drain) {
                     refresh_entry_wakeup(entry);
@@ -4151,6 +4371,15 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                     note_send_continuation(entry, drained, now);
                 }
                 append_result(result, std::move(drained));
+                if (retry_validation_was_pending && entry.connection != nullptr &&
+                    !entry.connection->retry_handshake_validation_pending() &&
+                    !entry.connection->has_failed()) {
+                    result.effects.insert(result.effects.begin(),
+                                          QuicCoreConnectionLifecycleEvent{
+                                              .connection = entry.handle,
+                                              .event = QuicCoreConnectionLifecycle::accepted,
+                                          });
+                }
                 if (entry.connection != nullptr) {
                     refresh_server_connection_routes(entry);
                 }
@@ -4341,7 +4570,9 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
         }
         if (endpoint_config_.retry_enabled) {
             retry_context = take_retry_context(*parsed, inbound->route_handle, now,
-                                               inbound->address_validation_identity);
+                                               inbound->address_validation_identity,
+                                               endpoint_config_.retry_handshake_validation_policy ==
+                                                   QuicRetryHandshakeValidationPolicy::disabled);
             if (!retry_context.has_value()) {
                 if (token_classification == AddressValidationTokenClassification::retry) {
                     auto close_bytes = make_invalid_retry_token_close_packet_bytes(*parsed);
@@ -4363,6 +4594,23 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                     return finalize_endpoint_result(std::move(result), now);
                 }
 
+                auto retry_handshake_crypto_capture =
+                    endpoint_config_.retry_handshake_validation_policy ==
+                            QuicRetryHandshakeValidationPolicy::disabled
+                        ? RetryHandshakeCryptoCapture{}
+                        : capture_retry_handshake_crypto_ranges(inbound_payload,
+                                                                parsed->destination_connection_id);
+                auto retry_handshake_crypto_digest =
+                    std::move(retry_handshake_crypto_capture.digest);
+                const bool retry_handshake_validation_state_unavailable =
+                    endpoint_config_.retry_handshake_validation_policy !=
+                        QuicRetryHandshakeValidationPolicy::disabled &&
+                    ((!retry_handshake_crypto_capture.incomplete &&
+                      !retry_handshake_crypto_digest.has_value()) ||
+                     !retry_handshake_validation_state_budget_available());
+                if (retry_handshake_validation_state_unavailable) {
+                    retry_handshake_crypto_digest.reset();
+                }
                 const auto sequence = next_server_connection_id_sequence_++;
                 auto retry_source_connection_id = make_endpoint_connection_id(
                     kServerConnectionIdPrefix, sequence, endpoint_random_);
@@ -4375,6 +4623,11 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
                         inbound->address_validation_identity, now),
                     .route_handle = inbound->route_handle,
                     .address_validation_identity = inbound->address_validation_identity,
+                    .retry_handshake_crypto_digest = std::move(retry_handshake_crypto_digest),
+                    .retry_handshake_validation_state_incomplete =
+                        retry_handshake_crypto_capture.incomplete,
+                    .retry_handshake_validation_state_unavailable =
+                        retry_handshake_validation_state_unavailable,
                     .expires_at = now + kRetryTokenLifetime,
                 };
                 retry_tokens_.insert_or_assign(connection_id_key(pending.token), pending);
@@ -4437,6 +4690,7 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             .emit_shared_receive_stream_data = endpoint_config_.emit_shared_receive_stream_data,
             .enable_out_of_order_receive = endpoint_config_.enable_out_of_order_receive,
             .enable_packet_inspection = endpoint_config_.enable_packet_inspection,
+            .retry_handshake_validation_policy = endpoint_config_.retry_handshake_validation_policy,
         };
         if (retry_context.has_value()) {
             config.initial_destination_connection_id = retry_context->retry_source_connection_id;
@@ -4445,6 +4699,8 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             config.retry_source_connection_id = retry_context->retry_source_connection_id;
             config.original_version = retry_context->original_version;
             config.initial_version = retry_context->original_version;
+            config.retry_handshake_crypto_digest =
+                std::move(retry_context->retry_handshake_crypto_digest);
         }
 
         auto entry = ConnectionEntry{
@@ -4493,19 +4749,34 @@ QuicCoreResult QuicCore::advance_endpoint_impl(QuicCoreEndpointInput input, Quic
             refresh_server_connection_routes(entry);
         }
         const auto drained_path = entry.connection->last_drained_path_id();
+        const bool retry_validation_discarded =
+            retry_context.has_value() && entry.connection->retry_handshake_validation_discarded();
+        const bool retry_validation_connection_error =
+            retry_context.has_value() &&
+            entry.connection->retry_handshake_validation_connection_error();
+        const bool retry_validation_rejected =
+            retry_validation_discarded || retry_validation_connection_error;
+        const bool retry_validation_pending =
+            retry_context.has_value() && entry.connection->retry_handshake_validation_pending();
         static_cast<void>(
             maybe_retain_minimal_closing_state(entry, DrainedCloseDatagram{
                                                           .bytes = std::move(capture.bytes),
                                                           .route = capture.route,
                                                           .path = drained_path,
                                                       }));
-        bool keep_entry = should_keep_endpoint_connection_entry(entry, drained, now);
+        if (retry_context.has_value()) {
+            consume_retry_context(*retry_context);
+        }
+        const bool keep_entry = !retry_validation_connection_error &&
+                                should_keep_endpoint_connection_entry(entry, drained, now);
         append_result(result, std::move(drained));
-        result.effects.insert(result.effects.begin(),
-                              QuicCoreConnectionLifecycleEvent{
-                                  .connection = entry.handle,
-                                  .event = QuicCoreConnectionLifecycle::accepted,
-                              });
+        if (!retry_validation_pending && !retry_validation_rejected) {
+            result.effects.insert(result.effects.begin(),
+                                  QuicCoreConnectionLifecycleEvent{
+                                      .connection = entry.handle,
+                                      .event = QuicCoreConnectionLifecycle::accepted,
+                                  });
+        }
 
         if (keep_entry) {
             const auto handle = entry.handle;

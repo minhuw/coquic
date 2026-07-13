@@ -1641,6 +1641,386 @@ TEST(QuicCoreEndpointInternalTest, InboundEndpointBranchesCoverAcceptRetryAndUnk
     EXPECT_EQ(retry_server.connection_count(), 0u);
 }
 
+TEST(QuicCoreEndpointInternalTest, RetryHandshakeValidationCapturesPreRetryCryptoOnlyWhenEnabled) {
+    auto enabled_config = make_server_endpoint_config();
+    enabled_config.retry_enabled = true;
+    enabled_config.retry_handshake_validation_policy = QuicRetryHandshakeValidationPolicy::discard;
+    QuicCore enabled_server(std::move(enabled_config));
+    auto enabled_result = enabled_server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_client_initial_datagram(),
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_EQ(send_effects_from(enabled_result).size(), 1u);
+    ASSERT_EQ(enabled_server.retry_tokens_.size(), 1u);
+    EXPECT_TRUE(
+        enabled_server.retry_tokens_.begin()->second.retry_handshake_crypto_digest.has_value());
+
+    auto disabled_config = make_server_endpoint_config();
+    disabled_config.retry_enabled = true;
+    QuicCore disabled_server(std::move(disabled_config));
+    auto disabled_result = disabled_server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_client_initial_datagram(),
+        },
+        coquic::quic::test::test_time(1));
+    ASSERT_EQ(send_effects_from(disabled_result).size(), 1u);
+    ASSERT_EQ(disabled_server.retry_tokens_.size(), 1u);
+    EXPECT_FALSE(
+        disabled_server.retry_tokens_.begin()->second.retry_handshake_crypto_digest.has_value());
+}
+
+TEST(QuicCoreEndpointInternalTest, RetryHandshakeValidationCaptureFailureStillRequiresRetry) {
+    auto config = make_server_endpoint_config();
+    config.retry_enabled = true;
+    config.retry_handshake_validation_policy = QuicRetryHandshakeValidationPolicy::discard;
+    QuicCore server(std::move(config));
+
+    const auto result = server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_plaintext_initial_datagram(
+                kQuicVersion1, bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}),
+                bytes_from_ints({0xc1, 0x01}), {}),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(1));
+
+    const auto sends = send_effects_from(result);
+    ASSERT_EQ(sends.size(), 1u);
+    const auto decoded_retry = deserialize_packet(sends.front().bytes.span(), {});
+    ASSERT_TRUE(decoded_retry.has_value());
+    const auto &retry_datagram = decoded_retry.value();
+    EXPECT_NE(std::get_if<RetryPacket>(&retry_datagram.packet), nullptr);
+    EXPECT_TRUE(lifecycle_events_from(result).empty());
+    EXPECT_EQ(server.connection_count(), 0u);
+    ASSERT_EQ(server.retry_tokens_.size(), 1u);
+    const auto &pending = server.retry_tokens_.begin()->second;
+    EXPECT_FALSE(pending.retry_handshake_crypto_digest.has_value());
+    EXPECT_TRUE(pending.retry_handshake_validation_state_unavailable);
+}
+
+TEST(QuicCoreEndpointInternalTest, RetryHandshakeValidationBudgetExhaustionStillRequiresRetry) {
+    auto config = make_server_endpoint_config();
+    config.retry_enabled = true;
+    config.retry_handshake_validation_policy = QuicRetryHandshakeValidationPolicy::discard;
+    QuicCore server(std::move(config));
+
+    const auto digest = make_retry_handshake_crypto_digest({QuicRetryHandshakeCryptoRange{
+        .offset = 0,
+        .bytes = bytes_from_ints({0x01, 0x00, 0x00, 0x00}),
+    }});
+    ASSERT_TRUE(digest.has_value());
+    for (std::size_t index = 0;
+         index < 300 && server.retry_handshake_validation_state_budget_available(); ++index) {
+        const auto token = bytes_from_ints({
+            static_cast<std::uint8_t>((index >> 24) & 0xffu),
+            static_cast<std::uint8_t>((index >> 16) & 0xffu),
+            static_cast<std::uint8_t>((index >> 8) & 0xffu),
+            static_cast<std::uint8_t>(index & 0xffu),
+        });
+        server.retry_tokens_.emplace(server.connection_id_key(token),
+                                     QuicCore::PendingRetryToken{
+                                         .token = token,
+                                         .retry_handshake_crypto_digest = digest,
+                                         .expires_at = coquic::quic::test::test_time(100),
+                                     });
+    }
+    ASSERT_FALSE(server.retry_handshake_validation_state_budget_available());
+
+    const auto result = server.advance_endpoint(
+        QuicCoreInboundDatagram{.bytes = make_client_initial_datagram(), .route_handle = 17},
+        coquic::quic::test::test_time(1));
+    EXPECT_EQ(send_effects_from(result).size(), 1u);
+    EXPECT_TRUE(lifecycle_events_from(result).empty());
+    EXPECT_EQ(server.connection_count(), 0u);
+    EXPECT_TRUE(std::any_of(server.retry_tokens_.begin(), server.retry_tokens_.end(),
+                            [](const auto &entry) {
+                                return entry.second.retry_handshake_validation_state_unavailable;
+                            }));
+}
+
+TEST(QuicCoreEndpointInternalTest,
+     RetryHandshakeValidationRejectsBeforeEndpointAcceptanceAndAllowsRetransmission) {
+    const auto client_dcid = bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});
+    const auto initial = make_client_initial_datagram();
+    auto decoded_initial = deserialize_protected_datagram(
+        initial, DeserializeProtectionContext{
+                     .peer_role = EndpointRole::client,
+                     .client_initial_destination_connection_id = client_dcid,
+                 });
+    ASSERT_TRUE(decoded_initial.has_value());
+    const auto &initial_packets = decoded_initial.value();
+    ASSERT_FALSE(initial_packets.empty());
+    const auto *initial_packet = std::get_if<ProtectedInitialPacket>(&initial_packets.front());
+    ASSERT_NE(initial_packet, nullptr);
+    const auto initial_crypto_it =
+        std::find_if(initial_packet->frames.begin(), initial_packet->frames.end(),
+                     [](const auto &frame) { return std::get_if<CryptoFrame>(&frame) != nullptr; });
+    ASSERT_NE(initial_crypto_it, initial_packet->frames.end());
+    const auto *initial_crypto = std::get_if<CryptoFrame>(&*initial_crypto_it);
+    ASSERT_NE(initial_crypto, nullptr);
+    ASSERT_GE(initial_crypto->crypto_data.size(), 4u);
+    const auto client_hello_length =
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(initial_crypto->crypto_data[1]))
+         << 16) |
+        (static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(initial_crypto->crypto_data[2]))
+         << 8) |
+        static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(initial_crypto->crypto_data[3]));
+    ASSERT_GT(client_hello_length, 0u);
+    const auto client_hello_last_byte = std::size_t{4} + client_hello_length - 1;
+    ASSERT_LT(client_hello_last_byte, initial_crypto->crypto_data.size());
+
+    const auto make_retried_initial = [&](const RetryPacket &retry, bool mismatch) {
+        auto retried = *initial_packet;
+        retried.destination_connection_id = retry.source_connection_id;
+        retried.token = retry.retry_token;
+        if (mismatch) {
+            for (auto &frame : retried.frames) {
+                auto *crypto = std::get_if<CryptoFrame>(&frame);
+                if (crypto != nullptr && !crypto->crypto_data.empty()) {
+                    crypto->crypto_data[client_hello_last_byte] ^= std::byte{0x01};
+                    break;
+                }
+            }
+        }
+        const auto encoded = serialize_protected_datagram(
+            std::array<ProtectedPacket, 1>{std::move(retried)},
+            SerializeProtectionContext{
+                .local_role = EndpointRole::client,
+                .client_initial_destination_connection_id = retry.source_connection_id,
+            });
+        EXPECT_TRUE(encoded.has_value());
+        return encoded.has_value() ? encoded.value() : std::vector<std::byte>{};
+    };
+
+    const auto make_retried_initial_fragment = [&](const RetryPacket &retry,
+                                                   std::vector<std::byte> crypto_data) {
+        auto retried = *initial_packet;
+        retried.destination_connection_id = retry.source_connection_id;
+        retried.token = retry.retry_token;
+        for (auto &frame : retried.frames) {
+            auto *crypto = std::get_if<CryptoFrame>(&frame);
+            if (crypto != nullptr) {
+                crypto->offset = 0;
+                crypto->crypto_data = std::move(crypto_data);
+                break;
+            }
+        }
+        for (std::size_t index = 0; index < 512; ++index) {
+            retried.frames.emplace_back(PaddingFrame{});
+        }
+        const auto encoded = serialize_protected_datagram(
+            std::array<ProtectedPacket, 1>{std::move(retried)},
+            SerializeProtectionContext{
+                .local_role = EndpointRole::client,
+                .client_initial_destination_connection_id = retry.source_connection_id,
+            });
+        EXPECT_TRUE(encoded.has_value());
+        return encoded.has_value() ? encoded.value() : std::vector<std::byte>{};
+    };
+
+    const auto make_pre_retry_initial_fragment = [&](std::vector<std::byte> crypto_data) {
+        auto fragmented = *initial_packet;
+        fragmented.token.clear();
+        for (auto &frame : fragmented.frames) {
+            auto *crypto = std::get_if<CryptoFrame>(&frame);
+            if (crypto != nullptr) {
+                crypto->offset = 0;
+                crypto->crypto_data = std::move(crypto_data);
+                break;
+            }
+        }
+        for (std::size_t index = 0; index < 512; ++index) {
+            fragmented.frames.emplace_back(PaddingFrame{});
+        }
+        const auto encoded = serialize_protected_datagram(
+            std::array<ProtectedPacket, 1>{std::move(fragmented)},
+            SerializeProtectionContext{
+                .local_role = EndpointRole::client,
+                .client_initial_destination_connection_id = client_dcid,
+            });
+        EXPECT_TRUE(encoded.has_value());
+        return encoded.has_value() ? encoded.value() : std::vector<std::byte>{};
+    };
+
+    const auto send_mismatch_and_get_retry = [&](QuicCore &server,
+                                                 bool fragmented) -> std::optional<RetryPacket> {
+        const auto retry_result =
+            server.advance_endpoint(QuicCoreInboundDatagram{.bytes = initial, .route_handle = 17},
+                                    coquic::quic::test::test_time(1));
+        const auto retry_sends = send_effects_from(retry_result);
+        EXPECT_EQ(retry_sends.size(), 1u);
+        if (retry_sends.empty()) {
+            return std::nullopt;
+        }
+        const auto retry_decoded = deserialize_packet(retry_sends.front().bytes.span(), {});
+        if (!retry_decoded.has_value()) {
+            ADD_FAILURE() << "Retry packet did not decode";
+            return std::nullopt;
+        }
+        const auto *retry = std::get_if<RetryPacket>(&retry_decoded.value().packet);
+        if (retry == nullptr) {
+            ADD_FAILURE() << "Retry response was not a Retry packet";
+            return std::nullopt;
+        }
+        if (server.retry_tokens_.size() != 1u) {
+            ADD_FAILURE() << "Retry token state was not retained";
+            return std::nullopt;
+        }
+
+        auto mismatch_bytes = make_retried_initial(*retry, true);
+        if (fragmented) {
+            auto wrong_prefix = std::vector<std::byte>{initial_crypto->crypto_data.front()};
+            wrong_prefix.front() ^= std::byte{0x01};
+            mismatch_bytes = make_retried_initial_fragment(*retry, std::move(wrong_prefix));
+        }
+        const auto parsed_mismatch = server.parse_endpoint_datagram(mismatch_bytes);
+        if (!parsed_mismatch.has_value() ||
+            parsed_mismatch->token.size() != retry->retry_token.size()) {
+            ADD_FAILURE() << "Retransmitted Initial did not preserve its Retry token";
+            return std::nullopt;
+        }
+        const auto mismatch_result = server.advance_endpoint(
+            QuicCoreInboundDatagram{
+                .bytes = std::move(mismatch_bytes),
+                .route_handle = 17,
+            },
+            coquic::quic::test::test_time(2));
+        const auto mismatch_lifecycle = lifecycle_events_from(mismatch_result);
+        if (server.endpoint_config_.retry_handshake_validation_policy ==
+            QuicRetryHandshakeValidationPolicy::connection_error) {
+            EXPECT_TRUE(std::none_of(
+                mismatch_lifecycle.begin(), mismatch_lifecycle.end(), [](const auto &event) {
+                    return event.event == QuicCoreConnectionLifecycle::accepted;
+                }));
+            EXPECT_EQ(server.connection_count(), 0u);
+        } else {
+            EXPECT_TRUE(mismatch_lifecycle.empty());
+        }
+        return *retry;
+    };
+
+    auto discard_config = make_server_endpoint_config();
+    discard_config.retry_enabled = true;
+    discard_config.application_protocol = "coquic";
+    discard_config.retry_handshake_validation_policy = QuicRetryHandshakeValidationPolicy::discard;
+    QuicCore discard_server(std::move(discard_config));
+    const auto discard_retry = send_mismatch_and_get_retry(discard_server, true);
+    ASSERT_TRUE(discard_retry.has_value());
+    if (!discard_retry.has_value()) {
+        return;
+    }
+    ASSERT_EQ(discard_server.connection_count(), 1u);
+    ASSERT_FALSE(discard_server.connections_.begin()->second.connection->has_failed());
+    const auto &discard_retry_packet = optional_ref_or_terminate(discard_retry);
+    const auto discard_suffix = discard_server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_retried_initial(discard_retry_packet, true),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(3));
+    EXPECT_TRUE(lifecycle_events_from(discard_suffix).empty());
+    EXPECT_EQ(discard_server.connection_count(), 1u);
+    auto correct_overlap = std::vector<std::byte>(initial_crypto->crypto_data.begin(),
+                                                  initial_crypto->crypto_data.begin() + 2);
+    const auto discard_overlap = discard_server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes =
+                make_retried_initial_fragment(discard_retry_packet, std::move(correct_overlap)),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(3));
+    EXPECT_TRUE(lifecycle_events_from(discard_overlap).empty());
+    EXPECT_EQ(discard_server.connection_count(), 1u);
+    const auto discard_retransmission = discard_server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_retried_initial(discard_retry_packet, false),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(4));
+    const auto discard_lifecycle = lifecycle_events_from(discard_retransmission);
+    ASSERT_EQ(discard_lifecycle.size(), 1u);
+    EXPECT_EQ(discard_lifecycle.front().event, QuicCoreConnectionLifecycle::accepted);
+    EXPECT_EQ(discard_server.connection_count(), 1u);
+
+    discard_server.connections_.begin()->second.connection->pending_terminal_state_ =
+        QuicConnectionTerminalState::closed;
+    const auto discard_teardown = discard_server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_retried_initial(discard_retry_packet, false),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(5));
+    const auto teardown_lifecycle = lifecycle_events_from(discard_teardown);
+    ASSERT_EQ(teardown_lifecycle.size(), 1u);
+    EXPECT_EQ(teardown_lifecycle.front().event, QuicCoreConnectionLifecycle::closed);
+    EXPECT_EQ(discard_server.connection_count(), 0u);
+
+    const auto replay = discard_server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_retried_initial(discard_retry_packet, false),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(6));
+    EXPECT_TRUE(lifecycle_events_from(replay).empty());
+    EXPECT_EQ(discard_server.connection_count(), 0u);
+    EXPECT_FALSE(send_effects_from(replay).empty());
+
+    auto error_config = make_server_endpoint_config();
+    error_config.retry_enabled = true;
+    error_config.application_protocol = "coquic";
+    error_config.retry_handshake_validation_policy =
+        QuicRetryHandshakeValidationPolicy::connection_error;
+    QuicCore error_server(std::move(error_config));
+    const auto error_retry = send_mismatch_and_get_retry(error_server, false);
+    ASSERT_TRUE(error_retry.has_value());
+    if (!error_retry.has_value()) {
+        return;
+    }
+    EXPECT_EQ(error_server.connection_count(), 0u);
+
+    auto fragmented_config = make_server_endpoint_config();
+    fragmented_config.retry_enabled = true;
+    fragmented_config.application_protocol = "coquic";
+    fragmented_config.retry_handshake_validation_policy =
+        QuicRetryHandshakeValidationPolicy::discard;
+    QuicCore fragmented_server(std::move(fragmented_config));
+    const auto prefix =
+        std::vector<std::byte>{initial_crypto->crypto_data[0], initial_crypto->crypto_data[1]};
+    const auto fragmented_retry_result = fragmented_server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_pre_retry_initial_fragment(prefix),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(7));
+    const auto fragmented_retry_sends = send_effects_from(fragmented_retry_result);
+    ASSERT_EQ(fragmented_retry_sends.size(), 1u);
+    const auto fragmented_retry_decoded =
+        deserialize_packet(fragmented_retry_sends.front().bytes.span(), {});
+    ASSERT_TRUE(fragmented_retry_decoded.has_value());
+    const auto &fragmented_retry_datagram = fragmented_retry_decoded.value();
+    const auto *fragmented_retry = std::get_if<RetryPacket>(&fragmented_retry_datagram.packet);
+    ASSERT_NE(fragmented_retry, nullptr);
+    ASSERT_EQ(fragmented_server.retry_tokens_.size(), 1u);
+    EXPECT_TRUE(fragmented_server.retry_tokens_.begin()
+                    ->second.retry_handshake_validation_state_incomplete);
+    EXPECT_FALSE(fragmented_server.retry_tokens_.begin()
+                     ->second.retry_handshake_validation_state_unavailable);
+    const auto fragmented_post_retry = fragmented_server.advance_endpoint(
+        QuicCoreInboundDatagram{
+            .bytes = make_retried_initial_fragment(
+                *fragmented_retry, std::vector<std::byte>(initial_crypto->crypto_data.begin(),
+                                                          initial_crypto->crypto_data.end())),
+            .route_handle = 17,
+        },
+        coquic::quic::test::test_time(8));
+    const auto fragmented_lifecycle = lifecycle_events_from(fragmented_post_retry);
+    ASSERT_EQ(fragmented_lifecycle.size(), 1u);
+    EXPECT_EQ(fragmented_lifecycle.front().event, QuicCoreConnectionLifecycle::accepted);
+    EXPECT_FALSE(send_effects_from(fragmented_post_retry).empty());
+    EXPECT_EQ(fragmented_server.connection_count(), 1u);
+}
+
 TEST(QuicCoreEndpointInternalTest, InitialServerCloseUsesMinimalRetention) {
     auto config = make_server_endpoint_config();
     config.application_protocol = "coquic";

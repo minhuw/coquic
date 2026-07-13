@@ -4742,5 +4742,279 @@ TEST(QuicCoreTest,
     EXPECT_EQ(connection.application_space_.largest_authenticated_packet_number, std::nullopt);
     EXPECT_FALSE(connection.application_space_.received_packets.has_ack_to_send());
 }
+TEST(QuicCoreTest, RetryHandshakeValidationMatchesFragmentedOverlappingRetransmissions) {
+    auto config = coquic::quic::test::make_server_core_config();
+    config.retry_source_connection_id = bytes_from_ints({0x51, 0x52});
+    config.retry_handshake_validation_policy =
+        coquic::quic::QuicRetryHandshakeValidationPolicy::discard;
+    config.retry_handshake_crypto_ranges = {
+        coquic::quic::QuicRetryHandshakeCryptoRange{
+            .offset = 0,
+            .bytes = bytes_from_ints({0x61, 0x62, 0x63, 0x64, 0x65, 0x66}),
+        },
+    };
+    coquic::quic::QuicConnection connection(std::move(config));
+
+    auto middle = bytes_from_ints({0x63, 0x64});
+    std::array<coquic::quic::QuicConnection::RetryHandshakeCryptoChunk, 1> middle_chunk{
+        coquic::quic::QuicConnection::RetryHandshakeCryptoChunk{
+            .offset = 2,
+            .bytes = middle,
+        },
+    };
+    EXPECT_EQ(connection.validate_post_retry_crypto(middle_chunk),
+              coquic::quic::QuicConnection::RetryHandshakeValidationResult::incomplete);
+
+    auto retransmission = bytes_from_ints({0x62, 0x63, 0x64});
+    std::array<coquic::quic::QuicConnection::RetryHandshakeCryptoChunk, 1> retransmission_chunk{
+        coquic::quic::QuicConnection::RetryHandshakeCryptoChunk{
+            .offset = 1,
+            .bytes = retransmission,
+        },
+    };
+    EXPECT_EQ(connection.validate_post_retry_crypto(retransmission_chunk),
+              coquic::quic::QuicConnection::RetryHandshakeValidationResult::incomplete);
+
+    auto complete = bytes_from_ints({0x61, 0x62, 0x63, 0x64, 0x65, 0x66});
+    std::array<coquic::quic::QuicConnection::RetryHandshakeCryptoChunk, 1> complete_chunk{
+        coquic::quic::QuicConnection::RetryHandshakeCryptoChunk{
+            .offset = 0,
+            .bytes = complete,
+        },
+    };
+    EXPECT_EQ(connection.validate_post_retry_crypto(complete_chunk),
+              coquic::quic::QuicConnection::RetryHandshakeValidationResult::matching);
+    EXPECT_TRUE(connection.retry_handshake_crypto_ranges_.empty());
+}
+
+TEST(QuicCoreTest, RetryHandshakeValidationDiscardAllowsCorrectRetransmission) {
+    auto config = coquic::quic::test::make_server_core_config();
+    config.retry_source_connection_id = bytes_from_ints({0x61, 0x62});
+    config.retry_handshake_validation_policy =
+        coquic::quic::QuicRetryHandshakeValidationPolicy::discard;
+    config.retry_handshake_crypto_ranges = {
+        coquic::quic::QuicRetryHandshakeCryptoRange{
+            .offset = 0,
+            .bytes = bytes_from_ints({0x68, 0x69}),
+        },
+    };
+    coquic::quic::QuicConnection connection(std::move(config));
+
+    auto mismatch = bytes_from_ints({0x6a, 0x69});
+    std::array<coquic::quic::QuicConnection::RetryHandshakeCryptoChunk, 1> mismatch_chunk{
+        coquic::quic::QuicConnection::RetryHandshakeCryptoChunk{
+            .offset = 0,
+            .bytes = mismatch,
+        },
+    };
+    EXPECT_EQ(connection.validate_post_retry_crypto(mismatch_chunk),
+              coquic::quic::QuicConnection::RetryHandshakeValidationResult::discard);
+    EXPECT_FALSE(connection.retry_handshake_crypto_ranges_.empty());
+
+    auto retransmission = bytes_from_ints({0x68, 0x69});
+    std::array<coquic::quic::QuicConnection::RetryHandshakeCryptoChunk, 1> retransmission_chunk{
+        coquic::quic::QuicConnection::RetryHandshakeCryptoChunk{
+            .offset = 0,
+            .bytes = retransmission,
+        },
+    };
+    EXPECT_EQ(connection.validate_post_retry_crypto(retransmission_chunk),
+              coquic::quic::QuicConnection::RetryHandshakeValidationResult::matching);
+    EXPECT_TRUE(connection.retry_handshake_crypto_ranges_.empty());
+}
+
+TEST(QuicCoreTest, RetryHandshakeValidationRejectsWrongFragmentBeforeOverlapCanBeReplaced) {
+    auto config = coquic::quic::test::make_server_core_config();
+    config.retry_source_connection_id = bytes_from_ints({0x63, 0x64});
+    config.retry_handshake_validation_policy =
+        coquic::quic::QuicRetryHandshakeValidationPolicy::discard;
+    config.retry_handshake_crypto_ranges = {
+        coquic::quic::QuicRetryHandshakeCryptoRange{
+            .offset = 0,
+            .bytes = bytes_from_ints({0x61, 0x62, 0x63}),
+        },
+    };
+    coquic::quic::QuicConnection connection(std::move(config));
+
+    const auto wrong_prefix = bytes_from_ints({0xff});
+    std::array<coquic::quic::QuicConnection::RetryHandshakeCryptoChunk, 1> wrong_chunk{
+        coquic::quic::QuicConnection::RetryHandshakeCryptoChunk{
+            .offset = 0,
+            .bytes = wrong_prefix,
+        },
+    };
+    EXPECT_EQ(connection.validate_post_retry_crypto(wrong_chunk),
+              coquic::quic::QuicConnection::RetryHandshakeValidationResult::incomplete);
+
+    const auto correct_prefix = bytes_from_ints({0x61, 0x62});
+    std::array<coquic::quic::QuicConnection::RetryHandshakeCryptoChunk, 1> overlapping_chunk{
+        coquic::quic::QuicConnection::RetryHandshakeCryptoChunk{
+            .offset = 0,
+            .bytes = correct_prefix,
+        },
+    };
+    EXPECT_EQ(connection.validate_post_retry_crypto(overlapping_chunk),
+              coquic::quic::QuicConnection::RetryHandshakeValidationResult::discard);
+
+    const auto retransmission = bytes_from_ints({0x61, 0x62, 0x63});
+    std::array<coquic::quic::QuicConnection::RetryHandshakeCryptoChunk, 1> retransmission_chunk{
+        coquic::quic::QuicConnection::RetryHandshakeCryptoChunk{
+            .offset = 0,
+            .bytes = retransmission,
+        },
+    };
+    EXPECT_EQ(connection.validate_post_retry_crypto(retransmission_chunk),
+              coquic::quic::QuicConnection::RetryHandshakeValidationResult::matching);
+}
+
+TEST(QuicCoreTest, RetryHandshakeValidationMatchesReceivedCryptoFrames) {
+    auto config = coquic::quic::test::make_server_core_config();
+    config.retry_source_connection_id = bytes_from_ints({0x69, 0x6a});
+    config.retry_handshake_validation_policy =
+        coquic::quic::QuicRetryHandshakeValidationPolicy::discard;
+    config.retry_handshake_crypto_ranges = {
+        coquic::quic::QuicRetryHandshakeCryptoRange{
+            .offset = 0,
+            .bytes = bytes_from_ints({0x71, 0x72, 0x73}),
+        },
+    };
+    coquic::quic::QuicConnection connection(std::move(config));
+
+    const auto frames = coquic::quic::ReceivedFrameList{
+        coquic::quic::ReceivedCryptoFrame{
+            .offset = 1,
+            .crypto_data = coquic::quic::SharedBytes(bytes_from_ints({0x72})),
+        },
+    };
+    EXPECT_EQ(connection.validate_post_retry_crypto(frames),
+              coquic::quic::QuicConnection::RetryHandshakeValidationResult::incomplete);
+    EXPECT_FALSE(connection.retry_handshake_crypto_ranges_.empty());
+}
+
+TEST(QuicCoreTest, RetryHandshakeValidationConnectionErrorRejectsMismatch) {
+    auto config = coquic::quic::test::make_server_core_config();
+    config.retry_source_connection_id = bytes_from_ints({0x71, 0x72});
+    config.retry_handshake_validation_policy =
+        coquic::quic::QuicRetryHandshakeValidationPolicy::connection_error;
+    config.retry_handshake_crypto_ranges = {
+        coquic::quic::QuicRetryHandshakeCryptoRange{
+            .offset = 4,
+            .bytes = bytes_from_ints({0x01, 0x02}),
+        },
+    };
+    coquic::quic::QuicConnection connection(std::move(config));
+
+    auto mismatch = bytes_from_ints({0x01, 0xff});
+    std::array<coquic::quic::QuicConnection::RetryHandshakeCryptoChunk, 1> mismatch_chunk{
+        coquic::quic::QuicConnection::RetryHandshakeCryptoChunk{
+            .offset = 4,
+            .bytes = mismatch,
+        },
+    };
+    EXPECT_EQ(connection.validate_post_retry_crypto(mismatch_chunk),
+              coquic::quic::QuicConnection::RetryHandshakeValidationResult::connection_error);
+    EXPECT_FALSE(connection.retry_handshake_crypto_ranges_.empty());
+}
+
+TEST(QuicCoreTest, RetryHandshakeValidationPacketMismatchDiscardsOrClosesBeforeStateMutation) {
+    const auto client_initial_destination_connection_id =
+        bytes_from_ints({0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08});
+    const auto make_initial = [&]() {
+        return serialize_protected_datagram(
+            std::array<coquic::quic::ProtectedPacket, 1>{
+                coquic::quic::ProtectedInitialPacket{
+                    .version = coquic::quic::kQuicVersion1,
+                    .destination_connection_id = client_initial_destination_connection_id,
+                    .source_connection_id = bytes_from_ints({0xc1, 0x01}),
+                    .packet_number_length = 1,
+                    .packet_number = 0,
+                    .frames = {coquic::quic::CryptoFrame{
+                        .offset = 0,
+                        .crypto_data = bytes_from_ints({0x01, 0xff}),
+                    }},
+                },
+            },
+            coquic::quic::SerializeProtectionContext{
+                .local_role = coquic::quic::EndpointRole::client,
+                .client_initial_destination_connection_id =
+                    client_initial_destination_connection_id,
+            });
+    };
+
+    {
+        auto config = coquic::quic::test::make_server_core_config();
+        config.retry_source_connection_id = bytes_from_ints({0x91, 0x92});
+        config.retry_handshake_validation_policy =
+            coquic::quic::QuicRetryHandshakeValidationPolicy::discard;
+        config.retry_handshake_crypto_ranges = {
+            coquic::quic::QuicRetryHandshakeCryptoRange{
+                .offset = 0,
+                .bytes = bytes_from_ints({0x01, 0x02}),
+            },
+        };
+        coquic::quic::QuicConnection server(std::move(config));
+        const auto initial = make_initial();
+        ASSERT_TRUE(initial.has_value());
+
+        const auto result =
+            server.process_inbound_datagram(initial.value(), coquic::quic::test::test_time(1));
+        EXPECT_FALSE(result.processed_any_packet);
+        EXPECT_FALSE(server.pending_transport_close_.has_value());
+        EXPECT_FALSE(server.initial_space_.largest_authenticated_packet_number.has_value());
+    }
+
+    {
+        auto config = coquic::quic::test::make_server_core_config();
+        config.retry_source_connection_id = bytes_from_ints({0xa1, 0xa2});
+        config.retry_handshake_validation_policy =
+            coquic::quic::QuicRetryHandshakeValidationPolicy::connection_error;
+        config.retry_handshake_crypto_ranges = {
+            coquic::quic::QuicRetryHandshakeCryptoRange{
+                .offset = 0,
+                .bytes = bytes_from_ints({0x01, 0x02}),
+            },
+        };
+        coquic::quic::QuicConnection server(std::move(config));
+        const auto initial = make_initial();
+        ASSERT_TRUE(initial.has_value());
+
+        const auto result =
+            server.process_inbound_datagram(initial.value(), coquic::quic::test::test_time(1));
+        EXPECT_FALSE(result.processed_any_packet);
+        ASSERT_TRUE(server.pending_transport_close_.has_value());
+        if (!server.pending_transport_close_.has_value()) {
+            return;
+        }
+        const auto &pending_transport_close =
+            optional_ref_or_terminate(server.pending_transport_close_);
+        EXPECT_EQ(
+            pending_transport_close.error_code,
+            static_cast<std::uint64_t>(coquic::quic::QuicTransportErrorCode::protocol_violation));
+        EXPECT_FALSE(server.initial_space_.largest_authenticated_packet_number.has_value());
+    }
+}
+
+TEST(QuicCoreTest, RetryHandshakeValidationDisabledIgnoresMismatch) {
+    auto config = coquic::quic::test::make_server_core_config();
+    config.retry_source_connection_id = bytes_from_ints({0x81, 0x82});
+    config.retry_handshake_crypto_ranges = {
+        coquic::quic::QuicRetryHandshakeCryptoRange{
+            .offset = 0,
+            .bytes = bytes_from_ints({0x01}),
+        },
+    };
+    coquic::quic::QuicConnection connection(std::move(config));
+
+    auto mismatch = bytes_from_ints({0xff});
+    std::array<coquic::quic::QuicConnection::RetryHandshakeCryptoChunk, 1> mismatch_chunk{
+        coquic::quic::QuicConnection::RetryHandshakeCryptoChunk{
+            .offset = 0,
+            .bytes = mismatch,
+        },
+    };
+    EXPECT_EQ(connection.validate_post_retry_crypto(mismatch_chunk),
+              coquic::quic::QuicConnection::RetryHandshakeValidationResult::not_applicable);
+    EXPECT_TRUE(connection.retry_handshake_crypto_ranges_.empty());
+}
 
 } // namespace

@@ -485,6 +485,21 @@ TEST(CoquicCoreFfiTest, EndpointConfigCoversMinimalClosingStateRetentionOption) 
     coquic_endpoint_destroy(endpoint);
 }
 
+TEST(CoquicCoreFfiTest, EndpointConfigSizeGatesRetryHandshakeValidationPolicy) {
+    coquic_endpoint_config_t endpoint_config{};
+    coquic_endpoint_config_init(&endpoint_config);
+    EXPECT_EQ(endpoint_config.retry_handshake_validation_policy,
+              COQUIC_RETRY_HANDSHAKE_VALIDATION_DISABLED);
+
+    endpoint_config.retry_handshake_validation_policy = COQUIC_RETRY_HANDSHAKE_VALIDATION_DISCARD;
+    endpoint_config.size = offsetof(coquic_endpoint_config_t, retry_handshake_validation_policy);
+
+    coquic_endpoint_t *endpoint = nullptr;
+    ASSERT_EQ(coquic_endpoint_create(&endpoint_config, &endpoint), COQUIC_STATUS_OK);
+    ASSERT_NE(endpoint, nullptr);
+    coquic_endpoint_destroy(endpoint);
+}
+
 TEST(CoquicCoreFfiTest, EndpointConfigCoversServerOptionsAndEnumConversions) {
     coquic_endpoint_config_t endpoint_config{};
     coquic_endpoint_config_init(&endpoint_config);

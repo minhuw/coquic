@@ -592,6 +592,8 @@ EndpointConfigMaterialization endpoint_config_from_js(napi_env env, napi_value v
         static_cast<std::uint8_t>(get_bool(env, value, "verifyPeer", out.config.verify_peer));
     out.config.retry_enabled =
         static_cast<std::uint8_t>(get_bool(env, value, "retryEnabled", out.config.retry_enabled));
+    out.config.retry_handshake_validation_policy = get_u8(
+        env, value, "retryHandshakeValidationPolicy", out.config.retry_handshake_validation_policy);
     out.config.application_protocol =
         reinterpret_cast<const char *>(out.application_protocol.view().data);
     out.config.application_protocol_length = out.application_protocol.storage.size();
@@ -944,6 +946,7 @@ napi_value DefaultEndpointConfig(napi_env env, napi_callback_info) {
     set_named(env, out, "supportedVersions", make_array(env));
     set_bool(env, out, "verifyPeer", config.verify_peer != 0);
     set_bool(env, out, "retryEnabled", config.retry_enabled != 0);
+    set_u32(env, out, "retryHandshakeValidationPolicy", config.retry_handshake_validation_policy);
     set_buffer(env, out, "applicationProtocol",
                reinterpret_cast<const std::uint8_t *>(config.application_protocol),
                config.application_protocol_length);

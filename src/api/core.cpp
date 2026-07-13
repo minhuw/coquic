@@ -30,6 +30,18 @@ quic::EndpointRole to_internal(Role role) {
     return quic::EndpointRole::client;
 }
 
+quic::QuicRetryHandshakeValidationPolicy to_internal(RetryHandshakeValidationPolicy policy) {
+    switch (policy) {
+    case RetryHandshakeValidationPolicy::disabled:
+        return quic::QuicRetryHandshakeValidationPolicy::disabled;
+    case RetryHandshakeValidationPolicy::discard:
+        return quic::QuicRetryHandshakeValidationPolicy::discard;
+    case RetryHandshakeValidationPolicy::connection_error:
+        return quic::QuicRetryHandshakeValidationPolicy::connection_error;
+    }
+    return quic::QuicRetryHandshakeValidationPolicy::disabled;
+}
+
 quic::QuicCongestionControlAlgorithm to_internal(CongestionControl algorithm) {
     switch (algorithm) {
     case CongestionControl::newreno:
@@ -294,6 +306,7 @@ quic::QuicCoreEndpointConfig to_internal(const EndpointConfig &config) {
         .supported_versions = config.supported_versions,
         .verify_peer = config.verify_peer,
         .retry_enabled = config.retry_enabled,
+        .retry_handshake_validation_policy = to_internal(config.retry_handshake_validation_policy),
         .require_address_validation_token = config.require_address_validation_token,
         .close_on_undersized_initial = config.close_on_undersized_initial,
         .max_server_connections = config.max_server_connections,

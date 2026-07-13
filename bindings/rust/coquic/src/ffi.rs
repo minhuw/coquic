@@ -4,7 +4,7 @@
 
 use std::ffi::c_char;
 
-pub const COQUIC_FFI_ABI_VERSION: u32 = 11;
+pub const COQUIC_FFI_ABI_VERSION: u32 = 12;
 
 pub enum coquic_endpoint_t {}
 pub enum coquic_result_t {}
@@ -27,6 +27,10 @@ pub const COQUIC_STATUS_INTERNAL_ERROR: coquic_status_t = 3;
 pub type coquic_role_t = u8;
 pub const COQUIC_ROLE_CLIENT: coquic_role_t = 0;
 pub const COQUIC_ROLE_SERVER: coquic_role_t = 1;
+
+pub const COQUIC_RETRY_HANDSHAKE_VALIDATION_DISABLED: u8 = 0;
+pub const COQUIC_RETRY_HANDSHAKE_VALIDATION_DISCARD: u8 = 1;
+pub const COQUIC_RETRY_HANDSHAKE_VALIDATION_CONNECTION_ERROR: u8 = 2;
 
 pub type coquic_congestion_control_t = u8;
 pub const COQUIC_CONGESTION_CONTROL_NEWRENO: coquic_congestion_control_t = 0;
@@ -268,7 +272,9 @@ pub struct coquic_endpoint_config_t {
     pub orphan_zero_rtt_buffer: coquic_orphan_zero_rtt_buffer_config_t,
     pub enable_reserved_version_probe: u8,
     pub enable_long_header_stateless_reset: u8,
-    pub reserved_endpoint_config_tail_padding: [u8; 6],
+    pub enable_minimal_closing_state_retention: u8,
+    pub reserved_endpoint_config_tail_padding: [u8; 5],
+    pub retry_handshake_validation_policy: u8,
 }
 
 #[repr(C)]

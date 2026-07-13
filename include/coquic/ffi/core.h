@@ -23,7 +23,7 @@ extern "C" {
 #endif
 #endif
 
-#define COQUIC_FFI_ABI_VERSION 11u
+#define COQUIC_FFI_ABI_VERSION 12u
 
 typedef struct coquic_endpoint coquic_endpoint_t;
 typedef struct coquic_result coquic_result_t;
@@ -42,6 +42,11 @@ typedef uint8_t coquic_status_t;
 typedef uint8_t coquic_role_t;
 #define COQUIC_ROLE_CLIENT 0u
 #define COQUIC_ROLE_SERVER 1u
+
+typedef uint8_t coquic_retry_handshake_validation_policy_t;
+#define COQUIC_RETRY_HANDSHAKE_VALIDATION_DISABLED 0u
+#define COQUIC_RETRY_HANDSHAKE_VALIDATION_DISCARD 1u
+#define COQUIC_RETRY_HANDSHAKE_VALIDATION_CONNECTION_ERROR 2u
 
 typedef uint8_t coquic_congestion_control_t;
 #define COQUIC_CONGESTION_CONTROL_NEWRENO 0u
@@ -241,6 +246,7 @@ typedef struct coquic_endpoint_config {
     uint8_t enable_long_header_stateless_reset;
     uint8_t enable_minimal_closing_state_retention;
     uint8_t reserved_endpoint_config_tail_padding[5];
+    coquic_retry_handshake_validation_policy_t retry_handshake_validation_policy;
 } coquic_endpoint_config_t;
 
 typedef struct coquic_resumption_state {

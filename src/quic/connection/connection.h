@@ -627,6 +627,9 @@ class QuicConnection {
     bool is_handshake_complete() const;
     bool has_processed_peer_packet() const;
     bool has_failed() const;
+    bool retry_handshake_validation_pending() const;
+    bool retry_handshake_validation_discarded() const;
+    bool retry_handshake_validation_connection_error() const;
     bool close_state_active() const;
     bool is_closing() const;
     std::optional<QuicPathAntiAmplificationState>
@@ -636,6 +639,25 @@ class QuicConnection {
     QuicCoreConnectionDiagnostics diagnostics(QuicConnectionHandle handle) const;
 
   private:
+    enum class RetryHandshakeValidationResult : std::uint8_t {
+        not_applicable,
+        incomplete,
+        matching,
+        discard,
+        connection_error,
+    };
+
+    struct RetryHandshakeCryptoChunk {
+        std::uint64_t offset = 0;
+        std::span<const std::byte> bytes;
+    };
+
+    RetryHandshakeValidationResult
+    validate_post_retry_crypto(std::span<const RetryHandshakeCryptoChunk> chunks);
+    RetryHandshakeValidationResult validate_post_retry_crypto(std::span<const Frame> frames);
+    RetryHandshakeValidationResult validate_post_retry_crypto(const ReceivedFrameList &frames);
+    std::vector<QuicRetryHandshakeCryptoRange> take_retry_handshake_crypto_release();
+
     struct PendingTrackedPacketScratch {
         PacketSpaceState *packet_space = nullptr;
         SentPacketRecord packet;
@@ -1126,6 +1148,16 @@ class QuicConnection {
     bool can_skip_receive_tls_sync(std::span<const std::byte> bytes) const;
 
     QuicCoreConfig config_;
+    std::optional<std::array<std::byte, kRetryHandshakeCryptoDigestLength>>
+        retry_handshake_crypto_digest_;
+    std::vector<QuicRetryHandshakeCryptoDigestRange> retry_handshake_crypto_ranges_;
+    std::vector<std::vector<std::byte>> retry_handshake_crypto_received_;
+    std::vector<std::vector<bool>> retry_handshake_crypto_matched_;
+    std::vector<QuicRetryHandshakeCryptoRange> retry_handshake_crypto_pending_;
+    std::vector<QuicRetryHandshakeCryptoRange> retry_handshake_crypto_release_;
+    bool retry_handshake_validation_acceptance_pending_ = false;
+    bool retry_handshake_crypto_mismatch_ = false;
+    std::optional<RetryHandshakeValidationResult> retry_handshake_validation_result_;
     bool latency_spin_bit_disabled_ = true;
     bool disabled_latency_spin_bit_value_ = false;
     std::uint32_t original_version_;

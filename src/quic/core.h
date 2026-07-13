@@ -116,6 +116,40 @@ enum class QuicEcnPolicy : std::uint8_t {
     rfc8311_ect1,
 };
 
+enum class QuicRetryHandshakeValidationPolicy : std::uint8_t {
+    disabled,
+    discard,
+    connection_error,
+};
+
+struct QuicRetryHandshakeCryptoRange {
+    std::uint64_t offset = 0;
+    std::vector<std::byte> bytes;
+};
+
+inline constexpr std::size_t kRetryHandshakeCryptoDigestLength = 32;
+inline constexpr std::size_t kMaximumRetryHandshakeCryptoRanges = 256;
+
+struct QuicRetryHandshakeCryptoDigestRange {
+    std::uint64_t offset = 0;
+    std::size_t length = 0;
+};
+
+struct QuicRetryHandshakeCryptoDigest {
+    std::array<std::byte, kRetryHandshakeCryptoDigestLength> value{};
+    std::vector<QuicRetryHandshakeCryptoDigestRange> ranges;
+};
+
+// Bound the compact digest metadata both per token and across outstanding Retry tokens.
+inline constexpr std::size_t kMaximumRetryHandshakeValidationStateBytes =
+    std::size_t{1024} * std::size_t{1024};
+inline constexpr std::size_t kRetryHandshakeValidationStateBytesPerToken =
+    sizeof(std::array<std::byte, kRetryHandshakeCryptoDigestLength>) +
+    kMaximumRetryHandshakeCryptoRanges * sizeof(QuicRetryHandshakeCryptoDigestRange);
+
+std::optional<QuicRetryHandshakeCryptoDigest>
+make_retry_handshake_crypto_digest(const std::vector<QuicRetryHandshakeCryptoRange> &ranges);
+
 std::string_view congestion_control_algorithm_name(QuicCongestionControlAlgorithm algorithm);
 std::optional<QuicCongestionControlAlgorithm>
 parse_congestion_control_algorithm(std::string_view value);
@@ -249,6 +283,10 @@ struct QuicCoreConfig {
     // RFC 9000 Section 8.1 permits this optional shortcut for endpoint-chosen
     // connection IDs with at least 64 bits of entropy.
     bool enable_connection_id_address_validation = false;
+    QuicRetryHandshakeValidationPolicy retry_handshake_validation_policy =
+        QuicRetryHandshakeValidationPolicy::disabled;
+    std::vector<QuicRetryHandshakeCryptoRange> retry_handshake_crypto_ranges;
+    std::optional<QuicRetryHandshakeCryptoDigest> retry_handshake_crypto_digest;
 };
 
 using QuicCoreClock = std::chrono::steady_clock;
@@ -396,6 +434,8 @@ struct QuicCoreEndpointConfig {
     std::vector<std::uint32_t> supported_versions = {kQuicVersion1};
     bool verify_peer = true;
     bool retry_enabled = false;
+    QuicRetryHandshakeValidationPolicy retry_handshake_validation_policy =
+        QuicRetryHandshakeValidationPolicy::disabled;
     bool require_address_validation_token = false;
     // RFC 9000 Section 14.1 permits an immediate PROTOCOL_VIOLATION close for
     // supported Initial datagrams smaller than 1200 bytes. Disabled by default.
@@ -842,6 +882,9 @@ class QuicCore {
         std::vector<std::byte> token;
         std::optional<QuicRouteHandle> route_handle;
         std::vector<std::byte> address_validation_identity;
+        std::optional<QuicRetryHandshakeCryptoDigest> retry_handshake_crypto_digest;
+        bool retry_handshake_validation_state_incomplete = false;
+        bool retry_handshake_validation_state_unavailable = false;
         QuicCoreTimePoint expires_at{};
     };
 
@@ -954,7 +997,9 @@ class QuicCore {
     std::optional<PendingRetryToken>
     take_retry_context(const ParsedEndpointDatagram &parsed,
                        const std::optional<QuicRouteHandle> &route_handle, QuicCoreTimePoint now,
-                       std::span<const std::byte> address_validation_identity);
+                       std::span<const std::byte> address_validation_identity, bool consume = true);
+    void consume_retry_context(const PendingRetryToken &retry_context);
+    bool retry_handshake_validation_state_budget_available() const;
     std::optional<StoredEndpointNewToken> take_new_token_context(
         const ParsedEndpointDatagram &parsed, const std::optional<QuicRouteHandle> &route_handle,
         QuicCoreTimePoint now, std::span<const std::byte> address_validation_identity);

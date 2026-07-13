@@ -45,6 +45,12 @@ enum class Role : std::uint8_t {
     server,
 };
 
+enum class RetryHandshakeValidationPolicy : std::uint8_t {
+    disabled,
+    discard,
+    connection_error,
+};
+
 enum class CongestionControl : std::uint8_t {
     newreno,
     cubic,
@@ -196,6 +202,9 @@ struct EndpointConfig {
     std::vector<std::uint32_t> supported_versions = {1};
     bool verify_peer = true;
     bool retry_enabled = false;
+    // Optional server-side Retry handshake validation; disabled by default.
+    RetryHandshakeValidationPolicy retry_handshake_validation_policy =
+        RetryHandshakeValidationPolicy::disabled;
     bool require_address_validation_token = false;
     // RFC 9000 Section 14.1 permits an immediate PROTOCOL_VIOLATION close for
     // supported Initial datagrams smaller than 1200 bytes. Disabled by default.

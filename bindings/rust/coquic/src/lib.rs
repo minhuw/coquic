@@ -86,6 +86,31 @@ impl Role {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetryHandshakeValidationPolicy {
+    Disabled,
+    Discard,
+    ConnectionError,
+}
+
+impl RetryHandshakeValidationPolicy {
+    fn into_raw(self) -> u8 {
+        match self {
+            Self::Disabled => ffi::COQUIC_RETRY_HANDSHAKE_VALIDATION_DISABLED,
+            Self::Discard => ffi::COQUIC_RETRY_HANDSHAKE_VALIDATION_DISCARD,
+            Self::ConnectionError => ffi::COQUIC_RETRY_HANDSHAKE_VALIDATION_CONNECTION_ERROR,
+        }
+    }
+
+    fn from_raw(raw: u8) -> Self {
+        match raw {
+            ffi::COQUIC_RETRY_HANDSHAKE_VALIDATION_DISCARD => Self::Discard,
+            ffi::COQUIC_RETRY_HANDSHAKE_VALIDATION_CONNECTION_ERROR => Self::ConnectionError,
+            _ => Self::Disabled,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CongestionControl {
     NewReno,
     Cubic,
@@ -494,6 +519,7 @@ pub struct EndpointConfig {
     pub supported_versions: Vec<u32>,
     pub verify_peer: bool,
     pub retry_enabled: bool,
+    pub retry_handshake_validation_policy: RetryHandshakeValidationPolicy,
     pub application_protocol: Vec<u8>,
     pub identity: Option<TlsIdentity>,
     pub transport: TransportConfig,
@@ -555,11 +581,15 @@ impl EndpointConfig {
                 enable_packet_inspection: self.enable_packet_inspection as u8,
                 enable_reserved_version_probe: self.enable_reserved_version_probe as u8,
                 enable_long_header_stateless_reset: self.enable_long_header_stateless_reset as u8,
+                enable_minimal_closing_state_retention: 0,
                 allow_peer_address_change: self.allow_peer_address_change as u8,
                 reserved_server_connections_padding: [0; 5],
                 max_server_connections: 0,
                 reserved_orphan_zero_rtt_padding: [0; 7],
-                reserved_endpoint_config_tail_padding: [0; 6],
+                reserved_endpoint_config_tail_padding: [0; 5],
+                retry_handshake_validation_policy: self
+                    .retry_handshake_validation_policy
+                    .into_raw(),
             },
             _marker: PhantomData,
         }
@@ -577,6 +607,9 @@ impl Default for EndpointConfig {
                 supported_versions: Vec::new(),
                 verify_peer: raw.verify_peer != 0,
                 retry_enabled: raw.retry_enabled != 0,
+                retry_handshake_validation_policy: RetryHandshakeValidationPolicy::from_raw(
+                    raw.retry_handshake_validation_policy,
+                ),
                 application_protocol: view_to_vec(
                     raw.application_protocol.cast::<u8>(),
                     raw.application_protocol_length,

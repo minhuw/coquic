@@ -2,6 +2,8 @@
 #include "src/quic/connection/connection_internal.h"
 
 #include <algorithm>
+#include <limits>
+#include <ranges>
 #include <type_traits>
 #include <utility>
 
@@ -35,6 +37,27 @@ QuicConnection::QuicConnection(QuicCoreConfig config)
       congestion_controller_(config_.transport.congestion_control,
                              initial_congestion_datagram_size(config_),
                              config_.transport.enable_hystart_plus_plus) {
+    if (config_.role == EndpointRole::server &&
+        config_.retry_handshake_validation_policy != QuicRetryHandshakeValidationPolicy::disabled &&
+        config_.retry_source_connection_id.has_value()) {
+        auto digest = std::move(config_.retry_handshake_crypto_digest);
+        if (!digest.has_value() && !config_.retry_handshake_crypto_ranges.empty()) {
+            digest = make_retry_handshake_crypto_digest(config_.retry_handshake_crypto_ranges);
+        }
+        if (digest.has_value()) {
+            retry_handshake_crypto_digest_ = digest->value;
+            retry_handshake_crypto_ranges_ = std::move(digest->ranges);
+            retry_handshake_validation_acceptance_pending_ =
+                !retry_handshake_crypto_ranges_.empty();
+        }
+        config_.retry_handshake_crypto_ranges.clear();
+        retry_handshake_crypto_matched_.reserve(retry_handshake_crypto_ranges_.size());
+        retry_handshake_crypto_received_.reserve(retry_handshake_crypto_ranges_.size());
+        for (const auto &range : retry_handshake_crypto_ranges_) {
+            retry_handshake_crypto_received_.emplace_back(range.length);
+            retry_handshake_crypto_matched_.emplace_back(range.length, false);
+        }
+    }
     const auto handshake_crypto_buffer_limit =
         std::clamp(config_.handshake_crypto_buffer_limit, kMinimumOutOfOrderCryptoBufferSize,
                    kMaximumHandshakeCryptoBufferSize);
@@ -90,6 +113,208 @@ QuicConnection::~QuicConnection() = default;
 QuicConnection::QuicConnection(QuicConnection &&other) noexcept = default;
 
 QuicConnection &QuicConnection::operator=(QuicConnection &&other) noexcept = default;
+
+bool QuicConnection::retry_handshake_validation_pending() const {
+    return retry_handshake_validation_acceptance_pending_;
+}
+
+bool QuicConnection::retry_handshake_validation_discarded() const {
+    return retry_handshake_validation_result_ == RetryHandshakeValidationResult::discard;
+}
+
+bool QuicConnection::retry_handshake_validation_connection_error() const {
+    return retry_handshake_validation_result_ == RetryHandshakeValidationResult::connection_error;
+}
+
+QuicConnection::RetryHandshakeValidationResult
+QuicConnection::validate_post_retry_crypto(std::span<const RetryHandshakeCryptoChunk> chunks) {
+    if (retry_handshake_crypto_ranges_.empty()) {
+        return RetryHandshakeValidationResult::not_applicable;
+    }
+
+    retry_handshake_validation_result_.reset();
+    const auto append_pending = [&](std::uint64_t offset, std::span<const std::byte> bytes) {
+        if (bytes.empty()) {
+            return true;
+        }
+        if (offset > kMaximumHandshakeCryptoBufferSize ||
+            bytes.size() > kMaximumHandshakeCryptoBufferSize - offset) {
+            return false;
+        }
+
+        auto ranges = std::move(retry_handshake_crypto_pending_);
+        ranges.push_back(QuicRetryHandshakeCryptoRange{
+            .offset = offset,
+            .bytes = std::vector<std::byte>(bytes.begin(), bytes.end()),
+        });
+        std::ranges::sort(
+            ranges, [](const auto &left, const auto &right) { return left.offset < right.offset; });
+
+        std::vector<QuicRetryHandshakeCryptoRange> merged;
+        merged.reserve(ranges.size());
+        std::size_t total_bytes = 0;
+        for (auto &range : ranges) {
+            if (merged.empty()) {
+                merged.push_back(std::move(range));
+                total_bytes = merged.back().bytes.size();
+                continue;
+            }
+
+            auto &previous = merged.back();
+            const auto previous_end = previous.offset + previous.bytes.size();
+            const auto range_end = range.offset + range.bytes.size();
+            if (previous_end < range.offset) {
+                if (merged.size() >= kMaximumRetryHandshakeCryptoRanges ||
+                    total_bytes > kMaximumHandshakeCryptoBufferSize - range.bytes.size()) {
+                    return false;
+                }
+                total_bytes += range.bytes.size();
+                merged.push_back(std::move(range));
+                continue;
+            }
+
+            const auto overlap_start = std::max(previous.offset, range.offset);
+            const auto overlap_end = std::min(previous_end, range_end);
+            for (auto offset = overlap_start; offset < overlap_end; ++offset) {
+                const auto previous_index = static_cast<std::size_t>(offset - previous.offset);
+                const auto range_index = static_cast<std::size_t>(offset - range.offset);
+                if (previous.bytes[previous_index] != range.bytes[range_index]) {
+                    return false;
+                }
+            }
+            if (range_end > previous_end) {
+                const auto suffix_index = static_cast<std::size_t>(previous_end - range.offset);
+                const auto suffix_size = range.bytes.size() - suffix_index;
+                if (total_bytes > kMaximumHandshakeCryptoBufferSize - suffix_size) {
+                    return false;
+                }
+                previous.bytes.insert(previous.bytes.end(),
+                                      range.bytes.begin() +
+                                          static_cast<std::ptrdiff_t>(suffix_index),
+                                      range.bytes.end());
+                total_bytes += suffix_size;
+            }
+        }
+        retry_handshake_crypto_pending_ = std::move(merged);
+        return true;
+    };
+
+    for (const auto &chunk : chunks) {
+        if (chunk.bytes.size() > std::numeric_limits<std::uint64_t>::max() - chunk.offset ||
+            !append_pending(chunk.offset, chunk.bytes)) {
+            retry_handshake_crypto_mismatch_ = true;
+            break;
+        }
+        for (std::size_t index = 0; index < chunk.bytes.size(); ++index) {
+            const auto offset = chunk.offset + index;
+            for (std::size_t range_index = 0; range_index < retry_handshake_crypto_ranges_.size();
+                 ++range_index) {
+                const auto &range = retry_handshake_crypto_ranges_[range_index];
+                if (offset < range.offset || offset - range.offset >= range.length) {
+                    continue;
+                }
+                const auto range_offset = static_cast<std::size_t>(offset - range.offset);
+                if (retry_handshake_crypto_matched_[range_index][range_offset]) {
+                    if (retry_handshake_crypto_received_[range_index][range_offset] !=
+                        chunk.bytes[index]) {
+                        retry_handshake_crypto_mismatch_ = true;
+                    }
+                } else {
+                    retry_handshake_crypto_received_[range_index][range_offset] =
+                        chunk.bytes[index];
+                    retry_handshake_crypto_matched_[range_index][range_offset] = true;
+                }
+                break;
+            }
+        }
+    }
+
+    const auto validation_failure = [&] {
+        const auto validation_result =
+            config_.retry_handshake_validation_policy == QuicRetryHandshakeValidationPolicy::discard
+                ? RetryHandshakeValidationResult::discard
+                : RetryHandshakeValidationResult::connection_error;
+        retry_handshake_validation_result_ = validation_result;
+        for (auto &matched : retry_handshake_crypto_matched_) {
+            std::fill(matched.begin(), matched.end(), false);
+        }
+        for (auto &received : retry_handshake_crypto_received_) {
+            std::fill(received.begin(), received.end(), std::byte{0});
+        }
+        retry_handshake_crypto_pending_.clear();
+        retry_handshake_crypto_mismatch_ = false;
+        return validation_result;
+    };
+
+    if (retry_handshake_crypto_mismatch_) {
+        return validation_failure();
+    }
+
+    const bool complete =
+        std::ranges::all_of(retry_handshake_crypto_matched_, [](const auto &matched) {
+            return std::ranges::all_of(matched, [](bool value) { return value; });
+        });
+    if (!complete) {
+        return RetryHandshakeValidationResult::incomplete;
+    }
+
+    std::vector<QuicRetryHandshakeCryptoRange> received_ranges;
+    received_ranges.reserve(retry_handshake_crypto_ranges_.size());
+    for (std::size_t index = 0; index < retry_handshake_crypto_ranges_.size(); ++index) {
+        received_ranges.push_back(QuicRetryHandshakeCryptoRange{
+            .offset = retry_handshake_crypto_ranges_[index].offset,
+            .bytes = retry_handshake_crypto_received_[index],
+        });
+    }
+    const auto received_digest = make_retry_handshake_crypto_digest(received_ranges);
+    const auto expected_digest = retry_handshake_crypto_digest_.value_or(
+        std::array<std::byte, kRetryHandshakeCryptoDigestLength>{});
+    if (!received_digest.has_value() || !retry_handshake_crypto_digest_.has_value() ||
+        received_digest->value != expected_digest) {
+        return validation_failure();
+    }
+
+    retry_handshake_crypto_release_ = std::move(retry_handshake_crypto_pending_);
+    retry_handshake_validation_acceptance_pending_ = false;
+    retry_handshake_validation_result_.reset();
+    retry_handshake_crypto_digest_.reset();
+    retry_handshake_crypto_ranges_.clear();
+    retry_handshake_crypto_received_.clear();
+    retry_handshake_crypto_matched_.clear();
+    return RetryHandshakeValidationResult::matching;
+}
+
+std::vector<QuicRetryHandshakeCryptoRange> QuicConnection::take_retry_handshake_crypto_release() {
+    return std::exchange(retry_handshake_crypto_release_, {});
+}
+
+QuicConnection::RetryHandshakeValidationResult
+QuicConnection::validate_post_retry_crypto(std::span<const Frame> frames) {
+    std::vector<RetryHandshakeCryptoChunk> chunks;
+    for (const auto &frame : frames) {
+        if (const auto *crypto = std::get_if<CryptoFrame>(&frame)) {
+            chunks.push_back(RetryHandshakeCryptoChunk{
+                .offset = crypto->offset,
+                .bytes = crypto->crypto_data,
+            });
+        }
+    }
+    return validate_post_retry_crypto(chunks);
+}
+
+QuicConnection::RetryHandshakeValidationResult
+QuicConnection::validate_post_retry_crypto(const ReceivedFrameList &frames) {
+    std::vector<RetryHandshakeCryptoChunk> chunks;
+    for (const auto &frame : frames) {
+        if (const auto *crypto = std::get_if<ReceivedCryptoFrame>(&frame)) {
+            chunks.push_back(RetryHandshakeCryptoChunk{
+                .offset = crypto->offset,
+                .bytes = crypto->crypto_data.span(),
+            });
+        }
+    }
+    return validate_post_retry_crypto(chunks);
+}
 
 void QuicConnection::start() {
     start(QuicCoreTimePoint{});

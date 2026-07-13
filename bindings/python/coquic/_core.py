@@ -49,6 +49,12 @@ class Role(IntEnum):
     SERVER = ffi.COQUIC_ROLE_SERVER
 
 
+class RetryHandshakeValidationPolicy(IntEnum):
+    DISABLED = ffi.COQUIC_RETRY_HANDSHAKE_VALIDATION_DISABLED
+    DISCARD = ffi.COQUIC_RETRY_HANDSHAKE_VALIDATION_DISCARD
+    CONNECTION_ERROR = ffi.COQUIC_RETRY_HANDSHAKE_VALIDATION_CONNECTION_ERROR
+
+
 class CongestionControl(IntEnum):
     NEWRENO = ffi.COQUIC_CONGESTION_CONTROL_NEWRENO
     CUBIC = ffi.COQUIC_CONGESTION_CONTROL_CUBIC
@@ -258,6 +264,9 @@ class EndpointConfig:
     supported_versions: list[int] = field(default_factory=list)
     verify_peer: bool = True
     retry_enabled: bool = False
+    retry_handshake_validation_policy: RetryHandshakeValidationPolicy = (
+        RetryHandshakeValidationPolicy.DISABLED
+    )
     application_protocol: bytes = b""
     identity: TlsIdentity | None = None
     transport: TransportConfig = field(default_factory=TransportConfig.default)
@@ -282,6 +291,9 @@ class EndpointConfig:
             supported_versions=[],
             verify_peer=bool(raw.verify_peer),
             retry_enabled=bool(raw.retry_enabled),
+            retry_handshake_validation_policy=RetryHandshakeValidationPolicy(
+                raw.retry_handshake_validation_policy
+            ),
             application_protocol=_bytes_view(
                 raw.application_protocol, raw.application_protocol_length
             ),
@@ -1033,6 +1045,7 @@ class _EndpointConfigMaterialization:
             supported_versions_count=len(config.supported_versions),
             verify_peer=int(config.verify_peer),
             retry_enabled=int(config.retry_enabled),
+            retry_handshake_validation_policy=int(config.retry_handshake_validation_policy),
             application_protocol=self._arena.char_pointer(config.application_protocol),
             application_protocol_length=len(config.application_protocol),
             identity=C.pointer(self._identity) if self._identity is not None else None,

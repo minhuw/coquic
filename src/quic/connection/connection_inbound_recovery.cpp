@@ -290,6 +290,35 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                 if (initial_packet_space_discarded_) {
                     return CodecResult<bool>::success(true);
                 }
+                const auto retry_validation = validate_post_retry_crypto(protected_packet.frames);
+                if (retry_validation == RetryHandshakeValidationResult::discard) {
+                    return CodecResult<bool>::success(false);
+                }
+                if (retry_validation == RetryHandshakeValidationResult::connection_error) {
+                    return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeCrypto));
+                }
+                if (retry_validation == RetryHandshakeValidationResult::incomplete) {
+                    return CodecResult<bool>::success(false);
+                }
+                std::vector<Frame> retry_validation_frames;
+                std::span<const Frame> inbound_frames = protected_packet.frames;
+                auto retry_crypto_release = take_retry_handshake_crypto_release();
+                if (!retry_crypto_release.empty()) {
+                    retry_validation_frames.reserve(protected_packet.frames.size() +
+                                                    retry_crypto_release.size());
+                    for (const auto &frame : protected_packet.frames) {
+                        if (std::get_if<CryptoFrame>(&frame) == nullptr) {
+                            retry_validation_frames.push_back(frame);
+                        }
+                    }
+                    for (auto &range : retry_crypto_release) {
+                        retry_validation_frames.push_back(CryptoFrame{
+                            .offset = range.offset,
+                            .crypto_data = std::move(range.bytes),
+                        });
+                    }
+                    inbound_frames = retry_validation_frames;
+                }
                 if (should_discard_client_long_header_with_changed_source(
                         protected_packet.source_connection_id)) {
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
@@ -335,12 +364,12 @@ QuicConnection::process_inbound_packet(const ProtectedPacket &packet, QuicCoreTi
                     note_endpoint_route_state_changed();
                 }
                 const auto processed =
-                    process_inbound_crypto(EncryptionLevel::initial, protected_packet.frames, now);
+                    process_inbound_crypto(EncryptionLevel::initial, inbound_frames, now);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     note_local_connection_id_used_by_peer(
                         protected_packet.destination_connection_id);
-                    const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
+                    const auto ack_eliciting = has_ack_eliciting_frame(inbound_frames);
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-13.1
                     // # A packet MUST NOT be acknowledged until packet protection has been
                     // # successfully removed and all frames contained in the packet have been
@@ -592,6 +621,35 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 if (initial_packet_space_discarded_) {
                     return CodecResult<bool>::success(true);
                 }
+                const auto retry_validation = validate_post_retry_crypto(protected_packet.frames);
+                if (retry_validation == RetryHandshakeValidationResult::discard) {
+                    return CodecResult<bool>::success(false);
+                }
+                if (retry_validation == RetryHandshakeValidationResult::connection_error) {
+                    return CodecResult<bool>::failure(protocol_violation_error(kFrameTypeCrypto));
+                }
+                if (retry_validation == RetryHandshakeValidationResult::incomplete) {
+                    return CodecResult<bool>::success(false);
+                }
+                std::vector<ReceivedFrame> retry_validation_frames;
+                std::span<const ReceivedFrame> inbound_frames = protected_packet.frames.span();
+                auto retry_crypto_release = take_retry_handshake_crypto_release();
+                if (!retry_crypto_release.empty()) {
+                    retry_validation_frames.reserve(protected_packet.frames.size() +
+                                                    retry_crypto_release.size());
+                    for (const auto &frame : protected_packet.frames) {
+                        if (std::get_if<ReceivedCryptoFrame>(&frame) == nullptr) {
+                            retry_validation_frames.push_back(frame);
+                        }
+                    }
+                    for (auto &range : retry_crypto_release) {
+                        retry_validation_frames.push_back(ReceivedCryptoFrame{
+                            .offset = range.offset,
+                            .crypto_data = SharedBytes(std::move(range.bytes)),
+                        });
+                    }
+                    inbound_frames = retry_validation_frames;
+                }
                 if (should_discard_client_long_header_with_changed_source(
                         protected_packet.source_connection_id)) {
                     //= https://www.rfc-editor.org/rfc/rfc9000#section-7.2
@@ -633,13 +691,13 @@ QuicConnection::process_inbound_received_packet(const ReceivedProtectedPacket &p
                 if (route_changed) {
                     note_endpoint_route_state_changed();
                 }
-                const auto processed = process_inbound_received_crypto(
-                    EncryptionLevel::initial, protected_packet.frames, now);
+                const auto processed =
+                    process_inbound_received_crypto(EncryptionLevel::initial, inbound_frames, now);
                 if (processed.has_value()) {
                     processed_peer_packet_ = true;
                     note_local_connection_id_used_by_peer(
                         protected_packet.destination_connection_id);
-                    const auto ack_eliciting = has_ack_eliciting_frame(protected_packet.frames);
+                    const auto ack_eliciting = has_ack_eliciting_frame(inbound_frames);
                     initial_space_.received_packets.record_received(
                         protected_packet.packet_number, ack_eliciting, now, ecn,
                         config_.transport.ack_eliciting_threshold);

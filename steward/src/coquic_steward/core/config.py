@@ -82,6 +82,8 @@ class PublicMirrorConfig:
     ssh_key_path: Path | None = None
     known_hosts_path: Path | None = None
     connect_timeout_seconds: int = 10
+    retry_initial_seconds: int = 30
+    retry_max_seconds: int = 300
 
 
 @dataclass(frozen=True)
@@ -466,6 +468,11 @@ def _public_mirror_config(raw: object) -> PublicMirrorConfig:
         ssh_key_path=ssh_key,
         known_hosts_path=known_hosts,
         connect_timeout_seconds=int(data.get("connect_timeout_seconds", 10)),
+        retry_initial_seconds=max(1, int(data.get("retry_initial_seconds", 30))),
+        retry_max_seconds=max(
+            int(data.get("retry_initial_seconds", 30)),
+            int(data.get("retry_max_seconds", 300)),
+        ),
     )
 
 

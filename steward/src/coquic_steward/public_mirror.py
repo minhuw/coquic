@@ -18,6 +18,8 @@ from .core.config import (
 from .core.models import (
     DaemonRuntime,
     Event,
+    PublicMirrorFailureCategory,
+    PublicMirrorHealth,
     SignalFetchRun,
     SignalItem,
     SignalItemStatus,
@@ -83,8 +85,10 @@ def public_mirror_payload(
     signal_limit: int = DEFAULT_MIRROR_SIGNAL_LIMIT,
     fetch_limit: int = DEFAULT_MIRROR_FETCH_LIMIT,
     runtime: DaemonRuntime | None = None,
+    publication: PublicMirrorHealth | None = None,
 ) -> dict[str, object]:
     runtime = runtime or _DEFAULT_RUNTIME
+    generated_at = utc_now()
     tasks = store.list_tasks(limit=task_limit)
     signal_items = store.list_signal_items(limit=signal_limit)
     fetch_runs = store.list_signal_fetch_runs(limit=fetch_limit)
@@ -92,12 +96,13 @@ def public_mirror_payload(
     return {
         "schema_version": PUBLIC_MIRROR_SCHEMA_VERSION,
         "compatibility_state": "compatible",
-        "generated_at": utc_now().isoformat(),
+        "generated_at": generated_at.isoformat(),
         "repository": config.github_repository,
         "main_branch": config.main_branch,
         "state": _public_state(tasks),
         "counts": _counts(tasks, signal_items),
         "runtime": _public_runtime(runtime),
+        "publication": _public_publication(config, generated_at, publication),
         "audit": [_public_text(config, finding) for finding in store.audit()],
         "configuration": _public_configuration(config),
         "tasks": [
@@ -128,9 +133,12 @@ def write_public_mirror(
     output_path: Path | None = None,
     *,
     runtime: DaemonRuntime | None = None,
+    publication: PublicMirrorHealth | None = None,
 ) -> Path:
     path = _mirror_output_path(config, output_path)
-    payload = public_mirror_payload(config, store, runtime=runtime)
+    payload = public_mirror_payload(
+        config, store, runtime=runtime, publication=publication
+    )
     tasks = store.list_tasks(limit=DEFAULT_MIRROR_TASK_LIMIT)
     mirror_dir = path.parent
     tasks_dir = mirror_dir / "data" / "tasks"
@@ -203,8 +211,11 @@ def publish_public_mirror(
     force: bool = False,
     publish: bool | None = None,
     runtime: DaemonRuntime | None = None,
+    publication: PublicMirrorHealth | None = None,
 ) -> tuple[Path, CommandResult | None]:
-    path = write_public_mirror(config, store, runtime=runtime)
+    path = write_public_mirror(
+        config, store, runtime=runtime, publication=publication
+    )
     should_publish = config.public_mirror.publish if publish is None else publish
     if not force and not should_publish:
         return path, None
@@ -281,8 +292,11 @@ def public_mirror_digest(
     store: TaskStore,
     *,
     runtime: DaemonRuntime | None = None,
+    publication: PublicMirrorHealth | None = None,
 ) -> str:
-    payload = public_mirror_payload(config, store, runtime=runtime)
+    payload = public_mirror_payload(
+        config, store, runtime=runtime, publication=publication
+    )
     task_details = [
         public_task_detail_payload(config, store, task)
         for task in store.list_tasks(limit=DEFAULT_MIRROR_TASK_LIMIT)
@@ -300,6 +314,20 @@ def public_mirror_digest(
                 provider.pop("idle_next_due_at", None)
                 provider.pop("due", None)
                 provider.pop("idle_due", None)
+    publication_payload = payload.get("publication")
+    if isinstance(publication_payload, dict):
+        for key in (
+            "state",
+            "snapshot_id",
+            "generated_at",
+            "last_attempt_at",
+            "last_success_at",
+            "last_failure_at",
+            "last_failure_category",
+            "retry_count",
+            "last_accepted_digest",
+        ):
+            publication_payload.pop(key, None)
     encoded = json.dumps(
         {"status": payload, "task_details": task_details},
         sort_keys=True,
@@ -494,6 +522,68 @@ def _public_runtime(runtime: DaemonRuntime) -> dict[str, object]:
         ),
         "heartbeat_interval_seconds": runtime.heartbeat_interval_seconds,
     }
+
+
+def _public_publication(
+    config: StewardConfig,
+    generated_at,
+    health: PublicMirrorHealth | None,
+) -> dict[str, object]:
+    selected = health or PublicMirrorHealth(
+        state=(
+            "pending"
+            if config.public_mirror.enabled and config.public_mirror.publish
+            else "disabled"
+        ),
+        generated_at=generated_at,
+    )
+    return {
+        "state": str(selected.state),
+        "snapshot_id": selected.snapshot_id,
+        "generated_at": _public_timestamp(generated_at),
+        "last_attempt_at": (
+            _public_timestamp(selected.last_attempt_at)
+            if selected.last_attempt_at
+            else None
+        ),
+        "last_success_at": (
+            _public_timestamp(selected.last_success_at)
+            if selected.last_success_at
+            else None
+        ),
+        "last_failure_at": (
+            _public_timestamp(selected.last_failure_at)
+            if selected.last_failure_at
+            else None
+        ),
+        "last_failure_category": (
+            str(selected.last_failure_category)
+            if selected.last_failure_category
+            else None
+        ),
+        "retry_count": selected.retry_count,
+        "last_accepted_digest": selected.last_accepted_digest,
+    }
+
+
+def classify_publish_failure(
+    result: CommandResult | BaseException,
+) -> PublicMirrorFailureCategory:
+    if isinstance(result, BaseException):
+        if isinstance(result, TimeoutError):
+            return PublicMirrorFailureCategory.timeout
+        return PublicMirrorFailureCategory.serialization
+    text = f"{result.stdout} {result.stderr}".lower()
+    if result.returncode == 124 or "timed out" in text or "timeout" in text:
+        return PublicMirrorFailureCategory.timeout
+    if "permission denied" in text or "operation not permitted" in text:
+        return PublicMirrorFailureCategory.permissions
+    command = Path(result.args[0]).name if result.args else ""
+    if command == "ssh":
+        return PublicMirrorFailureCategory.ssh_preparation
+    if command == "rsync":
+        return PublicMirrorFailureCategory.rsync_transfer
+    return PublicMirrorFailureCategory.unknown
 
 
 def _public_timestamp(value: datetime) -> str:

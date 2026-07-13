@@ -13,6 +13,9 @@ from ..core.models import (
     DaemonCycleSummary,
     DaemonRuntime,
     DaemonRuntimeState,
+    PublicMirrorFailureCategory,
+    PublicMirrorHealth,
+    PublicMirrorPublishState,
     SignalFetchStatus,
     SignalItem,
     TaskRecord,
@@ -22,7 +25,12 @@ from ..core.models import (
 )
 from ..execution.executor import StewardExecutor
 from ..planning import run_planner
-from ..public_mirror import public_mirror_digest, publish_public_mirror
+from ..public_mirror import (
+    classify_publish_failure,
+    public_mirror_digest,
+    publish_public_mirror,
+    write_public_mirror,
+)
 from ..storage import (
     TaskStore,
     idle_fetch_provider_names,
@@ -83,6 +91,13 @@ class StewardDaemon:
         self._runtime_lock = threading.Lock()
         self._public_mirror_local_digest: str | None = None
         self._public_mirror_remote_digest: str | None = None
+        self._public_mirror_health = PublicMirrorHealth(
+            state=(
+                PublicMirrorPublishState.pending
+                if config.public_mirror.enabled and config.public_mirror.publish
+                else PublicMirrorPublishState.disabled
+            )
+        )
         self._public_mirror_update_lock = threading.Lock()
         self._public_mirror_thread_lock = threading.Lock()
         self._public_mirror_dirty = threading.Event()
@@ -546,7 +561,17 @@ class StewardDaemon:
             self._public_mirror_dirty.set()
         thread.join()
         try:
-            self._update_public_mirror_if_changed(publish=True)
+            needs_final_publish = (
+                self._public_mirror_remote_digest
+                != self._public_mirror_local_digest
+                or self._public_mirror_health.state
+                in {
+                    PublicMirrorPublishState.pending,
+                    PublicMirrorPublishState.failed,
+                }
+            )
+            if needs_final_publish:
+                self._update_public_mirror_if_changed(publish=True)
         finally:
             with self._public_mirror_thread_lock:
                 if self._public_mirror_thread is thread:
@@ -576,7 +601,7 @@ class StewardDaemon:
                     return
             if synced:
                 continue
-            if self._public_mirror_stop.wait(PUBLIC_MIRROR_RETRY_SECONDS):
+            if self._public_mirror_stop.wait(self._public_mirror_retry_seconds()):
                 self._public_mirror_dirty.set()
                 continue
             self._public_mirror_dirty.set()
@@ -606,32 +631,62 @@ class StewardDaemon:
             return True
         with self._public_mirror_update_lock:
             try:
+                should_publish = publish and self.config.public_mirror.publish
+                if should_publish:
+                    self._record_publish_attempt()
                 runtime = self._runtime_snapshot()
+                health = self._public_mirror_health.model_copy(deep=True)
                 digest = public_mirror_digest(
-                    self.config, self.store, runtime=runtime
+                    self.config,
+                    self.store,
+                    runtime=runtime,
+                    publication=health,
                 )
                 current_digest = (
                     self._public_mirror_remote_digest
                     if publish and self.config.public_mirror.publish
                     else self._public_mirror_local_digest
                 )
-                if digest == current_digest:
+                if digest == current_digest and not (
+                    should_publish
+                    and self._public_mirror_health.state
+                    in {
+                        PublicMirrorPublishState.pending,
+                        PublicMirrorPublishState.failed,
+                    }
+                ):
                     return True
-                should_publish = publish and self.config.public_mirror.publish
                 path, result = publish_public_mirror(
                     self.config,
                     self.store,
                     runtime=runtime,
+                    publication=health,
                     publish=should_publish,
                 )
                 self._public_mirror_local_digest = digest
                 if result is not None and not result.ok:
-                    self._log(
-                        "public mirror publish failed "
-                        f"code={result.returncode} error={result.stderr.strip()}"
+                    category = classify_publish_failure(result)
+                    self._record_publish_failure(category)
+                    write_public_mirror(
+                        self.config,
+                        self.store,
+                        runtime=runtime,
+                        publication=self._public_mirror_health.model_copy(
+                            deep=True
+                        ),
                     )
+                    self._log(f"public mirror publish failed category={category}")
                     return False
                 if result is not None:
+                    self._record_publish_success(digest)
+                    write_public_mirror(
+                        self.config,
+                        self.store,
+                        runtime=runtime,
+                        publication=self._public_mirror_health.model_copy(
+                            deep=True
+                        ),
+                    )
                     self._public_mirror_remote_digest = digest
                     self._log(f"public mirror published path={path}")
                 else:
@@ -640,6 +695,36 @@ class StewardDaemon:
             except Exception as exc:  # pragma: no cover - daemon boundary guard.
                 self._log(f"public mirror publish failed error={exc}")
                 return False
+
+    def _record_publish_attempt(self) -> None:
+        now = utc_now()
+        self._public_mirror_health.last_attempt_at = now
+        self._public_mirror_health.state = PublicMirrorPublishState.pending
+
+    def _record_publish_failure(self, category: PublicMirrorFailureCategory) -> None:
+        health = self._public_mirror_health
+        health.state = PublicMirrorPublishState.failed
+        health.last_failure_at = utc_now()
+        health.last_failure_category = category
+        health.retry_count = min(10, health.retry_count + 1)
+
+    def _record_publish_success(self, digest: str) -> None:
+        health = self._public_mirror_health
+        health.state = PublicMirrorPublishState.published
+        health.last_success_at = utc_now()
+        health.last_failure_at = None
+        health.last_failure_category = None
+        health.retry_count = 0
+        health.last_accepted_digest = digest
+        health.snapshot_id = digest
+
+    def _public_mirror_retry_seconds(self) -> float:
+        retry_count = self._public_mirror_health.retry_count
+        initial = self.config.public_mirror.retry_initial_seconds
+        if PUBLIC_MIRROR_RETRY_SECONDS != 30.0:
+            initial = min(initial, PUBLIC_MIRROR_RETRY_SECONDS)
+        maximum = self.config.public_mirror.retry_max_seconds
+        return min(maximum, initial * (2 ** max(0, retry_count - 1)))
 
 
 def stale_task_minutes(config: StewardConfig) -> int:

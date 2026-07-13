@@ -14,7 +14,7 @@ import {
   type NodeProps,
   type SmoothStepPathOptions,
 } from '@xyflow/react';
-import { Activity, AlertTriangle, ArrowLeft, CheckCircle2, ChevronLeft, ChevronRight, Circle, ExternalLink, FileText, GitBranch, Inbox, ListChecks, RadioTower, Route, XCircle } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowLeft, CheckCircle2, ChevronLeft, ChevronRight, Circle, ExternalLink, FileText, GitBranch, Inbox, ListChecks, RadioTower, Route, Settings2, ShieldCheck, XCircle } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
 
 import { Badge } from '@/components/ui/badge';
@@ -331,7 +331,7 @@ export type PublicStewardState = {
   planner_runs_truncated?: boolean;
 };
 
-type StewardMirrorTab = 'overview' | 'tasks' | 'signals';
+type StewardMirrorTab = 'overview' | 'tasks' | 'signals' | 'audit' | 'configuration';
 const TASK_GRAPH_LANES: Array<{
   empty: string;
   key: string;
@@ -427,6 +427,16 @@ const STEWARD_MIRROR_TAB_COPY: Record<StewardMirrorTab, { description: string; e
     description: 'Provider schedule, current signal items, and recent fetches.',
     eyebrow: 'Signal inbox',
     title: 'Signals',
+  },
+  audit: {
+    description: 'Invariant findings reported by the Steward storage audit.',
+    eyebrow: 'Integrity',
+    title: 'Audit findings',
+  },
+  configuration: {
+    description: 'Sanitized operating configuration published for monitoring.',
+    eyebrow: 'Configuration',
+    title: 'Public configuration',
   },
 };
 
@@ -652,6 +662,9 @@ export function StewardDashboard({
           <MirrorNavItem active={activeTab === 'overview'} icon={<Activity />} label="State" onSelect={() => setActiveTab('overview')} tab="overview" value={state.state} />
           <MirrorNavItem active={activeTab === 'tasks'} icon={<ListChecks />} label="Tasks" onSelect={() => setActiveTab('tasks')} tab="tasks" value={String(counts.tasks)} />
           <MirrorNavItem active={activeTab === 'signals'} icon={<Inbox />} label="Signals" onSelect={() => setActiveTab('signals')} tab="signals" value={String(state.counts.signals)} />
+          <MirrorNavItem active={activeTab === 'audit'} icon={<ShieldCheck />} label="Audit" onSelect={() => setActiveTab('audit')} tab="audit" value={String(state.audit.length)} />
+          <MirrorNavItem active={activeTab === 'configuration'} icon={<Settings2 />} label="Config" onSelect={() => setActiveTab('configuration')} tab="configuration" value={String(state.configuration.enabled_signals.length)} />
+          <MirrorNavLink href="/steward/planner" icon={<FileText />} label="Planner" value={String(state.planner_runs?.length ?? 0)} />
         </nav>
       </aside>
 
@@ -686,6 +699,8 @@ export function StewardDashboard({
           {activeTab === 'overview' && <StewardOverviewTab state={state} />}
           {activeTab === 'tasks' && <StewardTasksTab state={state} />}
           {activeTab === 'signals' && <StewardSignalsTab state={state} />}
+          {activeTab === 'audit' && <StewardAuditTab state={state} />}
+          {activeTab === 'configuration' && <StewardConfigurationTab state={state} />}
         </div>
     </div>
     </div>
@@ -752,6 +767,58 @@ function StewardOverviewTab({ state }: { state: PublicStewardState }) {
       </section>
     </section>
   );
+}
+
+function StewardAuditTab({ state }: { state: PublicStewardState }) {
+  return (
+    <section className="steward-panel steward-audit-panel">
+      <PanelTitle icon={<ShieldCheck size={17} />} title="Invariant audit" description="Sanitized findings from the local Steward store." />
+      {state.audit.length ? (
+        <ul className="steward-audit-list">
+          {state.audit.map((finding, index) => (
+            <li key={`${finding}-${index}`}>
+              <Circle className="size-3" />
+              <span>{finding}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="steward-empty">No invariant findings were published.</div>
+      )}
+    </section>
+  );
+}
+
+function StewardConfigurationTab({ state }: { state: PublicStewardState }) {
+  const limits = Object.entries(state.configuration.limits);
+  const providers = Object.entries(state.configuration.signal_providers);
+  return (
+    <section className="steward-panel steward-configuration-panel">
+      <PanelTitle icon={<Settings2 size={17} />} title="Public configuration" description="Only sanitized operating values are included in the mirror." />
+      <dl className="steward-config-grid">
+        <ConfigFact label="Repository" value={state.configuration.repository} />
+        <ConfigFact label="Main branch" value={state.configuration.main_branch} />
+        <ConfigFact label="Integration mode" value={state.configuration.integration_mode} />
+        <ConfigFact label="Local-only" value={state.configuration.local_only ? 'yes' : 'no'} />
+        <ConfigFact label="Scheduler wait" value={`${state.configuration.scheduler_wait_interval_sec}s`} />
+        <ConfigFact label="Enabled signals" value={state.configuration.enabled_signals.join(', ') || 'none'} />
+      </dl>
+      <div className="steward-config-sections">
+        <section>
+          <h3>Limits</h3>
+          {limits.length ? <ul>{limits.map(([key, value]) => <li key={key}><span>{key}</span><b>{value ?? '-'}</b></li>)}</ul> : <p>Not published</p>}
+        </section>
+        <section>
+          <h3>Provider cadence</h3>
+          {providers.length ? <ul>{providers.map(([key, value]) => <li key={key}><span>{key}</span><b>{value.poll_interval_minutes}m</b></li>)}</ul> : <p>No providers enabled</p>}
+        </section>
+      </div>
+    </section>
+  );
+}
+
+function ConfigFact({ label, value }: { label: string; value: string }) {
+  return <div><dt>{label}</dt><dd>{value}</dd></div>;
 }
 
 function StewardTasksTab({ state }: { state: PublicStewardState }) {
@@ -1157,6 +1224,26 @@ function MirrorNavItem({
   );
 }
 
+function MirrorNavLink({
+  href,
+  icon,
+  label,
+  value,
+}: {
+  href: string;
+  icon: ReactNode;
+  label: string;
+  value: string;
+}) {
+  return (
+    <Link className="steward-mirror-nav-item" href={href}>
+      {icon}
+      <span>{label}</span>
+      <b>{value}</b>
+    </Link>
+  );
+}
+
 function SchedulerLane({ active, capacity, icon, label, queued }: { active: number; capacity: number; icon: ReactNode; label: string; queued: number }) {
   const slots = Math.max(capacity, active, 1);
   return (
@@ -1272,6 +1359,7 @@ export function StewardTaskDetail({ detail, loaded, taskId }: { detail: PublicSt
             {(task.workflow === 'feature' || task.spec.workflow === 'feature' || task.kind === 'feature') && (
               <PublicPlanRuns planRuns={detail.plan_runs ?? []} />
             )}
+            {detail.integration.runs.length > 0 && <IntegrationDetailRuns runs={detail.integration.runs} />}
             <div className="attempt-stack page-stack">
               {detail.attempts.length ? (
                 [...detail.attempts].reverse().map((attempt) => (
@@ -1314,6 +1402,45 @@ function FactPill({ label, mono = false, value }: { label: string; mono?: boolea
       <b>{label}</b>
       <span className={mono ? 'mono' : ''}>{value || '-'}</span>
     </span>
+  );
+}
+
+function IntegrationDetailRuns({
+  runs,
+}: {
+  runs: PublicStewardTaskDetail['integration']['runs'];
+}) {
+  return (
+    <section className="panel steward-integration-detail-panel">
+      <PanelTitle icon={<GitBranch size={17} />} title="Integration runs" description="Sanitized integration artifacts and remote outcomes." />
+      <div className="steward-integration-runs">
+        {runs.map((run) => (
+          <article className="steward-integration-run" key={run.task.id}>
+            <div className="steward-integration-run-head">
+              <div>
+                <h3>{run.task.title}</h3>
+                <span className="mono">{run.task.status} / {shortDate(run.task.updated_at)}</span>
+              </div>
+              {run.remote.commit && run.remote.commit_url && (
+                <a className="steward-commit-link" href={run.remote.commit_url} rel="noreferrer" target="_blank">
+                  <GitBranch className="size-4" />
+                  <span>{shortSha(run.remote.commit)}</span>
+                </a>
+              )}
+            </div>
+            <div className="steward-integration-artifacts">
+              <ArtifactContent
+                artifact={run.commit_message?.last_message ?? run.commit_message?.transcript ?? null}
+                empty="No commit-message artifact was published"
+              >{(text) => <CodeBlock compact text={text} title="Commit message" />}</ArtifactContent>
+              <ArtifactContent artifact={run.push_log} empty="No push log was published">
+                {(text) => <CodeBlock compact text={text} title="Push log" />}
+              </ArtifactContent>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
   );
 }
 

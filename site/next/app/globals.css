@@ -1249,6 +1249,149 @@
     opacity: 0.45;
   }
 
+  .steward-audit-list,
+  .steward-config-sections ul {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    gap: 7px;
+  }
+
+  .steward-audit-list li,
+  .steward-config-sections li {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    border-bottom: 1px solid var(--line);
+    padding: 9px 2px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .steward-audit-list li svg {
+    flex: 0 0 auto;
+    color: var(--warning);
+  }
+
+  .steward-audit-list li span {
+    min-width: 0;
+    flex: 1;
+    overflow-wrap: anywhere;
+  }
+
+  .steward-config-grid {
+    display: grid;
+    margin: 0;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .steward-config-grid > div {
+    min-width: 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    padding: 10px;
+  }
+
+  .steward-config-grid dt,
+  .steward-config-grid dd {
+    overflow-wrap: anywhere;
+  }
+
+  .steward-config-grid dt {
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .steward-config-grid dd {
+    margin-top: 4px;
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  .steward-config-sections,
+  .steward-integration-artifacts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .steward-config-sections {
+    margin-top: 14px;
+  }
+
+  .steward-config-sections section {
+    min-width: 0;
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+  }
+
+  .steward-config-sections h3 {
+    margin-bottom: 5px;
+    color: var(--ink);
+    font-size: 13px;
+  }
+
+  .steward-config-sections p {
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .steward-config-sections li span {
+    overflow-wrap: anywhere;
+  }
+
+  .steward-config-sections li b {
+    flex: 0 0 auto;
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  .steward-integration-detail-panel {
+    display: grid;
+    gap: 12px;
+  }
+
+  .steward-integration-runs {
+    display: grid;
+    gap: 10px;
+  }
+
+  .steward-integration-run {
+    min-width: 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    padding: 10px;
+  }
+
+  .steward-integration-run-head {
+    display: flex;
+    min-width: 0;
+    align-items: start;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+
+  .steward-integration-run-head h3 {
+    overflow-wrap: anywhere;
+    color: var(--ink);
+    font-size: 13px;
+  }
+
+  .steward-integration-run-head span {
+    color: var(--muted);
+    font-size: 11px;
+  }
+
   .steward-mirror-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.72fr);
@@ -8923,6 +9066,17 @@
 
     .steward-planner-artifact-grid {
       grid-template-columns: 1fr;
+    }
+
+    .steward-config-grid,
+    .steward-config-sections,
+    .steward-integration-artifacts {
+      grid-template-columns: 1fr;
+    }
+
+    .steward-integration-run-head {
+      align-items: stretch;
+      flex-direction: column;
     }
 
     .steward-mirror-kpis,

@@ -27,6 +27,7 @@ import {
   stewardFreshnessLabel,
   stewardPollIntervalMs,
 } from '@/lib/steward-freshness';
+import { paginateStewardItems } from '@/lib/steward-pagination';
 import { decodePublicStewardJson } from '@/lib/steward-schema';
 
 export type PublicStewardTask = {
@@ -1079,20 +1080,13 @@ function PaginationJump({
 
 function usePublicPagination<T>(items: T[], pageSize = 10) {
   const [page, setPage] = useState(1);
-  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
-  const safePage = Math.min(page, pageCount);
-  const start = (safePage - 1) * pageSize;
-  const pageItems = items.slice(start, start + pageSize);
+  const pagination = paginateStewardItems(items, page, pageSize);
   useEffect(() => {
-    if (page !== safePage) setPage(safePage);
-  }, [page, safePage]);
+    if (page !== pagination.page) setPage(pagination.page);
+  }, [page, pagination.page]);
   return {
-    page: safePage,
-    pageCount,
-    pageItems,
-    pageSize,
+    ...pagination,
     setPage,
-    start,
   };
 }
 

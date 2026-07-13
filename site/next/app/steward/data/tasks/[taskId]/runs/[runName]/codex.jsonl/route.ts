@@ -21,7 +21,7 @@ export async function GET(_request: Request, context: RouteContext) {
   }
 
   const filePath = path.join(
-    process.cwd(),
+    process.env.COQUIC_STEWARD_PUBLIC_ROOT ?? process.cwd(),
     'public',
     'steward',
     'data',

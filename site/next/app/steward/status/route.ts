@@ -6,7 +6,9 @@ export const runtime = 'nodejs';
 const noStoreHeaders = { 'Cache-Control': 'no-store' };
 
 export async function GET() {
-  const result = await readPublicStewardStatus(process.cwd());
+  const result = await readPublicStewardStatus(
+    process.env.COQUIC_STEWARD_PUBLIC_ROOT ?? process.cwd(),
+  );
   if (result.status === 'unavailable') {
     return Response.json(result, { status: 503, headers: noStoreHeaders });
   }

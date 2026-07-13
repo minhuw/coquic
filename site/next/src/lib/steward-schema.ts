@@ -17,9 +17,11 @@ const REQUIRED_FIELDS = [
   'runtime',
   'publication',
   'tasks',
+  'tasks_truncated',
   'signals',
   'scheduler',
   'planner_runs',
+  'planner_runs_truncated',
   'configuration',
   'integration',
 ] as const;
@@ -32,7 +34,21 @@ export function decodePublicStewardMonitor(value: unknown): StewardSchemaDecode 
   if (REQUIRED_FIELDS.some((field) => !(field in value))) {
     return { ok: false, reason: 'invalid' };
   }
-  if (!isRecord(value.runtime) || !isRecord(value.publication) || !Array.isArray(value.tasks)) {
+  if (
+    !isRecord(value.counts)
+    || !isRecord(value.runtime)
+    || !isRecord(value.publication)
+    || !Array.isArray(value.tasks)
+    || typeof value.tasks_truncated !== 'boolean'
+    || !isRecord(value.signals)
+    || typeof value.signals.items_truncated !== 'boolean'
+    || typeof value.signals.fetches_truncated !== 'boolean'
+    || !isRecord(value.scheduler)
+    || !Array.isArray(value.planner_runs)
+    || typeof value.planner_runs_truncated !== 'boolean'
+    || !isRecord(value.configuration)
+    || !isRecord(value.integration)
+  ) {
     return { ok: false, reason: 'invalid' };
   }
   return { ok: true, data: value as PublicStewardMonitor };

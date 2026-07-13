@@ -50,6 +50,9 @@ site/next/out/
 site/next/node_modules/
 site/next/tsconfig.tsbuildinfo
 site/next/.generated/
+site/next/test-results/
+site/next/playwright-report/
+site/next/blob-report/
 demo/next/.next/
 site/next/public/perf-results.json
 site/next/public/perf-history.json

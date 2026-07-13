@@ -5,6 +5,10 @@
     "prepare:site": "node scripts/prepare-public-assets.mjs && node scripts/build-transcript-dataset.mjs && node scripts/build-search-index.mjs",
     "predev": "npm run prepare:site",
     "dev": "next dev --hostname 127.0.0.1 --port 3001",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
     "prebuild": "npm run prepare:site",
     "build": "next build",
     "build:wasm-deps": "cd ../.. && nix develop .#wasm --option fallback true -c bash scripts/build-boringssl-wasm.sh",
@@ -40,9 +44,15 @@
     "yauzl": "^3.4.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "25.9.1",
     "@types/react": "19.2.15",
-    "typescript": "6.0.3"
+    "@vitejs/plugin-react": "^6.0.3",
+    "jsdom": "^29.1.1",
+    "typescript": "6.0.3",
+    "vitest": "^4.1.10"
   },
   "overrides": {
     "next": {

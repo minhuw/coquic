@@ -1,0 +1,73 @@
+{
+  "schema_version": 2,
+  "generated_at": "2026-07-13T12:00:00Z",
+  "repository": "minhuw/coquic",
+  "main_branch": "main",
+  "task": {
+    "id": "task-20260713115945-a1b2c3d4",
+    "title": "Implement dashboard contract",
+    "kind": "feature",
+    "workflow": "feature",
+    "worker": "feature-implementer",
+    "priority": "high",
+    "risk": "medium",
+    "status": "running",
+    "summary": "Worker is validating the public monitor",
+    "source": "manual",
+    "created_at": "2026-07-13T11:59:45Z",
+    "updated_at": "2026-07-13T12:00:00Z",
+    "detail_url": "/steward/tasks/task-20260713115945-a1b2c3d4",
+    "detail_json": "/steward/data/tasks/task-20260713115945-a1b2c3d4.json",
+    "validations": [],
+    "branch_name": "steward/feature/monitor-contract",
+    "spec": {
+      "id": "task-20260713115945-a1b2c3d4",
+      "kind": "feature",
+      "workflow": "feature",
+      "worker": "feature-implementer",
+      "title": "Implement dashboard contract",
+      "prompt": "",
+      "priority": "high",
+      "risk": "medium",
+      "source": "manual",
+      "allow_main_write": false,
+      "metadata": {"workflow_name": "dashboard"}
+    },
+    "has_patch": false,
+    "has_transcript": true,
+    "has_last_message": true
+  },
+  "source_task": null,
+  "events": [
+    {"task_id": "task-20260713115945-a1b2c3d4", "kind": "task.status", "message": "running", "created_at": "2026-07-13T12:00:00Z", "data": {"phase": "worker", "summary": "Worker is validating the public monitor"}},
+    {"task_id": "task-20260713115945-a1b2c3d4", "kind": "worktree.ready", "message": "worktree ready", "created_at": "2026-07-13T11:59:50Z", "data": {"branch": "steward/feature/monitor-contract"}}
+  ],
+  "source_events": [],
+  "attempts": [{
+    "attempt": 0,
+    "label": "Initial attempt",
+    "started_at": "2026-07-13T11:59:50Z",
+    "updated_at": "2026-07-13T12:00:00Z",
+    "worker": {
+      "name": "feature-implementer",
+      "role": "worker",
+      "label": "Initial attempt",
+      "exit_code": 0,
+      "completed": true,
+      "model": "gpt-test",
+      "reasoning_effort": "medium",
+      "diagnostics": {"status": "ok", "summary": "Worker completed", "exit_code": 0, "last_message_present": true, "event_count": 1, "error_count": 0, "last_event_type": "item.completed", "last_item_type": "agent_message", "last_item_status": "completed", "last_error": "", "last_output": "", "timed_out": false},
+      "transcript": {"availability": "available", "mode": "redacted", "text": "I checked the public monitor contract.", "size": 38, "size_bytes": 38, "original_size_bytes": 38, "truncated": false, "tail_bytes": 38},
+      "last_message": {"availability": "available", "mode": "redacted", "text": "Contract check complete.", "size": 24, "size_bytes": 24, "original_size_bytes": 24, "truncated": false, "tail_bytes": 24}
+    },
+    "reviewer": null,
+    "review": null,
+    "patch": null,
+    "validations": []
+  }],
+  "plan_runs": [],
+  "validations": [],
+  "artifacts": {"patch": null, "transcript": {"availability": "available", "mode": "redacted", "text": "I checked the public monitor contract.", "size": 38, "size_bytes": 38, "original_size_bytes": 38, "truncated": false, "tail_bytes": 38}, "last_message": {"availability": "available", "mode": "redacted", "text": "Contract check complete.", "size": 24, "size_bytes": 24, "original_size_bytes": 24, "truncated": false, "tail_bytes": 24}},
+  "integration": {"is_integration_task": false, "source_task_id": null, "runs": []},
+  "remote": {"commit": null, "commit_url": null}
+}

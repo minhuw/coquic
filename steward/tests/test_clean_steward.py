@@ -9539,35 +9539,13 @@ def test_cli_publish_public_state_writes_output(repo: Path, monkeypatch) -> None
     assert payload["tasks"][0]["id"] == task.id
 
 
-def test_cli_daemon_starts_web_runtime_for_forever_mode(repo: Path, monkeypatch) -> None:
+def test_cli_daemon_forever_is_headless(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
     started = []
-    captured = {}
-
-    class FakeRuntime:
-        api_url = "http://127.0.0.1:8765"
-        ui_url = "http://127.0.0.1:3000"
-
-        def __init__(
-            self,
-            *,
-            log_dir: Path | None = None,
-            expected_state_dir: Path | None = None,
-        ):
-            started.append(f"log_dir={log_dir.name if log_dir else '-'}")
-            captured["expected_state_dir"] = expected_state_dir
-
-        def __enter__(self):
-            started.append("enter")
-            return self
-
-        def __exit__(self, *_exc):
-            started.append("exit")
 
     def fake_run_forever(self) -> None:
         started.append("daemon")
 
-    monkeypatch.setattr("coquic_steward.cli.StewardWebRuntime", FakeRuntime)
     monkeypatch.setattr(
         "coquic_steward.cli.StewardDaemon.run_forever", fake_run_forever
     )
@@ -9575,41 +9553,21 @@ def test_cli_daemon_starts_web_runtime_for_forever_mode(repo: Path, monkeypatch)
     result = CliRunner().invoke(app, ["daemon"])
 
     assert result.exit_code == 0
-    assert started == ["log_dir=logs", "enter", "daemon", "exit"]
-    assert captured["expected_state_dir"] == load_config().state_dir
-    assert "Steward Web UI: http://127.0.0.1:3000" in result.output
+    assert started == ["daemon"]
+    assert "Steward public mirror: disabled; publication: disabled" in result.output
+    assert "Steward Web UI" not in result.output
 
 
-def test_cli_daemon_can_run_without_web_runtime(repo: Path, monkeypatch) -> None:
-    monkeypatch.chdir(repo)
-    started = []
-
-    class FakeRuntime:
-        def __enter__(self):
-            raise AssertionError("web runtime should not start")
-
-    def fake_run_forever(self) -> None:
-        started.append("daemon")
-
-    monkeypatch.setattr("coquic_steward.cli.StewardWebRuntime", FakeRuntime)
-    monkeypatch.setattr(
-        "coquic_steward.cli.StewardDaemon.run_forever", fake_run_forever
-    )
-
-    result = CliRunner().invoke(app, ["daemon", "--no-web"])
+def test_cli_daemon_help_has_no_web_options() -> None:
+    result = CliRunner().invoke(app, ["daemon", "--help"])
 
     assert result.exit_code == 0
-    assert started == ["daemon"]
+    assert "--web" not in result.output
+    assert "--no-web" not in result.output
 
 
-def test_cli_daemon_once_does_not_start_web_runtime(repo: Path, monkeypatch) -> None:
+def test_cli_daemon_once_is_headless(repo: Path, monkeypatch) -> None:
     monkeypatch.chdir(repo)
-
-    class FakeRuntime:
-        def __enter__(self):
-            raise AssertionError("web runtime should not start")
-
-    monkeypatch.setattr("coquic_steward.cli.StewardWebRuntime", FakeRuntime)
 
     result = CliRunner().invoke(app, ["daemon", "--once", "--no-plan", "--no-dispatch"])
 

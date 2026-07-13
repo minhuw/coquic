@@ -32,7 +32,6 @@ from .signals import (
     revalidate_signal_items,
 )
 from .storage import TaskStore
-from .web.runtime import StewardWebRuntime
 
 app = typer.Typer(help="CoQUIC Steward maintenance manager.")
 enqueue_app = typer.Typer(help="Enqueue tasks.")
@@ -82,11 +81,6 @@ def run(task_id: str) -> None:
 @app.command()
 def daemon(
     once: bool = typer.Option(False, help="Run one tick and exit."),
-    web_ui: bool = typer.Option(
-        True,
-        "--web/--no-web",
-        help="Launch the loopback API and Next.js dashboard with the daemon.",
-    ),
     no_plan: bool = typer.Option(False, help="Skip signal planning."),
     no_dispatch: bool = typer.Option(False, help="Skip running queued tasks."),
     max_dispatch: int | None = typer.Option(
@@ -97,6 +91,14 @@ def daemon(
     try:
         with acquire_daemon_lock(config):
             daemon_ = StewardDaemon(config, store, logger=typer.echo)
+            mirror_state = "enabled" if config.public_mirror.enabled else "disabled"
+            publication_state = (
+                "enabled" if config.public_mirror.publish else "disabled"
+            )
+            typer.echo(
+                "Steward public mirror: "
+                f"{mirror_state}; publication: {publication_state}"
+            )
             if once:
                 result = daemon_.tick(
                     plan=not no_plan,
@@ -104,14 +106,6 @@ def daemon(
                     max_dispatch=max_dispatch,
                 )
                 typer.echo(result)
-            elif web_ui:
-                with StewardWebRuntime(
-                    log_dir=config.logs_dir,
-                    expected_state_dir=config.state_dir,
-                ) as runtime:
-                    typer.echo(f"Steward API: {runtime.api_url}")
-                    typer.echo(f"Steward Web UI: {runtime.ui_url}")
-                    _run_until_stopped(daemon_)
             else:
                 _run_until_stopped(daemon_)
     except DaemonAlreadyRunning as exc:

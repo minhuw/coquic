@@ -4,10 +4,10 @@ Status: In Progress
 Date: 2026-07-13
 Last updated: 2026-07-13
 
-Current execution state: subplans 00 through 15 are complete locally on
-`main`; Wave 5 is active for daemon cutover. The local shadow gate passes, and
-the exit report records the remaining deployed-target route follow-up. The
-capability matrix is checked in at
+Current execution state: subplans 00 through 16 are complete locally on
+`main`; Wave 6 is active for the independent Python web-runtime and local UI
+removals. The local shadow gate passes, and the exit report records the
+remaining deployed-target route follow-up. The capability matrix is checked in at
 [00-capability-matrix.md](00-capability-matrix.md), and the v3 contract is
 checked in at `steward/schema/fixtures/public-monitor-v3/`.
 
@@ -160,9 +160,9 @@ flowchart LR
 | 13 | [Producer contract tests](13-producer-contract-tests.md) | 02, 03, 05, 09 | Complete |
 | 14 | [Site monitor tests](14-site-monitor-tests.md) | 04, 05, 06, 07, 08 | Complete |
 | 15 | [Shadow rollout](15-shadow-rollout.md) | 06-14 as graphed | Complete |
-| 16 | [Daemon entrypoint cutover](16-daemon-entrypoint-cutover.md) | 15 | In Progress |
-| 17 | [Remove Python web runtime](17-remove-python-web-runtime.md) | 16 | Pending |
-| 18 | [Remove local Next.js UI](18-remove-local-next-ui.md) | 16 | Pending |
+| 16 | [Daemon entrypoint cutover](16-daemon-entrypoint-cutover.md) | 15 | Complete |
+| 17 | [Remove Python web runtime](17-remove-python-web-runtime.md) | 16 | In Progress |
+| 18 | [Remove local Next.js UI](18-remove-local-next-ui.md) | 16 | In Progress |
 | 19 | [Dependency and documentation cleanup](19-dependency-cleanup.md) | 17, 18 | Pending |
 | 20 | [Final verification and release](20-final-verification.md) | 19 | Pending |
 

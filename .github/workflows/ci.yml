@@ -8,6 +8,25 @@ permissions:
   contents: read
 
 jobs:
+  steward-migration:
+    name: Steward Migration Guard
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f
+        with:
+          summarize: false
+
+      - name: Check removed dashboard invariants
+        run: nix develop -c ./scripts/check-steward-migration.py
+
+      - name: Smoke Steward without Node.js
+        run: nix develop -c ./scripts/smoke-steward-no-node.sh
+
   steward-schema:
     name: Steward Schema
     runs-on: ubuntu-latest

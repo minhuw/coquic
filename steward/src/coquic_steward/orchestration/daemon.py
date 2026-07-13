@@ -583,8 +583,7 @@ class StewardDaemon:
             dirty = self._public_mirror_dirty.wait(
                 timeout=self._heartbeat_interval_seconds()
             )
-            if not dirty:
-                self._touch_heartbeat()
+            self._touch_heartbeat()
             stopping = self._public_mirror_stop.is_set()
             if not stopping and dirty and self._public_mirror_stop.wait(
                 PUBLIC_MIRROR_DEBOUNCE_SECONDS

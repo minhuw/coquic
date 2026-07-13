@@ -1893,6 +1893,8 @@ EOF
         extraPackages = [
           llvmPkgs.clang-tools
           pkgs.pre-commit
+          pkgs.python3
+          pkgs.uv
           duvetTool
         ];
       };

@@ -26,7 +26,11 @@ def test_recursive_public_redaction_and_link_allowlist(config) -> None:
                 kind="finding",
                 fingerprint="fingerprint-is-not-public",
                 title="API_KEY=should-not-leak",
-                summary="thread_private and /home/private/key.pem",
+                summary=(
+                    "thread_private and /home/private/key.pem "
+                    "/worktrees/task /transcripts/task /patches/task "
+                    "secret = client_secret ="
+                ),
                 links=[
                     {"label": "safe", "url": "https://github.com/minhuw/coquic/issues/1"},
                     {"label": "unsafe", "url": "https://evil.example.test/steal"},
@@ -54,7 +58,12 @@ def test_recursive_public_redaction_and_link_allowlist(config) -> None:
     assert "private prompt" not in serialized
     assert "private-token" not in serialized
     assert "/home/private" not in serialized
-    assert "file:///etc/passwd" not in serialized
+    assert "/worktrees/" not in serialized
+    assert "/transcripts/" not in serialized
+    assert "/patches/" not in serialized
+    assert "file://" not in serialized
+    assert "secret =" not in serialized
+    assert "client_secret" not in serialized
     assert "https://evil.example.test" not in serialized
     assert payload["signals"]["items"][0]["links"] == [
         {"label": "safe", "url": "https://github.com/minhuw/coquic/issues/1"}

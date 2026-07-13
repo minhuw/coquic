@@ -1882,13 +1882,20 @@ def _public_text(config: StewardConfig, value: str | None) -> str:
         text = text.replace(original, replacement)
     text = re.sub(r"/(?:home|media|tmp|var|opt)/[^\s'\"`),;]+", "[local-path]", text)
     text = re.sub(
+        r"(?i)(?:file://|[^\s'\"`),;]*(?:/worktrees/|/transcripts/|/patches/))"
+        r"[^\s'\"`),;]*",
+        "[local-path]",
+        text,
+    )
+    text = re.sub(
         r"(?is)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
         "[redacted-secret]",
         text,
     )
     text = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [redacted-secret]", text)
     text = re.sub(
-        r"(?i)\b(?:api[_-]?key|access[_-]?token|secret|password|authorization)\s*[:=]\s*[^\s,;]+",
+        r"(?i)(?:api[_-]?key|access[_-]?token|secret|password|authorization)"
+        r"\s*[:=](?:\s*[^\s,;]+)?",
         "[redacted-secret]",
         text,
     )

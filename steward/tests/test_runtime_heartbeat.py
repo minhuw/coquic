@@ -119,6 +119,39 @@ def test_heartbeat_publishes_without_store_changes(
         daemon._stop_public_mirror_sync()
 
 
+def test_dirty_mirror_sync_advances_heartbeat(
+    config: StewardConfig, monkeypatch
+) -> None:
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "public_mirror": config.public_mirror.__class__(
+                enabled=True,
+                publish=False,
+                output_path=Path("public/steward/status.json"),
+            ),
+        }
+    )
+    config.ensure_dirs()
+    daemon = StewardDaemon(config, TaskStore(config.db_path))
+    monkeypatch.setattr(daemon, "_heartbeat_interval_seconds", lambda: 60)
+    monkeypatch.setattr(
+        "coquic_steward.orchestration.daemon.PUBLIC_MIRROR_DEBOUNCE_SECONDS",
+        0.001,
+    )
+    initial = daemon.runtime.heartbeat_at
+
+    daemon._start_public_mirror_sync()
+    try:
+        daemon._public_mirror_dirty.set()
+        deadline = time.monotonic() + 2
+        while daemon.runtime.heartbeat_at == initial and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert daemon.runtime.heartbeat_at > initial
+    finally:
+        daemon._stop_public_mirror_sync()
+
+
 def test_mirror_failure_does_not_stop_daemon_work(
     config: StewardConfig, monkeypatch
 ) -> None:
